@@ -591,9 +591,9 @@ def generate_c(
     writer.writeline("#include <stdlib.h>")
     writer.writeline("#include <stdio.h>")
     writer.writeline("#include <string.h>")
-    if mode == "benchmark":
-        writer.writeline("#include <time.h>")
-    writer.writeline("")
+    writer.writeline("#define _PROVIDE_POSIX_TIME_DECLS 1  // For Hexagon target")
+    writer.writeline("#include <time.h>")
+    writer.writeline("#undef _PROVIDE_POSIX_TIME_DECLS")
 
     if mode == "benchmark":
         writer.writeline(
