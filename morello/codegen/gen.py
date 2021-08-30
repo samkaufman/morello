@@ -19,7 +19,8 @@ _writer: contextvars.ContextVar["_Writer"] = contextvars.ContextVar("_writer")
 
 # TODO: Choose a more principled STACK_CUTOFF.
 STACK_CUTOFF = 256
-FLOAT_SIZE = 4  # bytes
+VALUE_SIZE = 2  # bytes (int16)
+BENCH_ITERS = 10
 
 
 class _Namer:
@@ -86,7 +87,7 @@ def _emit_tensor_print(
             index_expr = index_expr.subs(sym, it_name)
 
         with writer.indent_block():
-            writer.writeline(f'printf("%.4f ", {buffer_ref_fn(index_expr)});')
+            writer.writeline(f'printf("%d ", (short int){buffer_ref_fn(index_expr)});')
 
         if rank:
             writer.writeline("}")
@@ -262,21 +263,21 @@ def _emit_buffer_alloc(
         return f"{name}[{_expr_to_c(expr)}]"
 
     writer = _writer.get()
-    if (size * FLOAT_SIZE) > STACK_CUTOFF:
-        writer.writeline(f"float *{name};")
+    if (size * VALUE_SIZE) > STACK_CUTOFF:
+        writer.writeline(f"int16_t *{name};")
         writer.writeline(
-            f"posix_memalign((void **)&{name}, 64, {size}*sizeof(float));  // TODO: check return"
+            f"posix_memalign((void **)&{name}, 64, {size}*sizeof(int16_t));  // TODO: check return"
         )
-        writer.writeline(f"memset({name}, 0, {size}*sizeof(float));")
+        writer.writeline(f"memset({name}, 0, {size}*sizeof(int16_t));")
 
         return functools.partial(c_index, name), functools.partial(
             emit_free, name, writer
         )
     elif size > 1:
-        writer.writeline(f"float {name}[{size}] = {{0}};")
+        writer.writeline(f"int16_t {name}[{size}] = {{0}};")
         return functools.partial(c_index, name), lambda: None
     else:
-        writer.writeline(f"float {name} = 0.0f;")
+        writer.writeline(f"int16_t {name} = 0.0f;")
         return lambda _: name, lambda: None
 
 
@@ -573,7 +574,7 @@ def _flatten(src):
 
 
 def generate_c(
-    mode: Union[Literal["benchmark"], Literal["print_output"]],
+    mode: Literal["kernel_only", "benchmark", "print_output"],
     impl: ops.Schedule,
     out_fo,
     values=None,
@@ -591,9 +592,7 @@ def generate_c(
     writer.writeline("#include <stdlib.h>")
     writer.writeline("#include <stdio.h>")
     writer.writeline("#include <string.h>")
-    writer.writeline("#define _PROVIDE_POSIX_TIME_DECLS 1  // For Hexagon target")
     writer.writeline("#include <time.h>")
-    writer.writeline("#undef _PROVIDE_POSIX_TIME_DECLS")
 
     if mode == "benchmark":
         writer.writeline(
@@ -645,7 +644,9 @@ def generate_c(
                 [op.dim_sizes for op in impl.operands],
             )
 
-        if mode == "benchmark":
+        if mode == "kernel_only":
+            kernel()
+        elif mode == "benchmark":
             writer.writeline("// Inlined kernel follows. This is for warm-up.")
             kernel()
 
@@ -655,7 +656,7 @@ def generate_c(
             writer.writeline("struct timespec start, end;")
             writer.writeline("clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start);")
             writer.writeline(
-                "for (unsigned long benchiter = 0; benchiter < 10; ++benchiter) {"
+                f"for (unsigned long benchiter = 0; benchiter < {BENCH_ITERS}; ++benchiter) {{"
             )
             with writer.indent_block():
                 kernel()
