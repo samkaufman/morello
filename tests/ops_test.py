@@ -1,0 +1,279 @@
+import contextvars
+from typing import Iterable, List, cast
+
+import warnings
+import hypothesis
+import pytest
+from hypothesis import strategies as st
+
+from morello import op_pprint, ops, specs, tiling, tensor
+
+
+def test_dim_range():
+    # Common cases
+    for mode in ops.TileSizeMode:
+        token = ops.tile_size_mode.set(mode)
+        try:
+            assert list(ops.dim_range(0)) == []
+            assert list(ops.dim_range(0, include_end=False)) == []
+            assert list(ops.dim_range(1, include_end=False)) == []
+            assert list(ops.dim_range(2, include_end=False)) == [1]
+        finally:
+            ops.tile_size_mode.reset(token)
+
+    token = ops.tile_size_mode.set(ops.TileSizeMode.POWERS_OF_TWO)
+    try:
+        assert list(ops.dim_range(1)) == [1]
+        assert list(ops.dim_range(2)) == [1, 2]
+        assert list(ops.dim_range(3)) == [1, 2, 3]
+        assert list(ops.dim_range(4)) == [1, 2, 4]
+        assert list(ops.dim_range(5)) == [1, 2, 4, 5]
+        assert list(ops.dim_range(3, include_end=False)) == [1, 2]
+        assert list(ops.dim_range(4, include_end=False)) == [1, 2]
+        assert list(ops.dim_range(5, include_end=False)) == [1, 2, 4]
+    finally:
+        ops.tile_size_mode.reset(token)
+
+    token = ops.tile_size_mode.set(ops.TileSizeMode.CACHE_LINE_MULTIPLES)
+    try:
+        assert list(ops.dim_range(1)) == [1]
+        assert list(ops.dim_range(2)) == [1, 2]
+        assert list(ops.dim_range(3)) == [1, 3]
+        assert list(ops.dim_range(3, include_end=False)) == [1]
+    finally:
+        ops.tile_size_mode.reset(token)
+
+    token = ops.tile_size_mode.set(ops.TileSizeMode.ALL)
+    try:
+        assert list(ops.dim_range(1)) == [1]
+        assert list(ops.dim_range(2)) == [1, 2]
+        assert list(ops.dim_range(3)) == [1, 2, 3]
+        assert list(ops.dim_range(3, include_end=False)) == [1, 2]
+    finally:
+        ops.tile_size_mode.reset(token)
+
+
+@pytest.mark.parametrize(
+    "intermed_shapes,op_mems,expected_peaks,expected_additionals",
+    [
+        ([(10,)], [[20, 0], [5, 0]], [30, 0], [[10, 0], [10, 0]]),
+        (
+            [(10,), (90,)],
+            [[20, 0], [10, 10], [10, 0]],
+            [110, 10],
+            [[10, 0], [100, 0], [90, 0]],
+        ),
+    ],
+)
+def test_pipeline_peak_and_additional_memory(
+    intermed_shapes, op_mems, expected_peaks, expected_additionals
+):
+    class SubImplStub:
+        """A stub for an ops.Schedule with some arbitrary output and peak mem.
+
+        This doesn't fully implement the ops.Schedule abstract class, so we'll
+        have to `cast` at construction to satisfy the type checker.
+        """
+
+        def __init__(self, mem: List[int], output) -> None:
+            super().__init__()
+            self._mem = mem
+            self._output = output
+
+        @property
+        def output(self):
+            return self._output
+
+        @property
+        def spec(self):
+
+            class SubImplStubSpec:
+
+                @property
+                def serial_only(self):
+                    return False
+
+            return SubImplStubSpec()
+
+        @property
+        def peak_memory(self):
+            return self._mem
+
+    assert len(intermed_shapes) + 1 == len(op_mems)
+
+    intermediates = [
+        tensor.Tensor(spec=specs.TensorSpec(shp, level=0), name=None)
+        for shp in intermed_shapes
+    ]
+    intermediates.append(None)
+
+    pipeline = ops.Pipeline(
+        tuple(
+            cast(ops.Schedule, SubImplStub(m, intermed))
+            for m, intermed in zip(op_mems, intermediates)
+        )
+    )
+
+    assert pipeline.peak_memory == expected_peaks
+    assert pipeline.additional_memories == expected_additionals
+
+
+@pytest.mark.parametrize(
+    "img_size,filter_size,patch,out_size,tile_size,steps",
+    [
+        (3, 3, 3, 1, 1, 1),
+        (3, 1, 1, 3, 1, 9),
+        (10, 3, 5, 8, 3, 9),
+        (5, 3, 4, 3, 2, 4),
+    ],
+)
+def test_convolution_steps(img_size, filter_size, patch, out_size, tile_size, steps):
+    filter_cnt = 4
+    img = tensor.Tensor(
+        spec=specs.TensorSpec(dim_sizes=(img_size, img_size)), name="image"
+    )
+    filters = tensor.Tensor(
+        spec=specs.TensorSpec(dim_sizes=(filter_size, filter_size, filter_cnt)),
+        name="filters",
+    )
+    out = tensor.Tensor(
+        spec=specs.TensorSpec(dim_sizes=(out_size, out_size, filter_cnt)), name="output"
+    )
+    conv = ops.DirectConv(lhs=img, rhs=filters, output=out, serial_only=False)
+    loop = conv.tile_out((tile_size, tile_size, filter_cnt))
+    print(f"Loop:\n{op_pprint.pformat(loop, show_utilization=False, show_cost=False)}")
+    if steps == 1:
+        assert isinstance(loop, ops.DirectConv)
+    else:
+        assert loop.inner.lhs.dim_sizes == (patch, patch)
+        assert loop.steps == steps
+
+
+def test_evenly_divisible_matmul_tiling():
+    lhs = tensor.Tensor(specs.TensorSpec((4, 4)), name=None)
+    rhs = tensor.Tensor(specs.TensorSpec((4, 4)), name=None)
+    out = tensor.Tensor(specs.TensorSpec((4, 4)), name=None)
+    schedule = ops.Matmul(lhs, rhs, out, serial_only=False).tile_out((2, 2))
+    assert schedule.output.dim_sizes == (4, 4)
+    assert isinstance(schedule.inner, ops.Matmul)
+    assert schedule.inner.output.dim_sizes == (2, 2)
+    assert schedule.inner.lhs.dim_sizes[1] == 4
+
+
+@hypothesis.given(
+    st.integers(min_value=1, max_value=11),
+    st.integers(min_value=1, max_value=11),
+    st.integers(min_value=0, max_value=5),
+    st.integers(min_value=0, max_value=5),
+    st.integers(min_value=0, max_value=5),
+    st.integers(min_value=0, max_value=5),
+    st.integers(min_value=1, max_value=5),
+    st.integers(min_value=1, max_value=5),
+    st.integers(min_value=1, max_value=5),
+    st.integers(min_value=1, max_value=5),
+    st.integers(min_value=1, max_value=3),
+)
+def test_nested_convs_outputs_constant(h, w, a, b, fa, fb, th1, tw1, th2, tw2, fi):
+    image = tensor.Tensor(specs.TensorSpec((h + a + fa, w + b + fb)), name=None)
+    filters = tensor.Tensor(specs.TensorSpec((h, w, fi)), name=None)
+    expected_output_height = 1 + a + fa
+    expected_output_width = 1 + b + fb
+    output = tensor.Tensor(
+        specs.TensorSpec((expected_output_height, expected_output_width, fi)), name=None
+    )
+    schedule = ops.DirectConv(image, filters, output, serial_only=False)
+    assert schedule.output.dim_sizes[0] == expected_output_height
+    assert schedule.output.dim_sizes[1] == expected_output_width
+
+    hypothesis.assume(th1 <= 1 + image.height - filters.dim_sizes[0])
+    hypothesis.assume(tw1 <= 1 + image.width - filters.dim_sizes[1])
+    tiled_schedule_a = schedule.tile_out((th1, tw1, filters.dim_sizes[-1]))
+    assert tiled_schedule_a.output.dim_sizes[0] == expected_output_height
+    assert tiled_schedule_a.output.dim_sizes[1] == expected_output_width
+
+    hypothesis.assume(th2 <= th1)
+    hypothesis.assume(tw2 <= tw1)
+    tiled_schedule_b = schedule.tile_out((th2, tw2, filters.dim_sizes[-1]))
+    assert tiled_schedule_b.output.dim_sizes[0] == expected_output_height
+    assert tiled_schedule_b.output.dim_sizes[1] == expected_output_width
+
+
+def test_tile_compose_hole_out():
+    img = tensor.Tensor(specs.TensorSpec((8, 8)), name="image")
+    filters_a = tensor.Tensor(specs.TensorSpec((3, 3, 4)), name="filtersA")
+    filters_b = tensor.Tensor(specs.TensorSpec((3, 3, 4)), name="filtersB")
+    output = tensor.Tensor(specs.TensorSpec((4, 4, 4)), name="output")
+
+    compose_spec = specs.Compose(
+        (specs.Convolution, specs.ReduceSum, specs.Convolution),
+        (filters_b.spec, img.spec, filters_a.spec),
+        output.spec,
+        serial_only=False,
+    )
+
+    compose_hole = ops.ComposeHole(
+        spec=compose_spec,
+        inputs=(filters_b, img, filters_a),
+        output=output,
+    )
+    tiled_compose = compose_hole.tile_out((2, 2, 4))
+    assert isinstance(tiled_compose, ops.Loop)
+    assert tiled_compose.spec == compose_spec
+    assert isinstance(tiled_compose.inner, ops.ComposeHole)
+    assert tiled_compose.inner.output.dim_sizes == (2, 2, 4)
+    # TODO: Add checks for intermediate shape correctness
+
+
+def _walk_actions(
+    op: ops.Schedule, depth: int = 1, parents=None, parent_summary=None
+) -> Iterable[ops.Schedule]:
+    if depth == 0:
+        return
+    if parents is None:
+        parents = []
+    for act in op.actions(parent_summary=parent_summary):
+        try:
+            new_tree: ops.Schedule = act()
+        except tiling.UnimplementedCompositionError as e:
+            # This is a temporary workaround until I can implement Convolution
+            # and PartialConvolutionImageTile
+            warnings.warn("Skipping a composed tile_out: " + str(e))
+            continue
+        for child in new_tree.children:
+            yield child
+            yield from _walk_actions(
+                child,
+                depth=depth - 1,
+                parents=list(parents) + [op],
+                parent_summary=ops.ParentSummary.update(parent_summary, new_tree),
+            )
+
+
+# TODO: Extend to all Specs, not just a single ComposeHole
+def test_composehole_actions_change_spec():
+    # This doesn't test for cycles introduced by sequences of more than one
+    # action, but it makes sure that at least every individual step changes the
+    # spec.
+    img = tensor.Tensor(specs.TensorSpec((8, 8)), name="image")
+    filters_a = tensor.Tensor(specs.TensorSpec((3, 3, 10)), name="filtersA")
+    filters_b = tensor.Tensor(specs.TensorSpec((3, 3, 10)), name="filtersB")
+    output = tensor.Tensor(specs.TensorSpec((4, 4, 10)), name="output")
+    initial_spec = specs.Compose(
+        (specs.Convolution, specs.ReduceSum, specs.Convolution),
+        (filters_b.spec, img.spec, filters_a.spec),
+        output.spec,
+        serial_only=False,
+    )
+    initial_op = ops.ComposeHole(
+        initial_spec,
+        inputs=(filters_b, img, filters_a),
+        output=output,
+    )
+
+    for child in _walk_actions(initial_op, depth=3):
+        assert child.spec != initial_spec, f"{child.spec} == {str(initial_spec)}"
+
+
+@pytest.mark.skip("Not implemented")
+def test_composehole_construction_fails_if_shapes_incompatible():
+    raise NotImplementedError()

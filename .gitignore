@@ -1,0 +1,8 @@
+__pycache__
+.hypothesis
+joblib_cache
+results_*/**
+a.out
+
+.vim
+.vscode

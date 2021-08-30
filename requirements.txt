@@ -1,0 +1,11 @@
+tabulate~=0.8
+pyarrow
+pandas
+tqdm
+dataclass-abc
+pytest
+hypothesis
+atomicwrites==1.4.0
+termcolor==1.1.0
+sympy
+typeguard
