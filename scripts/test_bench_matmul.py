@@ -12,7 +12,16 @@ import time
 
 import numpy as np
 
-from morello import cost, op_pprint, ops, search, search_cache, specs, tensor
+from morello import (
+    cost,
+    op_pprint,
+    ops,
+    search,
+    search_cache,
+    specs,
+    system_config,
+    tensor,
+)
 from morello.codegen import benchmark
 
 RUNS = 5
@@ -97,10 +106,12 @@ def benchmark_numpy_impl() -> float:
     global spec
     assert isinstance(spec, specs.Matmul)
 
+    dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
+
     # Make arbitrary args
     (m, n), k = spec.output.dim_sizes, spec.lhs.dim_sizes[1]
-    lhs = np.arange(m * k, dtype=np.int16).reshape((m, k))
-    rhs = np.arange(k * n, dtype=np.int16).reshape((k, n))
+    lhs = np.arange(m * k, dtype=dtype.np_type).reshape((m, k))
+    rhs = np.arange(k * n, dtype=dtype.np_type).reshape((k, n))
     lhs @ rhs
 
     start = time.time()

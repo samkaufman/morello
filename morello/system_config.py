@@ -2,6 +2,8 @@ import dataclasses
 import sys
 from typing import List
 
+import numpy as np
+
 
 # TODO: Re-freeze
 @dataclasses.dataclass(frozen=False)
@@ -18,6 +20,7 @@ class SimpleSystemConfig:
     line_size: int
     level_configs: List[MemoryLevelConfig]
     processors: int
+    dtype: "_Dtype"
 
     def __post_init__(self):
         assert self.level_configs[-1].capacity == sys.maxsize
@@ -27,6 +30,13 @@ class SimpleSystemConfig:
         assert self.processors >= 1
 
 
+@dataclasses.dataclass(frozen=True)
+class _Dtype:
+    size: int  # in bytes
+    c_type: str
+    np_type: np.dtype
+
+
 DEFAULT_SYSTEM_CONFIG = SimpleSystemConfig(
     line_size=64,
     level_configs=[
@@ -34,4 +44,5 @@ DEFAULT_SYSTEM_CONFIG = SimpleSystemConfig(
         MemoryLevelConfig(cache_hit_cost=10, capacity=sys.maxsize),
     ],
     processors=4,
+    dtype=_Dtype(1, "uint8_t", np.uint8),
 )

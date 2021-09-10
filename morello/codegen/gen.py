@@ -9,7 +9,7 @@ from typing import Callable, Iterable, Literal, NamedTuple, Optional, Union, cas
 
 import sympy
 
-from .. import ops, specs, tensor
+from .. import ops, specs, system_config, tensor
 from ..tensor import Tensor, Tile
 from . import indexexpr
 
@@ -19,7 +19,6 @@ _writer: contextvars.ContextVar["_Writer"] = contextvars.ContextVar("_writer")
 
 # TODO: Choose a more principled STACK_CUTOFF.
 STACK_CUTOFF = 256
-VALUE_SIZE = 2  # bytes (int16)
 BENCH_ITERS = 10
 
 
@@ -262,22 +261,24 @@ def _emit_buffer_alloc(
     def c_index(name, expr):
         return f"{name}[{_expr_to_c(expr)}]"
 
+    dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
+
     writer = _writer.get()
-    if (size * VALUE_SIZE) > STACK_CUTOFF:
-        writer.writeline(f"int16_t *{name};")
+    if (size * dtype.size) > STACK_CUTOFF:
+        writer.writeline(f"{dtype.c_type} *{name};")
         writer.writeline(
-            f"posix_memalign((void **)&{name}, 64, {size}*sizeof(int16_t));  // TODO: check return"
+            f"posix_memalign((void **)&{name}, 64, {size}*sizeof({dtype.c_type}));  // TODO: check return"
         )
-        writer.writeline(f"memset({name}, 0, {size}*sizeof(int16_t));")
+        writer.writeline(f"memset({name}, 0, {size}*sizeof({dtype.c_type}));")
 
         return functools.partial(c_index, name), functools.partial(
             emit_free, name, writer
         )
     elif size > 1:
-        writer.writeline(f"int16_t {name}[{size}] = {{0}};")
+        writer.writeline(f"{dtype.c_type} {name}[{size}] = {{0}};")
         return functools.partial(c_index, name), lambda: None
     else:
-        writer.writeline(f"int16_t {name} = 0.0f;")
+        writer.writeline(f"{dtype.c_type} {name} = 0.0f;")
         return lambda _: name, lambda: None
 
 

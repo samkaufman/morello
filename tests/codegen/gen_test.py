@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from hypothesis import strategies as st
 
-from morello import op_pprint, ops, specs, tensor
+from morello import op_pprint, ops, specs, system_config, tensor
 from morello.codegen import gen
 
 CC_DEADLINE = 9000
@@ -71,10 +71,11 @@ def _test_c_program(source: str) -> np.ndarray:
 
 
 def _conv2d(img: np.ndarray, filters: np.ndarray) -> np.ndarray:
+    assert img.dtype == filters.dtype
     fh, fw, fc = filters.shape
     h_out = img.shape[0] - filters.shape[0] + 1
     w_out = img.shape[1] - filters.shape[1] + 1
-    out = np.zeros((h_out, w_out, fc))
+    out = np.zeros((h_out, w_out, fc), dtype=img.dtype)
     for i in range(1 + img.shape[0] - filters.shape[0]):
         for j in range(1 + img.shape[1] - filters.shape[1]):
             acts = img[i : i + fh, j : j + fw, np.newaxis] * filters
@@ -234,17 +235,19 @@ def _arb_matmul_matmul_spec(draw):
 
 @st.composite
 def _arb_zip_values_for_impl(draw, impl: ops.Schedule):
+    dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
+
     def _value(shape):
         num_elements: int = functools.reduce(operator.mul, shape, 1)
         return np.asarray(
             draw(
                 st.lists(
-                    st.integers(min_value=0, max_value=4),
+                    st.integers(min_value=0, max_value=7),
                     max_size=num_elements,
                     min_size=num_elements,
                 )
             ),
-            dtype=np.int16,
+            dtype=dtype.np_type,
         ).reshape(shape)
 
     return impl, [_value(op.dim_sizes) for op in impl.inputs]
@@ -270,6 +273,12 @@ def _calculator_to_test(spec_st):
 
             expected_result = calc_fn(inp_values)
 
+            dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
+            assert expected_result.dtype == dtype.np_type, (
+                f"expected_result should be of system dtype {dtype.np_type} "
+                f"but was {expected_result.dtype}"
+            )
+
             with io.StringIO() as buffer:
                 gen.generate_c("print_output", impl, buffer, inp_values)
                 source_code = buffer.getvalue()
@@ -290,7 +299,9 @@ def test_codegen_for_matmul(inp_values):
 
 @_calculator_to_test(_arb_matmul_matmul_spec())
 def test_codegen_for_matmul_matmul(inp_values):
-    return (inp_values[1] @ inp_values[2]) @ inp_values[0]
+    out = (inp_values[1] @ inp_values[2]) @ inp_values[0]
+    assert out.dtype == inp_values[0].dtype
+    return out
 
 
 @_calculator_to_test(_arb_conv_spec())
@@ -300,14 +311,16 @@ def test_codegen_for_conv(inp_values):
 
 @_calculator_to_test(_arb_reduce_conv_spec())
 def test_codegen_for_reduce_conv(inp_values):
+    dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
     expected_result = _conv2d(*inp_values)
-    expected_result = np.sum(expected_result, axis=-1)
+    expected_result = np.sum(expected_result, axis=-1, dtype=dtype.np_type)
     return expected_result
 
 
 @_calculator_to_test(_arb_conv_reduce_conv_spec())
 def test_codegen_for_conv_reduce_conv(inp_values):
+    dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
     expected_result = _conv2d(*inp_values[1:3])
-    expected_result = np.sum(expected_result, axis=-1)
+    expected_result = np.sum(expected_result, axis=-1, dtype=dtype.np_type)
     expected_result = _conv2d(expected_result, inp_values[0])
     return expected_result
