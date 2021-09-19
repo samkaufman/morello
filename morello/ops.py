@@ -526,12 +526,6 @@ class Schedule(abc.ABC):
             return getattr(self, "inner").is_scheduled
         raise NotImplementedError(f"No is_scheduled implementation for {type(self)}")
 
-    @_assert_stable_spec
-    def replace_leaf(self, replacement: "Schedule") -> "Schedule":
-        if self.innermost == self:
-            return replacement
-        return dataclasses.replace(self, inner=self.inner.replace_leaf(replacement))
-
     @abc.abstractmethod
     def replace_children(self, replacements: Iterable["Schedule"]) -> "Schedule":
         raise NotImplementedError()
@@ -1297,10 +1291,6 @@ class Pipeline(Schedule):
         return dataclasses.replace(
             self, stages=tuple(s.complete() for s in self.stages)
         )
-
-    @_assert_stable_spec
-    def replace_leaf(self, replacement: Schedule) -> Schedule:
-        raise NotImplementedError("replace_leaf ambiguous for Pipeline")
 
     @_assert_stable_spec
     def replace_children(self, replacements: Iterable[Schedule]) -> Schedule:
