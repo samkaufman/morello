@@ -1,9 +1,8 @@
 from typing import Optional
 
 import sympy
-from sympy import Min
 
-from ..specs import Layout, TensorSpec
+from ..specs import Layout
 from ..tensor import ConvolutionImageTile, SimpleTile, Tensor, Tile
 
 
@@ -68,9 +67,3 @@ def logical_indexing_expr(source: Tile, dim: int) -> sympy.Expr:
         return c * idx + pt
     else:
         raise NotImplementedError(f"Not defined for {type(source).__name__}")
-
-
-if __name__ == "__main__":
-    tspec = TensorSpec(dim_sizes=(2, 4, 10), level=0, layout=Layout.COL_MAJOR)
-    t = Tensor(tspec, name=None)
-    print(buffer_indexing_expr(t))

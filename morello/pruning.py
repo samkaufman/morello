@@ -1,10 +1,15 @@
 import abc
-from typing import Optional
+from typing import Optional, Literal, cast
 
 from . import ops, system_config
 from .tensor import Tensor
 
-_zero_tup = tuple(0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs)
+
+def _zero_tup() -> tuple[Literal[0], ...]:
+    return cast(
+        tuple[Literal[0], ...],
+        tuple(0 for _ in system_config.current_system().level_configs),
+    )
 
 
 class AvailableIsNegativeError(ValueError):
@@ -24,7 +29,7 @@ def _pipeline_transition(
 
     # TODO: Make this a method of Tensors
     def _tensor_mem(tensor: Tensor) -> tuple[int, ...]:
-        mem = list(_zero_tup)
+        mem = list(_zero_tup())
         mem[tensor.level] = tensor.volume
         return tuple(mem)
 
@@ -78,7 +83,7 @@ class StandardMemoryLimits(MemoryLimits):
     def __init__(self, available_memory: Optional[tuple[int, ...]] = None) -> None:
         super().__init__()
         if available_memory is None:
-            system = system_config.DEFAULT_SYSTEM_CONFIG
+            system = system_config.current_system()
             self._available = tuple(
                 c.capacity * system.line_size for c in system.level_configs
             )
@@ -109,7 +114,9 @@ class StandardMemoryLimits(MemoryLimits):
         """
         # base->pipeline
         if isinstance(schedule, ops.Pipeline):
-            return _pipeline_transition(self.available, schedule, _zero_tup, _zero_tup)
+            return _pipeline_transition(
+                self.available, schedule, _zero_tup(), _zero_tup()
+            )
 
         # base->base
         child_limits: list[tuple[int, ...]] = []
@@ -117,7 +124,10 @@ class StandardMemoryLimits(MemoryLimits):
             child_limits.append(
                 tuple(m - d for m, d in zip(self._available, additionals))
             )
-        assert len(child_limits) == len(schedule.children)
+        assert len(child_limits) == len(schedule.children), (
+            f"{len(child_limits)} child limits != {len(schedule.children)} "
+            f"children for {type(schedule).__name__}"
+        )
         if any(
             m < 0 for memory_after_action in child_limits for m in memory_after_action
         ):

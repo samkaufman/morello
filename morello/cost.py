@@ -1,25 +1,28 @@
 import functools
 import math
 from operator import mul
-from typing import Dict, Tuple, Union, cast
+from typing import Dict, Tuple, Union
 
 from . import specs
 from .ops import (
     DirectConv,
+    HvxVrmpyaccVuwVubRub,
     Loop,
-    Matmul,
     MatmulSplitLoop,
     MoveLet,
+    Mult,
     Pipeline,
     ReduceSum,
     Schedule,
     SlidingWindowLoop,
 )
-from .system_config import DEFAULT_SYSTEM_CONFIG
+from .system_config import current_system
 from .tensor import Tensor, Tile, layout_ordered_dims
 
 
-def move_cost(src: Union[Tensor, Tile], dest_layout: specs.Layout) -> int:
+def move_cost(
+    src: Union[Tensor, Tile], dest_layout: specs.Layout, prefetching: bool
+) -> int:
     """Estimate a cost of moving all data in `src` to a new matrix with `dest_layout`.
 
     Notice that the destination level is not considered. The cache_hit_cost for a
@@ -35,7 +38,7 @@ def move_cost(src: Union[Tensor, Tile], dest_layout: specs.Layout) -> int:
     #     * src.layout
     #     * dest_layout
 
-    level_coef = DEFAULT_SYSTEM_CONFIG.level_configs[src.root.level].cache_hit_cost
+    level_coef = current_system().level_configs[src.root.level].cache_hit_cost
 
     lodims = layout_ordered_dims(src)
     meaningful_layout_difference = (
@@ -52,8 +55,14 @@ def move_cost(src: Union[Tensor, Tile], dest_layout: specs.Layout) -> int:
         10
         * level_coef
         * functools.reduce(mul, real_dims[:-1], 1)
-        * math.ceil(real_dims[-1] / DEFAULT_SYSTEM_CONFIG.line_size)
+        * math.ceil(real_dims[-1] / current_system().line_size)
     )
+
+    # Remove half the cost for prefetched moves. This is essentially a
+    # tie-breaking hack to get around the fact that we are not modeling both
+    # compute and memory cost.
+    if prefetching:
+        cost //= 2
 
     # Add a 10% to penalize a lack of hardware prefetching
     if not src.contiguous or meaningful_layout_difference:
@@ -101,7 +110,7 @@ def detailed_analytical_cost(
 
         factor = op.steps
         if op.parallel:
-            factor = math.ceil(op.steps / DEFAULT_SYSTEM_CONFIG.processors)
+            factor = math.ceil(op.steps / current_system().processors)
 
         new_cost = factor * cost_dict[op.inner][0]
         cost_expl = f"{new_cost:5d} = {factor} * _"
@@ -117,8 +126,9 @@ def detailed_analytical_cost(
         # Tiles to serve as operands to `move_cost`.
         whole_window_tile = op.live_tensor.origin.simple_tile(op.live_tensor.dim_sizes)
         frontier_tile = op.live_tensor.origin.simple_tile(op.frontier_shape)
-        whole_load_cost = move_cost(whole_window_tile, op.live_tensor.layout)
-        update_cost = move_cost(frontier_tile, op.live_tensor.layout)
+        # TODO: Should support prefetching for sliding windows.
+        whole_load_cost = move_cost(whole_window_tile, op.live_tensor.layout, False)
+        update_cost = move_cost(frontier_tile, op.live_tensor.layout, False)
         new_cost = (
             (op.whole_loads * whole_load_cost)
             + (op.update_loads * update_cost)
@@ -127,36 +137,14 @@ def detailed_analytical_cost(
         cost_expl = f"{new_cost:5d} = {op.whole_loads}({whole_load_cost}) + {op.update_loads}({update_cost}) + {op.steps}(_)"
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
-    elif isinstance(op, SlidingWindowLoop):
-        op = cast(SlidingWindowLoop, op)
-        cost_dict = detailed_analytical_cost(
-            op.inner,
-            depth=depth + 1,
-            env=env,
-        )
-        # The moves are implicit in SlidingWindowLoop, so we'll construct
-        # Tiles to serve as operands to `move_cost`.
-        whole_tensor_tile = op.live_tensor.origin.simple_tile(op.live_tensor.dim_sizes)
-        frontier_tile = op.live_tensor.origin.simple_tile(op.frontier_shape)
-        whole_load_cost = move_cost(whole_tensor_tile, op.live_tensor.layout)
-        update_cost = move_cost(frontier_tile, op.live_tensor.layout)
-        new_cost = (
-            (op.whole_loads * whole_load_cost)
-            + (op.update_loads * update_cost)
-            + (op.steps * cost_dict[op.inner][0])
-        )
-        cost_expl = f"{new_cost:5d} = {op.whole_loads}({whole_load_cost}) + {op.update_loads}({update_cost}) + {op.steps}(_)"
-        assert not isinstance(op, list)
-        cost_dict[op] = (new_cost, cost_expl)
-        return cost_dict
-    elif isinstance(op, (DirectConv, Matmul, ReduceSum)):
-        # Tensor multiplication is free but its operands must be in memory. (This cost
-        # model is only interested in the cost of moving data.)
+    elif isinstance(op, (DirectConv, Mult, HvxVrmpyaccVuwVubRub, ReduceSum)):
+        # Tensor multiplication is free but its operands must be in memory.
+        # (This cost model is only interested in the cost of moving data.)
         return {op: (0, "    0")}
     elif isinstance(op, MoveLet):
         # This is the core of the cost model; the cost of a schedule is derived
         # entirely from its moves, which are done by MoveLet operations.
-        mcost = move_cost(op.source, op.destination.layout)
+        mcost = move_cost(op.source, op.destination.layout, op.prefetching)
         cost_dict = detailed_analytical_cost(
             op.inner,
             depth=depth + 1,

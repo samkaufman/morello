@@ -1,5 +1,5 @@
-import io
 import functools
+import io
 import sys
 from typing import Callable, List, Union
 
@@ -7,7 +7,6 @@ import tabulate
 import termcolor
 
 from morello import tensor_namer
-
 from . import cost, ops, system_config, tensor
 
 
@@ -93,7 +92,7 @@ def pprint(
         cost_dict = cost.detailed_analytical_cost(op)
         headers.append("cost")
     if show_utilization:
-        level_count = len(system_config.DEFAULT_SYSTEM_CONFIG.level_configs)
+        level_count = len(system_config.current_system().level_configs)
         for level in range(level_count):
             headers.append(f"lvl{level}")
     if show_scheduled:

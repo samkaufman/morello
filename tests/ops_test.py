@@ -1,12 +1,11 @@
-import contextvars
-from typing import Iterable, List, cast
-
 import warnings
+from typing import Iterable, List, cast, Optional
+
 import hypothesis
 import pytest
 from hypothesis import strategies as st
 
-from morello import op_pprint, ops, specs, tiling, tensor
+from morello import op_pprint, ops, specs, tensor, tiling, dtypes
 
 
 def test_dim_range():
@@ -54,11 +53,12 @@ def test_dim_range():
 
 
 @pytest.mark.parametrize(
-    "intermed_shapes,op_mems,expected_peaks,expected_additionals",
+    "intermed_shapes,dtype,op_mems,expected_peaks,expected_additionals",
     [
-        ([(10,)], [[20, 0], [5, 0]], [30, 0], [[10, 0], [10, 0]]),
+        ([(10,)], dtypes.Uint8, [[20, 0], [5, 0]], [30, 0], [[10, 0], [10, 0]]),
         (
             [(10,), (90,)],
+            dtypes.Uint32,
             [[20, 0], [10, 10], [10, 0]],
             [110, 10],
             [[10, 0], [100, 0], [90, 0]],
@@ -66,7 +66,7 @@ def test_dim_range():
     ],
 )
 def test_pipeline_peak_and_additional_memory(
-    intermed_shapes, op_mems, expected_peaks, expected_additionals
+    intermed_shapes, dtype, op_mems, expected_peaks, expected_additionals
 ):
     class SubImplStub:
         """A stub for an ops.Schedule with some arbitrary output and peak mem.
@@ -86,9 +86,7 @@ def test_pipeline_peak_and_additional_memory(
 
         @property
         def spec(self):
-
             class SubImplStubSpec:
-
                 @property
                 def serial_only(self):
                     return False
@@ -101,8 +99,8 @@ def test_pipeline_peak_and_additional_memory(
 
     assert len(intermed_shapes) + 1 == len(op_mems)
 
-    intermediates = [
-        tensor.Tensor(spec=specs.TensorSpec(shp, level=0), name=None)
+    intermediates: list[Optional[tensor.Tensor]] = [
+        tensor.Tensor(spec=specs.TensorSpec(shp, dtype=dtype, level=0), name=None)
         for shp in intermed_shapes
     ]
     intermediates.append(None)
@@ -119,25 +117,28 @@ def test_pipeline_peak_and_additional_memory(
 
 
 @pytest.mark.parametrize(
-    "img_size,filter_size,patch,out_size,tile_size,steps",
+    "img_size,filter_size,patch,out_size,tile_size,steps,dtype",
     [
-        (3, 3, 3, 1, 1, 1),
-        (3, 1, 1, 3, 1, 9),
-        (10, 3, 5, 8, 3, 9),
-        (5, 3, 4, 3, 2, 4),
+        (3, 3, 3, 1, 1, 1, dtypes.Uint32),
+        (3, 1, 1, 3, 1, 9, dtypes.Uint32),
+        (10, 3, 5, 8, 3, 9, dtypes.Uint8),
+        (5, 3, 4, 3, 2, 4, dtypes.Uint8),
     ],
 )
-def test_convolution_steps(img_size, filter_size, patch, out_size, tile_size, steps):
+def test_convolution_steps(
+    img_size, filter_size, patch, out_size, tile_size, steps, dtype
+):
     filter_cnt = 4
     img = tensor.Tensor(
-        spec=specs.TensorSpec(dim_sizes=(img_size, img_size)), name="image"
+        spec=specs.TensorSpec((img_size, img_size), dtype=dtype), name="image"
     )
     filters = tensor.Tensor(
-        spec=specs.TensorSpec(dim_sizes=(filter_size, filter_size, filter_cnt)),
+        spec=specs.TensorSpec((filter_size, filter_size, filter_cnt), dtype=dtype),
         name="filters",
     )
     out = tensor.Tensor(
-        spec=specs.TensorSpec(dim_sizes=(out_size, out_size, filter_cnt)), name="output"
+        spec=specs.TensorSpec((out_size, out_size, filter_cnt), dtype=dtype),
+        name="output",
     )
     conv = ops.DirectConv(lhs=img, rhs=filters, output=out, serial_only=False)
     loop = conv.tile_out((tile_size, tile_size, filter_cnt))
@@ -150,12 +151,12 @@ def test_convolution_steps(img_size, filter_size, patch, out_size, tile_size, st
 
 
 def test_evenly_divisible_matmul_tiling():
-    lhs = tensor.Tensor(specs.TensorSpec((4, 4)), name=None)
-    rhs = tensor.Tensor(specs.TensorSpec((4, 4)), name=None)
-    out = tensor.Tensor(specs.TensorSpec((4, 4)), name=None)
-    schedule = ops.Matmul(lhs, rhs, out, serial_only=False).tile_out((2, 2))
+    lhs = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
+    rhs = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
+    out = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
+    schedule = ops.MatmulHole(lhs, rhs, out, serial_only=False).tile_out((2, 2))
     assert schedule.output.dim_sizes == (4, 4)
-    assert isinstance(schedule.inner, ops.Matmul)
+    assert isinstance(schedule.inner, ops.MatmulBase)
     assert schedule.inner.output.dim_sizes == (2, 2)
     assert schedule.inner.lhs.dim_sizes[1] == 4
 
@@ -172,14 +173,22 @@ def test_evenly_divisible_matmul_tiling():
     st.integers(min_value=1, max_value=5),
     st.integers(min_value=1, max_value=5),
     st.integers(min_value=1, max_value=3),
+    st.from_type(dtypes.Dtype),
 )
-def test_nested_convs_outputs_constant(h, w, a, b, fa, fb, th1, tw1, th2, tw2, fi):
-    image = tensor.Tensor(specs.TensorSpec((h + a + fa, w + b + fb)), name=None)
-    filters = tensor.Tensor(specs.TensorSpec((h, w, fi)), name=None)
+def test_nested_convs_outputs_constant(
+    h, w, a, b, fa, fb, th1, tw1, th2, tw2, fi, dtype
+):
+    image = tensor.Tensor(
+        specs.TensorSpec((h + a + fa, w + b + fb), dtype=dtype), name=None
+    )
+    filters = tensor.Tensor(specs.TensorSpec((h, w, fi), dtype=dtype), name=None)
     expected_output_height = 1 + a + fa
     expected_output_width = 1 + b + fb
     output = tensor.Tensor(
-        specs.TensorSpec((expected_output_height, expected_output_width, fi)), name=None
+        specs.TensorSpec(
+            (expected_output_height, expected_output_width, fi), dtype=dtype
+        ),
+        name=None,
     )
     schedule = ops.DirectConv(image, filters, output, serial_only=False)
     assert schedule.output.dim_sizes[0] == expected_output_height
@@ -198,16 +207,20 @@ def test_nested_convs_outputs_constant(h, w, a, b, fa, fb, th1, tw1, th2, tw2, f
     assert tiled_schedule_b.output.dim_sizes[1] == expected_output_width
 
 
-def test_tile_compose_hole_out():
-    img = tensor.Tensor(specs.TensorSpec((8, 8)), name="image")
-    filters_a = tensor.Tensor(specs.TensorSpec((3, 3, 4)), name="filtersA")
-    filters_b = tensor.Tensor(specs.TensorSpec((3, 3, 4)), name="filtersB")
-    output = tensor.Tensor(specs.TensorSpec((4, 4, 4)), name="output")
+@pytest.mark.parametrize(
+    "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
+)
+def test_tile_compose_hole_out(dtype):
+    img = tensor.Tensor(specs.TensorSpec((8, 8), dtype=dtype), name="image")
+    filters_a = tensor.Tensor(specs.TensorSpec((3, 3, 4), dtype=dtype), name="filtersA")
+    filters_b = tensor.Tensor(specs.TensorSpec((3, 3, 4), dtype=dtype), name="filtersB")
+    output = tensor.Tensor(specs.TensorSpec((4, 4, 4), dtype=dtype), name="output")
 
     compose_spec = specs.Compose(
         (specs.Convolution, specs.ReduceSum, specs.Convolution),
         (filters_b.spec, img.spec, filters_a.spec),
         output.spec,
+        intermediate_dtypes=(dtype, dtype),
         serial_only=False,
     )
 
@@ -250,18 +263,26 @@ def _walk_actions(
 
 
 # TODO: Extend to all Specs, not just a single ComposeHole
-def test_composehole_actions_change_spec():
+@pytest.mark.parametrize(
+    "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
+)
+def test_composehole_actions_change_spec(dtype):
     # This doesn't test for cycles introduced by sequences of more than one
     # action, but it makes sure that at least every individual step changes the
     # spec.
-    img = tensor.Tensor(specs.TensorSpec((8, 8)), name="image")
-    filters_a = tensor.Tensor(specs.TensorSpec((3, 3, 10)), name="filtersA")
-    filters_b = tensor.Tensor(specs.TensorSpec((3, 3, 10)), name="filtersB")
-    output = tensor.Tensor(specs.TensorSpec((4, 4, 10)), name="output")
+    img = tensor.Tensor(specs.TensorSpec((8, 8), dtype=dtype), name="image")
+    filters_a = tensor.Tensor(
+        specs.TensorSpec((3, 3, 10), dtype=dtype), name="filtersA"
+    )
+    filters_b = tensor.Tensor(
+        specs.TensorSpec((3, 3, 10), dtype=dtype), name="filtersB"
+    )
+    output = tensor.Tensor(specs.TensorSpec((4, 4, 10), dtype=dtype), name="output")
     initial_spec = specs.Compose(
         (specs.Convolution, specs.ReduceSum, specs.Convolution),
         (filters_b.spec, img.spec, filters_a.spec),
         output.spec,
+        intermediate_dtypes=(dtype, dtype),
         serial_only=False,
     )
     initial_op = ops.ComposeHole(

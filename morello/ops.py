@@ -7,13 +7,13 @@ import itertools
 import math
 import sys
 import warnings
-from operator import mul
 from typing import (
     Callable,
     FrozenSet,
     Iterable,
     List,
     Optional,
+    Sequence,
     Tuple,
     TypeVar,
     Union,
@@ -23,7 +23,7 @@ from typing import (
 import dataclass_abc
 import termcolor
 
-from . import specs, system_config, tiling, utils
+from . import dtypes, specs, system_config, tiling, utils
 from .specs import Layout
 from .tensor import ConvolutionImageTile, SimpleTile, Tensor, Tile
 
@@ -100,7 +100,7 @@ def dim_range(dim: int, include_end: bool = True) -> Iterable[int]:
     assert dim >= 0
     if dim == 0:
         return
-    line_size = system_config.DEFAULT_SYSTEM_CONFIG.line_size
+    line_size = system_config.current_system().line_size
     if tile_size_mode.get() == TileSizeMode.CACHE_LINE_MULTIPLES:
         it = range(line_size, dim, line_size)
         if dim > 1:
@@ -161,9 +161,10 @@ class MoveAction:
     break_moves_symmetries.
     """
 
-    func: Callable[[Optional[int], Optional[Layout]], "Schedule"]
+    func: Callable[[Optional[int], Optional[Layout], bool], "Schedule"]
     source: Union[Tensor, Tile]
     input_idx: Optional[int]
+    prefetching: bool
     level: Optional[int] = None
     layout: Optional[specs.Layout] = None
 
@@ -173,12 +174,13 @@ class MoveAction:
         ), f"Layout was {self.layout} for dims. {self.source.dim_sizes}"
 
     def __call__(self):
-        return self.func(self.level, self.layout)
+        return self.func(self.level, self.layout, self.prefetching)
 
     def __str__(self):
         return (
-            f"MoveAction(input_idx={self.input_idx}, source={str(self.source)}, "
-            f"level={self.level}, layout={str(self.layout)})"
+            f"MoveAction(input_idx={self.input_idx}, source={str(self.source)},"
+            f" prefetching={self.prefetching}",
+            f" level={self.level}, layout={str(self.layout)})",
         )
 
 
@@ -360,7 +362,11 @@ def break_matmul_split_symmetries(func):
 
 @_assert_stable_spec
 def _common_move(
-    op, attr_name: str, level: Optional[int], layout: Optional[Layout]
+    op,
+    attr_name: str,
+    level: Optional[int],
+    layout: Optional[Layout],
+    prefetching: bool,
 ) -> "MoveLet":
     """Wraps a dataclass-based Schedule in a MoveLet moving one of its operands.
 
@@ -380,7 +386,9 @@ def _common_move(
     if operand.root.level == 0 and all(d == 1 for d in operand.dim_sizes):
         warnings.warn("There is no reason to move a single element in registers")
     new_mat = Tensor(
-        spec=specs.TensorSpec(dim_sizes=operand.dim_sizes, layout=layout, level=level),
+        spec=specs.TensorSpec(
+            dim_sizes=operand.dim_sizes, dtype=operand.dtype, layout=layout, level=level
+        ),
         name=None,
         origin=operand,
     )
@@ -398,6 +406,7 @@ def _common_move(
         source=operand,
         destination=new_mat,
         input_idx=input_idx,
+        prefetching=prefetching,
         inner=dataclasses.replace(op, **{attr_name: new_mat}),
     )
 
@@ -440,7 +449,8 @@ def _move_arguments(operand: Union[Tile, Tensor]) -> Iterable[tuple[int, Layout]
 def _common_operand_move_actions(op_move_tuples):
     for inp_idx, operand, move_fn in op_move_tuples:
         for level, layout in _move_arguments(operand):
-            yield MoveAction(move_fn, operand, inp_idx, level, layout)
+            for p in [True, False]:
+                yield MoveAction(move_fn, operand, inp_idx, p, level, layout)
 
 
 def spec_to_hole(spec: specs.Spec, inputs: Tuple, output) -> "Schedule":
@@ -455,7 +465,7 @@ def spec_to_hole(spec: specs.Spec, inputs: Tuple, output) -> "Schedule":
         )
     elif isinstance(spec, specs.Matmul):
         assert len(inputs) == 2, f"Expected 2 Tensor/Tile operands; got {len(inputs)}"
-        return Matmul(
+        return MatmulHole(
             lhs=inputs[0], rhs=inputs[1], output=output, serial_only=spec.serial_only
         )
     elif isinstance(spec, specs.ReduceSum):
@@ -656,7 +666,10 @@ class Schedule(abc.ABC):
         # and a Tile for calculating the update costs
         live_tensor = Tensor(
             specs.TensorSpec(
-                tile_to_convert.dim_sizes, level=level, layout=tile_to_convert.layout
+                tile_to_convert.dim_sizes,
+                tile_to_convert.dtype,
+                level=level,
+                layout=tile_to_convert.layout,
             ),
             name=None,
             origin=tile_to_convert.origin,
@@ -689,12 +702,37 @@ class Schedule(abc.ABC):
     def split_filters(self, k: int) -> "Schedule":
         return dataclasses.replace(self, inner=self.inner.split_filters(k))
 
+    @_assert_stable_spec
+    def place_mult(self, *args, **kwargs):
+        if len(self.children) != 1:
+            raise NotImplementedError()
+        return self.replace_children(
+            [next(iter(self.children)).place_mult(*args, **kwargs)]
+        )
+
+    @_assert_stable_spec
+    def place_hvx_vrmpyacc(self, *args, **kwargs):
+        if len(self.children) != 1:
+            raise NotImplementedError()
+        return self.replace_children(
+            [next(iter(self.children)).place_hvx_vrmpyacc(*args, **kwargs)]
+        )
+
+    @_assert_stable_spec
+    def place_hvx_gemvmpebbw(self, *args, **kwargs):
+        if len(self.children) != 1:
+            raise NotImplementedError()
+        return self.replace_children(
+            [next(iter(self.children)).place_hvx_gemvmpebbw(*args, **kwargs)]
+        )
+
     @abc.abstractmethod
     def move_input(
         self,
         input_idx: int,
         level: Optional[int] = None,
         layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ) -> "Schedule":
         raise NotImplementedError()
 
@@ -703,6 +741,7 @@ class Schedule(abc.ABC):
         self,
         level: Optional[int] = None,
         layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ) -> "Schedule":
         raise NotImplementedError()
 
@@ -790,7 +829,7 @@ class ComposeHole(Schedule):
     ) -> Iterable[Callable[[], Schedule]]:
         # TODO: Remove this symmetry: lots of ways to iteratively split the pipeline
         # TODO: Reintroduce splitting on non-index 0
-        for level in range(len(system_config.DEFAULT_SYSTEM_CONFIG.level_configs)):
+        for level in range(len(system_config.current_system().level_configs)):
             for layout in (Layout.ROW_MAJOR, Layout.COL_MAJOR):
                 yield PeelAction(self.peel, level=level, layout=layout)
 
@@ -838,6 +877,7 @@ class ComposeHole(Schedule):
         input_idx: int,
         level: Optional[int] = None,
         layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ):
         operand = self.inputs[input_idx]
         if level is None:
@@ -849,7 +889,7 @@ class ComposeHole(Schedule):
             raise ValueError("Either level or layout must differ from current")
         new_mat = Tensor(
             spec=specs.TensorSpec(
-                dim_sizes=operand.dim_sizes, layout=layout, level=level
+                operand.dim_sizes, dtype=operand.dtype, layout=layout, level=level
             ),
             name=None,
             origin=operand,
@@ -863,12 +903,16 @@ class ComposeHole(Schedule):
             source=operand,
             destination=new_mat,
             input_idx=input_idx,
+            prefetching=prefetching,
             inner=dataclasses.replace(self, spec=new_inner_spec, inputs=new_inputs),
         )
 
     @_assert_stable_spec
     def move_output(
-        self, level: Optional[int] = None, layout: Optional[Layout] = None
+        self,
+        level: Optional[int] = None,
+        layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ) -> "Schedule":
         operand = self.output
         if level is None:
@@ -880,7 +924,7 @@ class ComposeHole(Schedule):
             raise ValueError("Either level or layout must differ from current")
         new_mat = Tensor(
             spec=specs.TensorSpec(
-                dim_sizes=operand.dim_sizes, layout=layout, level=level
+                operand.dim_sizes, dtype=operand.dtype, layout=layout, level=level
             ),
             name=None,
             origin=operand,
@@ -891,15 +935,18 @@ class ComposeHole(Schedule):
             source=operand,
             destination=new_mat,
             input_idx=None,
+            prefetching=prefetching,
             inner=dataclasses.replace(self, spec=new_inner_spec, output=new_mat),
         )
 
     @_assert_stable_spec
     def peel(
-        self, level: Optional[int] = None, layout: Optional[Layout] = None
+        self,
+        level: Optional[int] = None,
+        layout: Optional[Layout] = None,
     ) -> Schedule:
         if level is None or layout is None:
-            raise NotImplementedError("Auto-selecting level and layout unimplemented")
+            raise NotImplementedError("Auto-selecting level or layout unimplemented")
 
         # TODO: Using ALPHABET_PRODUCT here will fail for long programs
         intermediate_tensor_layout = layout
@@ -908,6 +955,7 @@ class ComposeHole(Schedule):
         intermediate_tensor = Tensor(
             specs.TensorSpec(
                 dim_sizes=self.spec.intermediate_shapes[0],
+                dtype=self.spec.intermediate_dtypes[0],
                 level=level,
                 layout=intermediate_tensor_layout,
             ),
@@ -946,6 +994,7 @@ class ComposeHole(Schedule):
                     subspec_classes=self.spec.subspec_classes[1:],
                     inputs=tuple(t.spec for t in self.inputs[hi:]),
                     output=intermediate_tensor.spec,
+                    intermediate_dtypes=self.spec.intermediate_dtypes[1:],
                     serial_only=self.spec.serial_only,
                 ),
                 inputs=self.inputs[hi:],
@@ -987,6 +1036,7 @@ class ComposeHole(Schedule):
                     subspec_classes=self.spec.subspec_classes,
                     inputs=tuple(inp.spec for inp in reified_inputs),
                     output=shrunken_output_tile.spec,
+                    intermediate_dtypes=self.spec.intermediate_dtypes,
                     serial_only=(parallel or self.spec.serial_only),
                 ),
                 inputs=reified_inputs,
@@ -1057,6 +1107,7 @@ class ComposeHole(Schedule):
                 subspec_classes=self.spec.subspec_classes,
                 inputs=tuple(inp.spec for inp in reified_inputs),
                 output=self.output.spec,
+                intermediate_dtypes=self.spec.intermediate_dtypes,
                 serial_only=(parallel or self.spec.serial_only),
             ),
             inputs=reified_inputs,
@@ -1149,7 +1200,7 @@ class ComposeHole(Schedule):
 
     @_assert_stable_spec
     def complete(self) -> "Schedule":
-        level_count = len(system_config.DEFAULT_SYSTEM_CONFIG.level_configs)
+        level_count = len(system_config.current_system().level_configs)
         return self.peel(level=level_count - 1, layout=Layout.ROW_MAJOR).complete()
 
     @_assert_stable_spec
@@ -1160,11 +1211,11 @@ class ComposeHole(Schedule):
 
     @property
     def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]]
+        return [[0 for _ in system_config.current_system().level_configs]]
 
     @property
     def peak_memory(self) -> List[int]:
-        return [0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]
+        return [0 for _ in system_config.current_system().level_configs]
 
     @property
     def is_scheduled(self) -> bool:
@@ -1204,20 +1255,25 @@ class Pipeline(Schedule):
     @functools.cached_property
     def spec(self) -> specs.Compose:
         subspec_classes = []
+        intermed_dtypes = []
         inputs = tuple()
         for i, stage in enumerate(self.stages):
             if isinstance(stage.spec, specs.Compose):
                 subspec_classes = list(stage.spec.subspec_classes) + subspec_classes
+                intermed_dtypes = list(stage.spec.intermediate_dtypes) + intermed_dtypes
             else:
                 subspec_classes.insert(0, type(stage.spec))
             inputs = tuple(stage.spec.inputs) + inputs
             if i > 0:
                 inputs = inputs[1:]
+            intermed_dtypes.insert(0, stage.spec.output.dtype)
+        del intermed_dtypes[0]  # The head dtype will the output dtype, so drop it
         output = self.stages[-1].spec.output
         return specs.Compose(
             tuple(subspec_classes),
             inputs=inputs,
             output=output,
+            intermediate_dtypes=tuple(intermed_dtypes),
             serial_only=self.serial_only,
         )
 
@@ -1270,13 +1326,19 @@ class Pipeline(Schedule):
         return 1 + max(stage.depth for stage in self.stages)
 
     def move_input(
-        self, input_idx: int, level: Optional[int], layout: Optional[Layout]
+        self,
+        input_idx: int,
+        level: Optional[int],
+        layout: Optional[Layout],
+        prefetching: bool = False,
     ) -> "Schedule":
         raise NotImplementedError(
             "move_input should usually be called on ComposeHole, not Pipeline"
         )
 
-    def move_output(self, level: Optional[int], layout: Optional[Layout]) -> "Schedule":
+    def move_output(
+        self, level: Optional[int], layout: Optional[Layout], prefetching: bool = False
+    ) -> "Schedule":
         raise NotImplementedError(
             "move_output should usually be called on ComposeHole, not Pipeline"
         )
@@ -1317,19 +1379,19 @@ class Pipeline(Schedule):
     def additional_memories(self) -> List[List[int]]:
         # Initialize peaks to dependencies of the first stage, which is just its
         # output
-        first_peak = [0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]
+        first_peak = [0 for _ in system_config.current_system().level_configs]
         first_peak[self.stages[0].output.level] = self.stages[0].output.volume
 
         middle_peaks: List[List[int]] = []
         for stage_idx in range(1, len(self.stages) - 1):
             before = self.stages[stage_idx - 1].output
             after = self.stages[stage_idx].output
-            stage_mem = [0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]
+            stage_mem = [0 for _ in system_config.current_system().level_configs]
             stage_mem[before.level] += before.volume
             stage_mem[after.level] += after.volume
             middle_peaks.append(stage_mem)
 
-        last_peak = [0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]
+        last_peak = [0 for _ in system_config.current_system().level_configs]
         last_peak[self.stages[-2].output.level] = self.stages[-2].output.volume
 
         return [first_peak] + middle_peaks + [last_peak]
@@ -1342,7 +1404,7 @@ class Pipeline(Schedule):
         intermed_utils: List[List[int]] = []
         for tensor in intermediates:
             assert isinstance(tensor, Tensor)
-            new_mem = [0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]
+            new_mem = [0 for _ in system_config.current_system().level_configs]
             new_mem[tensor.level] += tensor.volume
             intermed_utils.append(new_mem)
 
@@ -1371,8 +1433,7 @@ class Pipeline(Schedule):
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
-class Matmul(Schedule):
-
+class MatmulBase(Schedule):
     lhs: Union[Tensor, Tile]  # n-by-m
     rhs: Union[Tensor, Tile]  # m-by-p
     output: Union[Tensor, Tile]  # m-by-n
@@ -1399,7 +1460,7 @@ class Matmul(Schedule):
         fancy: bool = False,
     ):
         return (
-            f"Matmul({name_tensor_fn(self.lhs)}, "
+            f"{type(self).__name__}({name_tensor_fn(self.lhs)}, "
             f"{name_tensor_fn(self.rhs)}, "
             f"{name_tensor_fn(self.output)})"
         )
@@ -1412,12 +1473,33 @@ class Matmul(Schedule):
     def innermost(self) -> "Schedule":
         return self
 
+    @_assert_stable_spec
+    def replace_children(self, replacements: Iterable[Schedule]) -> Schedule:
+        replacements = list(replacements)
+        if replacements:
+            raise Exception("Matmul has no children to replace")
+        return self
+
+    @property
+    def additional_memories(self) -> List[List[int]]:
+        return []
+
+    @property
+    def peak_memory(self) -> List[int]:
+        return [0 for _ in system_config.current_system().level_configs]
+
+    def replace_io(
+        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
+    ) -> "Schedule":
+        lhs, rhs = inputs
+        return type(self)(lhs, rhs, output)
+
+
+@dataclass_abc.dataclass_abc(frozen=True)
+class MatmulHole(MatmulBase):
     @property
     def is_scheduled(self) -> bool:
-        return all(
-            o.root.in_registers and functools.reduce(mul, o.dim_sizes, 1) == 1
-            for o in [self.lhs, self.rhs, self.output]
-        )
+        return False
 
     @prune_relayout_cycles
     @break_moves_symmetries
@@ -1446,23 +1528,34 @@ class Matmul(Schedule):
             + [(None, self.output, self.move_output)]
         )
 
+        if Mult.applies_to_operands(self.operands):
+            yield self.place_mult
+
+        if system_config.current_system().has_hvx:
+            if HvxVrmpyaccVuwVubRub.applies_to_operands(self.operands):
+                yield self.place_hvx_vrmpyacc
+
     def move_input(
         self,
         input_idx: int,
         level: Optional[int] = None,
         layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ) -> "MoveLet":
         if input_idx == 0:
-            return _common_move(self, "lhs", level, layout)
+            return _common_move(self, "lhs", level, layout, prefetching)
         elif input_idx == 1:
-            return _common_move(self, "rhs", level, layout)
+            return _common_move(self, "rhs", level, layout, prefetching)
         else:
             raise ValueError("input_idx must be 0 or 1")
 
     def move_output(
-        self, level: Optional[int] = None, layout: Optional[Layout] = None
+        self,
+        level: Optional[int] = None,
+        layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ) -> "MoveLet":
-        return _common_move(self, "output", level, layout)
+        return _common_move(self, "output", level, layout, prefetching)
 
     @_assert_stable_spec
     def split(self, size: int) -> "Schedule":
@@ -1480,7 +1573,7 @@ class Matmul(Schedule):
             lhs=self.lhs,
             rhs=self.rhs,
             output=self.output,
-            inner=Matmul(left_view, right_view, self.output, self.serial_only),
+            inner=MatmulHole(left_view, right_view, self.output, self.serial_only),
         )
 
     @_assert_stable_spec
@@ -1495,27 +1588,105 @@ class Matmul(Schedule):
             return self.move_input(1, level=self.rhs.root.level - 1).complete()
         if not self.output.root.in_registers:
             return self.move_output(level=self.output.root.level - 1).complete()
-        return self
+        return self.place_mult()
 
     @_assert_stable_spec
-    def replace_children(self, replacements: Iterable[Schedule]) -> Schedule:
-        if replacements:
-            raise Exception("Matmul has no children to replace")
-        return self
+    def place_mult(self) -> "Mult":
+        return Mult(self.lhs, self.rhs, self.output, self.serial_only)
 
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Schedule":
-        lhs, rhs = inputs
-        return Matmul(lhs, rhs, output)
+    @_assert_stable_spec
+    def place_hvx_vrmpyacc(self) -> "HvxVrmpyaccVuwVubRub":
+        return HvxVrmpyaccVuwVubRub(self.lhs, self.rhs, self.output, self.serial_only)
 
+
+@dataclass_abc.dataclass_abc(frozen=True)
+class MatmulLeaf(MatmulBase):
     @property
-    def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]]
+    def is_scheduled(self) -> bool:
+        return True
 
-    @property
-    def peak_memory(self) -> List[int]:
-        return [0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]
+    @prune_relayout_cycles
+    @break_moves_symmetries
+    @break_tile_out_symmetries
+    @break_matmul_split_symmetries
+    def actions(
+        self, parent_summary: Optional[ParentSummary] = None
+    ) -> Iterable[Callable[[], Schedule]]:
+        yield from []
+
+    def move_input(
+        self,
+        input_idx: int,
+        level: Optional[int] = None,
+        layout: Optional[Layout] = None,
+        prefetching: bool = False,
+    ) -> "MoveLet":
+        raise NotImplementedError()
+
+    def move_output(
+        self,
+        level: Optional[int] = None,
+        layout: Optional[Layout] = None,
+        prefetching: bool = False,
+    ) -> "MoveLet":
+        raise NotImplementedError()
+
+
+@dataclass_abc.dataclass_abc(frozen=True)
+class Mult(MatmulLeaf):
+    def __post_init__(self):
+        super().__post_init__()
+        assert all(o.root.in_registers for o in self.operands)
+        assert all(d == 1 for o in self.operands for d in o.dim_sizes)
+
+    @staticmethod
+    def applies_to_operands(operands: Sequence[Union[Tensor, Tile]]) -> bool:
+        return all(
+            o.root.in_registers and all(d == 1 for d in o.dim_sizes) for o in operands
+        )
+
+
+@dataclass_abc.dataclass_abc(frozen=True)
+class HvxVrmpyaccVuwVubRub(MatmulLeaf):
+    def __post_init__(self):
+        super().__post_init__()
+        check_result = HvxVrmpyaccVuwVubRub._check_operands(self.operands)
+        if check_result:
+            raise ValueError(check_result)
+
+    @staticmethod
+    def applies_to_operands(operands: Sequence[Union[Tensor, Tile]]) -> bool:
+        if HvxVrmpyaccVuwVubRub._check_operands(operands):
+            return False
+        return True
+
+    @staticmethod
+    def _check_operands(operands: Sequence[Union[Tensor, Tile]]) -> Optional[str]:
+        if not all(o.root.in_registers for o in operands):
+            return "All operands must be in registers"
+
+        lhs, rhs, out = operands
+
+        if lhs.dtype != dtypes.Uint8:
+            raise "lhs should be uint8"
+        if rhs.dtype != dtypes.Uint8:
+            raise "rhs should be uint8"
+        if out.dtype != dtypes.Uint32:
+            raise "out should be uint8"
+
+        if lhs.dim_sizes != (32, 4):
+            return f"lhs must have shape 1x4, but had shape: {lhs.dim_sizes}"
+        if rhs.dim_sizes != (4, 1):
+            return f"rhs must have shape 4x1, but had shape: {rhs.dim_sizes}"
+        if out.dim_sizes != (32, 1):
+            return f"out must have shape 1x1, but had shape: {out.dim_sizes}"
+
+        if not isinstance(lhs, Tensor):
+            return "lhs must be a Tensor"
+
+        if any(not o.contiguous for o in operands):
+            return "All operands must be contiguous"
+        return None
 
 
 # noinspection PyTypeChecker, PyArgumentList, PyUnresolvedReferences
@@ -1624,18 +1795,22 @@ class DirectConv(Schedule):
         input_idx: int,
         level: Optional[int] = None,
         layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ) -> "MoveLet":
         if input_idx == 0:
-            return _common_move(self, "lhs", level, layout)
+            return _common_move(self, "lhs", level, layout, prefetching)
         elif input_idx == 1:
-            return _common_move(self, "rhs", level, layout)
+            return _common_move(self, "rhs", level, layout, prefetching)
         else:
             raise ValueError("input_idx must be 0 or 1")
 
     def move_output(
-        self, level: Optional[int] = None, layout: Optional[Layout] = None
+        self,
+        level: Optional[int] = None,
+        layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ) -> "MoveLet":
-        return _common_move(self, "output", level, layout)
+        return _common_move(self, "output", level, layout, prefetching)
 
     @_assert_stable_spec
     def split(self, size: int) -> "Schedule":
@@ -1709,11 +1884,11 @@ class DirectConv(Schedule):
 
     @property
     def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]]
+        return [[0 for _ in system_config.current_system().level_configs]]
 
     @property
     def peak_memory(self) -> List[int]:
-        return [0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]
+        return [0 for _ in system_config.current_system().level_configs]
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -1789,16 +1964,20 @@ class ReduceSum(Schedule):
         input_idx: int,
         level: Optional[int] = None,
         layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ) -> "MoveLet":
         if input_idx == 0:
-            return _common_move(self, "source", level, layout)
+            return _common_move(self, "source", level, layout, prefetching)
         else:
             raise ValueError("input_idx must be 0 ")
 
     def move_output(
-        self, level: Optional[int] = None, layout: Optional[Layout] = None
+        self,
+        level: Optional[int] = None,
+        layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ) -> Schedule:
-        return _common_move(self, "output", level, layout)
+        return _common_move(self, "output", level, layout, prefetching)
 
     @_assert_stable_spec
     def split(self, k: int) -> Union["ReduceSum", "Loop"]:
@@ -1842,11 +2021,11 @@ class ReduceSum(Schedule):
 
     @property
     def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]]
+        return [[0 for _ in system_config.current_system().level_configs]]
 
     @property
     def peak_memory(self) -> List[int]:
-        return [0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]
+        return [0 for _ in system_config.current_system().level_configs]
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -1953,7 +2132,7 @@ class Loop(Schedule):
 
     @property
     def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]]
+        return [[0 for _ in system_config.current_system().level_configs]]
 
     @property
     def peak_memory(self) -> List[int]:
@@ -2058,7 +2237,7 @@ class _TilingMixin:
 
     @property
     def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]]
+        return [[0 for _ in system_config.current_system().level_configs]]
 
     @property
     def peak_memory(self) -> List[int]:
@@ -2233,7 +2412,7 @@ class SlidingWindowLoop(_TilingMixin, Schedule):
 
     @property
     def additional_memories(self) -> List[List[int]]:
-        mem = [0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]
+        mem = [0 for _ in system_config.current_system().level_configs]
         mem[self.live_tensor.root.level] = self.live_tensor.volume
         return [mem]
 
@@ -2347,6 +2526,7 @@ class MoveLet(Schedule):
     source: Union[Tensor, Tile]
     destination: Tensor
     input_idx: Optional[int]
+    prefetching: bool
     inner: Schedule
 
     def __post_init__(self):
@@ -2362,6 +2542,8 @@ class MoveLet(Schedule):
         fancy: bool = False,
     ):
         keyword = "move"
+        if self.prefetching:
+            keyword += "[p]"
         if self.is_store:
             keyword = "move*"
 
@@ -2489,16 +2671,20 @@ class MoveLet(Schedule):
 
     @property
     def additional_memories(self) -> List[List[int]]:
-        mem = [0 for _ in system_config.DEFAULT_SYSTEM_CONFIG.level_configs]
-        mem[self.destination.level] = self.destination.volume
+        mem = [0 for _ in system_config.current_system().level_configs]
+        additional = self.destination.volume
+        if self.prefetching:
+            additional *= 2
+        mem[self.destination.level] = additional
         return [mem]
 
     @property
     def peak_memory(self) -> List[int]:
         mem = self.inner.peak_memory
-        mem[self.destination.level] += functools.reduce(
-            mul, self.destination.dim_sizes, 1
-        )
+        additional = self.destination.volume
+        if self.prefetching:
+            additional *= 2
+        mem[self.destination.level] += additional
         return mem
 
     @property

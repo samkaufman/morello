@@ -4,7 +4,7 @@ import math
 from operator import mul
 from typing import Optional, Tuple, Union, cast
 
-from . import specs, system_config
+from . import dtypes, specs, system_config
 
 
 def layout_ordered_dims(operand: Union["Tensor", "Tile"]) -> Tuple[int, ...]:
@@ -29,6 +29,11 @@ class _TensorLike:
     @property
     def layout(self) -> specs.Layout:
         return self.spec.layout
+
+    @property
+    def dtype(self) -> dtypes.Dtype:
+        # Just a sugar getter.
+        return self.spec.dtype
 
     @property
     def height(self):
@@ -97,7 +102,7 @@ class Tensor(_TensorLike):
         level_epi = ""
         if self.layout != specs.Layout.ROW_MAJOR:
             layout_epi = f", {self.layout}"
-        if self.level != len(system_config.DEFAULT_SYSTEM_CONFIG.level_configs) - 1:
+        if self.level != len(system_config.current_system().level_configs) - 1:
             level_epi = f", lvl={self.level}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         return f"Tensor({dims_part}{layout_epi}{level_epi})"
@@ -105,7 +110,7 @@ class Tensor(_TensorLike):
     @property
     def in_registers(self):
         # TODO(samkaufman): The Tensor should carry a handle to its System instead of
-        #   assuming we're on DEFAULT_SYSTEM_CONFIG
+        #   assuming we're on current_system()
         return self.level == 0
 
     @property
@@ -190,7 +195,10 @@ class Tile(_TensorLike):
         if any(d != 1 for d in self.dim_sizes):
             layout = self.root.layout
         return specs.TensorSpec(
-            dim_sizes=self.dim_sizes, level=self.root.level, layout=layout
+            dim_sizes=self.dim_sizes,
+            dtype=self.root.dtype,
+            level=self.root.level,
+            layout=layout,
         )
 
     def __str__(self):
@@ -199,10 +207,7 @@ class Tile(_TensorLike):
         level_epi = ""
         if self.root.layout != specs.Layout.ROW_MAJOR:
             layout_epi = f", {self.root.layout}"
-        if (
-            self.root.level
-            != len(system_config.DEFAULT_SYSTEM_CONFIG.level_configs) - 1
-        ):
+        if self.root.level != len(system_config.current_system().level_configs) - 1:
             level_epi = f", lvl={self.root.level}"
         return f"{type(self).__name__}({dims_part}{layout_epi}{level_epi})"
 

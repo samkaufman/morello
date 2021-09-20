@@ -111,7 +111,7 @@ def schedule_search(
     if cache is None:
         cache = ScheduleCache()
 
-    # The default available memory is the capacities of DEFAULT_SYSTEM_CONFIG.
+    # The default available memory is the capacities of current_system().
     # These capacities are measured in cache lines, not words, so: multiply by
     # line size when initializing the limit.
     if memory_limits is None:
@@ -170,7 +170,6 @@ def schedule_search(
                     f"Action returned self: {new_tree}; spec = {str(new_tree.spec)}; action = {act}"
                 )
                 continue
-            assert new_tree.depth == 2
 
             # Ignore the action if it uses more memory than is available for any
             # hole.

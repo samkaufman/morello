@@ -91,8 +91,8 @@ def _mutating_replace(
         replacements[subject] = new_tile
         return new_tile
 
-    if isinstance(subject, ops.Matmul):
-        return ops.Matmul(
+    if isinstance(subject, (ops.MatmulHole, ops.Mult, ops.HvxVrmpyaccVuwVubRub)):
+        return type(subject)(
             lhs=_mutating_replace(subject.lhs, replacements),
             rhs=_mutating_replace(subject.rhs, replacements),
             output=_mutating_replace(subject.output, replacements),
@@ -109,6 +109,7 @@ def _mutating_replace(
         return ops.MoveLet(
             source=_mutating_replace(subject.source, replacements),
             destination=_mutating_replace(subject.destination, replacements),
+            prefetching=subject.prefetching,
             input_idx=subject.input_idx,
             inner=_mutating_replace(subject.inner, replacements),
         )
@@ -162,6 +163,8 @@ def _mutating_replace(
             subspec_classes=subject.spec.subspec_classes,
             inputs=tuple(inp.spec for inp in new_inputs),
             output=new_output.spec,
+            intermediate_dtypes=subject.spec.intermediate_dtypes,
+            serial_only=subject.spec.serial_only,
         )
         return ops.ComposeHole(
             spec=new_spec,

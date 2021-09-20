@@ -1,10 +1,11 @@
+from typing import Optional
+
 import hypothesis
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from morello import cost, ops, specs, system_config, tensor
-
+from morello import cost, dtypes, ops, specs, system_config, tensor
 from . import strategies
 
 strategies.register_default_strategies()
@@ -17,12 +18,12 @@ def tile_st(draw):
     dim_sizes = tuple(
         draw(st.integers(min_value=1, max_value=d)) for d in root_tensor.dim_sizes
     )
-    return tensor.Tile(root_tensor, dim_sizes, name=root_tile_name)
+    return tensor.Tile(dim_sizes, name=root_tile_name, origin=root_tensor)
 
 
 @st.composite
 def _move_operand(
-    draw, b: ops.Schedule, underlying_system: system_config.SimpleSystemConfig
+    draw, b: ops.Schedule, underlying_system: system_config.SystemDescription
 ):
     operand_idx = draw(st.integers(low=0, high=len(b.inputs) + 1))
     level_configs = underlying_system.level_configs
@@ -43,8 +44,10 @@ def _tile_schedule_op(draw, b: ops.Schedule):
 
 
 def full_schedule_st(
-    underlying_system: system_config.SimpleSystemConfig = system_config.DEFAULT_SYSTEM_CONFIG,
+    underlying_system: Optional[system_config.SystemDescription] = None,
 ):
+    if not underlying_system:
+        underlying_system = system_config.current_system()
     return st.recursive(
         base=st.from_type(ops.Matmul),
         extend=lambda b: st.one_of(
@@ -53,17 +56,19 @@ def full_schedule_st(
     ).filter(lambda ex: ex.is_scheduled)
 
 
-def _make_tiled_matmul(maximize_register_use: bool, c: int, m: int) -> ops.Schedule:
+def _make_tiled_matmul(
+    maximize_register_use: bool, c: int, m: int, dtype: dtypes.Dtype
+) -> ops.Schedule:
     m_dim = 2 ** c
-    tile_width = system_config.DEFAULT_SYSTEM_CONFIG.line_size * m
+    tile_width = system_config.current_system().line_size * m
     hypothesis.assume(tile_width <= m_dim)
     hypothesis.note(f"Non-contig. {m_dim}x{m_dim} Matmul w/ {tile_width}-wide tile")
 
-    a = tensor.Tensor(spec=specs.TensorSpec(dim_sizes=(m_dim, m_dim)), name=None)
-    b = tensor.Tensor(spec=specs.TensorSpec(dim_sizes=(m_dim, m_dim)), name=None)
-    o = tensor.Tensor(spec=specs.TensorSpec(dim_sizes=(m_dim, m_dim)), name=None)
+    a = tensor.Tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
+    b = tensor.Tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
+    o = tensor.Tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
 
-    schedule = ops.Matmul(a, b, o).tile_out((m_dim, tile_width))
+    schedule = ops.MatmulHole(a, b, o).tile_out((m_dim, tile_width))
     # if make_contiguous:
     #    schedule = schedule.move_input(1, 0, matrix.Layout.COL_MAJOR)
     #    n = tile_width
@@ -71,7 +76,7 @@ def _make_tiled_matmul(maximize_register_use: bool, c: int, m: int) -> ops.Sched
         # We've already broken columns into tile_width tiles, so lets just move panels
         # into registers
         schedule = (
-            schedule.tile_out((1, system_config.DEFAULT_SYSTEM_CONFIG.line_size))
+            schedule.tile_out((1, system_config.current_system().line_size))
             .move_input(0, level=0)
             .move_input(1, level=0)
         )
@@ -79,10 +84,14 @@ def _make_tiled_matmul(maximize_register_use: bool, c: int, m: int) -> ops.Sched
 
 
 @pytest.mark.skip("Skipping because assumptions cannot be satisfied")
-@given(c=st.integers(min_value=2, max_value=4), m=st.integers(min_value=1, max_value=4))
-def test_contiguous_copy_lowers_matmul_cost(c: int, m: int):
-    contiguous_matmul = _make_tiled_matmul(True, c, m)
-    noncontiguous_matmul = _make_tiled_matmul(False, c, m)
+@given(
+    st.integers(min_value=2, max_value=4),
+    st.integers(min_value=1, max_value=4),
+    st.from_type(dtypes.Dtype),
+)
+def test_contiguous_copy_lowers_matmul_cost(c: int, m: int, dtype: dtypes.Dtype):
+    contiguous_matmul = _make_tiled_matmul(True, c, m, dtype)
+    noncontiguous_matmul = _make_tiled_matmul(False, c, m, dtype)
     fast_cost = cost.analytical_cost(contiguous_matmul)
     slow_cost = cost.analytical_cost(noncontiguous_matmul)
     hypothesis.note(f"Speeds fast/slow are {fast_cost} and {slow_cost}")
@@ -92,43 +101,64 @@ def test_contiguous_copy_lowers_matmul_cost(c: int, m: int):
 
 
 @hypothesis.settings(deadline=10 * 1000)
-@given(matmul_spec=strategies.matmul_spec_st())
-def test_trivial_tilings_are_same_cost_as_untiled_matmul(matmul_spec: specs.Matmul):
-    lhs = ops.Tensor(matmul_spec.lhs, name=None)
-    rhs = ops.Tensor(matmul_spec.rhs, name=None)
-    out = ops.Tensor(matmul_spec.output, name=None)
+@given(
+    target=st.from_type(system_config.Target),
+    matmul_spec=strategies.matmul_spec_st(),
+)
+def test_trivial_tilings_are_same_cost_as_untiled_matmul(
+    target: system_config.Target, matmul_spec: specs.Matmul
+):
+    with system_config.with_target(target):
+        lhs = ops.Tensor(matmul_spec.lhs, name=None)
+        rhs = ops.Tensor(matmul_spec.rhs, name=None)
+        out = ops.Tensor(matmul_spec.output, name=None)
 
-    m, k, n = out.dim_sizes[0], lhs.dim_sizes[1], out.dim_sizes[1]
-    trivial_tiled_schedule = (
-        ops.Matmul(lhs, rhs, out, matmul_spec.serial_only)
-        .tile_out((m, n))
-        .split(k)
-        .complete()
-    )
+        m, k, n = out.dim_sizes[0], lhs.dim_sizes[1], out.dim_sizes[1]
+        trivial_tiled_schedule = (
+            ops.MatmulHole(lhs, rhs, out, matmul_spec.serial_only)
+            .tile_out((m, n))
+            .split(k)
+            .complete()
+        )
 
-    trivial_untiled_schedule = ops.Matmul(lhs, rhs, out, serial_only=False).complete()
-    assert cost.analytical_cost(trivial_tiled_schedule) == cost.analytical_cost(
-        trivial_untiled_schedule
-    )
+        trivial_untiled_schedule = ops.MatmulHole(
+            lhs, rhs, out, serial_only=False
+        ).complete()
+        assert cost.analytical_cost(trivial_tiled_schedule) == cost.analytical_cost(
+            trivial_untiled_schedule
+        )
 
 
 @given(
+    st.from_type(system_config.Target),
+    st.from_type(dtypes.Dtype),
     st.integers(min_value=0, max_value=1),
     st.integers(min_value=2, max_value=64),
     st.integers(min_value=0, max_value=1),
     st.from_type(specs.Layout),
+    st.booleans(),
 )
-def test_cost_is_invariant_to_panel_layouts(dim_idx, elements, level, dest_layout):
-    dim_sizes = tuple(elements if dim_idx == i else 1 for i in range(2))
-    left = tensor.Tensor(
-        spec=specs.TensorSpec(dim_sizes, layout=specs.Layout.ROW_MAJOR, level=level),
-        name=None,
-    )
-    right = tensor.Tensor(
-        spec=specs.TensorSpec(dim_sizes, layout=specs.Layout.COL_MAJOR, level=level),
-        name=None,
-    )
-    assert cost.move_cost(left, dest_layout) == cost.move_cost(right, dest_layout)
+def test_cost_is_invariant_to_panel_layouts(
+    target, dtype, dim_idx, elements, level, dest_layout, prefetching
+):
+    with system_config.with_target(target):
+        dim_sizes = tuple(elements if dim_idx == i else 1 for i in range(2))
+        left = tensor.Tensor(
+            spec=specs.TensorSpec(
+                dim_sizes, dtype=dtype, layout=specs.Layout.ROW_MAJOR, level=level
+            ),
+            name=None,
+        )
+        right = tensor.Tensor(
+            spec=specs.TensorSpec(
+                dim_sizes, dtype=dtype, layout=specs.Layout.COL_MAJOR, level=level
+            ),
+            name=None,
+        )
+
+        left_result = cost.move_cost(left, dest_layout, prefetching)
+        right_result = cost.move_cost(right, dest_layout, prefetching)
+        assert left_result == right_result
 
 
 if __name__ == "__main__":

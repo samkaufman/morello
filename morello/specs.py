@@ -13,7 +13,8 @@ from typing import Callable, Iterable, Optional, Tuple, TypeVar, cast
 
 import dataclass_abc
 
-from . import system_config
+from .dtypes import Dtype
+from .system_config.state import current_system
 
 T = TypeVar("T")
 
@@ -47,21 +48,24 @@ class TensorSpec:
     """
 
     dim_sizes: Tuple[int, ...]
+    dtype: Dtype
     level: int = 0
     layout: Layout = Layout.ROW_MAJOR
 
     def __init__(
         self,
         dim_sizes: Tuple[int, ...],
+        dtype: Dtype,
         level: Optional[int] = None,
         layout: Layout = Layout.ROW_MAJOR,
     ):
         object.__setattr__(self, "dim_sizes", dim_sizes)
+        object.__setattr__(self, "dtype", dtype)
         if level is None:
             object.__setattr__(
                 self,
                 "level",
-                len(system_config.DEFAULT_SYSTEM_CONFIG.level_configs) - 1,
+                len(current_system().level_configs) - 1,
             )
         else:
             object.__setattr__(self, "level", level)
@@ -79,17 +83,19 @@ class TensorSpec:
         new_layout = self.layout
         if all(d == 1 for d in new_dim_sizes):
             new_layout = Layout.ROW_MAJOR
-        return TensorSpec(dim_sizes=new_dim_sizes, level=self.level, layout=new_layout)
+        return TensorSpec(
+            new_dim_sizes, dtype=self.dtype, level=self.level, layout=new_layout
+        )
 
     def __str__(self):
         layout_epi = ""
         level_epi = ""
         if self.layout != Layout.ROW_MAJOR:
             layout_epi = f", {self.layout}"
-        if self.level != len(system_config.DEFAULT_SYSTEM_CONFIG.level_configs) - 1:
+        if self.level != len(current_system().level_configs) - 1:
             level_epi = f", lvl={self.level}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
-        return f"({dims_part}{layout_epi}{level_epi})"
+        return f"({dims_part}, {self.dtype}{layout_epi}{level_epi})"
 
 
 class Spec(abc.ABC):
@@ -218,6 +224,7 @@ class Compose(Spec):
     subspec_classes: Tuple[Callable[..., Spec], ...]
     inputs: Tuple[TensorSpec, ...]
     output: TensorSpec
+    intermediate_dtypes: Tuple[Dtype]
     serial_only: bool
 
     def __post_init__(self):
@@ -228,6 +235,7 @@ class Compose(Spec):
             self.inputs, tuple
         ), f"Given non-tuple inputs: {repr(self.inputs)}"
         assert len(self.inputs) == self.calculate_inputs_count(self.subspec_classes)
+        assert len(self.intermediate_dtypes) + 1 == len(self.subspec_classes)
         # TODO: Confirm output shape matches the outermost (first) subspec's output
 
     def replace_io(
@@ -242,6 +250,7 @@ class Compose(Spec):
             subspec_classes=self.subspec_classes,
             inputs=inputs,
             output=output,
+            intermediate_dtypes=self.intermediate_dtypes,
             serial_only=serial_only,
         )
 
@@ -331,6 +340,7 @@ class Compose(Spec):
                 for inp_spec, shp in zip(self.inputs, new_input_shapes)
             ),
             self.output.shrink(output_shape),
+            intermediate_dtypes=self.intermediate_dtypes,
             serial_only=serial_only,
         )
 
@@ -444,10 +454,11 @@ class Compose(Spec):
             getattr(s, "short_name", lambda: s.__name__)() for s in self.subspec_classes
         )
         inps_str = ", ".join(map(str, self.inputs))
+        dtype_str = ", ".join(map(str, self.intermediate_dtypes))
         epi = ""
         if self.serial_only:
             epi = ", serial"
-        return f"Compose({inner}, {inps_str}, out={self.output}{epi})"
+        return f"Compose({inner}, {inps_str}, out={self.output}, [{dtype_str}]{epi})"
 
 
 @dataclass_abc.dataclass_abc(frozen=True)

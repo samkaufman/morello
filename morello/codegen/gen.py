@@ -9,13 +9,14 @@ from typing import Callable, Iterable, Literal, NamedTuple, Optional, Union, cas
 
 import sympy
 
-from .. import ops, specs, system_config, tensor
-from ..tensor import Tensor, Tile
 from . import indexexpr
+from .. import ops, specs, tensor
+from ..dtypes import Dtype
+from ..system_config.state import current_system
+from ..tensor import Tensor, Tile
 
 _namer: contextvars.ContextVar["_Namer"] = contextvars.ContextVar("_namer")
 _writer: contextvars.ContextVar["_Writer"] = contextvars.ContextVar("_writer")
-
 
 # TODO: Choose a more principled STACK_CUTOFF.
 STACK_CUTOFF = 256
@@ -60,6 +61,7 @@ def _emit_tensor_print(
     buffer_name: str,
     buffer_ref_fn: Callable[[Union[sympy.Expr, int]], str],
     tensor_shape: Union[tuple[int, int], tuple[int, int, int]],
+    dtype: Dtype,
     index_expr: sympy.Expr,
     writer: _Writer,
     write_name=True,
@@ -86,13 +88,15 @@ def _emit_tensor_print(
             index_expr = index_expr.subs(sym, it_name)
 
         with writer.indent_block():
-            writer.writeline(f'printf("%d ", (short int){buffer_ref_fn(index_expr)});')
+            writer.writeline(
+                f'printf("%" {dtype.int_fmt_macro} " ", {buffer_ref_fn(index_expr)});'
+            )
 
-        if rank:
-            writer.writeline("}")
-        for idx in range(rank - 1):
-            writer.writeline('printf("\\n");')
-            writer.writeline("}")
+            if rank:
+                writer.writeline("}")
+            for idx in range(rank - 1):
+                writer.writeline('printf("\\n");')
+                writer.writeline("}")
     writer.writeline("}")
 
 
@@ -253,7 +257,7 @@ def _update_index_exprs(
 
 
 def _emit_buffer_alloc(
-    name: str, size: int
+    name: str, size: int, dtype: Dtype
 ) -> tuple[Callable[[Union[sympy.Expr, int]], str], Callable[[], None]]:
     def emit_free(name, writer):
         writer.writeline(f"free({name});")
@@ -261,13 +265,11 @@ def _emit_buffer_alloc(
     def c_index(name, expr):
         return f"{name}[{_expr_to_c(expr)}]"
 
-    dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
-
     writer = _writer.get()
     if (size * dtype.size) > STACK_CUTOFF:
         writer.writeline(f"{dtype.c_type} *{name};")
         writer.writeline(
-            f"posix_memalign((void **)&{name}, 64, {size}*sizeof({dtype.c_type}));  // TODO: check return"
+            f"posix_memalign((void **)&{name}, 128, {size}*sizeof({dtype.c_type}));  // TODO: Handle return"
         )
         writer.writeline(f"memset({name}, 0, {size}*sizeof({dtype.c_type}));")
 
@@ -275,10 +277,12 @@ def _emit_buffer_alloc(
             emit_free, name, writer
         )
     elif size > 1:
-        writer.writeline(f"{dtype.c_type} {name}[{size}] = {{0}};")
+        writer.writeline(
+            f"{dtype.c_type} {name}[{size}] __attribute__((aligned (128))) = {{0}};"
+        )
         return functools.partial(c_index, name), lambda: None
     else:
-        writer.writeline(f"{dtype.c_type} {name} = 0.0f;")
+        writer.writeline(f"{dtype.c_type} {name} = 0;")
         return lambda _: name, lambda: None
 
 
@@ -301,7 +305,7 @@ def _emit_copy(
     destination_index_expr = indexexpr.buffer_indexing_expr(destination, concrete_shape)
 
     ref_fn, free_fn = _emit_buffer_alloc(
-        new_name, size=functools.reduce(operator.mul, concrete_shape, 1)
+        new_name, functools.reduce(operator.mul, concrete_shape, 1), destination.dtype
     )
 
     def inner_emit(for_output: bool):
@@ -357,6 +361,7 @@ def _inner_generate_c(
     operand_index_exprs: Sequence[sympy.Expr],
     concrete_shapes: Sequence[tuple[int, ...]],
 ) -> None:
+    assert impl.is_scheduled
     assert operand_index_exprs, "no operand_index_exprs; from " + str(impl.spec)
     assert len(tensor_ref_fns) == len(impl.inputs) + 1
 
@@ -373,6 +378,7 @@ def _inner_generate_c(
             _inner_generate_c(impl.inner, tensor_ref_fns, iexprs, shapes)
 
         driving_tile_idx = impl.inner.operands.index(impl.driving_tile)
+        assert isinstance(driving_tile_idx, int)  # TODO: remove
         _emit_tile_out_loop_nest(
             list(impl.spec.operands_dim_subscripts()[driving_tile_idx]),
             [
@@ -432,7 +438,7 @@ def _inner_generate_c(
         out_name = namer.fresh_name("buf")
         assert isinstance(impl.stages[0].output, Tensor)
         last_ref_fn, last_free_fn = _emit_buffer_alloc(
-            out_name, impl.stages[0].output.volume
+            out_name, impl.stages[0].output.volume, impl.stages[0].output.dtype
         )
         cur_slice = slice(-len(impl.stages[0].inputs), len(inps_index_exprs))
         cur_out = emit_stage(impl.stages[0], cur_slice, None, last_ref_fn, None)
@@ -444,7 +450,9 @@ def _inner_generate_c(
         for stage, next_stage in zip(impl.stages[1:], impl.stages[2:]):
             assert isinstance(stage.output, Tensor)
             out_name = namer.fresh_name("buf")
-            ref_fn, free_fn = _emit_buffer_alloc(out_name, stage.output.volume)
+            ref_fn, free_fn = _emit_buffer_alloc(
+                out_name, stage.output.volume, stage.output.dtype
+            )
             cur_out = emit_stage(stage, cur_slice, cur_out, ref_fn, None)
             last_free_fn()
             last_free_fn = free_fn
@@ -461,19 +469,43 @@ def _inner_generate_c(
             cur_out[2] == concrete_shapes[-1]
         ), "Final stage output shape didn't match Pipeline output shape"
 
-    elif isinstance(impl, ops.Matmul):
-        if not all(d == 1 for d in impl.output.dim_sizes):
-            assert not impl.is_scheduled
-            raise Exception("Only 1x1x1 Matmuls supported")
-        assert impl.is_scheduled
+    elif isinstance(impl, ops.Mult):
         l, r, o = operand_index_exprs
         writer.writeline(
             f"{tensor_ref_fns[2](o)} += {tensor_ref_fns[0](l)} * {tensor_ref_fns[1](r)};"
         )
+    elif isinstance(impl, ops.HvxVrmpyaccVuwVubRub):
+        lhs_index_expr, rhs_index_expr, out_index_expr = operand_index_exprs
+        lhs_ref_fn, rhs_ref_fn, out_ref_fn = tensor_ref_fns
+
+        assert impl.lhs.contiguous
+        assert impl.rhs.contiguous
+        assert impl.output.contiguous
+        assert dict(lhs_index_expr.as_coefficients_dict()) == {
+            sympy.symbols("p0"): 4,
+            sympy.symbols("p1"): 1,
+        }, f"lhs_index_expr unexpectedly was: {lhs_index_expr}"
+        assert dict(rhs_index_expr.as_coefficients_dict()) == {
+            sympy.symbols("p0"): 1,
+        }, f"rhs_index_expr unexpectedly was: {rhs_index_expr}"
+        assert dict(out_index_expr.as_coefficients_dict()) == {
+            sympy.symbols("p0"): 1
+        }, f"out_index_expr unexpectedly was: {out_index_expr}"
+
+        # Rewrite index exprs. to refer to first element.
+        lhs_index_expr = rhs_index_expr.subs({"p0": 0, "p1": 0})
+        rhs_index_expr = lhs_index_expr.subs("p0", 0)
+        out_index_expr = out_index_expr.subs("p0", 0)
+
+        out_val = f"*(HVX_Vector *)(&{out_ref_fn(out_index_expr)})"
+        writer.writeline(f"{out_val} = Q6_Vuw_vrmpyacc_VuwVubRub(")
+        writer.writeline(f"  {out_val},")
+        writer.writeline(f"  *(HVX_Vector *)(&{lhs_ref_fn(lhs_index_expr)}),")
+        writer.writeline(f"  *(uint32_t *)(&{rhs_ref_fn(rhs_index_expr)})")
+        writer.writeline(f");")
     elif isinstance(impl, ops.DirectConv):
         if not all(d == 1 for d in impl.output.dim_sizes):
             raise Exception("Only 1x1x1 output shape DirectConvs supported")
-        assert impl.is_scheduled
         img, _, _ = impl.operands
         i_name = namer.fresh_name("pt")
         j_name = namer.fresh_name("pt")
@@ -494,7 +526,6 @@ def _inner_generate_c(
         writer.writeline("}")
     elif isinstance(impl, ops.ReduceSum):
         if not all(d == 1 for d in impl.output.dim_sizes):
-            assert not impl.is_scheduled
             raise Exception("Only 1x1x1 ReduceSums supported")
         assert impl.is_scheduled
         i, o = operand_index_exprs
@@ -590,10 +621,16 @@ def generate_c(
     namer_token = _namer.set(namer)
     writer_token = _writer.set(writer)
 
+    writer.writeline("#include <inttypes.h>")
     writer.writeline("#include <stdlib.h>")
+    writer.writeline("#include <stdint.h>")
     writer.writeline("#include <stdio.h>")
     writer.writeline("#include <string.h>")
     writer.writeline("#include <time.h>")
+    if current_system().has_hvx:
+        writer.writeline("#include <hexagon_types.h>")
+        writer.writeline("#include <hexagon_protos.h>")
+        writer.writeline("#include <hvx_inlines.h>")
 
     if mode == "benchmark":
         writer.writeline(
@@ -623,7 +660,9 @@ def generate_c(
         for operand, initial_value in zip(impl.operands, values):
             assert isinstance(operand, tensor.Tensor)
             buffer_name = namer.fresh_name("a")
-            ref_fn, free_fn = _emit_buffer_alloc(buffer_name, operand.volume)
+            ref_fn, free_fn = _emit_buffer_alloc(
+                buffer_name, operand.volume, operand.dtype
+            )
             index_exprs.append(indexexpr.buffer_indexing_expr(operand))
             tensor_names.append(buffer_name)
             tensor_ref_fns.append(ref_fn)
@@ -675,6 +714,7 @@ def generate_c(
                 cast(
                     Union[tuple[int, int], tuple[int, int, int]], impl.output.dim_sizes
                 ),
+                impl.output.dtype,
                 index_exprs[-1],
                 writer,
                 write_name=False,

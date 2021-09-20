@@ -2,7 +2,12 @@ from typing import Optional, Tuple
 
 from hypothesis import strategies as st
 
-from morello import ops, specs, system_config, tensor
+from morello import dtypes, ops, specs, system_config, tensor
+from morello.system_config import cpu, hexagon
+
+target_st = st.sampled_from([cpu.CpuTarget(), hexagon.HvxSimulatorTarget()])
+
+dtype_st = st.sampled_from([dtypes.Uint8, dtypes.Uint32])
 
 
 @st.composite
@@ -19,9 +24,11 @@ def layout_st(draw, dim_sizes: Optional[Tuple[int, ...]] = None) -> specs.Layout
     return draw(st.from_type(specs.Layout))
 
 
-level_st = st.integers(
-    min_value=0, max_value=len(system_config.DEFAULT_SYSTEM_CONFIG.level_configs) - 1
-)
+def level_st():
+    return st.integers(
+        min_value=0,
+        max_value=len(system_config.current_system().level_configs) - 1,
+    )
 
 
 @st.composite
@@ -37,7 +44,10 @@ def tensorspec_st(
         ).map(tuple)
     )
     return specs.TensorSpec(
-        dim_sizes, layout=draw(layout_st(dim_sizes=dim_sizes)), level=draw(level_st)
+        dim_sizes,
+        dtype=draw(st.from_type(dtypes.Dtype)),
+        layout=draw(layout_st(dim_sizes=dim_sizes)),
+        level=draw(level_st()),
     )
 
 
@@ -47,14 +57,16 @@ def matmul_spec_st(draw, max_dim_size: Optional[int] = 32):
     rhs_dim_sizes = (lhs.dim_sizes[1], draw(dim_st(max_size=max_dim_size)))
     rhs = specs.TensorSpec(
         dim_sizes=rhs_dim_sizes,
+        dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=rhs_dim_sizes)),
-        level=draw(level_st),
+        level=draw(level_st()),
     )
     out_dim_sizes = (lhs.dim_sizes[0], rhs.dim_sizes[1])
     out = specs.TensorSpec(
         dim_sizes=out_dim_sizes,
+        dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=out_dim_sizes)),
-        level=draw(level_st),
+        level=draw(level_st()),
     )
     return specs.Matmul(lhs, rhs, out, serial_only=draw(st.booleans()))
 
@@ -69,14 +81,16 @@ def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
     )
     filters = specs.TensorSpec(
         dim_sizes=filters_dim_sizes,
+        dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=filters_dim_sizes)),
-        level=draw(level_st),
+        level=draw(level_st()),
     )
     out_dim_sizes = specs.Convolution.output_shape(image.dim_sizes, filters_dim_sizes)
     out = specs.TensorSpec(
         dim_sizes=out_dim_sizes,
+        dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=out_dim_sizes)),
-        level=draw(level_st),
+        level=draw(level_st()),
     )
     return specs.Convolution(image, filters, out)
 
@@ -87,8 +101,9 @@ def reduce_spec_st(draw, max_dim_size: Optional[int] = 32):
     output_dim_sizes = source.dim_sizes[:-1]
     output = specs.TensorSpec(
         dim_sizes=output_dim_sizes,
+        dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=output_dim_sizes)),
-        level=draw(level_st),
+        level=draw(level_st()),
     )
     return specs.ReduceSum(source=source, output=output)
 
@@ -119,24 +134,25 @@ def compose_spec_st(draw) -> specs.Compose:
     output_dim_sizes = specs.Compose.calculate_output(
         subspec_classes, [inp.dim_sizes for inp in inputs_specs]
     )
-    print(f"About to:")
-    print(f"  subspec_classes:  {subspec_classes}")
-    print(f"  inputs_count:     {inputs_count}")
-    print(f"  inputs_specs:     {inputs_specs}")
-    print(f"  output_dim_sizes: {output_dim_sizes}")
     output_spec = specs.TensorSpec(
         dim_sizes=output_dim_sizes,
+        dtype=draw(st.from_type(dtypes.Dtype)),
         level=draw(st.integers(min_value=0, max_value=1)),
         layout=draw(layout_st(output_dim_sizes)),
     )
-    return specs.Compose(
-        subspec_classes=subspec_classes, inputs=inputs_specs, output=output_spec
+    intermediate_dtypes = draw(
+        st.lists(
+            st.from_type(dtypes.Dtype),
+            min_size=len(subspec_classes) - 1,
+            max_size=len(subspec_classes) - 1,
+        )
     )
-
-
-@st.composite
-def matmul_op_st(draw) -> ops.Matmul:
-    raise NotImplementedError("Implement using matmul_spec_st")
+    return specs.Compose(
+        subspec_classes=subspec_classes,
+        inputs=inputs_specs,
+        output=output_spec,
+        intermediate_dtypes=intermediate_dtypes,
+    )
 
 
 @st.composite
@@ -155,6 +171,8 @@ def pipeline_op_st(draw) -> ops.Pipeline:
 
 
 def register_default_strategies():
+    st.register_type_strategy(dtypes.Dtype, dtype_st)
+    st.register_type_strategy(system_config.Target, target_st)
     st.register_type_strategy(specs.TensorSpec, tensorspec_st())
 
     st.register_type_strategy(
@@ -183,14 +201,12 @@ def register_default_strategies():
 
     st.register_type_strategy(ops.ComposeHole, composehole_op_st())
     st.register_type_strategy(ops.Pipeline, pipeline_op_st())
-    st.register_type_strategy(ops.Matmul, matmul_op_st())
 
     st.register_type_strategy(
         ops.Schedule,
         st.one_of(
             st.from_type(ops.ComposeHole),
             st.from_type(ops.Pipeline),
-            st.from_type(ops.Matmul),
             st.from_type(ops.DirectConv),
             st.from_type(ops.ReduceSum),
             st.from_type(ops.Loop),

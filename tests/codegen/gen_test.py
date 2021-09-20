@@ -1,19 +1,15 @@
 import functools
-import io
 import operator
-import os.path
-import subprocess
-import tempfile
 
 import hypothesis
 import numpy as np
 import pytest
 from hypothesis import strategies as st
 
-from morello import op_pprint, ops, specs, system_config, tensor
-from morello.codegen import gen
+from morello import dtypes, op_pprint, ops, specs, system_config, tensor
+from morello.system_config import cpu, hexagon
 
-CC_DEADLINE = 9000
+CC_DEADLINE = 30000
 CC_SANITIZE = True
 
 
@@ -39,43 +35,11 @@ def _read_from_output(output: str) -> np.ndarray:
     return np.array(accum)
 
 
-def _test_c_program(source: str) -> np.ndarray:
-    with tempfile.TemporaryDirectory() as dirname:
-        source_path = os.path.join(dirname, "main.c")
-        binary_path = os.path.join(dirname, "a.out")
-        with open(source_path, mode="w") as fo:
-            print(source, file=fo)
-        # TODO: Is there a more secure way to depend on cc? And should we use clang?
-        additional_args = []
-        if CC_SANITIZE:
-            additional_args += [
-                "-fno-omit-frame-pointer",
-                "-fsanitize=undefined",
-                "-fsanitize=address",
-            ]
-        subprocess.run(
-            ["/usr/bin/env", "clang"]
-            + additional_args
-            + ["-o", binary_path, source_path],
-            check=True,
-        )
-        binary_result = subprocess.run(
-            [binary_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        binary_output = binary_result.stdout.decode("utf-8")
-        binary_stderr = binary_result.stderr.decode("utf-8")
-        hypothesis.note("Output of program:\n" + binary_output)
-        hypothesis.note("stderr of program:\n" + binary_stderr)
-        binary_result.check_returncode()
-        return _read_from_output(binary_output)
-
-
-def _conv2d(img: np.ndarray, filters: np.ndarray) -> np.ndarray:
-    assert img.dtype == filters.dtype
+def _conv2d(img: np.ndarray, filters: np.ndarray, out_type) -> np.ndarray:
     fh, fw, fc = filters.shape
     h_out = img.shape[0] - filters.shape[0] + 1
     w_out = img.shape[1] - filters.shape[1] + 1
-    out = np.zeros((h_out, w_out, fc), dtype=img.dtype)
+    out = np.zeros((h_out, w_out, fc), dtype=out_type)
     for i in range(1 + img.shape[0] - filters.shape[0]):
         for j in range(1 + img.shape[1] - filters.shape[1]):
             acts = img[i : i + fh, j : j + fw, np.newaxis] * filters
@@ -136,7 +100,11 @@ def _spec_to_applied_hole(spec: specs.Spec) -> ops.Schedule:
 
 @st.composite
 def _arb_conv_spec(draw):
-    """A strategy that yields Conv-then-Reduce specs."""
+    """A strategy that yields Convolution specs.
+
+    All tensors will have the same type.
+    """
+    dtype = draw(st.from_type(dtypes.Dtype))
     inp_h = draw(st.integers(min_value=1, max_value=9))
     inp_w = draw(st.integers(min_value=1, max_value=9))
     fh = draw(st.integers(min_value=1, max_value=inp_h))
@@ -145,16 +113,20 @@ def _arb_conv_spec(draw):
     out_h, out_w = 1 + inp_h - fh, 1 + inp_w - fw
 
     return specs.Convolution(
-        specs.TensorSpec((inp_h, inp_w)),
-        specs.TensorSpec((fh, fw, fc)),
-        output=specs.TensorSpec((out_h, out_w, fc)),
+        specs.TensorSpec((inp_h, inp_w), dtype=dtype),
+        specs.TensorSpec((fh, fw, fc), dtype=dtype),
+        output=specs.TensorSpec((out_h, out_w, fc), dtype=dtype),
         serial_only=draw(st.booleans()),
     )
 
 
 @st.composite
 def _arb_reduce_conv_spec(draw):
-    """A strategy that yields Conv-then-Reduce specs."""
+    """A strategy that yields Conv-then-Reduce specs.
+
+    All tensors will have the same type.
+    """
+    dtype = draw(st.from_type(dtypes.Dtype))
     inp_h = draw(st.integers(min_value=1, max_value=9))
     inp_w = draw(st.integers(min_value=1, max_value=9))
     fh = draw(st.integers(min_value=1, max_value=inp_h))
@@ -165,17 +137,22 @@ def _arb_reduce_conv_spec(draw):
     return specs.Compose(
         (specs.ReduceSum, specs.Convolution),
         inputs=(
-            specs.TensorSpec((inp_h, inp_w)),
-            specs.TensorSpec((fh, fw, fc)),
+            specs.TensorSpec((inp_h, inp_w), dtype=dtype),
+            specs.TensorSpec((fh, fw, fc), dtype=dtype),
         ),
-        output=specs.TensorSpec((out_h, out_w)),
+        output=specs.TensorSpec((out_h, out_w), dtype=dtype),
+        intermediate_dtypes=(draw(st.from_type(dtypes.Dtype)),),
         serial_only=draw(st.booleans()),
     )
 
 
 @st.composite
 def _arb_conv_reduce_conv_spec(draw):
-    """A strategy that yields Conv-Reduce-Conv specs."""
+    """A strategy that yields Conv-Reduce-Conv specs.
+
+    All tensors will have the same dtype.
+    """
+    dtype = draw(st.from_type(dtypes.Dtype))
     inp_h = draw(st.integers(min_value=1, max_value=9))
     inp_w = draw(st.integers(min_value=1, max_value=9))
     fa_h = draw(st.integers(min_value=1, max_value=inp_h))
@@ -191,25 +168,34 @@ def _arb_conv_reduce_conv_spec(draw):
     return specs.Compose(
         (specs.Convolution, specs.ReduceSum, specs.Convolution),
         inputs=(
-            specs.TensorSpec((fb_h, fb_w, fb_c)),
-            specs.TensorSpec((inp_h, inp_w)),
-            specs.TensorSpec((fa_h, fa_w, fa_c)),
+            specs.TensorSpec((fb_h, fb_w, fb_c), dtype=dtype),
+            specs.TensorSpec((inp_h, inp_w), dtype=dtype),
+            specs.TensorSpec((fa_h, fa_w, fa_c), dtype=dtype),
         ),
-        output=specs.TensorSpec((out_h, out_w, fb_c)),
+        output=specs.TensorSpec((out_h, out_w, fb_c), dtype=dtype),
+        intermediate_dtypes=(
+            draw(st.from_type(dtypes.Dtype)),
+            draw(st.from_type(dtypes.Dtype)),
+        ),
         serial_only=draw(st.booleans()),
     )
 
 
 @st.composite
 def _arb_matmul_spec(draw):
-    """A strategy that yields Matmul specs."""
-    m = draw(st.integers(min_value=1, max_value=13))
-    k = draw(st.integers(min_value=1, max_value=13))
-    n = draw(st.integers(min_value=1, max_value=13))
+    """A strategy that yields Matmul specs.
+
+    All tensors will have the same dtype.
+    """
+    # The max sizes should be at least 16 to explore vectorized ops
+    dtype = draw(st.from_type(dtypes.Dtype))
+    m = draw(st.integers(min_value=1, max_value=32))
+    k = draw(st.integers(min_value=1, max_value=32))
+    n = draw(st.integers(min_value=1, max_value=32))
     return specs.Matmul(
-        specs.TensorSpec((m, k)),
-        specs.TensorSpec((k, n)),
-        output=specs.TensorSpec((m, n)),
+        specs.TensorSpec((m, k), dtype=dtype),
+        specs.TensorSpec((k, n), dtype=dtype),
+        output=specs.TensorSpec((m, n), dtype=dtype),
         serial_only=draw(st.booleans()),
     )
 
@@ -217,27 +203,28 @@ def _arb_matmul_spec(draw):
 @st.composite
 def _arb_matmul_matmul_spec(draw):
     """A strategy that yields Matmul-Matmul specs."""
-    m = draw(st.integers(min_value=1, max_value=9))
-    k = draw(st.integers(min_value=1, max_value=9))
-    n = draw(st.integers(min_value=1, max_value=9))
+    # The max sizes should be at least 16 to explore vectorized ops
+    dtype = draw(st.from_type(dtypes.Dtype))
+    m = draw(st.integers(min_value=1, max_value=32))
+    k = draw(st.integers(min_value=1, max_value=32))
+    n = draw(st.integers(min_value=1, max_value=32))
     second_n = draw(st.integers(min_value=1, max_value=9))
     return specs.Compose(
         (specs.Matmul, specs.Matmul),
         inputs=(
-            specs.TensorSpec((n, second_n)),
-            specs.TensorSpec((m, k)),
-            specs.TensorSpec((k, n)),
+            specs.TensorSpec((n, second_n), dtype=draw(st.from_type(dtypes.Dtype))),
+            specs.TensorSpec((m, k), dtype=draw(st.from_type(dtypes.Dtype))),
+            specs.TensorSpec((k, n), dtype=draw(st.from_type(dtypes.Dtype))),
         ),
-        output=specs.TensorSpec((m, second_n)),
+        output=specs.TensorSpec((m, second_n), dtype=dtype),
+        intermediate_dtypes=(draw(st.from_type(dtypes.Dtype)),),
         serial_only=draw(st.booleans()),
     )
 
 
 @st.composite
 def _arb_zip_values_for_impl(draw, impl: ops.Schedule):
-    dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
-
-    def _value(shape):
+    def _value(shape, dtype: dtypes.Dtype):
         num_elements: int = functools.reduce(operator.mul, shape, 1)
         return np.asarray(
             draw(
@@ -250,42 +237,57 @@ def _arb_zip_values_for_impl(draw, impl: ops.Schedule):
             dtype=dtype.np_type,
         ).reshape(shape)
 
-    return impl, [_value(op.dim_sizes) for op in impl.inputs]
+    return impl, [_value(op.dim_sizes, op.dtype) for op in impl.inputs]
 
 
 def _calculator_to_test(spec_st):
     def decorator_wrapper(calc_fn):
         @pytest.mark.slow
+        @pytest.mark.parametrize(
+            "target",
+            [
+                cpu.CpuTarget(),
+                pytest.param(hexagon.HvxSimulatorTarget(), marks=pytest.mark.hexagon),
+            ],
+            ids=["cpu", "hexagon"],
+        )
         @hypothesis.given(
             spec_st.map(_spec_to_applied_hole)
             .flatmap(_arb_impls_from_actions)
-            .flatmap(_arb_zip_values_for_impl)
+            .flatmap(_arb_zip_values_for_impl),
         )
         @hypothesis.settings(deadline=CC_DEADLINE)
         @functools.wraps(calc_fn)
-        def wrapper(pair):
-            impl, inp_values = pair
+        def wrapper(target, pair):
+            with system_config.with_target(target):
+                impl, inp_values = pair
 
-            hypothesis.note(
-                "Impl:\n"
-                + op_pprint.pformat(impl, show_utilization=False, show_cost=False)
-            )
+                hypothesis.note(
+                    "Impl:\n"
+                    + op_pprint.pformat(impl, show_utilization=False, show_cost=False)
+                )
 
-            expected_result = calc_fn(inp_values)
+                expected_result = calc_fn(impl.spec, inp_values)
 
-            dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
-            assert expected_result.dtype == dtype.np_type, (
-                f"expected_result should be of system dtype {dtype.np_type} "
-                f"but was {expected_result.dtype}"
-            )
+                additional_clang_args = []
+                if CC_SANITIZE:
+                    additional_clang_args += [
+                        "-fno-omit-frame-pointer",
+                        "-fsanitize=undefined",
+                        "-fsanitize=address",
+                    ]
 
-            with io.StringIO() as buffer:
-                gen.generate_c("print_output", impl, buffer, inp_values)
-                source_code = buffer.getvalue()
-            hypothesis.note("Source:\n" + source_code)
-            result = _test_c_program(source_code)
-
-            np.testing.assert_allclose(result, expected_result, rtol=1e-6)
+                binary_output, binary_stderr = target.run_impl(
+                    impl,
+                    print_output=True,
+                    source_cb=lambda s: hypothesis.note("Source Code:\n" + s),
+                    values=inp_values,
+                )
+                hypothesis.note("stderr of program:\n" + binary_stderr)
+                hypothesis.note("stdout of program:\n" + binary_output)
+                hypothesis.note("Expected output:\n" + str(expected_result))
+                result = _read_from_output(binary_output)
+                np.testing.assert_allclose(result, expected_result, rtol=1e-6)
 
         return wrapper
 
@@ -293,34 +295,37 @@ def _calculator_to_test(spec_st):
 
 
 @_calculator_to_test(_arb_matmul_spec())
-def test_codegen_for_matmul(inp_values):
+def test_codegen_for_matmul(_, inp_values):
     return inp_values[0] @ inp_values[1]
 
 
 @_calculator_to_test(_arb_matmul_matmul_spec())
-def test_codegen_for_matmul_matmul(inp_values):
-    out = (inp_values[1] @ inp_values[2]) @ inp_values[0]
-    assert out.dtype == inp_values[0].dtype
-    return out
+def test_codegen_for_matmul_matmul(spec, inp_values):
+    first_result = np.matmul(
+        inp_values[1], inp_values[2], dtype=spec.intermediate_dtypes[0].np_type
+    )
+    return np.matmul(first_result, inp_values[0], dtype=spec.output.dtype.np_type)
 
 
 @_calculator_to_test(_arb_conv_spec())
-def test_codegen_for_conv(inp_values):
-    return _conv2d(*inp_values)
+def test_codegen_for_conv(spec, inp_values):
+    out_type = spec.output.dtype.np_type
+    return _conv2d(*inp_values, out_type)
 
 
 @_calculator_to_test(_arb_reduce_conv_spec())
-def test_codegen_for_reduce_conv(inp_values):
-    dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
-    expected_result = _conv2d(*inp_values)
-    expected_result = np.sum(expected_result, axis=-1, dtype=dtype.np_type)
+def test_codegen_for_reduce_conv(spec, inp_values):
+    conv_out_type = spec.intermediate_dtypes[0].np_type
+    expected_result = _conv2d(*inp_values, conv_out_type)
+    final_out_type = spec.output.dtype.np_type
+    expected_result = np.sum(expected_result, axis=-1, dtype=final_out_type)
     return expected_result
 
 
 @_calculator_to_test(_arb_conv_reduce_conv_spec())
-def test_codegen_for_conv_reduce_conv(inp_values):
-    dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
-    expected_result = _conv2d(*inp_values[1:3])
-    expected_result = np.sum(expected_result, axis=-1, dtype=dtype.np_type)
-    expected_result = _conv2d(expected_result, inp_values[0])
-    return expected_result
+def test_codegen_for_conv_reduce_conv(spec, inp_values):
+    expected_result = _conv2d(*inp_values[1:3], spec.intermediate_dtypes[1].np_type)
+    expected_result = np.sum(
+        expected_result, axis=-1, dtype=spec.intermediate_dtypes[0].np_type
+    )
+    return _conv2d(expected_result, inp_values[0], spec.output.dtype.np_type)

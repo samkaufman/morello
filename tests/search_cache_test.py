@@ -1,24 +1,41 @@
-from morello.ops import Matmul, Schedule
-from morello import specs, tensor, ops, pruning, search_cache
+import pytest
+
+from morello import dtypes, ops, pruning, search_cache, specs, tensor
 
 
-def test_cache_common_scenario():
-    lhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), level=0), name=None)
-    rhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), level=0), name=None)
-    output = tensor.Tensor(spec=specs.TensorSpec((8, 8), level=0), name=None)
-    fast_schedule = ops.Matmul(lhs, rhs, output, serial_only=False)
+# TODO: Add assertion that tests below only put scheduled Impls into the cache.
+
+
+@pytest.mark.parametrize(
+    "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
+)
+def test_cache_common_scenario(dtype):
+    lhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, level=0), name=None)
+    rhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, level=0), name=None)
+    output = tensor.Tensor(
+        spec=specs.TensorSpec((8, 8), dtype=dtype, level=0), name=None
+    )
+    fast_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
     fast_wrapped_schedule = search_cache.CachedSchedule(fast_schedule, cost=10)
 
-    lhs = tensor.Tensor(spec=specs.TensorSpec((100, 100), level=0), name=None)
-    rhs = tensor.Tensor(spec=specs.TensorSpec((100, 100), level=0), name=None)
-    output = tensor.Tensor(spec=specs.TensorSpec((100, 100), level=0), name=None)
-    slow_schedule = ops.Matmul(lhs, rhs, output, serial_only=False)
+    lhs = tensor.Tensor(
+        spec=specs.TensorSpec((100, 100), dtype=dtype, level=0), name=None
+    )
+    rhs = tensor.Tensor(
+        spec=specs.TensorSpec((100, 100), dtype=dtype, level=0), name=None
+    )
+    output = tensor.Tensor(
+        spec=specs.TensorSpec((100, 100), dtype=dtype, level=0), name=None
+    )
+    slow_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
     slow_wrapped_schedule = search_cache.CachedSchedule(slow_schedule, cost=50)
 
-    lhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), level=0), name=None)
-    rhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), level=0), name=None)
-    output = tensor.Tensor(spec=specs.TensorSpec((8, 8), level=0), name=None)
-    impossible_schedule = ops.Matmul(lhs, rhs, output, serial_only=False)
+    lhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, level=0), name=None)
+    rhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, level=0), name=None)
+    output = tensor.Tensor(
+        spec=specs.TensorSpec((8, 8), dtype=dtype, level=0), name=None
+    )
+    impossible_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
 
     cache = search_cache.ScheduleCache()
     cache.put(
@@ -64,8 +81,11 @@ def test_cache_common_scenario():
     }
 
 
-def test_cache_updates_when_none_result_put_with_higher_memory_cap():
-    t = specs.TensorSpec((8, 8), level=0)
+@pytest.mark.parametrize(
+    "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
+)
+def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype):
+    t = specs.TensorSpec((8, 8), dtype=dtype, level=0)
     spec = specs.Matmul(t, t, t, serial_only=False)
     wrapped_schedule = None
 
@@ -76,11 +96,16 @@ def test_cache_updates_when_none_result_put_with_higher_memory_cap():
     assert set(cache) == {(spec, None, pruning.StandardMemoryLimits((101, 0)))}
 
 
-def test_cache_updates_when_schedules_put_with_higher_memory_cap():
-    lhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), level=0), name=None)
-    rhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), level=0), name=None)
-    output = tensor.Tensor(spec=specs.TensorSpec((8, 8), level=0), name=None)
-    schedule = ops.Matmul(lhs, rhs, output, serial_only=False)
+@pytest.mark.parametrize(
+    "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
+)
+def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
+    lhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, level=0), name=None)
+    rhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, level=0), name=None)
+    output = tensor.Tensor(
+        spec=specs.TensorSpec((8, 8), dtype=dtype, level=0), name=None
+    )
+    schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
     wrapped_schedule = search_cache.CachedSchedule(schedule, cost=10)
 
     cache = search_cache.ScheduleCache()

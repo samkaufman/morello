@@ -8,11 +8,14 @@ import sys
 import time
 from typing import TypeVar
 
-from morello import ops, op_pprint, search, search_cache, specs
+from morello import dtypes, ops, op_pprint, search, search_cache, specs
+from morello.codegen import gen
 from morello.search import schedule_search
 from morello.tensor import Tensor
 
 T = TypeVar("T")
+
+DTYPE = dtypes.Uint32
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,7 @@ parser.add_argument(
     default="powers_of_two",
     dest="tile_sizes",
 )
+parser.add_argument("--generate-code", action="store_true", dest="generate_code")
 subparsers = parser.add_subparsers(dest="spec")
 
 parser_matmul = subparsers.add_parser("matmul", help="Schedule a matrix multiplication")
@@ -47,19 +51,17 @@ parser_convnet = subparsers.add_parser(
 
 
 def _matmul_main(m, k, n, cache: search_cache.ScheduleCache):
-    left = Tensor(specs.TensorSpec((m, k)), name="left")
-    right = Tensor(specs.TensorSpec((k, n)), name="right")
-    output = Tensor(specs.TensorSpec((m, n)), name="output")
+    left = Tensor(specs.TensorSpec((m, k), dtype=DTYPE), name="left")
+    right = Tensor(specs.TensorSpec((k, n), dtype=DTYPE), name="right")
+    output = Tensor(specs.TensorSpec((m, n), dtype=DTYPE), name="output")
     start = time.time()
-    op_pprint.pprint(
-        schedule_search(
-            specs.Matmul(left.spec, right.spec, output.spec, serial_only=False),
-            inputs=(left, right),
-            output=output,
-            cache=cache,
-        )
+    s = schedule_search(
+        specs.Matmul(left.spec, right.spec, output.spec, serial_only=False),
+        inputs=(left, right),
+        output=output,
+        cache=cache,
     )
-    print(f"Took {time.time() - start:.2f}s")
+    return s, (time.time() - start)
 
 
 def _conv_main(
@@ -69,11 +71,14 @@ def _conv_main(
     filter_height,
     filter_count,
     cache: search_cache.ScheduleCache,
-):
+) -> tuple[ops.Schedule, float]:
     assert filter_width <= image_width and filter_height <= image_height
-    left = Tensor(specs.TensorSpec((image_width, image_height)), name="image")
+    left = Tensor(
+        specs.TensorSpec((image_width, image_height), dtype=DTYPE), name="image"
+    )
     right = Tensor(
-        specs.TensorSpec((filter_width, filter_height, filter_count)), name="filters"
+        specs.TensorSpec((filter_width, filter_height, filter_count), dtype=DTYPE),
+        name="filters",
     )
     output = Tensor(
         specs.TensorSpec(
@@ -81,43 +86,41 @@ def _conv_main(
                 image_width - filter_width + 1,
                 image_height - filter_height + 1,
                 filter_count,
-            )
+            ),
+            dtype=DTYPE,
         ),
         name="output",
     )
     start = time.time()
-    op_pprint.pprint(
-        schedule_search(
-            specs.Convolution(left.spec, right.spec, output.spec, serial_only=False),
-            inputs=(left, right),
-            output=output,
-            cache=cache,
-        )
+    s = schedule_search(
+        specs.Convolution(left.spec, right.spec, output.spec, serial_only=False),
+        inputs=(left, right),
+        output=output,
+        cache=cache,
     )
-    print(f"Took {time.time() - start:.2f}s")
+    return s, (time.time() - start)
 
 
 def _convnet_main(cache: search_cache.ScheduleCache):
-    img = Tensor(specs.TensorSpec((8, 8)), name="image")
-    filters_a = Tensor(specs.TensorSpec((3, 3, 4)), name="filtersA")
-    filters_b = Tensor(specs.TensorSpec((3, 3, 4)), name="filtersB")
-    output = Tensor(specs.TensorSpec((4, 4, 4)), name="output")
+    img = Tensor(specs.TensorSpec((8, 8), dtype=DTYPE), name="image")
+    filters_a = Tensor(specs.TensorSpec((3, 3, 4), dtype=DTYPE), name="filtersA")
+    filters_b = Tensor(specs.TensorSpec((3, 3, 4), dtype=DTYPE), name="filtersB")
+    output = Tensor(specs.TensorSpec((4, 4, 4), dtype=DTYPE), name="output")
 
     start = time.time()
-    op_pprint.pprint(
-        schedule_search(
-            specs.Compose(
-                (specs.Convolution, specs.ReduceSum, specs.Convolution),
-                (filters_b.spec, img.spec, filters_a.spec),
-                output.spec,
-                serial_only=False,
-            ),
-            inputs=(filters_b, img, filters_a),
-            output=output,
-            cache=cache,
+    s = schedule_search(
+        specs.Compose(
+            (specs.Convolution, specs.ReduceSum, specs.Convolution),
+            (filters_b.spec, img.spec, filters_a.spec),
+            output.spec,
+            intermediate_dtypes=(DTYPE, DTYPE),
+            serial_only=False,
         ),
+        inputs=(filters_b, img, filters_a),
+        output=output,
+        cache=cache,
     )
-    print(f"Took {time.time() - start:.2f}s")
+    return s, (time.time() - start)
 
 
 def main() -> int:
@@ -153,24 +156,35 @@ def main() -> int:
             parsed_args.cache, save=parsed_args.save_cache
         ) as cache:
             if parsed_args.spec == "matmul":
-                _matmul_main(parsed_args.m, parsed_args.k, parsed_args.n, cache)
-            elif parsed_args.spec == "conv":
-                _conv_main(
-                    parsed_args.image_width,
-                    parsed_args.image_height,
-                    parsed_args.filter_width,
-                    parsed_args.filter_height,
-                    parsed_args.filter_count,
-                    cache,
-                )
-            elif parsed_args.spec == "convnet":
-                _convnet_main(cache)
-    finally:
-        search.prune_column_major.reset(col_major_token)
-        ops.tile_size_mode.reset(tile_size_mode_token)
+    sched, runtime = _matmul_main(parsed_args.m, parsed_args.k, parsed_args.n, cache)
+    elif parsed_args.spec == "conv":
 
-    return 0
 
+sched, runtime = _conv_main(
+    parsed_args.image_width,
+    parsed_args.image_height,
+    parsed_args.filter_width,
+    parsed_args.filter_height,
+    parsed_args.filter_count,
+    cache,
+)
+
+elif parsed_args.spec == "convnet":
+sched, runtime = _convnet_main(cache)
+finally:
+search.prune_column_major.reset(col_major_token)
+ops.tile_size_mode.reset(tile_size_mode_token)
+
+op_pprint.pprint(sched)
+
+if parsed_args.generate_code:
+    print("")
+    gen.generate_c("kernel_only", sched, sys.stdout)
+
+print("")
+print(f"Took {runtime:.2f}s")
+
+return 0
 
 if __name__ == "__main__":
     sys.exit(main())

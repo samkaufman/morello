@@ -14,6 +14,7 @@ import numpy as np
 
 from morello import (
     cost,
+    dtypes,
     op_pprint,
     ops,
     search,
@@ -22,21 +23,27 @@ from morello import (
     system_config,
     tensor,
 )
-from morello.codegen import benchmark
 
 RUNS = 5
+DTYPE = dtypes.Uint32
+
+logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("mode", choices=["best", "sample", "perturb", "numpy"])
+parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--n_cpus", type=int, default=1)
 parser.add_argument("--db_path", type=str, default="samples.db")
 
-spec = specs.Matmul(
-    specs.TensorSpec((128, 128)),
-    specs.TensorSpec((128, 128)),
-    specs.TensorSpec((128, 128)),
-    serial_only=True,
-)
+
+@functools.lru_cache()
+def spec():
+    return specs.Matmul(
+        specs.TensorSpec((64, 64), dtype=DTYPE),
+        specs.TensorSpec((64, 64), dtype=DTYPE),
+        specs.TensorSpec((64, 64), dtype=DTYPE),
+        serial_only=True,
+    )
 
 
 def sample_completion(partial_impl: ops.Schedule) -> tuple[ops.Schedule, str]:
@@ -76,10 +83,9 @@ def _sample_randint_on_boundary(upper, overweight_one=False) -> int:
 
 
 def sample_perturbed(hole: ops.Schedule) -> tuple[ops.Schedule, str]:
-    global spec
     m, k, n = [
         _sample_randint_on_boundary(bound)
-        for bound in spec.lhs.dim_sizes + (spec.rhs.dim_sizes[0],)
+        for bound in spec().lhs.dim_sizes + (spec().rhs.dim_sizes[0],)
     ]
     impl = hole.tile_out((m, n))
     impl = impl.split(k)
@@ -103,13 +109,12 @@ def sample_and_benchmark(
 
 
 def benchmark_numpy_impl() -> float:
-    global spec
-    assert isinstance(spec, specs.Matmul)
+    assert isinstance(spec(), specs.Matmul)
 
-    dtype = system_config.DEFAULT_SYSTEM_CONFIG.dtype
+    dtype = system_config.current_system().dtype
 
     # Make arbitrary args
-    (m, n), k = spec.output.dim_sizes, spec.lhs.dim_sizes[1]
+    (m, n), k = spec().output.dim_sizes, spec().lhs.dim_sizes[1]
     lhs = np.arange(m * k, dtype=dtype.np_type).reshape((m, k))
     rhs = np.arange(k * n, dtype=dtype.np_type).reshape((k, n))
     lhs @ rhs
@@ -122,10 +127,12 @@ def benchmark_numpy_impl() -> float:
 
 
 def _benchmark(impl):
-    runtime_secs = min(
-        benchmark.time_impl(impl, target_fn=benchmark.build_and_run_on_hexagon_sim)
-        for _ in range(RUNS)
-    )
+    runtime_secs = None
+    for _ in range(RUNS):
+        secs = system_config.current_target().time_impl(impl)
+        logger.info(f"Sample runtime result {secs}s:")
+        if runtime_secs is None or secs < runtime_secs:
+            runtime_secs = secs
     impl_str = op_pprint.pformat(impl)
     c = cost.analytical_cost(impl)
     peak = impl.peak_memory
@@ -147,6 +154,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    system_config.set_current_target(system_config.target_by_name(args.target))
+
     if args.mode == "numpy":
         runtime_secs = benchmark_numpy_impl()
         with _open_db(args, check_same_thread=False) as db_conn:
@@ -158,10 +167,10 @@ if __name__ == "__main__":
         sys.exit(0)
 
     operands = (
-        tuple(tensor.Tensor(inp_spec, name=None) for inp_spec in spec.inputs),
-        tensor.Tensor(spec.output, name=None),
+        tuple(tensor.Tensor(inp_spec, name=None) for inp_spec in spec().inputs),
+        tensor.Tensor(spec().output, name=None),
     )
-    hole = ops.spec_to_hole(spec, *operands)
+    hole = ops.spec_to_hole(spec(), *operands)
 
     # Find the best schedule
     with _open_db(args, check_same_thread=False) as db_conn:
@@ -170,7 +179,7 @@ if __name__ == "__main__":
                 "test_bench_matmul_cache.pkl", save=True
             ) as cache:
                 impl = search.schedule_search(
-                    spec,
+                    spec(),
                     *operands,
                     cache=cache,
                 )

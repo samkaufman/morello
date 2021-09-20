@@ -7,8 +7,16 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from morello import op_pprint, ops, search, specs, system_config, tensor
-
+from morello import (
+    dtypes,
+    op_pprint,
+    ops,
+    pruning,
+    search,
+    specs,
+    system_config,
+    tensor,
+)
 from . import strategies
 
 strategies.register_default_strategies()
@@ -32,7 +40,12 @@ class CountingCache(search.ScheduleCache):
         self.get_counts[spec] += 1
         return super().get(spec, *args)
 
-    def put(self, spec: specs.Spec, schedule: search.CachedSchedule) -> None:
+    def put(
+        self,
+        spec: specs.Spec,
+        schedule: Optional[search.CachedSchedule],
+        memory_limits: pruning.MemoryLimits,
+    ) -> None:
         self.put_counts[spec] += 1
         return super().put(spec, schedule)
 
@@ -103,12 +116,8 @@ def _smaller_matmuls(spec: specs.Matmul) -> Iterable[MatmulConfig]:
 # TODO: Optionally drop cache line restriction
 @pytest.mark.skip(reason="_smaller_matmuls fallen out of sync with action space")
 @hypothesis.settings(deadline=10 * 1000)
-@given(
-    strategies.matmul_spec_st(
-        max_dim_size=system_config.DEFAULT_SYSTEM_CONFIG.line_size + 1
-    )
-)
-def test_matmul_search_schedules_every_smaller_op_exactly_once(op_spec):
+@given(strategies.matmul_spec_st(max_dim_size=65), st.from_type(dtypes.Dtype))
+def test_matmul_search_schedules_every_smaller_op_exactly_once(op_spec, dtype):
     """Checks that search of a Matmul spec checks each "smaller" Matmul exactly once.
 
     This only works with pruning/symmetry-breaking on.
@@ -122,9 +131,9 @@ def test_matmul_search_schedules_every_smaller_op_exactly_once(op_spec):
     smaller_specs = {op_spec}
     for matmul_config in _smaller_matmuls(op_spec):
         m, k, n, levels, layouts = matmul_config
-        lhs = specs.TensorSpec((m, k), level=levels[0], layout=layouts[0])
-        rhs = specs.TensorSpec((k, n), level=levels[1], layout=layouts[1])
-        out = specs.TensorSpec((m, n), level=levels[2], layout=layouts[2])
+        lhs = specs.TensorSpec((m, k), dtype=dtype, level=levels[0], layout=layouts[0])
+        rhs = specs.TensorSpec((k, n), dtype=dtype, level=levels[1], layout=layouts[1])
+        out = specs.TensorSpec((m, n), dtype=dtype, level=levels[2], layout=layouts[2])
         smaller_specs.add(specs.Matmul(lhs, rhs, out))
 
     assert set(cache.specs()) == smaller_specs
@@ -141,28 +150,29 @@ def test_matmul_search_schedules_every_smaller_op_exactly_once(op_spec):
 @pytest.mark.skip("Skipping due to performance issues")
 @pytest.mark.slow
 @hypothesis.settings(deadline=30 * 60 * 1000)
-@given(st.integers(min_value=5))
+@given(st.integers(min_value=5), st.from_type(dtypes.Dtype))
 @hypothesis.example(16)
-def test_compose_schedules_improve_as_memory_increases(cap_start):
+def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
     results = []
     for cap in range(cap_start, cap_start + 2):
-        img = tensor.Tensor(specs.TensorSpec((6, 6)), name="image")
-        filters_a = tensor.Tensor(specs.TensorSpec((3, 3, 2)), name="filtersA")
-        output = tensor.Tensor(specs.TensorSpec((4, 4)), name="output")
+        img = tensor.Tensor(specs.TensorSpec((6, 6), dtype=dtype), name="image")
+        filters_a = tensor.Tensor(
+            specs.TensorSpec((3, 3, 2), dtype=dtype), name="filtersA"
+        )
+        output = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtype), name="output")
 
-        original_capacity = system_config.DEFAULT_SYSTEM_CONFIG.level_configs[
-            0
-        ].capacity
+        original_capacity = system_config.current_system().level_configs[0].capacity
 
         hypothesis.note("---------")
         try:
-            system_config.DEFAULT_SYSTEM_CONFIG.level_configs[0].capacity = cap
+            system_config.current_system().level_configs[0].capacity = cap
             results.append(
                 search.schedule_search(
                     specs.Compose(
                         (specs.ReduceSum, specs.Convolution),
                         (img.spec, filters_a.spec),
                         output.spec,
+                        intermediate_dtypes=(dtype,),
                         serial_only=False,
                     ),
                     inputs=(img, filters_a),
@@ -170,9 +180,7 @@ def test_compose_schedules_improve_as_memory_increases(cap_start):
                 )
             )
         finally:
-            system_config.DEFAULT_SYSTEM_CONFIG.level_configs[
-                0
-            ].capacity = original_capacity
+            system_config.current_system().level_configs[0].capacity = original_capacity
 
         if len(results) >= 2:
             print(f"results: {results}")
