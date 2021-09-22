@@ -2,7 +2,7 @@ import abc
 import dataclasses
 import logging
 import sys
-from typing import List, NamedTuple
+from typing import List, NamedTuple, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,6 @@ class Target(abc.ABC):
         impl,
         print_output=False,
         source_cb=None,
-        extra_clang_args=None,
         values=None,
     ) -> RunResult:
         raise NotImplementedError()
@@ -38,20 +37,37 @@ class SystemDescription:
     """Describes hardware simulated by a SimpleSystem."""
 
     line_size: int
-    level_configs: List["MemoryLevelConfig"]
+    banks: dict[str, "MemoryBankConfig"]
+    default_bank: str
     processors: int
     has_hvx: bool
+    faster_destination_banks: Callable[[str], set[str]]
+    next_general_bank: Callable[[str], Optional[str]]
 
     def __post_init__(self):
-        assert self.level_configs[-1].capacity == sys.maxsize
-        for a, b in zip(self.level_configs[:-1], self.level_configs[1:]):
-            assert a.cache_hit_cost < b.cache_hit_cost
-            assert a.capacity < b.capacity
         assert self.processors >= 1
+
+    def destination_banks_closure(self, bank: str) -> set[str]:
+        closure = {bank}
+        last_size = -1
+        while last_size != len(closure):
+            last_size = len(closure)
+            for b in closure:
+                closure.update(self.faster_destination_banks(b))
+        return closure
+
+    @property
+    def default_fast_bank(self) -> str:
+        bank = self.default_bank
+        while True:
+            next_bank = self.next_general_bank(bank)
+            if next_bank is None:
+                return bank
+            bank = next_bank
 
 
 # TODO: Re-freeze
 @dataclasses.dataclass(frozen=False)
-class MemoryLevelConfig:
+class MemoryBankConfig:
     cache_hit_cost: int
-    capacity: int
+    capacity: int  # in bytes

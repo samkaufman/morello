@@ -1,15 +1,16 @@
 import contextlib
 import pathlib
 import pickle
-from typing import Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple, \
-    Union
+from typing import Iterable, Iterator, NamedTuple, Optional, Tuple, Union
 import warnings
+from frozendict import frozendict
 
 import atomicwrites
 
 from . import pruning
 from .ops import Schedule
 from .specs import Spec
+from .utils import zip_dict
 
 
 class CachedSchedule(NamedTuple):
@@ -33,20 +34,23 @@ class _Rect(NamedTuple):
 
     spec: Spec
     schedule: Optional[CachedSchedule]
-    caps: Tuple[int, ...]
+    caps: frozendict[str, int]
 
     @property
-    def peak_memory(self) -> Iterable[int]:
-        """Returns an iterable of peak memory used by the nested schedule.
+    def peak_memory(self) -> frozendict[str, int]:
+        """Returns peak memory used by the nested schedule.
 
         This is just a convenience accessor.
         """
         assert self.schedule is not None
-        return iter(self.schedule.schedule.peak_memory)
+        peaks = self.schedule.schedule.peak_memory
+        # If it's a frozendict, we don't need the conversion
+        assert not isinstance(peaks, frozendict)
+        return frozendict(peaks)
 
 
 class ScheduleCache:
-    _rects: Dict[Spec, List[_Rect]]
+    _rects: dict[Spec, list[_Rect]]
 
     def __init__(self):
         self._rects = {}
@@ -70,12 +74,19 @@ class ScheduleCache:
         memory_caps = memory_limits.available
         for rect in self._rects[spec]:
             if rect.schedule is None:
-                if all(q <= b for q, b in zip(memory_caps, rect.caps)):
+                if all(
+                    q <= b
+                    for q, b in zip_dict(
+                        memory_caps, rect.caps, same_keys=True
+                    ).values()
+                ):
                     return None
             else:
                 if all(
                     a <= q <= b
-                    for a, q, b in zip(rect.peak_memory, memory_caps, rect.caps)
+                    for a, q, b in zip_dict(
+                        rect.peak_memory, memory_caps, rect.caps, same_keys=True
+                    ).values()
                 ):
                     return rect.schedule
         raise KeyError(f"'{str(spec)}'")
@@ -98,7 +109,10 @@ class ScheduleCache:
 
         memory_caps = memory_limits.available
         assert schedule is None or all(
-            m <= c for m, c in zip(schedule.schedule.peak_memory, memory_caps)
+            m <= c
+            for m, c in zip_dict(
+                schedule.schedule.peak_memory, memory_caps, same_keys=True
+            ).values()
         )
         rects = self._rects.setdefault(spec, [])
 
@@ -108,7 +122,12 @@ class ScheduleCache:
                     rects[idx] = _Rect(
                         spec,
                         None,
-                        tuple(max(a, b) for a, b in zip(memory_caps, rects[idx].caps)),
+                        {
+                            k: max(a, b)
+                            for k, (a, b) in zip_dict(
+                                memory_caps, rects[idx].caps, same_keys=True
+                            ).items()
+                        },
                     )
                     return
             else:
@@ -116,16 +135,22 @@ class ScheduleCache:
                     continue
                 if all(
                     a <= b <= c
-                    for a, b, c in zip(
+                    for a, b, c in zip_dict(
                         rects[idx].peak_memory,
                         schedule.schedule.peak_memory,
                         rects[idx].caps,
-                    )
+                        same_keys=True,
+                    ).values()
                 ):
                     rects[idx] = _Rect(
                         spec,
                         schedule,
-                        tuple(max(a, b) for a, b in zip(memory_caps, rects[idx].caps)),
+                        {
+                            k: max(a, b)
+                            for k, (a, b) in zip_dict(
+                                memory_caps, rects[idx].caps, same_keys=True
+                            ).items()
+                        },
                     )
                     return
             # TODO: Assert that there is at most one intersection

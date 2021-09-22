@@ -44,12 +44,13 @@ allow_reduce_splits: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "allow_reduce_splits", default=True
 )
 
-ALLOW_ABOVE_REGISTERS_RELAYOUT = True
 PRUNE_RELAYOUT_CYCLES = True
 BREAK_MOVE_SYMMETRIES = True
 BREAK_SEQUENTIAL_TILES = False
 
 T = TypeVar("T")
+U = TypeVar("U")
+V = TypeVar("V")
 
 
 def _assert_stable_spec(func):
@@ -67,8 +68,12 @@ def _assert_stable_spec(func):
     return wrapper_decorator
 
 
-def _zipply(fn, *args: List[T]) -> List[T]:
-    return [fn(z) for z in zip(*args)]
+def _zipply(fn: Callable[[tuple[U]], V], *args: dict[T, U]) -> dict[T, V]:
+    if not args:
+        return {}
+    return {
+        k: fn(v) for k, v in utils.zip_dict(args[0], *args[1:], same_keys=True).items()
+    }
 
 
 def _loop_operand_str(
@@ -136,7 +141,7 @@ class SplitNotSupportedByHeadError(NotImplementedError):
 @dataclasses.dataclass
 class ParentSummary:
     parent: "Schedule"
-    movements: FrozenSet[Tuple[Union[Tensor, Tile], int]]
+    movements: FrozenSet[tuple[Union[Tensor, Tile], str]]
 
     @staticmethod
     def update(
@@ -148,7 +153,7 @@ class ParentSummary:
             movements = set(original.movements)
 
         if isinstance(parent, MoveLet):
-            movements.add((parent.destination, parent.destination.level))
+            movements.add((parent.destination, parent.destination.bank))
 
         return ParentSummary(parent=parent, movements=frozenset(movements))
 
@@ -161,11 +166,11 @@ class MoveAction:
     break_moves_symmetries.
     """
 
-    func: Callable[[Optional[int], Optional[Layout], bool], "Schedule"]
+    func: Callable[[Optional[str], Optional[Layout], bool], "Schedule"]
     source: Union[Tensor, Tile]
     input_idx: Optional[int]
     prefetching: bool
-    level: Optional[int] = None
+    bank: Optional[str] = None
     layout: Optional[specs.Layout] = None
 
     def __post_init__(self):
@@ -174,24 +179,24 @@ class MoveAction:
         ), f"Layout was {self.layout} for dims. {self.source.dim_sizes}"
 
     def __call__(self):
-        return self.func(self.level, self.layout, self.prefetching)
+        return self.func(self.bank, self.layout, self.prefetching)
 
     def __str__(self):
         return (
             f"MoveAction(input_idx={self.input_idx}, source={str(self.source)},"
             f" prefetching={self.prefetching}",
-            f" level={self.level}, layout={str(self.layout)})",
+            f" {self.bank}, layout={str(self.layout)})",
         )
 
 
 @dataclasses.dataclass(frozen=True)
 class PeelAction:
-    func: Callable[[Optional[int], Optional[Layout]], "Schedule"]
-    level: Optional[int] = None
+    func: Callable[[Optional[str], Optional[Layout]], "Schedule"]
+    bank: Optional[str] = None
     layout: Optional[specs.Layout] = None
 
     def __call__(self):
-        return self.func(self.level, self.layout)
+        return self.func(self.bank, self.layout)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -206,13 +211,13 @@ class TileOutAction:
 
 @dataclasses.dataclass(frozen=True)
 class SlidingTileOutAction:
-    func: Callable[[int, int, int], "Schedule"]
+    func: Callable[[int, int, str], "Schedule"]
     sliding_dim: int
     output_size: int
-    level: int
+    bank: str
 
     def __call__(self):
-        return self.func(self.sliding_dim, self.output_size, self.level)
+        return self.func(self.sliding_dim, self.output_size, self.bank)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -238,7 +243,7 @@ def prune_relayout_cycles(func):
             if not isinstance(action, MoveAction):
                 yield action
                 continue
-            if (action.source, action.level) in parent_summary.movements:
+            if (action.source, action.bank) in parent_summary.movements:
                 continue
             yield action
 
@@ -287,14 +292,11 @@ def break_moves_symmetries(func):
                 continue
 
             # Assert that there is no interleaving of destination levels between moves.
-            if action.level > parent_summary.parent.destination.root.level:
-                continue
-
-            # Avoid relayout once in registers if the operand previously had the
-            #   opportunity to be put into that layout as moved into registers.
-            #   This applies if a single level 0-to-0 relayout happened as well,
-            #   preventing multiple relayouts in registers.
-            if action.level == 0 and (action.source, 0) in parent_summary.movements:
+            # Note: destination_banks_closure includes the given bank itself.
+            system = system_config.current_system()
+            if action.bank not in system.destination_banks_closure(
+                parent_summary.parent.destination.bank
+            ):
                 continue
 
             yield action
@@ -364,7 +366,7 @@ def break_matmul_split_symmetries(func):
 def _common_move(
     op,
     attr_name: str,
-    level: Optional[int],
+    bank: Optional[str],
     layout: Optional[Layout],
     prefetching: bool,
 ) -> "MoveLet":
@@ -373,21 +375,18 @@ def _common_move(
     This is the logic underpinning some ops' move_input actions.
 
     :param attr_name: The name of the field holding the operand to move.
-    :param level: The level to which the operand should be moved, if not None.
+    :param bank: The bank to which the operand should be moved, if not None.
     """
     operand: Union[Tensor, Tile] = getattr(op, attr_name)
-    if level is None:
-        level = operand.spec.level
+    if bank is None:
+        bank = operand.spec.bank
     if layout is None:
         layout = operand.spec.layout
-    assert level <= operand.root.level
-    if level == operand.root.level and layout == operand.layout:
-        raise ValueError("Either level or layout must differ from current")
-    if operand.root.level == 0 and all(d == 1 for d in operand.dim_sizes):
-        warnings.warn("There is no reason to move a single element in registers")
+    if bank == operand.root.bank and layout == operand.layout:
+        raise ValueError("Either bank or layout must differ from current")
     new_mat = Tensor(
         spec=specs.TensorSpec(
-            dim_sizes=operand.dim_sizes, dtype=operand.dtype, layout=layout, level=level
+            dim_sizes=operand.dim_sizes, dtype=operand.dtype, layout=layout, bank=bank
         ),
         name=None,
         origin=operand,
@@ -411,46 +410,29 @@ def _common_move(
     )
 
 
-def _move_arguments(operand: Union[Tile, Tensor]) -> Iterable[tuple[int, Layout]]:
-    if operand.root.level > 1:
-        raise NotImplementedError("Only two levels of memory tested")
-
-    # There is no reason to move a single-element tensor already in registers.
-    if operand.root.level == 0 and all(d == 1 for d in operand.dim_sizes):
-        return
-
+def _move_arguments(operand: Union[Tile, Tensor]) -> Iterable[tuple[str, Layout]]:
+    """Yields banks and layouts to which ."""
     # If the tensor has only one element, row-major is the only available
     # layout. Otherwise, all layouts are available.
     allowable_layouts = [specs.Layout.ROW_MAJOR]
     if any(d > 1 for d in operand.dim_sizes):
         allowable_layouts = list(specs.Layout)
 
-    # If enabled and at level 1, allow relayouts in level 1.
-    if ALLOW_ABOVE_REGISTERS_RELAYOUT and operand.root.level > 0:
-        for layout in allowable_layouts:
-            if layout != operand.layout:
-                yield 1, layout
-
-    # If the tensor is already in registers, it makes no sense to do a move
-    # (really: a relayout) to its current layout.
-    if operand.root.level == 0:
-        try:
-            allowable_layouts.remove(operand.layout)
-        except ValueError:
-            # operand.layout wasn't in allowable_layouts
-            pass
-
     # Yield actions for movement with register file destination, which
     # includes relayouts in registers and movements from level 1 to RF.
+    system = system_config.current_system()
     for layout in allowable_layouts:
-        yield 0, layout
+        for bank in system.faster_destination_banks(operand.bank):
+            yield bank, layout
 
 
-def _common_operand_move_actions(op_move_tuples):
+def _common_operand_move_actions(
+    op_move_tuples: Iterable[tuple[int, Union[Tensor, Tile], Callable]]
+) -> Iterable[MoveAction]:
     for inp_idx, operand, move_fn in op_move_tuples:
-        for level, layout in _move_arguments(operand):
+        for bank, layout in _move_arguments(operand):
             for p in [True, False]:
-                yield MoveAction(move_fn, operand, inp_idx, p, level, layout)
+                yield MoveAction(move_fn, operand, inp_idx, p, bank, layout)
 
 
 def spec_to_hole(spec: specs.Spec, inputs: Tuple, output) -> "Schedule":
@@ -617,13 +599,13 @@ class Schedule(abc.ABC):
 
     @_assert_stable_spec
     def sliding_tile_out(
-        self, sliding_dim: int, output_size: int, level: int
+        self, sliding_dim: int, output_size: int, bank: str
     ) -> "Schedule":
         """Like tile_out, without reloading overlapping image regions in one dimension."""
         # If this is an Impl with a single child, just forward.
         if len(self.children) == 1:
             return self.replace_children(
-                [self.children[0].sliding_tile_out(sliding_dim, output_size, level)]
+                [self.children[0].sliding_tile_out(sliding_dim, output_size, bank)]
             )
 
         # A no-op if the given shape is already the output shape.
@@ -668,7 +650,7 @@ class Schedule(abc.ABC):
             specs.TensorSpec(
                 tile_to_convert.dim_sizes,
                 tile_to_convert.dtype,
-                level=level,
+                bank=bank,
                 layout=tile_to_convert.layout,
             ),
             name=None,
@@ -730,7 +712,7 @@ class Schedule(abc.ABC):
     def move_input(
         self,
         input_idx: int,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "Schedule":
@@ -739,7 +721,7 @@ class Schedule(abc.ABC):
     @abc.abstractmethod
     def move_output(
         self,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "Schedule":
@@ -758,18 +740,18 @@ class Schedule(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def additional_memories(self) -> List[List[int]]:
+    def additional_memories(self) -> list[dict[str, int]]:
         """Memory costs of self when the corresponding child is executed.
 
         :returns: A list of amounts of memory to remove from that available. The
-          outermost list has the same length as the  number of children in this
+          outermost list has the same length as the number of children in this
           Impl.
         """
         raise NotImplementedError()
 
     @property
     @abc.abstractmethod
-    def peak_memory(self) -> List[int]:
+    def peak_memory(self) -> dict[str, int]:
         raise NotImplementedError()
 
 
@@ -827,11 +809,13 @@ class ComposeHole(Schedule):
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Schedule]]:
+        system = system_config.current_system()
+
         # TODO: Remove this symmetry: lots of ways to iteratively split the pipeline
         # TODO: Reintroduce splitting on non-index 0
-        for level in range(len(system_config.current_system().level_configs)):
+        for bank in system.banks:
             for layout in (Layout.ROW_MAJOR, Layout.COL_MAJOR):
-                yield PeelAction(self.peel, level=level, layout=layout)
+                yield PeelAction(self.peel, bank=bank, layout=layout)
 
         yield from _common_operand_move_actions(
             [
@@ -859,9 +843,12 @@ class ComposeHole(Schedule):
                 for slide_size in dim_range(
                     self.output.dim_sizes[sliding_dim], include_end=False
                 ):
-                    # TODO: Handle choices of level in a way that generalizes to more than 2 levels
+                    # TODO: Range over multiple choices of bank
                     yield SlidingTileOutAction(
-                        self.sliding_tile_out, sliding_dim, slide_size, level=0
+                        self.sliding_tile_out,
+                        sliding_dim,
+                        slide_size,
+                        system.default_fast_bank,
                     )
 
         # TODO: This is awful. Produce a real interface for both deferring to
@@ -875,21 +862,20 @@ class ComposeHole(Schedule):
     def move_input(
         self,
         input_idx: int,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ):
         operand = self.inputs[input_idx]
-        if level is None:
-            level = operand.root.level
+        if bank is None:
+            bank = operand.root.bank
         if layout is None:
             layout = operand.layout
-        assert level >= 0
-        if level == operand.root.level and layout == operand.layout:
-            raise ValueError("Either level or layout must differ from current")
+        if bank == operand.root.bank and layout == operand.layout:
+            raise ValueError("Either bank or layout must differ from current")
         new_mat = Tensor(
             spec=specs.TensorSpec(
-                operand.dim_sizes, dtype=operand.dtype, layout=layout, level=level
+                operand.dim_sizes, dtype=operand.dtype, layout=layout, bank=bank
             ),
             name=None,
             origin=operand,
@@ -910,21 +896,20 @@ class ComposeHole(Schedule):
     @_assert_stable_spec
     def move_output(
         self,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "Schedule":
         operand = self.output
-        if level is None:
-            level = operand.root.level
+        if bank is None:
+            bank = operand.root.bank
         if layout is None:
             layout = operand.layout
-        assert level >= 0
-        if level == operand.root.level and layout == operand.layout:
-            raise ValueError("Either level or layout must differ from current")
+        if bank == operand.root.bank and layout == operand.layout:
+            raise ValueError("Either bank or layout must differ from current")
         new_mat = Tensor(
             spec=specs.TensorSpec(
-                operand.dim_sizes, dtype=operand.dtype, layout=layout, level=level
+                operand.dim_sizes, dtype=operand.dtype, layout=layout, bank=bank
             ),
             name=None,
             origin=operand,
@@ -942,11 +927,11 @@ class ComposeHole(Schedule):
     @_assert_stable_spec
     def peel(
         self,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
     ) -> Schedule:
-        if level is None or layout is None:
-            raise NotImplementedError("Auto-selecting level or layout unimplemented")
+        if bank is None or layout is None:
+            raise NotImplementedError("Auto-selecting bank or layout unimplemented")
 
         # TODO: Using ALPHABET_PRODUCT here will fail for long programs
         intermediate_tensor_layout = layout
@@ -956,7 +941,7 @@ class ComposeHole(Schedule):
             specs.TensorSpec(
                 dim_sizes=self.spec.intermediate_shapes[0],
                 dtype=self.spec.intermediate_dtypes[0],
-                level=level,
+                bank=bank,
                 layout=intermediate_tensor_layout,
             ),
             name="buf"
@@ -1200,8 +1185,8 @@ class ComposeHole(Schedule):
 
     @_assert_stable_spec
     def complete(self) -> "Schedule":
-        level_count = len(system_config.current_system().level_configs)
-        return self.peel(level=level_count - 1, layout=Layout.ROW_MAJOR).complete()
+        next_bank = system_config.current_system().default_bank
+        return self.peel(bank=next_bank, layout=Layout.ROW_MAJOR).complete()
 
     @_assert_stable_spec
     def replace_children(self, replacements: Iterable[Schedule]) -> Schedule:
@@ -1210,12 +1195,12 @@ class ComposeHole(Schedule):
         return self
 
     @property
-    def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.current_system().level_configs]]
+    def additional_memories(self) -> list[dict[str, int]]:
+        return [{b: 0 for b in system_config.current_system().banks}]
 
     @property
-    def peak_memory(self) -> List[int]:
-        return [0 for _ in system_config.current_system().level_configs]
+    def peak_memory(self) -> dict[str, int]:
+        return {b: 0 for b in system_config.current_system().banks}
 
     @property
     def is_scheduled(self) -> bool:
@@ -1328,8 +1313,8 @@ class Pipeline(Schedule):
     def move_input(
         self,
         input_idx: int,
-        level: Optional[int],
-        layout: Optional[Layout],
+        bank: Optional[str] = None,
+        layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "Schedule":
         raise NotImplementedError(
@@ -1337,7 +1322,10 @@ class Pipeline(Schedule):
         )
 
     def move_output(
-        self, level: Optional[int], layout: Optional[Layout], prefetching: bool = False
+        self,
+        bank: Optional[str] = None,
+        layout: Optional[Layout] = None,
+        prefetching: bool = False,
     ) -> "Schedule":
         raise NotImplementedError(
             "move_output should usually be called on ComposeHole, not Pipeline"
@@ -1376,36 +1364,36 @@ class Pipeline(Schedule):
         raise NotImplementedError()
 
     @property
-    def additional_memories(self) -> List[List[int]]:
+    def additional_memories(self) -> list[dict[str, int]]:
         # Initialize peaks to dependencies of the first stage, which is just its
         # output
-        first_peak = [0 for _ in system_config.current_system().level_configs]
-        first_peak[self.stages[0].output.level] = self.stages[0].output.volume
+        first_peak = {k: 0 for k in system_config.current_system().banks}
+        first_peak[self.stages[0].output.bank] = self.stages[0].output.bytes_used
 
-        middle_peaks: List[List[int]] = []
+        middle_peaks: list[dict[str, int]] = []
         for stage_idx in range(1, len(self.stages) - 1):
             before = self.stages[stage_idx - 1].output
             after = self.stages[stage_idx].output
-            stage_mem = [0 for _ in system_config.current_system().level_configs]
-            stage_mem[before.level] += before.volume
-            stage_mem[after.level] += after.volume
+            stage_mem = {b: 0 for b in system_config.current_system().banks}
+            stage_mem[before.bank] += before.bytes_used
+            stage_mem[after.bank] += after.bytes_used
             middle_peaks.append(stage_mem)
 
-        last_peak = [0 for _ in system_config.current_system().level_configs]
-        last_peak[self.stages[-2].output.level] = self.stages[-2].output.volume
+        last_peak = {k: 0 for k in system_config.current_system().banks}
+        last_peak[self.stages[-2].output.bank] = self.stages[-2].output.bytes_used
 
         return [first_peak] + middle_peaks + [last_peak]
 
     @property
-    def peak_memory(self) -> List[int]:
+    def peak_memory(self) -> dict[str, int]:
         # Pipeline currently adds an intermediate tensor between each stage, so
         # intermediates is just the output of everything but the last stage
         intermediates = [o.output for o in self.stages[:-1]]
-        intermed_utils: List[List[int]] = []
+        intermed_utils: list[dict[str, int]] = []
         for tensor in intermediates:
             assert isinstance(tensor, Tensor)
-            new_mem = [0 for _ in system_config.current_system().level_configs]
-            new_mem[tensor.level] += tensor.volume
+            new_mem = {k: 0 for k in system_config.current_system().banks}
+            new_mem[tensor.bank] += tensor.bytes_used
             intermed_utils.append(new_mem)
 
         # Utilization is the memory used by an operand and, where present, input and
@@ -1481,12 +1469,12 @@ class MatmulBase(Schedule):
         return self
 
     @property
-    def additional_memories(self) -> List[List[int]]:
+    def additional_memories(self) -> list[dict[str, int]]:
         return []
 
     @property
-    def peak_memory(self) -> List[int]:
-        return [0 for _ in system_config.current_system().level_configs]
+    def peak_memory(self) -> dict[str, int]:
+        return {k: 0 for k in system_config.current_system().banks}
 
     def replace_io(
         self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
@@ -1538,24 +1526,24 @@ class MatmulHole(MatmulBase):
     def move_input(
         self,
         input_idx: int,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "MoveLet":
         if input_idx == 0:
-            return _common_move(self, "lhs", level, layout, prefetching)
+            return _common_move(self, "lhs", bank, layout, prefetching)
         elif input_idx == 1:
-            return _common_move(self, "rhs", level, layout, prefetching)
+            return _common_move(self, "rhs", bank, layout, prefetching)
         else:
             raise ValueError("input_idx must be 0 or 1")
 
     def move_output(
         self,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "MoveLet":
-        return _common_move(self, "output", level, layout, prefetching)
+        return _common_move(self, "output", bank, layout, prefetching)
 
     @_assert_stable_spec
     def split(self, size: int) -> "Schedule":
@@ -1578,16 +1566,21 @@ class MatmulHole(MatmulBase):
 
     @_assert_stable_spec
     def complete(self) -> Schedule:
+        system = system_config.current_system()
         if self.lhs.height > 1 or self.rhs.width > 1:
             return self.tile_out((1, 1)).complete()
         if self.lhs.width > 1:
             return self.split(1).complete()
-        if not self.lhs.root.in_registers:
-            return self.move_input(0, level=self.lhs.root.level - 1).complete()
-        if not self.rhs.root.in_registers:
-            return self.move_input(1, level=self.rhs.root.level - 1).complete()
-        if not self.output.root.in_registers:
-            return self.move_output(level=self.output.root.level - 1).complete()
+
+        next_general_lhs = system.next_general_bank(self.lhs.bank)
+        if next_general_lhs:
+            return self.move_input(0, bank=next_general_lhs).complete()
+        next_general_rhs = system.next_general_bank(self.rhs.bank)
+        if next_general_rhs:
+            return self.move_input(1, bank=next_general_rhs).complete()
+        next_general_out = system.next_general_bank(self.output.bank)
+        if next_general_out:
+            return self.move_output(bank=next_general_out).complete()
         return self.place_mult()
 
     @_assert_stable_spec
@@ -1617,7 +1610,7 @@ class MatmulLeaf(MatmulBase):
     def move_input(
         self,
         input_idx: int,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "MoveLet":
@@ -1625,7 +1618,7 @@ class MatmulLeaf(MatmulBase):
 
     def move_output(
         self,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "MoveLet":
@@ -1634,15 +1627,18 @@ class MatmulLeaf(MatmulBase):
 
 @dataclass_abc.dataclass_abc(frozen=True)
 class Mult(MatmulLeaf):
+    # TODO: Replace whole class w/ target-specific implementations
+
     def __post_init__(self):
         super().__post_init__()
-        assert all(o.root.in_registers for o in self.operands)
+        assert all(o.bank in ("RF", "HexagonRF") for o in self.operands)
         assert all(d == 1 for o in self.operands for d in o.dim_sizes)
 
     @staticmethod
     def applies_to_operands(operands: Sequence[Union[Tensor, Tile]]) -> bool:
         return all(
-            o.root.in_registers and all(d == 1 for d in o.dim_sizes) for o in operands
+            o.bank in ("RF", "HexagonRF") and all(d == 1 for d in o.dim_sizes)
+            for o in operands
         )
 
 
@@ -1662,10 +1658,14 @@ class HvxVrmpyaccVuwVubRub(MatmulLeaf):
 
     @staticmethod
     def _check_operands(operands: Sequence[Union[Tensor, Tile]]) -> Optional[str]:
-        if not all(o.root.in_registers for o in operands):
-            return "All operands must be in registers"
-
         lhs, rhs, out = operands
+
+        if lhs.bank != "VMEM":
+            return "lhs must be in vector memory"
+        if rhs.bank != "HexagonRF":
+            return "rhs must be in scalar registers"
+        if out.bank != "VMEM":
+            return "out must be in vector memory"
 
         if lhs.dtype != dtypes.Uint8:
             raise "lhs should be uint8"
@@ -1769,7 +1769,8 @@ class DirectConv(Schedule):
 
     @property
     def is_scheduled(self) -> bool:
-        if not all(op.root.in_registers for op in self.operands):
+        # TODO: Drop these RF constants. Instead, use target-specific impls.
+        if not all(op.bank in ("RF", "HexagonRF") for op in self.operands):
             return False
         if any(d > 1 for d in self.output.dim_sizes):
             return False
@@ -1793,24 +1794,24 @@ class DirectConv(Schedule):
     def move_input(
         self,
         input_idx: int,
-        level: Optional[int] = None,
+        bank: Optional[int] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "MoveLet":
         if input_idx == 0:
-            return _common_move(self, "lhs", level, layout, prefetching)
+            return _common_move(self, "lhs", bank, layout, prefetching)
         elif input_idx == 1:
-            return _common_move(self, "rhs", level, layout, prefetching)
+            return _common_move(self, "rhs", bank, layout, prefetching)
         else:
             raise ValueError("input_idx must be 0 or 1")
 
     def move_output(
         self,
-        level: Optional[int] = None,
+        bank: Optional[int] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "MoveLet":
-        return _common_move(self, "output", level, layout, prefetching)
+        return _common_move(self, "output", bank, layout, prefetching)
 
     @_assert_stable_spec
     def split(self, size: int) -> "Schedule":
@@ -1820,12 +1821,17 @@ class DirectConv(Schedule):
     def complete(self) -> Schedule:
         if any(d > 1 for d in self.output.dim_sizes):
             return self.tile_out((1, 1, 1)).complete()
-        if not self.lhs.root.in_registers:
-            return self.move_input(0, level=self.lhs.root.level - 1).complete()
-        if not self.rhs.root.in_registers:
-            return self.move_input(1, level=self.rhs.root.level - 1).complete()
-        if not self.output.root.in_registers:
-            return self.move_output(level=self.output.root.level - 1).complete()
+
+        next_general_lhs = system.next_general_bank(self.lhs.bank)
+        if next_general_lhs:
+            return self.move_input(0, bank=next_general_lhs).complete()
+        next_general_rhs = system.next_general_bank(self.rhs.bank)
+        if next_general_rhs:
+            return self.move_input(1, bank=next_general_rhs).complete()
+        next_general_out = system.next_general_bank(self.output.bank)
+        if next_general_out:
+            return self.move_output(bank=next_general_out).complete()
+
         return self
 
     @prune_relayout_cycles
@@ -1847,13 +1853,13 @@ class DirectConv(Schedule):
         # We only need the levels for the left-hand side (images), because that
         # is the only operand over which one can slide.
         if allow_sliding_windows.get():
-            for level in set(l for l, _ in _move_arguments(self.lhs)):
+            for bank in set(b for b, _ in _move_arguments(self.lhs)):
                 for sliding_dim in [0, 1]:
                     for slide_size in dim_range(
                         self.output.dim_sizes[sliding_dim], include_end=False
                     ):
                         yield SlidingTileOutAction(
-                            self.sliding_tile_out, sliding_dim, slide_size, level
+                            self.sliding_tile_out, sliding_dim, slide_size, bank
                         )
 
         # Search over all possible filters splits
@@ -1872,8 +1878,11 @@ class DirectConv(Schedule):
 
     @_assert_stable_spec
     def replace_children(self, replacements: Iterable[Schedule]) -> Schedule:
-        if list(replacements):
-            raise ValueError("DirectConv has no children to replace")
+        r = list(replacements)
+        if r:
+            raise ValueError(
+                f"DirectConv has no children, but given {len(r)} replacements"
+            )
         return self
 
     def replace_io(
@@ -1883,12 +1892,12 @@ class DirectConv(Schedule):
         return DirectConv(lhs, rhs, output, serial_only=self.serial_only)
 
     @property
-    def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.current_system().level_configs]]
+    def additional_memories(self) -> list[dict[str, int]]:
+        return [{k: 0 for k in system_config.current_system().banks}]
 
     @property
-    def peak_memory(self) -> List[int]:
-        return [0 for _ in system_config.current_system().level_configs]
+    def peak_memory(self) -> dict[str, int]:
+        return {k: 0 for k in system_config.current_system().banks}
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -1927,9 +1936,10 @@ class ReduceSum(Schedule):
 
     @property
     def is_scheduled(self) -> bool:
+        # TODO: Drop these RF constants. Instead, use target-specific Impls.
         return (
-            self.source.root.in_registers
-            and self.output.root.in_registers
+            self.source.bank in ("RF", "HexagonRF")
+            and self.output.bank in ("RF", "HexagonRF")
             and all(d == 1 for d in self.source.dim_sizes)
         )
 
@@ -1962,22 +1972,22 @@ class ReduceSum(Schedule):
     def move_input(
         self,
         input_idx: int,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> "MoveLet":
         if input_idx == 0:
-            return _common_move(self, "source", level, layout, prefetching)
+            return _common_move(self, "source", bank, layout, prefetching)
         else:
             raise ValueError("input_idx must be 0 ")
 
     def move_output(
         self,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
     ) -> Schedule:
-        return _common_move(self, "output", level, layout, prefetching)
+        return _common_move(self, "output", bank, layout, prefetching)
 
     @_assert_stable_spec
     def split(self, k: int) -> Union["ReduceSum", "Loop"]:
@@ -1999,10 +2009,15 @@ class ReduceSum(Schedule):
             return self.tile_out(tuple(1 for _ in self.output.dim_sizes)).complete()
         if self.source.dim_sizes[-1] > 1:
             return self.split(1).complete()
-        if not self.source.root.in_registers:
-            return self.move_input(0, level=self.source.root.level - 1).complete()
-        if not self.output.root.in_registers:
-            return self.move_output(level=self.output.root.level - 1).complete()
+
+        system = system_config.current_system()
+        next_general_source = system.next_general_bank(self.lhs.bank)
+        if next_general_source:
+            return self.move_input(0, bank=next_general_source).complete()
+        next_general_out = system.next_general_bank(self.output.bank)
+        if next_general_out:
+            return self.move_output(bank=next_general_out).complete()
+
         return self
 
     @_assert_stable_spec
@@ -2020,12 +2035,12 @@ class ReduceSum(Schedule):
         return ReduceSum(inputs[0], output, serial_only=self.serial_only)
 
     @property
-    def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.current_system().level_configs]]
+    def additional_memories(self) -> list[dict[str, int]]:
+        return [{k: 0 for k in system_config.current_system().banks}]
 
     @property
-    def peak_memory(self) -> List[int]:
-        return [0 for _ in system_config.current_system().level_configs]
+    def peak_memory(self) -> dict[str, int]:
+        return {k: 0 for k in system_config.current_system().banks}
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -2131,11 +2146,11 @@ class Loop(Schedule):
         return self.driving_tile.boundary_size(dim, concrete_outer_size)
 
     @property
-    def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.current_system().level_configs]]
+    def additional_memories(self) -> list[dict[str, int]]:
+        return [{k: 0 for k in system_config.current_system().banks}]
 
     @property
-    def peak_memory(self) -> List[int]:
+    def peak_memory(self) -> dict[str, int]:
         return self.inner.peak_memory
 
     @property
@@ -2236,11 +2251,11 @@ class _TilingMixin:
         return None
 
     @property
-    def additional_memories(self) -> List[List[int]]:
-        return [[0 for _ in system_config.current_system().level_configs]]
+    def additional_memories(self) -> list[dict[str, int]]:
+        return [{b: 0 for b in system_config.current_system().banks}]
 
     @property
-    def peak_memory(self) -> List[int]:
+    def peak_memory(self) -> dict[str, int]:
         return self.inner.peak_memory
 
     @property
@@ -2405,15 +2420,15 @@ class SlidingWindowLoop(_TilingMixin, Schedule):
         raise NotImplementedError()
 
     @property
-    def peak_memory(self) -> List[int]:
-        inner_peak_memory = list(self.inner.peak_memory)
-        inner_peak_memory[self.live_tensor.level] += self.live_tensor.volume
+    def peak_memory(self) -> dict[str, int]:
+        inner_peak_memory = dict(self.inner.peak_memory)
+        inner_peak_memory[self.live_tensor.bank] += self.live_tensor.bytes_used
         return inner_peak_memory
 
     @property
-    def additional_memories(self) -> List[List[int]]:
-        mem = [0 for _ in system_config.current_system().level_configs]
-        mem[self.live_tensor.root.level] = self.live_tensor.volume
+    def additional_memories(self) -> list[dict[str, int]]:
+        mem = {k: 0 for k in system_config.current_system().banks}
+        mem[self.live_tensor.bank] = self.live_tensor.bytes_used
         return [mem]
 
 
@@ -2552,7 +2567,7 @@ class MoveLet(Schedule):
             keyword = termcolor.colored(keyword, attrs=["bold"])
             arrow = termcolor.colored(arrow, attrs=["bold"])
         return (
-            f"{keyword}[lvl={self.destination.root.level}]"
+            f"{keyword}[{self.destination.bank}]"
             f" {name_tensor_fn(self.destination)}"
             f" {arrow} {name_tensor_fn(self.source)}"
         )
@@ -2670,21 +2685,21 @@ class MoveLet(Schedule):
         raise NotImplementedError()
 
     @property
-    def additional_memories(self) -> List[List[int]]:
-        mem = [0 for _ in system_config.current_system().level_configs]
-        additional = self.destination.volume
+    def additional_memories(self) -> list[dict[str, int]]:
+        mem = {k: 0 for k in system_config.current_system().banks}
+        additional = self.destination.bytes_used
         if self.prefetching:
             additional *= 2
-        mem[self.destination.level] = additional
+        mem[self.destination.bank] = additional
         return [mem]
 
     @property
-    def peak_memory(self) -> List[int]:
+    def peak_memory(self) -> dict[str, int]:
         mem = self.inner.peak_memory
-        additional = self.destination.volume
+        additional = self.destination.bytes_used
         if self.prefetching:
             additional *= 2
-        mem[self.destination.level] += additional
+        mem[self.destination.bank] += additional
         return mem
 
     @property

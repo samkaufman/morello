@@ -9,3 +9,4 @@ atomicwrites==1.4.0
 termcolor==1.1.0
 sympy
 typeguard
+frozendict~=2.0

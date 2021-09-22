@@ -1,17 +1,16 @@
 import contextlib
-import dataclasses
 import functools
 import io
 import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
-from . import cpu
-from .base import Target, RunResult, SystemDescription
+from .base import Target, RunResult, SystemDescription, MemoryBankConfig
 from .. import ops
 from ..codegen import gen
 
@@ -35,15 +34,50 @@ class HvxSimulatorTarget(Target):
 
     @property
     def system(self) -> "SystemDescription":
-        # TODO: Implement a SystemDescription more specific to HVX
-        return dataclasses.replace(cpu.CpuTarget().system, has_hvx=True)
+        # TODO: The `banks` description should model multiple "vector contexts"
+        return SystemDescription(
+            line_size=64,
+            banks={
+                "HexagonRF": MemoryBankConfig(cache_hit_cost=0, capacity=32 * 4),
+                "VMEM": MemoryBankConfig(cache_hit_cost=0, capacity=32 * 1024),  # HVX
+                "L1": MemoryBankConfig(cache_hit_cost=10, capacity=32 * 1024),
+                "L2": MemoryBankConfig(cache_hit_cost=10, capacity=2048 * 1024),
+                "GL": MemoryBankConfig(cache_hit_cost=10, capacity=sys.maxsize),
+            },
+            default_bank="GL",
+            processors=2,
+            has_hvx=True,
+            faster_destination_banks=self._faster_destination_banks,
+            next_general_bank=self._next_general_bank,
+        )
+
+    def _faster_destination_banks(self, source: str) -> set[str]:
+        if source in ("HexagonRF", "VMEM"):
+            return set()
+        elif source == "L1":
+            return {"HexagonRF"}
+        elif source == "L2":
+            return {"L1", "VMEM"}
+        elif source == "GL":
+            return {"L2"}
+        raise ValueError("Unknown source: " + source)
+
+    def _next_general_bank(self, source: str) -> Optional[str]:
+        if source in ("HexagonRF", "VMEM"):
+            return None
+        elif source == "L1":
+            return "HexagonRF"
+        elif source == "L2":
+            return "L1"
+        elif source == "GL":
+            return "L2"
+        raise ValueError("No general next bank for " + source)
 
     def run_impl(
         self,
         impl,
         print_output=False,
         source_cb=None,
-        extra_clang_args=None,
         values=None,
     ) -> RunResult:
         sim_path = _hexagon_sdk_tools_root() / "Tools" / "bin" / "hexagon-sim"
@@ -57,8 +91,6 @@ class HvxSimulatorTarget(Target):
                 "--profile",
                 binary_path,
             ]
-            if extra_clang_args:
-                hexagon_sim_cmd += extra_clang_args
             result = subprocess.run(
                 hexagon_sim_cmd,
                 stdout=subprocess.PIPE,

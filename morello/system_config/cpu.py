@@ -4,12 +4,13 @@ import re
 import subprocess
 import sys
 import tempfile
+from typing import Optional
 
 from .base import (
     RunResult,
     Target,
     SystemDescription,
-    MemoryLevelConfig,
+    MemoryBankConfig,
 )
 from ..codegen import gen
 
@@ -29,20 +30,37 @@ class CpuTarget(Target):
     def system(self) -> "SystemDescription":
         return SystemDescription(
             line_size=64,
-            level_configs=[
-                MemoryLevelConfig(cache_hit_cost=0, capacity=100),
-                MemoryLevelConfig(cache_hit_cost=10, capacity=sys.maxsize),
-            ],
+            banks={
+                "RF": MemoryBankConfig(cache_hit_cost=0, capacity=6400),
+                "GL": MemoryBankConfig(cache_hit_cost=10, capacity=sys.maxsize),
+            },
+            default_bank="GL",
             processors=4,
             has_hvx=False,
+            faster_destination_banks=self._faster_destination_banks,
+            next_general_bank=self._next_general_bank,
         )
+
+    def _faster_destination_banks(self, source: str) -> set[str]:
+        assert isinstance(source, str)
+        if source == "RF":
+            return set()
+        elif source == "GL":
+            return {"RF"}
+        raise ValueError("Unknown source: " + source)
+
+    def _next_general_bank(self, source: str) -> Optional[str]:
+        if source == "RF":
+            return None
+        elif source == "GL":
+            return "RF"
+        raise ValueError("Unknown source: " + source)
 
     def run_impl(
         self,
         impl,
         print_output=False,
         source_cb=None,
-        extra_clang_args=None,
         values=None,
     ) -> RunResult:
         with tempfile.TemporaryDirectory() as dirname:
@@ -66,8 +84,6 @@ class CpuTarget(Target):
                 "clang",
                 "-O3",
             ]
-            if extra_clang_args:
-                clang_cmd += extra_clang_args
             clang_cmd += [
                 "-o",
                 binary_path,

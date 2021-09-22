@@ -24,13 +24,6 @@ def layout_st(draw, dim_sizes: Optional[Tuple[int, ...]] = None) -> specs.Layout
     return draw(st.from_type(specs.Layout))
 
 
-def level_st():
-    return st.integers(
-        min_value=0,
-        max_value=len(system_config.current_system().level_configs) - 1,
-    )
-
-
 @st.composite
 def tensorspec_st(
     draw,
@@ -38,6 +31,7 @@ def tensorspec_st(
     min_dims: int = 1,
     max_dims: Optional[int] = None,
 ) -> specs.TensorSpec:
+    system = system_config.current_system()
     dim_sizes = draw(
         st.lists(
             dim_st(max_size=max_dim_size), min_size=min_dims, max_size=max_dims
@@ -47,32 +41,34 @@ def tensorspec_st(
         dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=dim_sizes)),
-        level=draw(level_st()),
+        bank=draw(st.sampled_from(sorted(system.banks))),
     )
 
 
 @st.composite
 def matmul_spec_st(draw, max_dim_size: Optional[int] = 32):
+    system = system_config.current_system()
     lhs = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=2))
     rhs_dim_sizes = (lhs.dim_sizes[1], draw(dim_st(max_size=max_dim_size)))
     rhs = specs.TensorSpec(
         dim_sizes=rhs_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=rhs_dim_sizes)),
-        level=draw(level_st()),
+        bank=draw(st.sampled_from(sorted(system.banks))),
     )
     out_dim_sizes = (lhs.dim_sizes[0], rhs.dim_sizes[1])
     out = specs.TensorSpec(
         dim_sizes=out_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=out_dim_sizes)),
-        level=draw(level_st()),
+        bank=draw(st.sampled_from(sorted(system.banks))),
     )
     return specs.Matmul(lhs, rhs, out, serial_only=draw(st.booleans()))
 
 
 @st.composite
 def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
+    system = system_config.current_system()
     image = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=2))
     filters_dim_sizes = (
         draw(dim_st(max_size=image.dim_sizes[0])),
@@ -83,27 +79,28 @@ def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
         dim_sizes=filters_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=filters_dim_sizes)),
-        level=draw(level_st()),
+        bank=draw(st.sampled_from(sorted(system.banks))),
     )
     out_dim_sizes = specs.Convolution.output_shape(image.dim_sizes, filters_dim_sizes)
     out = specs.TensorSpec(
         dim_sizes=out_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=out_dim_sizes)),
-        level=draw(level_st()),
+        bank=draw(st.sampled_from(sorted(system.banks))),
     )
     return specs.Convolution(image, filters, out)
 
 
 @st.composite
 def reduce_spec_st(draw, max_dim_size: Optional[int] = 32):
+    system = system_config.current_system()
     source = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=4))
     output_dim_sizes = source.dim_sizes[:-1]
     output = specs.TensorSpec(
         dim_sizes=output_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=output_dim_sizes)),
-        level=draw(level_st()),
+        bank=draw(st.sampled_from(sorted(system.banks))),
     )
     return specs.ReduceSum(source=source, output=output)
 
@@ -137,7 +134,7 @@ def compose_spec_st(draw) -> specs.Compose:
     output_spec = specs.TensorSpec(
         dim_sizes=output_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
-        level=draw(st.integers(min_value=0, max_value=1)),
+        bank=draw(st.sampled_from(sorted(system_config.current_system().banks))),
         layout=draw(layout_st(output_dim_sizes)),
     )
     intermediate_dtypes = draw(

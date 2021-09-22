@@ -94,24 +94,26 @@ class Tensor(_TensorLike):
         return self.spec.dim_sizes
 
     @property
-    def level(self) -> int:
-        return self.spec.level
+    def bank(self) -> str:
+        return self.spec.bank
+
+    @property
+    def dtype(self) -> dtypes.Dtype:
+        return self.spec.dtype
+
+    @property
+    def bytes_used(self) -> int:
+        return self.volume * self.dtype.size
 
     def __str__(self):
         layout_epi = ""
-        level_epi = ""
+        bank_epi = ""
         if self.layout != specs.Layout.ROW_MAJOR:
             layout_epi = f", {self.layout}"
-        if self.level != len(system_config.current_system().level_configs) - 1:
-            level_epi = f", lvl={self.level}"
+        if self.bank != system_config.current_system().default_bank:
+            bank_epi = f", {self.bank}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
-        return f"Tensor({dims_part}{layout_epi}{level_epi})"
-
-    @property
-    def in_registers(self):
-        # TODO(samkaufman): The Tensor should carry a handle to its System instead of
-        #   assuming we're on current_system()
-        return self.level == 0
+        return f"Tensor({dims_part}{layout_epi}{bank_epi})"
 
     @property
     def root(self):
@@ -180,6 +182,10 @@ class Tile(_TensorLike):
         return self.origin.root
 
     @property
+    def bank(self) -> str:
+        return self.origin.bank
+
+    @property
     def steps(self) -> int:
         result = 1
         for dim in range(len(self.dim_sizes)):
@@ -196,20 +202,20 @@ class Tile(_TensorLike):
             layout = self.root.layout
         return specs.TensorSpec(
             dim_sizes=self.dim_sizes,
-            dtype=self.root.dtype,
-            level=self.root.level,
+            dtype=self.origin.dtype,
+            bank=self.origin.bank,
             layout=layout,
         )
 
     def __str__(self):
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         layout_epi = ""
-        level_epi = ""
+        bank_epi = ""
         if self.root.layout != specs.Layout.ROW_MAJOR:
             layout_epi = f", {self.root.layout}"
-        if self.root.level != len(system_config.current_system().level_configs) - 1:
-            level_epi = f", lvl={self.root.level}"
-        return f"{type(self).__name__}({dims_part}{layout_epi}{level_epi})"
+        if self.bank != system_config.current_system().default_bank:
+            bank_epi = f", {self.bank}"
+        return f"{type(self).__name__}({dims_part}{layout_epi}{bank_epi})"
 
     def __eq__(self, other):
         return self is other

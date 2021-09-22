@@ -92,9 +92,7 @@ def pprint(
         cost_dict = cost.detailed_analytical_cost(op)
         headers.append("cost")
     if show_utilization:
-        level_count = len(system_config.current_system().level_configs)
-        for level in range(level_count):
-            headers.append(f"lvl{level}")
+        headers.extend(sorted(system_config.current_system().banks))
     if show_scheduled:
         headers.append("scheduled")
     table = []

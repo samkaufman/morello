@@ -1,4 +1,4 @@
-#!python3
+#!/usr/bin/env python3
 
 """Experiments in search over a Kriek Impl-like IR."""
 import argparse
@@ -11,6 +11,7 @@ from typing import TypeVar
 from morello import dtypes, ops, op_pprint, search, search_cache, specs
 from morello.codegen import gen
 from morello.search import schedule_search
+from morello.system_config import set_current_target, cpu, hexagon
 from morello.tensor import Tensor
 
 T = TypeVar("T")
@@ -134,6 +135,10 @@ def main() -> int:
     # Parse command line arguments
     parsed_args = parser.parse_args()
 
+    # Set a target
+    # TODO: Support HVX as well
+    set_current_target(cpu.CpuTarget())
+
     # Configure from args
     if parsed_args.row_major_only:
         col_major_token = search.prune_column_major.set(True)
@@ -156,35 +161,35 @@ def main() -> int:
             parsed_args.cache, save=parsed_args.save_cache
         ) as cache:
             if parsed_args.spec == "matmul":
-    sched, runtime = _matmul_main(parsed_args.m, parsed_args.k, parsed_args.n, cache)
-    elif parsed_args.spec == "conv":
+                sched, runtime = _matmul_main(
+                    parsed_args.m, parsed_args.k, parsed_args.n, cache
+                )
+            elif parsed_args.spec == "conv":
+                sched, runtime = _conv_main(
+                    parsed_args.image_width,
+                    parsed_args.image_height,
+                    parsed_args.filter_width,
+                    parsed_args.filter_height,
+                    parsed_args.filter_count,
+                    cache,
+                )
+            elif parsed_args.spec == "convnet":
+                sched, runtime = _convnet_main(cache)
+    finally:
+        search.prune_column_major.reset(col_major_token)
+        ops.tile_size_mode.reset(tile_size_mode_token)
 
+    op_pprint.pprint(sched)
 
-sched, runtime = _conv_main(
-    parsed_args.image_width,
-    parsed_args.image_height,
-    parsed_args.filter_width,
-    parsed_args.filter_height,
-    parsed_args.filter_count,
-    cache,
-)
+    if parsed_args.generate_code:
+        print("")
+        gen.generate_c("kernel_only", sched, sys.stdout)
 
-elif parsed_args.spec == "convnet":
-sched, runtime = _convnet_main(cache)
-finally:
-search.prune_column_major.reset(col_major_token)
-ops.tile_size_mode.reset(tile_size_mode_token)
-
-op_pprint.pprint(sched)
-
-if parsed_args.generate_code:
     print("")
-    gen.generate_c("kernel_only", sched, sys.stdout)
+    print(f"Took {runtime:.2f}s")
 
-print("")
-print(f"Took {runtime:.2f}s")
+    return 0
 
-return 0
 
 if __name__ == "__main__":
     sys.exit(main())

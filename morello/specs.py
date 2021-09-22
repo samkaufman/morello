@@ -49,26 +49,26 @@ class TensorSpec:
 
     dim_sizes: Tuple[int, ...]
     dtype: Dtype
-    level: int = 0
+    bank: str
     layout: Layout = Layout.ROW_MAJOR
 
     def __init__(
         self,
         dim_sizes: Tuple[int, ...],
         dtype: Dtype,
-        level: Optional[int] = None,
+        bank: Optional[str] = None,
         layout: Layout = Layout.ROW_MAJOR,
     ):
         object.__setattr__(self, "dim_sizes", dim_sizes)
         object.__setattr__(self, "dtype", dtype)
-        if level is None:
+        if bank is None:
             object.__setattr__(
                 self,
-                "level",
-                len(current_system().level_configs) - 1,
+                "bank",
+                current_system().default_bank,
             )
         else:
-            object.__setattr__(self, "level", level)
+            object.__setattr__(self, "bank", bank)
         object.__setattr__(self, "layout", layout)
         if not len(self.dim_sizes):
             raise ValueError("dim_sizes cannot be empty")
@@ -84,18 +84,18 @@ class TensorSpec:
         if all(d == 1 for d in new_dim_sizes):
             new_layout = Layout.ROW_MAJOR
         return TensorSpec(
-            new_dim_sizes, dtype=self.dtype, level=self.level, layout=new_layout
+            new_dim_sizes, dtype=self.dtype, bank=self.bank, layout=new_layout
         )
 
     def __str__(self):
         layout_epi = ""
-        level_epi = ""
+        bank_epi = ""
         if self.layout != Layout.ROW_MAJOR:
             layout_epi = f", {self.layout}"
-        if self.level != len(current_system().level_configs) - 1:
-            level_epi = f", lvl={self.level}"
+        if self.bank != current_system().default_bank:
+            bank_epi = f", {self.bank}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
-        return f"({dims_part}, {self.dtype}{layout_epi}{level_epi})"
+        return f"({dims_part}, {self.dtype}{bank_epi}{layout_epi})"
 
 
 class Spec(abc.ABC):

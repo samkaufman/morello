@@ -55,13 +55,19 @@ def test_dim_range():
 @pytest.mark.parametrize(
     "intermed_shapes,dtype,op_mems,expected_peaks,expected_additionals",
     [
-        ([(10,)], dtypes.Uint8, [[20, 0], [5, 0]], [30, 0], [[10, 0], [10, 0]]),
+        (
+            [(10,)],
+            dtypes.Uint8,
+            [{"RF": 20, "GL": 0}, {"RF": 5, "GL": 0}],
+            {"RF": 30, "GL": 0},
+            [{"RF": 10, "GL": 0}, {"RF": 10, "GL": 0}],
+        ),
         (
             [(10,), (90,)],
             dtypes.Uint32,
-            [[20, 0], [10, 10], [10, 0]],
-            [110, 10],
-            [[10, 0], [100, 0], [90, 0]],
+            [{"RF": 20, "GL": 0}, {"RF": 10, "GL": 10}, {"RF": 10, "GL": 0}],
+            {"RF": 410, "GL": 10},
+            [{"RF": 40, "GL": 0}, {"RF": 400, "GL": 0}, {"RF": 360, "GL": 0}],
         ),
     ],
 )
@@ -75,7 +81,7 @@ def test_pipeline_peak_and_additional_memory(
         have to `cast` at construction to satisfy the type checker.
         """
 
-        def __init__(self, mem: List[int], output) -> None:
+        def __init__(self, mem: dict[str, int], output) -> None:
             super().__init__()
             self._mem = mem
             self._output = output
@@ -100,7 +106,7 @@ def test_pipeline_peak_and_additional_memory(
     assert len(intermed_shapes) + 1 == len(op_mems)
 
     intermediates: list[Optional[tensor.Tensor]] = [
-        tensor.Tensor(spec=specs.TensorSpec(shp, dtype=dtype, level=0), name=None)
+        tensor.Tensor(spec=specs.TensorSpec(shp, dtype=dtype, bank="RF"), name=None)
         for shp in intermed_shapes
     ]
     intermediates.append(None)

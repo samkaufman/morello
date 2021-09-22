@@ -1,15 +1,14 @@
 import abc
-from typing import Optional, Literal, cast
+from typing import Optional
+from collections.abc import Mapping
+from frozendict import frozendict
 
-from . import ops, system_config
+from . import ops, system_config, utils
 from .tensor import Tensor
 
 
-def _zero_tup() -> tuple[Literal[0], ...]:
-    return cast(
-        tuple[Literal[0], ...],
-        tuple(0 for _ in system_config.current_system().level_configs),
-    )
+def _zero_banks() -> dict[str, int]:
+    return {bank: 0 for bank in system_config.current_system().banks}
 
 
 class AvailableIsNegativeError(ValueError):
@@ -21,17 +20,15 @@ class IntermediatesTooBigError(ValueError):
 
 
 def _pipeline_transition(
-    base_available: tuple[int, ...],
+    base_available: dict[str, int],
     pipeline: ops.Pipeline,
-    carried_input_consumption: tuple[int, ...],
-    carried_output_consumption: tuple[int, ...],
+    carried_input_consumption: dict[str, int],
+    carried_output_consumption: dict[str, int],
 ) -> Optional[list["MemoryLimits"]]:
-
-    # TODO: Make this a method of Tensors
-    def _tensor_mem(tensor: Tensor) -> tuple[int, ...]:
-        mem = list(_zero_tup())
-        mem[tensor.level] = tensor.volume
-        return tuple(mem)
+    def _tensor_mem(tensor: Tensor) -> dict[str, int]:
+        mem = _zero_banks()
+        mem[tensor.bank] = tensor.bytes_used
+        return mem
 
     child_limits: list["MemoryLimits"] = []
     try:
@@ -78,21 +75,21 @@ class MemoryLimits(abc.ABC):
 
 
 class StandardMemoryLimits(MemoryLimits):
-    _available: tuple[int, ...]
+    _available: frozendict[str, int]
 
-    def __init__(self, available_memory: Optional[tuple[int, ...]] = None) -> None:
+    def __init__(self, available_memory: Optional[Mapping[str, int]] = None) -> None:
         super().__init__()
         if available_memory is None:
             system = system_config.current_system()
-            self._available = tuple(
-                c.capacity * system.line_size for c in system.level_configs
-            )
+            self._available = {}
+            for bank, bank_config in system.banks.items():
+                self._available[bank] = bank_config.capacity
         else:
-            if any(m < 0 for m in available_memory):
+            if any(m < 0 for m in available_memory.values()):
                 raise AvailableIsNegativeError(
                     f"Given negative available memory: {available_memory}"
                 )
-            self._available = available_memory
+            self._available = frozendict(available_memory)
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, StandardMemoryLimits):
@@ -103,33 +100,34 @@ class StandardMemoryLimits(MemoryLimits):
         return hash(self.available)
 
     @property
-    def available(self) -> tuple[int, ...]:
+    def available(self) -> frozendict[str, int]:
         return self._available
 
     def transition(self, schedule: ops.Schedule) -> Optional[list["MemoryLimits"]]:
         """Returns new limits for the children (holes) of the given schedule.
 
-        Returns `None` if the given schedule violates limits and is therefore
-        unschedulable.
+        Returns `None` if the given schedule violates limits and therefore cannot be
+        scheduled.
         """
         # base->pipeline
         if isinstance(schedule, ops.Pipeline):
             return _pipeline_transition(
-                self.available, schedule, _zero_tup(), _zero_tup()
+                self.available, schedule, _zero_banks(), _zero_banks()
             )
 
         # base->base
-        child_limits: list[tuple[int, ...]] = []
-        for additionals in schedule.additional_memories:
-            child_limits.append(
-                tuple(m - d for m, d in zip(self._available, additionals))
-            )
+        child_limits = []
+        for adds in schedule.additional_memories:
+            zd = utils.zip_dict(self._available, adds, same_keys=True).items()
+            child_limits.append({k: m - d for k, (m, d) in zd})
         assert len(child_limits) == len(schedule.children), (
             f"{len(child_limits)} child limits != {len(schedule.children)} "
             f"children for {type(schedule).__name__}"
         )
         if any(
-            m < 0 for memory_after_action in child_limits for m in memory_after_action
+            m < 0
+            for memory_after_action in child_limits
+            for m in memory_after_action.values()
         ):
             # This violates the limits, so we return None
             return None
@@ -139,20 +137,28 @@ class StandardMemoryLimits(MemoryLimits):
 class PipelineChildMemoryLimits(MemoryLimits):
     """A MemoryLimits carrying extra information for a hole in a Pipeline."""
 
-    base_available: tuple[int, ...]
-    input_consumption: tuple[int, ...]
-    output_consumption: tuple[int, ...]
+    base_available: dict[str, int]
+    input_consumption: dict[str, int]
+    output_consumption: dict[str, int]
 
     def __init__(
         self,
-        base: tuple[int, ...],
-        input_consumption: tuple[int, ...],
-        output_consumption: tuple[int, ...],
+        base: dict[str, int],
+        input_consumption: dict[str, int],
+        output_consumption: dict[str, int],
     ) -> None:
         super().__init__()
-        if any(v > b for v, b in zip(input_consumption, base)):
+        if any(
+            v > b
+            for v, b in utils.zip_dict(input_consumption, base, same_keys=True).values()
+        ):
             raise IntermediatesTooBigError("input tensor doesn't fit in available")
-        if any(v > b for v, b in zip(output_consumption, base)):
+        if any(
+            v > b
+            for v, b in utils.zip_dict(
+                output_consumption, base, same_keys=True
+            ).values()
+        ):
             raise IntermediatesTooBigError("output tensor doesn't fit in available")
 
         self.base_available = base
@@ -174,16 +180,19 @@ class PipelineChildMemoryLimits(MemoryLimits):
         )
 
     @property
-    def available(self):
+    def available(self) -> dict[str, int]:
         # This property is the interface for any caller expecting a base
         # StandardMemoryLimits (i.e. one that can't use extra information about
         # its context in a Pipeline).
-        return tuple(
-            a - (b + c)
-            for a, b, c in zip(
-                self.base_available, self.input_consumption, self.output_consumption
-            )
-        )
+        return {
+            bank: a - (b + c)
+            for bank, (a, b, c) in utils.zip_dict(
+                self.base_available,
+                self.input_consumption,
+                self.output_consumption,
+                same_keys=True,
+            ).items()
+        }
 
     def transition(self, schedule: ops.Schedule) -> Optional[list["MemoryLimits"]]:
         # pipeline->base; treat self as a StandardMemoryLimits and transition

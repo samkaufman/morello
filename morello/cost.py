@@ -1,7 +1,7 @@
 import functools
 import math
 from operator import mul
-from typing import Dict, Tuple, Union
+from typing import Union
 
 from . import specs
 from .ops import (
@@ -38,7 +38,7 @@ def move_cost(
     #     * src.layout
     #     * dest_layout
 
-    level_coef = current_system().level_configs[src.root.level].cache_hit_cost
+    hit_cost = current_system().banks[src.bank].cache_hit_cost
 
     lodims = layout_ordered_dims(src)
     meaningful_layout_difference = (
@@ -53,7 +53,7 @@ def move_cost(
     # Main cost formula
     cost = (
         10
-        * level_coef
+        * hit_cost
         * functools.reduce(mul, real_dims[:-1], 1)
         * math.ceil(real_dims[-1] / current_system().line_size)
     )
@@ -73,8 +73,8 @@ def move_cost(
 def detailed_analytical_cost(
     op: Schedule,
     depth: int = 0,
-    env: Dict[Union[Tensor, Tile], str] = None,
-) -> Dict[Schedule, Tuple[int, str]]:
+    env: dict[Union[Tensor, Tile], str] = None,
+) -> dict[Schedule, tuple[int, str]]:
     """Compute costs for a given Schedule and its children.
 
     Returns a dict mapping each Schedule to a 2-tuple of its cost and a
@@ -88,7 +88,7 @@ def detailed_analytical_cost(
         env = {}
 
     if isinstance(op, Pipeline):
-        cost_dict = {}
+        cost_dict: dict[Schedule, tuple[int, str]] = {}
         sum_cost = 0
         for stage in op.stages:
             sub_cd = detailed_analytical_cost(
@@ -134,7 +134,10 @@ def detailed_analytical_cost(
             + (op.update_loads * update_cost)
             + (op.steps * cost_dict[op.inner][0])
         )
-        cost_expl = f"{new_cost:5d} = {op.whole_loads}({whole_load_cost}) + {op.update_loads}({update_cost}) + {op.steps}(_)"
+        cost_expl = (
+            f"{new_cost:5d} = {op.whole_loads}({whole_load_cost}) + "
+            f"{op.update_loads}({update_cost}) + {op.steps}(_)"
+        )
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
     elif isinstance(op, (DirectConv, Mult, HvxVrmpyaccVuwVubRub, ReduceSum)):

@@ -17,6 +17,7 @@ from morello import (
     system_config,
     tensor,
 )
+from morello.system_config import current_system, current_target
 from . import strategies
 
 strategies.register_default_strategies()
@@ -48,99 +49,6 @@ class CountingCache(search.ScheduleCache):
     ) -> None:
         self.put_counts[spec] += 1
         return super().put(spec, schedule)
-
-
-class MatmulConfig(NamedTuple):
-    m: int
-    k: int
-    n: int
-    levels: Tuple[int, int, int]
-    layouts: Tuple[specs.Layout, specs.Layout, specs.Layout]
-
-
-def _smaller_matmuls(spec: specs.Matmul) -> Iterable[MatmulConfig]:
-    """Yields the sub-specs we expect search to schedule while scheduling a Matmul.
-
-    Scheduling a Matmul should evaluate all Matmuls with smaller dimensions (of original
-    size, size 1, or divisible by cache line size), lower memory levels for operands
-    such that, left-to-right, levels are non-strictly decreasing in level.
-    """
-    orig_dims = spec.lhs.dim_sizes + (spec.rhs.dim_sizes[1],)
-    operands = spec.inputs + (spec.output,)
-
-    orig_config = MatmulConfig(
-        spec.lhs.dim_sizes[0],
-        spec.lhs.dim_sizes[1],
-        spec.rhs.dim_sizes[1],
-        levels=(spec.lhs.level, spec.rhs.level, spec.output.level),
-        layouts=(spec.lhs.layout, spec.rhs.layout, spec.output.layout),
-    )
-
-    for m, k, n in itertools.product(*[ops.dim_range(d) for d in orig_dims]):
-        numels = (m * k, k * n, m * n)
-        for levels in itertools.product(*[range(op.level + 1) for op in operands]):
-            levels = cast(Tuple[int, int, int], levels)
-            for layouts in itertools.product(
-                *[
-                    list(specs.Layout) if n > 1 else [specs.Layout.ROW_MAJOR]
-                    for n in numels
-                ]
-            ):
-                layouts = cast(Tuple[specs.Layout, specs.Layout, specs.Layout], layouts)
-
-                new_config = MatmulConfig(m=m, k=k, n=n, levels=levels, layouts=layouts)
-                if new_config == orig_config:
-                    continue
-                # Exclude any Matmul with a different layout at a level slower than RF
-                if any(
-                    lvl > 0 and lay != orig_lay
-                    for lvl, lay, orig_lay in zip(levels, layouts, orig_config.layouts)
-                ):
-                    continue
-                # Exclude any Matmul with a scalar operand not in row-major
-                if any(
-                    n == 1 and l != specs.Layout.ROW_MAJOR
-                    for n, l in zip(numels, layouts)
-                ):
-                    continue
-                # Exclude any Matmul where the levels of operands aren't non-strictly
-                # decreasing
-                if any(a > b for a, b in zip(levels[:-1], levels[1:])):
-                    continue
-                # If the operand started at level 1 or higher, it will have the option
-                # of moving directly into level 0 with the desired layout, so we don't
-                # expect to explore both
-                yield new_config
-
-
-# TODO: Optionally drop cache line restriction
-@pytest.mark.skip(reason="_smaller_matmuls fallen out of sync with action space")
-@hypothesis.settings(deadline=10 * 1000)
-@given(strategies.matmul_spec_st(max_dim_size=65), st.from_type(dtypes.Dtype))
-def test_matmul_search_schedules_every_smaller_op_exactly_once(op_spec, dtype):
-    """Checks that search of a Matmul spec checks each "smaller" Matmul exactly once.
-
-    This only works with pruning/symmetry-breaking on.
-    """
-    cache = CountingCache()
-    inputs = tuple(tensor.Tensor(t, name=None) for t in op_spec.inputs)
-    output = tensor.Tensor(op_spec.output, name="output")
-    search.schedule_search(op_spec, inputs, output, cache=cache)
-
-    # Check that given and all smaller Matmuls are queried for and set once
-    smaller_specs = {op_spec}
-    for matmul_config in _smaller_matmuls(op_spec):
-        m, k, n, levels, layouts = matmul_config
-        lhs = specs.TensorSpec((m, k), dtype=dtype, level=levels[0], layout=layouts[0])
-        rhs = specs.TensorSpec((k, n), dtype=dtype, level=levels[1], layout=layouts[1])
-        out = specs.TensorSpec((m, n), dtype=dtype, level=levels[2], layout=layouts[2])
-        smaller_specs.add(specs.Matmul(lhs, rhs, out))
-
-    assert set(cache.specs()) == smaller_specs
-
-    for smaller in smaller_specs:
-        puts = cache.put_counts[smaller]
-        assert puts == 1, f"put count for {smaller} was {puts}"
 
 
 # TODO: Generalize beyond just one Compose spec

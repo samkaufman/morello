@@ -68,7 +68,7 @@ def _assign_tensor_name(
     if tensor.origin:
         if isinstance(tensor, Tile):
             preferred_suffix = "t"
-        elif tensor.root.level == 0:
+        elif "RF" in tensor.root.bank:
             preferred_suffix = "r"
         else:
             # 's' is an arbitrary choice, but this case hardly ever occurs in

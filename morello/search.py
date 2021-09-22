@@ -147,7 +147,7 @@ def schedule_search(
         """Returns Impls which implement the query spec."""
 
         # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
-        if all(m >= 0 for m in memory_limits.available) and leaf.is_scheduled:
+        if all(m >= 0 for m in memory_limits.available.values()) and leaf.is_scheduled:
             yield leaf
 
         # Yield all the complete expansions of the hole by expanding once into

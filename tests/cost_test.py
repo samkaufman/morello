@@ -26,13 +26,12 @@ def _move_operand(
     draw, b: ops.Schedule, underlying_system: system_config.SystemDescription
 ):
     operand_idx = draw(st.integers(low=0, high=len(b.inputs) + 1))
-    level_configs = underlying_system.level_configs
-    level = draw(st.integers(min_value=0, max_value=len(level_configs) - 1))
+    bank = draw(st.sampled_from(sorted(underlying_system.banks)))
     layout = draw(st.from_type(specs.Layout))
     b = draw(b)
     if operand_idx == len(b.inputs):
-        return b.move_output(operand_idx, level=level, layout=layout)
-    return b.move_input(operand_idx, level=level, layout=layout)
+        return b.move_output(operand_idx, bank=bank, layout=layout)
+    return b.move_input(operand_idx, bank=bank, layout=layout)
 
 
 @st.composite
@@ -101,57 +100,58 @@ def test_contiguous_copy_lowers_matmul_cost(c: int, m: int, dtype: dtypes.Dtype)
 
 
 @hypothesis.settings(deadline=10 * 1000)
+@given(matmul_spec=strategies.matmul_spec_st())
+def test_trivial_tilings_are_same_cost_as_untiled_matmul(matmul_spec):
+    lhs = ops.Tensor(matmul_spec.lhs, name=None)
+    rhs = ops.Tensor(matmul_spec.rhs, name=None)
+    out = ops.Tensor(matmul_spec.output, name=None)
+
+    m, k, n = out.dim_sizes[0], lhs.dim_sizes[1], out.dim_sizes[1]
+    trivial_tiled_schedule = (
+        ops.MatmulHole(lhs, rhs, out, matmul_spec.serial_only)
+        .tile_out((m, n))
+        .split(k)
+        .complete()
+    )
+
+    trivial_untiled_schedule = ops.MatmulHole(
+        lhs, rhs, out, serial_only=False
+    ).complete()
+    assert cost.analytical_cost(trivial_tiled_schedule) == cost.analytical_cost(
+        trivial_untiled_schedule
+    )
+
+
+@st.composite
+def _st_test_cost_is_invariant_to_panel_layouts(draw):
+    target = draw(st.from_type(system_config.Target))
+    bank = draw(st.sampled_from(sorted(target.system.banks)))
+    return target, bank
+
+
 @given(
-    target=st.from_type(system_config.Target),
-    matmul_spec=strategies.matmul_spec_st(),
-)
-def test_trivial_tilings_are_same_cost_as_untiled_matmul(
-    target: system_config.Target, matmul_spec: specs.Matmul
-):
-    with system_config.with_target(target):
-        lhs = ops.Tensor(matmul_spec.lhs, name=None)
-        rhs = ops.Tensor(matmul_spec.rhs, name=None)
-        out = ops.Tensor(matmul_spec.output, name=None)
-
-        m, k, n = out.dim_sizes[0], lhs.dim_sizes[1], out.dim_sizes[1]
-        trivial_tiled_schedule = (
-            ops.MatmulHole(lhs, rhs, out, matmul_spec.serial_only)
-            .tile_out((m, n))
-            .split(k)
-            .complete()
-        )
-
-        trivial_untiled_schedule = ops.MatmulHole(
-            lhs, rhs, out, serial_only=False
-        ).complete()
-        assert cost.analytical_cost(trivial_tiled_schedule) == cost.analytical_cost(
-            trivial_untiled_schedule
-        )
-
-
-@given(
-    st.from_type(system_config.Target),
+    _st_test_cost_is_invariant_to_panel_layouts(),
     st.from_type(dtypes.Dtype),
     st.integers(min_value=0, max_value=1),
     st.integers(min_value=2, max_value=64),
-    st.integers(min_value=0, max_value=1),
     st.from_type(specs.Layout),
     st.booleans(),
 )
 def test_cost_is_invariant_to_panel_layouts(
-    target, dtype, dim_idx, elements, level, dest_layout, prefetching
+    target_bank, dtype, dim_idx, elements, dest_layout, prefetching
 ):
+    target, bank = target_bank
     with system_config.with_target(target):
         dim_sizes = tuple(elements if dim_idx == i else 1 for i in range(2))
         left = tensor.Tensor(
             spec=specs.TensorSpec(
-                dim_sizes, dtype=dtype, layout=specs.Layout.ROW_MAJOR, level=level
+                dim_sizes, dtype=dtype, layout=specs.Layout.ROW_MAJOR, bank=bank
             ),
             name=None,
         )
         right = tensor.Tensor(
             spec=specs.TensorSpec(
-                dim_sizes, dtype=dtype, layout=specs.Layout.COL_MAJOR, level=level
+                dim_sizes, dtype=dtype, layout=specs.Layout.COL_MAJOR, bank=bank
             ),
             name=None,
         )

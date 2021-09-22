@@ -1,4 +1,4 @@
-from .base import Target, SystemDescription, MemoryLevelConfig
+from .base import Target, SystemDescription, MemoryBankConfig
 from .state import (
     current_target,
     current_system,
