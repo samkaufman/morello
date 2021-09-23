@@ -49,6 +49,7 @@ class HvxSimulatorTarget(Target):
             has_hvx=True,
             faster_destination_banks=self._faster_destination_banks,
             next_general_bank=self._next_general_bank,
+            ordered_banks=["HexagonRF", "VMEM", "L1", "L2", "GL"],
         )
 
     def _faster_destination_banks(self, source: str) -> set[str]:

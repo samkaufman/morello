@@ -1,5 +1,6 @@
 import functools
 import io
+from morello.system_config.state import current_system
 import sys
 from typing import Callable, List, Union
 
@@ -20,6 +21,7 @@ def _build_table(
     tensor_name_fn: Callable[[Union[tensor.Tensor, tensor.Tile]], str],
     indent_depth: int,
 ) -> None:
+    system = current_system()
     ds = " " * (indent_depth * 2)
     new_row = [f"{ds}{op.env_str(tensor_name_fn, underscore_inner=True, fancy=True)}"]
     if show_spec:
@@ -27,7 +29,7 @@ def _build_table(
     if cost_dict:
         new_row.append(cost_dict[op][1])
     if show_utilization:
-        new_row.extend(op.peak_memory)
+        new_row.extend(op.peak_memory[b] for b in system.ordered_banks)
     if show_scheduled:
         new_row.append("yes" if op.is_scheduled else "no")
     table.append(new_row)
@@ -92,7 +94,7 @@ def pprint(
         cost_dict = cost.detailed_analytical_cost(op)
         headers.append("cost")
     if show_utilization:
-        headers.extend(sorted(system_config.current_system().banks))
+        headers.extend(current_system().ordered_banks)
     if show_scheduled:
         headers.append("scheduled")
     table = []

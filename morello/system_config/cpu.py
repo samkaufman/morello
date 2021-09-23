@@ -39,6 +39,7 @@ class CpuTarget(Target):
             has_hvx=False,
             faster_destination_banks=self._faster_destination_banks,
             next_general_bank=self._next_general_bank,
+            ordered_banks=["RF", "GL"],
         )
 
     def _faster_destination_banks(self, source: str) -> set[str]:

@@ -4,6 +4,8 @@ import logging
 import sys
 from typing import List, NamedTuple, Callable, Optional
 
+from sympy.utilities.iterables import ordered_partitions
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,16 +45,19 @@ class SystemDescription:
     has_hvx: bool
     faster_destination_banks: Callable[[str], set[str]]
     next_general_bank: Callable[[str], Optional[str]]
+    ordered_banks: list[str]
 
     def __post_init__(self):
         assert self.processors >= 1
+        closure = self.destination_banks_closure(self.default_bank)
+        assert set(self.ordered_banks) == closure
 
     def destination_banks_closure(self, bank: str) -> set[str]:
         closure = {bank}
         last_size = -1
         while last_size != len(closure):
             last_size = len(closure)
-            for b in closure:
+            for b in set(closure):
                 closure.update(self.faster_destination_banks(b))
         return closure
 

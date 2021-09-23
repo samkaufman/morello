@@ -92,11 +92,11 @@ def _emit_tensor_print(
                 f'printf("%" {dtype.int_fmt_macro} " ", {buffer_ref_fn(index_expr)});'
             )
 
-            if rank:
-                writer.writeline("}")
-            for idx in range(rank - 1):
-                writer.writeline('printf("\\n");')
-                writer.writeline("}")
+        if rank:
+            writer.writeline("}")
+        for idx in range(rank - 1):
+            writer.writeline('printf("\\n");')
+            writer.writeline("}")
     writer.writeline("}")
 
 
