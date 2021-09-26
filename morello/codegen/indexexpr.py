@@ -32,6 +32,7 @@ def buffer_indexing_expr(
             raise NotImplementedError("Column-major index exprs. not implemented")
         index_expr = _tensor_row_major_indexing_expr(len(concrete_shape))
         index_expr = index_expr.subs(substitutions, simultaneous=True)
+        assert isinstance(index_expr, sympy.Expr)
         return index_expr
     else:
         raise NotImplementedError(

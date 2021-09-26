@@ -1,17 +1,24 @@
 import functools
+import itertools
 import operator
+from typing import Optional
 
 import hypothesis
 import numpy as np
 import pytest
+import sympy
 from hypothesis import strategies as st
 
 from morello import dtypes, op_pprint, ops, specs, system_config, tensor
+from morello.codegen import indexexpr
 from morello.system_config import cpu, hexagon
+
+from .. import strategies
 
 CC_DEADLINE = 30000
 CC_SANITIZE = True
 
+strategies.register_default_strategies()
 
 def _read_from_output(output: str) -> np.ndarray:
     is_3d = False
@@ -292,6 +299,81 @@ def _calculator_to_test(spec_st):
         return wrapper
 
     return decorator_wrapper
+
+
+@st.composite
+def _st_test_index_exprs_consistent_with_contiguous_props(draw):
+    t = draw(st.from_type(tensor.Tensor))
+
+    # TODO: Test column-major as well.
+    tensor_spec = draw(strategies.tensorspec_st(max_dim_size=9, min_dims=1, max_dims=4, layout=specs.Layout.ROW_MAJOR))
+    t = tensor.Tensor(spec=tensor_spec, name=None, origin=None)
+
+    concrete_tile_idxs: list[list[int]] = []
+
+    depth = draw(st.integers(1, 2))
+    for _ in range(depth):
+        # TODO: Use a more generic strategy for producing any tile callable 
+        # TODO: Test convolution tiles
+        t = t.simple_tile(tuple(draw(st.integers(1, d)) for d in t.dim_sizes))
+        # The following `assume` avoids the case where simple_tile returns `t`
+        # itself.
+        hypothesis.assume(not isinstance(t, tensor.Tensor))
+        assert not isinstance(t, tensor.Tensor)
+        concrete_tile_idxs.append([
+            draw(st.integers(min_value=0, max_value=t.steps_dim(dim_idx) - 1))
+            for dim_idx in range(len(t.dim_sizes))
+        ])
+    return t, concrete_tile_idxs
+
+
+@hypothesis.settings(max_examples=1000, deadline=700)
+@hypothesis.given(_st_test_index_exprs_consistent_with_contiguous_props())
+def test_index_exprs_consistent_with_contiguous_props(inp):
+    """Test that Tiles' `contiguous` property matches walking elements.
+
+    More specifically: test that walking all elements with the highest-numbered
+    logical index (`p1` in a 2-dim. tensor) in an innermost loop returns
+    adjacent buffer indices.
+    """
+    tile, concrete_tile_idxs = inp
+
+    # TODO: Modify the strategy so that it always returns a Tile.
+    hypothesis.assume(isinstance(tile, tensor.Tile))
+
+    # Compose indexing expressions so that we have a mapping from the final
+    # tile's coordinates all the way back to its root tensor.
+    stack: list[tensor.Tile] = [tile]
+    while isinstance(stack[0].origin, tensor.Tile):
+        stack.insert(0, stack[0].origin)
+    expr = indexexpr.buffer_indexing_expr(stack[0].origin)
+    while stack:
+        operand = stack[0]
+        del stack[0]
+        all_substitutions = {}
+        tile_it_vars = concrete_tile_idxs[-1]
+        del concrete_tile_idxs[-1]
+        for dim_idx, it_var in zip(range(len(tile.dim_sizes)), tile_it_vars):
+            e = indexexpr.logical_indexing_expr(operand, dim_idx)
+            e = e.subs(f"i{dim_idx}", it_var)
+            all_substitutions[f"p{dim_idx}"] = e
+        expr = expr.subs(all_substitutions)
+
+    # Walk the elements.
+    is_contiguous = True
+    last_offset: Optional[int] = None
+    for pts in itertools.product(*map(range, tile.dim_sizes)):
+        offset = int(expr.evalf(subs={f"p{idx}": pt for idx, pt in enumerate(pts)}))
+        assert isinstance(offset, int), f"offset was type {type(offset)}"
+        if last_offset is None:
+            last_offset = offset
+            continue
+        if offset != last_offset + 1:
+            is_contiguous = False
+            break
+        last_offset = offset
+
+    assert tile.contiguous == is_contiguous
 
 
 @_calculator_to_test(_arb_matmul_spec())

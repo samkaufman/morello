@@ -27,9 +27,10 @@ def layout_st(draw, dim_sizes: Optional[Tuple[int, ...]] = None) -> specs.Layout
 @st.composite
 def tensorspec_st(
     draw,
-    max_dim_size: Optional[int] = 32,
+    max_dim_size: Optional[int] = 128,
     min_dims: int = 1,
     max_dims: Optional[int] = None,
+    layout: Optional[specs.Layout] = None,
 ) -> specs.TensorSpec:
     system = system_config.current_system()
     dim_sizes = draw(
@@ -37,10 +38,12 @@ def tensorspec_st(
             dim_st(max_size=max_dim_size), min_size=min_dims, max_size=max_dims
         ).map(tuple)
     )
+    if layout is None:
+        layout = draw(layout_st(dim_sizes=dim_sizes))
     return specs.TensorSpec(
         dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
-        layout=draw(layout_st(dim_sizes=dim_sizes)),
+        layout=layout,
         bank=draw(st.sampled_from(sorted(system.banks))),
     )
 

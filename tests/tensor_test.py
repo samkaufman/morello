@@ -2,13 +2,31 @@ import io
 import pickle
 
 import hypothesis
+import pytest
 from hypothesis import strategies as st
 
-from morello import specs, tensor
+from morello import dtypes, specs, tensor
 
 from . import strategies
 
 strategies.register_default_strategies()
+
+
+@pytest.mark.parametrize(
+    "tensor_shape, tile_shape, expected",
+    [
+        ((8, 8), (8, 8), True),
+        ((8, 8, 8), (8, 8, 8), True),
+        ((8, 8, 8), (4, 8, 8), True),
+    ],
+)
+def test_tile_contiguous(tensor_shape, tile_shape, expected):
+    # TODO: Vary the following three parameters with hypothesis
+    dtype, bank, layout = dtypes.Uint8, "RF", specs.Layout.ROW_MAJOR
+    tensor_spec = specs.TensorSpec(tensor_shape, dtype, bank, layout)
+    t = tensor.Tensor(tensor_spec, name=None, origin=None)
+    tile = t.simple_tile(tile_shape)
+    assert tile.contiguous == expected
 
 
 @hypothesis.given(st.from_type(specs.TensorSpec), st.text(), st.booleans())

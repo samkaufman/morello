@@ -1,5 +1,6 @@
 import dataclasses
 import functools
+import itertools
 import math
 from operator import mul
 from typing import Optional, Tuple, Union, cast
@@ -226,12 +227,17 @@ class Tile(_TensorLike):
     @property
     def contiguous(self):
         """Whether or not elements are contiguous in the underlying memory."""
-        # TODO: Throw together some unit tests for this method
-        for tile_dim, root_dim in zip(
-            layout_ordered_dims(self), layout_ordered_dims(self.root)
-        ):
+        pairs = zip(layout_ordered_dims(self), layout_ordered_dims(self.root))
+
+        # Drop leading dimensions where the tile size is one
+        pairs = itertools.dropwhile(lambda x: x[0] == 1, pairs)
+
+        # Drop the first
+        pairs = itertools.islice(pairs, 1, None)
+
+        for tile_dim_size, root_dim_size in pairs:
             # The following includes the case where an underlying dimension is 1.
-            if tile_dim != root_dim:
+            if tile_dim_size != root_dim_size:
                 return False
         return True
 
