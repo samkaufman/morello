@@ -17,6 +17,9 @@ from . import indexexpr
 
 _namer: contextvars.ContextVar["_Namer"] = contextvars.ContextVar("_namer")
 _writer: contextvars.ContextVar["_Writer"] = contextvars.ContextVar("_writer")
+_unroll: contextvars.ContextVar["bool"] = contextvars.ContextVar(
+    "_unroll", default=False
+)
 
 # TODO: Choose a more principled STACK_CUTOFF.
 STACK_CUTOFF = 256
@@ -112,12 +115,20 @@ def _emit_tensor_print(
 
 
 class _OperandDetails(NamedTuple):
+    """Data about an Impl operand commonly moved together during codegen.
+
+    This tuple contains a reference to the Tensor/Tile itself, a mapping from the tensor
+    dimensions to the Impl's subscripts, the current index expression mapping those
+    dimensions to the underlying buffer, and the concrete shape of the *origin* of the
+    tensor.
+    """
+
     # inner tensor/tile.
     operand: Union[Tensor, Tile]
     subscripts: tuple[int, ...]
     index_expr: sympy.Expr
     # concrete_origin_shape is usually greater than a tile size in each
-    # corresponding dimensions, but might be smaller in boundary cases
+    # corresponding dimension, but might be smaller in boundary cases
     # (where the tile is effectively truncated).
     concrete_origin_shape: tuple[int, ...]
 
@@ -136,6 +147,8 @@ def _emit_tile_out_loop_nest(
 
     namer, writer = _namer.get(), _writer.get()
 
+    # If given no subscripts, jump to generating the body of the loop. This is the base
+    # case for recursive calls below.
     if not remaining_subscripts:
         inner_codegen(
             [d.index_expr for d in op_details],
@@ -152,52 +165,72 @@ def _emit_tile_out_loop_nest(
     full_steps = partial_steps - 1 if driving_boundary_size else partial_steps
 
     if full_steps:
-        # Print the loop header
-        it_var = 0
-        if full_steps > 1:
-            it_var = namer.fresh_name("t")
-            writer.writeline(
-                f"for (int {it_var} = 0; {it_var} < {full_steps}; {it_var}++) {{"
+        main_concrete_sizes: list[tuple[int, ...]] = [
+            tuple(
+                (min(ts, cos) if s == it_subscript else cos)
+                for ts, cos, s in zip(tile.dim_sizes, concrete_shape, subscripts)
             )
-            writer.indent()
+            for tile, subscripts, _, concrete_shape in op_details
+        ]
 
-        # Update all indexing expressions where dimensions share a subscript with
-        # the one we're modifying.
-        full_new_index_exprs = _update_index_exprs(it_var, it_subscript, op_details)
-
-        main_concrete_sizes = []
-        for tile, subscripts, _, concrete_shape in op_details:
-            new_shape = []
-            for tile_size, concrete_outer_size, subscript in zip(
-                tile.dim_sizes, concrete_shape, subscripts
-            ):
-                if subscript == it_subscript:
-                    new_shape.append(min(tile_size, concrete_outer_size))
-                else:
-                    new_shape.append(concrete_outer_size)
-            main_concrete_sizes.append(tuple(new_shape))
-
-        # Recurse to process the remaining iterators
-        _emit_tile_out_loop_nest(
-            remaining_subscripts[1:],
-            [
-                _OperandDetails(d.operand, d.subscripts, e, s)
-                for d, e, s in zip(
-                    op_details, full_new_index_exprs, main_concrete_sizes
+        if not _unroll.get():
+            # Emit the loop opener.
+            it_var = 0
+            if full_steps > 1:
+                it_var = namer.fresh_name("t")
+                writer.writeline(
+                    f"for (int {it_var} = 0; {it_var} < {full_steps}; {it_var}++) {{"
                 )
-            ],
-            driving_tile_idx,
-            inner_codegen,
-        )
+                writer.indent()
 
-        if full_steps > 1:
-            writer.dedent()
-            writer.writeline("}")
+            # Update all indexing expressions where dimensions share a subscript with
+            # the one we're modifying.
+            full_new_index_exprs = _update_index_exprs(it_subscript, it_var, op_details)
+
+            # Recurse to process the remaining iterators
+            _emit_tile_out_loop_nest(
+                remaining_subscripts[1:],
+                [
+                    _OperandDetails(d.operand, d.subscripts, e, s)
+                    for d, e, s in zip(
+                        op_details, full_new_index_exprs, main_concrete_sizes
+                    )
+                ],
+                driving_tile_idx,
+                inner_codegen,
+            )
+
+            # Emit loop closer.
+            if full_steps > 1:
+                writer.dedent()
+                writer.writeline("}")
+        else:
+            for it_var_idx in range(full_steps):
+                # Sub. in the concrete step index instead of a reference to a generated
+                # iterator name.
+                full_new_index_exprs = _update_index_exprs(
+                    it_subscript, it_var_idx, op_details
+                )
+
+                # Recurse to process the remaining iterators
+                _emit_tile_out_loop_nest(
+                    remaining_subscripts[1:],
+                    [
+                        _OperandDetails(d.operand, d.subscripts, e, s)
+                        for d, e, s in zip(
+                            op_details, full_new_index_exprs, main_concrete_sizes
+                        )
+                    ],
+                    driving_tile_idx,
+                    inner_codegen,
+                )
 
     # Generate boundary epilogue here
     if driving_boundary_size:
+        # We don't check _unroll in the boundary case because it is already effectively
+        # "unrolled" (it doesn't generate a loop).
         boundary_new_index_exprs = _update_index_exprs(
-            full_steps, it_subscript, op_details
+            it_subscript, full_steps, op_details
         )
 
         boundary_concrete_shapes = []
@@ -231,11 +264,13 @@ def _emit_tile_out_loop_nest(
 
 
 def _update_index_exprs(
-    it_var: Union[str, int],
-    it_subscript: int,
-    op_details: Iterable[_OperandDetails],
+    it_subscript: int, it_var: Union[str, int], op_details: Iterable[_OperandDetails]
 ) -> Sequence[sympy.Expr]:
     """Update operand indexing expressions for an introduced C loop.
+
+    Specifically, this function returns indexing expressions---one for each given
+    _OperandDetails---which have had dimensions corresponding to it_subscript replaced
+    by the operand's logical indexing expression and the given it_var.
 
     :param it_var: Either the name of the iteration variable or an integer constant.
     """
@@ -257,8 +292,8 @@ def _update_index_exprs(
         # introduced loop iterator variable name and the Expr mapping points
         # in the tile's coordinate space to that of its origin.
         all_substitutions = {}
-        for idx, sub in enumerate(dims_map):
-            if sub != it_subscript:
+        for idx, subscript in enumerate(dims_map):
+            if subscript != it_subscript:
                 continue
             new_expr = indexexpr.logical_indexing_expr(operand, idx)
             new_expr = new_expr.subs(sympy.symbols(f"i{idx}"), it_var)
@@ -342,6 +377,10 @@ def _emit_assignment_copy(
 
 @contextlib.contextmanager
 def _emit_loop_nest_for_shape(shape: tuple[int, ...]):
+    if _unroll.get():
+        raise NotADirectoryError(
+            "unrolling not implemented for _emit_loop_nest_for_shape"
+        )
     namer, writer = _namer.get(), _writer.get()
     subs = []
     for dim_size in shape:
@@ -504,6 +543,8 @@ def _inner_generate_c(
         img, _, _ = impl.operands
         i_name = namer.fresh_name("pt")
         j_name = namer.fresh_name("pt")
+        if _unroll.get():
+            raise NotImplementedError("unrolling not implemented for DirectConv")
         writer.writeline(
             f"for (int {i_name} = 0; {i_name} < {img.dim_sizes[0]}; {i_name}++) {{"
         )
@@ -701,7 +742,7 @@ def _move_hvx_vmem(
     concrete_shape = concrete_shapes[source_idx]
 
     source_ref_fn = tensor_ref_fns[source_idx]
-    source_index_expr = operand_index_exprs[source_idx]      # .subs("p0", 0)
+    source_index_expr = operand_index_exprs[source_idx]
     destination_name = namer.fresh_name("mo")
 
     dest_ref_fn = functools.partial(
