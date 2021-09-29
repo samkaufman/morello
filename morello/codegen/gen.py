@@ -9,11 +9,11 @@ from typing import Callable, Iterable, Literal, NamedTuple, Optional, Union, cas
 
 import sympy
 
-from . import indexexpr
 from .. import ops, specs, tensor
 from ..dtypes import Dtype
 from ..system_config.state import current_system
 from ..tensor import Tensor, Tile
+from . import indexexpr
 
 _namer: contextvars.ContextVar["_Namer"] = contextvars.ContextVar("_namer")
 _writer: contextvars.ContextVar["_Writer"] = contextvars.ContextVar("_writer")
@@ -298,13 +298,15 @@ def _emit_buffer_alloc(
 
 
 @contextlib.contextmanager
-def _emit_copy(
+def _emit_assignment_copy(
     source: Union[Tensor, Tile],
     destination: Tensor,
     source_index_expr: sympy.Expr,
+    destination_index_expr: sympy.Expr,
     concrete_shape: tuple[int, ...],
     source_ref_fn: Callable[[Union[sympy.Expr, int]], str],
-    new_name: str,
+    dest_ref_fn: Callable[[Union[sympy.Expr, int]], str],
+    dest_free_fn: Callable[[], None],
     is_input: bool,
     is_output: bool,
 ):
@@ -313,38 +315,29 @@ def _emit_copy(
 
     writer = _writer.get()
 
-    destination_index_expr = indexexpr.buffer_indexing_expr(destination, concrete_shape)
-
-    ref_fn, free_fn = _emit_buffer_alloc(
-        new_name, functools.reduce(operator.mul, concrete_shape, 1), destination.dtype
-    )
-
     def inner_emit(for_output: bool):
         nonlocal source_index_expr, destination_index_expr, source_ref_fn
         with _emit_loop_nest_for_shape(concrete_shape) as loop_subs:
-            # Apply the loop substitutions
+            # Substitute the loop iterator names into the source and destination
+            # index expressions.
             substitutions = {
                 f"p{dim}": (s if isinstance(s, int) else f"_{s}")
                 for dim, s in enumerate(loop_subs)
             }
-            subbed_source_index_expr = cast(
-                sympy.Expr, source_index_expr.subs(substitutions)
-            )
-            subbed_destination_index_expr = cast(
-                sympy.Expr, destination_index_expr.subs(substitutions)
-            )
+            subbed_source_index_expr = source_index_expr.subs(substitutions)
+            subbed_destination_index_expr = destination_index_expr.subs(substitutions)
 
-            left = ref_fn(subbed_destination_index_expr)
+            left = dest_ref_fn(subbed_destination_index_expr)
             right = source_ref_fn(subbed_source_index_expr)
             if for_output:
                 left, right = right, left
             writer.writeline(f"{left} = {right};")
 
     inner_emit(False)
-    yield ref_fn
+    yield
     if is_output:
         inner_emit(True)
-    free_fn()
+    dest_free_fn()
 
 
 @contextlib.contextmanager
@@ -391,7 +384,6 @@ def _inner_generate_c(
             _inner_generate_c(impl.inner, tensor_ref_fns, iexprs, shapes)
 
         driving_tile_idx = impl.inner.operands.index(impl.driving_tile)
-        assert isinstance(driving_tile_idx, int)  # TODO: remove
         _emit_tile_out_loop_nest(
             list(impl.spec.operands_dim_subscripts()[driving_tile_idx]),
             [
@@ -494,27 +486,17 @@ def _inner_generate_c(
         assert impl.lhs.contiguous
         assert impl.rhs.contiguous
         assert impl.output.contiguous
-        assert dict(lhs_index_expr.as_coefficients_dict()) == {
-            sympy.symbols("p0"): 4,
-            sympy.symbols("p1"): 1,
-        }, f"lhs_index_expr unexpectedly was: {lhs_index_expr}"
-        assert dict(rhs_index_expr.as_coefficients_dict()) == {
-            sympy.symbols("p0"): 1,
-        }, f"rhs_index_expr unexpectedly was: {rhs_index_expr}"
-        assert dict(out_index_expr.as_coefficients_dict()) == {
-            sympy.symbols("p0"): 1
-        }, f"out_index_expr unexpectedly was: {out_index_expr}"
 
         # Rewrite index exprs. to refer to first element.
         lhs_index_expr = rhs_index_expr.subs({"p0": 0, "p1": 0})
         rhs_index_expr = lhs_index_expr.subs("p0", 0)
         out_index_expr = out_index_expr.subs("p0", 0)
 
-        out_val = f"*(HVX_Vector *)(&{out_ref_fn(out_index_expr)})"
+        out_val = f"*(HVX_Vector *)({_c_ptr(out_ref_fn, out_index_expr)})"
         writer.writeline(f"{out_val} = Q6_Vuw_vrmpyacc_VuwVubRub(")
         writer.writeline(f"  {out_val},")
-        writer.writeline(f"  *(HVX_Vector *)(&{lhs_ref_fn(lhs_index_expr)}),")
-        writer.writeline(f"  *(uint32_t *)(&{rhs_ref_fn(rhs_index_expr)})")
+        writer.writeline(f"  *(HVX_Vector *)({_c_ptr(lhs_ref_fn, lhs_index_expr)}),")
+        writer.writeline(f"  *(uint32_t *)({_c_ptr(rhs_ref_fn, rhs_index_expr)})")
         writer.writeline(f");")
     elif isinstance(impl, ops.DirectConv):
         if not all(d == 1 for d in impl.output.dim_sizes):
@@ -547,45 +529,76 @@ def _inner_generate_c(
         source_idx = impl.operands.index(impl.source)
         assert (
             impl.inner.operands[source_idx] is impl.destination
-        ), "MoveLet source and destination indices differ"
+        ), "MoveLet's inner Impl does not use destination tensor"
 
-        # Code is only generated for MoveLet if there is a layout or
-        # contiguity change. Otherwise, we just recurse.
         concrete_shape = concrete_shapes[source_idx]
-        if not impl.source.contiguous or (
-            impl.source.layout != impl.destination.layout
-            and functools.reduce(operator.mul, concrete_shape, 1) != 1
-        ):
-            source_ref_fn = tensor_ref_fns[source_idx]
-            source_index_expr = operand_index_exprs[source_idx]
-            destination_name = namer.fresh_name("mo")
 
-            new_tensor_ref_fns = list(tensor_ref_fns)
-            new_operand_index_exprs = list(operand_index_exprs)
-            new_concrete_shapes = list(concrete_shapes)
-            # TODO: Do we need to call this both here and in _emit_copy?
-            new_operand_index_exprs[source_idx] = indexexpr.buffer_indexing_expr(
-                impl.destination, concrete_shape
-            )
-            new_concrete_shapes[source_idx] = concrete_shape
+        is_store = impl.input_idx is None
 
-            with _emit_copy(
-                impl.source,
-                impl.destination,
-                source_index_expr,
-                concrete_shape,
-                source_ref_fn,
-                destination_name,
-                is_input=(source_idx < len(impl.operands) - 1),
-                is_output=(source_idx >= len(impl.operands) - 1),
-            ) as destination_ref_fn:
-                new_tensor_ref_fns[source_idx] = destination_ref_fn
+        # On the Hexagon target:
+        if current_system().has_hvx:
+            if not impl.is_store and impl.destination.bank == "L2":
+                assert impl.source.bank == "GL"
+                _load_hvx_l2fetch(
+                    impl,
+                    is_store,
+                    source_idx,
+                    tensor_ref_fns,
+                    operand_index_exprs,
+                    concrete_shapes,
+                )
+            # HVX scalar L1/dc-to-register case
+            elif not impl.is_store and impl.destination.bank == "L1":
+                assert impl.source.bank == "L2"
+                _move_hvx_dcfetch(
+                    impl,
+                    source_idx,
+                    tensor_ref_fns,
+                    operand_index_exprs,
+                    concrete_shapes,
+                )
+            elif impl.is_store and impl.destination.bank == "L2":
+                # Generate no code for moves from L2 to global.
+                assert impl.source.bank == "GL"
                 _inner_generate_c(
                     impl.inner,
-                    new_tensor_ref_fns,
-                    new_operand_index_exprs,
-                    new_concrete_shapes,
+                    tensor_ref_fns,
+                    operand_index_exprs,
+                    concrete_shapes,
                 )
+            elif impl.destination.bank == "VMEM":
+                assert impl.source.bank == "L2"
+                _move_hvx_vmem(
+                    impl,
+                    source_idx,
+                    tensor_ref_fns,
+                    operand_index_exprs,
+                    concrete_shapes,
+                )
+            elif impl.destination.bank == "HexagonRF":
+                _move_registers(
+                    impl,
+                    source_idx,
+                    tensor_ref_fns,
+                    operand_index_exprs,
+                    concrete_shapes,
+                )
+            else:
+                word = "store" if impl.is_store else "load"
+                raise Exception(f"Unexpected {word} case: {impl.destination.bank}")
+        # On CPU and Hexagon targets: code is only generated (after the
+        # previous cases) for MoveLet if there is a layout or contiguity change.
+        # Otherwise, we just recurse.
+        elif impl.destination.bank == "RF" and (
+            not impl.source.contiguous
+            or (
+                impl.source.layout != impl.destination.layout
+                and functools.reduce(operator.mul, concrete_shape, 1) != 1
+            )
+        ):
+            _move_registers(
+                impl, source_idx, tensor_ref_fns, operand_index_exprs, concrete_shapes
+            )
         else:
             _inner_generate_c(
                 impl.inner,
@@ -596,6 +609,218 @@ def _inner_generate_c(
 
     else:
         raise NotImplementedError(f"Not implemented for {type(impl).__name__}")
+
+
+def _load_hvx_l2fetch(
+    impl,
+    is_store,
+    source_idx,
+    tensor_ref_fns,
+    operand_index_exprs,
+    concrete_shapes,
+):
+    writer = _writer.get()
+
+    # TODO: Assert we're *not* in a boundary loop
+    assert isinstance(impl, ops.MoveLet)
+    assert not impl.is_store
+    assert not impl.prefetching
+
+    # Swap w and h if column-major.
+    h, w = tensor.layout_ordered_dims(impl.destination)
+    assert w < 256, f"Maximum size of l2fetch is 255; tile width is: {w}"
+    assert h < 256, f"Maximum size of l2fetch is 255; tile height is: {h}"
+
+    outer_w = tensor.layout_ordered_dims(impl.source.root)[1]
+    stride = outer_w - w
+    assert stride < 65536
+
+    source_ref_fn = tensor_ref_fns[source_idx]
+    source_index_expr = operand_index_exprs[source_idx].subs({"p0": 0, "p1": 0})
+    if not is_store:
+        writer.writeline(
+            f"l2fetch(&{source_ref_fn(source_index_expr)}, {stride}, {w}, {h});"
+        )
+    _inner_generate_c(
+        impl.inner,
+        tensor_ref_fns,
+        operand_index_exprs,
+        concrete_shapes,
+    )
+
+
+def _move_hvx_dcfetch(
+    impl, source_idx, tensor_ref_fns, operand_index_exprs, concrete_shapes
+):
+    writer = _writer.get()
+
+    # TODO: Assert we're *not* in a boundary loop
+    assert isinstance(impl, ops.MoveLet)
+    # TODO: Do we want: assert not impl.is_store
+    assert not impl.prefetching
+    assert len([d for d in impl.destination.dim_sizes if d != 1]) == 1
+    # L1 cache lines are 32 bytes
+    # TODO: Find canon reference here. Are cache lines actually 64?
+    assert (
+        impl.destination.bytes_used == 32
+    ), f"dest. used {impl.destination.bytes_used} bytes"
+    assert impl.destination.contiguous
+
+    source_ref_fn = tensor_ref_fns[source_idx]
+    source_index_expr = operand_index_exprs[source_idx].subs("p0", 0)
+    writer.writeline(f"Q6_dcfetch_A(&{source_ref_fn(source_index_expr)});")
+    _inner_generate_c(
+        impl.inner,
+        tensor_ref_fns,
+        operand_index_exprs,
+        concrete_shapes,
+    )
+
+
+def _move_hvx_vmem(
+    impl,
+    source_idx,
+    tensor_ref_fns,
+    operand_index_exprs,
+    concrete_shapes,
+):
+    namer, writer = _namer.get(), _writer.get()
+
+    # TODO: If source is contiguous, just assign. Else, add move loop.
+
+    # TODO: Assert we're *not* in a boundary loop
+    assert isinstance(impl, ops.MoveLet)
+    assert impl.destination.bank == "VMEM"
+    assert not impl.prefetching
+    assert (
+        impl.destination.bytes_used == 128
+    ), f"dest. used {impl.destination.bytes_used} bytes"
+    assert impl.destination.contiguous
+    # TODO: Do we want to handle any HVX_Vector_x2 (pair) cases?
+
+    concrete_shape = concrete_shapes[source_idx]
+
+    source_ref_fn = tensor_ref_fns[source_idx]
+    source_index_expr = operand_index_exprs[source_idx]      # .subs("p0", 0)
+    destination_name = namer.fresh_name("mo")
+
+    dest_ref_fn = functools.partial(
+        lambda n, e: f"{n}[{_expr_to_c(e)}]", destination_name
+    )
+    dest_free_fn = lambda: None
+
+    # TODO: The below block shares a lot of code with _move_registers.
+    #   Abstract them out.
+    new_tensor_ref_fns = list(tensor_ref_fns)
+    new_operand_index_exprs = list(operand_index_exprs)
+    new_concrete_shapes = list(concrete_shapes)
+    # TODO: Do we need to call this both here and in _emit_assignment_copy?
+    new_tensor_ref_fns[source_idx] = dest_ref_fn
+    new_operand_index_exprs[source_idx] = indexexpr.buffer_indexing_expr(
+        impl.destination, concrete_shape
+    )
+    new_concrete_shapes[source_idx] = concrete_shape
+
+    if impl.source.contiguous:
+        source_index_expr = source_index_expr.subs("p0", 0)
+        writer.writeline(
+            f"HVX_Vector {destination_name} = *(HVX_Vector *)({_c_ptr(source_ref_fn, source_index_expr)});"
+        )
+        _inner_generate_c(
+            impl.inner,
+            new_tensor_ref_fns,
+            new_operand_index_exprs,
+            new_concrete_shapes,
+        )
+        if impl.is_store:
+            writer.writeline(
+                f"*(HVX_Vector *)({_c_ptr(source_ref_fn, source_index_expr)}) = {destination_name};"
+            )
+    else:
+        # We don't assign with Q6_V_vzero() because this is a load, so it'll be
+        # immediately filled.
+        writer.writeline(f"HVX_Vector {destination_name};")
+        destination_index_expr = indexexpr.buffer_indexing_expr(
+            impl.destination, concrete_shape
+        )
+        with _emit_assignment_copy(
+            impl.source,
+            impl.destination,
+            source_index_expr,
+            destination_index_expr,
+            concrete_shapes[source_idx],
+            source_ref_fn,
+            dest_ref_fn,
+            dest_free_fn,
+            is_input=(not impl.is_store),
+            is_output=impl.is_store,
+        ):
+            _inner_generate_c(
+                impl.inner,
+                new_tensor_ref_fns,
+                new_operand_index_exprs,
+                new_concrete_shapes,
+            )
+
+
+def _move_registers(
+    impl, source_idx, tensor_ref_fns, operand_index_exprs, concrete_shapes
+):
+    namer, writer = _namer.get(), _writer.get()
+
+    concrete_shape = concrete_shapes[source_idx]
+
+    source_ref_fn = tensor_ref_fns[source_idx]
+    source_index_expr = operand_index_exprs[source_idx]
+    destination_name = namer.fresh_name("mo")
+
+    new_tensor_ref_fns = list(tensor_ref_fns)
+    new_operand_index_exprs = list(operand_index_exprs)
+    new_concrete_shapes = list(concrete_shapes)
+    # TODO: Do we need to call this both here and in _emit_assignment_copy?
+    new_operand_index_exprs[source_idx] = indexexpr.buffer_indexing_expr(
+        impl.destination, concrete_shape
+    )
+    new_concrete_shapes[source_idx] = concrete_shape
+
+    destination_index_expr = indexexpr.buffer_indexing_expr(
+        impl.destination, concrete_shape
+    )
+    dest_ref_fn, dest_free_fn = _emit_buffer_alloc(
+        destination_name,
+        functools.reduce(operator.mul, concrete_shape, 1),
+        impl.destination.dtype,
+    )
+
+    assert (source_idx < len(impl.operands) - 1) == (not impl.is_store)
+    assert (source_idx >= len(impl.operands) - 1) == impl.is_store
+
+    with _emit_assignment_copy(
+        impl.source,
+        impl.destination,
+        source_index_expr,
+        destination_index_expr,
+        concrete_shape,
+        source_ref_fn,
+        dest_ref_fn,
+        dest_free_fn,
+        is_input=(not impl.is_store),
+        is_output=impl.is_store,
+    ):
+        new_tensor_ref_fns[source_idx] = dest_ref_fn
+        _inner_generate_c(
+            impl.inner,
+            new_tensor_ref_fns,
+            new_operand_index_exprs,
+            new_concrete_shapes,
+        )
+
+
+def _c_ptr(ref_fn, expr: Union[sympy.Expr, int]) -> str:
+    s = ref_fn(expr)
+    if s.endswith("[0]"):
+        s = s[:-3]
+    return "&" + s
 
 
 def _expr_to_c(expr: Union[sympy.Expr, int]) -> str:
@@ -644,6 +869,26 @@ def generate_c(
         writer.writeline("#include <hexagon_types.h>")
         writer.writeline("#include <hexagon_protos.h>")
         writer.writeline("#include <hvx_inlines.h>")
+
+    # From nn_asm_ops.h
+    writer.writeline("")
+    writer.writeline(
+        "static inline void __attribute__((always_inline)) l2pref(const void *p, uint32_t height, uint32_t width, uint32_t stride) {"
+    )
+    writer.writeline("#if defined(__hexagon__)")
+    writer.writeline(
+        "  uint64_t control = Q6_P_combine_RR(stride,Q6_R_combine_RlRl(width,height));"
+    )
+    writer.writeline('  asm volatile (" l2fetch(%0,%1) " : :"r"(p),"r"(control));')
+    writer.writeline("#endif")
+    writer.writeline("}")
+    writer.writeline("")
+    writer.writeline(
+        "static inline void __attribute__((always_inline)) l2fetch(const void *p, uint32_t stride, uint32_t width, uint32_t height) {"
+    )
+    writer.writeline("  return l2pref(p,height,width,stride);")
+    writer.writeline("}")
+    writer.writeline("")
 
     if mode == "benchmark":
         writer.writeline(
