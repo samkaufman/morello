@@ -3,6 +3,7 @@ import functools
 import io
 import logging
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -10,9 +11,9 @@ import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
-from .base import Target, RunResult, SystemDescription, MemoryBankConfig
 from .. import ops
 from ..codegen import gen
+from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
 HEXAGON_CLANG_ARGS = ["-mhvx", "-mv66"]
 HEXAGON_SIM_TARGET_ARG = "--mv66g_1024_rev2"
@@ -80,18 +81,26 @@ class HvxSimulatorTarget(Target):
         print_output=False,
         source_cb=None,
         values=None,
+        profile_output: Optional[pathlib.Path] = None,
     ) -> RunResult:
+        if profile_output:
+            profile_output.mkdir(parents=True, exist_ok=True)
+
         sim_path = _hexagon_sdk_tools_root() / "Tools" / "bin" / "hexagon-sim"
         with _build_for_hexagon(
             impl, source_cb=source_cb, print_output=print_output, values=values
         ) as binary_path:
             hexagon_sim_cmd = [
                 str(sim_path),
+                "--timing",
                 "--verbose",
                 HEXAGON_SIM_TARGET_ARG,
-                "--profile",
                 binary_path,
             ]
+            if profile_output:
+                hexagon_sim_cmd += [
+                    "--packet_analyze=" + str(profile_output / "stats.json"),
+                ]
             result = subprocess.run(
                 hexagon_sim_cmd,
                 stdout=subprocess.PIPE,
@@ -100,10 +109,31 @@ class HvxSimulatorTarget(Target):
             )
             stdout = result.stdout.decode("utf8")
             stderr = result.stderr.decode("utf8")
+
+            if profile_output:
+                profiler_path = (
+                    _hexagon_sdk_tools_root() / "Tools" / "bin" / "hexagon-profiler"
+                )
+                profile_result = subprocess.run(
+                    [
+                        str(profiler_path),
+                        "--packet_analyze",
+                        "--json=" + str(profile_output / "stats.json"),
+                        "--elf=" + binary_path,
+                        "-o",
+                        str(profile_output / "output0.html"),
+                    ],
+                    check=True,
+                )
+
             return RunResult(stdout, stderr)
 
-    def time_impl(self, impl) -> float:
-        _, stderr = self.run_impl(impl)
+    def time_impl(
+        self,
+        impl,
+        profile_output: Optional[pathlib.Path] = None,
+    ) -> float:
+        _, stderr = self.run_impl(impl, profile_output=profile_output)
         stderr_lines = stderr.splitlines()
         real_time_line_matches = [_REAL_TIME_RE.match(l) for l in stderr_lines]
         time_matches = [m for m in real_time_line_matches if m is not None]
@@ -139,6 +169,7 @@ def _build_for_hexagon(
             ["/usr/bin/env", str(clang_path)]
             + HEXAGON_CLANG_ARGS
             + [
+                "--save-temps=obj",
                 "-O3",
                 "-std=gnu99",
                 "-I",
@@ -148,8 +179,16 @@ def _build_for_hexagon(
                 source_path,
             ]
         )
+
         logger.debug("Running: " + " ".join(cmd))
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # with open(os.path.join(dirname, "main.s"), "r") as fo:
+        #     print("")
+        #     print(".S:")
+        #     print("")
+        #     print(fo.read())
+
         try:
             result.check_returncode()
         except subprocess.CalledProcessError:
