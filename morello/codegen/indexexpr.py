@@ -15,6 +15,17 @@ def _tensor_row_major_indexing_expr(rank: int) -> sympy.Expr:
         return _tensor_row_major_indexing_expr(rank - 1) * s + p
 
 
+def _tensor_col_major_indexing_expr(rank: int) -> sympy.Expr:
+    if rank == 2:
+        p0, p1, s0 = sympy.symbols("p0 p1 s0")
+        return (p1 * s0) + p0
+    elif rank > 2:
+        s, p = sympy.symbols(f"s{rank - 1}, p{rank - 1}")
+        return _tensor_col_major_indexing_expr(rank - 1) * s + p
+    else:
+        raise ValueError("rank must be at least 2, but was " + str(rank))
+
+
 def buffer_indexing_expr(
     tensor: Tensor, concrete_shape: Optional[tuple[int, ...]] = None
 ) -> sympy.Expr:
@@ -28,9 +39,10 @@ def buffer_indexing_expr(
             substitutions[sympy.symbols(f"s{idx}")] = dim
             if dim == 1:
                 substitutions[sympy.symbols(f"p{idx}")] = 0
-        if tensor.layout != Layout.ROW_MAJOR:
-            raise NotImplementedError("Column-major index exprs. not implemented")
-        index_expr = _tensor_row_major_indexing_expr(len(concrete_shape))
+        if tensor.layout == Layout.ROW_MAJOR:
+            index_expr = _tensor_row_major_indexing_expr(len(concrete_shape))
+        else:
+            index_expr = _tensor_col_major_indexing_expr(len(concrete_shape))
         index_expr = index_expr.subs(substitutions, simultaneous=True)
         assert isinstance(index_expr, sympy.Expr)
         return index_expr
