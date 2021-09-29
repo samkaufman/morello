@@ -25,6 +25,7 @@ import termcolor
 
 from . import dtypes, specs, system_config, tiling, utils
 from .specs import Layout
+from .system_config.state import current_system
 from .tensor import ConvolutionImageTile, SimpleTile, Tensor, Tile
 
 
@@ -1649,6 +1650,7 @@ class HvxVrmpyaccVuwVubRub(MatmulLeaf):
         check_result = HvxVrmpyaccVuwVubRub._check_operands(self.operands)
         if check_result:
             raise ValueError(check_result)
+        print("output contiguous?: " + str(self.output.contiguous))
 
     @staticmethod
     def applies_to_operands(operands: Sequence[Union[Tensor, Tile]]) -> bool:
@@ -1668,24 +1670,25 @@ class HvxVrmpyaccVuwVubRub(MatmulLeaf):
             return "out must be in vector memory"
 
         if lhs.dtype != dtypes.Uint8:
-            raise "lhs should be uint8"
+            return "lhs should be uint8"
         if rhs.dtype != dtypes.Uint8:
-            raise "rhs should be uint8"
+            return "rhs should be uint8"
         if out.dtype != dtypes.Uint32:
-            raise "out should be uint8"
+            return "out should be uint8"
 
         if lhs.dim_sizes != (32, 4):
-            return f"lhs must have shape 1x4, but had shape: {lhs.dim_sizes}"
+            return f"lhs must have shape 32x4, but had shape: {lhs.dim_sizes}"
         if rhs.dim_sizes != (4, 1):
             return f"rhs must have shape 4x1, but had shape: {rhs.dim_sizes}"
         if out.dim_sizes != (32, 1):
             return f"out must have shape 1x1, but had shape: {out.dim_sizes}"
 
         if not isinstance(lhs, Tensor):
-            return "lhs must be a Tensor"
+            return "lhs must be a Tensor but was: " + str(lhs)
 
-        if any(not o.contiguous for o in operands):
+        if not all(o.contiguous for o in operands):
             return "All operands must be contiguous"
+
         return None
 
 
@@ -2545,6 +2548,9 @@ class MoveLet(Schedule):
     inner: Schedule
 
     def __post_init__(self):
+        assert self.destination.bank in current_system().faster_destination_banks(
+            self.source.bank
+        )
         assert self.destination.origin is self.source, (
             f"Destination's origin {self.destination.origin} was not source"
             f" {self.source}"

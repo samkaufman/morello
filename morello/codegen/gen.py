@@ -278,7 +278,7 @@ def _emit_buffer_alloc(
 
     writer = _writer.get()
     if (size * dtype.size) > STACK_CUTOFF:
-        writer.writeline(f"{dtype.c_type} *{name};")
+        writer.writeline(f"{dtype.c_type} *restrict {name};")
         writer.writeline(
             f"posix_memalign((void **)&{name}, 128, {size}*sizeof({dtype.c_type}));  // TODO: Handle return"
         )

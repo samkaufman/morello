@@ -108,13 +108,10 @@ class Tensor(_TensorLike):
 
     def __str__(self):
         layout_epi = ""
-        bank_epi = ""
         if self.layout != specs.Layout.ROW_MAJOR:
             layout_epi = f", {self.layout}"
-        if self.bank != system_config.current_system().default_bank:
-            bank_epi = f", {self.bank}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
-        return f"Tensor({dims_part}{layout_epi}{bank_epi})"
+        return f"Tensor({dims_part}{layout_epi}, {self.bank})"
 
     @property
     def root(self):
