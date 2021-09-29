@@ -38,6 +38,7 @@ class _Writer:
     def __init__(self, fo):
         self._fo = fo
         self._prefix = ""
+        self._pending_rhs_comment = None
 
     def indent(self):
         self._prefix += " " * 2
@@ -45,8 +46,18 @@ class _Writer:
     def dedent(self):
         self._prefix = self._prefix[:-2]
 
+    def set_impl(self, impl: ops.Schedule):
+        self._pending_rhs_comment = str(impl.spec)
+
     def writeline(self, line: str):
-        print(self._prefix + line, file=self._fo)
+        if self._pending_rhs_comment:
+            print(
+                self._prefix + line + "        // " + self._pending_rhs_comment,
+                file=self._fo,
+            )
+            self._pending_rhs_comment = None
+        else:
+            print(self._prefix + line, file=self._fo)
 
     @contextlib.contextmanager
     def indent_block(self):
@@ -366,6 +377,8 @@ def _inner_generate_c(
     assert len(tensor_ref_fns) == len(impl.inputs) + 1
 
     namer, writer = _namer.get(), _writer.get()
+
+    writer.set_impl(impl)
 
     if isinstance(impl, (ops.Loop, ops.MatmulSplitLoop)):
         if impl.parallel:
