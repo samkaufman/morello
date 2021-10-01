@@ -1,3 +1,4 @@
+import abc
 import contextlib
 import contextvars
 import functools
@@ -7,13 +8,14 @@ import warnings
 from collections.abc import Sequence
 from typing import Callable, Iterable, Literal, NamedTuple, Optional, Union, cast
 
+import dataclass_abc
 import sympy
 
+from . import indexexpr
 from .. import ops, specs, tensor
 from ..dtypes import Dtype
 from ..system_config.state import current_system
 from ..tensor import Tensor, Tile
-from . import indexexpr
 
 _namer: contextvars.ContextVar["_Namer"] = contextvars.ContextVar("_namer")
 _writer: contextvars.ContextVar["_Writer"] = contextvars.ContextVar("_writer")
@@ -302,34 +304,77 @@ def _update_index_exprs(
     return new_index_exprs
 
 
-def _emit_buffer_alloc(
-    name: str, size: int, dtype: Dtype
-) -> tuple[Callable[[Union[sympy.Expr, int]], str], Callable[[], None]]:
-    def emit_free(name, writer):
-        writer.writeline(f"free({name});")
+class _CTensor(abc.ABC):
+    @abc.abstractmethod
+    def c_index(self, expr):
+        raise NotImplementedError()
 
-    def c_index(name, expr):
-        return f"{name}[{_expr_to_c(expr)}]"
+    @abc.abstractmethod
+    def emit_free(self):
+        raise NotImplementedError()
 
-    writer = _writer.get()
+
+class _CNameTensor(_CTensor):
+    @property
+    @abc.abstractmethod
+    def name(self) -> str:
+        raise NotImplementedError()
+
+
+@dataclass_abc.dataclass_abc(frozen=True)
+class _CHeapArray(_CNameTensor):
+    name: str
+
+    def c_index(self, expr):
+        return f"{self.name}[{_expr_to_c(expr)}]"
+
+    def emit_free(self):
+        _writer.get().writeline(f"free({self.name});")
+
+
+@dataclass_abc.dataclass_abc(frozen=True)
+class _CStackArray(_CNameTensor):
+    name: str
+
+    def c_index(self, expr):
+        return f"{self.name}[{_expr_to_c(expr)}]"
+
+    def emit_free(self):
+        pass
+
+
+@dataclass_abc.dataclass_abc(frozen=True)
+class _CValueVar(_CNameTensor):
+    name: str
+
+    def c_index(self, expr):
+        # TODO: Assert that expr evaluates to 0
+        return self.name
+
+    def emit_free(self):
+        pass
+
+
+def _emit_buffer_alloc(size: int, dtype: Dtype) -> _CNameTensor:
+    namer, writer = _namer.get(), _writer.get()
+
+    name = namer.fresh_name("buf")
+
     if (size * dtype.size) > STACK_CUTOFF:
         writer.writeline(f"{dtype.c_type} *restrict {name};")
         writer.writeline(
             f"posix_memalign((void **)&{name}, 128, {size}*sizeof({dtype.c_type}));  // TODO: Handle return"
         )
         writer.writeline(f"memset({name}, 0, {size}*sizeof({dtype.c_type}));")
-
-        return functools.partial(c_index, name), functools.partial(
-            emit_free, name, writer
-        )
+        return _CHeapArray(name)
     elif size > 1:
         writer.writeline(
             f"{dtype.c_type} {name}[{size}] __attribute__((aligned (128))) = {{0}};"
         )
-        return functools.partial(c_index, name), lambda: None
+        return _CStackArray(name)
     else:
         writer.writeline(f"{dtype.c_type} {name} = 0;")
-        return lambda _: name, lambda: None
+        return _CValueVar(name)
 
 
 @contextlib.contextmanager
@@ -479,13 +524,15 @@ def _inner_generate_c(
             return cur_tensor_ref_fns[-1], cur_index_exprs[-1], cur_concrete_shapes[-1]
 
         # First stage
-        out_name = namer.fresh_name("buf")
         assert isinstance(impl.stages[0].output, Tensor)
-        last_ref_fn, last_free_fn = _emit_buffer_alloc(
-            out_name, impl.stages[0].output.volume, impl.stages[0].output.dtype
+
+        last_c_buf = _emit_buffer_alloc(
+            impl.stages[0].output.volume, impl.stages[0].output.dtype
         )
+        ref_fn, last_free_fn = last_c_buf.c_index, last_c_buf.emit_free
+
         cur_slice = slice(-len(impl.stages[0].inputs), len(inps_index_exprs))
-        cur_out = emit_stage(impl.stages[0], cur_slice, None, last_ref_fn, None)
+        cur_out = emit_stage(impl.stages[0], cur_slice, None, ref_fn, None)
         cur_slice = slice(
             1 + cur_slice.start - len(impl.stages[1].inputs), cur_slice.start
         )
@@ -493,10 +540,10 @@ def _inner_generate_c(
         # Intermediate stages
         for stage, next_stage in zip(impl.stages[1:], impl.stages[2:]):
             assert isinstance(stage.output, Tensor)
-            out_name = namer.fresh_name("buf")
-            ref_fn, free_fn = _emit_buffer_alloc(
-                out_name, stage.output.volume, stage.output.dtype
-            )
+
+            new_c_buf = _emit_buffer_alloc(stage.output.volume, stage.output.dtype)
+            ref_fn, free_fn = new_c_buf.c_index, new_c_buf.emit_free
+
             cur_out = emit_stage(stage, cur_slice, cur_out, ref_fn, None)
             last_free_fn()
             last_free_fn = free_fn
@@ -813,7 +860,6 @@ def _move_registers(
 
     source_ref_fn = tensor_ref_fns[source_idx]
     source_index_expr = operand_index_exprs[source_idx]
-    destination_name = namer.fresh_name("mo")
 
     new_tensor_ref_fns = list(tensor_ref_fns)
     new_operand_index_exprs = list(operand_index_exprs)
@@ -827,8 +873,7 @@ def _move_registers(
     destination_index_expr = indexexpr.buffer_indexing_expr(
         impl.destination, concrete_shape
     )
-    dest_ref_fn, dest_free_fn = _emit_buffer_alloc(
-        destination_name,
+    c_buf = _emit_buffer_alloc(
         functools.reduce(operator.mul, concrete_shape, 1),
         impl.destination.dtype,
     )
@@ -843,12 +888,12 @@ def _move_registers(
         destination_index_expr,
         concrete_shape,
         source_ref_fn,
-        dest_ref_fn,
-        dest_free_fn,
+        c_buf.c_index,
+        c_buf.emit_free,
         is_input=(not impl.is_store),
         is_output=impl.is_store,
     ):
-        new_tensor_ref_fns[source_idx] = dest_ref_fn
+        new_tensor_ref_fns[source_idx] = c_buf.c_index
         _inner_generate_c(
             impl.inner,
             new_tensor_ref_fns,
@@ -958,12 +1003,10 @@ def generate_c(
         index_exprs = []
         for operand, initial_value in zip(impl.operands, values):
             assert isinstance(operand, tensor.Tensor)
-            buffer_name = namer.fresh_name("a")
-            ref_fn, free_fn = _emit_buffer_alloc(
-                buffer_name, operand.volume, operand.dtype
-            )
+            c_buf = _emit_buffer_alloc(operand.volume, operand.dtype)
+            ref_fn, free_fn = c_buf.c_index, c_buf.emit_free
             index_exprs.append(indexexpr.buffer_indexing_expr(operand))
-            tensor_names.append(buffer_name)
+            tensor_names.append(c_buf.name)
             tensor_ref_fns.append(ref_fn)
             tensor_free_fns.append(free_fn)
             if initial_value is not None:
