@@ -25,7 +25,7 @@ import termcolor
 
 from . import dtypes, specs, system_config, tiling, utils
 from .specs import Layout
-from .system_config.state import current_system
+from .system_config.state import current_system, current_target
 from .tensor import ConvolutionImageTile, SimpleTile, Tensor, Tile
 
 
@@ -385,7 +385,7 @@ def _common_move(
         layout = operand.spec.layout
     if bank == operand.root.bank and layout == operand.layout:
         raise ValueError("Either bank or layout must differ from current")
-    new_mat = Tensor(
+    new_mat = current_target().tensor(
         spec=specs.TensorSpec(
             dim_sizes=operand.dim_sizes, dtype=operand.dtype, layout=layout, bank=bank
         ),
@@ -647,8 +647,8 @@ class Schedule(abc.ABC):
 
         # Turn tile_to_convert into a Tensor under management of the SlidingWindowLoop
         # and a Tile for calculating the update costs
-        live_tensor = Tensor(
-            specs.TensorSpec(
+        live_tensor = current_target().tensor(
+            spec=specs.TensorSpec(
                 tile_to_convert.dim_sizes,
                 tile_to_convert.dtype,
                 bank=bank,
@@ -874,7 +874,7 @@ class ComposeHole(Schedule):
             layout = operand.layout
         if bank == operand.root.bank and layout == operand.layout:
             raise ValueError("Either bank or layout must differ from current")
-        new_mat = Tensor(
+        new_mat = current_target().tensor(
             spec=specs.TensorSpec(
                 operand.dim_sizes, dtype=operand.dtype, layout=layout, bank=bank
             ),
@@ -908,7 +908,7 @@ class ComposeHole(Schedule):
             layout = operand.layout
         if bank == operand.root.bank and layout == operand.layout:
             raise ValueError("Either bank or layout must differ from current")
-        new_mat = Tensor(
+        new_mat = current_target().tensor(
             spec=specs.TensorSpec(
                 operand.dim_sizes, dtype=operand.dtype, layout=layout, bank=bank
             ),
@@ -938,7 +938,7 @@ class ComposeHole(Schedule):
         intermediate_tensor_layout = layout
         if all(d == 1 for d in self.spec.intermediate_shapes[0]):
             intermediate_tensor_layout = Layout.ROW_MAJOR
-        intermediate_tensor = Tensor(
+        intermediate_tensor = current_target().tensor(
             specs.TensorSpec(
                 dim_sizes=self.spec.intermediate_shapes[0],
                 dtype=self.spec.intermediate_dtypes[0],

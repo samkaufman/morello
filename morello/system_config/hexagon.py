@@ -9,9 +9,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
-from .. import ops
+from .. import ops, specs, tensor
 from ..codegen import gen
 from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
@@ -32,6 +32,14 @@ class HvxSimulatorTarget(Target):
             return it
         cls.__one__ = it = object.__new__(cls)
         return it
+
+    def tensor(
+        self,
+        spec: specs.TensorSpec,
+        name: Optional[str],
+        origin: Optional[Union[tensor.Tensor, tensor.Tile]] = None,
+    ) -> tensor.Tensor:
+        return tensor.Tensor(spec=spec, name=name, origin=origin)
 
     @property
     def system(self) -> "SystemDescription":

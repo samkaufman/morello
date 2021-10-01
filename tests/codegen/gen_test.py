@@ -99,10 +99,11 @@ def _arb_impls_from_actions(draw, partial_impl: ops.Schedule):
 
 
 def _spec_to_applied_hole(spec: specs.Spec) -> ops.Schedule:
+    target = system_config.current_target()
     return ops.spec_to_hole(
         spec,
-        tuple(tensor.Tensor(inp_spec, name=None) for inp_spec in spec.inputs),
-        tensor.Tensor(spec.output, name=None),
+        tuple(target.tensor(inp_spec, name=None) for inp_spec in spec.inputs),
+        target.tensor(spec.output, name=None),
     )
 
 
@@ -304,6 +305,8 @@ def _calculator_to_test(spec_st):
 
 @st.composite
 def _st_test_index_exprs_consistent_with_contiguous_props(draw):
+    target = system_config.current_target()
+
     t = draw(st.from_type(tensor.Tensor))
 
     # TODO: Test column-major as well.
@@ -312,7 +315,7 @@ def _st_test_index_exprs_consistent_with_contiguous_props(draw):
             max_dim_size=9, min_dims=1, max_dims=4, layout=specs.Layout.ROW_MAJOR
         )
     )
-    t = tensor.Tensor(spec=tensor_spec, name=None, origin=None)
+    t = target.tensor(spec=tensor_spec, name=None, origin=None)
 
     concrete_tile_idxs: list[list[int]] = []
 

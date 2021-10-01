@@ -4,15 +4,12 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Optional
+from typing import Optional, Union
 
-from .base import (
-    RunResult,
-    Target,
-    SystemDescription,
-    MemoryBankConfig,
-)
+from .. import specs
 from ..codegen import gen
+from ..tensor import Tensor, Tile
+from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
 _OUTPUT_RE = re.compile(r"cpu:\s+(\d+)s\s*(\d+)ns")
 
@@ -25,6 +22,14 @@ class CpuTarget(Target):
             return it
         cls.__one__ = it = object.__new__(cls)
         return it
+
+    def tensor(
+        self,
+        spec: specs.TensorSpec,
+        name: Optional[str],
+        origin: Optional[Union[Tensor, Tile]] = None,
+    ) -> Tensor:
+        return Tensor(spec=spec, name=name, origin=origin)
 
     @property
     def system(self) -> "SystemDescription":

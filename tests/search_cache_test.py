@@ -1,8 +1,7 @@
 import pytest
 
-from morello import dtypes, ops, pruning, search_cache, specs, tensor
-from morello.system_config import current_system
-
+from morello import dtypes, ops, pruning, search_cache, specs, system_config, tensor
+from morello.system_config import current_system, current_target
 
 # TODO: Add assertion that tests below only put scheduled Impls into the cache.
 
@@ -11,37 +10,39 @@ from morello.system_config import current_system
     "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
 )
 def test_cache_common_scenario(dtype):
-    lhs = tensor.Tensor(
+    target = current_target()
+
+    lhs = target.tensor(
         spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
     )
-    rhs = tensor.Tensor(
+    rhs = target.tensor(
         spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
     )
-    output = tensor.Tensor(
+    output = target.tensor(
         spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
     )
     fast_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
     fast_wrapped_schedule = search_cache.CachedSchedule(fast_schedule, cost=10)
 
-    lhs = tensor.Tensor(
+    lhs = target.tensor(
         spec=specs.TensorSpec((100, 100), dtype=dtype, bank="RF"), name=None
     )
-    rhs = tensor.Tensor(
+    rhs = target.tensor(
         spec=specs.TensorSpec((100, 100), dtype=dtype, bank="RF"), name=None
     )
-    output = tensor.Tensor(
+    output = target.tensor(
         spec=specs.TensorSpec((100, 100), dtype=dtype, bank="RF"), name=None
     )
     slow_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
     slow_wrapped_schedule = search_cache.CachedSchedule(slow_schedule, cost=50)
 
-    lhs = tensor.Tensor(
+    lhs = target.tensor(
         spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
     )
-    rhs = tensor.Tensor(
+    rhs = target.tensor(
         spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
     )
-    output = tensor.Tensor(
+    output = target.tensor(
         spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
     )
     impossible_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
@@ -125,10 +126,11 @@ def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype):
     "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
 )
 def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
+    target = current_target()
     db = current_system().default_bank
-    lhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, bank=db), name=None)
-    rhs = tensor.Tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, bank=db), name=None)
-    output = tensor.Tensor(
+    lhs = target.tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, bank=db), name=None)
+    rhs = target.tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, bank=db), name=None)
+    output = target.tensor(
         spec=specs.TensorSpec((8, 8), dtype=dtype, bank=db), name=None
     )
     schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)

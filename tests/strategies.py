@@ -25,6 +25,12 @@ def layout_st(draw, dim_sizes: Optional[Tuple[int, ...]] = None) -> specs.Layout
 
 
 @st.composite
+def tensor_st(draw):
+    target = system_config.current_target()
+    return target.tensor(spec=draw(tensorspec_st()), name=draw(st.text()), origin=None)
+
+
+@st.composite
 def tensorspec_st(
     draw,
     max_dim_size: Optional[int] = 128,
@@ -157,11 +163,12 @@ def compose_spec_st(draw) -> specs.Compose:
 
 @st.composite
 def composehole_op_st(draw) -> ops.ComposeHole:
+    target = system_config.current_target()
     spec = draw(compose_spec_st())
     return ops.ComposeHole(
         spec=spec,
-        inputs=tuple(tensor.Tensor(s, name=None) for s in spec.inputs),
-        output=tensor.Tensor(spec.output, name="output"),
+        inputs=tuple(target.tensor(s, name=None) for s in spec.inputs),
+        output=target.tensor(spec.output, name="output"),
     )
 
 
@@ -175,14 +182,7 @@ def register_default_strategies():
     st.register_type_strategy(system_config.Target, target_st)
     st.register_type_strategy(specs.TensorSpec, tensorspec_st())
 
-    st.register_type_strategy(
-        tensor.Tensor,
-        st.builds(
-            tensor.Tensor,
-            spec=st.from_type(specs.TensorSpec),
-            name=st.one_of(st.none(), st.text(min_size=1)),
-        ),
-    )
+    st.register_type_strategy(tensor.Tensor, tensor_st())
 
     st.register_type_strategy(specs.Compose, compose_spec_st())
     st.register_type_strategy(specs.Matmul, matmul_spec_st())

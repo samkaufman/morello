@@ -1,10 +1,11 @@
 import abc
 import dataclasses
 import logging
-import sys
-from typing import List, NamedTuple, Callable, Optional
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Union
 
-from sympy.utilities.iterables import ordered_partitions
+if TYPE_CHECKING:
+    from ..specs import TensorSpec
+    from ..tensor import Tensor, Tile
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,15 @@ class RunResult(NamedTuple):
 
 
 class Target(abc.ABC):
+    @abc.abstractmethod
+    def tensor(
+        self,
+        spec: "TensorSpec",
+        name: Optional[str],
+        origin: Optional[Union["Tensor", "Tile"]] = None,
+    ) -> "Tensor":
+        raise NotImplementedError()
+
     @property
     @abc.abstractmethod
     def system(self) -> "SystemDescription":

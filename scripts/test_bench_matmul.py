@@ -155,6 +155,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     system_config.set_current_target(system_config.target_by_name(args.target))
+    target = system_config.current_target()
 
     if args.mode == "numpy":
         runtime_secs = benchmark_numpy_impl()
@@ -167,8 +168,8 @@ if __name__ == "__main__":
         sys.exit(0)
 
     operands = (
-        tuple(tensor.Tensor(inp_spec, name=None) for inp_spec in spec().inputs),
-        tensor.Tensor(spec().output, name=None),
+        tuple(target.tensor(inp_spec, name=None) for inp_spec in spec().inputs),
+        target.tensor(spec().output, name=None),
     )
     hole = ops.spec_to_hole(spec(), *operands)
 

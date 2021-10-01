@@ -8,10 +8,10 @@ import sys
 import time
 from typing import TypeVar
 
-from morello import dtypes, ops, op_pprint, search, search_cache, specs
+from morello import dtypes, op_pprint, ops, search, search_cache, specs, system_config
 from morello.codegen import gen
 from morello.search import schedule_search
-from morello.system_config import set_current_target, cpu, hexagon
+from morello.system_config import cpu, hexagon, set_current_target
 from morello.tensor import Tensor
 
 T = TypeVar("T")
@@ -52,9 +52,10 @@ parser_convnet = subparsers.add_parser(
 
 
 def _matmul_main(m, k, n, cache: search_cache.ScheduleCache):
-    left = Tensor(specs.TensorSpec((m, k), dtype=DTYPE), name="left")
-    right = Tensor(specs.TensorSpec((k, n), dtype=DTYPE), name="right")
-    output = Tensor(specs.TensorSpec((m, n), dtype=DTYPE), name="output")
+    target = system_config.current_target()
+    left = target.tensor(specs.TensorSpec((m, k), dtype=DTYPE), name="left")
+    right = target.tensor(specs.TensorSpec((k, n), dtype=DTYPE), name="right")
+    output = target.tensor(specs.TensorSpec((m, n), dtype=DTYPE), name="output")
     start = time.time()
     s = schedule_search(
         specs.Matmul(left.spec, right.spec, output.spec, serial_only=False),
@@ -73,15 +74,16 @@ def _conv_main(
     filter_count,
     cache: search_cache.ScheduleCache,
 ) -> tuple[ops.Schedule, float]:
+    target = system_config.current_target()
     assert filter_width <= image_width and filter_height <= image_height
-    left = Tensor(
+    left = target.tensor(
         specs.TensorSpec((image_width, image_height), dtype=DTYPE), name="image"
     )
-    right = Tensor(
+    right = target.tensor(
         specs.TensorSpec((filter_width, filter_height, filter_count), dtype=DTYPE),
         name="filters",
     )
-    output = Tensor(
+    output = target.tensor(
         specs.TensorSpec(
             (
                 image_width - filter_width + 1,
@@ -103,10 +105,11 @@ def _conv_main(
 
 
 def _convnet_main(cache: search_cache.ScheduleCache):
-    img = Tensor(specs.TensorSpec((8, 8), dtype=DTYPE), name="image")
-    filters_a = Tensor(specs.TensorSpec((3, 3, 4), dtype=DTYPE), name="filtersA")
-    filters_b = Tensor(specs.TensorSpec((3, 3, 4), dtype=DTYPE), name="filtersB")
-    output = Tensor(specs.TensorSpec((4, 4, 4), dtype=DTYPE), name="output")
+    target = system_config.current_target()
+    img = target.tensor(specs.TensorSpec((8, 8), dtype=DTYPE), name="image")
+    filters_a = target.tensor(specs.TensorSpec((3, 3, 4), dtype=DTYPE), name="filtersA")
+    filters_b = target.tensor(specs.TensorSpec((3, 3, 4), dtype=DTYPE), name="filtersB")
+    output = target.tensor(specs.TensorSpec((4, 4, 4), dtype=DTYPE), name="output")
 
     start = time.time()
     s = schedule_search(

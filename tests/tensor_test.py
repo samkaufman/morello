@@ -5,7 +5,7 @@ import hypothesis
 import pytest
 from hypothesis import strategies as st
 
-from morello import dtypes, specs, tensor
+from morello import dtypes, specs, system_config, tensor
 
 from . import strategies
 
@@ -24,7 +24,7 @@ def test_tile_contiguous(tensor_shape, tile_shape, expected):
     # TODO: Vary the following three parameters with hypothesis
     dtype, bank, layout = dtypes.Uint8, "RF", specs.Layout.ROW_MAJOR
     tensor_spec = specs.TensorSpec(tensor_shape, dtype, bank, layout)
-    t = tensor.Tensor(tensor_spec, name=None, origin=None)
+    t = system_config.current_target().tensor(tensor_spec, name=None, origin=None)
     tile = t.simple_tile(tile_shape)
     assert tile.contiguous == expected
 
@@ -33,7 +33,7 @@ def test_tile_contiguous(tensor_shape, tile_shape, expected):
 def test_tensors_and_tiles_can_be_pickled_and_unpickled_losslessly(
     spec, name, should_tile
 ):
-    t = tensor.Tensor(spec=spec, name=name)
+    t = system_config.current_target().tensor(spec=spec, name=name)
     if should_tile:
         t = t.simple_tile(tuple(1 for _ in t.dim_sizes))
 

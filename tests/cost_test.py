@@ -6,6 +6,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from morello import cost, dtypes, ops, specs, system_config, tensor
+
 from . import strategies
 
 strategies.register_default_strategies()
@@ -58,14 +59,16 @@ def full_schedule_st(
 def _make_tiled_matmul(
     maximize_register_use: bool, c: int, m: int, dtype: dtypes.Dtype
 ) -> ops.Schedule:
+    target = system_config.current_target()
+
     m_dim = 2 ** c
-    tile_width = system_config.current_system().line_size * m
+    tile_width = target.system.line_size * m
     hypothesis.assume(tile_width <= m_dim)
     hypothesis.note(f"Non-contig. {m_dim}x{m_dim} Matmul w/ {tile_width}-wide tile")
 
-    a = tensor.Tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
-    b = tensor.Tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
-    o = tensor.Tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
+    a = target.tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
+    b = target.tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
+    o = target.tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
 
     schedule = ops.MatmulHole(a, b, o).tile_out((m_dim, tile_width))
     # if make_contiguous:
@@ -75,7 +78,7 @@ def _make_tiled_matmul(
         # We've already broken columns into tile_width tiles, so lets just move panels
         # into registers
         schedule = (
-            schedule.tile_out((1, system_config.current_system().line_size))
+            schedule.tile_out((1, target.system.line_size))
             .move_input(0, level=0)
             .move_input(1, level=0)
         )
@@ -102,9 +105,11 @@ def test_contiguous_copy_lowers_matmul_cost(c: int, m: int, dtype: dtypes.Dtype)
 @hypothesis.settings(deadline=10 * 1000)
 @given(matmul_spec=strategies.matmul_spec_st())
 def test_trivial_tilings_are_same_cost_as_untiled_matmul(matmul_spec):
-    lhs = ops.Tensor(matmul_spec.lhs, name=None)
-    rhs = ops.Tensor(matmul_spec.rhs, name=None)
-    out = ops.Tensor(matmul_spec.output, name=None)
+    target = system_config.current_target()
+
+    lhs = target.tensor(matmul_spec.lhs, name=None)
+    rhs = target.tensor(matmul_spec.rhs, name=None)
+    out = target.tensor(matmul_spec.output, name=None)
 
     m, k, n = out.dim_sizes[0], lhs.dim_sizes[1], out.dim_sizes[1]
     trivial_tiled_schedule = (
@@ -143,13 +148,13 @@ def test_cost_is_invariant_to_panel_layouts(
     target, bank = target_bank
     with system_config.with_target(target):
         dim_sizes = tuple(elements if dim_idx == i else 1 for i in range(2))
-        left = tensor.Tensor(
+        left = target.tensor(
             spec=specs.TensorSpec(
                 dim_sizes, dtype=dtype, layout=specs.Layout.ROW_MAJOR, bank=bank
             ),
             name=None,
         )
-        right = tensor.Tensor(
+        right = target.tensor(
             spec=specs.TensorSpec(
                 dim_sizes, dtype=dtype, layout=specs.Layout.COL_MAJOR, bank=bank
             ),

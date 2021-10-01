@@ -18,6 +18,7 @@ from morello import (
     tensor,
 )
 from morello.system_config import current_system, current_target
+
 from . import strategies
 
 strategies.register_default_strategies()
@@ -26,8 +27,9 @@ strategies.register_default_strategies()
 @pytest.mark.skip(reason="No good way to constrain shapes (e.g. Reduce·Reduce·Reduce)")
 @given(st.from_type(specs.Spec))
 def test_search_passes_on_any_spec(spec: specs.Spec):
-    inputs = tuple(tensor.Tensor(tensor_spec, name=None) for tensor_spec in spec.inputs)
-    output = tensor.Tensor(spec.output, name="output")
+    target = current_target()
+    inputs = tuple(target.tensor(tensor_spec, name=None) for tensor_spec in spec.inputs)
+    output = target.tensor(spec.output, name="output")
     search.schedule_search(spec, inputs, output)
 
 
@@ -61,13 +63,15 @@ class CountingCache(search.ScheduleCache):
 @given(st.integers(min_value=5), st.from_type(dtypes.Dtype))
 @hypothesis.example(16)
 def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
+    target = current_target()
+
     results = []
     for cap in range(cap_start, cap_start + 2):
-        img = tensor.Tensor(specs.TensorSpec((6, 6), dtype=dtype), name="image")
-        filters_a = tensor.Tensor(
+        img = target.tensor(specs.TensorSpec((6, 6), dtype=dtype), name="image")
+        filters_a = target.tensor(
             specs.TensorSpec((3, 3, 2), dtype=dtype), name="filtersA"
         )
-        output = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtype), name="output")
+        output = target.tensor(specs.TensorSpec((4, 4), dtype=dtype), name="output")
 
         original_capacity = system_config.current_system().level_configs[0].capacity
 
