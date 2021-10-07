@@ -6,7 +6,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from morello import cost, dtypes, ops, specs, system_config, tensor
-
+from morello.system_config import cpu
 from . import strategies
 
 strategies.register_default_strategies()
@@ -127,25 +127,19 @@ def test_trivial_tilings_are_same_cost_as_untiled_matmul(matmul_spec):
     )
 
 
-@st.composite
-def _st_test_cost_is_invariant_to_panel_layouts(draw):
-    target = draw(st.from_type(system_config.Target))
-    bank = draw(st.sampled_from(sorted(target.system.banks)))
-    return target, bank
-
-
 @given(
-    _st_test_cost_is_invariant_to_panel_layouts(),
+    st.sampled_from(sorted(cpu.CpuTarget().system.banks)),
     st.from_type(dtypes.Dtype),
     st.integers(min_value=0, max_value=1),
     st.integers(min_value=2, max_value=64),
     st.from_type(specs.Layout),
     st.booleans(),
 )
-def test_cost_is_invariant_to_panel_layouts(
-    target_bank, dtype, dim_idx, elements, dest_layout, prefetching
+def test_cost_is_invariant_to_panel_layouts_cpu(
+    bank, dtype, dim_idx, elements, dest_layout, prefetching
 ):
-    target, bank = target_bank
+    # TODO: Add a version of this test for Hexagon targets
+    target = cpu.CpuTarget()
     with system_config.with_target(target):
         dim_sizes = tuple(elements if dim_idx == i else 1 for i in range(2))
         left = target.tensor(

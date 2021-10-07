@@ -202,12 +202,12 @@ class PeelAction:
 
 @dataclasses.dataclass(frozen=True)
 class TileOutAction:
-    func: Callable[..., "Schedule"]
+    impl: "Schedule"
     shape: Tuple[int, ...]
     parallel: bool
 
     def __call__(self):
-        return self.func(self.shape, parallel=self.parallel)
+        return self.impl.tile_out(self.shape, parallel=self.parallel)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -370,6 +370,7 @@ def _common_move(
     bank: Optional[str],
     layout: Optional[Layout],
     prefetching: bool,
+    **kwargs,
 ) -> "MoveLet":
     """Wraps a dataclass-based Schedule in a MoveLet moving one of its operands.
 
@@ -377,6 +378,8 @@ def _common_move(
 
     :param attr_name: The name of the field holding the operand to move.
     :param bank: The bank to which the operand should be moved, if not None.
+    :param kwargs: Extra keyword arguments are forwarded the current target's `tensor`
+      method while constructing the destination tensor.
     """
     operand: Union[Tensor, Tile] = getattr(op, attr_name)
     if bank is None:
@@ -391,6 +394,7 @@ def _common_move(
         ),
         name=None,
         origin=operand,
+        **kwargs,
     )
 
     # Figure out the input index, if it's an input
@@ -716,6 +720,7 @@ class Schedule(abc.ABC):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "Schedule":
         raise NotImplementedError()
 
@@ -725,6 +730,7 @@ class Schedule(abc.ABC):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "Schedule":
         raise NotImplementedError()
 
@@ -756,18 +762,35 @@ class Schedule(abc.ABC):
         raise NotImplementedError()
 
 
-# TODO: Use this everywhere tile_out actions are produced
-def gen_tile_sizes(tensor_shape: Tuple[int, ...]) -> Iterable[Tuple[int, ...]]:
-    """Returns tile shapes to explore for a given tensor shape."""
+# TODO: Use this everywhere sliding_tile_out actions are produced
+def gen_tile_sizes(
+    tensor_shape: Sequence[int],
+    filter: Optional[Callable[[tuple[int, ...]], bool]] = None,
+    drop_given: bool = True,
+) -> Iterable[tuple[int, ...]]:
+    """Returns tile shapes to explore for a given tensor shape.
+
+    Doesn't return tensor_shape itself.
+    """
     if len(tensor_shape) == 0:
         return
     elif len(tensor_shape) == 1:
         for d in dim_range(tensor_shape[0]):
-            yield (d,)
+            new_shape = (d,)
+            if drop_given and new_shape == tensor_shape:
+                continue
+            if filter and not filter(new_shape):
+                continue
+            yield new_shape
     else:
-        for rest in gen_tile_sizes(tensor_shape[1:]):
+        for rest in gen_tile_sizes(tensor_shape[1:], drop_given=False):
             for d in dim_range(tensor_shape[0]):
-                yield (d,) + rest
+                new_shape = (d,) + rest
+                if drop_given and new_shape == tensor_shape:
+                    continue
+                if filter and not filter(new_shape):
+                    continue
+                yield new_shape
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -826,10 +849,11 @@ class ComposeHole(Schedule):
             + [(None, self.output, self.move_output)]
         )
 
-        for tile in gen_tile_sizes(self.output.dim_sizes):
-            if tile != self.output.dim_sizes:
-                for parallel in [False] if self.spec.serial_only else [True, False]:
-                    yield TileOutAction(self.tile_out, tile, parallel)
+        for tile_shape in gen_tile_sizes(
+            self.output.dim_sizes, filter=self.output.is_valid_tile_shape
+        ):
+            for parallel in [False] if self.spec.serial_only else [True, False]:
+                yield TileOutAction(self, tile_shape, parallel)
 
         # TODO: Don't just use the first input. This isn't general to arbitrary
         # slideable ops in a Pipeline, or even, for instance, if we swapped the
@@ -866,6 +890,7 @@ class ComposeHole(Schedule):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ):
         operand = self.inputs[input_idx]
         if bank is None:
@@ -880,6 +905,7 @@ class ComposeHole(Schedule):
             ),
             name=None,
             origin=operand,
+            **kwargs,
         )
 
         new_inputs = self.inputs[:input_idx] + (new_mat,) + self.inputs[input_idx + 1 :]
@@ -900,6 +926,7 @@ class ComposeHole(Schedule):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "Schedule":
         operand = self.output
         if bank is None:
@@ -914,6 +941,7 @@ class ComposeHole(Schedule):
             ),
             name=None,
             origin=operand,
+            **kwargs,
         )
 
         new_inner_spec = dataclasses.replace(self.spec, output=new_mat.spec)
@@ -1317,6 +1345,7 @@ class Pipeline(Schedule):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "Schedule":
         raise NotImplementedError(
             "move_input should usually be called on ComposeHole, not Pipeline"
@@ -1327,6 +1356,7 @@ class Pipeline(Schedule):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "Schedule":
         raise NotImplementedError(
             "move_output should usually be called on ComposeHole, not Pipeline"
@@ -1429,7 +1459,7 @@ class MatmulBase(Schedule):
     serial_only: bool
 
     def __post_init__(self):
-        lw, rh = self.lhs.width, self.rhs.height
+        lw, rh = self.lhs.dim_sizes[1], self.rhs.dim_sizes[0]
         assert lw == rh, f"Inner dims. of Matmul operands don't match: {lw} and {rh}"
 
     @property
@@ -1498,12 +1528,11 @@ class MatmulHole(MatmulBase):
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Schedule]]:
         # Search only over full line sizes
-        for h, w in itertools.product(
-            dim_range(self.output.dim_sizes[0]), dim_range(self.output.dim_sizes[1])
+        for h, w in gen_tile_sizes(
+            self.output.dim_sizes, filter=self.output.is_valid_tile_shape
         ):
-            if self.output.dim_sizes != (h, w):
-                for parallel in [False] if self.serial_only else [True, False]:
-                    yield TileOutAction(self.tile_out, (h, w), parallel)
+            for parallel in [False] if self.serial_only else [True, False]:
+                yield TileOutAction(self, (h, w), parallel)
 
         if self.lhs.dim_sizes[1] > 1:
             for k in dim_range(self.lhs.dim_sizes[1], include_end=False):
@@ -1530,11 +1559,12 @@ class MatmulHole(MatmulBase):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "MoveLet":
         if input_idx == 0:
-            return _common_move(self, "lhs", bank, layout, prefetching)
+            return _common_move(self, "lhs", bank, layout, prefetching, **kwargs)
         elif input_idx == 1:
-            return _common_move(self, "rhs", bank, layout, prefetching)
+            return _common_move(self, "rhs", bank, layout, prefetching, **kwargs)
         else:
             raise ValueError("input_idx must be 0 or 1")
 
@@ -1543,8 +1573,9 @@ class MatmulHole(MatmulBase):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "MoveLet":
-        return _common_move(self, "output", bank, layout, prefetching)
+        return _common_move(self, "output", bank, layout, prefetching, **kwargs)
 
     @_assert_stable_spec
     def split(self, size: int) -> "Schedule":
@@ -1555,8 +1586,8 @@ class MatmulHole(MatmulBase):
             )
         if size == self.lhs.dim_sizes[1]:
             return self
-        left_view = self.lhs.simple_tile((self.lhs.height, size))
-        right_view = self.rhs.simple_tile((size, self.rhs.width))
+        left_view = self.lhs.simple_tile((self.lhs.dim_sizes[0], size))
+        right_view = self.rhs.simple_tile((size, self.rhs.dim_sizes[1]))
         warnings.warn("Not yet specializing spec for split Matmuls")
         return MatmulSplitLoop(
             lhs=self.lhs,
@@ -1568,9 +1599,9 @@ class MatmulHole(MatmulBase):
     @_assert_stable_spec
     def complete(self) -> Schedule:
         system = system_config.current_system()
-        if self.lhs.height > 1 or self.rhs.width > 1:
+        if self.lhs.dim_sizes[0] > 1 or self.rhs.dim_sizes[1] > 1:
             return self.tile_out((1, 1)).complete()
-        if self.lhs.width > 1:
+        if self.lhs.dim_sizes[1] > 1:
             return self.split(1).complete()
 
         next_general_lhs = system.next_general_bank(self.lhs.bank)
@@ -1614,6 +1645,7 @@ class MatmulLeaf(MatmulBase):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "MoveLet":
         raise NotImplementedError()
 
@@ -1622,6 +1654,7 @@ class MatmulLeaf(MatmulBase):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "MoveLet":
         raise NotImplementedError()
 
@@ -1650,7 +1683,6 @@ class HvxVrmpyaccVuwVubRub(MatmulLeaf):
         check_result = HvxVrmpyaccVuwVubRub._check_operands(self.operands)
         if check_result:
             raise ValueError(check_result)
-        print("output contiguous?: " + str(self.output.contiguous))
 
     @staticmethod
     def applies_to_operands(operands: Sequence[Union[Tensor, Tile]]) -> bool:
@@ -1683,11 +1715,17 @@ class HvxVrmpyaccVuwVubRub(MatmulLeaf):
         if out.dim_sizes != (32, 1):
             return f"out must have shape 1x1, but had shape: {out.dim_sizes}"
 
-        if not isinstance(lhs, Tensor):
-            return "lhs must be a Tensor but was: " + str(lhs)
+        if not lhs.contiguous:
+            return "lhs must be contiguous, but was: " + str(lhs)
+        if not rhs.contiguous:
+            return "rhs must be contiguous, but was: " + str(rhs)
+        if not out.contiguous:
+            return "out must be contiguous, but was: " + str(out)
 
-        if not all(o.contiguous for o in operands):
-            return "All operands must be contiguous"
+        if not lhs.vector_count == 1:
+            return f"lhs must be a single HVX vector, but was: {lhs}"
+        if not out.vector_count == 1:
+            return f"out must be a single HVX vector, but was: {out}"
 
         return None
 
@@ -1719,8 +1757,8 @@ class DirectConv(Schedule):
             raise Exception("Image too small to apply a filter without padding")
         # Check output shape
         assert self.output.dim_sizes == (
-            1 + self.lhs.height - self.rhs.dim_sizes[0],
-            1 + self.lhs.width - self.rhs.dim_sizes[1],
+            1 + self.lhs.dim_sizes[0] - self.rhs.dim_sizes[0],
+            1 + self.lhs.dim_sizes[1] - self.rhs.dim_sizes[1],
             self.rhs.dim_sizes[2],
         )
 
@@ -1740,11 +1778,11 @@ class DirectConv(Schedule):
 
     @property
     def image_height(self):
-        return self.lhs.height
+        return self.lhs.dim_sizes[0]
 
     @property
     def image_width(self):
-        return self.lhs.width
+        return self.lhs.dim_sizes[1]
 
     @property
     def kernel_height(self):
@@ -1800,11 +1838,12 @@ class DirectConv(Schedule):
         bank: Optional[int] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "MoveLet":
         if input_idx == 0:
-            return _common_move(self, "lhs", bank, layout, prefetching)
+            return _common_move(self, "lhs", bank, layout, prefetching, **kwargs)
         elif input_idx == 1:
-            return _common_move(self, "rhs", bank, layout, prefetching)
+            return _common_move(self, "rhs", bank, layout, prefetching, **kwargs)
         else:
             raise ValueError("input_idx must be 0 or 1")
 
@@ -1813,8 +1852,9 @@ class DirectConv(Schedule):
         bank: Optional[int] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "MoveLet":
-        return _common_move(self, "output", bank, layout, prefetching)
+        return _common_move(self, "output", bank, layout, prefetching, **kwargs)
 
     @_assert_stable_spec
     def split(self, size: int) -> "Schedule":
@@ -1844,14 +1884,11 @@ class DirectConv(Schedule):
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Schedule]]:
         # Yield .tile_outs and .sliding_tile_outs
-        for h, w, c, parallel in itertools.product(
-            dim_range(self.output.dim_sizes[0]),
-            dim_range(self.output.dim_sizes[1]),
-            dim_range(self.output.dim_sizes[2]),
-            [False] if self.serial_only else [True, False],
+        for shape in gen_tile_sizes(
+            self.output.dim_sizes, filter=self.output.is_valid_tile_shape
         ):
-            if self.output.dim_sizes != (h, w, c):
-                yield TileOutAction(self.tile_out, (h, w, c), parallel)
+            for parallel in [False] if self.serial_only else [True, False]:
+                yield TileOutAction(self, shape, parallel)
 
         # We only need the levels for the left-hand side (images), because that
         # is the only operand over which one can slide.
@@ -1902,10 +1939,15 @@ class DirectConv(Schedule):
     def peak_memory(self) -> dict[str, int]:
         return {k: 0 for k in system_config.current_system().banks}
 
+    def __str__(self) -> str:
+        epi = ", serial" if self.serial_only else ""
+        return (
+            f"{type(self).__name__}({self.lhs}, {self.rhs}, " f"out={self.output}{epi})"
+        )
+
 
 @dataclass_abc.dataclass_abc(frozen=True)
 class ReduceSum(Schedule):
-
     source: Union[Tensor, Tile]
     "The tensor to reduce."
     output: Union[Tensor, Tile]
@@ -1954,10 +1996,11 @@ class ReduceSum(Schedule):
     ) -> Iterable[Callable[[], Schedule]]:
         # TODO: Lots of code duplication in this method
         # Search only over full line sizes
-        for ds in itertools.product(*[dim_range(d) for d in self.output.dim_sizes]):
-            if self.output.dim_sizes != ds:
-                for parallel in [False] if self.serial_only else [True, False]:
-                    yield TileOutAction(self.tile_out, ds, parallel)
+        for ds in gen_tile_sizes(self.output.dim_sizes):
+            if not self.output.is_valid_tile_shape(ds):
+                continue
+            for parallel in [False] if self.serial_only else [True, False]:
+                yield TileOutAction(self, ds, parallel)
 
         # Split over the reduction dimension
         if allow_reduce_splits.get():
@@ -1978,9 +2021,10 @@ class ReduceSum(Schedule):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> "MoveLet":
         if input_idx == 0:
-            return _common_move(self, "source", bank, layout, prefetching)
+            return _common_move(self, "source", bank, layout, prefetching, **kwargs)
         else:
             raise ValueError("input_idx must be 0 ")
 
@@ -1989,8 +2033,9 @@ class ReduceSum(Schedule):
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
+        **kwargs,
     ) -> Schedule:
-        return _common_move(self, "output", bank, layout, prefetching)
+        return _common_move(self, "output", bank, layout, prefetching, **kwargs)
 
     @_assert_stable_spec
     def split(self, k: int) -> Union["ReduceSum", "Loop"]:
@@ -2451,9 +2496,9 @@ class MatmulSplitLoop(_TilingMixin, Schedule):
     def __post_init__(self):
         assert isinstance(self.innermost.spec, specs.Matmul)
         assert self.output.dim_sizes == (
-            self.lhs.height,
-            self.rhs.width,
-        ), f"Expected output to have shape {self.lhs.height}×{self.rhs.width}"
+            self.lhs.dim_sizes[0],
+            self.rhs.dim_sizes[1],
+        ), f"Expected output to have shape {self.lhs.dim_sizes[0]}×{self.rhs.dim_sizes[1]}"
 
     # TODO: Needing this for split loops is a design flaw. Should just be
     #   able to specify dimensions being iterated over.
@@ -2527,8 +2572,8 @@ class MatmulSplitLoop(_TilingMixin, Schedule):
 
         result = None
         for dest, src in [(inner_lhs, self.lhs), (inner_rhs, self.rhs)]:
-            dh, dw = dest.height, dest.width
-            sh, sw = src.height, src.width
+            dh, dw = dest.dim_sizes[0], dest.dim_sizes[1]
+            sh, sw = src.dim_sizes[0], src.dim_sizes[1]
             r = math.ceil(sh / dh) * math.ceil(sw / dw)
             if result is None:
                 result = r
@@ -2554,6 +2599,14 @@ class MoveLet(Schedule):
         assert self.destination.origin is self.source, (
             f"Destination's origin {self.destination.origin} was not source"
             f" {self.source}"
+        )
+        assert (
+            self.operands[(-1 if self.input_idx is None else self.input_idx)]
+            is self.source
+        )
+        assert (
+            self.inner.operands[(-1 if self.input_idx is None else self.input_idx)]
+            is self.destination
         )
 
     def env_str(

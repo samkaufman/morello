@@ -1,27 +1,32 @@
 import abc
 import contextlib
 import contextvars
+import dataclasses
 import functools
+import itertools
 import operator
+import re
 import string
 import warnings
 from collections.abc import Sequence
 from typing import Callable, Iterable, Literal, NamedTuple, Optional, Union, cast
 
-import dataclass_abc
 import sympy
 
 from . import indexexpr
-from .. import ops, specs, tensor
+from .. import ops, specs, tensor, utils
 from ..dtypes import Dtype
+from ..system_config import hexagon
 from ..system_config.state import current_system
-from ..tensor import Tensor, Tile
+from ..tensor import Tensor, Tile, TensorBase
 
 _namer: contextvars.ContextVar["_Namer"] = contextvars.ContextVar("_namer")
 _writer: contextvars.ContextVar["_Writer"] = contextvars.ContextVar("_writer")
 _unroll: contextvars.ContextVar["bool"] = contextvars.ContextVar(
     "_unroll", default=False
 )
+
+_POINT_SYMBOL_RE = re.compile(r"^p(\d+)$")
 
 # TODO: Choose a more principled STACK_CUTOFF.
 STACK_CUTOFF = 256
@@ -101,7 +106,7 @@ def _emit_tensor_print(
             writer.writeline(
                 f"for (size_t {it_name} = 0; {it_name} < {size}; {it_name}++) {{"
             )
-            index_expr = index_expr.subs(sym, it_name)
+            index_expr = index_expr.subs(sym, f"_{it_name}")
 
         with writer.indent_block():
             writer.writeline(
@@ -315,13 +320,10 @@ class _CTensor(abc.ABC):
 
 
 class _CNameTensor(_CTensor):
-    @property
-    @abc.abstractmethod
-    def name(self) -> str:
-        raise NotImplementedError()
+    name: str
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class _CHeapArray(_CNameTensor):
     name: str
 
@@ -332,7 +334,7 @@ class _CHeapArray(_CNameTensor):
         _writer.get().writeline(f"free({self.name});")
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class _CStackArray(_CNameTensor):
     name: str
 
@@ -343,7 +345,7 @@ class _CStackArray(_CNameTensor):
         pass
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class _CValueVar(_CNameTensor):
     name: str
 
@@ -377,10 +379,43 @@ def _emit_buffer_alloc(size: int, dtype: Dtype) -> _CNameTensor:
         return _CValueVar(name)
 
 
+@dataclasses.dataclass(frozen=True)
+class _CHvxVectors(_CTensor):
+    names: list[str]
+    dtype_bytes: int
+
+    # TODO: Use this static emit pattern for all _CTensor types
+    @staticmethod
+    def emit(tensor: hexagon.HvxVmemTensor) -> "_CHvxVectors":
+        namer, writer = _namer.get(), _writer.get()
+        assert (tensor.volume * tensor.dtype.size) % 128 == 0
+        names = []
+        for _ in range(tensor.vector_count):
+            new_name = namer.fresh_name("vv")
+            writer.writeline(f"HVX_Vector {new_name};")
+            names.append(new_name)
+        return _CHvxVectors(names=names, dtype_bytes=tensor.dtype.size)
+
+    def c_index(self, expr):
+        offset = int(expr)
+        assert 128 % self.dtype_bytes == 0
+        increment = 128 // self.dtype_bytes
+
+        if offset % increment != 0:
+            raise ValueError(
+                f"Unexpected expression: {expr}. HVX vectors can only be indexed by "
+                f"the first coordinate in their corresponding vector tile."
+            )
+        return self.names[offset // increment]
+
+    def emit_free(self):
+        pass
+
+
 @contextlib.contextmanager
 def _emit_assignment_copy(
     source: Union[Tensor, Tile],
-    destination: Tensor,
+    destination: TensorBase,
     source_index_expr: sympy.Expr,
     destination_index_expr: sympy.Expr,
     concrete_shape: tuple[int, ...],
@@ -423,8 +458,8 @@ def _emit_assignment_copy(
 @contextlib.contextmanager
 def _emit_loop_nest_for_shape(shape: tuple[int, ...]):
     if _unroll.get():
-        raise NotADirectoryError(
-            "unrolling not implemented for _emit_loop_nest_for_shape"
+        warnings.warn(
+            "Unrolling not implemented for _emit_loop_nest_for_shape; will be ignored"
         )
     namer, writer = _namer.get(), _writer.get()
     subs = []
@@ -559,7 +594,6 @@ def _inner_generate_c(
         assert (
             cur_out[2] == concrete_shapes[-1]
         ), "Final stage output shape didn't match Pipeline output shape"
-
     elif isinstance(impl, ops.Mult):
         l, r, o = operand_index_exprs
         writer.writeline(
@@ -574,9 +608,9 @@ def _inner_generate_c(
         assert impl.output.contiguous
 
         # Rewrite index exprs. to refer to first element.
-        lhs_index_expr = rhs_index_expr.subs({"p0": 0, "p1": 0})
-        rhs_index_expr = lhs_index_expr.subs("p0", 0)
-        out_index_expr = out_index_expr.subs("p0", 0)
+        lhs_index_expr = _zero_points(lhs_index_expr)
+        rhs_index_expr = _zero_points(rhs_index_expr)
+        out_index_expr = _zero_points(out_index_expr)
 
         out_val = f"*(HVX_Vector *)({_c_ptr(out_ref_fn, out_index_expr)})"
         writer.writeline(f"{out_val} = Q6_Vuw_vrmpyacc_VuwVubRub(")
@@ -715,11 +749,11 @@ def _load_hvx_l2fetch(
     assert not impl.prefetching
 
     # Swap w and h if column-major.
-    h, w = tensor.layout_ordered_dims(impl.destination)
+    h, w = utils.layout_ordered_dims(impl.destination)
     assert w < 256, f"Maximum size of l2fetch is 255; tile width is: {w}"
     assert h < 256, f"Maximum size of l2fetch is 255; tile height is: {h}"
 
-    outer_w = tensor.layout_ordered_dims(impl.source.root)[1]
+    outer_w = utils.layout_ordered_dims(impl.source.address_root)[1]
     stride = outer_w - w
     assert stride < 65536
 
@@ -740,23 +774,18 @@ def _load_hvx_l2fetch(
 def _move_hvx_dcfetch(
     impl, source_idx, tensor_ref_fns, operand_index_exprs, concrete_shapes
 ):
+    """Emit an instruction for prefetching into L1 on Hexagon."""
     writer = _writer.get()
 
-    # TODO: Assert we're *not* in a boundary loop
     assert isinstance(impl, ops.MoveLet)
-    # TODO: Do we want: assert not impl.is_store
     assert not impl.prefetching
-    assert len([d for d in impl.destination.dim_sizes if d != 1]) == 1
-    # L1 cache lines are 32 bytes
-    # TODO: Find canon reference here. Are cache lines actually 64?
-    assert (
-        impl.destination.bytes_used == 32
-    ), f"dest. used {impl.destination.bytes_used} bytes"
-    assert impl.destination.contiguous
+
+    # TODO: Assert we're *not* in a boundary loop
 
     source_ref_fn = tensor_ref_fns[source_idx]
-    source_index_expr = operand_index_exprs[source_idx].subs("p0", 0)
-    writer.writeline(f"Q6_dcfetch_A(&{source_ref_fn(source_index_expr)});")
+    source_index_expr = operand_index_exprs[source_idx]
+    source_index_expr = _zero_points(source_index_expr)
+    writer.writeline(f"Q6_dcfetch_A(&{source_ref_fn(source_index_expr + 128)});")
     _inner_generate_c(
         impl.inner,
         tensor_ref_fns,
@@ -766,7 +795,7 @@ def _move_hvx_dcfetch(
 
 
 def _move_hvx_vmem(
-    impl,
+    impl: ops.MoveLet,
     source_idx,
     tensor_ref_fns,
     operand_index_exprs,
@@ -776,26 +805,20 @@ def _move_hvx_vmem(
 
     # TODO: If source is contiguous, just assign. Else, add move loop.
 
-    # TODO: Assert we're *not* in a boundary loop
-    assert isinstance(impl, ops.MoveLet)
     assert impl.destination.bank == "VMEM"
-    assert not impl.prefetching
-    assert (
-        impl.destination.bytes_used == 128
-    ), f"dest. used {impl.destination.bytes_used} bytes"
-    assert impl.destination.contiguous
-    # TODO: Do we want to handle any HVX_Vector_x2 (pair) cases?
+    assert isinstance(impl.destination, hexagon.HvxVmemTensor)
+    if impl.prefetching:
+        raise NotImplementedError()
 
     concrete_shape = concrete_shapes[source_idx]
+    assert (
+        impl.destination.dim_sizes == concrete_shape
+    ), "Shapes don't match. This may be a loop boundary."
 
     source_ref_fn = tensor_ref_fns[source_idx]
     source_index_expr = operand_index_exprs[source_idx]
-    destination_name = namer.fresh_name("mo")
 
-    dest_ref_fn = functools.partial(
-        lambda n, e: f"{n}[{_expr_to_c(e)}]", destination_name
-    )
-    dest_free_fn = lambda: None
+    vectors = _CHvxVectors.emit(impl.destination)
 
     # TODO: The below block shares a lot of code with _move_registers.
     #   Abstract them out.
@@ -803,59 +826,118 @@ def _move_hvx_vmem(
     new_operand_index_exprs = list(operand_index_exprs)
     new_concrete_shapes = list(concrete_shapes)
     # TODO: Do we need to call this both here and in _emit_assignment_copy?
-    new_tensor_ref_fns[source_idx] = dest_ref_fn
+    new_tensor_ref_fns[source_idx] = vectors.c_index
     new_operand_index_exprs[source_idx] = indexexpr.buffer_indexing_expr(
         impl.destination, concrete_shape
     )
-    new_concrete_shapes[source_idx] = concrete_shape
 
-    if impl.source.contiguous:
-        source_index_expr = source_index_expr.subs("p0", 0)
-        writer.writeline(
-            f"HVX_Vector {destination_name} = *(HVX_Vector *)({_c_ptr(source_ref_fn, source_index_expr)});"
-        )
+    # TODO: Remove new_concrete_shapes entirely if the following assert holds
+    # new_concrete_shapes[source_idx] = concrete_shape
+    assert new_concrete_shapes[source_idx] == concrete_shape
+
+    slice_idx_exprs, slices_contig = _iter_vectors(impl.destination, source_index_expr)
+    if slices_contig:
+        # source_index_expr = source_index_expr.subs("p0", 0)
+        for destination_name, slice_index_expr in zip(vectors.names, slice_idx_exprs):
+            slice_index_expr = _zero_points(slice_index_expr)
+            writer.writeline(
+                f"{destination_name} = *(HVX_Vector *)({_c_ptr(source_ref_fn, slice_index_expr)});"
+            )
+        unroll_token = _unroll.set(True)
         _inner_generate_c(
             impl.inner,
             new_tensor_ref_fns,
             new_operand_index_exprs,
             new_concrete_shapes,
         )
+        _unroll.reset(unroll_token)
         if impl.is_store:
-            writer.writeline(
-                f"*(HVX_Vector *)({_c_ptr(source_ref_fn, source_index_expr)}) = {destination_name};"
-            )
+            for destination_name, slice_index_expr in zip(
+                vectors.names, slice_idx_exprs
+            ):
+                slice_index_expr = _zero_points(slice_index_expr)
+                writer.writeline(
+                    f"*(HVX_Vector *)({_c_ptr(source_ref_fn, slice_index_expr)}) = {destination_name};"
+                )
     else:
-        # We don't assign with Q6_V_vzero() because this is a load, so it'll be
-        # immediately filled.
-        writer.writeline(f"HVX_Vector {destination_name};")
-        destination_index_expr = indexexpr.buffer_indexing_expr(
-            impl.destination, concrete_shape
+        raise NotImplementedError(
+            "The below needs to copy for *all* vectors in this tensor."
         )
-        with _emit_assignment_copy(
-            impl.source,
-            impl.destination,
-            source_index_expr,
-            destination_index_expr,
-            concrete_shapes[source_idx],
-            source_ref_fn,
-            dest_ref_fn,
-            dest_free_fn,
-            is_input=(not impl.is_store),
-            is_output=impl.is_store,
-        ):
-            _inner_generate_c(
-                impl.inner,
-                new_tensor_ref_fns,
-                new_operand_index_exprs,
-                new_concrete_shapes,
+        for destination_name, slice_index_expr in zip(vectors.names, slice_idx_exprs):
+            # TODO: Can we use vgather here?
+            # We don't assign with Q6_V_vzero() because this is a load, so it'll be
+            # immediately filled.
+            destination_index_expr = indexexpr.buffer_indexing_expr(
+                impl.destination, concrete_shape
             )
+
+            with _emit_assignment_copy(
+                impl.source,
+                impl.destination,
+                slice_index_expr,
+                destination_index_expr,
+                concrete_shapes[source_idx],
+                source_ref_fn,
+                dest_ref_fn=vectors.c_index,
+                dest_free_fn=vectors.emit_free,
+                is_input=(not impl.is_store),
+                is_output=impl.is_store,
+            ):
+                unroll_token = _unroll.set(True)
+                _inner_generate_c(
+                    impl.inner,
+                    new_tensor_ref_fns,
+                    new_operand_index_exprs,
+                    new_concrete_shapes,
+                )
+                _unroll.reset(unroll_token)
+
+
+def _iter_vectors(
+    destination: hexagon.HvxVmemTensor,
+    source_index_expr: sympy.Expr,
+) -> tuple[Iterable[sympy.Expr], bool]:
+    """Compute source slices for HVX vectors in `destination`.
+
+    This doesn't accept a concrete shapes parameter because it is intended to only be
+    used in non-boundary cases. (In that case, the destination and origin should already
+    have the correct concrete shape.)
+
+    :param destination:
+    :param source_index_expr:
+    :return: Indexing expressions for concrete source tensors corresponding to each
+             concrete vector, as well as whether or not source tiles are contiguous.
+    """
+    vector_tiling = destination.simple_tile(destination.vector_shape)
+    steps_dim: Callable[[int], int] = getattr(vector_tiling, "steps_dim", lambda _: 1)
+
+    substitutions = {}
+    for dim in range(len(vector_tiling.dim_sizes)):
+        assert isinstance(vector_tiling, hexagon.HvxVmemSimpleTile)
+        substitutions[f"p{dim}"] = indexexpr.logical_indexing_expr(vector_tiling, dim)
+    source_index_expr = source_index_expr.subs(substitutions)
+
+    exprs = []
+    for step_idxs in itertools.product(  # Loop over each concrete vector tile
+        *[range(steps_dim(i)) for i in range(len(vector_tiling.dim_sizes))]
+    ):
+        subs = {}
+        for dim_idx, step in enumerate(step_idxs):
+            subs[f"i{dim_idx}"] = step
+        exprs.append(source_index_expr.subs(subs))
+    assert len(exprs) == destination.vector_count
+
+    # Calculate whether or not the tiles are contiguous in the backing address space.
+    contiguous = utils.contiguous(
+        (destination.vector_shape, destination.layout), destination.address_root
+    )
+
+    return exprs, contiguous
 
 
 def _move_registers(
     impl, source_idx, tensor_ref_fns, operand_index_exprs, concrete_shapes
 ):
-    namer, writer = _namer.get(), _writer.get()
-
     concrete_shape = concrete_shapes[source_idx]
 
     source_ref_fn = tensor_ref_fns[source_idx]
@@ -916,17 +998,17 @@ def _expr_to_c(expr: Union[sympy.Expr, int]) -> str:
     for sym in expr.free_symbols:
         if sym.name.startswith("_"):
             substitutions[sym] = sym.name[1:]
+        else:
+            raise ValueError(f"Found unbound symbols in expression: {expr}")
     return str(expr.subs(substitutions))
 
 
-def _flatten(src):
-    if hasattr(src, "tolist"):
-        src = src.tolist()
-    for el in src:
-        if isinstance(el, Iterable) and not isinstance(el, (str, bytes)):
-            yield from _flatten(el)
-        else:
-            yield el
+def _zero_points(expr: sympy.Expr) -> sympy.Expr:
+    substitutions = {}
+    for sym in expr.free_symbols:
+        if _POINT_SYMBOL_RE.match(sym.name):
+            substitutions[sym] = 0
+    return expr.subs(substitutions)
 
 
 def generate_c(
@@ -1014,7 +1096,7 @@ def generate_c(
                     raise NotImplementedError(
                         "Initializing non-row-major tensors not yet implemented"
                     )
-                for idx, el in enumerate(_flatten(initial_value)):
+                for idx, el in enumerate(utils.flatten(initial_value)):
                     writer.writeline(f"{ref_fn(idx)} = {el};")
 
         def kernel():

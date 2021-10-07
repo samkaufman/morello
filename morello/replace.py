@@ -8,10 +8,10 @@ re-used during subsequent visits.
 
 import functools
 import threading
-from typing import TypeVar, Union, cast
+from typing import Optional, TypeVar, Union, cast
 
 from . import ops, specs
-from .tensor import ConvolutionImageTile, SimpleTile, Tensor, Tile
+from .tensor import ConvolutionImageTile, SimpleTile, Tensor, TensorLike, Tile
 
 T = TypeVar("T")
 
@@ -41,18 +41,18 @@ def _assert_no_cycles(func):
 
 @_assert_no_cycles
 def _mutating_replace(
-    subject: T, replacements: dict[Union[Tensor, Tile], Union[Tensor, Tile]]
-) -> T:
+    subject: Optional[T], replacements: dict[TensorLike, TensorLike]
+) -> Optional[T]:
     if subject is None:
         return None
 
-    if isinstance(subject, (Tensor, Tile)):
+    if isinstance(subject, TensorLike):
         try:
             return cast(T, replacements[subject])
         except KeyError:
             pass
 
-    if isinstance(subject, Tensor):
+    if type(subject) is Tensor:
         new_origin = _mutating_replace(subject.origin, replacements)
         if new_origin is subject.origin:
             return cast(T, subject)
@@ -63,7 +63,7 @@ def _mutating_replace(
         )
         replacements[subject] = new_tensor
         return cast(T, new_tensor)
-    elif isinstance(subject, (SimpleTile, ConvolutionImageTile)):
+    elif type(subject) in (SimpleTile, ConvolutionImageTile):
         # After replacement, it's possible for what was once the subject Tile's
         # root, which should be a Tensor, to become a Tile. In this case, the
         # correct thing to do is to propagate that Tile's root. Since a Tensor's
@@ -91,21 +91,21 @@ def _mutating_replace(
         replacements[subject] = new_tile
         return new_tile
 
-    if isinstance(subject, (ops.MatmulHole, ops.Mult, ops.HvxVrmpyaccVuwVubRub)):
+    if type(subject) in (ops.MatmulHole, ops.Mult, ops.HvxVrmpyaccVuwVubRub):
         return type(subject)(
             lhs=_mutating_replace(subject.lhs, replacements),
             rhs=_mutating_replace(subject.rhs, replacements),
             output=_mutating_replace(subject.output, replacements),
             serial_only=subject.serial_only,
         )
-    elif isinstance(subject, ops.DirectConv):
+    elif type(subject) is ops.DirectConv:
         return ops.DirectConv(
             lhs=_mutating_replace(subject.lhs, replacements),
             rhs=_mutating_replace(subject.rhs, replacements),
             output=_mutating_replace(subject.output, replacements),
             serial_only=subject.serial_only,
         )
-    elif isinstance(subject, ops.MoveLet):
+    elif type(subject) is ops.MoveLet:
         return ops.MoveLet(
             source=_mutating_replace(subject.source, replacements),
             destination=_mutating_replace(subject.destination, replacements),
@@ -113,14 +113,14 @@ def _mutating_replace(
             input_idx=subject.input_idx,
             inner=_mutating_replace(subject.inner, replacements),
         )
-    elif isinstance(subject, ops.MatmulSplitLoop):
+    elif type(subject) is ops.MatmulSplitLoop:
         return ops.MatmulSplitLoop(
             lhs=_mutating_replace(subject.lhs, replacements),
             rhs=_mutating_replace(subject.rhs, replacements),
             output=_mutating_replace(subject.output, replacements),
             inner=_mutating_replace(subject.inner, replacements),
         )
-    elif isinstance(subject, ops.Loop):
+    elif type(subject) is ops.Loop:
         return ops.Loop(
             driving_tile=_mutating_replace(subject.driving_tile, replacements),
             dependent_tiles=frozenset(
@@ -129,7 +129,7 @@ def _mutating_replace(
             inner=_mutating_replace(subject.inner, replacements),
             parallel=subject.parallel,
         )
-    elif isinstance(subject, ops.SlidingWindowLoop):
+    elif type(subject) is ops.SlidingWindowLoop:
         new_inputs = tuple(_mutating_replace(t, replacements) for t in subject.inputs)
         new_output = _mutating_replace(subject.output, replacements)
         new_spec = subject.spec.replace_io(
@@ -146,17 +146,17 @@ def _mutating_replace(
             spec=new_spec,
             inner=_mutating_replace(subject.inner, replacements),
         )
-    elif isinstance(subject, ops.ReduceSum):
+    elif type(subject) is ops.ReduceSum:
         return ops.ReduceSum(
             source=_mutating_replace(subject.source, replacements),
             output=_mutating_replace(subject.output, replacements),
             serial_only=subject.serial_only,
         )
-    elif isinstance(subject, ops.Pipeline):
+    elif type(subject) is ops.Pipeline:
         return ops.Pipeline(
             stages=tuple(_mutating_replace(s, replacements) for s in subject.stages)
         )
-    elif isinstance(subject, ops.ComposeHole):
+    elif type(subject) is ops.ComposeHole:
         new_inputs = tuple(_mutating_replace(t, replacements) for t in subject.inputs)
         new_output = _mutating_replace(subject.output, replacements)
         new_spec = specs.Compose(

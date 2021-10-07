@@ -6,13 +6,11 @@ from typing import Optional
 import hypothesis
 import numpy as np
 import pytest
-import sympy
 from hypothesis import strategies as st
 
 from morello import dtypes, op_pprint, ops, specs, system_config, tensor
 from morello.codegen import indexexpr
 from morello.system_config import cpu, hexagon
-
 from .. import strategies
 
 CC_DEADLINE = 30000
@@ -87,7 +85,7 @@ def _arb_impls_from_actions(draw, partial_impl: ops.Schedule):
         )
         and not isinstance(a, ops.SlidingTileOutAction)
     ]
-    assert actions, f"actions was empty"
+    assert actions, f"actions was empty for Impl: {partial_impl}"
 
     action_idx = draw(st.integers(min_value=0, max_value=len(actions) - 1))
 

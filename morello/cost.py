@@ -3,7 +3,7 @@ import math
 from operator import mul
 from typing import Union
 
-from . import specs
+from . import specs, utils
 from .ops import (
     DirectConv,
     HvxVrmpyaccVuwVubRub,
@@ -17,7 +17,7 @@ from .ops import (
     SlidingWindowLoop,
 )
 from .system_config import current_system
-from .tensor import Tensor, Tile, layout_ordered_dims
+from .tensor import Tensor, Tile
 
 
 def move_cost(
@@ -40,7 +40,7 @@ def move_cost(
 
     hit_cost = current_system().banks[src.bank].cache_hit_cost
 
-    lodims = layout_ordered_dims(src)
+    lodims = utils.layout_ordered_dims(src)
     meaningful_layout_difference = (
         src.layout != dest_layout and lodims[0] != 1 and lodims[1] != 1
     )

@@ -1,5 +1,5 @@
 import warnings
-from typing import Iterable, List, cast, Optional
+from typing import Iterable, cast, Optional
 
 import hypothesis
 import pytest
@@ -200,8 +200,8 @@ def test_nested_convs_outputs_constant(
     assert schedule.output.dim_sizes[0] == expected_output_height
     assert schedule.output.dim_sizes[1] == expected_output_width
 
-    hypothesis.assume(th1 <= 1 + image.height - filters.dim_sizes[0])
-    hypothesis.assume(tw1 <= 1 + image.width - filters.dim_sizes[1])
+    hypothesis.assume(th1 <= 1 + image.dim_sizes[0] - filters.dim_sizes[0])
+    hypothesis.assume(tw1 <= 1 + image.dim_sizes[1] - filters.dim_sizes[1])
     tiled_schedule_a = schedule.tile_out((th1, tw1, filters.dim_sizes[-1]))
     assert tiled_schedule_a.output.dim_sizes[0] == expected_output_height
     assert tiled_schedule_a.output.dim_sizes[1] == expected_output_width

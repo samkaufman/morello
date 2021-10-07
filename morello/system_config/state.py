@@ -14,7 +14,7 @@ def current_target() -> Target:
     try:
         return _CURRENT_TARGET.get()
     except LookupError:
-        raise NoTargetSetException()
+        raise NoTargetSetException("No target set. Call set_current_target.")
 
 
 def set_current_target(target: Target):

@@ -1,25 +1,38 @@
+import abc
 import contextlib
+import dataclasses
 import functools
 import io
 import logging
+import operator
 import os
 import pathlib
 import re
 import subprocess
 import sys
 import tempfile
+import typing
+from collections import Sequence
 from pathlib import Path
 from typing import Callable, Optional, Union
 
+from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 from .. import ops, specs, tensor
 from ..codegen import gen
-from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
 HEXAGON_CLANG_ARGS = ["-mhvx", "-mv66"]
 HEXAGON_SIM_TARGET_ARG = "--mv66g_1024_rev2"
 _REAL_TIME_RE = re.compile(
     r"\s*Ratio to Real Time \(\d+ MHz\) = ~\d+/\d+ \(elapsed time = ([\d.]+)s\)\s*"
 )
+
+# L1 cache size is drawn from Linux source:
+#   https://docs.huihoo.com/doxygen/linux/kernel/3.7/include_2asm-generic_2cache_8h.html#a9400cc2ba37e33279bdbc510a6311fb4
+L1_CACHE_LINE_BYTES = 32
+# L2 cache size is a guess based on existing implementations and the description of
+# L2FETCH in Qualcomm's HVX Programmer’s Reference Manual.
+# TODO: Find a more definitive source.
+L2_CACHE_LINE_BYTES = 8 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +51,10 @@ class HvxSimulatorTarget(Target):
         spec: specs.TensorSpec,
         name: Optional[str],
         origin: Optional[Union[tensor.Tensor, tensor.Tile]] = None,
+        **kwargs,
     ) -> tensor.Tensor:
+        if spec.bank == "VMEM":
+            return HvxVmemTensor(spec=spec, name=name, origin=origin, **kwargs)
         return tensor.Tensor(spec=spec, name=name, origin=origin)
 
     @property
@@ -147,6 +163,109 @@ class HvxSimulatorTarget(Target):
         time_matches = [m for m in real_time_line_matches if m is not None]
         assert len(time_matches) == 1, f"Got {len(time_matches)} matches"
         return float(time_matches[0].group(1))
+
+
+class HvxVmemTensorlike(tensor.TensorLike):
+    def _common_post_init(self):
+        assert self.spec.bank == "VMEM"
+        if self.bytes_used % 128 != 0:
+            raise tensor.DisallowedTileShapeError(
+                f"Bytes {self.bytes_used} not divisible by 128"
+            )
+
+    @property
+    def contiguous(self) -> bool:
+        return self.vector_count == 1
+
+    def is_valid_tile_shape(self, shape: tuple[int, ...]) -> bool:
+        if len(shape) != len(self.dim_sizes):
+            return False
+        if any(i > o for (i, o) in zip(shape, self.dim_sizes)):
+            return False
+        if functools.reduce(operator.mul, shape, 1) % 128 != 0:
+            return False
+        return True
+
+    def simple_tile(self, tile_shape: tuple[int, ...]) -> "HvxVmemTensorlike":
+        return self._tile(HvxVmemSimpleTile, tile_shape)
+
+    def conv_image_tile(
+        self, tile_shape: tuple[int, ...], filter_shape: tuple[int, int]
+    ) -> tensor.TensorLike:
+        raise Exception("Convolution tiling of HVX vectors is not supported")
+
+    @property
+    def vector_count(self) -> int:
+        return self.volume // functools.reduce(operator.mul, self.root.vector_shape, 1)
+
+    @abc.abstractmethod
+    def vector_indices(self, tile_pt: Sequence[int]) -> Sequence[int]:
+        """Returns identifiers of the included root HVX vectors."""
+        raise NotImplementedError()
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class HvxVmemTensor(HvxVmemTensorlike, tensor.TensorBase):
+    spec: specs.TensorSpec
+    name: Optional[str]
+    vector_shape: tuple[int, ...]
+    origin: Optional[tensor.TensorLike] = None
+
+    def __post_init__(self):
+        self._common_post_init()
+        if functools.reduce(operator.mul, self.vector_shape, self.dtype.size) != 128:
+            raise ValueError("vector shape must use 128 bytes")
+
+    @typing.final
+    def vector_indices(self, tile_pt: Sequence[int]) -> Sequence[int]:
+        """Returns identifiers of the included root HVX vectors."""
+        return list(range(self.vector_count))
+
+    def __str__(self):
+        layout_epi = ""
+        if self.layout != specs.Layout.ROW_MAJOR:
+            layout_epi = f", {self.layout}"
+        dims_part = "×".join(str(s) for s in self.dim_sizes)
+        vec_part = "×".join(str(s) for s in self.vector_shape)
+        return (
+            f"{type(self).__name__}({dims_part}{layout_epi}, {self.bank}, {vec_part})"
+        )
+
+    def __getstate__(self):
+        return {
+            "spec": self.spec,
+            "name": self.name,
+            "origin": self.origin,
+            "vector_shape": self.vector_shape,
+        }
+
+    def __setstate__(self, state_dict):
+        object.__setattr__(self, "spec", state_dict["spec"])
+        object.__setattr__(self, "name", state_dict["name"])
+        object.__setattr__(self, "vector_shape", state_dict["vector_shape"])
+        object.__setattr__(self, "origin", state_dict["origin"])
+
+
+class HvxVmemSimpleTile(HvxVmemTensorlike, tensor.SimpleTile):
+    def __post_init__(self):
+        super().__post_init__()
+        self._common_post_init()
+        for size, vs in zip(self.dim_sizes, self.root.vector_shape):
+            tile_str = "×".join(str(s) for s in self.dim_sizes)
+            vec_str = "×".join(str(s) for s in self.dim_sizes)
+            if size % vs != 0:
+                raise ValueError(
+                    f"Tile shape {tile_str} not a multiple of vector shape {vec_str}"
+                )
+
+    def vector_indices(self, tile_pt: Sequence[int]) -> Sequence[int]:
+        raise NotImplementedError()
+
+    def __getstate__(self):
+        raise NotImplementedError()
+
+    def __setstate__(self, state_dict):
+        raise NotImplementedError()
 
 
 @contextlib.contextmanager

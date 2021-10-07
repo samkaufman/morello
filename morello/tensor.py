@@ -1,66 +1,94 @@
+import abc
 import dataclasses
 import functools
-import itertools
 import math
+import operator
+import typing
 from operator import mul
-from typing import Optional, Tuple, Union, cast
+from typing import Mapping, Optional, Union
 
 from . import dtypes, specs, system_config
 
 
-def layout_ordered_dims(operand: Union["Tensor", "Tile"]) -> Tuple[int, ...]:
-    """Returns tuple of operand's height and width; or vice versa if column-major."""
-    if len(operand.dim_sizes) == 1:
-        return (operand.dim_sizes[0],)
-    if operand.root.layout == specs.Layout.ROW_MAJOR:
-        lead = [operand.dim_sizes[0], operand.dim_sizes[1]]
-    elif operand.root.layout == specs.Layout.COL_MAJOR:
-        lead = [operand.dim_sizes[1], operand.dim_sizes[0]]
-    else:
-        raise NotImplementedError(f"Unknown layout {operand.root.layout}")
-    lead.extend(operand.dim_sizes[2:])
-    return tuple(lead)
+class DisallowedTileShapeError(ValueError):
+    pass
 
 
-class _TensorLike:
+class TensorLike(abc.ABC):
+    spec: specs.TensorSpec
+    dim_sizes: tuple[int, ...]
+    origin: "Optional[TensorLike]"
+
+    def _common_init_checks(self):
+        for dim_size in self.dim_sizes:
+            if dim_size <= 0:
+                raise ValueError("Invalid dimensions: " + str(self.dim_sizes))
+
     @property
+    @typing.final
     def volume(self) -> int:
         return functools.reduce(mul, self.dim_sizes, 1)
 
     @property
+    @typing.final
     def layout(self) -> specs.Layout:
         return self.spec.layout
 
     @property
+    @typing.final
     def dtype(self) -> dtypes.Dtype:
         # Just a sugar getter.
         return self.spec.dtype
 
     @property
-    def height(self):
-        # TODO: Should really remove the `height` property, but useful for backwards
-        #  compatibility for the moment.
-        assert len(self.dim_sizes) == 2, f"{self} is not a matrix"
-        return self.dim_sizes[0]
+    def bytes_used(self) -> int:
+        return self.volume * self.dtype.size
 
     @property
-    def width(self):
-        # TODO: Should really remove the `width` property, but useful for backwards
-        #  compatibility for the moment.
-        assert len(self.dim_sizes) == 2, f"{self} is not a matrix"
-        return self.dim_sizes[1]
+    @abc.abstractmethod
+    def contiguous(self) -> bool:
+        """Whether or not elements are contiguous in the underlying memory."""
+        # TODO: Expand the above doc to talk about phys. vs. logical contiguousness.
+        raise NotImplementedError()
 
-    def simple_tile(self, tile_shape: tuple[int, ...]) -> Union["Tensor", "Tile"]:
+    @property
+    @abc.abstractmethod
+    def address_root(self) -> "TensorBase":
+        """Returns the containing tensor with a contiguous address space.
+
+        Essentially, this returns the receiver if in non-cache memory, or its own
+        address_space otherwise.
+        """
+        raise NotImplementedError()
+
+    def is_valid_tile_shape(self, shape: tuple[int, ...]) -> bool:
+        """Returns True if self can be tiled in this shape."""
+        if len(shape) != len(self.dim_sizes):
+            return False
+        return all(i <= o for (i, o) in zip(shape, self.dim_sizes))
+
+    def simple_tile(self, tile_shape: tuple[int, ...]) -> "TensorLike":
         return self._tile(SimpleTile, tile_shape)
 
     def conv_image_tile(
         self, tile_shape: tuple[int, ...], filter_shape: tuple[int, int]
-    ) -> Union["Tensor", "Tile"]:
+    ) -> "TensorLike":
         return self._tile(ConvolutionImageTile, tile_shape, filter_shape=filter_shape)
 
-    def _tile(
-        self, tile_cls, tile_shape: tuple[int, ...], **kw
-    ) -> Union["Tensor", "Tile"]:
+    def replace_tensors(
+        self,
+        replacements: "Mapping[TensorLike, TensorLike]",
+    ) -> "Tensor":
+        # Default implementation just replaces the origin.
+        new_origin = None
+        if self.origin is not None:
+            try:
+                new_origin = replacements[self.origin]
+            except KeyError:
+                new_origin = self.origin.replace_tensors(replacements)
+        return dataclasses.replace(self, origin=new_origin)
+
+    def _tile(self, tile_cls, tile_shape: tuple[int, ...], **kw) -> "TensorLike":
         if len(tile_shape) != len(self.dim_sizes):
             raise ValueError(
                 f"Cannot produce rank-{len(tile_shape)} tile of shape "
@@ -72,76 +100,62 @@ class _TensorLike:
                 f"Tile {tile_shape} would be larger than tensor {self.dim_sizes}"
             )
         if tile_shape == self.dim_sizes:
-            # This cast is safe because there are only two _TensorLike subclasses
-            return cast(Union[Tensor, Tile], self)
+            return self
         return tile_cls(dim_sizes=tile_shape, name=None, origin=self, **kw)
 
+    @typing.final
+    def __eq__(self, other):
+        return self is other
 
-@dataclasses.dataclass(frozen=True)
-class Tensor(_TensorLike):
-    """An n-dimensional array."""
+    @typing.final
+    def __hash__(self):
+        return hash(id(self))
 
+
+class TensorBase(TensorLike):
     spec: specs.TensorSpec
-    name: Optional[str]
-    origin: Optional[Union["Tensor", "Tile"]] = None
-
-    def __post_init__(self):
-        assert isinstance(self.spec, specs.TensorSpec)
-        for dim_size in self.dim_sizes:
-            assert dim_size > 0
 
     @property
-    def dim_sizes(self) -> Tuple[int, ...]:
+    def dim_sizes(self) -> tuple[int, ...]:
         return self.spec.dim_sizes
+
+    @property
+    def root(self) -> "TensorBase":
+        return self
+
+    @property
+    def contiguous(self) -> bool:
+        return True
+
+    @property
+    def address_root(self) -> "TensorBase":
+        # TODO: Don't hardcode cache names here.
+        if self.bank in ("L1", "L2"):
+            return self.origin.address_root
+        return self
 
     @property
     def bank(self) -> str:
         return self.spec.bank
 
-    @property
-    def dtype(self) -> dtypes.Dtype:
-        return self.spec.dtype
 
-    @property
-    def bytes_used(self) -> int:
-        return self.volume * self.dtype.size
+@dataclasses.dataclass(frozen=True, eq=False)
+class Tensor(TensorBase):
+    """An n-dimensional array."""
+
+    spec: specs.TensorSpec
+    name: Optional[str]
+    origin: Optional[TensorLike] = None
+
+    def __post_init__(self):
+        self._common_init_checks()
 
     def __str__(self):
         layout_epi = ""
         if self.layout != specs.Layout.ROW_MAJOR:
             layout_epi = f", {self.layout}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
-        return f"Tensor({dims_part}{layout_epi}, {self.bank})"
-
-    @property
-    def root(self):
-        return self
-
-    @property
-    def contiguous(self):
-        """Whether or not elements are contiguous in the underlying memory.
-
-        This is always True for matrices.
-        """
-        return True
-
-    def replace_tensors(
-        self,
-        replacements: "Mapping[Union[Tensor, Tile], Union[Tensor, Tile]]",
-    ) -> "Tensor":
-        new_origin = None
-        if self.origin is not None:
-            try:
-                new_origin = replacements[self.origin]
-            except KeyError:
-                new_origin = self.origin.replace_tensors(replacements)
-        return Tensor(spec=self.spec, name=self.name, origin=new_origin)
-
-    def __eq__(self, other):
-        return self is other
-
-    def __hash__(self):
-        return hash(id(self))
+        return f"{type(self).__name__}({dims_part}{layout_epi}, {self.bank})"
 
     def __getstate__(self):
         return {
@@ -159,21 +173,19 @@ class Tensor(_TensorLike):
         object.__setattr__(self, "origin", state_dict["origin"])
 
 
-@dataclasses.dataclass(frozen=True)
-class Tile(_TensorLike):
-    dim_sizes: Tuple[int, ...]
+@dataclasses.dataclass(frozen=True, eq=False)
+class Tile(TensorLike):
+    dim_sizes: tuple[int, ...]
     name: Optional[str]
     # TODO: Rename origin, in Tensor and Tile, `source`, which is more descriptive
     origin: Union[Tensor, "Tile"]
 
     def __post_init__(self):
+        self._common_init_checks()
         assert isinstance(
-            self.root, Tensor
-        ), f"root was not Tensor; got: {type(self.root)}"
+            self.root, TensorBase
+        ), f"root was not a tensor; was: {type(self.root)}"
         assert self.origin is not None
-        for dim_size in self.dim_sizes:
-            if dim_size <= 0:
-                raise ValueError("Invalid dimensions: " + str(self.dim_sizes))
 
     @property
     def root(self) -> Tensor:
@@ -185,10 +197,9 @@ class Tile(_TensorLike):
 
     @property
     def steps(self) -> int:
-        result = 1
-        for dim in range(len(self.dim_sizes)):
-            result *= self.steps_dim(dim)
-        return result
+        return functools.reduce(
+            operator.mul, map(self.steps_dim, range(len(self.dim_sizes))), 1
+        )
 
     def steps_dim(self, dim: int, origin_size: Optional[int] = None) -> int:
         raise NotImplementedError()
@@ -215,38 +226,20 @@ class Tile(_TensorLike):
             bank_epi = f", {self.bank}"
         return f"{type(self).__name__}({dims_part}{layout_epi}{bank_epi})"
 
-    def __eq__(self, other):
-        return self is other
+    @property
+    def contiguous(self) -> bool:
+        """Whether or not elements are contiguous in the underlying memory."""
+        from . import utils
 
-    def __hash__(self):
-        return hash(id(self))
+        return utils.contiguous(self, self.address_root)
 
     @property
-    def contiguous(self):
-        """Whether or not elements are contiguous in the underlying memory."""
-        pairs = zip(layout_ordered_dims(self), layout_ordered_dims(self.root))
-
-        # Drop leading dimensions where the tile size is one
-        pairs = itertools.dropwhile(lambda x: x[0] == 1, pairs)
-
-        # Drop the first
-        pairs = itertools.islice(pairs, 1, None)
-
-        for tile_dim_size, root_dim_size in pairs:
-            # The following includes the case where an underlying dimension is 1.
-            if tile_dim_size != root_dim_size:
-                return False
-        return True
+    def address_root(self) -> "TensorBase":
+        return self.origin.address_root
 
     @property
     def frontiers(self) -> tuple[int, ...]:
         """The sizes of non-overlapping regions between consecutive tiles in each dimension."""
-        raise NotImplementedError()
-
-    def replace_tensors(
-        self,
-        replacements: "Mapping[Union[Tensor, Tile], Union[Tensor, Tile]]",
-    ) -> "Tile":
         raise NotImplementedError()
 
     def __getstate__(self):
@@ -266,7 +259,7 @@ class Tile(_TensorLike):
         object.__setattr__(self, "origin", state_dict["origin"])
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, eq=False)
 class SimpleTile(Tile):
     def steps_dim(self, dim: int, origin_size: Optional[int] = None) -> int:
         if origin_size is None:
@@ -282,25 +275,8 @@ class SimpleTile(Tile):
     def frontiers(self) -> tuple[int, ...]:
         return tuple(0 for _ in self.dim_sizes)
 
-    def replace_tensors(
-        self,
-        replacements: "Mapping[Union[Tensor, Tile], Union[Tensor, Tile]]",
-    ) -> "SimpleTile":
-        new_origin = None
-        if self.origin is not None:
-            try:
-                new_origin = replacements[self.origin]
-            except KeyError:
-                new_origin = self.origin.replace_tensors(replacements)
 
-        return SimpleTile(
-            dim_sizes=self.dim_sizes,
-            name=self.name,
-            origin=new_origin,
-        )
-
-
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, eq=False)
 class ConvolutionImageTile(Tile):
     filter_shape: tuple[int, int]
 
@@ -350,24 +326,6 @@ class ConvolutionImageTile(Tile):
         # Step size is one, so the frontier in each dimension equals the output
         # size in that dimension.
         return tuple(self._s(w, f) for w, f in zip(self.dim_sizes, self.filter_shape))
-
-    def replace_tensors(
-        self,
-        replacements: "Mapping[Union[Tensor, Tile], Union[Tensor, Tile]]",
-    ) -> "ConvolutionImageTile":
-        new_origin = None
-        if self.origin is not None:
-            try:
-                new_origin = replacements[self.origin]
-            except KeyError:
-                new_origin = self.origin.replace_tensors(replacements)
-
-        return ConvolutionImageTile(
-            filter_shape=self.filter_shape,
-            dim_sizes=self.dim_sizes,
-            name=self.name,
-            origin=new_origin,
-        )
 
     def __getstate__(self):
         state = super().__getstate__()

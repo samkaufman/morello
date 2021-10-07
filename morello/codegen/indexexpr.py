@@ -3,7 +3,7 @@ from typing import Optional
 import sympy
 
 from ..specs import Layout
-from ..tensor import ConvolutionImageTile, SimpleTile, Tensor, Tile
+from ..tensor import ConvolutionImageTile, SimpleTile, TensorBase, Tile
 
 
 def _tensor_row_major_indexing_expr(rank: int) -> sympy.Expr:
@@ -27,7 +27,7 @@ def _tensor_col_major_indexing_expr(rank: int) -> sympy.Expr:
 
 
 def buffer_indexing_expr(
-    tensor: Tensor, concrete_shape: Optional[tuple[int, ...]] = None
+    tensor: TensorBase, concrete_shape: Optional[tuple[int, ...]] = None
 ) -> sympy.Expr:
     """Returns a sympy.Expr mapping logical Tensor coordinates to buffer offset."""
     if concrete_shape is None:

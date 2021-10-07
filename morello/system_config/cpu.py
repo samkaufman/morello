@@ -6,16 +6,16 @@ import sys
 import tempfile
 from typing import Optional, Union
 
+from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 from .. import specs
 from ..codegen import gen
 from ..tensor import Tensor, Tile
-from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
 _OUTPUT_RE = re.compile(r"cpu:\s+(\d+)s\s*(\d+)ns")
 
 
 class CpuTarget(Target):
-    def __new__(cls, *args, **kwds):
+    def __new__(cls, *args, **kwargs):
         # Singleton pattern. Constructor will return the first instance made.
         it = cls.__dict__.get("__one__")
         if it is not None:
@@ -28,7 +28,10 @@ class CpuTarget(Target):
         spec: specs.TensorSpec,
         name: Optional[str],
         origin: Optional[Union[Tensor, Tile]] = None,
+        **kwargs,
     ) -> Tensor:
+        if kwargs:
+            raise TypeError("Unexpected keyword argument(s)")
         return Tensor(spec=spec, name=name, origin=origin)
 
     @property

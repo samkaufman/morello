@@ -1,6 +1,9 @@
 import itertools
-from typing import TypeVar
 from collections.abc import Mapping
+from typing import TypeVar, Iterable
+
+from . import tensor, specs
+from .tensor import TensorLike
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -25,3 +28,63 @@ def zip_dict(
     for key in keys:
         result[key] = (first[key],) + tuple(d[key] for d in others)
     return result
+
+
+def flatten(src):
+    """Flattens nested iterables and ndarrays."""
+    if hasattr(src, "tolist"):
+        src = src.tolist()
+    for el in src:
+        if isinstance(el, Iterable) and not isinstance(el, (str, bytes)):
+            yield from flatten(el)
+        else:
+            yield el
+
+
+def contiguous(t, address_root):
+    if isinstance(t, tensor.TensorLike):
+        self_ordered_dims = layout_ordered_dims(t)
+    else:
+        self_ordered_dims = layout_ordered_dims(*t)
+
+    if isinstance(address_root, tensor.TensorLike):
+        address_root_ordered_dims = layout_ordered_dims(address_root)
+    else:
+        address_root_ordered_dims = layout_ordered_dims(*address_root)
+
+    pairs = zip(self_ordered_dims, address_root_ordered_dims)
+
+    # Drop leading dimensions where the tile size is one
+    pairs = itertools.dropwhile(lambda x: x[0] == 1, pairs)
+
+    # Drop the first
+    pairs = itertools.islice(pairs, 1, None)
+
+    for tile_dim_size, root_dim_size in pairs:
+        # The following includes the case where an underlying dimension is 1.
+        if tile_dim_size != root_dim_size:
+            return False
+    return True
+
+
+def layout_ordered_dims(*args) -> tuple[int, ...]:
+    """Returns tuple of operand's height and width; or vice versa if column-major."""
+    dim_sizes: tuple[int, ...]
+    root_layout: specs.Layout
+    if len(args) == 1 and isinstance(args[0], TensorLike):
+        dim_sizes, root_layout = args[0].dim_sizes, args[0].root.layout
+    elif len(args) == 2:
+        dim_sizes, root_layout = args
+    else:
+        raise TypeError("Unknown arguments")
+
+    if len(dim_sizes) == 1:
+        return (dim_sizes[0],)
+    if root_layout == specs.Layout.ROW_MAJOR:
+        lead = [dim_sizes[0], dim_sizes[1]]
+    elif root_layout == specs.Layout.COL_MAJOR:
+        lead = [dim_sizes[1], dim_sizes[0]]
+    else:
+        raise NotImplementedError(f"Unknown layout {root_layout}")
+    lead.extend(dim_sizes[2:])
+    return tuple(lead)
