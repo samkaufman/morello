@@ -13,25 +13,6 @@ strategies.register_default_strategies()
 
 
 @st.composite
-def _arb_hvx_tensor(draw):
-    tensor_shape = tuple(
-        draw(st.lists(st.integers(min_value=1, max_value=256), min_size=1, max_size=5))
-    )
-    vector_shape = tuple(
-        draw(st.integers(min_value=1, max_value=o)) for o in tensor_shape
-    )
-    return hexagon.HvxVmemTensor(
-        specs.TensorSpec(
-            tensor_shape,
-            draw(st.from_type(dtypes.Dtype)),
-            bank="VMEM",
-            layout=draw(st.from_type(specs.Layout)),
-        ),
-        vector_shape=vector_shape,
-    )
-
-
-@st.composite
 def _st_test_tiling_always_produces_vector_indices_in_parent_set(draw):
     tensor_shape = tuple(
         draw(st.lists(st.integers(min_value=1, max_value=256), min_size=1, max_size=5))

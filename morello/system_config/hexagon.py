@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import typing
-from collections import Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable, Optional, Union
 
