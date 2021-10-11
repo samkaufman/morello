@@ -74,16 +74,10 @@ def _arb_impls_from_actions(draw, partial_impl: ops.Schedule):
     # output tile shapes are not explored.
     if partial_impl.is_scheduled:
         return partial_impl
-    # TODO: Remove the following filter once codegen is implemented for column-major.
-    #   and sliding windows.
+    # TODO: Remove the following filter once codegen is implemented for sliding
+    #  windows.
     actions = [
-        a
-        for a in partial_impl.actions()
-        if (
-            not isinstance(a, (ops.MoveAction, ops.PeelAction))
-            or a.layout == specs.Layout.ROW_MAJOR
-        )
-        and not isinstance(a, ops.SlidingTileOutAction)
+        a for a in partial_impl.actions() if not isinstance(a, ops.SlidingTileOutAction)
     ]
     assert actions, f"actions was empty for Impl: {partial_impl}"
 
