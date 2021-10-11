@@ -66,9 +66,9 @@ def _make_tiled_matmul(
     hypothesis.assume(tile_width <= m_dim)
     hypothesis.note(f"Non-contig. {m_dim}x{m_dim} Matmul w/ {tile_width}-wide tile")
 
-    a = target.tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
-    b = target.tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
-    o = target.tensor(spec=specs.TensorSpec((m_dim, m_dim), dtype), name=None)
+    a = target.tensor(spec=target.tensor_spec((m_dim, m_dim), dtype), name=None)
+    b = target.tensor(spec=target.tensor_spec((m_dim, m_dim), dtype), name=None)
+    o = target.tensor(spec=target.tensor_spec((m_dim, m_dim), dtype), name=None)
 
     schedule = ops.MatmulHole(a, b, o).tile_out((m_dim, tile_width))
     # if make_contiguous:
@@ -143,13 +143,13 @@ def test_cost_is_invariant_to_panel_layouts_cpu(
     with system_config.with_target(target):
         dim_sizes = tuple(elements if dim_idx == i else 1 for i in range(2))
         left = target.tensor(
-            spec=specs.TensorSpec(
+            spec=target.tensor_spec(
                 dim_sizes, dtype=dtype, layout=specs.Layout.ROW_MAJOR, bank=bank
             ),
             name=None,
         )
         right = target.tensor(
-            spec=specs.TensorSpec(
+            spec=target.tensor_spec(
                 dim_sizes, dtype=dtype, layout=specs.Layout.COL_MAJOR, bank=bank
             ),
             name=None,

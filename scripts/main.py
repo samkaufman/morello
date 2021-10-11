@@ -53,9 +53,9 @@ parser_convnet = subparsers.add_parser(
 
 def _matmul_main(m, k, n, cache: search_cache.ScheduleCache):
     target = system_config.current_target()
-    left = target.tensor(specs.TensorSpec((m, k), dtype=DTYPE), name="left")
-    right = target.tensor(specs.TensorSpec((k, n), dtype=DTYPE), name="right")
-    output = target.tensor(specs.TensorSpec((m, n), dtype=DTYPE), name="output")
+    left = target.tensor(target.tensor_spec((m, k), dtype=DTYPE), name="left")
+    right = target.tensor(target.tensor_spec((k, n), dtype=DTYPE), name="right")
+    output = target.tensor(target.tensor_spec((m, n), dtype=DTYPE), name="output")
     start = time.time()
     s = schedule_search(
         specs.Matmul(left.spec, right.spec, output.spec, serial_only=False),
@@ -77,14 +77,14 @@ def _conv_main(
     target = system_config.current_target()
     assert filter_width <= image_width and filter_height <= image_height
     left = target.tensor(
-        specs.TensorSpec((image_width, image_height), dtype=DTYPE), name="image"
+        target.tensor_spec((image_width, image_height), dtype=DTYPE), name="image"
     )
     right = target.tensor(
-        specs.TensorSpec((filter_width, filter_height, filter_count), dtype=DTYPE),
+        target.tensor_spec((filter_width, filter_height, filter_count), dtype=DTYPE),
         name="filters",
     )
     output = target.tensor(
-        specs.TensorSpec(
+        target.tensor_spec(
             (
                 image_width - filter_width + 1,
                 image_height - filter_height + 1,
@@ -106,10 +106,14 @@ def _conv_main(
 
 def _convnet_main(cache: search_cache.ScheduleCache):
     target = system_config.current_target()
-    img = target.tensor(specs.TensorSpec((8, 8), dtype=DTYPE), name="image")
-    filters_a = target.tensor(specs.TensorSpec((3, 3, 4), dtype=DTYPE), name="filtersA")
-    filters_b = target.tensor(specs.TensorSpec((3, 3, 4), dtype=DTYPE), name="filtersB")
-    output = target.tensor(specs.TensorSpec((4, 4, 4), dtype=DTYPE), name="output")
+    img = target.tensor(target.tensor_spec((8, 8), dtype=DTYPE), name="image")
+    filters_a = target.tensor(
+        target.tensor_spec((3, 3, 4), dtype=DTYPE), name="filtersA"
+    )
+    filters_b = target.tensor(
+        target.tensor_spec((3, 3, 4), dtype=DTYPE), name="filtersB"
+    )
+    output = target.tensor(target.tensor_spec((4, 4, 4), dtype=DTYPE), name="output")
 
     start = time.time()
     s = schedule_search(

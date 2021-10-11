@@ -111,6 +111,8 @@ def _arb_conv_spec(draw):
 
     All tensors will have the same type.
     """
+    target = system_config.current_target()
+
     dtype = draw(st.from_type(dtypes.Dtype))
     inp_h = draw(st.integers(min_value=1, max_value=9))
     inp_w = draw(st.integers(min_value=1, max_value=9))
@@ -120,9 +122,9 @@ def _arb_conv_spec(draw):
     out_h, out_w = 1 + inp_h - fh, 1 + inp_w - fw
 
     return specs.Convolution(
-        specs.TensorSpec((inp_h, inp_w), dtype=dtype),
-        specs.TensorSpec((fh, fw, fc), dtype=dtype),
-        output=specs.TensorSpec((out_h, out_w, fc), dtype=dtype),
+        target.tensor_spec((inp_h, inp_w), dtype=dtype),
+        target.tensor_spec((fh, fw, fc), dtype=dtype),
+        output=target.tensor_spec((out_h, out_w, fc), dtype=dtype),
         serial_only=draw(st.booleans()),
     )
 
@@ -133,6 +135,8 @@ def _arb_reduce_conv_spec(draw):
 
     All tensors will have the same type.
     """
+    target = system_config.current_target()
+
     dtype = draw(st.from_type(dtypes.Dtype))
     inp_h = draw(st.integers(min_value=1, max_value=9))
     inp_w = draw(st.integers(min_value=1, max_value=9))
@@ -144,10 +148,10 @@ def _arb_reduce_conv_spec(draw):
     return specs.Compose(
         (specs.ReduceSum, specs.Convolution),
         inputs=(
-            specs.TensorSpec((inp_h, inp_w), dtype=dtype),
-            specs.TensorSpec((fh, fw, fc), dtype=dtype),
+            target.tensor_spec((inp_h, inp_w), dtype=dtype),
+            target.tensor_spec((fh, fw, fc), dtype=dtype),
         ),
-        output=specs.TensorSpec((out_h, out_w), dtype=dtype),
+        output=target.tensor_spec((out_h, out_w), dtype=dtype),
         intermediate_dtypes=(draw(st.from_type(dtypes.Dtype)),),
         serial_only=draw(st.booleans()),
     )
@@ -159,6 +163,8 @@ def _arb_conv_reduce_conv_spec(draw):
 
     All tensors will have the same dtype.
     """
+    target = system_config.current_target()
+
     dtype = draw(st.from_type(dtypes.Dtype))
     inp_h = draw(st.integers(min_value=1, max_value=9))
     inp_w = draw(st.integers(min_value=1, max_value=9))
@@ -175,11 +181,11 @@ def _arb_conv_reduce_conv_spec(draw):
     return specs.Compose(
         (specs.Convolution, specs.ReduceSum, specs.Convolution),
         inputs=(
-            specs.TensorSpec((fb_h, fb_w, fb_c), dtype=dtype),
-            specs.TensorSpec((inp_h, inp_w), dtype=dtype),
-            specs.TensorSpec((fa_h, fa_w, fa_c), dtype=dtype),
+            target.tensor_spec((fb_h, fb_w, fb_c), dtype=dtype),
+            target.tensor_spec((inp_h, inp_w), dtype=dtype),
+            target.tensor_spec((fa_h, fa_w, fa_c), dtype=dtype),
         ),
-        output=specs.TensorSpec((out_h, out_w, fb_c), dtype=dtype),
+        output=target.tensor_spec((out_h, out_w, fb_c), dtype=dtype),
         intermediate_dtypes=(
             draw(st.from_type(dtypes.Dtype)),
             draw(st.from_type(dtypes.Dtype)),
@@ -195,14 +201,16 @@ def _arb_matmul_spec(draw):
     All tensors will have the same dtype.
     """
     # The max sizes should be at least 16 to explore vectorized ops
+    target = system_config.current_target()
+
     dtype = draw(st.from_type(dtypes.Dtype))
     m = draw(st.integers(min_value=1, max_value=32))
     k = draw(st.integers(min_value=1, max_value=32))
     n = draw(st.integers(min_value=1, max_value=32))
     return specs.Matmul(
-        specs.TensorSpec((m, k), dtype=dtype),
-        specs.TensorSpec((k, n), dtype=dtype),
-        output=specs.TensorSpec((m, n), dtype=dtype),
+        target.tensor_spec((m, k), dtype=dtype),
+        target.tensor_spec((k, n), dtype=dtype),
+        output=target.tensor_spec((m, n), dtype=dtype),
         serial_only=draw(st.booleans()),
     )
 
@@ -211,6 +219,8 @@ def _arb_matmul_spec(draw):
 def _arb_matmul_matmul_spec(draw):
     """A strategy that yields Matmul-Matmul specs."""
     # The max sizes should be at least 16 to explore vectorized ops
+    target = system_config.current_target()
+
     dtype = draw(st.from_type(dtypes.Dtype))
     m = draw(st.integers(min_value=1, max_value=32))
     k = draw(st.integers(min_value=1, max_value=32))
@@ -219,11 +229,11 @@ def _arb_matmul_matmul_spec(draw):
     return specs.Compose(
         (specs.Matmul, specs.Matmul),
         inputs=(
-            specs.TensorSpec((n, second_n), dtype=draw(st.from_type(dtypes.Dtype))),
-            specs.TensorSpec((m, k), dtype=draw(st.from_type(dtypes.Dtype))),
-            specs.TensorSpec((k, n), dtype=draw(st.from_type(dtypes.Dtype))),
+            target.tensor_spec((n, second_n), dtype=draw(st.from_type(dtypes.Dtype))),
+            target.tensor_spec((m, k), dtype=draw(st.from_type(dtypes.Dtype))),
+            target.tensor_spec((k, n), dtype=draw(st.from_type(dtypes.Dtype))),
         ),
-        output=specs.TensorSpec((m, second_n), dtype=dtype),
+        output=target.tensor_spec((m, second_n), dtype=dtype),
         intermediate_dtypes=(draw(st.from_type(dtypes.Dtype)),),
         serial_only=draw(st.booleans()),
     )
@@ -258,16 +268,16 @@ def _calculator_to_test(spec_st):
             ],
             ids=["cpu", "hexagon"],
         )
-        @hypothesis.given(
-            spec_st.map(_spec_to_applied_hole)
-            .flatmap(_arb_impls_from_actions)
-            .flatmap(_arb_zip_values_for_impl),
-        )
+        @hypothesis.given(st.data())
         @hypothesis.settings(deadline=CC_DEADLINE)
         @functools.wraps(calc_fn)
-        def wrapper(target, pair):
+        def wrapper(target, data):
             with system_config.with_target(target):
-                impl, inp_values = pair
+                impl, inp_values = data.draw(
+                    spec_st.map(_spec_to_applied_hole)
+                    .flatmap(_arb_impls_from_actions)
+                    .flatmap(_arb_zip_values_for_impl)
+                )
 
                 hypothesis.note(
                     "Impl:\n"

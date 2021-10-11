@@ -67,11 +67,11 @@ def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
 
     results = []
     for cap in range(cap_start, cap_start + 2):
-        img = target.tensor(specs.TensorSpec((6, 6), dtype=dtype), name="image")
+        img = target.tensor(target.tensor_spec((6, 6), dtype=dtype), name="image")
         filters_a = target.tensor(
-            specs.TensorSpec((3, 3, 2), dtype=dtype), name="filtersA"
+            target.tensor_spec((3, 3, 2), dtype=dtype), name="filtersA"
         )
-        output = target.tensor(specs.TensorSpec((4, 4), dtype=dtype), name="output")
+        output = target.tensor(target.tensor_spec((4, 4), dtype=dtype), name="output")
 
         original_capacity = system_config.current_system().level_configs[0].capacity
 

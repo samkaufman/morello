@@ -1,4 +1,5 @@
 import itertools
+import functools
 from collections.abc import Mapping
 from typing import TypeVar, Iterable
 
@@ -88,3 +89,18 @@ def layout_ordered_dims(*args) -> tuple[int, ...]:
         raise NotImplementedError(f"Unknown layout {root_layout}")
     lead.extend(dim_sizes[2:])
     return tuple(lead)
+
+
+def factors(n: int) -> Iterable[int]:
+    """Returns the factors of an integer, in ascending order.
+
+    Implementation taken from https://stackoverflow.com/a/6800214.
+    """
+    return sorted(
+        set(
+            functools.reduce(
+                list.__add__,
+                ([i, n // i] for i in range(1, int(n ** 0.5) + 1) if n % i == 0),
+            )
+        )
+    )

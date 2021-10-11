@@ -22,9 +22,10 @@ strategies.register_default_strategies()
 )
 def test_tile_contiguous(tensor_shape, tile_shape, expected):
     # TODO: Vary the following three parameters with hypothesis
+    target = system_config.current_target()
     dtype, bank, layout = dtypes.Uint8, "RF", specs.Layout.ROW_MAJOR
-    tensor_spec = specs.TensorSpec(tensor_shape, dtype, bank, layout)
-    t = system_config.current_target().tensor(tensor_spec, name=None, origin=None)
+    tensor_spec = target.tensor_spec(tensor_shape, dtype, bank, layout)
+    t = target.tensor(tensor_spec, name=None, origin=None)
     tile = t.simple_tile(tile_shape)
     assert tile.contiguous == expected
 

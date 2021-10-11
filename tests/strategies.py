@@ -5,8 +5,6 @@ from hypothesis import strategies as st
 from morello import dtypes, ops, specs, system_config, tensor
 from morello.system_config import cpu, hexagon
 
-target_st = st.sampled_from([cpu.CpuTarget(), hexagon.HvxSimulatorTarget()])
-
 dtype_st = st.sampled_from([dtypes.Uint8, dtypes.Uint32])
 
 
@@ -38,7 +36,8 @@ def tensorspec_st(
     max_dims: Optional[int] = None,
     layout: Optional[specs.Layout] = None,
 ) -> specs.TensorSpec:
-    system = system_config.current_system()
+    target = system_config.current_target()
+
     dim_sizes = draw(
         st.lists(
             dim_st(max_size=max_dim_size), min_size=min_dims, max_size=max_dims
@@ -46,76 +45,78 @@ def tensorspec_st(
     )
     if layout is None:
         layout = draw(layout_st(dim_sizes=dim_sizes))
-    return specs.TensorSpec(
+    return target.tensor_spec(
         dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=layout,
-        bank=draw(st.sampled_from(sorted(system.banks))),
+        bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
 
 
 @st.composite
 def matmul_spec_st(draw, max_dim_size: Optional[int] = 32):
-    system = system_config.current_system()
+    target = system_config.current_target()
     lhs = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=2))
     rhs_dim_sizes = (lhs.dim_sizes[1], draw(dim_st(max_size=max_dim_size)))
-    rhs = specs.TensorSpec(
+    rhs = target.tensor_spec(
         dim_sizes=rhs_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=rhs_dim_sizes)),
-        bank=draw(st.sampled_from(sorted(system.banks))),
+        bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
     out_dim_sizes = (lhs.dim_sizes[0], rhs.dim_sizes[1])
-    out = specs.TensorSpec(
+    out = target.tensor_spec(
         dim_sizes=out_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=out_dim_sizes)),
-        bank=draw(st.sampled_from(sorted(system.banks))),
+        bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
     return specs.Matmul(lhs, rhs, out, serial_only=draw(st.booleans()))
 
 
 @st.composite
 def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
-    system = system_config.current_system()
+    target = system_config.current_target()
     image = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=2))
     filters_dim_sizes = (
         draw(dim_st(max_size=image.dim_sizes[0])),
         draw(dim_st(max_size=image.dim_sizes[1])),
         draw(dim_st(max_size=max_dim_size)),
     )
-    filters = specs.TensorSpec(
+    filters = target.tensor_spec(
         dim_sizes=filters_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=filters_dim_sizes)),
-        bank=draw(st.sampled_from(sorted(system.banks))),
+        bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
     out_dim_sizes = specs.Convolution.output_shape(image.dim_sizes, filters_dim_sizes)
-    out = specs.TensorSpec(
+    out = target.tensor_spec(
         dim_sizes=out_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=out_dim_sizes)),
-        bank=draw(st.sampled_from(sorted(system.banks))),
+        bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
     return specs.Convolution(image, filters, out)
 
 
 @st.composite
 def reduce_spec_st(draw, max_dim_size: Optional[int] = 32):
-    system = system_config.current_system()
+    target = system_config.current_target()
     source = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=4))
     output_dim_sizes = source.dim_sizes[:-1]
-    output = specs.TensorSpec(
+    output = target.tensor_spec(
         dim_sizes=output_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         layout=draw(layout_st(dim_sizes=output_dim_sizes)),
-        bank=draw(st.sampled_from(sorted(system.banks))),
+        bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
     return specs.ReduceSum(source=source, output=output)
 
 
 @st.composite
 def compose_spec_st(draw) -> specs.Compose:
+    target = system_config.current_target()
+
     subspec_classes = draw(
         st.lists(
             st.one_of(
@@ -140,7 +141,7 @@ def compose_spec_st(draw) -> specs.Compose:
     output_dim_sizes = specs.Compose.calculate_output(
         subspec_classes, [inp.dim_sizes for inp in inputs_specs]
     )
-    output_spec = specs.TensorSpec(
+    output_spec = target.tensor_spec(
         dim_sizes=output_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         bank=draw(st.sampled_from(sorted(system_config.current_system().banks))),
@@ -179,7 +180,6 @@ def pipeline_op_st(draw) -> ops.Pipeline:
 
 def register_default_strategies():
     st.register_type_strategy(dtypes.Dtype, dtype_st)
-    st.register_type_strategy(system_config.Target, target_st)
     st.register_type_strategy(specs.TensorSpec, tensorspec_st())
 
     st.register_type_strategy(tensor.Tensor, tensor_st())

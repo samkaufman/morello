@@ -4,8 +4,9 @@ import logging
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Union
 
 if TYPE_CHECKING:
+    from .. import dtypes
     from ..specs import TensorSpec
-    from ..tensor import Tensor, Tile
+    from ..tensor import TensorBase, Tensor, Tile
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,18 @@ class Target(abc.ABC):
         name: Optional[str],
         origin: Optional[Union["Tensor", "Tile"]] = None,
         **kwargs,
-    ) -> "Tensor":
+    ) -> "TensorBase":
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def tensor_spec(
+        self,
+        dim_sizes: tuple[int, ...],
+        dtype: "dtypes.Dtype",
+        bank: Optional[str] = None,
+        *args,
+        **kwargs,
+    ) -> "TensorSpec":
         raise NotImplementedError()
 
     @property

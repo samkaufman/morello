@@ -52,6 +52,22 @@ def test_dim_range():
         ops.tile_size_mode.reset(token)
 
 
+def test_gen_vector_shapes_1():
+    assert list(ops.gen_vector_shapes([4, 4], elements=4 * 4)) == [(4, 4)]
+
+
+def test_gen_vector_shapes_2():
+    assert list(ops.gen_vector_shapes([8], elements=16)) == []
+
+
+def test_gen_vector_shapes_3():
+    assert list(ops.gen_vector_shapes([16, 2], elements=16)) == [(8, 2), (16, 1)]
+
+
+def test_gen_vector_shapes_4():
+    assert list(ops.gen_vector_shapes([16], elements=16)) == [(16,)]
+
+
 @pytest.mark.parametrize(
     "intermed_shapes,dtype,op_mems,expected_peaks,expected_additionals",
     [

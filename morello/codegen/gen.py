@@ -688,6 +688,10 @@ def _inner_generate_c(
                     operand_index_exprs,
                     concrete_shapes,
                 )
+            elif impl.is_store and impl.destination.bank == "L1":
+                raise NotImplementedError(
+                    f"Writing from L1 back to {impl.source.bank} not implemented"
+                )
             elif impl.destination.bank == "VMEM":
                 assert impl.source.bank == "L2"
                 _move_hvx_vmem(

@@ -4,7 +4,7 @@ from morello import dtypes, ops, replace, specs, system_config, tensor
 def test_replace_origin_of_tiles():
     target = system_config.current_target()
     origin = target.tensor(
-        specs.TensorSpec((10, 10), dtype=dtypes.Uint32, bank="GL"),
+        target.tensor_spec((10, 10), dtype=dtypes.Uint32, bank="GL"),
         name="origin",
         origin=None,
     )
@@ -13,7 +13,7 @@ def test_replace_origin_of_tiles():
     impl = ops.MatmulHole(l_and_r, l_and_r, output, serial_only=False)
 
     new_origin = target.tensor(
-        specs.TensorSpec((20, 20), dtype=dtypes.Uint32, bank="GL"),
+        target.tensor_spec((20, 20), dtype=dtypes.Uint32, bank="GL"),
         name="new_origin",
         origin=None,
     ).simple_tile((10, 10))
@@ -26,7 +26,7 @@ def test_replace_origin_of_tiles():
 def test_replace_is_no_op_with_no_real_changes():
     target = system_config.current_target()
     origin = target.tensor(
-        specs.TensorSpec((10, 10), dtype=dtypes.Uint32, bank="GL"),
+        target.tensor_spec((10, 10), dtype=dtypes.Uint32, bank="GL"),
         name="origin",
         origin=None,
     )

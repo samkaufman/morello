@@ -38,10 +38,11 @@ parser.add_argument("--db_path", type=str, default="samples.db")
 
 @functools.lru_cache()
 def spec():
+    target = system_config.current_target()
     return specs.Matmul(
-        specs.TensorSpec((64, 64), dtype=DTYPE),
-        specs.TensorSpec((64, 64), dtype=DTYPE),
-        specs.TensorSpec((64, 64), dtype=DTYPE),
+        target.tensor_spec((64, 64), dtype=DTYPE),
+        target.tensor_spec((64, 64), dtype=DTYPE),
+        target.tensor_spec((64, 64), dtype=DTYPE),
         serial_only=True,
     )
 

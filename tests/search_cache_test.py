@@ -13,37 +13,37 @@ def test_cache_common_scenario(dtype):
     target = current_target()
 
     lhs = target.tensor(
-        spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
+        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
     )
     rhs = target.tensor(
-        spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
+        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
     )
     output = target.tensor(
-        spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
+        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
     )
     fast_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
     fast_wrapped_schedule = search_cache.CachedSchedule(fast_schedule, cost=10)
 
     lhs = target.tensor(
-        spec=specs.TensorSpec((100, 100), dtype=dtype, bank="RF"), name=None
+        spec=target.tensor_spec((100, 100), dtype=dtype, bank="RF"), name=None
     )
     rhs = target.tensor(
-        spec=specs.TensorSpec((100, 100), dtype=dtype, bank="RF"), name=None
+        spec=target.tensor_spec((100, 100), dtype=dtype, bank="RF"), name=None
     )
     output = target.tensor(
-        spec=specs.TensorSpec((100, 100), dtype=dtype, bank="RF"), name=None
+        spec=target.tensor_spec((100, 100), dtype=dtype, bank="RF"), name=None
     )
     slow_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
     slow_wrapped_schedule = search_cache.CachedSchedule(slow_schedule, cost=50)
 
     lhs = target.tensor(
-        spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
+        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
     )
     rhs = target.tensor(
-        spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
+        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
     )
     output = target.tensor(
-        spec=specs.TensorSpec((8, 8), dtype=dtype, bank="RF"), name=None
+        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
     )
     impossible_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
 
@@ -128,10 +128,14 @@ def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype):
 def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
     target = current_target()
     db = current_system().default_bank
-    lhs = target.tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, bank=db), name=None)
-    rhs = target.tensor(spec=specs.TensorSpec((8, 8), dtype=dtype, bank=db), name=None)
+    lhs = target.tensor(
+        spec=target.tensor_spec((8, 8), dtype=dtype, bank=db), name=None
+    )
+    rhs = target.tensor(
+        spec=target.tensor_spec((8, 8), dtype=dtype, bank=db), name=None
+    )
     output = target.tensor(
-        spec=specs.TensorSpec((8, 8), dtype=dtype, bank=db), name=None
+        spec=target.tensor_spec((8, 8), dtype=dtype, bank=db), name=None
     )
     schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
     wrapped_schedule = search_cache.CachedSchedule(schedule, cost=10)

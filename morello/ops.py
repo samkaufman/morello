@@ -7,6 +7,7 @@ import itertools
 import math
 import sys
 import warnings
+from collections.abc import Mapping
 from typing import (
     Callable,
     FrozenSet,
@@ -18,6 +19,7 @@ from typing import (
     TypeVar,
     Union,
     cast,
+    Any,
 )
 
 import dataclass_abc
@@ -173,14 +175,23 @@ class MoveAction:
     prefetching: bool
     bank: Optional[str] = None
     layout: Optional[specs.Layout] = None
+    kwargs: Optional[Mapping[Any, Any]] = None
 
     def __post_init__(self):
         assert (
             any(d > 1 for d in self.source.dim_sizes) or self.layout == Layout.ROW_MAJOR
         ), f"Layout was {self.layout} for dims. {self.source.dim_sizes}"
+        assert (
+            self.bank is None
+            or self.bank
+            in system_config.current_system().faster_destination_banks(self.source.bank)
+        )
 
     def __call__(self):
-        return self.func(self.bank, self.layout, self.prefetching)
+        kws = {}
+        if self.kwargs is not None:
+            kws = self.kwargs
+        return self.func(self.bank, self.layout, self.prefetching, **kws)
 
     def __str__(self):
         return (
@@ -192,12 +203,16 @@ class MoveAction:
 
 @dataclasses.dataclass(frozen=True)
 class PeelAction:
-    func: Callable[[Optional[str], Optional[Layout]], "Schedule"]
+    impl: "ComposeHole"
     bank: Optional[str] = None
     layout: Optional[specs.Layout] = None
+    kwargs: Mapping[Any, Any] = None
 
     def __call__(self):
-        return self.func(self.bank, self.layout)
+        kws = {}
+        if self.kwargs:
+            kws = self.kwargs
+        return self.impl.peel(self.bank, self.layout, **kws)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -378,8 +393,8 @@ def _common_move(
 
     :param attr_name: The name of the field holding the operand to move.
     :param bank: The bank to which the operand should be moved, if not None.
-    :param kwargs: Extra keyword arguments are forwarded the current target's `tensor`
-      method while constructing the destination tensor.
+    :param kwargs: Extra keyword arguments are forwarded the current target's
+      `tensor_spec` method while constructing the destination tensor.
     """
     operand: Union[Tensor, Tile] = getattr(op, attr_name)
     if bank is None:
@@ -389,12 +404,15 @@ def _common_move(
     if bank == operand.root.bank and layout == operand.layout:
         raise ValueError("Either bank or layout must differ from current")
     new_mat = current_target().tensor(
-        spec=specs.TensorSpec(
-            dim_sizes=operand.dim_sizes, dtype=operand.dtype, layout=layout, bank=bank
+        spec=current_target().tensor_spec(
+            dim_sizes=operand.dim_sizes,
+            dtype=operand.dtype,
+            layout=layout,
+            bank=bank,
+            **kwargs,
         ),
         name=None,
         origin=operand,
-        **kwargs,
     )
 
     # Figure out the input index, if it's an input
@@ -415,8 +433,11 @@ def _common_move(
     )
 
 
-def _move_arguments(operand: Union[Tile, Tensor]) -> Iterable[tuple[str, Layout]]:
-    """Yields banks and layouts to which ."""
+def _move_arguments(
+    operand: Union[Tile, Tensor]
+) -> Iterable[tuple[str, Layout, dict[str, Any]]]:
+    system = system_config.current_system()
+
     # If the tensor has only one element, row-major is the only available
     # layout. Otherwise, all layouts are available.
     allowable_layouts = [specs.Layout.ROW_MAJOR]
@@ -425,19 +446,23 @@ def _move_arguments(operand: Union[Tile, Tensor]) -> Iterable[tuple[str, Layout]
 
     # Yield actions for movement with register file destination, which
     # includes relayouts in registers and movements from level 1 to RF.
-    system = system_config.current_system()
     for layout in allowable_layouts:
         for bank in system.faster_destination_banks(operand.bank):
-            yield bank, layout
+            # TODO: Hacky check for VMEM.
+            if bank == "VMEM":
+                for vector_shape in gen_vector_shapes(operand.dim_sizes):
+                    yield bank, layout, {"vector_shape": vector_shape}
+            else:
+                yield bank, layout, {}
 
 
 def _common_operand_move_actions(
     op_move_tuples: Iterable[tuple[int, Union[Tensor, Tile], Callable]]
 ) -> Iterable[MoveAction]:
     for inp_idx, operand, move_fn in op_move_tuples:
-        for bank, layout in _move_arguments(operand):
+        for bank, layout, kws in _move_arguments(operand):
             for p in [True, False]:
-                yield MoveAction(move_fn, operand, inp_idx, p, bank, layout)
+                yield MoveAction(move_fn, operand, inp_idx, p, bank, layout, kws)
 
 
 def spec_to_hole(spec: specs.Spec, inputs: Tuple, output) -> "Schedule":
@@ -652,7 +677,7 @@ class Schedule(abc.ABC):
         # Turn tile_to_convert into a Tensor under management of the SlidingWindowLoop
         # and a Tile for calculating the update costs
         live_tensor = current_target().tensor(
-            spec=specs.TensorSpec(
+            spec=current_target().tensor_spec(
                 tile_to_convert.dim_sizes,
                 tile_to_convert.dtype,
                 bank=bank,
@@ -793,6 +818,21 @@ def gen_tile_sizes(
                 yield new_shape
 
 
+def gen_vector_shapes(
+    outer_shape: Sequence[int], elements: int = 128
+) -> Iterable[tuple[int, ...]]:
+    if len(outer_shape) == 0:
+        raise ValueError("Given shape cannot be empty")
+    elif len(outer_shape) == 1:
+        if outer_shape[0] < elements:
+            return
+        yield (elements,)
+    else:
+        for factor in utils.factors(min(outer_shape[0], elements)):
+            for tail in gen_vector_shapes(outer_shape[1:], elements // factor):
+                yield (factor,) + tail
+
+
 @dataclass_abc.dataclass_abc(frozen=True)
 class ComposeHole(Schedule):
     spec: specs.Compose
@@ -839,7 +879,18 @@ class ComposeHole(Schedule):
         # TODO: Reintroduce splitting on non-index 0
         for bank in system.banks:
             for layout in (Layout.ROW_MAJOR, Layout.COL_MAJOR):
-                yield PeelAction(self.peel, bank=bank, layout=layout)
+                # TODO: This hack stinks. If we had partial finite functions/lenses,
+                #   we could just constrain a few properties and enumerate the rest.
+                #   It would also be okay to just generate Tensor-making callables
+                #   for the peel to populate in a generic way.
+                peel_kwargs = [{}]
+                if bank == "VMEM":
+                    peel_kwargs = (
+                        {"vector_shape": shape}
+                        for shape in gen_vector_shapes(self.spec.intermediate_shapes[0])
+                    )
+                for peel_kws in peel_kwargs:
+                    yield PeelAction(self, bank=bank, layout=layout, kwargs=peel_kws)
 
         yield from _common_operand_move_actions(
             [
@@ -900,12 +951,15 @@ class ComposeHole(Schedule):
         if bank == operand.root.bank and layout == operand.layout:
             raise ValueError("Either bank or layout must differ from current")
         new_mat = current_target().tensor(
-            spec=specs.TensorSpec(
-                operand.dim_sizes, dtype=operand.dtype, layout=layout, bank=bank
+            spec=current_target().tensor_spec(
+                operand.dim_sizes,
+                dtype=operand.dtype,
+                layout=layout,
+                bank=bank,
+                **kwargs,
             ),
             name=None,
             origin=operand,
-            **kwargs,
         )
 
         new_inputs = self.inputs[:input_idx] + (new_mat,) + self.inputs[input_idx + 1 :]
@@ -936,12 +990,15 @@ class ComposeHole(Schedule):
         if bank == operand.root.bank and layout == operand.layout:
             raise ValueError("Either bank or layout must differ from current")
         new_mat = current_target().tensor(
-            spec=specs.TensorSpec(
-                operand.dim_sizes, dtype=operand.dtype, layout=layout, bank=bank
+            spec=current_target().tensor_spec(
+                operand.dim_sizes,
+                dtype=operand.dtype,
+                layout=layout,
+                bank=bank,
+                **kwargs,
             ),
             name=None,
             origin=operand,
-            **kwargs,
         )
 
         new_inner_spec = dataclasses.replace(self.spec, output=new_mat.spec)
@@ -958,6 +1015,7 @@ class ComposeHole(Schedule):
         self,
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
+        **kwargs,
     ) -> Schedule:
         if bank is None or layout is None:
             raise NotImplementedError("Auto-selecting bank or layout unimplemented")
@@ -967,11 +1025,12 @@ class ComposeHole(Schedule):
         if all(d == 1 for d in self.spec.intermediate_shapes[0]):
             intermediate_tensor_layout = Layout.ROW_MAJOR
         intermediate_tensor = current_target().tensor(
-            specs.TensorSpec(
+            current_target().tensor_spec(
                 dim_sizes=self.spec.intermediate_shapes[0],
                 dtype=self.spec.intermediate_dtypes[0],
                 bank=bank,
                 layout=intermediate_tensor_layout,
+                **kwargs,
             ),
             name="buf"
             + utils.ALPHABET_PRODUCT[len(self.spec.subspec_classes) - 2].upper(),
@@ -1893,7 +1952,7 @@ class DirectConv(Schedule):
         # We only need the levels for the left-hand side (images), because that
         # is the only operand over which one can slide.
         if allow_sliding_windows.get():
-            for bank in set(b for b, _ in _move_arguments(self.lhs)):
+            for bank in set(b for b, _, _ in _move_arguments(self.lhs)):
                 for sliding_dim in [0, 1]:
                     for slide_size in dim_range(
                         self.output.dim_sizes[sliding_dim], include_end=False

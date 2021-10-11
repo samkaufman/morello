@@ -7,7 +7,7 @@ import tempfile
 from typing import Optional, Union
 
 from .base import MemoryBankConfig, RunResult, SystemDescription, Target
-from .. import specs
+from .. import dtypes, specs
 from ..codegen import gen
 from ..tensor import Tensor, Tile
 
@@ -33,6 +33,16 @@ class CpuTarget(Target):
         if kwargs:
             raise TypeError("Unexpected keyword argument(s)")
         return Tensor(spec=spec, name=name, origin=origin)
+
+    def tensor_spec(
+        self,
+        dim_sizes: tuple[int, ...],
+        dtype: dtypes.Dtype,
+        bank: Optional[str] = None,
+        layout: specs.Layout = specs.Layout.ROW_MAJOR,
+        **kwargs,
+    ) -> specs.TensorSpec:
+        return specs.TensorSpec(dim_sizes, dtype, bank, layout)
 
     @property
     def system(self) -> "SystemDescription":

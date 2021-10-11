@@ -14,10 +14,10 @@ import tempfile
 import typing
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Callable, Optional, Union
+from typing import cast, Callable, Optional, Union
 
 from .base import MemoryBankConfig, RunResult, SystemDescription, Target
-from .. import ops, specs, tensor
+from .. import dtypes, ops, specs, tensor
 from ..codegen import gen
 
 HEXAGON_CLANG_ARGS = ["-mhvx", "-mv66"]
@@ -52,10 +52,23 @@ class HvxSimulatorTarget(Target):
         name: Optional[str],
         origin: Optional[Union[tensor.Tensor, tensor.Tile]] = None,
         **kwargs,
-    ) -> tensor.Tensor:
+    ) -> tensor.TensorBase:
         if spec.bank == "VMEM":
-            return HvxVmemTensor(spec=spec, name=name, origin=origin, **kwargs)
+            assert isinstance(spec, specs.HvxVmemTensorSpec)
+            return HvxVmemTensor(spec=spec, name=name, origin=origin)
         return tensor.Tensor(spec=spec, name=name, origin=origin)
+
+    def tensor_spec(
+        self,
+        dim_sizes: tuple[int, ...],
+        dtype: dtypes.Dtype,
+        bank: Optional[str] = None,
+        layout: specs.Layout = specs.Layout.ROW_MAJOR,
+        **kwargs,
+    ) -> "TensorSpec":
+        if bank == "VMEM":
+            return specs.HvxVmemTensorSpec(dim_sizes, dtype, bank, layout, **kwargs)
+        return specs.TensorSpec(dim_sizes, dtype, bank, layout)
 
     @property
     def system(self) -> "SystemDescription":
@@ -167,6 +180,7 @@ class HvxSimulatorTarget(Target):
 
 class HvxVmemTensorlike(tensor.TensorLike):
     def _common_post_init(self):
+        assert isinstance(self.spec, specs.HvxVmemTensorSpec)
         assert self.spec.bank == "VMEM"
         if self.bytes_used % 128 != 0:
             raise tensor.DisallowedTileShapeError(
@@ -206,15 +220,18 @@ class HvxVmemTensorlike(tensor.TensorLike):
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class HvxVmemTensor(HvxVmemTensorlike, tensor.TensorBase):
-    spec: specs.TensorSpec
+    spec: specs.HvxVmemTensorSpec
     name: Optional[str]
-    vector_shape: tuple[int, ...]
     origin: Optional[tensor.TensorLike] = None
 
     def __post_init__(self):
         self._common_post_init()
         if functools.reduce(operator.mul, self.vector_shape, self.dtype.size) != 128:
             raise ValueError("vector shape must use 128 bytes")
+
+    @property
+    def vector_shape(self) -> tuple[int, ...]:
+        return self.spec.vector_shape
 
     @typing.final
     def vector_indices(self, tile_pt: Sequence[int]) -> Sequence[int]:
@@ -236,13 +253,11 @@ class HvxVmemTensor(HvxVmemTensorlike, tensor.TensorBase):
             "spec": self.spec,
             "name": self.name,
             "origin": self.origin,
-            "vector_shape": self.vector_shape,
         }
 
     def __setstate__(self, state_dict):
         object.__setattr__(self, "spec", state_dict["spec"])
         object.__setattr__(self, "name", state_dict["name"])
-        object.__setattr__(self, "vector_shape", state_dict["vector_shape"])
         object.__setattr__(self, "origin", state_dict["origin"])
 
 
@@ -260,6 +275,17 @@ class HvxVmemSimpleTile(HvxVmemTensorlike, tensor.SimpleTile):
 
     def vector_indices(self, tile_pt: Sequence[int]) -> Sequence[int]:
         raise NotImplementedError()
+
+    @functools.cached_property
+    def spec(self) -> specs.HvxVmemTensorSpec:
+        orig = super().spec
+        return specs.HvxVmemTensorSpec(
+            dim_sizes=orig.dim_sizes,
+            dtype=orig.dtype,
+            bank=orig.bank,
+            layout=orig.layout,
+            vector_shape=cast(HvxVmemTensor, self.root).vector_shape,
+        )
 
     def __getstate__(self):
         raise NotImplementedError()

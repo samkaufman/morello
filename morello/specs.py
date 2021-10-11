@@ -50,11 +50,11 @@ class TensorSpec:
     dim_sizes: Tuple[int, ...]
     dtype: Dtype
     bank: str
-    layout: Layout = Layout.ROW_MAJOR
+    layout: Layout
 
     def __init__(
         self,
-        dim_sizes: Tuple[int, ...],
+        dim_sizes: tuple[int, ...],
         dtype: Dtype,
         bank: Optional[str] = None,
         layout: Layout = Layout.ROW_MAJOR,
@@ -98,6 +98,25 @@ class TensorSpec:
         return f"({dims_part}, {self.dtype}{bank_epi}{layout_epi})"
 
 
+@dataclasses.dataclass(frozen=True, init=False)
+class HvxVmemTensorSpec(TensorSpec):
+    vector_shape: tuple[int, ...]
+
+    def __init__(self, *args, vector_shape: tuple[int, ...], **kwargs):
+        super().__init__(*args, **kwargs)
+        object.__setattr__(self, "vector_shape", vector_shape)
+        if any(s < vs for s, vs in zip(self.dim_sizes, self.vector_shape)):
+            raise ValueError(
+                f"Shape {self.dim_sizes} is larger in some dimensions than vector shape {vector_shape}"
+            )
+
+    def __str__(self):
+        base_str = super().__str__()[:-1]
+        vs_dims_part = "×".join(str(s) for s in self.vector_shape)
+        base_str = f"{base_str}, {vs_dims_part})"
+        return base_str
+
+
 class Spec(abc.ABC):
     """The abstract root class for program specifications."""
 
@@ -107,7 +126,7 @@ class Spec(abc.ABC):
         output: TensorSpec,
         serial_only: Optional[bool] = None,
     ) -> "Spec":
-        # This method is similiar to the static `from_io` except that it will
+        # This method is similar to the static `from_io` except that it will
         # preserve properties other than the inputs and outputs. This is important for
         # Compose, which carries subspec kinds, not just inputs and arrays.
         if serial_only is None:

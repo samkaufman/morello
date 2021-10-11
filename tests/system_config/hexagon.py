@@ -53,10 +53,14 @@ def test_tiling_across_full_vectors_succeeds(
     tensor_shape, vector_shape, tile_shape, dtype
 ):
     def inner(layout):
-        spec = specs.TensorSpec(tensor_shape, dtype=dtype, bank="VMEM", layout=layout)
-        tensor = hexagon.HvxVmemTensor(
-            spec, None, origin=None, vector_shape=vector_shape
+        spec = specs.HvxVmemTensorSpec(
+            tensor_shape,
+            dtype=dtype,
+            bank="VMEM",
+            layout=layout,
+            vector_shape=vector_shape,
         )
+        tensor = hexagon.HvxVmemTensor(spec, None, origin=None)
         tensor.simple_tile(tile_shape)
 
     inner(specs.Layout.ROW_MAJOR)
@@ -76,10 +80,14 @@ def test_tiling_across_partial_vectors_raises(
     tensor_shape, vector_shape, tile_shape, dtype
 ):
     def inner(layout):
-        spec = specs.TensorSpec(tensor_shape, dtype=dtype, bank="VMEM", layout=layout)
-        tensor = hexagon.HvxVmemTensor(
-            spec, None, origin=None, vector_shape=vector_shape
+        spec = specs.HvxVmemTensorSpec(
+            tensor_shape,
+            dtype=dtype,
+            bank="VMEM",
+            layout=layout,
+            vector_shape=vector_shape,
         )
+        tensor = hexagon.HvxVmemTensor(spec, None, origin=None)
         with pytest.raises(ValueError):
             tensor.simple_tile(tile_shape)
 
@@ -97,10 +105,14 @@ def test_tiling_always_produces_vector_indices_in_parent_set(shapes):
     dtype = dtypes.Uint8
 
     def inner(layout):
-        spec = specs.TensorSpec(shapes[0], dtype=dtype, bank="VMEM", layout=layout)
-        prev_tensorlike = hexagon.HvxVmemTensor(
-            spec, None, origin=None, vector_shape=vector_shape
+        spec = specs.HvxVmemTensorSpec(
+            shapes[0],
+            dtype=dtype,
+            bank="VMEM",
+            layout=layout,
+            vector_shape=vector_shape,
         )
+        prev_tensorlike = hexagon.HvxVmemTensor(spec, None, origin=None)
         for shape in shapes[1:]:
             tile: hexagon.HvxVmemTensorlike = prev_tensorlike.simple_tile(shape)
             prev_tensorlike = tile
