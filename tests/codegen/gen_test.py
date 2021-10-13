@@ -339,7 +339,7 @@ def _st_test_index_exprs_consistent_with_contiguous_props(draw):
     return t, concrete_tile_idxs
 
 
-@hypothesis.settings(max_examples=1000, deadline=2000)
+@hypothesis.settings(max_examples=1000, deadline=4000)
 @hypothesis.given(_st_test_index_exprs_consistent_with_contiguous_props())
 def test_index_exprs_consistent_with_contiguous_props(inp):
     """Test that Tiles' `contiguous` property matches walking elements.
