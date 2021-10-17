@@ -2652,9 +2652,10 @@ class MoveLet(Schedule):
     inner: Schedule
 
     def __post_init__(self):
-        assert self.destination.bank in current_system().faster_destination_banks(
-            self.source.bank
-        )
+        fasters = current_system().faster_destination_banks(self.source.bank)
+        assert (
+            self.destination.bank in fasters
+        ), f"{self.destination.bank} not in {fasters}"
         assert self.destination.origin is self.source, (
             f"Destination's origin {self.destination.origin} was not source"
             f" {self.source}"

@@ -26,7 +26,7 @@ class CpuTarget(Target):
     def tensor(
         self,
         spec: specs.TensorSpec,
-        name: Optional[str],
+        name: Optional[str] = None,
         origin: Optional[Union[Tensor, Tile]] = None,
         **kwargs,
     ) -> Tensor:

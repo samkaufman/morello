@@ -19,6 +19,49 @@ CC_SANITIZE = True
 strategies.register_default_strategies()
 
 
+def test_can_manually_schedule_generate_and_run_matmul_without_raise() -> None:
+    """Manually schedule a Matmul, generate code, compile, and run.
+
+    This test's goals are subsumed by the property-based tests in codegen/gen_test.py.
+    It exists to educate new Morello users/developers.
+    """
+    target = cpu.CpuTarget()
+    with system_config.with_target(target):
+        spec = specs.Matmul(
+            target.tensor_spec((16, 4), dtype=dtypes.Uint32),
+            target.tensor_spec((4, 16), dtype=dtypes.Uint32),
+            target.tensor_spec((16, 16), dtype=dtypes.Uint32),
+            serial_only=True,
+        )
+        hole = ops.spec_to_hole(
+            spec,
+            (target.tensor(spec.lhs), target.tensor(spec.rhs)),
+            target.tensor(spec.output),
+        )
+        impl = (
+            hole.tile_out((8, 8))
+            .move_input(0, bank="RF")
+            .move_input(1, bank="RF")
+            .move_output(bank="RF")
+            .complete()
+        )
+
+        # Make some arbitrary input values
+        input_values = [
+            np.arange(16 * 4, dtype=np.uint32).reshape((16, 4)),
+            np.arange(4 * 16, dtype=np.uint32).reshape((4, 16)),
+        ]
+
+        binary_output, binary_stderr = target.run_impl(
+            impl,
+            print_output=True,
+            values=input_values,
+        )
+        print("stderr of program:\n" + binary_stderr)
+        print("")
+        print("stdout of program:\n" + binary_output)
+
+
 def _read_from_output(output: str) -> np.ndarray:
     is_3d = False
     accum = []

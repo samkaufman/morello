@@ -21,7 +21,7 @@ class Target(abc.ABC):
     def tensor(
         self,
         spec: "TensorSpec",
-        name: Optional[str],
+        name: Optional[str] = None,
         origin: Optional[Union["Tensor", "Tile"]] = None,
         **kwargs,
     ) -> "TensorBase":

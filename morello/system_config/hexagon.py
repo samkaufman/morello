@@ -49,7 +49,7 @@ class HvxSimulatorTarget(Target):
     def tensor(
         self,
         spec: specs.TensorSpec,
-        name: Optional[str],
+        name: Optional[str] = None,
         origin: Optional[Union[tensor.Tensor, tensor.Tile]] = None,
         **kwargs,
     ) -> tensor.TensorBase:
