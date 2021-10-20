@@ -11,8 +11,6 @@ from typing import TypeVar
 from morello import dtypes, op_pprint, ops, search, search_cache, specs, system_config
 from morello.codegen import gen
 from morello.search import schedule_search
-from morello.system_config import cpu, hexagon, set_current_target
-from morello.tensor import Tensor
 
 T = TypeVar("T")
 
@@ -21,6 +19,7 @@ DTYPE = dtypes.Uint32
 logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=str)
 parser.add_argument("--no-save-cache", action="store_false", dest="save_cache")
 parser.add_argument("--row-major-only", action="store_true", dest="row_major_only")
@@ -143,8 +142,7 @@ def main() -> int:
     parsed_args = parser.parse_args()
 
     # Set a target
-    # TODO: Support HVX as well
-    set_current_target(cpu.CpuTarget())
+    system_config.set_current_target(system_config.target_by_name(parsed_args.target))
 
     # Configure from args
     if parsed_args.row_major_only:
