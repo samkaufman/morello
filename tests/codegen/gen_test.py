@@ -11,6 +11,7 @@ from hypothesis import strategies as st
 from morello import dtypes, op_pprint, ops, specs, system_config, tensor
 from morello.codegen import indexexpr
 from morello.system_config import cpu, hexagon
+
 from .. import strategies
 
 CC_DEADLINE = 30000
@@ -113,7 +114,7 @@ def _count_basic_leaves(impl: ops.Schedule) -> int:
 @st.composite
 def _arb_impls_from_actions(draw, partial_impl: ops.Schedule):
     # Remember that this strategy only returns Impls that could appear during
-    # schedule search. This might mean, for instance, that especially stange
+    # schedule search. This might mean, for instance, that especially strange
     # output tile shapes are not explored.
     if partial_impl.is_scheduled:
         return partial_impl

@@ -25,6 +25,8 @@ _unroll: contextvars.ContextVar["bool"] = contextvars.ContextVar(
     "_unroll", default=False
 )
 
+_DCFETCH_EMIT_STRATEGY = "first-pt"
+
 
 # TODO: Choose a more principled STACK_CUTOFF.
 STACK_CUTOFF = 256
@@ -316,6 +318,12 @@ class _CTensor(abc.ABC):
     def c_index(self, expr):
         raise NotImplementedError()
 
+    def c_index_ptr(self, expr):
+        ptr_str = f"&{self.c_index(expr)}"
+        if ptr_str.endswith("[0]"):
+            ptr_str = ptr_str[:-3]
+        return ptr_str
+
     @abc.abstractmethod
     def emit_free(self):
         raise NotImplementedError()
@@ -344,6 +352,9 @@ class _CHeapArray(_CNameTensor):
 
     def c_index(self, expr):
         return f"{self.name}[{_expr_to_c(expr)}]"
+
+    def c_index_ptr(self, expr):
+        return f"{self.name} + {_expr_to_c(self.dtype.size * expr)}"
 
     def emit_free(self):
         _writer.get().writeline(f"free({self.name});")
@@ -575,7 +586,9 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
         writer.writeline(f"{o_ref(o)} += {l_ref(l)} * {r_ref(r)};")
     elif isinstance(impl, ops.HvxVrmpyaccVuwVubRub):
         lhs, rhs, out = op_details
-        lhs_ref_fn, rhs_ref_fn, out_ref_fn = (d.c_tensor.c_index for d in op_details)
+        lhs_ref_fn, rhs_ref_fn, out_ref_fn = (
+            d.c_tensor.c_index_ptr for d in op_details
+        )
 
         assert impl.lhs.contiguous
         assert impl.rhs.contiguous
@@ -586,11 +599,11 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
         rhs_index_expr = expr_utils.zero_points(rhs.index_expr)
         out_index_expr = expr_utils.zero_points(out.index_expr)
 
-        out_val = f"*(HVX_Vector *)({_c_ptr(out_ref_fn, out_index_expr)})"
+        out_val = f"*(HVX_Vector *)({out_ref_fn(out_index_expr)})"
         writer.writeline(f"{out_val} = Q6_Vuw_vrmpyacc_VuwVubRub(")
         writer.writeline(f"  {out_val},")
-        writer.writeline(f"  *(HVX_Vector *)({_c_ptr(lhs_ref_fn, lhs_index_expr)}),")
-        writer.writeline(f"  *(uint32_t *)({_c_ptr(rhs_ref_fn, rhs_index_expr)})")
+        writer.writeline(f"  *(HVX_Vector *)({lhs_ref_fn(lhs_index_expr)}),")
+        writer.writeline(f"  *(uint32_t *)({rhs_ref_fn(rhs_index_expr)})")
         writer.writeline(f");")
     elif isinstance(impl, ops.DirectConv):
         if not all(d == 1 for d in impl.output.dim_sizes):
@@ -651,7 +664,9 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
             # HVX scalar L1/dc-to-register case
             elif not impl.is_store and impl.destination.bank == "L1":
                 assert impl.source.bank == "L2"
-                _emit_hvx_dcfetch(impl, op_details[source_idx])
+                _emit_hvx_dcfetch(
+                    impl, impl.operands[source_idx], op_details[source_idx]
+                )
                 _inner_generate_c(impl.inner, op_details)
             elif impl.is_store and impl.destination.bank == "L2":
                 # Generate no code for moves from L2 to global.
@@ -787,23 +802,44 @@ def _emit_hvx_l2fetch(
     stride = outer_w - w
     assert stride < 65536
 
-    source_ref_fn = source_operand.c_tensor.c_index
+    source_ref_ptr_fn = source_operand.c_tensor.c_index_ptr
     source_index_expr = source_operand.index_expr.subs({"p0": 0, "p1": 0})
     if not is_store:
         writer.writeline(
-            f"l2fetch(&{source_ref_fn(source_index_expr)}, {stride}, {w}, {h});"
+            f"l2fetch({source_ref_ptr_fn(source_index_expr)}, {stride}, {w}, {h});"
         )
 
 
-def _emit_hvx_dcfetch(impl: ops.MoveLet, source_operand: _OperandDetails) -> None:
+def _emit_hvx_dcfetch(
+    impl: ops.MoveLet, source: TensorLike, source_operand: _OperandDetails
+) -> None:
     writer = _writer.get()
 
     assert not impl.prefetching
     # TODO: Assert we're *not* in a boundary loop
 
-    source_ref_fn = source_operand.c_tensor.c_index
-    source_index_expr = expr_utils.zero_points(source_operand.index_expr)
-    writer.writeline(f"Q6_dcfetch_A(&{source_ref_fn(source_index_expr)});")
+    # TODO: Determine cache line size and implement a correct strategy.
+    if _DCFETCH_EMIT_STRATEGY == "first-pt":
+        source_ref_ptr_fn = source_operand.c_tensor.c_index_ptr
+        source_index_expr = expr_utils.zero_points(source_operand.index_expr)
+        writer.writeline(f"Q6_dcfetch_A({source_ref_ptr_fn(source_index_expr)});")
+    elif _DCFETCH_EMIT_STRATEGY == "every-pt":
+        # Just dcfetch every point not on the innermost dimension. We do this
+        # because we don't know the cache line size.
+        sizes_to_scan = source.dim_sizes[:-1]
+        for dims in itertools.product(
+            *[range(0, dim_max + 1) for dim_max in sizes_to_scan]
+        ):
+            enumerated = list(enumerate(dims))
+            if source.layout == specs.Layout.COL_MAJOR and len(enumerated) > 1:
+                enumerated = [enumerated[1], enumerated[0]] + enumerated[2:]
+            subs = {f"p{i}": d for i, d in enumerated}
+            for i in range(len(source.dim_sizes)):
+                subs.setdefault(f"p{i}", 0)
+            new_index_expr = source_operand.index_expr.subs(subs) + 512
+            writer.writeline(f"Q6_dcfetch_A(&{source_ref_fn(new_index_expr)});")
+    else:
+        raise Exception("Unknown emit strategy: " + _DCFETCH_EMIT_STRATEGY)
 
 
 def _move_hvx_vmem(
@@ -846,7 +882,7 @@ def _move_hvx_vmem(
         for destination_name, slice_index_expr in zip(vectors.names, slice_idx_exprs):
             slice_index_expr = expr_utils.zero_points(slice_index_expr)
             writer.writeline(
-                f"{destination_name} = *(HVX_Vector *)({_c_ptr(source_c_tensor.c_index, slice_index_expr)});"
+                f"{destination_name} = *(HVX_Vector *)({source_c_tensor.c_index_ptr(slice_index_expr)});"
             )
         unroll_token = _unroll.set(True)
         _inner_generate_c(
@@ -863,7 +899,7 @@ def _move_hvx_vmem(
             ):
                 slice_index_expr = expr_utils.zero_points(slice_index_expr)
                 writer.writeline(
-                    f"*(HVX_Vector *)({_c_ptr(source_c_tensor.c_index, slice_index_expr)}) = {destination_name};"
+                    f"*(HVX_Vector *)({source_c_tensor.c_index_ptr(slice_index_expr)}) = {destination_name};"
                 )
     else:
         raise NotImplementedError(
@@ -989,13 +1025,6 @@ def _move_registers(impl, source_idx, c_tensors, operand_index_exprs, concrete_s
                 )
             ],
         )
-
-
-def _c_ptr(ref_fn, expr: Union[sympy.Expr, int]) -> str:
-    s = ref_fn(expr)
-    if s.endswith("[0]"):
-        s = s[:-3]
-    return "&" + s
 
 
 def _expr_to_c(expr: Union[sympy.Expr, int]) -> str:

@@ -14,11 +14,11 @@ import tempfile
 import typing
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast, Callable, Optional, Union
+from typing import Callable, Optional, Union, cast
 
-from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 from .. import dtypes, ops, specs, tensor
 from ..codegen import gen
+from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
 HEXAGON_CLANG_ARGS = ["-mhvx", "-mv66"]
 HEXAGON_SIM_TARGET_ARG = "--mv66g_1024_rev2"
