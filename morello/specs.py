@@ -107,7 +107,7 @@ class HvxVmemTensorSpec(TensorSpec):
         object.__setattr__(self, "vector_shape", vector_shape)
         if any(s < vs for s, vs in zip(self.dim_sizes, self.vector_shape)):
             raise ValueError(
-                f"Shape {self.dim_sizes} is larger in some dimensions than vector shape {vector_shape}"
+                f"Shape {self.dim_sizes} is smaller in some dimensions than vector shape {vector_shape}"
             )
 
     def __str__(self):
@@ -240,10 +240,10 @@ class Spec(abc.ABC):
 class Compose(Spec):
     """Multiple specs where the first operand of each spec is the result of the next."""
 
-    subspec_classes: Tuple[Callable[..., Spec], ...]
-    inputs: Tuple[TensorSpec, ...]
+    subspec_classes: tuple[Callable[..., Spec], ...]
+    inputs: tuple[TensorSpec, ...]
     output: TensorSpec
-    intermediate_dtypes: Tuple[Dtype]
+    intermediate_dtypes: tuple[Dtype]
     serial_only: bool
 
     def __post_init__(self):

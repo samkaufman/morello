@@ -6,6 +6,7 @@ from typing import Optional
 import hypothesis
 import numpy as np
 import pytest
+from hypothesis import HealthCheck
 from hypothesis import strategies as st
 
 from morello import dtypes, op_pprint, ops, specs, system_config, tensor
@@ -14,7 +15,7 @@ from morello.system_config import cpu, hexagon
 
 from .. import strategies
 
-CC_DEADLINE = 30000
+CC_DEADLINE = 60 * 1000
 CC_SANITIZE = True
 
 strategies.register_default_strategies()
@@ -56,6 +57,7 @@ def test_can_manually_schedule_generate_and_run_matmul_without_raise() -> None:
         binary_output, binary_stderr = target.run_impl(
             impl,
             print_output=True,
+            source_cb=lambda s: print("Source Code:\n" + s),
             values=input_values,
         )
         print("stderr of program:\n" + binary_stderr)
@@ -113,21 +115,21 @@ def _count_basic_leaves(impl: ops.Schedule) -> int:
 
 @st.composite
 def _arb_impls_from_actions(draw, partial_impl: ops.Schedule):
-    # Remember that this strategy only returns Impls that could appear during
-    # schedule search. This might mean, for instance, that especially strange
-    # output tile shapes are not explored.
-    if partial_impl.is_scheduled:
-        return partial_impl
+    """A strategy that expands a given Impl into a fully scheduled Impl."""
     # TODO: Remove the following filter once codegen is implemented for sliding
     #  windows.
     actions = [
         a for a in partial_impl.actions() if not isinstance(a, ops.SlidingTileOutAction)
     ]
-    assert actions, f"actions was empty for Impl: {partial_impl}"
+
+    if partial_impl.is_scheduled:
+        if not actions or draw(st.booleans()):
+            return partial_impl
+
+    # If we hit a dead end (no actions), then this isn't a viable example
+    hypothesis.assume(len(actions))
 
     action_idx = draw(st.integers(min_value=0, max_value=len(actions) - 1))
-
-    # TODO: Need to repeatedly draw.
     expanded = actions[action_idx]()
     return expanded.replace_children(
         draw(_arb_impls_from_actions(c)) for c in expanded.children

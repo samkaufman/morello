@@ -1,9 +1,11 @@
+import functools
 import io
 import os
 import re
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 from typing import Optional, Union
 
 from .base import MemoryBankConfig, RunResult, SystemDescription, Target
@@ -99,11 +101,8 @@ class CpuTarget(Target):
 
             # TODO: Is there a more secure way to depend on clang?
             clang_cmd = [
-                "/usr/bin/env",
-                "clang",
+                _clang_path(),
                 "-O3",
-            ]
-            clang_cmd += [
                 "-o",
                 binary_path,
                 source_path,
@@ -129,3 +128,10 @@ def _parse_benchmark_output(output: str) -> float:
     re_match = _OUTPUT_RE.match(output)
     assert re_match is not None
     return int(re_match.group(1)) + (int(re_match.group(2)) / 1e9)
+
+
+@functools.cache
+def _clang_path() -> Path:
+    if "CLANG" in os.environ:
+        return Path(os.environ["CLANG"])
+    raise Exception("Environment variable CLANG is not set")

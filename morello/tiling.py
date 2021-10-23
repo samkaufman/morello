@@ -2,7 +2,7 @@ import dataclasses
 from typing import Sequence, Union
 
 from . import specs
-from .tensor import ConvolutionImageTile, SimpleTile, Tensor, Tile
+from .tensor import ConvolutionImageTile, SimpleTile, TensorLike, Tensor, Tile
 
 
 class UnimplementedCompositionError(NotImplementedError):
@@ -14,13 +14,13 @@ class PartialTile:
     # Shouldn't initialize this base class. Instantiate a subclass instead.
     dim_sizes: tuple[int, ...]
 
-    def tile(self, source: Union[Tensor, Tile]):
+    def tile(self, source: TensorLike) -> TensorLike:
         raise NotImplementedError()
 
 
 @dataclasses.dataclass(frozen=True)
 class PartialSimpleTile(PartialTile):
-    def tile(self, source: Union[Tensor, Tile]):
+    def tile(self, source: TensorLike) -> TensorLike:
         return source.simple_tile(self.dim_sizes)
 
 
@@ -28,7 +28,7 @@ class PartialSimpleTile(PartialTile):
 class PartialConvolutionImageTile(PartialTile):
     filter_shape: tuple[int, int]
 
-    def tile(self, source: Union[Tensor, Tile]):
+    def tile(self, source: TensorLike) -> TensorLike:
         return source.conv_image_tile(self.dim_sizes, self.filter_shape)
 
 

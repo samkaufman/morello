@@ -68,3 +68,4 @@ COPY comparisons ./comparisons
 
 ENV PATH=/hexagon_sdk/Hexagon_SDK/3.5.3/tools/HEXAGON_Tools/8.3.07/Tools/lib:$PATH
 ENV PYTHONPATH "."
+ENV CLANG=/usr/bin/clang-12

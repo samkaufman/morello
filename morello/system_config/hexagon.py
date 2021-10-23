@@ -196,6 +196,9 @@ class HvxVmemTensorlike(tensor.TensorLike):
             return False
         if any(i > o for (i, o) in zip(shape, self.dim_sizes)):
             return False
+        assert isinstance(self.spec, specs.HvxVmemTensorSpec)
+        if any(i > v for (i, v) in zip(shape, self.spec.vector_shape)):
+            return False
         if functools.reduce(operator.mul, shape, 1) % 128 != 0:
             return False
         return True
@@ -226,8 +229,9 @@ class HvxVmemTensor(HvxVmemTensorlike, tensor.TensorBase):
 
     def __post_init__(self):
         self._common_post_init()
-        if functools.reduce(operator.mul, self.vector_shape, self.dtype.size) != 128:
-            raise ValueError("vector shape must use 128 bytes")
+        vbytes = functools.reduce(operator.mul, self.vector_shape, self.dtype.size)
+        if vbytes != 128:
+            raise ValueError(f"vector shape must use 128 bytes, but used {vbytes}")
 
     @property
     def vector_shape(self) -> tuple[int, ...]:

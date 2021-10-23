@@ -6,6 +6,7 @@ import functools
 import itertools
 import math
 import sys
+import typing
 import warnings
 from collections.abc import Mapping
 from typing import (
@@ -28,7 +29,7 @@ import termcolor
 from . import dtypes, specs, system_config, tiling, utils
 from .specs import Layout
 from .system_config.state import current_system, current_target
-from .tensor import ConvolutionImageTile, SimpleTile, Tensor, Tile
+from .tensor import ConvolutionImageTile, SimpleTile, TensorLike, Tensor, Tile
 
 
 class TileSizeMode(enum.Enum):
@@ -196,8 +197,8 @@ class MoveAction:
     def __str__(self):
         return (
             f"MoveAction(input_idx={self.input_idx}, source={str(self.source)},"
-            f" prefetching={self.prefetching}",
-            f" {self.bank}, layout={str(self.layout)})",
+            f" prefetching={self.prefetching}"
+            f" {self.bank}, layout={str(self.layout)})"
         )
 
 
@@ -450,26 +451,35 @@ def _move_arguments(
         for bank in system.faster_destination_banks(operand.bank):
             # TODO: Hacky check for VMEM.
             if bank == "VMEM":
-                for vector_shape in gen_vector_shapes(operand.dim_sizes):
+                for vector_shape in gen_vector_shapes(operand.dim_sizes, operand.dtype):
                     yield bank, layout, {"vector_shape": vector_shape}
             else:
                 yield bank, layout, {}
 
 
-def _common_operand_move_actions(
-    op_move_tuples: Iterable[tuple[int, Union[Tensor, Tile], Callable]]
-) -> Iterable[MoveAction]:
-    for inp_idx, operand, move_fn in op_move_tuples:
+def _common_operand_move_actions(impl: "Schedule") -> Iterable[MoveAction]:
+    def inner(inp_idx, operand):
+        move_fn, can_move_fn = impl.move_output, impl.output.can_move_to
+        if inp_idx is not None:
+            move_fn = functools.partial(impl.move_input, inp_idx)
+            can_move_fn = impl.inputs[inp_idx].can_move_to
+
         for bank, layout, kws in _move_arguments(operand):
-            for p in [True, False]:
-                yield MoveAction(move_fn, operand, inp_idx, p, bank, layout, kws)
+            for prf in [True, False]:
+                if can_move_fn(bank, layout):
+                    yield MoveAction(move_fn, operand, inp_idx, prf, bank, layout, kws)
+
+    for i, inp in enumerate(impl.inputs):
+        yield from inner(i, inp)
+    yield from inner(None, impl.output)
 
 
-def spec_to_hole(spec: specs.Spec, inputs: Tuple, output) -> "Schedule":
+def spec_to_hole(spec: specs.Spec, inputs: Iterable, output) -> "Schedule":
     """Returns a default, incomplete schedule for a Spec which consume given inputs.
 
     Output tensors will be constructed using the spec's output shape property.
     """
+    inputs = tuple(inputs)
     if isinstance(spec, specs.Convolution):
         assert len(inputs) == 2, f"Expected 2 Tensor/Tile operands; got {len(inputs)}"
         return DirectConv(
@@ -584,16 +594,8 @@ class Schedule(abc.ABC):
         assert isinstance(smaller_output, SimpleTile)
 
         # Tile the corresponding inputs.
-        smaller_inputs = tuple(
-            partial_inp.tile(inp)
-            for inp, partial_inp in zip(
-                self.inputs,
-                tiling.tile_out(
-                    type(self.spec),
-                    [inp.dim_sizes for inp in self.inputs],
-                    tiling.tile_to_partial(smaller_output),
-                ),
-            )
+        smaller_inputs = self._calculate_inputs_for_tile_out(
+            tiling.tile_to_partial(smaller_output)
         )
 
         # Make an inner hole for the now-smaller Spec.
@@ -622,6 +624,49 @@ class Schedule(abc.ABC):
             dependent_tiles=frozenset(unchanged_input_tiles),
             inner=inner,
             parallel=parallel,
+        )
+
+    @typing.final
+    def _can_tile_out(self, output_shape: Sequence[int]) -> bool:
+        """Returns True if the Schedule can be tiled to a given output shape.
+
+        This is true if the output can be tiled to given shape and all input operands
+        can be tiled to the corresponding input shapes.
+        """
+        output_shape = tuple(output_shape)
+        if not self.output.is_valid_tile_shape(output_shape):
+            return False
+        # TODO: It'd be nice to not need to tile the output to get its PartialTile
+        smaller_output = self.output.simple_tile(output_shape)
+        smaller_partial_out = tiling.tile_to_partial(smaller_output)
+        for inp, partial_input in zip(
+            self.inputs,
+            self._calculate_partial_inputs_for_tile_out(smaller_partial_out),
+        ):
+            if not inp.is_valid_tile_shape(partial_input.dim_sizes):
+                return False
+        return True
+
+    @typing.final
+    def _calculate_inputs_for_tile_out(
+        self, output_tile: Union[SimpleTile, tiling.PartialTile]
+    ) -> list[TensorLike]:
+        return [
+            partial_tile.tile(inp)
+            for inp, partial_tile in zip(
+                self.inputs, self._calculate_partial_inputs_for_tile_out(output_tile)
+            )
+        ]
+
+    def _calculate_partial_inputs_for_tile_out(
+        self, output_tile: Union[SimpleTile, tiling.PartialTile]
+    ) -> list[tiling.PartialTile]:
+        return list(
+            tiling.tile_out(
+                type(self.spec),
+                [inp.dim_sizes for inp in self.inputs],
+                output_tile,
+            )
         )
 
     def split(self, k: int) -> "Schedule":
@@ -819,8 +864,13 @@ def gen_tile_sizes(
 
 
 def gen_vector_shapes(
-    outer_shape: Sequence[int], elements: int = 128
+    outer_shape: Sequence[int], dtype: dtypes.Dtype, elements: int = 128
 ) -> Iterable[tuple[int, ...]]:
+    if dtype.size != 1:
+        return gen_vector_shapes(
+            outer_shape, dtypes.Uint8, elements=elements // dtype.size
+        )
+
     if len(outer_shape) == 0:
         raise ValueError("Given shape cannot be empty")
     elif len(outer_shape) == 1:
@@ -829,14 +879,14 @@ def gen_vector_shapes(
         yield (elements,)
     else:
         for factor in utils.factors(min(outer_shape[0], elements)):
-            for tail in gen_vector_shapes(outer_shape[1:], elements // factor):
+            for tail in gen_vector_shapes(outer_shape[1:], dtype, elements // factor):
                 yield (factor,) + tail
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
 class ComposeHole(Schedule):
     spec: specs.Compose
-    inputs: Tuple[Union[Tensor, Tile], ...]
+    inputs: tuple[Union[Tensor, Tile], ...]
     output: Union[Tensor, Tile]
 
     def __post_init__(self):
@@ -877,31 +927,28 @@ class ComposeHole(Schedule):
 
         # TODO: Remove this symmetry: lots of ways to iteratively split the pipeline
         # TODO: Reintroduce splitting on non-index 0
-        for bank in system.banks:
-            for layout in (Layout.ROW_MAJOR, Layout.COL_MAJOR):
-                # TODO: This hack stinks. If we had partial finite functions/lenses,
-                #   we could just constrain a few properties and enumerate the rest.
-                #   It would also be okay to just generate Tensor-making callables
-                #   for the peel to populate in a generic way.
-                peel_kwargs = [{}]
-                if bank == "VMEM":
-                    peel_kwargs = (
-                        {"vector_shape": shape}
-                        for shape in gen_vector_shapes(self.spec.intermediate_shapes[0])
+        for bank, layout in itertools.product(system.banks, Layout):
+            # TODO: The below special-casing for VMEM stinks. If we had partial
+            #  finite functions/lenses, we could just constrain a few properties and
+            #  enumerate the rest. It would also be possible to generate
+            #  Tensor-making callables for the peel to populate in a generic way.
+            peel_kwargs = [{}]
+            if bank == "VMEM":
+                peel_kwargs = (
+                    {"vector_shape": shape}
+                    for shape in gen_vector_shapes(
+                        self.spec.intermediate_shapes[0],
+                        dtype=self.spec.intermediate_dtypes[0],
                     )
-                for peel_kws in peel_kwargs:
-                    yield PeelAction(self, bank=bank, layout=layout, kwargs=peel_kws)
+                )
+            for kws in peel_kwargs:
+                if self._can_peel(bank=bank, layout=layout, **kws):
+                    yield PeelAction(self, bank=bank, layout=layout, kwargs=kws)
 
-        yield from _common_operand_move_actions(
-            [
-                (i, inp, functools.partial(self.move_input, i))
-                for i, inp in enumerate(self.inputs)
-            ]
-            + [(None, self.output, self.move_output)]
-        )
+        yield from _common_operand_move_actions(self)
 
         for tile_shape in gen_tile_sizes(
-            self.output.dim_sizes, filter=self.output.is_valid_tile_shape
+            self.output.dim_sizes, filter=self._can_tile_out
         ):
             for parallel in [False] if self.spec.serial_only else [True, False]:
                 yield TileOutAction(self, tile_shape, parallel)
@@ -1010,6 +1057,28 @@ class ComposeHole(Schedule):
             inner=dataclasses.replace(self, spec=new_inner_spec, output=new_mat),
         )
 
+    def _can_peel(self, bank: str, layout: str, **kwargs) -> bool:
+        # Check if we can peel by just trying to make the intermediate tensor that peel
+        # would make and seeing if we get a ValueError. This isn't a great solution:
+        # catching all ValueErrors might become overbroad as the code evolves, and the
+        # object construction is inefficient and unneeded. However, it'll work for now.
+        intermediate_tensor_layout = layout
+        if all(d == 1 for d in self.spec.intermediate_shapes[0]):
+            intermediate_tensor_layout = Layout.ROW_MAJOR
+        try:
+            current_target().tensor(
+                current_target().tensor_spec(
+                    dim_sizes=self.spec.intermediate_shapes[0],
+                    dtype=self.spec.intermediate_dtypes[0],
+                    bank=bank,
+                    layout=intermediate_tensor_layout,
+                    **kwargs,
+                )
+            )
+            return True
+        except ValueError:
+            return False
+
     @_assert_stable_spec
     def peel(
         self,
@@ -1018,6 +1087,7 @@ class ComposeHole(Schedule):
         **kwargs,
     ) -> Schedule:
         if bank is None or layout is None:
+            # TODO: Just require them as arguments. Can relax the signature later.
             raise NotImplementedError("Auto-selecting bank or layout unimplemented")
 
         # TODO: Using ALPHABET_PRODUCT here will fail for long programs
@@ -1201,6 +1271,12 @@ class ComposeHole(Schedule):
         for original_input, tiled_input in zip(self.inputs, source):
             if original_input != tiled_input:
                 yield tiled_input
+
+    @typing.final
+    def _calculate_partial_inputs_for_tile_out(
+        self, output_tile: Union[SimpleTile, tiling.PartialTile]
+    ) -> list[tiling.PartialTile]:
+        return self._compute_partial_inputs(output_tile)
 
     def _compute_partial_inputs(
         self,
@@ -1587,23 +1663,16 @@ class MatmulHole(MatmulBase):
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Schedule]]:
         # Search only over full line sizes
-        for h, w in gen_tile_sizes(
-            self.output.dim_sizes, filter=self.output.is_valid_tile_shape
-        ):
+        for h, w in gen_tile_sizes(self.output.dim_sizes, filter=self._can_tile_out):
             for parallel in [False] if self.serial_only else [True, False]:
                 yield TileOutAction(self, (h, w), parallel)
 
         if self.lhs.dim_sizes[1] > 1:
             for k in dim_range(self.lhs.dim_sizes[1], include_end=False):
-                yield MatmulSplitAction(self.split, k=k)
+                if self._split_valid(k):
+                    yield MatmulSplitAction(self.split, k=k)
 
-        yield from _common_operand_move_actions(
-            [
-                (i, inp, functools.partial(self.move_input, i))
-                for i, inp in enumerate(self.inputs)
-            ]
-            + [(None, self.output, self.move_output)]
-        )
+        yield from _common_operand_move_actions(self)
 
         if Mult.applies_to_operands(self.operands):
             yield self.place_mult
@@ -1654,6 +1723,18 @@ class MatmulHole(MatmulBase):
             output=self.output,
             inner=MatmulHole(left_view, right_view, self.output, self.serial_only),
         )
+
+    def _split_valid(self, k: int) -> bool:
+        lhs_h, lhs_w = self.lhs.dim_sizes
+        rhs_h, rhs_w = self.rhs.dim_sizes
+        assert lhs_w == rhs_h
+        if k > lhs_w:
+            return False
+        if not self.lhs.is_valid_tile_shape((lhs_h, k)):
+            return False
+        if not self.rhs.is_valid_tile_shape((k, rhs_w)):
+            return False
+        return True
 
     @_assert_stable_spec
     def complete(self) -> Schedule:
@@ -1943,9 +2024,7 @@ class DirectConv(Schedule):
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Schedule]]:
         # Yield .tile_outs and .sliding_tile_outs
-        for shape in gen_tile_sizes(
-            self.output.dim_sizes, filter=self.output.is_valid_tile_shape
-        ):
+        for shape in gen_tile_sizes(self.output.dim_sizes, filter=self._can_tile_out):
             for parallel in [False] if self.serial_only else [True, False]:
                 yield TileOutAction(self, shape, parallel)
 
@@ -1967,13 +2046,7 @@ class DirectConv(Schedule):
         #     for k in range(1, self.rhs.dim_sizes[-1]):
         #         yield functools.partial(self.split_filters, k)
 
-        yield from _common_operand_move_actions(
-            [
-                (i, inp, functools.partial(self.move_input, i))
-                for i, inp in enumerate(self.inputs)
-            ]
-            + [(None, self.output, self.move_output)]
-        )
+        yield from _common_operand_move_actions(self)
 
     @_assert_stable_spec
     def replace_children(self, replacements: Iterable[Schedule]) -> Schedule:
@@ -2067,12 +2140,7 @@ class ReduceSum(Schedule):
                 if k != self.source.dim_sizes[-1]:
                     yield functools.partial(self.split, k)
 
-        yield from _common_operand_move_actions(
-            [
-                (0, self.source, functools.partial(self.move_input, 0)),
-                (None, self.output, self.move_output),
-            ]
-        )
+        yield from _common_operand_move_actions(self)
 
     def move_input(
         self,

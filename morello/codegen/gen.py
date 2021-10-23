@@ -673,9 +673,9 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
                 assert impl.source.bank == "GL"
                 _inner_generate_c(impl.inner, op_details)
             elif impl.is_store and impl.destination.bank == "L1":
-                raise NotImplementedError(
-                    f"Writing from L1 back to {impl.source.bank} not implemented"
-                )
+                # Generate no code for writing from L1 back to L2
+                assert impl.source.bank == "L2"
+                _inner_generate_c(impl.inner, op_details)
             elif impl.destination.bank == "VMEM":
                 assert impl.source.bank == "L2"
                 _move_hvx_vmem(
@@ -791,10 +791,14 @@ def _emit_hvx_l2fetch(
     # TODO: Assert we're *not* in a boundary loop
     assert isinstance(impl, ops.MoveLet)
     assert not impl.is_store
-    assert not impl.prefetching
+    if not impl.prefetching:
+        warnings.warn("l2fetch prefetching not implemented")
 
     # Swap w and h if column-major.
-    h, w = utils.layout_ordered_dims(impl.destination)
+    # TODO: Add test for following parameter choices.
+    lod = utils.layout_ordered_dims(impl.destination)
+    head, w = lod[:-1], lod[-1]
+    h = functools.reduce(operator.mul, head, 1)
     assert w < 256, f"Maximum size of l2fetch is 255; tile width is: {w}"
     assert h < 256, f"Maximum size of l2fetch is 255; tile height is: {h}"
 
@@ -803,7 +807,7 @@ def _emit_hvx_l2fetch(
     assert stride < 65536
 
     source_ref_ptr_fn = source_operand.c_tensor.c_index_ptr
-    source_index_expr = source_operand.index_expr.subs({"p0": 0, "p1": 0})
+    source_index_expr = expr_utils.zero_points(source_operand.index_expr)
     if not is_store:
         writer.writeline(
             f"l2fetch({source_ref_ptr_fn(source_index_expr)}, {stride}, {w}, {h});"
@@ -815,7 +819,8 @@ def _emit_hvx_dcfetch(
 ) -> None:
     writer = _writer.get()
 
-    assert not impl.prefetching
+    if not impl.prefetching:
+        warnings.warn("dcfetch prefetching not implemented")
     # TODO: Assert we're *not* in a boundary loop
 
     # TODO: Determine cache line size and implement a correct strategy.

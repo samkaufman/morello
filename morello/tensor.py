@@ -67,6 +67,14 @@ class TensorLike(abc.ABC):
             return False
         return all(i <= o for (i, o) in zip(shape, self.dim_sizes))
 
+    def can_move_to(self, bank: Optional[str], layout: Optional[specs.Layout]) -> bool:
+        if bank is None:
+            bank = self.bank
+        # TODO: Factor the following check out into a Hexagon-specific tensorlike
+        if bank == "VMEM" and (self.volume * self.dtype.size) % 128 != 0:
+            return False
+        return True
+
     def simple_tile(self, tile_shape: tuple[int, ...]) -> "TensorLike":
         return self._tile(SimpleTile, tile_shape)
 
