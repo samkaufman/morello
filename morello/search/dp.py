@@ -1,47 +1,10 @@
-import contextvars
 import functools
-import sys
-import warnings
-from typing import Any, Callable, Generator, Iterable, Optional
+from typing import Any, Generator, Iterable, Optional
 
-from . import cost, ops, pruning, replace, specs, tiling
-from .ops import Schedule
-from .search_cache import CachedSchedule, ScheduleCache
-
-prune_column_major: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "prune_column_major", default=False
-)
-
-
-class ActionFailedException(Exception):
-    def __init__(self, act) -> None:
-        super().__init__(f"Failed to call action: {act}")
-
-
-# TODO: Remove this once grid_search.py no longer needs it
-def apply_or_max(fn: Callable[..., int], schedule: Schedule, *args, **kwargs) -> int:
-    """Applies function, or returns maxsize if `schedule` unscheduled or over memory.
-
-    This function is useful for searches to assign an effectively infinite cost to
-    un-executable implementations.
-    """
-    if not schedule.is_scheduled:
-        return sys.maxsize
-    return fn(schedule, *args, **kwargs)
-
-
-def _schedule_key(schedule: Schedule) -> tuple[int, Any, Any]:
-    """Returns a key for ordering schedules during search.
-
-    The returned key is a tuple of the schedule cost, peak memory usage, and
-    schedule depth. In Python, tuples are compared by their first non-equal
-    term, so this key can be used to select a schedule with the lowest cost
-    with peak memory and then syntactic depth as tie-breakers.
-    """
-    base_cost = sys.maxsize
-    if schedule.is_scheduled:
-        base_cost = cost.analytical_cost(schedule)
-    return base_cost, tuple(schedule.peak_memory), schedule.depth
+from . import common
+from .. import ops, pruning, replace, specs, tiling
+from ..ops import Schedule
+from ..search_cache import CachedSchedule, ScheduleCache
 
 
 def _best_schedule(
@@ -49,10 +12,10 @@ def _best_schedule(
 ) -> Optional[tuple[Schedule, tuple[int, Any, Any, Any]]]:
     """Returns the best schedule if `it` is non-empty; `None` if it is.
 
-    This uses _schedule_key, so it will return the lowest cost schedule,
-    breaking ties as described in _schedule_key's docstring.
+    This uses schedule_key, so it will return the lowest cost schedule,
+    breaking ties as described in schedule_key's docstring.
     """
-    it = ((s, _schedule_key(s)) for s in it)
+    it = ((s, common.schedule_key(s)) for s in it)
     return min(it, key=lambda x: x[1], default=None)
 
 
@@ -95,13 +58,13 @@ def schedule_search(
     memory_limits: Optional[pruning.MemoryLimits] = None,
     cache: Optional[ScheduleCache] = None,
     parent_summary: Optional[ops.ParentSummary] = None,
+    stats: Optional[common.SearchStats] = None,
 ) -> Optional[Schedule]:
-    """Find a cool schedule for the given spec.
+    """Returns the best Impl for a given Spec and memory limits.
 
-    :param search_depth: The search depth. A returned schedule might be deeper if a
-        hole is expanded via `complete` or a cache lookup.
+    May return `None` if no Impl satisfies the given Spec and memory limits.
     """
-    if prune_column_major.get():
+    if common.prune_column_major.get():
         if any(inp.layout == specs.Layout.COL_MAJOR for inp in spec.inputs):
             return None
         if spec.output.layout == specs.Layout.COL_MAJOR:
@@ -117,8 +80,13 @@ def schedule_search(
     if memory_limits is None:
         memory_limits = pruning.StandardMemoryLimits()
 
-    # Do a cache lookup
-    cached_schedule: Optional[Schedule] = None
+    if stats:
+        stats.expansions += 1
+
+    # Do a cache lookup. There are three outcomes: (a) a cached schedule is present and
+    # can be returned, (b) the cache knows that no Impl satisfying the given limits
+    # exists and we can propagate that fact to the caller, and (c) the cache has no
+    # information for us and search can proceed.
     try:
         wrapped_cached_schedule = cache.get(spec, memory_limits)
         if wrapped_cached_schedule is None:
@@ -126,25 +94,19 @@ def schedule_search(
     except KeyError:
         pass
     else:
-        # Substitute in the correct operands.
-        cached_schedule = wrapped_cached_schedule.schedule
-        assert len(inputs) == len(cached_schedule.inputs)
-        operand_replacements = dict(zip(cached_schedule.inputs, inputs))
-        operand_replacements[cached_schedule.output] = output
-        cached_schedule = replace.replace(cached_schedule, operand_replacements)
-        assert cached_schedule.spec == spec, (
-            "spec doesn't match query after operand replacement; expected "
-            f"{spec} but was {cached_schedule.spec}"
-        )
-        return cached_schedule
+        # Substitute in the correct operands. This is needed because schedules are
+        # stored in the cache along with their concrete operands. While these operands
+        # have the same TensorSpecs as those of our query Spec, they aren't the same
+        # objects, so: swap in the query operands before returning the cached schedule.
+        return _subs_query_operands(spec, inputs, output, wrapped_cached_schedule)
 
     # Create a an Impl hole corresponding to the query spec
     leaf = ops.spec_to_hole(spec, inputs, output)
     assert leaf.depth == 1, f"Expected hole to have depth 1; had {leaf.depth}"
 
-    # Return the best option
+    # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
     def yield_options() -> Generator[Schedule, None, None]:
-        """Returns Impls which implement the query spec."""
+        """Yields best Impls after taking any of leaf's actions (or no action)."""
 
         # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
         if all(m >= 0 for m in memory_limits.available.values()) and leaf.is_scheduled:
@@ -156,30 +118,25 @@ def schedule_search(
         for act in leaf.actions(parent_summary=parent_summary):
             try:
                 new_tree = act()
-            except tiling.UnimplementedCompositionError as e:
-                # This is a temporary workaround until I can implement Convolution
-                # and PartialConvolutionImageTile
-                warnings.warn("Skipping a composed tile_out: " + str(e))
-                continue
             except Exception as e:
                 # Re-raise the exception with a little more detail about act.
-                raise ActionFailedException(act) from e
+                raise common.ActionFailedException(act) from e
             assert new_tree.spec == spec, f"{str(new_tree.spec)} != {str(spec)}"
-            if new_tree == leaf:
-                warnings.warn(
-                    f"Action returned self: {new_tree}; spec = {str(new_tree.spec)}; action = {act}"
-                )
-                continue
+            assert new_tree != leaf, (
+                f"Action returned self: {new_tree}; spec = {str(new_tree.spec)}; "
+                f"action = {act}"
+            )
 
-            # Ignore the action if it uses more memory than is available for any
-            # hole.
+            # Ignore the action if it uses more memory than is available for any hole.
             new_child_memory_limits = memory_limits.transition(new_tree)
             if new_child_memory_limits is None:
                 continue
 
-            # Repeatedly expand all holes in new_tree until no holes remain.
-            subsearch_results = [
-                schedule_search(
+            # Recurse for all holes (nested Specs) in the new Impl. If any hole cannot
+            # be filled, short-circuit because this action is a dead end.
+            subsearch_results = []
+            for child, mem in zip(new_tree.children, new_child_memory_limits):
+                child_result = schedule_search(
                     child.spec,
                     inputs=child.inputs,
                     output=child.output,
@@ -188,13 +145,14 @@ def schedule_search(
                     parent_summary=ops.ParentSummary.update(
                         parent_summary, parent=new_tree
                     ),
+                    stats=stats,
                 )
-                for child, mem in zip(new_tree.children, new_child_memory_limits)
-            ]
-
-            # If any hole could not be filled--this can happen, for instance, if
-            # every possible action uses too much memory.
-            if any(r is None for r in subsearch_results):
+                # If any hole could not be filled--this can happen, for instance, if
+                # every possible action uses too much memory--then exit the outer loop.
+                if child_result is None:
+                    break
+                subsearch_results.append(child_result)
+            if len(subsearch_results) < len(new_tree.children):
                 continue
 
             # Fill the holes and yield as a possible Impl
@@ -217,3 +175,16 @@ def schedule_search(
     else:
         cache.put(spec, None, memory_limits)
         return None
+
+
+def _subs_query_operands(spec, inputs, output, wrapped_cached_schedule):
+    cached_schedule = wrapped_cached_schedule.schedule
+    assert len(inputs) == len(cached_schedule.inputs)
+    operand_replacements = dict(zip(cached_schedule.inputs, inputs))
+    operand_replacements[cached_schedule.output] = output
+    cached_schedule = replace.replace(cached_schedule, operand_replacements)
+    assert cached_schedule.spec == spec, (
+        "spec doesn't match query after operand replacement; expected "
+        f"{spec} but was {cached_schedule.spec}"
+    )
+    return cached_schedule

@@ -1,5 +1,6 @@
 import abc
 import dataclasses
+import functools
 import logging
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Union
 
@@ -56,8 +57,8 @@ class Target(abc.ABC):
         raise NotImplementedError()
 
 
-# TODO: Re-freeze
-@dataclasses.dataclass(frozen=False)
+# TODO: Re-freeze. (Need a way to cache properties.)
+@dataclasses.dataclass(frozen=False, eq=False)
 class SystemDescription:
     """Describes hardware simulated by a SimpleSystem."""
 
@@ -75,6 +76,7 @@ class SystemDescription:
         closure = self.destination_banks_closure(self.default_bank)
         assert set(self.ordered_banks) == closure
 
+    @functools.cache
     def destination_banks_closure(self, bank: str) -> set[str]:
         closure = {bank}
         last_size = -1

@@ -85,13 +85,14 @@ def pprint(
     show_utilization: bool = True,
     show_scheduled: bool = False,
     file=sys.stdout,
+    holes_ok=False,
 ):
     cost_dict = None
     headers = [""]
     if show_spec:
         headers.append("spec")
     if show_cost:
-        cost_dict = cost.detailed_analytical_cost(op)
+        cost_dict = cost.detailed_analytical_cost(op, holes_ok=holes_ok)
         headers.append("cost")
     if show_utilization:
         headers.extend(current_system().ordered_banks)

@@ -270,13 +270,7 @@ def _walk_actions(
     if parents is None:
         parents = []
     for act in op.actions(parent_summary=parent_summary):
-        try:
-            new_tree: ops.Schedule = act()
-        except tiling.UnimplementedCompositionError as e:
-            # This is a temporary workaround until I can implement Convolution
-            # and PartialConvolutionImageTile
-            warnings.warn("Skipping a composed tile_out: " + str(e))
-            continue
+        new_tree = act()
         for child in new_tree.children:
             yield child
             yield from _walk_actions(

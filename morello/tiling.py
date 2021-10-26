@@ -2,11 +2,7 @@ import dataclasses
 from typing import Sequence, Union
 
 from . import specs
-from .tensor import ConvolutionImageTile, SimpleTile, TensorLike, Tensor, Tile
-
-
-class UnimplementedCompositionError(NotImplementedError):
-    pass
+from .tensor import ConvolutionImageTile, SimpleTile, TensorLike, Tile
 
 
 @dataclasses.dataclass(frozen=True)

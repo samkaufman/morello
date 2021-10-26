@@ -558,6 +558,12 @@ class Schedule(abc.ABC):
             return getattr(self, "inner").is_scheduled
         raise NotImplementedError(f"No is_scheduled implementation for {type(self)}")
 
+    @typing.final
+    def replace_child(self, child_idx: int, new_child: "Schedule") -> "Schedule":
+        replacements = list(self.children)
+        replacements[child_idx] = new_child
+        return self.replace_children(replacements)
+
     @abc.abstractmethod
     def replace_children(self, replacements: Iterable["Schedule"]) -> "Schedule":
         raise NotImplementedError()
@@ -647,6 +653,32 @@ class Schedule(abc.ABC):
                 return False
         return True
 
+    def _can_sliding_tile_out(
+        self, sliding_dim: int, output_size: int, bank: str
+    ) -> bool:
+        # If this is an Impl with a single child, just forward.
+        if len(self.children) == 1:
+            return self.children[0]._can_sliding_tile_out(
+                sliding_dim, output_size, bank
+            )
+
+        # If the given shape is already the output shape, this is trivially permitted.
+        output_shape = (
+            self.output.dim_sizes[:sliding_dim]
+            + (output_size,)
+            + self.output.dim_sizes[sliding_dim + 1 :]
+        )
+        if output_shape == self.output.dim_sizes:
+            return True
+
+        # We cannot introduce a sliding tile if there is no overlap in the corresponding
+        # input dimension.
+        impl = cast(Loop, self.tile_out(output_shape))
+        if not any(t.frontiers[sliding_dim] for t in impl.tiles):
+            return False
+
+        return True
+
     @typing.final
     def _calculate_inputs_for_tile_out(
         self, output_tile: Union[SimpleTile, tiling.PartialTile]
@@ -715,6 +747,8 @@ class Schedule(abc.ABC):
                 tile_to_convert = tile
             else:
                 other_tiles.append(tile)
+        if tile_to_convert is None:
+            raise ValueError(f"There is no overlap in dimension {sliding_dim}")
         assert isinstance(
             tile_to_convert, Tile
         ), f"tile_to_convert was unexpectedly a {type(tile_to_convert)}"
@@ -967,12 +1001,15 @@ class ComposeHole(Schedule):
                     self.output.dim_sizes[sliding_dim], include_end=False
                 ):
                     # TODO: Range over multiple choices of bank
-                    yield SlidingTileOutAction(
-                        self.sliding_tile_out,
-                        sliding_dim,
-                        slide_size,
-                        system.default_fast_bank,
-                    )
+                    if self._can_sliding_tile_out(
+                        sliding_dim, slide_size, system.default_fast_bank
+                    ):
+                        yield SlidingTileOutAction(
+                            self.sliding_tile_out,
+                            sliding_dim,
+                            slide_size,
+                            system.default_fast_bank,
+                        )
 
         # TODO: This is awful. Produce a real interface for both deferring to
         #   inner split and for gathering the right split.
@@ -2036,9 +2073,10 @@ class DirectConv(Schedule):
                     for slide_size in dim_range(
                         self.output.dim_sizes[sliding_dim], include_end=False
                     ):
-                        yield SlidingTileOutAction(
-                            self.sliding_tile_out, sliding_dim, slide_size, bank
-                        )
+                        if self._can_sliding_tile_out(sliding_dim, slide_size, bank):
+                            yield SlidingTileOutAction(
+                                self.sliding_tile_out, sliding_dim, slide_size, bank
+                            )
 
         # Search over all possible filters splits
         # TODO: We don't need a sep. split_filters. Should be just a dim for tile_out!
@@ -2218,7 +2256,8 @@ class ReduceSum(Schedule):
         return {k: 0 for k in system_config.current_system().banks}
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+# frozen is False below to support cached properties
+@dataclass_abc.dataclass_abc(frozen=False, unsafe_hash=True, eq=True)
 class Loop(Schedule):
     driving_tile: Tile
     dependent_tiles: frozenset[Tile]
@@ -2234,11 +2273,11 @@ class Loop(Schedule):
         if self.parallel and not self.inner.spec.serial_only:
             raise ValueError("Parallel loop's child must be serial only")
 
-    @property
+    @functools.cached_property
     def tiles(self) -> frozenset[Tile]:
         return frozenset([self.driving_tile]) | self.dependent_tiles
 
-    @property
+    @functools.cached_property
     def spec(self) -> specs.Spec:
         serial_only = self.inner.spec.serial_only
         if self.parallel:
@@ -2249,7 +2288,7 @@ class Loop(Schedule):
             serial_only=serial_only,
         )
 
-    @property
+    @functools.cached_property
     def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
         # The inputs of a Loop are inner's inputs, with the introduced
         # tiles substituted for their origins

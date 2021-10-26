@@ -1,6 +1,5 @@
 import collections
-import itertools
-from typing import Iterable, NamedTuple, Optional, Tuple, cast
+from typing import Optional
 
 import hypothesis
 import pytest
@@ -10,12 +9,11 @@ from hypothesis import strategies as st
 from morello import (
     dtypes,
     op_pprint,
-    ops,
     pruning,
     search,
+    search_cache,
     specs,
     system_config,
-    tensor,
 )
 from morello.system_config import current_system, current_target
 
@@ -33,20 +31,20 @@ def test_search_passes_on_any_spec(spec: specs.Spec):
     search.schedule_search(spec, inputs, output)
 
 
-class CountingCache(search.ScheduleCache):
+class CountingCache(search_cache.ScheduleCache):
     def __init__(self):
         super().__init__()
         self.get_counts = collections.defaultdict(lambda: 0)
         self.put_counts = collections.defaultdict(lambda: 0)
 
-    def get(self, spec: specs.Spec, *args) -> Optional[search.CachedSchedule]:
+    def get(self, spec: specs.Spec, *args) -> Optional[search_cache.CachedSchedule]:
         self.get_counts[spec] += 1
         return super().get(spec, *args)
 
     def put(
         self,
         spec: specs.Spec,
-        schedule: Optional[search.CachedSchedule],
+        schedule: Optional[search_cache.CachedSchedule],
         memory_limits: pruning.MemoryLimits,
     ) -> None:
         self.put_counts[spec] += 1
@@ -64,6 +62,7 @@ class CountingCache(search.ScheduleCache):
 @hypothesis.example(16)
 def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
     target = current_target()
+    system = target.system
 
     results = []
     for cap in range(cap_start, cap_start + 2):
@@ -73,11 +72,11 @@ def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
         )
         output = target.tensor(target.tensor_spec((4, 4), dtype=dtype), name="output")
 
-        original_capacity = system_config.current_system().level_configs[0].capacity
+        original_capacity = system.level_configs[0].capacity
 
         hypothesis.note("---------")
         try:
-            system_config.current_system().level_configs[0].capacity = cap
+            system.level_configs[0].capacity = cap
             results.append(
                 search.schedule_search(
                     specs.Compose(
@@ -92,7 +91,7 @@ def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
                 )
             )
         finally:
-            system_config.current_system().level_configs[0].capacity = original_capacity
+            system.level_configs[0].capacity = original_capacity
 
         if len(results) >= 2:
             print(f"results: {results}")

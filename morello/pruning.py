@@ -71,6 +71,16 @@ class MemoryLimits(abc.ABC):
 
     @abc.abstractmethod
     def transition(self, schedule: ops.Schedule) -> Optional[list["MemoryLimits"]]:
+        """Returns new limits for the children (holes) of the given schedule.
+
+        Returns `None` if the given schedule violates limits and therefore cannot be
+        scheduled.
+
+        Some MemoryLimits, such as PipelineMemoryLimits, may return different memory
+        limits for individual children. In the case of pipelines, this is because
+        intermediate tensors are only live during the execution of their adjacent
+        stages.
+        """
         raise NotImplementedError()
 
 
@@ -81,9 +91,10 @@ class StandardMemoryLimits(MemoryLimits):
         super().__init__()
         if available_memory is None:
             system = system_config.current_system()
-            self._available = {}
+            available = {}
             for bank, bank_config in system.banks.items():
-                self._available[bank] = bank_config.capacity
+                available[bank] = bank_config.capacity
+            self._available = frozendict(available)
         else:
             if any(m < 0 for m in available_memory.values()):
                 raise AvailableIsNegativeError(
@@ -104,15 +115,10 @@ class StandardMemoryLimits(MemoryLimits):
         return self._available
 
     def transition(self, schedule: ops.Schedule) -> Optional[list["MemoryLimits"]]:
-        """Returns new limits for the children (holes) of the given schedule.
-
-        Returns `None` if the given schedule violates limits and therefore cannot be
-        scheduled.
-        """
         # base->pipeline
         if isinstance(schedule, ops.Pipeline):
             return _pipeline_transition(
-                self.available, schedule, _zero_banks(), _zero_banks()
+                dict(self.available), schedule, _zero_banks(), _zero_banks()
             )
 
         # base->base

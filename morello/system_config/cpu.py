@@ -46,7 +46,7 @@ class CpuTarget(Target):
     ) -> specs.TensorSpec:
         return specs.TensorSpec(dim_sizes, dtype, bank, layout)
 
-    @property
+    @functools.cached_property
     def system(self) -> "SystemDescription":
         return SystemDescription(
             line_size=64,

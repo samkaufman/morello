@@ -58,10 +58,10 @@ class ScheduleCache:
     def get(
         self, spec: Spec, memory_limits: pruning.MemoryLimits
     ) -> Optional[CachedSchedule]:
-        """Returns a CachedSchedule or None if no schedule exists below given caps.
+        """Returns a cached schedule or `None` if no Impl satisfies the given limits.
 
-        Raises KeyError if neither a schedule nor the fact that no schedule
-        exists below that cap exists.
+        Raises KeyError if no Impl meeting the given limits exists and it is unknown
+        whether or not such an Impl exists (i.e., search should be done).
         """
         if not isinstance(memory_limits, pruning.StandardMemoryLimits):
             # TODO: Add support for PipelineChildMemoryLimits
@@ -122,12 +122,14 @@ class ScheduleCache:
                     rects[idx] = _Rect(
                         spec,
                         None,
-                        {
-                            k: max(a, b)
-                            for k, (a, b) in zip_dict(
-                                memory_caps, rects[idx].caps, same_keys=True
-                            ).items()
-                        },
+                        frozendict(
+                            {
+                                k: max(a, b)
+                                for k, (a, b) in zip_dict(
+                                    memory_caps, rects[idx].caps, same_keys=True
+                                ).items()
+                            }
+                        ),
                     )
                     return
             else:
@@ -145,12 +147,14 @@ class ScheduleCache:
                     rects[idx] = _Rect(
                         spec,
                         schedule,
-                        {
-                            k: max(a, b)
-                            for k, (a, b) in zip_dict(
-                                memory_caps, rects[idx].caps, same_keys=True
-                            ).items()
-                        },
+                        frozendict(
+                            {
+                                k: max(a, b)
+                                for k, (a, b) in zip_dict(
+                                    memory_caps, rects[idx].caps, same_keys=True
+                                ).items()
+                            }
+                        ),
                     )
                     return
             # TODO: Assert that there is at most one intersection

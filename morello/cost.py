@@ -15,6 +15,8 @@ from .ops import (
     ReduceSum,
     Schedule,
     SlidingWindowLoop,
+    MatmulHole,
+    ComposeHole,
 )
 from .system_config import current_system
 from .tensor import Tensor, Tile
@@ -74,6 +76,7 @@ def detailed_analytical_cost(
     op: Schedule,
     depth: int = 0,
     env: dict[Union[Tensor, Tile], str] = None,
+    holes_ok=False,
 ) -> dict[Schedule, tuple[int, str]]:
     """Compute costs for a given Schedule and its children.
 
@@ -83,6 +86,7 @@ def detailed_analytical_cost(
     :param op: The root of the schedule for which to calculate a cost.
     :param depth: The amount of whitespace to prefix logs.
     :param env: Names for matrices and views. Used for prettier printing.
+    :param holes_ok: If `True`, cost holes as zero. Otherwise, raise an exception.
     """
     if env is None:
         env = {}
@@ -95,6 +99,7 @@ def detailed_analytical_cost(
                 stage,
                 depth=depth + 1,
                 env=env,
+                holes_ok=holes_ok,
             )
             cost_dict.update(sub_cd)
             sum_cost += sub_cd[stage][0]
@@ -103,9 +108,7 @@ def detailed_analytical_cost(
     elif isinstance(op, (MatmulSplitLoop, Loop)):
         # Non-sliding loops are just the inner cost times the number of iterations.
         cost_dict = detailed_analytical_cost(
-            op.inner,
-            depth=depth + 1,
-            env=env,
+            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
         )
 
         factor = op.steps
@@ -121,6 +124,7 @@ def detailed_analytical_cost(
             op.inner,
             depth=depth + 1,
             env=env,
+            holes_ok=holes_ok,
         )
         # The moves are implicit in SlidingWindowLoop, so we'll construct
         # Tiles to serve as operands to `move_cost`.
@@ -140,7 +144,9 @@ def detailed_analytical_cost(
         )
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
-    elif isinstance(op, (DirectConv, Mult, HvxVrmpyaccVuwVubRub, ReduceSum)):
+    elif isinstance(op, (DirectConv, ReduceSum)) and (op.is_scheduled or holes_ok):
+        return {op: (0, "    0")}
+    elif isinstance(op, (Mult, HvxVrmpyaccVuwVubRub)):
         # Tensor multiplication is free but its operands must be in memory.
         # (This cost model is only interested in the cost of moving data.)
         return {op: (0, "    0")}
@@ -152,11 +158,14 @@ def detailed_analytical_cost(
             op.inner,
             depth=depth + 1,
             env=env,
+            holes_ok=holes_ok,
         )
         new_cost = mcost + cost_dict[op.inner][0]
         cost_expl = f"{new_cost:5d} = {mcost} + _"
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
+    elif holes_ok and isinstance(op, (ComposeHole, MatmulHole)):
+        return {op: (0, "")}
     else:
         raise ValueError(f"Unsupported op. {type(op)}")
 
