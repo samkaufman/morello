@@ -20,10 +20,10 @@ conda install --file requirements.txt
 
 Once installed, try auto-scheduling a small matrix multiplication by running from the source directory root:
 ```sh
-PYTHONPATH=. scripts/main.py matmul --cache seed_cache.pkl 8 4 8
+PYTHONPATH=. scripts/main.py --cache seed_cache.pkl 8 4 8 matmul
 ```
 
-If that works, you're in good shape. Find out how to schedule some other pre-baked Specs by running `scripts/main.py --help' or dig into the source code of [main.py](main.py) to schedule your own programs.
+If that works, you're in good shape. Find out how to schedule some other pre-baked Specs by running `scripts/main.py --help' or dig into the source code of [scripts/main.py](main.py) to schedule your own programs.
 
 ## Understanding the Output
 
