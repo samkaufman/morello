@@ -445,12 +445,11 @@ def _move_arguments(
     if any(d > 1 for d in operand.dim_sizes):
         allowable_layouts = list(specs.Layout)
 
-    # TODO: Remove following check once cost.move_cost handles it correctly.
-    if not system.has_hvx:
-        try:
-            allowable_layouts.remove(specs.Layout.HEXAGON_TRANSPACKED)
-        except ValueError:
-            pass
+    # TODO: Moves into HEXAGON_TRANSPACKED are handled by pad_transpack, not
+    #   move_{input, output} at the moment.
+    allowable_layouts = [
+        l for l in allowable_layouts if l != specs.Layout.HEXAGON_TRANSPACKED
+    ]
 
     # Yield actions for movement with register file destination, which
     # includes relayouts in registers and movements from level 1 to RF.
@@ -3016,6 +3015,7 @@ class MoveLet(_OperandWrapper):
             self.inner.operands[(-1 if self.input_idx is None else self.input_idx)]
             is self.destination
         )
+        assert self.destination.layout != Layout.HEXAGON_TRANSPACKED
 
     def env_str(
         self,

@@ -1,6 +1,8 @@
 import functools
 from typing import Any, Generator, Iterable, Optional
 
+from morello import system_config
+
 from . import common
 from .. import ops, pruning, replace, specs
 from ..ops import Schedule
@@ -53,8 +55,8 @@ def _assert_no_cycles_in_stack(func):
 @_assert_no_cycles_in_stack
 def schedule_search(
     spec: specs.Spec,
-    inputs: tuple,
-    output,
+    inputs: Optional[tuple] = None,
+    output: Optional[Any] = None,
     memory_limits: Optional[pruning.MemoryLimits] = None,
     cache: Optional[ScheduleCache] = None,
     parent_summary: Optional[ops.ParentSummary] = None,
@@ -65,6 +67,12 @@ def schedule_search(
 
     May return `None` if no Impl satisfies the given Spec and memory limits.
     """
+    if inputs is None:
+        target = system_config.current_target()
+        inputs = tuple(target.tensor(s) for s in spec.inputs)
+    if output is None:
+        output = system_config.current_target().tensor(spec.output)
+
     if common.prune_column_major.get():
         if any(inp.layout == specs.Layout.COL_MAJOR for inp in spec.inputs):
             return None

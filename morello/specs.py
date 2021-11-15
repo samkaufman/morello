@@ -116,7 +116,14 @@ class TensorSpec:
         """Returns True if self can be tiled in this shape."""
         if len(shape) != len(self.dim_sizes):
             return False
-        return all(i <= o for (i, o) in zip(shape, self.dim_sizes))
+        if not all(i <= o for (i, o) in zip(shape, self.dim_sizes)):
+            return False
+        if self.layout == Layout.HEXAGON_TRANSPACKED:
+            if self.dtype != Uint8:
+                return False
+            if shape[0] % 4 != 0 or shape[1] % 32 != 0:
+                return False
+        return True
 
     def __str__(self):
         layout_epi = ""
@@ -142,9 +149,7 @@ class HvxVmemTensorSpec(TensorSpec):
             )
 
     def is_valid_tile_shape(self, shape: tuple[int, ...]) -> bool:
-        if len(shape) != len(self.dim_sizes):
-            return False
-        if any(i > o for (i, o) in zip(shape, self.dim_sizes)):
+        if not super().is_valid_tile_shape(shape):
             return False
         if any(i > v for (i, v) in zip(shape, self.vector_shape)):
             return False
