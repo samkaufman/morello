@@ -1,8 +1,12 @@
 import re
+
 import sympy
 
-
 _POINT_SYMBOL_RE = re.compile(r"^p(\d+)$")
+
+
+class FloorDiv(sympy.Function):
+    nargs = 2
 
 
 def zero_points(expr: sympy.Expr) -> sympy.Expr:

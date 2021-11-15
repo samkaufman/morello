@@ -1,6 +1,7 @@
 import abc
-from typing import Optional
 from collections.abc import Mapping
+from typing import Optional
+
 from frozendict import frozendict
 
 from . import ops, system_config, utils
@@ -66,12 +67,12 @@ def _pipeline_transition(
 class MemoryLimits(abc.ABC):
     @property
     @abc.abstractmethod
-    def available(self) -> tuple[int, ...]:
+    def available(self) -> frozendict[str, int]:
         pass
 
     @abc.abstractmethod
     def transition(self, schedule: ops.Schedule) -> Optional[list["MemoryLimits"]]:
-        """Returns new limits for the children (holes) of the given schedule.
+        """Returns new limits for the children of the given schedule.
 
         Returns `None` if the given schedule violates limits and therefore cannot be
         scheduled.
@@ -110,6 +111,11 @@ class StandardMemoryLimits(MemoryLimits):
     def __hash__(self) -> int:
         return hash(self.available)
 
+    def __str__(self) -> str:
+        s = f"{type(self).__name__}("
+        s += ", ".join(f"{k}={self.available[k]}" for k in sorted(self.available))
+        return s + ")"
+
     @property
     def available(self) -> frozendict[str, int]:
         return self._available
@@ -137,11 +143,15 @@ class StandardMemoryLimits(MemoryLimits):
         ):
             # This violates the limits, so we return None
             return None
+
         return [StandardMemoryLimits(a) for a in child_limits]
 
 
 class PipelineChildMemoryLimits(MemoryLimits):
-    """A MemoryLimits carrying extra information for a hole in a Pipeline."""
+    """A MemoryLimits carrying extra information for a hole in a Pipeline.
+
+    This should not be mutated.
+    """
 
     base_available: dict[str, int]
     input_consumption: dict[str, int]
@@ -185,20 +195,28 @@ class PipelineChildMemoryLimits(MemoryLimits):
             (self.base_available, self.input_consumption, self.output_consumption)
         )
 
+    def __str__(self) -> str:
+        return (
+            f"{type(self).__name__}({self.base_available}, "
+            f"{self.input_consumption}, {self.output_consumption})"
+        )
+
     @property
-    def available(self) -> dict[str, int]:
+    def available(self) -> frozendict[str, int]:
         # This property is the interface for any caller expecting a base
         # StandardMemoryLimits (i.e. one that can't use extra information about
         # its context in a Pipeline).
-        return {
-            bank: a - (b + c)
-            for bank, (a, b, c) in utils.zip_dict(
-                self.base_available,
-                self.input_consumption,
-                self.output_consumption,
-                same_keys=True,
-            ).items()
-        }
+        return frozendict(
+            {
+                bank: a - (b + c)
+                for bank, (a, b, c) in utils.zip_dict(
+                    self.base_available,
+                    self.input_consumption,
+                    self.output_consumption,
+                    same_keys=True,
+                ).items()
+            }
+        )
 
     def transition(self, schedule: ops.Schedule) -> Optional[list["MemoryLimits"]]:
         # pipeline->base; treat self as a StandardMemoryLimits and transition

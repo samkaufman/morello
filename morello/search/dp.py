@@ -2,7 +2,7 @@ import functools
 from typing import Any, Generator, Iterable, Optional
 
 from . import common
-from .. import ops, pruning, replace, specs, tiling
+from .. import ops, pruning, replace, specs
 from ..ops import Schedule
 from ..search_cache import CachedSchedule, ScheduleCache
 
@@ -59,6 +59,7 @@ def schedule_search(
     cache: Optional[ScheduleCache] = None,
     parent_summary: Optional[ops.ParentSummary] = None,
     stats: Optional[common.SearchStats] = None,
+    callbacks: Optional[common.SearchCallbacks] = None,
 ) -> Optional[Schedule]:
     """Returns the best Impl for a given Spec and memory limits.
 
@@ -100,6 +101,9 @@ def schedule_search(
         # objects, so: swap in the query operands before returning the cached schedule.
         return _subs_query_operands(spec, inputs, output, wrapped_cached_schedule)
 
+    if callbacks:
+        callbacks.enter_unseen(spec, memory_limits)
+
     # Create a an Impl hole corresponding to the query spec
     leaf = ops.spec_to_hole(spec, inputs, output)
     assert leaf.depth == 1, f"Expected hole to have depth 1; had {leaf.depth}"
@@ -107,7 +111,6 @@ def schedule_search(
     # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
     def yield_options() -> Generator[Schedule, None, None]:
         """Yields best Impls after taking any of leaf's actions (or no action)."""
-
         # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
         if all(m >= 0 for m in memory_limits.available.values()) and leaf.is_scheduled:
             yield leaf
@@ -118,6 +121,8 @@ def schedule_search(
         for act in leaf.actions(parent_summary=parent_summary):
             try:
                 new_tree = act()
+                if callbacks:
+                    callbacks.applied_action(act, new_tree)
             except Exception as e:
                 # Re-raise the exception with a little more detail about act.
                 raise common.ActionFailedException(act) from e
@@ -125,6 +130,10 @@ def schedule_search(
             assert new_tree != leaf, (
                 f"Action returned self: {new_tree}; spec = {str(new_tree.spec)}; "
                 f"action = {act}"
+            )
+
+            new_parent_summary = ops.ParentSummary.update(
+                parent_summary, parent=new_tree
             )
 
             # Ignore the action if it uses more memory than is available for any hole.
@@ -142,10 +151,9 @@ def schedule_search(
                     output=child.output,
                     cache=cache,
                     memory_limits=mem,
-                    parent_summary=ops.ParentSummary.update(
-                        parent_summary, parent=new_tree
-                    ),
+                    parent_summary=new_parent_summary,
                     stats=stats,
+                    callbacks=callbacks,
                 )
                 # If any hole could not be filled--this can happen, for instance, if
                 # every possible action uses too much memory--then exit the outer loop.
@@ -160,9 +168,13 @@ def schedule_search(
             assert (
                 completed.spec == new_tree.spec
             ), f"{str(completed.spec)} != {str(new_tree.spec)}"
+
             yield completed
 
     best_result = _best_schedule(yield_options())
+    if callbacks:
+        callbacks.exit(spec, best_result[1][0] if best_result else None)
+
     if best_result is not None:
         schedule_to_return, (cost_ret, _, _) = best_result
         assert (

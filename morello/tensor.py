@@ -61,15 +61,16 @@ class TensorLike(abc.ABC):
         """
         raise NotImplementedError()
 
-    def is_valid_tile_shape(self, shape: tuple[int, ...]) -> bool:
-        """Returns True if self can be tiled in this shape."""
-        if len(shape) != len(self.dim_sizes):
-            return False
-        return all(i <= o for (i, o) in zip(shape, self.dim_sizes))
-
     def can_move_to(self, bank: Optional[str], layout: Optional[specs.Layout]) -> bool:
         if bank is None:
             bank = self.bank
+        if layout == specs.Layout.HEXAGON_TRANSPACKED:
+            if self.dtype != dtypes.Uint8:
+                return False
+            if len(self.dim_sizes) != 2:
+                return False
+            if self.dim_sizes[0] % 4 != 0 or self.dim_sizes[1] % 32 != 0:
+                return False
         # TODO: Factor the following check out into a Hexagon-specific tensorlike
         if bank == "VMEM" and (self.volume * self.dtype.size) % 128 != 0:
             return False
@@ -214,10 +215,11 @@ class Tile(TensorLike):
 
     @functools.cached_property
     def spec(self) -> specs.TensorSpec:
+        target = system_config.current_target()
         layout = specs.Layout.ROW_MAJOR
         if any(d != 1 for d in self.dim_sizes):
             layout = self.root.layout
-        return specs.TensorSpec(
+        return target.tensor_spec(
             dim_sizes=self.dim_sizes,
             dtype=self.origin.dtype,
             bank=self.origin.bank,

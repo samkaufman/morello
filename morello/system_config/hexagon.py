@@ -3,28 +3,29 @@ import contextlib
 import dataclasses
 import functools
 import io
+import json
 import logging
 import operator
 import os
 import pathlib
-import re
 import subprocess
 import sys
 import tempfile
 import typing
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable, Optional, Union, cast
 
-from .. import dtypes, ops, specs, tensor
+from .. import dtypes, ops, specs, system_config, tensor
 from ..codegen import gen
 from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
+_WORKAROUND_CRASH_STR = "CRASH from thread 0!"
+
 HEXAGON_CLANG_ARGS = ["-mhvx", "-mv66"]
 HEXAGON_SIM_TARGET_ARG = "--mv66g_1024_rev2"
-_REAL_TIME_RE = re.compile(
-    r"\s*Ratio to Real Time \(\d+ MHz\) = ~\d+/\d+ \(elapsed time = ([\d.]+)s\)\s*"
-)
+
 
 # L1 cache size is drawn from Linux source:
 #   https://docs.huihoo.com/doxygen/linux/kernel/3.7/include_2asm-generic_2cache_8h.html#a9400cc2ba37e33279bdbc510a6311fb4
@@ -129,6 +130,8 @@ class HvxSimulatorTarget(Target):
         ) as binary_path:
             hexagon_sim_cmd = [
                 str(sim_path),
+                "--pctrace",
+                "--statsfile",
                 "--timing",
                 "--verbose",
                 HEXAGON_SIM_TARGET_ARG,
@@ -144,14 +147,24 @@ class HvxSimulatorTarget(Target):
                 stderr=subprocess.PIPE,
                 check=True,
             )
+
             stdout = result.stdout.decode("utf8")
             stderr = result.stderr.decode("utf8")
+            stdout = _workaround_coredump_in_stdout(stdout)
+
+            # objdump_cmd = [
+            #     _hexagon_sdk_tools_root() / "Tools" / "bin" / "hexagon-llvm-objdump",
+            #     "--disassemble",
+            #     "-source",
+            #     binary_path,
+            # ]
+            # subprocess.run(objdump_cmd, check=True)
 
             if profile_output:
                 profiler_path = (
                     _hexagon_sdk_tools_root() / "Tools" / "bin" / "hexagon-profiler"
                 )
-                profile_result = subprocess.run(
+                subprocess.run(
                     [
                         str(profiler_path),
                         "--packet_analyze",
@@ -170,15 +183,24 @@ class HvxSimulatorTarget(Target):
         impl,
         profile_output: Optional[pathlib.Path] = None,
     ) -> float:
-        _, stderr = self.run_impl(impl, profile_output=profile_output)
-        stderr_lines = stderr.splitlines()
-        real_time_line_matches = [_REAL_TIME_RE.match(l) for l in stderr_lines]
-        time_matches = [m for m in real_time_line_matches if m is not None]
-        assert len(time_matches) == 1, f"Got {len(time_matches)} matches"
-        return float(time_matches[0].group(1))
+        """Executes and benchmarks an Impl on the Hexagon simulator.
+
+        Returns the reported number of processor cycles.
+        """
+        profile_output_ctx = contextlib.nullcontext(profile_output)
+        if not profile_output:
+            profile_output_ctx = tempfile.TemporaryDirectory()
+
+        with profile_output_ctx as po_path:
+            assert po_path is not None
+            po_path = pathlib.Path(po_path)
+            run_result = self.run_impl(impl, profile_output=po_path)
+            return float(_read_pcycles_from_stats_json(po_path / "stats.json"))
 
 
 class HvxVmemTensorlike(tensor.TensorLike):
+    spec: specs.HvxVmemTensorSpec
+
     def _common_post_init(self):
         assert isinstance(self.spec, specs.HvxVmemTensorSpec)
         assert self.spec.bank == "VMEM"
@@ -190,18 +212,6 @@ class HvxVmemTensorlike(tensor.TensorLike):
     @property
     def contiguous(self) -> bool:
         return self.vector_count == 1
-
-    def is_valid_tile_shape(self, shape: tuple[int, ...]) -> bool:
-        if len(shape) != len(self.dim_sizes):
-            return False
-        if any(i > o for (i, o) in zip(shape, self.dim_sizes)):
-            return False
-        assert isinstance(self.spec, specs.HvxVmemTensorSpec)
-        if any(i > v for (i, v) in zip(shape, self.spec.vector_shape)):
-            return False
-        if functools.reduce(operator.mul, shape, 1) % 128 != 0:
-            return False
-        return True
 
     def simple_tile(self, tile_shape: tuple[int, ...]) -> "HvxVmemTensorlike":
         return self._tile(HvxVmemSimpleTile, tile_shape)
@@ -282,12 +292,14 @@ class HvxVmemSimpleTile(HvxVmemTensorlike, tensor.SimpleTile):
 
     @functools.cached_property
     def spec(self) -> specs.HvxVmemTensorSpec:
-        orig = super().spec
+        layout = specs.Layout.ROW_MAJOR
+        if any(d != 1 for d in self.dim_sizes):
+            layout = self.root.layout
         return specs.HvxVmemTensorSpec(
-            dim_sizes=orig.dim_sizes,
-            dtype=orig.dtype,
-            bank=orig.bank,
-            layout=orig.layout,
+            dim_sizes=self.dim_sizes,
+            dtype=self.origin.dtype,
+            bank=self.origin.bank,
+            layout=layout,
             vector_shape=cast(HvxVmemTensor, self.root).vector_shape,
         )
 
@@ -322,20 +334,50 @@ def _build_for_hexagon(
         with open(source_path, mode="w") as fo:
             fo.write(source_code)
 
+        iss_include_dir = _hexagon_sdk_tools_root() / "Tools" / "include" / "iss"
+        assert iss_include_dir.is_dir()
+        iss_lib_dir = _hexagon_sdk_tools_root() / "Tools" / "lib" / "iss"
+        iss_v66_so = iss_lib_dir / "libhexagonissv66.so"
+        assert iss_v66_so.is_file()
+
         cmd = (
             ["/usr/bin/env", str(clang_path)]
             + HEXAGON_CLANG_ARGS
             + [
+                "-v",
                 "--save-temps=obj",
                 "-O3",
                 "-std=gnu99",
+                # "-L",
+                # str(iss_lib_dir),
+                # "-Wl,-rpath," + str(iss_lib_dir),
+                # "-lwrapper",
+                # "-l:libhexagonissv66.so",
+                # str(
+                #     _hexagon_sdk_tools_root()
+                #     / "Tools"
+                #     / "lib"
+                #     / "iss"
+                #     / "libhexagonissv66.so"
+                # ),
                 "-I",
                 str(_hexagon_nn_root() / "hexagon" / "include"),
+                "-I",
+                str(iss_include_dir),
                 "-o",
                 binary_path,
                 source_path,
             ]
         )
+
+        # Append some units from hexagon_nn
+        asm_src = _hexagon_nn_root() / "hexagon" / "asm_src"
+        cmd += [
+            str(asm_src / "gemvmpybbw_h.S"),
+            str(asm_src / "vmemcpy_2d_h.S"),
+            str(asm_src / "vmemcpy_h.S"),
+            str(asm_src / "vmemset_2d_h.S"),
+        ]
 
         logger.debug("Running: " + " ".join(cmd))
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -377,3 +419,23 @@ def _hexagon_sdk_tools_root():
 
 def _hexagon_nn_root() -> Path:
     return _hexagon_sdk_root() / "libs" / "hexagon_nn" / "2.10.1"
+
+
+def _workaround_coredump_in_stdout(stdout: str) -> str:
+    filtered_lines = []
+    for line in stdout.splitlines():
+        if line == _WORKAROUND_CRASH_STR:
+            warnings.warn(
+                f"Some stdout from Hexagon simulator has been dropped.\n"
+                "This is a workaround for an apparent error within the "
+                "simulator which doesn't affect program results."
+            )
+            break
+        filtered_lines.append(line)
+    return "\n".join(filtered_lines)
+
+
+def _read_pcycles_from_stats_json(path: pathlib.Path) -> int:
+    with path.open("r") as fo:
+        stats = json.load(fo)
+    return int(stats["derived_stats"]["TOTAL_PCYCLES"]["Value"])

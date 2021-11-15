@@ -1,6 +1,5 @@
 import functools
 import io
-from morello.system_config.state import current_system
 import sys
 from typing import Callable, List, Union
 
@@ -8,7 +7,9 @@ import tabulate
 import termcolor
 
 from morello import tensor_namer
-from . import cost, ops, system_config, tensor
+from morello.system_config.state import current_system
+
+from . import cost, ops, tensor
 
 
 def _build_table(
@@ -29,7 +30,7 @@ def _build_table(
     if cost_dict:
         new_row.append(cost_dict[op][1])
     if show_utilization:
-        new_row.extend(op.peak_memory[b] for b in system.ordered_banks)
+        new_row.extend([str(op.peak_memory[b]) for b in system.ordered_banks])
     if show_scheduled:
         new_row.append("yes" if op.is_scheduled else "no")
     table.append(new_row)

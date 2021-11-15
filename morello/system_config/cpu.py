@@ -120,8 +120,13 @@ class CpuTarget(Target):
             return RunResult(stdout, stderr)
 
     def time_impl(self, impl) -> float:
-        stdout, _ = self.run_impl(impl)
-        return _parse_benchmark_output(stdout) / gen.BENCH_ITERS
+        """Executes and benchmarks an Impl on the local machine using Clang.
+
+        Returns the time in seconds. Measured by executing 10 times and
+        returning the mean.
+        """
+        r = self.run_impl(impl)
+        return _parse_benchmark_output(r.stdout) / gen.BENCH_ITERS
 
 
 def _parse_benchmark_output(output: str) -> float:

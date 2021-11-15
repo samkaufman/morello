@@ -54,21 +54,27 @@ def test_can_manually_schedule_generate_and_run_matmul_without_raise() -> None:
             np.arange(4 * 16, dtype=np.uint32).reshape((4, 16)),
         ]
 
-        binary_output, binary_stderr = target.run_impl(
+        run_result = target.run_impl(
             impl,
             print_output=True,
             source_cb=lambda s: print("Source Code:\n" + s),
             values=input_values,
         )
-        print("stderr of program:\n" + binary_stderr)
+        print("stderr of program:\n" + run_result.stderr)
         print("")
-        print("stdout of program:\n" + binary_output)
+        print("stdout of program:\n" + run_result.stdout)
 
 
 def _read_from_output(output: str) -> np.ndarray:
+    reported_rank: Optional[int] = None
+
     is_3d = False
     accum = []
     for line in output.splitlines():
+        # Use leading whitespace to determine intended rank
+        if line.strip() and reported_rank is None:
+            reported_rank = 1 + len(line) - len(line.lstrip(" "))
+
         if is_3d:
             if not line.strip():
                 accum.append([])
@@ -84,7 +90,12 @@ def _read_from_output(output: str) -> np.ndarray:
                 accum.append(row)
     if is_3d and len(accum[-1]) == 0:
         accum.pop()
-    return np.array(accum)
+
+    result_arr = np.array(accum)
+    if reported_rank:
+        while len(result_arr.shape) < reported_rank:
+            result_arr = result_arr[np.newaxis, :]
+    return result_arr
 
 
 def _conv2d(img: np.ndarray, filters: np.ndarray, out_type) -> np.ndarray:
@@ -318,37 +329,39 @@ def _calculator_to_test(spec_st):
                     .flatmap(_arb_impls_from_actions)
                     .flatmap(_arb_zip_values_for_impl)
                 )
-
-                hypothesis.note(
-                    "Impl:\n"
-                    + op_pprint.pformat(impl, show_utilization=False, show_cost=False)
-                )
-
-                expected_result = calc_fn(impl.spec, inp_values)
-
-                additional_clang_args = []
-                if CC_SANITIZE:
-                    additional_clang_args += [
-                        "-fno-omit-frame-pointer",
-                        "-fsanitize=undefined",
-                        "-fsanitize=address",
-                    ]
-
-                binary_output, binary_stderr = target.run_impl(
-                    impl,
-                    print_output=True,
-                    source_cb=lambda s: hypothesis.note("Source Code:\n" + s),
-                    values=inp_values,
-                )
-                hypothesis.note("stderr of program:\n" + binary_stderr)
-                hypothesis.note("stdout of program:\n" + binary_output)
-                hypothesis.note("Expected output:\n" + str(expected_result))
-                result = _read_from_output(binary_output)
-                np.testing.assert_allclose(result, expected_result, rtol=1e-6)
-
-        return wrapper
+                _test_impl(impl, inp_values, calc_fn)
+                return wrapper
 
     return decorator_wrapper
+
+
+def _test_impl(impl: ops.Schedule, inp_values, calc_fn):
+    target = system_config.current_target()
+
+    pformatted = op_pprint.pformat(impl, show_utilization=False, show_cost=False)
+    hypothesis.note("Impl:\n" + pformatted)
+
+    expected_result = calc_fn(impl.spec, inp_values)
+
+    additional_clang_args = []
+    if CC_SANITIZE:
+        additional_clang_args += [
+            "-fno-omit-frame-pointer",
+            "-fsanitize=undefined",
+            "-fsanitize=address",
+        ]
+
+    run_result = target.run_impl(
+        impl,
+        print_output=True,
+        source_cb=lambda s: hypothesis.note("Source Code:\n" + s),
+        values=inp_values,
+    )
+    hypothesis.note("stderr of program:\n" + run_result.stderr)
+    hypothesis.note("stdout of program:\n" + run_result.stdout)
+    hypothesis.note("Expected output:\n" + str(expected_result))
+    result = _read_from_output(run_result.stdout)
+    np.testing.assert_allclose(result, expected_result, rtol=1e-6)
 
 
 @st.composite
@@ -437,6 +450,53 @@ def test_index_exprs_consistent_with_contiguous_props(inp):
 @_calculator_to_test(_arb_matmul_spec())
 def test_codegen_for_matmul(_, inp_values):
     return inp_values[0] @ inp_values[1]
+
+
+@pytest.mark.slow
+@pytest.mark.hexagon
+@hypothesis.settings(deadline=CC_DEADLINE)
+@hypothesis.given(
+    m_mult=st.integers(min_value=1, max_value=6),
+    k_mult=st.integers(min_value=1, max_value=6),
+    n=st.integers(min_value=32, max_value=144),
+    serial_only=st.booleans(),
+)
+def test_codegen_for_matmul_with_hvx_gemvmpebbw_with_aligned_k_without_split(
+    m_mult, k_mult, n, serial_only
+):
+    m = m_mult * 4
+    k = k_mult * 16
+
+    target = hexagon.HvxSimulatorTarget()
+    with system_config.with_target(target):
+        spec = specs.Matmul(
+            target.tensor_spec((m, k), dtype=dtypes.Uint8),
+            target.tensor_spec((k, n), dtype=dtypes.Uint8),
+            target.tensor_spec((m, n), dtype=dtypes.Uint32),
+            serial_only=serial_only,
+        )
+        hole = ops.spec_to_hole(
+            spec,
+            (target.tensor(spec.lhs), target.tensor(spec.rhs)),
+            target.tensor(spec.output),
+        )
+        impl = hole.tile_out((1, 32))
+        # TODO: Re-introduce split
+        # if spec.lhs.dim_sizes[1] > 16:
+        #     impl = impl.split(16)
+        impl = (
+            impl.move_input(0, bank="L2")
+            .pad_transpack(1)
+            .move_input(1, bank="L2")
+            .move_output(bank="L2")
+            .place_hvx_gemvmpebbw()
+        )
+
+        inp_values = [
+            np.arange(m * k, dtype=np.uint32).reshape((m, k)),
+            np.arange(k * n, dtype=np.uint32).reshape((k, n)),
+        ]
+        _test_impl(impl, inp_values, lambda _, v: v[0] @ v[1])
 
 
 @_calculator_to_test(_arb_matmul_matmul_spec())

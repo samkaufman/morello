@@ -4,16 +4,18 @@ In Morello, a program's algorithm is independent of its schedule. A schedule's
 logical semantics are described by a Spec.
 """
 import abc
+import operator
 import dataclasses
 import enum
 import functools
+import typing
 import warnings
 from collections.abc import Sequence
 from typing import Callable, Iterable, Optional, Tuple, TypeVar, cast
 
 import dataclass_abc
 
-from .dtypes import Dtype
+from .dtypes import Dtype, Uint8
 from .system_config.state import current_system
 
 T = TypeVar("T")
@@ -30,11 +32,19 @@ class Layout(enum.Enum):
     ROW_MAJOR = enum.auto()
     COL_MAJOR = enum.auto()
 
+    # This layout zero-pads, tranposes, and packs the tensor. The padding can consume
+    # slightly more memory than is reflected by our cost model/memory limits,
+    # though this doesn't currently matter in practice for the Hexagon target.
+    # TODO: Encode this, as well as alignment, in a systematic way.
+    HEXAGON_TRANSPACKED = enum.auto()
+
     def __str__(self):
         if self == Layout.ROW_MAJOR:
             return "RM"
         elif self == Layout.COL_MAJOR:
             return "CM"
+        elif self == Layout.HEXAGON_TRANSPACKED:
+            return "TP"
         else:
             raise NotImplementedError(f"No __str__ for {repr(self)}")
 
@@ -75,6 +85,21 @@ class TensorSpec:
         if all(d == 1 for d in self.dim_sizes) and self.layout != Layout.ROW_MAJOR:
             raise ValueError("If all dimensions are 1, layout must be row-major")
 
+        if self.layout == Layout.HEXAGON_TRANSPACKED:
+            if self.dtype != Uint8:
+                raise ValueError(
+                    f"Cannot create transpacked tensor with type {self.dtype}"
+                )
+            if len(self.dim_sizes) != 2:
+                raise ValueError(
+                    f"Cannot create transpacked tensor with rank {len(self.dim_sizes)}"
+                )
+            if self.dim_sizes[0] % 4 != 0 or self.dim_sizes[1] % 32 != 0:
+                raise ValueError(
+                    f"Cannot create transpacked tensor with shape "
+                    f"{self.dim_sizes}. Must be multiple of 4×32."
+                )
+
     def shrink(self, new_dim_sizes: Tuple[int, ...]) -> "TensorSpec":
         """Returns a clone with new dimensions.
 
@@ -86,6 +111,12 @@ class TensorSpec:
         return TensorSpec(
             new_dim_sizes, dtype=self.dtype, bank=self.bank, layout=new_layout
         )
+
+    def is_valid_tile_shape(self, shape: tuple[int, ...]) -> bool:
+        """Returns True if self can be tiled in this shape."""
+        if len(shape) != len(self.dim_sizes):
+            return False
+        return all(i <= o for (i, o) in zip(shape, self.dim_sizes))
 
     def __str__(self):
         layout_epi = ""
@@ -109,6 +140,17 @@ class HvxVmemTensorSpec(TensorSpec):
             raise ValueError(
                 f"Shape {self.dim_sizes} is smaller in some dimensions than vector shape {vector_shape}"
             )
+
+    def is_valid_tile_shape(self, shape: tuple[int, ...]) -> bool:
+        if len(shape) != len(self.dim_sizes):
+            return False
+        if any(i > o for (i, o) in zip(shape, self.dim_sizes)):
+            return False
+        if any(i > v for (i, v) in zip(shape, self.vector_shape)):
+            return False
+        if functools.reduce(operator.mul, shape, 1) % 128 != 0:
+            return False
+        return True
 
     def __str__(self):
         base_str = super().__str__()[:-1]
@@ -176,6 +218,7 @@ class Spec(abc.ABC):
     def output(self) -> TensorSpec:
         raise NotImplementedError()
 
+    @typing.final
     @property
     def operands(self) -> tuple[TensorSpec, ...]:
         return self.inputs + (self.output,)
@@ -693,7 +736,11 @@ class ReduceSum(Spec):
     def __post_init__(self):
         assert len(self.source.dim_sizes) >= 2
         assert len(self.output.dim_sizes) == len(self.source.dim_sizes) - 1
-        assert self.output.dim_sizes == self.output_shape(self.source.dim_sizes)
+        assert self.output.dim_sizes == self.output_shape(self.source.dim_sizes), (
+            f"Given output shape was {self.output.dim_sizes} but the computed "
+            f"output shape is {self.output_shape(self.source.dim_sizes)} "
+            f"(input shape: {self.source.dim_sizes})"
+        )
 
     @staticmethod
     def from_io(

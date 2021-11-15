@@ -17,9 +17,21 @@ def dim_st(draw, max_size: Optional[int] = None) -> int:
 
 @st.composite
 def layout_st(draw, dim_sizes: Optional[Tuple[int, ...]] = None) -> specs.Layout:
+    target = system_config.current_target()
     if all(d == 1 for d in dim_sizes):
         return specs.Layout.ROW_MAJOR
-    return draw(st.from_type(specs.Layout))
+
+    if isinstance(target, cpu.CpuTarget):
+        available_layouts = [
+            l for l in specs.Layout if l != specs.Layout.HEXAGON_TRANSPACKED
+        ]
+    elif isinstance(target, hexagon.HvxSimulatorTarget):
+        available_layouts = list(specs.Layout)
+    else:
+        raise NotImplementedError(
+            f"layout_st not implemented for target {type(target).__name__}"
+        )
+    return draw(st.sampled_from(available_layouts))
 
 
 @st.composite
@@ -54,7 +66,7 @@ def tensorspec_st(
 
 
 @st.composite
-def matmul_spec_st(draw, max_dim_size: Optional[int] = 32):
+def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
     target = system_config.current_target()
     lhs = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=2))
     rhs_dim_sizes = (lhs.dim_sizes[1], draw(dim_st(max_size=max_dim_size)))

@@ -63,8 +63,8 @@ def test_tiling_across_full_vectors_succeeds(
         tensor = hexagon.HvxVmemTensor(spec, None, origin=None)
         tensor.simple_tile(tile_shape)
 
-    inner(specs.Layout.ROW_MAJOR)
-    inner(specs.Layout.COL_MAJOR)
+    for layout in specs.Layout:
+        inner(layout)
 
 
 @pytest.mark.parametrize(
@@ -91,8 +91,8 @@ def test_tiling_across_partial_vectors_raises(
         with pytest.raises(ValueError):
             tensor.simple_tile(tile_shape)
 
-    inner(specs.Layout.ROW_MAJOR)
-    inner(specs.Layout.COL_MAJOR)
+    for layout in specs.Layout:
+        inner(layout)
 
 
 @hypothesis.given(_st_test_tiling_always_produces_vector_indices_in_parent_set())
@@ -117,5 +117,5 @@ def test_tiling_always_produces_vector_indices_in_parent_set(shapes):
             tile: hexagon.HvxVmemTensorlike = prev_tensorlike.simple_tile(shape)
             prev_tensorlike = tile
 
-    inner(specs.Layout.ROW_MAJOR)
-    inner(specs.Layout.COL_MAJOR)
+    for layout in specs.Layout:
+        inner(layout)

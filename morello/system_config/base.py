@@ -12,7 +12,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class RunResult(NamedTuple):
+@dataclasses.dataclass
+class RunResult:
     stdout: str
     stderr: str
 
@@ -54,6 +55,10 @@ class Target(abc.ABC):
         raise NotImplementedError()
 
     def time_impl(self, impl) -> float:
+        """Executes and benchmarks an Impl.
+
+        Returns a measurement of time in arbitrary units.
+        """
         raise NotImplementedError()
 
 

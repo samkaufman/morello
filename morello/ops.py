@@ -10,6 +10,7 @@ import typing
 import warnings
 from collections.abc import Mapping
 from typing import (
+    Any,
     Callable,
     FrozenSet,
     Iterable,
@@ -20,7 +21,6 @@ from typing import (
     TypeVar,
     Union,
     cast,
-    Any,
 )
 
 import dataclass_abc
@@ -29,7 +29,7 @@ import termcolor
 from . import dtypes, specs, system_config, tiling, utils
 from .specs import Layout
 from .system_config.state import current_system, current_target
-from .tensor import ConvolutionImageTile, SimpleTile, TensorLike, Tensor, Tile
+from .tensor import ConvolutionImageTile, SimpleTile, Tensor, TensorLike, Tile
 
 
 class TileSizeMode(enum.Enum):
@@ -49,7 +49,7 @@ allow_reduce_splits: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 PRUNE_RELAYOUT_CYCLES = True
-BREAK_MOVE_SYMMETRIES = True
+BREAK_MOVE_SYMMETRIES = False  # TODO: Remove this code entirely
 BREAK_SEQUENTIAL_TILES = False
 
 T = TypeVar("T")
@@ -197,7 +197,7 @@ class MoveAction:
     def __str__(self):
         return (
             f"MoveAction(input_idx={self.input_idx}, source={str(self.source)},"
-            f" prefetching={self.prefetching}"
+            f" prefetching={self.prefetching},"
             f" {self.bank}, layout={str(self.layout)})"
         )
 
@@ -445,6 +445,13 @@ def _move_arguments(
     if any(d > 1 for d in operand.dim_sizes):
         allowable_layouts = list(specs.Layout)
 
+    # TODO: Remove following check once cost.move_cost handles it correctly.
+    if not system.has_hvx:
+        try:
+            allowable_layouts.remove(specs.Layout.HEXAGON_TRANSPACKED)
+        except ValueError:
+            pass
+
     # Yield actions for movement with register file destination, which
     # includes relayouts in registers and movements from level 1 to RF.
     for layout in allowable_layouts:
@@ -474,11 +481,20 @@ def _common_operand_move_actions(impl: "Schedule") -> Iterable[MoveAction]:
     yield from inner(None, impl.output)
 
 
-def spec_to_hole(spec: specs.Spec, inputs: Iterable, output) -> "Schedule":
+def spec_to_hole(
+    spec: specs.Spec, inputs: Optional[Iterable] = None, output: Optional[Any] = None
+) -> "Schedule":
     """Returns a default, incomplete schedule for a Spec which consume given inputs.
 
-    Output tensors will be constructed using the spec's output shape property.
+    If either `inputs` or `output` is None, default Tensors from the corresponding
+    TensorSpecs will be constructed (using the current target).
     """
+    if inputs is None:
+        target = current_target()
+        inputs = tuple(target.tensor(s) for s in spec.inputs)
+    if output is None:
+        output = current_target().tensor(spec.output)
+
     inputs = tuple(inputs)
     if isinstance(spec, specs.Convolution):
         assert len(inputs) == 2, f"Expected 2 Tensor/Tile operands; got {len(inputs)}"
@@ -640,16 +656,17 @@ class Schedule(abc.ABC):
         can be tiled to the corresponding input shapes.
         """
         output_shape = tuple(output_shape)
-        if not self.output.is_valid_tile_shape(output_shape):
+        if not self.output.spec.is_valid_tile_shape(output_shape):
             return False
         # TODO: It'd be nice to not need to tile the output to get its PartialTile
-        smaller_output = self.output.simple_tile(output_shape)
-        smaller_partial_out = tiling.tile_to_partial(smaller_output)
+        smaller_partial_out = tiling.tile_to_partial(
+            self.output.simple_tile(output_shape)
+        )
         for inp, partial_input in zip(
             self.inputs,
             self._calculate_partial_inputs_for_tile_out(smaller_partial_out),
         ):
-            if not inp.is_valid_tile_shape(partial_input.dim_sizes):
+            if not inp.spec.is_valid_tile_shape(partial_input.dim_sizes):
                 return False
         return True
 
@@ -838,6 +855,9 @@ class Schedule(abc.ABC):
     ) -> "Schedule":
         raise NotImplementedError()
 
+    def pad_transpack(self, input_idx: int) -> "Schedule":
+        raise NotImplementedError(f"Unimplemented for {type(self).__name__}")
+
     @_assert_stable_spec
     def subschedule(self, *args, **kwargs) -> "Schedule":
         if len(self.children) == 1:
@@ -962,6 +982,10 @@ class ComposeHole(Schedule):
         # TODO: Remove this symmetry: lots of ways to iteratively split the pipeline
         # TODO: Reintroduce splitting on non-index 0
         for bank, layout in itertools.product(system.banks, Layout):
+            # TODO: Remove following check once cost.move_cost handles it correctly.
+            if not system.has_hvx and layout == Layout.HEXAGON_TRANSPACKED:
+                continue
+
             # TODO: The below special-casing for VMEM stinks. If we had partial
             #  finite functions/lenses, we could just constrain a few properties and
             #  enumerate the rest. It would also be possible to generate
@@ -1203,7 +1227,8 @@ class ComposeHole(Schedule):
         reified_inputs = tuple(
             partial_inp.tile(inp)
             for inp, partial_inp in zip(
-                self.inputs, self._compute_partial_inputs(shrunken_output_tile)
+                self.inputs,
+                self._calculate_partial_inputs_for_tile_out(shrunken_output_tile),
             )
         )
 
@@ -1263,7 +1288,9 @@ class ComposeHole(Schedule):
             partial_inp.tile(inp)
             for inp, partial_inp in zip(
                 self.inputs,
-                self._compute_partial_inputs(smaller_partial_input_tile, skip_first=1),
+                self._calculate_partial_inputs_for_tile_out(
+                    smaller_partial_input_tile, skip_first=1
+                ),
             )
         )
 
@@ -1309,15 +1336,9 @@ class ComposeHole(Schedule):
             if original_input != tiled_input:
                 yield tiled_input
 
-    @typing.final
     def _calculate_partial_inputs_for_tile_out(
-        self, output_tile: Union[SimpleTile, tiling.PartialTile]
-    ) -> list[tiling.PartialTile]:
-        return self._compute_partial_inputs(output_tile)
-
-    def _compute_partial_inputs(
         self,
-        output_tile: Union[SimpleTile, tiling.PartialSimpleTile],
+        output_tile: Union[SimpleTile, tiling.PartialTile],
         skip_first: int = 0,
     ) -> list[tiling.PartialTile]:
         """Returns PartialTiles for this ComposeHole's inputs for an output tiling.
@@ -1415,9 +1436,9 @@ class Pipeline(Schedule):
     The output of the pipeline is the output of the final stage.
     """
 
-    stages: Tuple[Schedule, ...]
+    stages: tuple[Schedule, ...]
 
-    def __init__(self, stages: Tuple[Schedule, ...]):
+    def __init__(self, stages: tuple[Schedule, ...]):
         assert len(stages) >= 2
         # TODO: Reintroduce check for operand agreement
         # for before, after in zip(self.stages[:-1], self.stages[1:]):
@@ -1433,10 +1454,6 @@ class Pipeline(Schedule):
             else:
                 flattened_stages.append(stage)
         object.__setattr__(self, "stages", tuple(flattened_stages))
-
-        assert all(
-            self.stages[0].spec.serial_only == s.spec.serial_only for s in self.stages
-        ), "All Pipeline stages should have the same serial_only flag"
 
     @functools.cached_property
     def spec(self) -> specs.Compose:
@@ -1672,10 +1689,6 @@ class MatmulBase(Schedule):
         return self
 
     @property
-    def additional_memories(self) -> list[dict[str, int]]:
-        return []
-
-    @property
     def peak_memory(self) -> dict[str, int]:
         return {k: 0 for k in system_config.current_system().banks}
 
@@ -1683,7 +1696,7 @@ class MatmulBase(Schedule):
         self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
     ) -> "Schedule":
         lhs, rhs = inputs
-        return type(self)(lhs, rhs, output)
+        return type(self)(lhs, rhs, output, serial_only=self.serial_only)
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -1743,6 +1756,27 @@ class MatmulHole(MatmulBase):
         return _common_move(self, "output", bank, layout, prefetching, **kwargs)
 
     @_assert_stable_spec
+    def pad_transpack(self, input_idx: int) -> "Schedule":
+        source = self.inputs[input_idx]
+        new_mat = current_target().tensor(
+            spec=current_target().tensor_spec(
+                dim_sizes=source.dim_sizes,
+                dtype=source.dtype,
+                bank="GL",
+                layout=Layout.HEXAGON_TRANSPACKED,
+            ),
+            origin=source,
+        )
+
+        new_inputs = self.inputs[:input_idx] + (new_mat,) + self.inputs[input_idx + 1 :]
+        return PadTranspack(
+            source=source,
+            destination=new_mat,
+            input_idx=input_idx,
+            inner=self.replace_io(new_inputs, self.output),
+        )
+
+    @_assert_stable_spec
     def split(self, size: int) -> "Schedule":
         assert size > 0
         if size > self.lhs.dim_sizes[1]:
@@ -1767,9 +1801,9 @@ class MatmulHole(MatmulBase):
         assert lhs_w == rhs_h
         if k > lhs_w:
             return False
-        if not self.lhs.is_valid_tile_shape((lhs_h, k)):
+        if not self.lhs.spec.is_valid_tile_shape((lhs_h, k)):
             return False
-        if not self.rhs.is_valid_tile_shape((k, rhs_w)):
+        if not self.rhs.spec.is_valid_tile_shape((k, rhs_w)):
             return False
         return True
 
@@ -1797,8 +1831,16 @@ class MatmulHole(MatmulBase):
         return Mult(self.lhs, self.rhs, self.output, self.serial_only)
 
     @_assert_stable_spec
+    def place_hvx_gemvmpebbw(self) -> "HvxGemvmpybbwAsm":
+        return HvxGemvmpybbwAsm(self.lhs, self.rhs, self.output, self.serial_only)
+
+    @_assert_stable_spec
     def place_hvx_vrmpyacc(self) -> "HvxVrmpyaccVuwVubRub":
         return HvxVrmpyaccVuwVubRub(self.lhs, self.rhs, self.output, self.serial_only)
+
+    @property
+    def additional_memories(self) -> list[dict[str, int]]:
+        return [{k: 0 for k in system_config.current_system().banks}]
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -1835,6 +1877,10 @@ class MatmulLeaf(MatmulBase):
     ) -> "MoveLet":
         raise NotImplementedError()
 
+    @property
+    def additional_memories(self) -> list[dict[str, int]]:
+        return []
+
 
 @dataclass_abc.dataclass_abc(frozen=True)
 class Mult(MatmulLeaf):
@@ -1851,6 +1897,62 @@ class Mult(MatmulLeaf):
             o.bank in ("RF", "HexagonRF") and all(d == 1 for d in o.dim_sizes)
             for o in operands
         )
+
+
+@dataclass_abc.dataclass_abc(frozen=True)
+class HvxGemvmpybbwAsm(MatmulLeaf):
+    """Impl that invokes hexagon_nn's gemvmpybbw_asm function."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        check_result = HvxGemvmpybbwAsm._check_operands(self.operands)
+        if check_result:
+            raise ValueError(check_result)
+
+    @staticmethod
+    def applies_to_operands(operands: Sequence[Union[Tensor, Tile]]) -> bool:
+        if HvxGemvmpybbwAsm._check_operands(operands):
+            return False
+        return True
+
+    @staticmethod
+    def _check_operands(operands: Sequence[Union[Tensor, Tile]]) -> Optional[str]:
+        lhs, rhs, out = operands
+
+        if lhs.bank != "L2":
+            # The left-hand side will be prefetched into L1 by the operation
+            # itself.
+            return "lhs must be in L2"
+        if rhs.bank != "L2":
+            return "rhs must be in L2"
+        if out.bank != "L2":
+            return "out must be in L2"
+
+        if lhs.layout != Layout.ROW_MAJOR:
+            return "lhs must be in row-major"
+        if rhs.layout != Layout.HEXAGON_TRANSPACKED:
+            return "rhs must be transpacked"
+        if out.layout != Layout.ROW_MAJOR:
+            return "out must be in row-major"
+
+        if lhs.dtype != dtypes.Uint8:
+            return "lhs should be uint8"
+        if rhs.dtype != dtypes.Uint8:
+            return "rhs should be uint8"
+        if out.dtype != dtypes.Uint32:
+            return "out should be uint8"
+
+        # The n dimension below is called m by the implementation.
+        m, _ = lhs.dim_sizes
+        k, n = rhs.dim_sizes
+        if m != 1:
+            return f"m must be 1; was: {m}"
+        if k < 16 or k % 16 != 0:
+            return f"k dimension must be a non-zero multiple of 16; was {k}"
+        if n > 32:
+            return f"n must be at most 32; was {n}"
+
+        return None
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -1906,6 +2008,9 @@ class HvxVrmpyaccVuwVubRub(MatmulLeaf):
 
         return None
 
+
+_directconv_tile_out_params_cache = {}
+_directconv_sliding_tile_out_params_cache = {}
 
 # noinspection PyTypeChecker, PyArgumentList, PyUnresolvedReferences
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -2060,23 +2165,58 @@ class DirectConv(Schedule):
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Schedule]]:
-        # Yield .tile_outs and .sliding_tile_outs
-        for shape in gen_tile_sizes(self.output.dim_sizes, filter=self._can_tile_out):
-            for parallel in [False] if self.serial_only else [True, False]:
-                yield TileOutAction(self, shape, parallel)
+        # Yield .tile_outs.
+        #
+        # Because this was a performance problem during beam search trails with the
+        # random search heuristic, we can cache the possible tile sizes according to
+        # DirectConv's spec. With some refactoring, we would be able to make
+        # _can_tile_out a function of the Spec alone, then cache tile size results on
+        # Specs and hash-cons the Specs. This isn't super important right now, though,
+        # so we just do it here, where the problem is, and because we know it's safe
+        # to do with a non-composed Spec and for DirectConv, which has no subclasses.
+        try:
+            gen_tile_sizes_results = _directconv_tile_out_params_cache[
+                (self.output.dim_sizes, self.spec)
+            ]
+        except KeyError:
+            gen_tile_sizes_results = []
+            for shape in gen_tile_sizes(
+                self.output.dim_sizes, filter=self._can_tile_out
+            ):
+                for parallel in [False] if self.serial_only else [True, False]:
+                    gen_tile_sizes_results.append((shape, parallel))
+            _directconv_tile_out_params_cache[
+                (self.output.dim_sizes, self.spec)
+            ] = gen_tile_sizes_results
+        yield from (TileOutAction(self, *a) for a in gen_tile_sizes_results)
 
+        # Yield .sliding_tile_outs.
         # We only need the levels for the left-hand side (images), because that
         # is the only operand over which one can slide.
         if allow_sliding_windows.get():
-            for bank in set(b for b, _, _ in _move_arguments(self.lhs)):
-                for sliding_dim in [0, 1]:
+            try:
+                sliding_tile_out_results = _directconv_sliding_tile_out_params_cache[
+                    (self.output.dim_sizes, self.spec)
+                ]
+            except KeyError:
+                sliding_tile_out_results = []
+                for bank, sliding_dim in itertools.product(
+                    set(b for b, _, _ in _move_arguments(self.lhs)), [0, 1]
+                ):
                     for slide_size in dim_range(
                         self.output.dim_sizes[sliding_dim], include_end=False
                     ):
                         if self._can_sliding_tile_out(sliding_dim, slide_size, bank):
-                            yield SlidingTileOutAction(
-                                self.sliding_tile_out, sliding_dim, slide_size, bank
+                            sliding_tile_out_results.append(
+                                (sliding_dim, slide_size, bank)
                             )
+                _directconv_sliding_tile_out_params_cache[
+                    (self.output.dim_sizes, self.spec)
+                ] = sliding_tile_out_results
+            yield from (
+                SlidingTileOutAction(self.sliding_tile_out, *a)
+                for a in sliding_tile_out_results
+            )
 
         # Search over all possible filters splits
         # TODO: We don't need a sep. split_filters. Should be just a dim for tile_out!
@@ -2167,7 +2307,7 @@ class ReduceSum(Schedule):
         # TODO: Lots of code duplication in this method
         # Search only over full line sizes
         for ds in gen_tile_sizes(self.output.dim_sizes):
-            if not self.output.is_valid_tile_shape(ds):
+            if not self.output.spec.is_valid_tile_shape(ds):
                 continue
             for parallel in [False] if self.serial_only else [True, False]:
                 yield TileOutAction(self, ds, parallel)
@@ -2381,6 +2521,13 @@ class Loop(Schedule):
         # basically sugar for calling subschedule.
         return dataclasses.replace(self, inner=self.inner.move_output(*args, **kwargs))
 
+    def pad_transpack(self, *args, **kwargs) -> "Loop":
+        # Pass pad_transpack through to the inner schedule. This method is
+        # basically sugar for calling subschedule.
+        return dataclasses.replace(
+            self, inner=self.inner.pad_transpack(*args, **kwargs)
+        )
+
     @_assert_stable_spec
     def split(self, size: int) -> "Loop":
         # Pass split through to the inner schedule. This method is
@@ -2413,7 +2560,12 @@ class Loop(Schedule):
     def replace_io(
         self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
     ) -> "Schedule":
-        raise NotImplementedError()
+        return type(self)(
+            driving_tile=self.driving_tile,
+            dependent_tiles=self.dependent_tiles,
+            inner=self.inner,
+            parallel=self.parallel,
+        )
 
     @_assert_stable_spec
     def subschedule(self, fn: Callable[["Schedule"], "Schedule"]) -> "Schedule":
@@ -2485,6 +2637,11 @@ class _TilingMixin:
         # Pass move_output through to the inner schedule. This method is
         # basically sugar for calling subschedule.
         return dataclasses.replace(self, inner=self.inner.move_output(*args, **kwargs))
+
+    def pad_transpack(self, *args, **kwargs) -> "Schedule":
+        return dataclasses.replace(
+            self, inner=self.inner.pad_transpack(*args, **kwargs)
+        )
 
     @_assert_stable_spec
     def split(self, size: int) -> "Schedule":
@@ -2729,7 +2886,7 @@ class MatmulSplitLoop(_TilingMixin, Schedule):
         self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
     ) -> "Schedule":
         l, r = inputs
-        return MatmulSplitLoop(lhs=l, rhs=r, out=output, inner=self.inner)
+        return MatmulSplitLoop(lhs=l, rhs=r, output=output, inner=self.inner)
 
     @property
     def steps(self) -> int:
@@ -2748,8 +2905,96 @@ class MatmulSplitLoop(_TilingMixin, Schedule):
         return result
 
 
+class _OperandWrapper(Schedule):
+    @property
+    def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
+        new_inputs = []
+        for inner_inp in self.inner.inputs:
+            assert inner_inp is not self.source
+            if inner_inp is self.destination:
+                new_inputs.append(self.source)
+            else:
+                new_inputs.append(inner_inp)
+        return tuple(new_inputs)
+
+    @property
+    def output(self):
+        # A MoveLet can move any operand. This returns the source of the move if output
+        # is the operand being moved; the inner output otherwise.
+        if self.inner.output is self.destination:
+            return self.source
+        return self.inner.output
+
+    @property
+    def children(self) -> tuple[Schedule, ...]:
+        return (self.inner,)
+
+    @property
+    def is_scheduled(self) -> bool:
+        return self.inner.is_scheduled
+
+    @_assert_stable_spec
+    def replace_children(self, replacements: Iterable[Schedule]) -> Schedule:
+        replacements = list(replacements)
+        if len(replacements) != 1:
+            raise ValueError(f"One replacement child expected; got {len(replacements)}")
+        if replacements[0].spec != self.inner.spec:
+            raise ValueError(f"Expected a replacement with spec {self.inner.spec}")
+        return dataclasses.replace(self, inner=replacements[0])
+
+    def replace_io(
+        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
+    ) -> "Schedule":
+        raise NotImplementedError(f"Not implemented for {type(self).__name__}")
+
+    @functools.cached_property
+    def spec(self) -> specs.Spec:
+        return self._spec_with_replaced_operand(self.destination, self.source)
+
+    def move_input(self, *args, **kwargs) -> "Schedule":
+        # Pass move_input through to the inner schedule
+        return dataclasses.replace(self, inner=self.inner.move_input(*args, **kwargs))
+
+    def move_output(self, *args, **kwargs) -> "Schedule":
+        # Pass move_output through to the inner schedule
+        return dataclasses.replace(self, inner=self.inner.move_output(*args, **kwargs))
+
+    def pad_transpack(self, *args, **kwargs) -> "Schedule":
+        # Pass pad_transpack through to the inner schedule
+        return dataclasses.replace(
+            self, inner=self.inner.pad_transpack(*args, **kwargs)
+        )
+
+    @_assert_stable_spec
+    def split(self, size: int) -> "Schedule":
+        return dataclasses.replace(self, inner=self.inner.split(size))
+
+    @_assert_stable_spec
+    def complete(self) -> Schedule:
+        return dataclasses.replace(self, inner=self.inner.complete())
+
+    def _spec_with_replaced_operand(
+        self, to_replace: TensorLike, replacement: TensorLike
+    ) -> specs.Spec:
+        # The spec of a MoveLet can be calculated by taking the spec of the inner
+        # schedule and replacing the right inputs/output of the spec with the source
+        # tensor's spec.
+        new_input_specs = []
+        for inp in self.inner.inputs:
+            if inp is to_replace:
+                new_input_specs.append(replacement.spec)
+            else:
+                new_input_specs.append(inp.spec)
+
+        new_output_spec = self.inner.output.spec
+        if self.inner.output is to_replace:
+            new_output_spec = replacement.spec
+
+        return self.inner.spec.replace_io(tuple(new_input_specs), new_output_spec)
+
+
 @dataclass_abc.dataclass_abc(frozen=True)
-class MoveLet(Schedule):
+class MoveLet(_OperandWrapper):
     """A Move operation composed with some subsequent Schedule."""
 
     source: Union[Tensor, Tile]
@@ -2759,10 +3004,6 @@ class MoveLet(Schedule):
     inner: Schedule
 
     def __post_init__(self):
-        fasters = current_system().faster_destination_banks(self.source.bank)
-        assert (
-            self.destination.bank in fasters
-        ), f"{self.destination.bank} not in {fasters}"
         assert self.destination.origin is self.source, (
             f"Destination's origin {self.destination.origin} was not source"
             f" {self.source}"
@@ -2784,9 +3025,9 @@ class MoveLet(Schedule):
     ):
         keyword = "move"
         if self.prefetching:
+            keyword += "*"
+        if self.prefetching:
             keyword += "[p]"
-        if self.is_store:
-            keyword = "move*"
 
         arrow = "<-"
         if fancy:
@@ -2818,43 +3059,6 @@ class MoveLet(Schedule):
         return self.source == self.output
 
     @property
-    def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
-        new_inputs = []
-        for inner_inp in self.inner.inputs:
-            assert inner_inp is not self.source
-            if inner_inp is self.destination:
-                new_inputs.append(self.source)
-            else:
-                new_inputs.append(inner_inp)
-        return tuple(new_inputs)
-
-    @property
-    def children(self) -> Tuple[Schedule, ...]:
-        return (self.inner,)
-
-    @functools.cached_property
-    def spec(self) -> specs.Spec:
-        # The spec of a MoveLet can be calculated by taking the spec of the inner
-        # schedule and replacing the right inputs/output of the spec with the source
-        # tensor's spec.
-        new_input_specs = []
-        for inp in self.inner.inputs:
-            assert (
-                inp is not self.source
-            ), "There is no reason for an inner schedule to reference the moved tensor"
-            if inp is self.destination:
-                new_input_specs.append(self.source.spec)
-            else:
-                new_input_specs.append(inp.spec)
-
-        new_output_spec = self.inner.output.spec
-        assert new_output_spec is not self.source
-        if self.inner.output is self.destination:
-            new_output_spec = self.source.spec
-
-        return self.inner.spec.replace_io(tuple(new_input_specs), new_output_spec)
-
-    @property
     def lhs(self):
         # A MoveLet can move any operand. This returns the source of the move if output
         # is the operand being moved; the inner output otherwise.
@@ -2871,44 +3075,6 @@ class MoveLet(Schedule):
         if inner_rhs is self.destination:
             return self.source
         return inner_rhs
-
-    @property
-    def output(self):
-        # A MoveLet can move any operand. This returns the source of the move if output
-        # is the operand being moved; the inner output otherwise.
-        if self.inner.output is self.destination:
-            return self.source
-        return self.inner.output
-
-    @_assert_stable_spec
-    def split(self, size: int) -> "Schedule":
-        return dataclasses.replace(self, inner=self.inner.split(size))
-
-    @_assert_stable_spec
-    def complete(self) -> Schedule:
-        return dataclasses.replace(self, inner=self.inner.complete())
-
-    def move_input(self, *args, **kwargs) -> "Schedule":
-        # Pass move_input through to the inner schedule
-        return dataclasses.replace(self, inner=self.inner.move_input(*args, **kwargs))
-
-    def move_output(self, *args, **kwargs) -> "Schedule":
-        # Pass move_output through to the inner schedule
-        return dataclasses.replace(self, inner=self.inner.move_output(*args, **kwargs))
-
-    @_assert_stable_spec
-    def replace_children(self, replacements: Iterable[Schedule]) -> Schedule:
-        replacements = list(replacements)
-        if len(replacements) != 1:
-            raise ValueError(f"One replacement child expected; got {len(replacements)}")
-        if replacements[0].spec != self.inner.spec:
-            raise ValueError(f"Expected a replacement with spec {self.inner.spec}")
-        return dataclasses.replace(self, inner=replacements[0])
-
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Schedule":
-        raise NotImplementedError()
 
     @property
     def additional_memories(self) -> list[dict[str, int]]:
@@ -2928,10 +3094,58 @@ class MoveLet(Schedule):
         mem[self.destination.bank] += additional
         return mem
 
-    @property
-    def is_scheduled(self) -> bool:
-        return self.inner.is_scheduled
-
     def __hash__(self):
         # A slightly faster hash
         return hash((self.source, self.destination))
+
+
+@dataclass_abc.dataclass_abc(frozen=True)
+class PadTranspack(_OperandWrapper):
+    """Impl that pads and transpacks an input tensor.
+
+    Output transpacking not supported.
+    """
+
+    # TODO: With padding, Morello is perfectly capable of generating this
+    #  without the call to the one-off transpack method. Add padding and remove
+    #  this instruction.
+
+    source: TensorLike
+    destination: Tensor
+    input_idx: int
+    inner: Schedule
+
+    def __post_init__(self):
+        if self.source is self.destination:
+            raise ValueError("Source and destination cannot be the same tensor")
+        if self.source.dim_sizes != self.destination.dim_sizes:
+            raise ValueError("Source and dest. must have matching shapes")
+        if self.source.bank != "GL":
+            raise ValueError(f"Source must be in GL, but is in {self.source.bank}")
+        if self.destination.bank != "GL":
+            raise ValueError(f"Dest. must be in GL, but is in {self.destination.bank}")
+        if self.source.layout != Layout.ROW_MAJOR:
+            raise ValueError("Source must have a row-major layout")
+        if self.destination.layout != Layout.HEXAGON_TRANSPACKED:
+            raise ValueError("Destination must be HEXAGON_TRANSPACKED")
+
+    def env_str(
+        self,
+        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
+        underscore_inner: bool = False,
+        fancy: bool = False,
+    ):
+        return (
+            f"{type(self).__name__}({name_tensor_fn(self.destination)} <- "
+            f"{name_tensor_fn(self.source)})"
+        )
+
+    @property
+    def additional_memories(self) -> list[dict[str, int]]:
+        # TODO: Include memory used between pad and transpack.
+        return [{k: 0 for k in system_config.current_system().banks}]
+
+    @property
+    def peak_memory(self) -> dict[str, int]:
+        # TODO: Include memory used between pad and transpack.
+        return self.inner.peak_memory

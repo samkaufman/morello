@@ -4,6 +4,7 @@ import sympy
 
 from ..specs import Layout
 from ..tensor import ConvolutionImageTile, SimpleTile, TensorBase, Tile
+from .expr_utils import FloorDiv
 
 
 def _tensor_row_major_indexing_expr(rank: int) -> sympy.Expr:
@@ -41,11 +42,30 @@ def buffer_indexing_expr(
                 substitutions[sympy.symbols(f"p{idx}")] = 0
         if tensor.layout == Layout.ROW_MAJOR:
             index_expr = _tensor_row_major_indexing_expr(len(concrete_shape))
-        else:
+        elif tensor.layout == Layout.COL_MAJOR:
             index_expr = _tensor_col_major_indexing_expr(len(concrete_shape))
+        else:
+            raise NotImplementedError(f"Unsupported layout: {tensor.layout}")
         index_expr = index_expr.subs(substitutions, simultaneous=True)
         assert isinstance(index_expr, sympy.Expr)
         return index_expr
+    elif tensor.spec.layout == Layout.HEXAGON_TRANSPACKED:
+        # This layout is only used for Uint8, so the following will index
+        # 128-bit blocks (vectors in HVX VMEM).
+        orig_rows, orig_cols = concrete_shape
+        padded_rows = orig_rows - orig_rows % -32
+        p0, p1 = sympy.symbols("p0 p1")
+        # Logical sizes for the 128-byte vectors.
+        row_block = FloorDiv(p0, 4)
+        col_block = FloorDiv(p1, 32)
+        # The blocks in each dimension might differ because of padding, and this
+        # can affect the offsets (e.g., by added intervening all-zero vectors).
+        inner_offset = 4 * sympy.UnevaluatedExpr(p1 % 32) + sympy.UnevaluatedExpr(
+            p0 % 4
+        )
+        block_rows = padded_rows // 4
+        block_offset = (128 * block_rows * col_block) + row_block  # block offset
+        return block_offset + inner_offset
     else:
         raise NotImplementedError(
             f"Indexing expression not defined for {tensor.spec.layout}"
@@ -73,8 +93,7 @@ def logical_indexing_expr(source: Tile, dim: int) -> sympy.Expr:
         # If w == 1, pt must be 0 an w == 1, so we can simplify.
         if w == 1:
             return idx
-        else:
-            return (w * idx) + pt
+        return (w * idx) + pt
     elif isinstance(source, ConvolutionImageTile):
         c = 1 + source.dim_sizes[dim] - source.filter_shape[dim]
         return c * idx + pt
