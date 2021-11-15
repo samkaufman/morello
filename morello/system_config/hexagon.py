@@ -71,7 +71,7 @@ class HvxSimulatorTarget(Target):
             return specs.HvxVmemTensorSpec(dim_sizes, dtype, bank, layout, **kwargs)
         return specs.TensorSpec(dim_sizes, dtype, bank, layout)
 
-    @property
+    @functools.cached_property
     def system(self) -> "SystemDescription":
         # TODO: The `banks` description should model multiple "vector contexts"
         return SystemDescription(
