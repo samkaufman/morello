@@ -1,16 +1,32 @@
 import contextlib
+import math
 import pathlib
 import pickle
-from typing import Iterable, Iterator, NamedTuple, Optional, Tuple, Union
 import warnings
-from frozendict import frozendict
+from typing import Iterable, Iterator, NamedTuple, Optional, Tuple, Union
 
 import atomicwrites
+from frozendict import frozendict
 
 from . import pruning
 from .ops import Schedule
 from .specs import Spec
 from .utils import zip_dict
+
+# If True, schedules will be saved as if they had memory limits, for all banks,
+# that are the next highest power of 2. This discretizes the cache a bit, even
+# though it
+SNAP_CAP_TO_POWER_OF_TWO = True
+
+
+def _next_power_of_two(x: int) -> int:
+    """Return next highest power of 2, or self if a power of two or zero."""
+    if x == 0:
+        return 0
+    assert x >= 1, f"x must be 1 or greater; was: {x}"
+    result = int(2 ** math.ceil(math.log2(x)))
+    assert result >= x
+    return result
 
 
 class CachedSchedule(NamedTuple):
@@ -23,10 +39,10 @@ class CachedSchedule(NamedTuple):
     cost: int
 
 
-class _Rect(NamedTuple):
+class _TableEntry(NamedTuple):
     """Stores the best schedule for a region from its used memory to `caps`.
 
-    Interpret a _Rect as a record of the best schedule that exists up to `caps`.
+    A _TabelEntry is a record of the best schedule that exists up to `caps`.
     That schedule is no longer the best as soon as any memory capacity is above
     its corresponding level in `caps` or below the memory used at that level by
     the schedule.
@@ -35,6 +51,15 @@ class _Rect(NamedTuple):
     spec: Spec
     schedule: Optional[CachedSchedule]
     caps: frozendict[str, int]
+
+    def snap(self) -> "_TableEntry":
+        """Raises caps to the next power of two if SNAP_CAP_TO_POWER_TO_TWO."""
+        if not SNAP_CAP_TO_POWER_OF_TWO:
+            return self
+        new_caps = frozendict(
+            {bank: _next_power_of_two(c) for bank, c in self.caps.items()}
+        )
+        return _TableEntry(self.spec, self.schedule, new_caps)
 
     @property
     def peak_memory(self) -> frozendict[str, int]:
@@ -50,7 +75,7 @@ class _Rect(NamedTuple):
 
 
 class ScheduleCache:
-    _rects: dict[Spec, list[_Rect]]
+    _rects: dict[Spec, list[_TableEntry]]
 
     def __init__(self):
         self._rects = {}
@@ -72,12 +97,12 @@ class ScheduleCache:
             raise KeyError(f"'{str(spec)}'")
 
         memory_caps = memory_limits.available
-        for rect in self._rects[spec]:
-            if rect.schedule is None:
+        for entry in self._rects[spec]:
+            if entry.schedule is None:  # No Impl exists for this entry
                 if all(
                     q <= b
                     for q, b in zip_dict(
-                        memory_caps, rect.caps, same_keys=True
+                        memory_caps, entry.caps, same_keys=True
                     ).values()
                 ):
                     return None
@@ -85,10 +110,10 @@ class ScheduleCache:
                 if all(
                     a <= q <= b
                     for a, q, b in zip_dict(
-                        rect.peak_memory, memory_caps, rect.caps, same_keys=True
+                        entry.peak_memory, memory_caps, entry.caps, same_keys=True
                     ).values()
                 ):
-                    return rect.schedule
+                    return entry.schedule
         raise KeyError(f"'{str(spec)}'")
 
     def put(
@@ -119,7 +144,7 @@ class ScheduleCache:
         for idx in range(len(rects)):
             if schedule is None:
                 if rects[idx].schedule is None:
-                    rects[idx] = _Rect(
+                    rects[idx] = _TableEntry(
                         spec,
                         None,
                         frozendict(
@@ -130,7 +155,7 @@ class ScheduleCache:
                                 ).items()
                             }
                         ),
-                    )
+                    ).snap()
                     return
             else:
                 if rects[idx].schedule is None:
@@ -144,7 +169,7 @@ class ScheduleCache:
                         same_keys=True,
                     ).values()
                 ):
-                    rects[idx] = _Rect(
+                    rects[idx] = _TableEntry(
                         spec,
                         schedule,
                         frozendict(
@@ -155,15 +180,19 @@ class ScheduleCache:
                                 ).items()
                             }
                         ),
-                    )
+                    ).snap()
                     return
             # TODO: Assert that there is at most one intersection
 
-        # If we haven't returned at this point, then we didn't find a _Rect to
+        # If we haven't returned at this point, then we didn't find a _TableEntry to
         # update, so add one.
-        rects.append(_Rect(spec, schedule, memory_caps))
+        rects.append(_TableEntry(spec, schedule, memory_caps).snap())
 
     def update(self, other: "ScheduleCache") -> None:
+        """Update with the contents of another cache.
+
+        Equivalent to `put`ing every entry from the given cache.
+        """
         for spec, rect_schedule, limits in other:
             self.put(spec, rect_schedule, limits)
 
