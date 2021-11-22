@@ -24,6 +24,7 @@ from morello.system_config import set_current_target, target_by_name
 logger = logging.getLogger(__name__)
 
 arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument("--dp_only", action="store_true")
 arg_parser.add_argument("--cachedir", metavar="CACHEDIR", type=pathlib.Path)
 arg_parser.add_argument("output", metavar="OUTPUT", type=pathlib.Path)
 
@@ -85,13 +86,23 @@ def main():
             budgets[r.spec_name] = r.expansions
 
     # Run the other searches in serial. They are parallel internally.
-    for spec_name, spec, _ in experiment_specs():
-        budget = budgets[spec_name]
-        all_results += list(beam_task(spec_name, spec, budget=budget, parallel=PROCS))
-        all_results += list(random_task(spec_name, spec, budget=budget, parallel=PROCS))
-
-    print(f"Saving to: {results_path}")
-    pd.DataFrame.from_records(map(dataclasses.asdict, all_results)).to_csv(results_path)
+    try:
+        for spec_name, spec, _ in experiment_specs():
+            budget = budgets[spec_name]
+            if not args.dp_only:
+                for result in beam_task(spec_name, spec, budget=budget, parallel=PROCS):
+                    all_results.append(result)
+                for result in random_task(
+                    spec_name, spec, budget=budget, parallel=PROCS
+                ):
+                    all_results.append(result)
+    except Exception:
+        raise
+    finally:
+        print(f"Saving to: {results_path}")
+        pd.DataFrame.from_records(map(dataclasses.asdict, all_results)).to_csv(
+            results_path
+        )
     return 0
 
 
@@ -136,13 +147,13 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec, Optional[int]]]:
         target.tensor_spec((512, 512), dtype=DTYPE),
         target.tensor_spec((512, 512), dtype=DTYPE),
         serial_only=True,
-    ), 846647
+    ), None
     yield "conv-256x256-5x5-32", specs.Convolution(
         target.tensor_spec((256, 256), dtype=DTYPE),
         target.tensor_spec((5, 5, 32), dtype=DTYPE),
         target.tensor_spec((256 - 4, 256 - 4, 32), dtype=DTYPE),
         serial_only=True,
-    ), 1120990
+    ), None
     yield "gemm3-256", specs.Compose(
         (specs.Matmul, specs.Matmul),
         (
@@ -153,7 +164,7 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec, Optional[int]]]:
         target.tensor_spec((256, 256), dtype=DTYPE),
         intermediate_dtypes=(DTYPE,),
         serial_only=True,
-    ), 3675961
+    ), None
     # yield "cnn-3layer", _make_cnn(depth=3), None
     # yield "cnn-6layer", _make_cnn(depth=6), None
 
@@ -198,7 +209,13 @@ def dp_task(
     sys.stdout.flush()
 
     return ExperimentResult(
-        "dp", spec_name, best_cost, stats.expansions, runtime, best_pretty_formatted
+        "dp",
+        spec_name,
+        best_cost,
+        stats.expansions,
+        runtime,
+        best_pretty_formatted,
+        all_run_costs=None,
     )
 
 

@@ -1,10 +1,14 @@
 import copy
 import random
+import logging
 from collections.abc import Sequence
 from typing import Callable, Optional
 
 from .. import ops, op_pprint, pruning
 from . import common
+
+
+logger = logging.getLogger(__name__)
 
 
 class MaxRestartsExceeded(Exception):
@@ -39,6 +43,7 @@ def randomly_schedule_impl(
     steps_taken = 0
     impl = root_impl
     restarts = 0
+    edge_case_restarts = 0
     while max_restarts is None or restarts < max_restarts:
         if budget is not None and budget <= steps_taken:
             assert steps_taken == budget
@@ -62,11 +67,23 @@ def randomly_schedule_impl(
             return impl, steps_taken
         chosen_action, chosen_child_idx = chosen_act_idx
         impl, inner_impl = chosen_action()
-        assert chosen_child_idx < len(child_limits), (
-            f"{chosen_child_idx} >= {len(child_limits)} for action (index: "
-            f"{chosen_child_idx}): {str(chosen_action)}\nwhich produced Impl:\n"
-            f"{str(op_pprint.pformat(impl, show_cost=False))}"
-        )
+
+        # Workaround for a rare edge case that only matters for the beam
+        # heuristic. Doesn't affect results; we can just retry.
+        # TODO: Fix root cause.
+        if chosen_child_idx >= len(child_limits):
+            logger.warning(
+                "Hit a heuristic edge case; restarting with subtracting from "
+                "max restarts\n"
+                f"{chosen_child_idx} >= {len(child_limits)} for action (index: "
+                f"{chosen_child_idx}): {str(chosen_action)}\nwhich produced Impl:\n"
+                f"{str(op_pprint.pformat(impl, show_cost=False))}"
+            )
+            edge_case_restarts += 1
+            if edge_case_restarts > 10:
+                logger.warning("Saw %s edge case restarts", edge_case_restarts)
+            continue
+
         new_child_limits = child_limits[chosen_child_idx].transition(inner_impl)
         if new_child_limits is None:
             impl, child_limits = root_impl, copy.deepcopy(memory_limits)

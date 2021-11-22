@@ -2,6 +2,7 @@ import contextlib
 import dataclasses
 import logging
 import sys
+import os
 from collections.abc import Sequence
 from typing import Callable, Optional, Union
 
@@ -12,7 +13,7 @@ from . import common, random
 from .. import cost, ops, pruning, specs
 
 HEURISTIC_SAMPLES_PER_SPEC = 10
-HEURISTIC_MAX_RESTARTS = 1000
+HEURISTIC_MAX_RESTARTS = int(os.getenv("HEURISTIC_MAX_RESTARTS", 100))
 STOCHASTIC = False
 
 logger = logging.getLogger(__name__)

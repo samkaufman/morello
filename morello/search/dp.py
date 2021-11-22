@@ -129,8 +129,8 @@ def schedule_search(
         for act in leaf.actions(parent_summary=parent_summary):
             try:
                 new_tree = act()
-                if callbacks:
-                    callbacks.applied_action(act, new_tree)
+            except ops.ActionOutOfDomain:
+                continue
             except Exception as e:
                 # Re-raise the exception with a little more detail about act.
                 raise common.ActionFailedException(act) from e
@@ -139,6 +139,9 @@ def schedule_search(
                 f"Action returned self: {new_tree}; spec = {str(new_tree.spec)}; "
                 f"action = {act}"
             )
+
+            if callbacks:
+                callbacks.applied_action(act, new_tree)
 
             new_parent_summary = ops.ParentSummary.update(
                 parent_summary, parent=new_tree

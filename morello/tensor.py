@@ -72,8 +72,14 @@ class TensorLike(abc.ABC):
             if self.dim_sizes[0] % 4 != 0 or self.dim_sizes[1] % 32 != 0:
                 return False
         # TODO: Factor the following check out into a Hexagon-specific tensorlike
-        if bank == "VMEM" and (self.volume * self.dtype.size) % 128 != 0:
-            return False
+        if system_config.current_system().has_hvx and bank == "L2":
+            if len([d for d in self.dim_sizes if d != 1]) != 2:
+                return False
+            if any(d >= 256 for d in self.dim_sizes):
+                return False
+        if bank == "VMEM":
+            if (self.volume * self.dtype.size) % 128 != 0:
+                return False
         return True
 
     def simple_tile(self, tile_shape: tuple[int, ...]) -> "TensorLike":
@@ -139,7 +145,7 @@ class TensorBase(TensorLike):
     @property
     def address_root(self) -> "TensorBase":
         # TODO: Don't hardcode cache names here.
-        if self.bank in ("L1", "L2"):
+        if self.bank in ("L1", "L2") and self.origin:
             return self.origin.address_root
         return self
 

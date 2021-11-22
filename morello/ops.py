@@ -5,6 +5,7 @@ import enum
 import functools
 import itertools
 import math
+import operator
 import sys
 import typing
 import warnings
@@ -55,6 +56,11 @@ BREAK_SEQUENTIAL_TILES = False
 T = TypeVar("T")
 U = TypeVar("U")
 V = TypeVar("V")
+
+# TODO: Remove. This shouldn't be needed; just don't enumerate unsupported
+#   actions. It was added as a hack on a deadline.
+class ActionOutOfDomain(Exception):
+    pass
 
 
 def _assert_stable_spec(func):
@@ -917,10 +923,19 @@ def gen_tile_sizes(
 
 
 def gen_vector_shapes(
+    outer_shape: Sequence[int], dtype: dtypes.Dtype
+) -> Iterable[tuple[int, ...]]:
+    for result in _gen_vector_shapes_inner(outer_shape, dtype):
+        velems = functools.reduce(operator.mul, result, 1)
+        if (velems * dtype.size) % 128 == 0:
+            yield result
+
+
+def _gen_vector_shapes_inner(
     outer_shape: Sequence[int], dtype: dtypes.Dtype, elements: int = 128
 ) -> Iterable[tuple[int, ...]]:
     if dtype.size != 1:
-        return gen_vector_shapes(
+        return _gen_vector_shapes_inner(
             outer_shape, dtypes.Uint8, elements=elements // dtype.size
         )
 
@@ -932,7 +947,9 @@ def gen_vector_shapes(
         yield (elements,)
     else:
         for factor in utils.factors(min(outer_shape[0], elements)):
-            for tail in gen_vector_shapes(outer_shape[1:], dtype, elements // factor):
+            for tail in _gen_vector_shapes_inner(
+                outer_shape[1:], dtype, elements // factor
+            ):
                 yield (factor,) + tail
 
 
@@ -1133,7 +1150,7 @@ class ComposeHole(Schedule):
                     bank=bank,
                     layout=intermediate_tensor_layout,
                     **kwargs,
-                )
+                ),
             )
             return True
         except ValueError:
@@ -2146,6 +2163,8 @@ class DirectConv(Schedule):
         if any(d > 1 for d in self.output.dim_sizes):
             return self.tile_out((1, 1, 1)).complete()
 
+        system = system_config.current_system()
+
         next_general_lhs = system.next_general_bank(self.lhs.bank)
         if next_general_lhs:
             return self.move_input(0, bank=next_general_lhs).complete()
@@ -2305,7 +2324,7 @@ class ReduceSum(Schedule):
     ) -> Iterable[Callable[[], Schedule]]:
         # TODO: Lots of code duplication in this method
         # Search only over full line sizes
-        for ds in gen_tile_sizes(self.output.dim_sizes):
+        for ds in gen_tile_sizes(self.output.dim_sizes, filter=self._can_tile_out):
             if not self.output.spec.is_valid_tile_shape(ds):
                 continue
             for parallel in [False] if self.serial_only else [True, False]:
@@ -2315,9 +2334,18 @@ class ReduceSum(Schedule):
         if allow_reduce_splits.get():
             for k in dim_range(self.source.dim_sizes[-1], include_end=False):
                 if k != self.source.dim_sizes[-1]:
-                    yield functools.partial(self.split, k)
+                    if self._split_valid(k):
+                        yield functools.partial(self.split, k)
 
         yield from _common_operand_move_actions(self)
+
+    def _split_valid(self, k: int) -> bool:
+        orig_shape = self.source.dim_sizes
+        if k > orig_shape[-1]:
+            return False
+        if not self.source.spec.is_valid_tile_shape(orig_shape[:-1] + (k,)):
+            return False
+        return True
 
     def move_input(
         self,
@@ -2363,7 +2391,7 @@ class ReduceSum(Schedule):
             return self.split(1).complete()
 
         system = system_config.current_system()
-        next_general_source = system.next_general_bank(self.lhs.bank)
+        next_general_source = system.next_general_bank(self.source.bank)
         if next_general_source:
             return self.move_input(0, bank=next_general_source).complete()
         next_general_out = system.next_general_bank(self.output.bank)

@@ -80,8 +80,8 @@ class HvxSimulatorTarget(Target):
                 "HexagonRF": MemoryBankConfig(cache_hit_cost=0, capacity=32 * 4),
                 "VMEM": MemoryBankConfig(cache_hit_cost=0, capacity=32 * 1024),  # HVX
                 "L1": MemoryBankConfig(cache_hit_cost=10, capacity=32 * 1024),
-                "L2": MemoryBankConfig(cache_hit_cost=10, capacity=2048 * 1024),
-                "GL": MemoryBankConfig(cache_hit_cost=10, capacity=sys.maxsize),
+                "L2": MemoryBankConfig(cache_hit_cost=100, capacity=2048 * 1024),
+                "GL": MemoryBankConfig(cache_hit_cost=1000, capacity=sys.maxsize),
             },
             default_bank="GL",
             processors=2,
@@ -219,7 +219,9 @@ class HvxVmemTensorlike(tensor.TensorLike):
     def conv_image_tile(
         self, tile_shape: tuple[int, ...], filter_shape: tuple[int, int]
     ) -> tensor.TensorLike:
-        raise Exception("Convolution tiling of HVX vectors is not supported")
+        raise ops.ActionOutOfDomain(
+            "Convolution tiling of HVX vectors is not supported"
+        )
 
     @property
     def vector_count(self) -> int:
