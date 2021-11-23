@@ -12,16 +12,16 @@ import time
 
 import numpy as np
 
+import morello.impl.actions
+import morello.impl.base
 from morello import (
     cost,
     dtypes,
     op_pprint,
-    ops,
     search,
     search_cache,
     specs,
     system_config,
-    tensor,
 )
 
 RUNS = 5
@@ -47,7 +47,9 @@ def spec():
     )
 
 
-def sample_completion(partial_impl: ops.Schedule) -> tuple[ops.Schedule, str]:
+def sample_completion(
+    partial_impl: morello.impl.base.Impl,
+) -> tuple[morello.impl.base.Impl, str]:
     if partial_impl.is_scheduled:
         return partial_impl, "random"
 
@@ -57,10 +59,12 @@ def sample_completion(partial_impl: ops.Schedule) -> tuple[ops.Schedule, str]:
         a
         for a in partial_impl.actions()
         if (
-            not isinstance(a, (ops.MoveAction, ops.PeelAction))
+            not isinstance(
+                a, (morello.impl.actions.MoveAction, morello.impl.actions.PeelAction)
+            )
             or a.layout == specs.Layout.ROW_MAJOR
         )
-        and not isinstance(a, ops.SlidingTileOutAction)
+        and not isinstance(a, morello.impl.actions.SlidingTileOutAction)
     ]
     assert actions, f"actions was empty"
 
@@ -83,7 +87,9 @@ def _sample_randint_on_boundary(upper, overweight_one=False) -> int:
     return raw * 4
 
 
-def sample_perturbed(hole: ops.Schedule) -> tuple[ops.Schedule, str]:
+def sample_perturbed(
+    hole: morello.impl.base.Impl,
+) -> tuple[morello.impl.base.Impl, str]:
     m, k, n = [
         _sample_randint_on_boundary(bound)
         for bound in spec().lhs.dim_sizes + (spec().rhs.dim_sizes[0],)
@@ -101,7 +107,7 @@ def sample_perturbed(hole: ops.Schedule) -> tuple[ops.Schedule, str]:
 
 def sample_and_benchmark(
     sample_fn,
-    hole: ops.Schedule,
+    hole: morello.impl.base.Impl,
     _: int,
 ):
     impl, procedure = sample_fn(hole)
@@ -172,7 +178,7 @@ if __name__ == "__main__":
         tuple(target.tensor(inp_spec, name=None) for inp_spec in spec().inputs),
         target.tensor(spec().output, name=None),
     )
-    hole = ops.spec_to_hole(spec(), *operands)
+    hole = morello.impl.base.spec_to_hole(spec(), *operands)
 
     # Find the best schedule
     with _open_db(args, check_same_thread=False) as db_conn:

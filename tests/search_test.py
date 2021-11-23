@@ -95,7 +95,7 @@ def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
 
         if len(results) >= 2:
             print(f"results: {results}")
-            hypothesis.note("Left Schedule:\n" + op_pprint.pformat(results[-2]))
-            hypothesis.note("Right Schedule:\n" + op_pprint.pformat(results[-1]))
+            hypothesis.note("Left Impl:\n" + op_pprint.pformat(results[-2]))
+            hypothesis.note("Right Impl:\n" + op_pprint.pformat(results[-1]))
             # TODO: Need to re-run costing.
             # assert results[-2][1] >= results[-1][1]

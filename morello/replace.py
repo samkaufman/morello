@@ -1,4 +1,4 @@
-"""Functions for replacing Tensors and Tiles in a Schedule.
+"""Functions for replacing Tensors and Tiles in a Impl.
 
 This module exists because maintaining reference equality for Tensors and Tiles
 in the case that their `root` or `origin` properties are changed requires extra
@@ -10,7 +10,7 @@ import functools
 import threading
 from typing import Optional, TypeVar, Union, cast
 
-from . import ops, specs
+from . import impl, specs
 from .tensor import ConvolutionImageTile, SimpleTile, Tensor, TensorLike, Tile
 
 T = TypeVar("T")
@@ -91,37 +91,37 @@ def _mutating_replace(
         replacements[subject] = new_tile
         return new_tile
 
-    if type(subject) in (ops.MatmulHole, ops.Mult, ops.HvxVrmpyaccVuwVubRub):
+    if type(subject) in (impl.MatmulHole, impl.Mult, impl.HvxVrmpyaccVuwVubRub):
         return type(subject)(
             lhs=_mutating_replace(subject.lhs, replacements),
             rhs=_mutating_replace(subject.rhs, replacements),
             output=_mutating_replace(subject.output, replacements),
             serial_only=subject.serial_only,
         )
-    elif type(subject) is ops.DirectConv:
-        return ops.DirectConv(
+    elif type(subject) is morello.impl.directconv.DirectConv:
+        return morello.impl.directconv.DirectConv(
             lhs=_mutating_replace(subject.lhs, replacements),
             rhs=_mutating_replace(subject.rhs, replacements),
             output=_mutating_replace(subject.output, replacements),
             serial_only=subject.serial_only,
         )
-    elif type(subject) is ops.MoveLet:
-        return ops.MoveLet(
+    elif type(subject) is morello.impl.moves.MoveLet:
+        return morello.impl.moves.MoveLet(
             source=_mutating_replace(subject.source, replacements),
             destination=_mutating_replace(subject.destination, replacements),
             prefetching=subject.prefetching,
             input_idx=subject.input_idx,
             inner=_mutating_replace(subject.inner, replacements),
         )
-    elif type(subject) is ops.MatmulSplitLoop:
-        return ops.MatmulSplitLoop(
+    elif type(subject) is morello.impl.loops.MatmulSplitLoop:
+        return morello.impl.loops.MatmulSplitLoop(
             lhs=_mutating_replace(subject.lhs, replacements),
             rhs=_mutating_replace(subject.rhs, replacements),
             output=_mutating_replace(subject.output, replacements),
             inner=_mutating_replace(subject.inner, replacements),
         )
-    elif type(subject) is ops.Loop:
-        return ops.Loop(
+    elif type(subject) is morello.impl.loops.Loop:
+        return morello.impl.loops.Loop(
             driving_tile=_mutating_replace(subject.driving_tile, replacements),
             dependent_tiles=frozenset(
                 _mutating_replace(t, replacements) for t in subject.dependent_tiles
@@ -129,13 +129,13 @@ def _mutating_replace(
             inner=_mutating_replace(subject.inner, replacements),
             parallel=subject.parallel,
         )
-    elif type(subject) is ops.SlidingWindowLoop:
+    elif type(subject) is morello.impl.loops.SlidingWindowLoop:
         new_inputs = tuple(_mutating_replace(t, replacements) for t in subject.inputs)
         new_output = _mutating_replace(subject.output, replacements)
         new_spec = subject.spec.replace_io(
             tuple(inp.spec for inp in new_inputs), new_output.spec
         )
-        return ops.SlidingWindowLoop(
+        return morello.impl.loops.SlidingWindowLoop(
             inputs=new_inputs,
             output=new_output,
             live_tensor=_mutating_replace(subject.live_tensor, replacements),
@@ -146,17 +146,17 @@ def _mutating_replace(
             spec=new_spec,
             inner=_mutating_replace(subject.inner, replacements),
         )
-    elif type(subject) is ops.ReduceSum:
-        return ops.ReduceSum(
+    elif type(subject) is morello.impl.reducesum.ReduceSum:
+        return morello.impl.reducesum.ReduceSum(
             source=_mutating_replace(subject.source, replacements),
             output=_mutating_replace(subject.output, replacements),
             serial_only=subject.serial_only,
         )
-    elif type(subject) is ops.Pipeline:
-        return ops.Pipeline(
+    elif type(subject) is morello.impl.compose.Pipeline:
+        return morello.impl.compose.Pipeline(
             stages=tuple(_mutating_replace(s, replacements) for s in subject.stages)
         )
-    elif type(subject) is ops.ComposeHole:
+    elif type(subject) is morello.impl.compose.ComposeHole:
         new_inputs = tuple(_mutating_replace(t, replacements) for t in subject.inputs)
         new_output = _mutating_replace(subject.output, replacements)
         new_spec = specs.Compose(
@@ -166,7 +166,7 @@ def _mutating_replace(
             intermediate_dtypes=subject.spec.intermediate_dtypes,
             serial_only=subject.spec.serial_only,
         )
-        return ops.ComposeHole(
+        return morello.impl.compose.ComposeHole(
             spec=new_spec,
             inputs=new_inputs,
             output=new_output,

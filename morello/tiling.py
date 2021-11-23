@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Sequence, Union
+from typing import Sequence
 
 from . import specs
 from .tensor import ConvolutionImageTile, SimpleTile, TensorLike, Tile

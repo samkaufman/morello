@@ -1,74 +1,82 @@
-import warnings
 from typing import Iterable, cast, Optional
 
 import hypothesis
 import pytest
 from hypothesis import strategies as st
 
-from morello import op_pprint, ops, specs, tensor, tiling, dtypes
+import morello.impl.utils
+from morello import op_pprint, impl, specs, tensor, dtypes
 
 
 def test_dim_range():
     # Common cases
-    for mode in ops.TileSizeMode:
-        token = ops.tile_size_mode.set(mode)
+    for mode in impl.TileSizeMode:
+        token = impl.tile_size_mode.set(mode)
         try:
-            assert list(ops.dim_range(0)) == []
-            assert list(ops.dim_range(0, include_end=False)) == []
-            assert list(ops.dim_range(1, include_end=False)) == []
-            assert list(ops.dim_range(2, include_end=False)) == [1]
+            assert list(morello.impl.utils.dim_range(0)) == []
+            assert list(morello.impl.utils.dim_range(0, include_end=False)) == []
+            assert list(morello.impl.utils.dim_range(1, include_end=False)) == []
+            assert list(morello.impl.utils.dim_range(2, include_end=False)) == [1]
         finally:
-            ops.tile_size_mode.reset(token)
+            impl.tile_size_mode.reset(token)
 
-    token = ops.tile_size_mode.set(ops.TileSizeMode.POWERS_OF_TWO)
+    token = impl.tile_size_mode.set(impl.TileSizeMode.POWERS_OF_TWO)
     try:
-        assert list(ops.dim_range(1)) == [1]
-        assert list(ops.dim_range(2)) == [1, 2]
-        assert list(ops.dim_range(3)) == [1, 2, 3]
-        assert list(ops.dim_range(4)) == [1, 2, 4]
-        assert list(ops.dim_range(5)) == [1, 2, 4, 5]
-        assert list(ops.dim_range(3, include_end=False)) == [1, 2]
-        assert list(ops.dim_range(4, include_end=False)) == [1, 2]
-        assert list(ops.dim_range(5, include_end=False)) == [1, 2, 4]
+        assert list(morello.impl.utils.dim_range(1)) == [1]
+        assert list(morello.impl.utils.dim_range(2)) == [1, 2]
+        assert list(morello.impl.utils.dim_range(3)) == [1, 2, 3]
+        assert list(morello.impl.utils.dim_range(4)) == [1, 2, 4]
+        assert list(morello.impl.utils.dim_range(5)) == [1, 2, 4, 5]
+        assert list(morello.impl.utils.dim_range(3, include_end=False)) == [1, 2]
+        assert list(morello.impl.utils.dim_range(4, include_end=False)) == [1, 2]
+        assert list(morello.impl.utils.dim_range(5, include_end=False)) == [1, 2, 4]
     finally:
-        ops.tile_size_mode.reset(token)
+        impl.tile_size_mode.reset(token)
 
-    token = ops.tile_size_mode.set(ops.TileSizeMode.CACHE_LINE_MULTIPLES)
+    token = impl.tile_size_mode.set(impl.TileSizeMode.CACHE_LINE_MULTIPLES)
     try:
-        assert list(ops.dim_range(1)) == [1]
-        assert list(ops.dim_range(2)) == [1, 2]
-        assert list(ops.dim_range(3)) == [1, 3]
-        assert list(ops.dim_range(3, include_end=False)) == [1]
+        assert list(morello.impl.utils.dim_range(1)) == [1]
+        assert list(morello.impl.utils.dim_range(2)) == [1, 2]
+        assert list(morello.impl.utils.dim_range(3)) == [1, 3]
+        assert list(morello.impl.utils.dim_range(3, include_end=False)) == [1]
     finally:
-        ops.tile_size_mode.reset(token)
+        impl.tile_size_mode.reset(token)
 
-    token = ops.tile_size_mode.set(ops.TileSizeMode.ALL)
+    token = impl.tile_size_mode.set(impl.TileSizeMode.ALL)
     try:
-        assert list(ops.dim_range(1)) == [1]
-        assert list(ops.dim_range(2)) == [1, 2]
-        assert list(ops.dim_range(3)) == [1, 2, 3]
-        assert list(ops.dim_range(3, include_end=False)) == [1, 2]
+        assert list(morello.impl.utils.dim_range(1)) == [1]
+        assert list(morello.impl.utils.dim_range(2)) == [1, 2]
+        assert list(morello.impl.utils.dim_range(3)) == [1, 2, 3]
+        assert list(morello.impl.utils.dim_range(3, include_end=False)) == [1, 2]
     finally:
-        ops.tile_size_mode.reset(token)
+        impl.tile_size_mode.reset(token)
 
 
 def test_gen_vector_shapes_1():
-    assert list(ops.gen_vector_shapes([4, 4], dtypes.Uint8, elements=4 * 4)) == [(4, 4)]
+    assert list(
+        morello.impl.utils.gen_vector_shapes([4, 4], dtypes.Uint8, elements=4 * 4)
+    ) == [(4, 4)]
 
 
 def test_gen_vector_shapes_2():
-    assert list(ops.gen_vector_shapes([8], dtypes.Uint8, elements=16)) == []
+    assert (
+        list(morello.impl.utils.gen_vector_shapes([8], dtypes.Uint8, elements=16)) == []
+    )
 
 
 def test_gen_vector_shapes_3():
-    assert list(ops.gen_vector_shapes([16, 2], dtypes.Uint8, elements=16)) == [
+    assert list(
+        morello.impl.utils.gen_vector_shapes([16, 2], dtypes.Uint8, elements=16)
+    ) == [
         (8, 2),
         (16, 1),
     ]
 
 
 def test_gen_vector_shapes_4():
-    assert list(ops.gen_vector_shapes([16], dtypes.Uint8, elements=16)) == [(16,)]
+    assert list(
+        morello.impl.utils.gen_vector_shapes([16], dtypes.Uint8, elements=16)
+    ) == [(16,)]
 
 
 @pytest.mark.parametrize(
@@ -94,9 +102,9 @@ def test_pipeline_peak_and_additional_memory(
     intermed_shapes, dtype, op_mems, expected_peaks, expected_additionals
 ):
     class SubImplStub:
-        """A stub for an ops.Schedule with some arbitrary output and peak mem.
+        """A stub for an impl.Impl with some arbitrary output and peak mem.
 
-        This doesn't fully implement the ops.Schedule abstract class, so we'll
+        This doesn't fully implement the impl.Impl abstract class, so we'll
         have to `cast` at construction to satisfy the type checker.
         """
 
@@ -130,9 +138,9 @@ def test_pipeline_peak_and_additional_memory(
     ]
     intermediates.append(None)
 
-    pipeline = ops.Pipeline(
+    pipeline = morello.impl.compose.Pipeline(
         tuple(
-            cast(ops.Schedule, SubImplStub(m, intermed))
+            cast(morello.impl.base.Impl, SubImplStub(m, intermed))
             for m, intermed in zip(op_mems, intermediates)
         )
     )
@@ -165,11 +173,13 @@ def test_convolution_steps(
         spec=specs.TensorSpec((out_size, out_size, filter_cnt), dtype=dtype),
         name="output",
     )
-    conv = ops.DirectConv(lhs=img, rhs=filters, output=out, serial_only=False)
+    conv = morello.impl.directconv.DirectConv(
+        lhs=img, rhs=filters, output=out, serial_only=False
+    )
     loop = conv.tile_out((tile_size, tile_size, filter_cnt))
     print(f"Loop:\n{op_pprint.pformat(loop, show_utilization=False, show_cost=False)}")
     if steps == 1:
-        assert isinstance(loop, ops.DirectConv)
+        assert isinstance(loop, morello.impl.directconv.DirectConv)
     else:
         assert loop.inner.lhs.dim_sizes == (patch, patch)
         assert loop.steps == steps
@@ -179,9 +189,11 @@ def test_evenly_divisible_matmul_tiling():
     lhs = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
     rhs = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
     out = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
-    schedule = ops.MatmulHole(lhs, rhs, out, serial_only=False).tile_out((2, 2))
+    schedule = morello.impl.matmuls.MatmulHole(
+        lhs, rhs, out, serial_only=False
+    ).tile_out((2, 2))
     assert schedule.output.dim_sizes == (4, 4)
-    assert isinstance(schedule.inner, ops.MatmulBase)
+    assert isinstance(schedule.inner, morello.impl.matmuls.MatmulBase)
     assert schedule.inner.output.dim_sizes == (2, 2)
     assert schedule.inner.lhs.dim_sizes[1] == 4
 
@@ -215,7 +227,9 @@ def test_nested_convs_outputs_constant(
         ),
         name=None,
     )
-    schedule = ops.DirectConv(image, filters, output, serial_only=False)
+    schedule = morello.impl.directconv.DirectConv(
+        image, filters, output, serial_only=False
+    )
     assert schedule.output.dim_sizes[0] == expected_output_height
     assert schedule.output.dim_sizes[1] == expected_output_width
 
@@ -249,22 +263,22 @@ def test_tile_compose_hole_out(dtype):
         serial_only=False,
     )
 
-    compose_hole = ops.ComposeHole(
+    compose_hole = morello.impl.compose.ComposeHole(
         spec=compose_spec,
         inputs=(filters_b, img, filters_a),
         output=output,
     )
     tiled_compose = compose_hole.tile_out((2, 2, 4))
-    assert isinstance(tiled_compose, ops.Loop)
+    assert isinstance(tiled_compose, impl.Loop)
     assert tiled_compose.spec == compose_spec
-    assert isinstance(tiled_compose.inner, ops.ComposeHole)
+    assert isinstance(tiled_compose.inner, impl.ComposeHole)
     assert tiled_compose.inner.output.dim_sizes == (2, 2, 4)
     # TODO: Add checks for intermediate shape correctness
 
 
 def _walk_actions(
-    op: ops.Schedule, depth: int = 1, parents=None, parent_summary=None
-) -> Iterable[ops.Schedule]:
+    op: impl.Impl, depth: int = 1, parents=None, parent_summary=None
+) -> Iterable[impl.Impl]:
     if depth == 0:
         return
     if parents is None:
@@ -277,7 +291,7 @@ def _walk_actions(
                 child,
                 depth=depth - 1,
                 parents=list(parents) + [op],
-                parent_summary=ops.ParentSummary.update(parent_summary, new_tree),
+                parent_summary=impl.ParentSummary.update(parent_summary, new_tree),
             )
 
 
@@ -304,7 +318,7 @@ def test_composehole_actions_change_spec(dtype):
         intermediate_dtypes=(dtype, dtype),
         serial_only=False,
     )
-    initial_op = ops.ComposeHole(
+    initial_op = morello.impl.compose.ComposeHole(
         initial_spec,
         inputs=(filters_b, img, filters_a),
         output=output,

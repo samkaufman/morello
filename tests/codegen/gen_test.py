@@ -6,13 +6,15 @@ from typing import Optional
 import hypothesis
 import numpy as np
 import pytest
-from hypothesis import HealthCheck
 from hypothesis import strategies as st
 
-from morello import dtypes, op_pprint, ops, specs, system_config, tensor
+import morello.impl.actions
+import morello.impl.base
+import morello.impl.compose
+import morello.impl.moves
+from morello import dtypes, op_pprint, specs, system_config, tensor
 from morello.codegen import indexexpr
 from morello.system_config import cpu, hexagon
-
 from .. import strategies
 
 CC_DEADLINE = 60 * 1000
@@ -35,12 +37,12 @@ def test_can_manually_schedule_generate_and_run_matmul_without_raise() -> None:
             target.tensor_spec((16, 16), dtype=dtypes.Uint32),
             serial_only=True,
         )
-        hole = ops.spec_to_hole(
+        hole = morello.impl.base.spec_to_hole(
             spec,
             (target.tensor(spec.lhs), target.tensor(spec.rhs)),
             target.tensor(spec.output),
         )
-        impl = (
+        imp = (
             hole.tile_out((8, 8))
             .move_input(0, bank="RF")
             .move_input(1, bank="RF")
@@ -55,7 +57,7 @@ def test_can_manually_schedule_generate_and_run_matmul_without_raise() -> None:
         ]
 
         run_result = target.run_impl(
-            impl,
+            imp,
             print_output=True,
             source_cb=lambda s: print("Source Code:\n" + s),
             values=input_values,
@@ -111,26 +113,28 @@ def _conv2d(img: np.ndarray, filters: np.ndarray, out_type) -> np.ndarray:
     return out
 
 
-def _count_basic_leaves(impl: ops.Schedule) -> int:
+def _count_basic_leaves(imp: morello.impl.base.Impl) -> int:
     """Return the of sub-Impls which aren't Pipelines or ComposeHoles."""
-    if isinstance(impl, ops.Pipeline):
-        return sum(_count_basic_leaves(s) for s in impl.stages)
-    elif isinstance(impl, ops.ComposeHole):
+    if isinstance(imp, morello.impl.compose.Pipeline):
+        return sum(_count_basic_leaves(s) for s in imp.stages)
+    elif isinstance(imp, morello.impl.compose.ComposeHole):
         return 0
-    elif isinstance(impl, ops.MoveLet):
-        return _count_basic_leaves(impl.inner)
+    elif isinstance(imp, morello.impl.moves.MoveLet):
+        return _count_basic_leaves(imp.inner)
     else:
-        assert len(impl.children) == 0
+        assert len(imp.children) == 0
         return 1
 
 
 @st.composite
-def _arb_impls_from_actions(draw, partial_impl: ops.Schedule):
+def _arb_impls_from_actions(draw, partial_impl: morello.impl.base.Impl):
     """A strategy that expands a given Impl into a fully scheduled Impl."""
     # TODO: Remove the following filter once codegen is implemented for sliding
     #  windows.
     actions = [
-        a for a in partial_impl.actions() if not isinstance(a, ops.SlidingTileOutAction)
+        a
+        for a in partial_impl.actions()
+        if not isinstance(a, morello.impl.actions.SlidingTileOutAction)
     ]
 
     if partial_impl.is_scheduled:
@@ -147,9 +151,9 @@ def _arb_impls_from_actions(draw, partial_impl: ops.Schedule):
     )
 
 
-def _spec_to_applied_hole(spec: specs.Spec) -> ops.Schedule:
+def _spec_to_applied_hole(spec: specs.Spec) -> morello.impl.base.Impl:
     target = system_config.current_target()
-    return ops.spec_to_hole(
+    return morello.impl.base.spec_to_hole(
         spec,
         tuple(target.tensor(inp_spec, name=None) for inp_spec in spec.inputs),
         target.tensor(spec.output, name=None),
@@ -291,7 +295,7 @@ def _arb_matmul_matmul_spec(draw):
 
 
 @st.composite
-def _arb_zip_values_for_impl(draw, impl: ops.Schedule):
+def _arb_zip_values_for_impl(draw, imp: morello.impl.base.Impl):
     def _value(shape, dtype: dtypes.Dtype):
         num_elements: int = functools.reduce(operator.mul, shape, 1)
         return np.asarray(
@@ -305,7 +309,7 @@ def _arb_zip_values_for_impl(draw, impl: ops.Schedule):
             dtype=dtype.np_type,
         ).reshape(shape)
 
-    return impl, [_value(op.dim_sizes, op.dtype) for op in impl.inputs]
+    return imp, [_value(op.dim_sizes, op.dtype) for op in imp.inputs]
 
 
 def _calculator_to_test(spec_st):
@@ -335,13 +339,13 @@ def _calculator_to_test(spec_st):
     return decorator_wrapper
 
 
-def _test_impl(impl: ops.Schedule, inp_values, calc_fn):
+def _test_impl(imp: morello.impl.base.Impl, inp_values, calc_fn):
     target = system_config.current_target()
 
-    pformatted = op_pprint.pformat(impl, show_utilization=False, show_cost=False)
+    pformatted = op_pprint.pformat(imp, show_utilization=False, show_cost=False)
     hypothesis.note("Impl:\n" + pformatted)
 
-    expected_result = calc_fn(impl.spec, inp_values)
+    expected_result = calc_fn(imp.spec, inp_values)
 
     additional_clang_args = []
     if CC_SANITIZE:
@@ -352,7 +356,7 @@ def _test_impl(impl: ops.Schedule, inp_values, calc_fn):
         ]
 
     run_result = target.run_impl(
-        impl,
+        imp,
         print_output=True,
         source_cb=lambda s: hypothesis.note("Source Code:\n" + s),
         values=inp_values,
@@ -475,17 +479,17 @@ def test_codegen_for_matmul_with_hvx_gemvmpebbw_with_aligned_k_without_split(
             target.tensor_spec((m, n), dtype=dtypes.Uint32),
             serial_only=serial_only,
         )
-        hole = ops.spec_to_hole(
+        hole = morello.impl.base.spec_to_hole(
             spec,
             (target.tensor(spec.lhs), target.tensor(spec.rhs)),
             target.tensor(spec.output),
         )
-        impl = hole.tile_out((1, 32))
+        imp = hole.tile_out((1, 32))
         # TODO: Re-introduce split
         # if spec.lhs.dim_sizes[1] > 16:
-        #     impl = impl.split(16)
-        impl = (
-            impl.move_input(0, bank="L2")
+        #     imp = imp.split(16)
+        imp = (
+            imp.move_input(0, bank="L2")
             .pad_transpack(1)
             .move_input(1, bank="L2")
             .move_output(bank="L2")
@@ -496,7 +500,7 @@ def test_codegen_for_matmul_with_hvx_gemvmpebbw_with_aligned_k_without_split(
             np.arange(m * k, dtype=np.uint32).reshape((m, k)),
             np.arange(k * n, dtype=np.uint32).reshape((k, n)),
         ]
-        _test_impl(impl, inp_values, lambda _, v: v[0] @ v[1])
+        _test_impl(imp, inp_values, lambda _, v: v[0] @ v[1])
 
 
 @_calculator_to_test(_arb_matmul_matmul_spec())

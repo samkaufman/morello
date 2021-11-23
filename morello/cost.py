@@ -4,20 +4,18 @@ from operator import mul
 from typing import Union
 
 from . import specs, utils
-from .ops import (
+from .impl import (
     DirectConv,
-    HvxVrmpyaccVuwVubRub,
     Loop,
-    MatmulSplitLoop,
     MoveLet,
-    Mult,
-    Pipeline,
     ReduceSum,
-    Schedule,
-    SlidingWindowLoop,
+    Impl,
     MatmulHole,
     ComposeHole,
 )
+from .impl.compose import Pipeline
+from .impl.loops import SlidingWindowLoop, MatmulSplitLoop
+from .impl.matmuls import Mult, HvxVrmpyaccVuwVubRub
 from .system_config import current_system
 from .tensor import Tensor, Tile
 
@@ -73,14 +71,14 @@ def move_cost(
 
 
 def detailed_analytical_cost(
-    op: Schedule,
+    op: Impl,
     depth: int = 0,
     env: dict[Union[Tensor, Tile], str] = None,
     holes_ok=False,
-) -> dict[Schedule, tuple[int, str]]:
-    """Compute costs for a given Schedule and its children.
+) -> dict[Impl, tuple[int, str]]:
+    """Compute costs for a given Impl and its children.
 
-    Returns a dict mapping each Schedule to a 2-tuple of its cost and a
+    Returns a dict mapping each Impl to a 2-tuple of its cost and a
     string describing how that cost was computed (used for pretty-printing).
 
     :param op: The root of the schedule for which to calculate a cost.
@@ -92,7 +90,7 @@ def detailed_analytical_cost(
         env = {}
 
     if isinstance(op, Pipeline):
-        cost_dict: dict[Schedule, tuple[int, str]] = {}
+        cost_dict: dict[Impl, tuple[int, str]] = {}
         sum_cost = 0
         for stage in op.stages:
             sub_cd = detailed_analytical_cost(
@@ -170,5 +168,5 @@ def detailed_analytical_cost(
         raise ValueError(f"Unsupported op. {type(op)}")
 
 
-def analytical_cost(op: Schedule, *args, **kwargs) -> int:
+def analytical_cost(op: Impl, *args, **kwargs) -> int:
     return detailed_analytical_cost(op, *args, **kwargs)[op][0]

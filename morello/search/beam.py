@@ -1,16 +1,17 @@
 import contextlib
 import dataclasses
 import logging
-import sys
 import os
+import sys
 from collections.abc import Sequence
 from typing import Callable, Optional, Union
 
 import numpy as np
 import tqdm
 
+import morello.impl.base
 from . import common, random
-from .. import cost, ops, pruning, specs
+from .. import cost, pruning, specs
 
 HEURISTIC_SAMPLES_PER_SPEC = 10
 HEURISTIC_MAX_RESTARTS = int(os.getenv("HEURISTIC_MAX_RESTARTS", 100))
@@ -20,14 +21,14 @@ logger = logging.getLogger(__name__)
 
 
 def _cost(
-    schedule: ops.Schedule, limits: Sequence[pruning.MemoryLimits]
+    schedule: morello.impl.base.Impl, limits: Sequence[pruning.MemoryLimits]
 ) -> Union[int, float]:
     """Returns a cost to use as a heuristic."""
     return cost.analytical_cost(schedule, holes_ok=True)
 
 
 def sampling_heuristic(
-    schedule: ops.Schedule, limits: Sequence[pruning.MemoryLimits]
+    schedule: morello.impl.base.Impl, limits: Sequence[pruning.MemoryLimits]
 ) -> Union[int, float]:
     best_cost = sys.maxsize
     for _ in range(HEURISTIC_SAMPLES_PER_SPEC):
@@ -52,8 +53,8 @@ def sampling_heuristic(
                     skip_sliding=True,
                 )[0]
         assert isinstance(
-            sampled_impl, ops.Schedule
-        ), f"Schedule was unexpectedly {sampled_impl}"
+            sampled_impl, morello.impl.base.Impl
+        ), f"Impl was unexpectedly {sampled_impl}"
         sampled_cost = cost.analytical_cost(sampled_impl, holes_ok=True)
         best_cost = min(best_cost, sampled_cost)
     return best_cost
@@ -61,7 +62,7 @@ def sampling_heuristic(
 
 @dataclasses.dataclass(frozen=True)
 class _State:
-    schedule: ops.Schedule
+    schedule: morello.impl.base.Impl
     child_limits: tuple[pruning.MemoryLimits, ...]
     cost: Union[int, float]
 
@@ -74,11 +75,16 @@ def beam_schedule_search(
     budget: Optional[int] = None,
     stats: Optional[common.SearchStats] = None,
     cost_fn: Callable[
-        [ops.Schedule, Sequence[pruning.MemoryLimits]], Union[int, float]
+        [morello.impl.base.Impl, Sequence[pruning.MemoryLimits]], Union[int, float]
     ] = None,
     progress_bar: bool = False,
     return_run_costs: bool = False,
-) -> Optional[Union[ops.Schedule, tuple[ops.Schedule, Sequence[Union[int, float]]]]]:
+) -> Optional[
+    Union[
+        morello.impl.base.Impl,
+        tuple[morello.impl.base.Impl, Sequence[Union[int, float]]],
+    ]
+]:
     if cost_fn is None:
         cost_fn = _cost
 
@@ -99,8 +105,11 @@ def beam_schedule_search(
         pb_ctx_b = tqdm.tqdm(unit="action")
 
     # Initialize the beam search with a single state: an Impl hole for the query Spec.
-    best_found: tuple[Optional[ops.Schedule], Union[int, float]] = None, sys.maxsize
-    first_impl = ops.spec_to_hole(spec, inputs, output)
+    best_found: tuple[Optional[morello.impl.base.Impl], Union[int, float]] = (
+        None,
+        sys.maxsize,
+    )
+    first_impl = morello.impl.base.spec_to_hole(spec, inputs, output)
     fresh_limits = (pruning.StandardMemoryLimits(),)
     states = [_State(first_impl, fresh_limits, cost_fn(first_impl, fresh_limits))]
 
@@ -149,7 +158,7 @@ def beam_schedule_search(
                     # Decrement budget even if the action exceeds memory limits.
                     if budget is not None:
                         if budget == 0:
-                            assert isinstance(best_found[0], ops.Schedule)
+                            assert isinstance(best_found[0], morello.impl.base.Impl)
                             if return_run_costs and best_found[0] is not None:
                                 return best_found[0], all_run_costs
                             return best_found[0]

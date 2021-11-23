@@ -1,7 +1,9 @@
 import pytest
 
-from morello import dtypes, ops, pruning, search_cache, specs, system_config, tensor
+import morello.impl.matmuls
+from morello import dtypes, pruning, search_cache, specs
 from morello.system_config import current_system, current_target
+
 
 # TODO: Add assertion that tests below only put scheduled Impls into the cache.
 
@@ -21,7 +23,7 @@ def test_cache_common_scenario(dtype):
     output = target.tensor(
         spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
     )
-    fast_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
+    fast_schedule = morello.impl.matmuls.MatmulHole(lhs, rhs, output, serial_only=False)
     fast_wrapped_schedule = search_cache.CachedSchedule(fast_schedule, cost=10)
 
     lhs = target.tensor(
@@ -33,7 +35,7 @@ def test_cache_common_scenario(dtype):
     output = target.tensor(
         spec=target.tensor_spec((100, 100), dtype=dtype, bank="RF"), name=None
     )
-    slow_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
+    slow_schedule = morello.impl.matmuls.MatmulHole(lhs, rhs, output, serial_only=False)
     slow_wrapped_schedule = search_cache.CachedSchedule(slow_schedule, cost=50)
 
     lhs = target.tensor(
@@ -45,7 +47,9 @@ def test_cache_common_scenario(dtype):
     output = target.tensor(
         spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
     )
-    impossible_schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
+    impossible_schedule = morello.impl.matmuls.MatmulHole(
+        lhs, rhs, output, serial_only=False
+    )
 
     cache = search_cache.ScheduleCache()
     cache.put(
@@ -137,7 +141,7 @@ def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
     output = target.tensor(
         spec=target.tensor_spec((8, 8), dtype=dtype, bank=db), name=None
     )
-    schedule = ops.MatmulHole(lhs, rhs, output, serial_only=False)
+    schedule = morello.impl.matmuls.MatmulHole(lhs, rhs, output, serial_only=False)
     wrapped_schedule = search_cache.CachedSchedule(schedule, cost=10)
 
     cache = search_cache.ScheduleCache()

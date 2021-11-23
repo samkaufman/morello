@@ -30,7 +30,7 @@ If that works, you're in good shape. Find out how to schedule some other pre-bak
 The output of `main.py` should be the best found implementation of the given spec `Matmul((8×4), (4×8), (8×8))`. It should look something like this:
 
 ```
-Schedule
+Impl
 Inputs: left: Tensor(8×4), right: Tensor(4×8)
 Output: output: Tensor(8×8)
                                                                              spec                                              cost              lvl0    lvl1
@@ -74,7 +74,7 @@ Tiles over tensors are added by the tiling iterators `tile` and `convTile` and a
 
 ## Scheduling Language
 
-Implementations are scheduled using a tree of operators deriving from `Schedule`, and are defined in [ops.py](ops.py). They are:
+Implementations are scheduled using a tree of operators deriving from `Impl`, and are defined in [ops.py](ops.py). They are:
 
   * `MoveLet` represents a memory move. It moves from slow to fast memory, and, in fast memory, may optionally change the layout of the underlying matrix.
   * `MatmulTilesLoop` represents a loop over the operand tiles required to calculate a tiled output.
@@ -84,7 +84,7 @@ Implementations are scheduled using a tree of operators deriving from `Schedule`
 
 Tree leaves are either `Matmul` or `DirectConv`.
 
-Every `Schedule` has two operands: `lhs` and `rhs`. All except `Matmul` and `DirectConv` have an inner `Schedule`.
+Every `Impl` has two operands: `lhs` and `rhs`. All except `Matmul` and `DirectConv` have an inner `Impl`.
 
 Operands are either tensors or views into tensors (tiles). These are defined in [tensor.py](tensor.py).
 

@@ -4,7 +4,9 @@ from typing import Optional
 
 from frozendict import frozendict
 
-from . import ops, system_config, utils
+import morello.impl.base
+import morello.impl.compose
+from . import system_config, utils
 from .tensor import Tensor
 
 
@@ -22,7 +24,7 @@ class IntermediatesTooBigError(ValueError):
 
 def _pipeline_transition(
     base_available: dict[str, int],
-    pipeline: ops.Pipeline,
+    pipeline: morello.impl.compose.Pipeline,
     carried_input_consumption: dict[str, int],
     carried_output_consumption: dict[str, int],
 ) -> Optional[list["MemoryLimits"]]:
@@ -71,7 +73,9 @@ class MemoryLimits(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def transition(self, schedule: ops.Schedule) -> Optional[list["MemoryLimits"]]:
+    def transition(
+        self, schedule: morello.impl.base.Impl
+    ) -> Optional[list["MemoryLimits"]]:
         """Returns new limits for the children of the given schedule.
 
         Returns `None` if the given schedule violates limits and therefore cannot be
@@ -120,9 +124,11 @@ class StandardMemoryLimits(MemoryLimits):
     def available(self) -> frozendict[str, int]:
         return self._available
 
-    def transition(self, schedule: ops.Schedule) -> Optional[list["MemoryLimits"]]:
+    def transition(
+        self, schedule: morello.impl.base.Impl
+    ) -> Optional[list["MemoryLimits"]]:
         # base->pipeline
-        if isinstance(schedule, ops.Pipeline):
+        if isinstance(schedule, morello.impl.compose.Pipeline):
             return _pipeline_transition(
                 dict(self.available), schedule, _zero_banks(), _zero_banks()
             )
@@ -218,10 +224,12 @@ class PipelineChildMemoryLimits(MemoryLimits):
             }
         )
 
-    def transition(self, schedule: ops.Schedule) -> Optional[list["MemoryLimits"]]:
+    def transition(
+        self, schedule: morello.impl.base.Impl
+    ) -> Optional[list["MemoryLimits"]]:
         # pipeline->base; treat self as a StandardMemoryLimits and transition
         # normally.
-        if not isinstance(schedule, ops.Pipeline):
+        if not isinstance(schedule, morello.impl.compose.Pipeline):
             # If we're transitioning to a non-Pipeline, we lose the precision of a
             # PipelineChildMemoryLimits. It's possible, at this point, that the uniform
             # lower bound on available memory becomes negative, in which case we'll

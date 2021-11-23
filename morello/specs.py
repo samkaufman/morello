@@ -53,8 +53,8 @@ class Layout(enum.Enum):
 class TensorSpec:
     """A TensorSpec describes an operand to a Spec.
 
-    This class is distinct from ops.Tensor and ops.Tile, which describe operands in the
-    scheduling language.
+    This class is distinct from impl.Tensor and impl.Tile, which describe operands in
+    the scheduling language.
     """
 
     dim_sizes: Tuple[int, ...]

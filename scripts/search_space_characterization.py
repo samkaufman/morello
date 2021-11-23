@@ -9,7 +9,8 @@ import time
 from pathlib import Path
 from typing import Iterable
 
-from morello import cost, dtypes, ops, specs
+import morello.impl.base
+from morello import cost, dtypes, specs
 from morello.search.naive import enumerate_impls
 from morello.system_config.state import (
     current_target,
@@ -48,7 +49,7 @@ def job(spec_name: str, root_spec: specs.Spec) -> dict[str, list[int]]:
 
     inputs = tuple(target.tensor(i) for i in root_spec.inputs)
     output = target.tensor(root_spec.output)
-    root_impl = ops.spec_to_hole(root_spec, inputs, output)
+    root_impl = morello.impl.base.spec_to_hole(root_spec, inputs, output)
     return {
         spec_name: [
             cost.analytical_cost(impl)

@@ -9,7 +9,7 @@ import atomicwrites
 from frozendict import frozendict
 
 from . import pruning
-from .ops import Schedule
+from .impl import Impl
 from .specs import Spec
 from .utils import zip_dict
 
@@ -35,7 +35,7 @@ class CachedSchedule(NamedTuple):
     Stores, along with the schedule itself, the cost of the schedule.
     """
 
-    schedule: Schedule
+    schedule: Impl
     cost: int
 
 

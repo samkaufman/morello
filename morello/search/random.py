@@ -1,12 +1,12 @@
 import copy
-import random
 import logging
+import random
 from collections.abc import Sequence
 from typing import Callable, Optional
 
-from .. import ops, op_pprint, pruning
+import morello.impl.base
 from . import common
-
+from .. import op_pprint, pruning
 
 logger = logging.getLogger(__name__)
 
@@ -16,12 +16,12 @@ class MaxRestartsExceeded(Exception):
 
 
 def randomly_schedule_impl(
-    root_impl: ops.Schedule,
+    root_impl: morello.impl.base.Impl,
     budget: Optional[int],
     memory_limits: Optional[Sequence[pruning.MemoryLimits]] = None,
     max_restarts: Optional[int] = None,
     skip_sliding=False,
-) -> tuple[Optional[ops.Schedule], int]:
+) -> tuple[Optional[morello.impl.base.Impl], int]:
     """Randomly schedule an Impl.
 
     Schedules the Impl by repeatedly choosing actions at random from the union

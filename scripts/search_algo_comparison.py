@@ -6,18 +6,18 @@ import contextlib
 import dataclasses
 import functools
 import itertools
+import logging
 import multiprocessing
 import os
 import pathlib
-import logging
 import sys
 import time
-from pathlib import Path
 from typing import Iterable, Literal, Optional, Union, Sequence
 
 import pandas as pd
 
-from morello import cost, dtypes, op_pprint, ops, search, search_cache, specs
+import morello.impl.base
+from morello import cost, dtypes, op_pprint, search, search_cache, specs
 from morello.search import beam, random
 from morello.system_config import set_current_target, target_by_name
 
@@ -301,7 +301,7 @@ def random_search(
 
     inputs = tuple(target.tensor(inp_spec, name=None) for inp_spec in spec.inputs)
     output = target.tensor(spec.output, name=None)
-    hole = ops.spec_to_hole(spec, inputs, output)
+    hole = morello.impl.base.spec_to_hole(spec, inputs, output)
 
     run_costs: list[int] = []
     best_cost, best_pformatted = None, None
@@ -370,7 +370,7 @@ def random_search(
 
 
 def _randomly_schedule_impls_job(
-    root_impl: ops.Schedule,
+    root_impl: morello.impl.base.Impl,
     results_queue: multiprocessing.Queue,
     should_stop,
 ):

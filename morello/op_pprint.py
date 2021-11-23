@@ -6,14 +6,12 @@ from typing import Callable, List, Union
 import tabulate
 import termcolor
 
-from morello import tensor_namer
-from morello.system_config.state import current_system
-
-from . import cost, ops, tensor
+from . import cost, impl, tensor, tensor_namer
+from .system_config.state import current_system
 
 
 def _build_table(
-    op: ops.Schedule,
+    op: impl.Impl,
     show_spec: bool,
     cost_dict,
     show_utilization: bool,
@@ -35,7 +33,7 @@ def _build_table(
         new_row.append("yes" if op.is_scheduled else "no")
     table.append(new_row)
 
-    if isinstance(op, ops.Pipeline):
+    if isinstance(op, impl.Pipeline):
         for stage in op.stages:
             _build_table(
                 stage,
@@ -49,9 +47,9 @@ def _build_table(
             )
     else:
         for child in op.children:
-            if not isinstance(child, ops.Schedule):
+            if not isinstance(child, impl.Impl):
                 continue
-            should_indent = not isinstance(op, ops.MoveLet)
+            should_indent = not isinstance(op, impl.MoveLet)
             _build_table(
                 child,
                 show_spec,
@@ -64,7 +62,7 @@ def _build_table(
             )
 
     # As the stack unwinds, insert a "store" line if this was a Move for an output
-    if isinstance(op, ops.MoveLet) and op.is_store:
+    if isinstance(op, impl.MoveLet) and op.is_store:
         store_row = [f"{ds}{op.store_env_str(tensor_name_fn, fancy=True)}"]
         while len(store_row) < len(table[-1]):
             store_row.append("")
@@ -80,7 +78,7 @@ def _whitespace_preserving_tabulate(*args, **kwargs):
 
 
 def pprint(
-    op: ops.Schedule,
+    op: impl.Impl,
     show_spec: bool = True,
     show_cost: bool = True,
     show_utilization: bool = True,
@@ -113,7 +111,7 @@ def pprint(
     )
 
     # Print a simple, static header.
-    print(termcolor.colored("Schedule", attrs=["bold", "underline"]), file=file)
+    print(termcolor.colored("Impl", attrs=["bold", "underline"]), file=file)
 
     # Print the inputs and output
     inputs_str = termcolor.colored("Inputs: ", attrs=["bold"])

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-"""Experiments in search over a Kriek Impl-like IR."""
 import argparse
 import doctest
 import logging
@@ -8,8 +7,10 @@ import sys
 import time
 from typing import TypeVar
 
-from morello import dtypes, op_pprint, ops, search, search_cache, specs, system_config
+import morello.impl.base
+from morello import dtypes, impl, op_pprint, search, search_cache, specs, system_config
 from morello.codegen import gen
+from morello.impl import TileSizeMode
 from morello.search import schedule_search
 
 T = TypeVar("T")
@@ -33,12 +34,12 @@ parser.add_argument(
 parser.add_argument("--generate-code", action="store_true", dest="generate_code")
 subparsers = parser.add_subparsers(dest="spec")
 
-parser_matmul = subparsers.add_parser("matmul", help="Schedule a matrix multiplication")
+parser_matmul = subparsers.add_parser("matmul", help="Impl a matrix multiplication")
 parser_matmul.add_argument("m", type=int)
 parser_matmul.add_argument("k", type=int)
 parser_matmul.add_argument("n", type=int)
 
-parser_conv = subparsers.add_parser("conv", help="Schedule a convolution")
+parser_conv = subparsers.add_parser("conv", help="Impl a convolution")
 parser_conv.add_argument("image_width", type=int)
 parser_conv.add_argument("image_height", type=int)
 parser_conv.add_argument("filter_width", type=int)
@@ -46,7 +47,7 @@ parser_conv.add_argument("filter_height", type=int)
 parser_conv.add_argument("filter_count", type=int)
 
 parser_convnet = subparsers.add_parser(
-    "convnet", help="Schedule a Conv-Reduce-Conv pipeline"
+    "convnet", help="Impl a Conv-Reduce-Conv pipeline"
 )
 
 
@@ -72,7 +73,7 @@ def _conv_main(
     filter_height,
     filter_count,
     cache: search_cache.ScheduleCache,
-) -> tuple[ops.Schedule, float]:
+) -> tuple[morello.impl.base.Impl, float]:
     target = system_config.current_target()
     assert filter_width <= image_width and filter_height <= image_height
     left = target.tensor(
@@ -152,14 +153,14 @@ def main() -> int:
 
     # Apply the --tile-sizes setting
     if parsed_args.tile_sizes == "all":
-        tile_size_mode = ops.TileSizeMode.ALL
+        tile_size_mode = TileSizeMode.ALL
     elif parsed_args.tile_sizes == "powers_of_two":
-        tile_size_mode = ops.TileSizeMode.POWERS_OF_TWO
+        tile_size_mode = TileSizeMode.POWERS_OF_TWO
     elif parsed_args.tile_sizes == "cache_line_multiples":
-        tile_size_mode = ops.TileSizeMode.CACHE_LINE_MULTIPLES
+        tile_size_mode = TileSizeMode.CACHE_LINE_MULTIPLES
     else:
         raise Exception("Unexpectedly got: " + parsed_args.tile_sizes)
-    tile_size_mode_token = ops.tile_size_mode.set(tile_size_mode)
+    tile_size_mode_token = impl.tile_size_mode.set(tile_size_mode)
 
     try:
         with search_cache.persistent_cache(
@@ -182,7 +183,7 @@ def main() -> int:
                 sched, runtime = _convnet_main(cache)
     finally:
         search.prune_column_major.reset(col_major_token)
-        ops.tile_size_mode.reset(tile_size_mode_token)
+        impl.tile_size_mode.reset(tile_size_mode_token)
 
     op_pprint.pprint(sched)
 

@@ -17,9 +17,10 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable, Optional, Union, cast
 
-from .. import dtypes, ops, specs, system_config, tensor
-from ..codegen import gen
+import morello.impl.base
 from .base import MemoryBankConfig, RunResult, SystemDescription, Target
+from .. import dtypes, impl, specs, tensor
+from ..codegen import gen
 
 _WORKAROUND_CRASH_STR = "CRASH from thread 0!"
 
@@ -219,7 +220,7 @@ class HvxVmemTensorlike(tensor.TensorLike):
     def conv_image_tile(
         self, tile_shape: tuple[int, ...], filter_shape: tuple[int, int]
     ) -> tensor.TensorLike:
-        raise ops.ActionOutOfDomain(
+        raise impl.ActionOutOfDomain(
             "Convolution tiling of HVX vectors is not supported"
         )
 
@@ -314,7 +315,11 @@ class HvxVmemSimpleTile(HvxVmemTensorlike, tensor.SimpleTile):
 
 @contextlib.contextmanager
 def _build_for_hexagon(
-    impl: ops.Schedule, *, source_cb: Callable[[str], None], print_output: bool, values
+    impl: morello.impl.base.Impl,
+    *,
+    source_cb: Callable[[str], None],
+    print_output: bool,
+    values,
 ):
     clang_path = _hexagon_sdk_tools_root() / "Tools" / "bin" / "hexagon-clang"
     if not clang_path.is_file():

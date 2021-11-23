@@ -2,7 +2,7 @@ import abc
 import dataclasses
 import functools
 import logging
-from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 
 if TYPE_CHECKING:
     from .. import dtypes

@@ -12,12 +12,12 @@ from typing import Callable, Iterable, Literal, Optional, Union, cast
 
 import sympy
 
-from .. import ops, specs, tensor, utils
+from . import expr_utils, indexexpr
+from .. import impl, specs, tensor, utils
 from ..dtypes import Dtype, Uint8, Uint32
 from ..system_config import hexagon
 from ..system_config.state import current_system
 from ..tensor import Tensor, TensorBase, TensorLike, Tile
-from . import expr_utils, indexexpr
 
 _namer: contextvars.ContextVar["_Namer"] = contextvars.ContextVar("_namer")
 _writer: contextvars.ContextVar["_Writer"] = contextvars.ContextVar("_writer")
@@ -56,8 +56,8 @@ class _Writer:
     def dedent(self):
         self._prefix = self._prefix[:-2]
 
-    def set_impl(self, impl: ops.Schedule):
-        self._pending_rhs_comment = str(impl.spec)
+    def set_impl(self, imp: impl.Impl):
+        self._pending_rhs_comment = str(imp.spec)
 
     def writeline(self, line: str):
         if self._pending_rhs_comment:
@@ -529,55 +529,55 @@ def _emit_loop_nest_for_shape(shape: Sequence[int]):
             writer.writeline("}")
 
 
-def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails]):
-    assert impl.is_scheduled
-    assert len(op_details) == len(impl.inputs) + 1
+def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
+    assert imp.is_scheduled
+    assert len(op_details) == len(imp.inputs) + 1
 
     namer, writer = _namer.get(), _writer.get()
 
-    writer.set_impl(impl)
+    writer.set_impl(imp)
 
-    if isinstance(impl, (ops.Loop, ops.MatmulSplitLoop)):
-        if impl.parallel:
+    if isinstance(imp, (impl.Loop, impl.MatmulSplitLoop)):
+        if imp.parallel:
             warnings.warn("Parallel loops not implemented")
 
-        # TODO: Add a comment about why the following is `impl.inner`, not `impl`.
-        driving_tile_idx = impl.inner.operands.index(impl.driving_tile)
+        # TODO: Add a comment about why the following is `imp.inner`, not `imp`.
+        driving_tile_idx = imp.inner.operands.index(imp.driving_tile)
         _emit_tile_out_loop_nest(
-            list(impl.spec.operands_dim_subscripts()[driving_tile_idx]),
+            list(imp.spec.operands_dim_subscripts()[driving_tile_idx]),
             [
                 _OperandDetailsExt(
                     o.c_tensor, o.index_expr, o.concrete_origin_shape, subs, operand
                 )
                 for o, subs, operand in zip(
                     op_details,
-                    impl.inner.spec.operands_dim_subscripts(),
-                    impl.inner.operands,
+                    imp.inner.spec.operands_dim_subscripts(),
+                    imp.inner.operands,
                 )
             ],
-            impl.inner.operands.index(impl.driving_tile),
-            inner_codegen=lambda details: _inner_generate_c(impl.inner, details),
+            imp.inner.operands.index(imp.driving_tile),
+            inner_codegen=lambda details: _inner_generate_c(imp.inner, details),
         )
-    elif isinstance(impl, ops.Pipeline):
+    elif isinstance(imp, impl.Pipeline):
         inps_op_details = op_details[:-1]
         output_op_details = op_details[-1]
 
         # First stage
-        assert isinstance(impl.stages[0].output, Tensor)
+        assert isinstance(imp.stages[0].output, Tensor)
 
         last_c_buf = _emit_buffer_alloc(
-            impl.stages[0].output.volume, impl.stages[0].output.dtype
+            imp.stages[0].output.volume, imp.stages[0].output.dtype
         )
-        cur_slice = slice(-len(impl.stages[0].inputs), len(inps_op_details))
+        cur_slice = slice(-len(imp.stages[0].inputs), len(inps_op_details))
         cur_out = _pipeline_emit_stage(
-            impl.stages[0], inps_op_details[cur_slice], last_c_buf, None, None
+            imp.stages[0], inps_op_details[cur_slice], last_c_buf, None, None
         )
         cur_slice = slice(
-            1 + cur_slice.start - len(impl.stages[1].inputs), cur_slice.start
+            1 + cur_slice.start - len(imp.stages[1].inputs), cur_slice.start
         )
 
         # Intermediate stages
-        for stage, next_stage in zip(impl.stages[1:], impl.stages[2:]):
+        for stage, next_stage in zip(imp.stages[1:], imp.stages[2:]):
             assert isinstance(stage.output, Tensor)
 
             new_c_buf = _emit_buffer_alloc(stage.output.volume, stage.output.dtype)
@@ -592,7 +592,7 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
 
         # Last stage
         cur_out = _pipeline_emit_stage(
-            impl.stages[-1],
+            imp.stages[-1],
             inps_op_details[cur_slice],
             output_op_details.c_tensor,
             cur_out,
@@ -602,19 +602,19 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
         assert (
             cur_out.concrete_origin_shape == output_op_details.concrete_origin_shape
         ), "Final stage output shape didn't match Pipeline output shape"
-    elif isinstance(impl, ops.Mult):
+    elif isinstance(imp, impl.Mult):
         l_ref, r_ref, o_ref = (d.c_tensor.c_index for d in op_details)
         l, r, o = (d.index_expr for d in op_details)
         writer.writeline(f"{o_ref(o)} += {l_ref(l)} * {r_ref(r)};")
-    elif isinstance(impl, ops.HvxVrmpyaccVuwVubRub):
+    elif isinstance(imp, impl.HvxVrmpyaccVuwVubRub):
         lhs, rhs, out = op_details
         lhs_ref_fn, rhs_ref_fn, out_ref_fn = (
             d.c_tensor.c_index_ptr for d in op_details
         )
 
-        assert impl.lhs.contiguous
-        assert impl.rhs.contiguous
-        assert impl.output.contiguous
+        assert imp.lhs.contiguous
+        assert imp.rhs.contiguous
+        assert imp.output.contiguous
 
         # Rewrite index exprs. to refer to first element.
         lhs_index_expr = expr_utils.zero_points(lhs.index_expr)
@@ -627,14 +627,14 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
         writer.writeline(f"  *(HVX_Vector *)({lhs_ref_fn(lhs_index_expr)}),")
         writer.writeline(f"  *(uint32_t *)({rhs_ref_fn(rhs_index_expr)})")
         writer.writeline(f");")
-    elif isinstance(impl, ops.DirectConv):
-        if not all(d == 1 for d in impl.output.dim_sizes):
+    elif isinstance(imp, impl.DirectConv):
+        if not all(d == 1 for d in imp.output.dim_sizes):
             raise Exception("Only 1x1x1 output shape DirectConvs supported")
         # TODO: Remove the following _OperandDetails "destructuring"
         operand_index_exprs = [d.index_expr for d in op_details]
         tensor_ref_fns = [d.c_tensor.c_index for d in op_details]
 
-        img, _, _ = impl.operands
+        img, _, _ = imp.operands
         i_name = namer.fresh_name("pt")
         j_name = namer.fresh_name("pt")
         if _unroll.get():
@@ -654,19 +654,19 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
             )
         writer.writeline("}")
         writer.writeline("}")
-    elif isinstance(impl, ops.ReduceSum):
-        if not all(d == 1 for d in impl.output.dim_sizes):
+    elif isinstance(imp, impl.ReduceSum):
+        if not all(d == 1 for d in imp.output.dim_sizes):
             raise Exception("Only 1x1x1 ReduceSums supported")
         # TODO: Remove the following _OperandDetails "destructuring"
         operand_index_exprs = [d.index_expr for d in op_details]
         tensor_ref_fns = [d.c_tensor.c_index for d in op_details]
-        assert impl.is_scheduled
+        assert imp.is_scheduled
         i, o = operand_index_exprs
         writer.writeline(f"{tensor_ref_fns[1](o)} += {tensor_ref_fns[0](i)};")
-    elif isinstance(impl, ops.MoveLet):
-        source_idx = impl.operands.index(impl.source)
+    elif isinstance(imp, impl.MoveLet):
+        source_idx = imp.operands.index(imp.source)
         assert (
-            impl.inner.operands[source_idx] is impl.destination
+            imp.inner.operands[source_idx] is imp.destination
         ), "MoveLet's inner Impl does not use destination tensor"
 
         # TODO: Remove the following "destructuring" of _OperandDetails
@@ -675,69 +675,67 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
 
         concrete_shape = op_details[source_idx].concrete_origin_shape
 
-        is_store = impl.input_idx is None
+        is_store = imp.input_idx is None
 
         # On the Hexagon target:
         if current_system().has_hvx:
-            if not impl.is_store and impl.destination.bank == "L2":
-                assert impl.source.bank == "GL"
-                _emit_hvx_l2fetch(impl, is_store, op_details[source_idx])
-                _inner_generate_c(impl.inner, op_details)
+            if not imp.is_store and imp.destination.bank == "L2":
+                assert imp.source.bank == "GL"
+                _emit_hvx_l2fetch(imp, is_store, op_details[source_idx])
+                _inner_generate_c(imp.inner, op_details)
             # HVX scalar L1/dc-to-register case
-            elif not impl.is_store and impl.destination.bank == "L1":
-                assert impl.source.bank == "L2"
-                _emit_hvx_dcfetch(
-                    impl, impl.operands[source_idx], op_details[source_idx]
-                )
+            elif not imp.is_store and imp.destination.bank == "L1":
+                assert imp.source.bank == "L2"
+                _emit_hvx_dcfetch(imp, imp.operands[source_idx], op_details[source_idx])
                 _inner_generate_c(impl.inner, op_details)
-            elif impl.is_store and impl.destination.bank == "L2":
+            elif imp.is_store and imp.destination.bank == "L2":
                 # Generate no code for moves from L2 to global.
-                assert impl.source.bank == "GL"
-                _inner_generate_c(impl.inner, op_details)
-            elif impl.is_store and impl.destination.bank == "L1":
+                assert imp.source.bank == "GL"
+                _inner_generate_c(imp.inner, op_details)
+            elif imp.is_store and imp.destination.bank == "L1":
                 # Generate no code for writing from L1 back to L2
-                assert impl.source.bank == "L2"
-                _inner_generate_c(impl.inner, op_details)
-            elif impl.destination.bank == "VMEM":
-                assert impl.source.bank == "L2"
+                assert imp.source.bank == "L2"
+                _inner_generate_c(imp.inner, op_details)
+            elif imp.destination.bank == "VMEM":
+                assert imp.source.bank == "L2"
                 _move_hvx_vmem(
-                    impl,
+                    imp,
                     source_idx,
                     [d.c_tensor for d in op_details],
                     operand_index_exprs,
                     concrete_shapes,
                 )
-            elif impl.destination.bank == "HexagonRF":
+            elif imp.destination.bank == "HexagonRF":
                 _move_registers(
-                    impl,
+                    imp,
                     source_idx,
                     [d.c_tensor for d in op_details],
                     operand_index_exprs,
                     concrete_shapes,
                 )
             else:
-                word = "store" if impl.is_store else "load"
-                raise Exception(f"Unexpected {word} case: {impl.destination.bank}")
+                word = "store" if imp.is_store else "load"
+                raise Exception(f"Unexpected {word} case: {imp.destination.bank}")
         # On CPU and Hexagon targets: code is only generated (after the
         # previous cases) for MoveLet if there is a layout or contiguity change.
         # Otherwise, we just recurse.
-        elif impl.destination.bank == "RF" and (
-            not impl.source.contiguous
+        elif imp.destination.bank == "RF" and (
+            not imp.source.contiguous
             or (
-                impl.source.layout != impl.destination.layout
+                imp.source.layout != imp.destination.layout
                 and functools.reduce(operator.mul, concrete_shape, 1) != 1
             )
         ):
             _move_registers(
-                impl,
+                imp,
                 source_idx,
                 [d.c_tensor for d in op_details],
                 operand_index_exprs,
                 concrete_shapes,
             )
         else:
-            _inner_generate_c(impl.inner, op_details)
-    elif isinstance(impl, ops.HvxGemvmpybbwAsm):
+            _inner_generate_c(imp.inner, op_details)
+    elif isinstance(imp, impl.HvxGemvmpybbwAsm):
         lhs, rhs, out = op_details
         lhs_ref_fn, rhs_ref_fn, out_ref_fn = (
             d.c_tensor.c_index_ptr for d in op_details
@@ -794,7 +792,7 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
             writer.writeline(");")
             writer.writeline(f"free({kout_name});")
         writer.writeline("}")
-    elif isinstance(impl, ops.PadTranspack):
+    elif isinstance(impl, impl.PadTranspack):
         # Make a _CHeapArray for the result of the pad2d_and_transpack call.
         source_op_details = op_details[impl.input_idx]
         concrete_shape = source_op_details.concrete_origin_shape
@@ -833,7 +831,7 @@ def _inner_generate_c(impl: ops.Schedule, op_details: Sequence[_OperandDetails])
 
 
 def _pipeline_emit_stage(
-    stage: ops.Schedule,
+    stage: impl.Impl,
     input_operand_details: Sequence[_OperandDetails],
     output_c_tensor: _CTensor,
     previous_output: Optional[_OperandDetails],  # None only on first stage.
@@ -896,9 +894,9 @@ def _pipeline_emit_stage(
 
 
 def _emit_hvx_l2fetch(
-    impl: ops.MoveLet, is_store: bool, source_operand: _OperandDetails
+    impl: impl.MoveLet, is_store: bool, source_operand: _OperandDetails
 ) -> None:
-    assert isinstance(impl, ops.MoveLet)
+    assert isinstance(impl, impl.MoveLet)
 
     writer = _writer.get()
 
@@ -945,7 +943,7 @@ def _emit_hvx_l2fetch(
 
 
 def _emit_hvx_dcfetch(
-    impl: ops.MoveLet, source: TensorLike, source_operand: _OperandDetails
+    impl: impl.MoveLet, source: TensorLike, source_operand: _OperandDetails
 ) -> None:
     writer = _writer.get()
 
@@ -982,7 +980,7 @@ def _emit_hvx_dcfetch(
 
 
 def _move_hvx_vmem(
-    impl: ops.MoveLet,
+    imp: impl.MoveLet,
     source_idx,
     c_tensors: Sequence[_CTensor],
     operand_index_exprs,
@@ -992,19 +990,19 @@ def _move_hvx_vmem(
 
     # TODO: If source is contiguous, just assign. Else, add move loop.
 
-    assert impl.destination.bank == "VMEM"
-    assert isinstance(impl.destination, hexagon.HvxVmemTensor)
-    if impl.prefetching:
+    assert imp.destination.bank == "VMEM"
+    assert isinstance(imp.destination, hexagon.HvxVmemTensor)
+    if imp.prefetching:
         raise NotImplementedError()
 
     assert (
-        impl.destination.dim_sizes == concrete_shapes[source_idx]
+        imp.destination.dim_sizes == concrete_shapes[source_idx]
     ), "Shapes don't match. This may be a loop boundary."
 
     source_c_tensor = c_tensors[source_idx]
     source_index_expr = operand_index_exprs[source_idx]
 
-    vectors = _CHvxVectors.emit(impl.destination)
+    vectors = _CHvxVectors.emit(imp.destination)
 
     new_c_tensors = list(c_tensors)
     new_c_tensors[source_idx] = vectors
@@ -1012,10 +1010,10 @@ def _move_hvx_vmem(
     new_operand_index_exprs = list(operand_index_exprs)
     # TODO: Do we need to call this both here and in _emit_assignment_copy?
     new_operand_index_exprs[source_idx] = indexexpr.buffer_indexing_expr(
-        impl.destination, concrete_shapes[source_idx]
+        imp.destination, concrete_shapes[source_idx]
     )
 
-    slice_idx_exprs, slices_contig = _iter_vectors(impl.destination, source_index_expr)
+    slice_idx_exprs, slices_contig = _iter_vectors(imp.destination, source_index_expr)
     if slices_contig:
         # source_index_expr = source_index_expr.subs("p0", 0)
         for destination_name, slice_index_expr in zip(vectors.names, slice_idx_exprs):
@@ -1025,14 +1023,14 @@ def _move_hvx_vmem(
             )
         unroll_token = _unroll.set(True)
         _inner_generate_c(
-            impl.inner,
+            imp.inner,
             [
                 _OperandDetails(*t)
                 for t in zip(new_c_tensors, new_operand_index_exprs, concrete_shapes)
             ],
         )
         _unroll.reset(unroll_token)
-        if impl.is_store:
+        if imp.is_store:
             for destination_name, slice_index_expr in zip(
                 vectors.names, slice_idx_exprs
             ):
@@ -1049,24 +1047,24 @@ def _move_hvx_vmem(
             # We don't assign with Q6_V_vzero() because this is a load, so it'll be
             # immediately filled.
             destination_index_expr = indexexpr.buffer_indexing_expr(
-                impl.destination, concrete_shape
+                imp.destination, concrete_shape
             )
 
             with _emit_assignment_copy(
-                impl.source,
-                impl.destination,
+                imp.source,
+                imp.destination,
                 slice_index_expr,
                 destination_index_expr,
                 concrete_shapes[source_idx],
                 source_ref_fn,
                 dest_ref_fn=vectors.c_index,
                 dest_free_fn=vectors.emit_free,
-                is_input=(not impl.is_store),
-                is_output=impl.is_store,
+                is_input=(not imp.is_store),
+                is_output=imp.is_store,
             ):
                 unroll_token = _unroll.set(True)
                 _inner_generate_c(
-                    impl.inner,
+                    imp.inner,
                     new_tensor_ref_fns,
                     new_operand_index_exprs,
                     new_concrete_shapes,
@@ -1202,12 +1200,12 @@ def _expr_to_c(expr: Union[sympy.Expr, int]) -> str:
 
 def generate_c(
     mode: Literal["kernel_only", "benchmark", "print_output"],
-    impl: ops.Schedule,
+    imp: impl.Impl,
     out_fo,
     values=None,
 ) -> None:
     if values is None:
-        values = [None] * len(impl.inputs)
+        values = [None] * len(imp.inputs)
     values.append(None)  # for output, which is never initialized by caller
 
     namer = _Namer()
@@ -1500,7 +1498,7 @@ def generate_c(
         tensor_names = []
         c_tensors = []
         index_exprs = []
-        for operand, initial_value in zip(impl.operands, values):
+        for operand, initial_value in zip(imp.operands, values):
             assert isinstance(operand, tensor.Tensor)
             c_buf = _emit_buffer_alloc(operand.volume, operand.dtype)
             ref_fn, free_fn = c_buf.c_index, c_buf.emit_free
@@ -1516,16 +1514,16 @@ def generate_c(
                     writer.writeline(f"{ref_fn(idx)} = ({operand.dtype.c_type})({el});")
 
         def kernel():
-            nonlocal impl, c_tensors, index_exprs
+            nonlocal imp, c_tensors, index_exprs
             operand_details = [
                 _OperandDetails(c_tensor, index_expr, shape)
                 for c_tensor, index_expr, shape in zip(
                     c_tensors,
                     index_exprs,
-                    (op.dim_sizes for op in impl.operands),
+                    (op.dim_sizes for op in imp.operands),
                 )
             ]
-            _inner_generate_c(impl, operand_details)
+            _inner_generate_c(imp, operand_details)
 
         if mode == "kernel_only":
             kernel()
@@ -1564,9 +1562,9 @@ def generate_c(
                 tensor_names[-1],
                 c_tensors[-1].c_index,
                 cast(
-                    Union[tuple[int, int], tuple[int, int, int]], impl.output.dim_sizes
+                    Union[tuple[int, int], tuple[int, int, int]], imp.output.dim_sizes
                 ),
-                impl.output.dtype,
+                imp.output.dtype,
                 index_exprs[-1],
                 writer,
                 write_name=False,

@@ -6,16 +6,16 @@ import multiprocessing
 from collections.abc import Sequence
 from typing import Any, Generator, Iterable, Optional
 
-from .. import ops, pruning, specs
-from ..ops import Schedule
 from . import common
+from .. import impl, pruning, specs
+from ..impl import Impl
 
 logger = logging.getLogger(__name__)
 
 
 def _best_schedule(
-    it: Iterable[Schedule],
-) -> Optional[tuple[Schedule, tuple[int, Sequence[int], Any]]]:
+    it: Iterable[Impl],
+) -> Optional[tuple[Impl, tuple[int, Sequence[int], Any]]]:
     """Returns the best schedule if `it` is non-empty; `None` if it is.
 
     This uses schedule_key, so it will return the lowest cost schedule,
@@ -39,7 +39,7 @@ def _assert_no_cycles_in_stack(func):
     # noinspection PyUnreachableCode
     @functools.wraps(func)
     def assert_no_cycles_in_stack_inner(*args, **kwargs):
-        if isinstance(args[0], ops.Schedule):
+        if isinstance(args[0], impl.Impl):
             spec = args[0].spec
         else:
             spec = args[0]
@@ -64,9 +64,9 @@ def naive_search(
     inputs: tuple,
     output,
     memory_limits: Optional[pruning.MemoryLimits] = None,
-    parent_summary: Optional[ops.ParentSummary] = None,
+    parent_summary: Optional[impl.ParentSummary] = None,
     parallel_jobs: Optional[int] = 1,
-) -> Optional[Schedule]:
+) -> Optional[Impl]:
     """Returns the best Impl for a given Spec and memory limits.
 
     Search explicitly enumerates every possible Impl of the given Spec,
@@ -90,7 +90,7 @@ def naive_search(
         memory_limits = pruning.StandardMemoryLimits()
 
     # Create a an Impl hole corresponding to the query spec
-    leaf = ops.spec_to_hole(spec, inputs, output)
+    leaf = impl.spec_to_hole(spec, inputs, output)
     assert leaf.depth == 1, f"Expected hole to have depth 1; had {leaf.depth}"
 
     best_result = _best_schedule(
@@ -111,11 +111,11 @@ def naive_search(
 
 @_assert_no_cycles_in_stack
 def enumerate_impls(
-    leaf: ops.Schedule,
+    leaf: impl.Impl,
     memory_limits: Optional[pruning.MemoryLimits],
-    parent_summary: Optional[ops.ParentSummary],
+    parent_summary: Optional[impl.ParentSummary],
     parallel_jobs: Optional[int] = 1,
-) -> Iterable[Schedule]:
+) -> Iterable[Impl]:
     """Yields all completions of a given Impl.
 
     If given, only yield Impls which satisfy memory limits.
@@ -139,7 +139,7 @@ def enumerate_impls(
     with parallel_ctx as pool:
         for act in leaf.actions(parent_summary=parent_summary):
             new_tree = act()
-            new_parent_summary = ops.ParentSummary.update(parent_summary, new_tree)
+            new_parent_summary = impl.ParentSummary.update(parent_summary, new_tree)
 
             new_child_memory_limits = [None for _ in new_tree.children]
             if memory_limits:
@@ -181,7 +181,7 @@ def enumerate_impls(
 
 def _impls_from_new_tree(
     new_tree, new_parent_summary, new_child_memory_limits, expected_spec
-) -> Generator[Schedule, None, None]:
+) -> Generator[Impl, None, None]:
     for child_options in itertools.product(
         *[
             enumerate_impls(child, mem, new_parent_summary)

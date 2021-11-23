@@ -2,7 +2,13 @@ from typing import Optional, Tuple
 
 from hypothesis import strategies as st
 
-from morello import dtypes, ops, specs, system_config, tensor
+import morello.impl.base
+import morello.impl.compose
+import morello.impl.directconv
+import morello.impl.loops
+import morello.impl.moves
+import morello.impl.reducesum
+from morello import dtypes, specs, system_config, tensor
 from morello.system_config import cpu, hexagon
 
 dtype_st = st.sampled_from([dtypes.Uint8, dtypes.Uint32])
@@ -175,10 +181,10 @@ def compose_spec_st(draw) -> specs.Compose:
 
 
 @st.composite
-def composehole_op_st(draw) -> ops.ComposeHole:
+def composehole_op_st(draw) -> morello.impl.compose.ComposeHole:
     target = system_config.current_target()
     spec = draw(compose_spec_st())
-    return ops.ComposeHole(
+    return morello.impl.compose.ComposeHole(
         spec=spec,
         inputs=tuple(target.tensor(s, name=None) for s in spec.inputs),
         output=target.tensor(spec.output, name="output"),
@@ -186,7 +192,7 @@ def composehole_op_st(draw) -> ops.ComposeHole:
 
 
 @st.composite
-def pipeline_op_st(draw) -> ops.Pipeline:
+def pipeline_op_st(draw) -> morello.impl.compose.Pipeline:
     raise NotImplementedError()
 
 
@@ -211,18 +217,18 @@ def register_default_strategies():
         ),
     )
 
-    st.register_type_strategy(ops.ComposeHole, composehole_op_st())
-    st.register_type_strategy(ops.Pipeline, pipeline_op_st())
+    st.register_type_strategy(morello.impl.compose.ComposeHole, composehole_op_st())
+    st.register_type_strategy(morello.impl.compose.Pipeline, pipeline_op_st())
 
     st.register_type_strategy(
-        ops.Schedule,
+        morello.impl.base.Impl,
         st.one_of(
-            st.from_type(ops.ComposeHole),
-            st.from_type(ops.Pipeline),
-            st.from_type(ops.DirectConv),
-            st.from_type(ops.ReduceSum),
-            st.from_type(ops.Loop),
-            st.from_type(ops.MatmulSplitLoop),
-            st.from_type(ops.MoveLet),
+            st.from_type(morello.impl.compose.ComposeHole),
+            st.from_type(morello.impl.compose.Pipeline),
+            st.from_type(morello.impl.directconv.DirectConv),
+            st.from_type(morello.impl.reducesum.ReduceSum),
+            st.from_type(morello.impl.loops.Loop),
+            st.from_type(morello.impl.loops.MatmulSplitLoop),
+            st.from_type(morello.impl.moves.MoveLet),
         ),
     )

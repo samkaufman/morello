@@ -1,17 +1,18 @@
 import functools
 from typing import Any, Generator, Iterable, Optional
 
+import morello.impl.base
+import morello.impl.pruning
 from morello import system_config
-
 from . import common
-from .. import ops, pruning, replace, specs
-from ..ops import Schedule
+from .. import impl, pruning, replace, specs
+from ..impl import Impl
 from ..search_cache import CachedSchedule, ScheduleCache
 
 
 def _best_schedule(
-    it: Iterable[Schedule],
-) -> Optional[tuple[Schedule, tuple[int, Any, Any, Any]]]:
+    it: Iterable[Impl],
+) -> Optional[tuple[Impl, tuple[int, Any, Any, Any]]]:
     """Returns the best schedule if `it` is non-empty; `None` if it is.
 
     This uses schedule_key, so it will return the lowest cost schedule,
@@ -59,10 +60,10 @@ def schedule_search(
     output: Optional[Any] = None,
     memory_limits: Optional[pruning.MemoryLimits] = None,
     cache: Optional[ScheduleCache] = None,
-    parent_summary: Optional[ops.ParentSummary] = None,
+    parent_summary: Optional[morello.impl.pruning.ParentSummary] = None,
     stats: Optional[common.SearchStats] = None,
     callbacks: Optional[common.SearchCallbacks] = None,
-) -> Optional[Schedule]:
+) -> Optional[Impl]:
     """Returns the best Impl for a given Spec and memory limits.
 
     May return `None` if no Impl satisfies the given Spec and memory limits.
@@ -113,11 +114,11 @@ def schedule_search(
         callbacks.enter_unseen(spec, memory_limits)
 
     # Create a an Impl hole corresponding to the query spec
-    leaf = ops.spec_to_hole(spec, inputs, output)
+    leaf = morello.impl.base.spec_to_hole(spec, inputs, output)
     assert leaf.depth == 1, f"Expected hole to have depth 1; had {leaf.depth}"
 
     # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
-    def yield_options() -> Generator[Schedule, None, None]:
+    def yield_options() -> Generator[Impl, None, None]:
         """Yields best Impls after taking any of leaf's actions (or no action)."""
         # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
         if all(m >= 0 for m in memory_limits.available.values()) and leaf.is_scheduled:
@@ -129,7 +130,7 @@ def schedule_search(
         for act in leaf.actions(parent_summary=parent_summary):
             try:
                 new_tree = act()
-            except ops.ActionOutOfDomain:
+            except impl.ActionOutOfDomain:
                 continue
             except Exception as e:
                 # Re-raise the exception with a little more detail about act.
@@ -143,7 +144,7 @@ def schedule_search(
             if callbacks:
                 callbacks.applied_action(act, new_tree)
 
-            new_parent_summary = ops.ParentSummary.update(
+            new_parent_summary = morello.impl.pruning.ParentSummary.update(
                 parent_summary, parent=new_tree
             )
 
