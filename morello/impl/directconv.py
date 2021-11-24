@@ -109,10 +109,6 @@ class DirectConv(Impl):
             return False
         return True
 
-    @property
-    def innermost(self) -> "Impl":
-        return self
-
     # @assert_stable_spec
     # def tile_out(self, output_shape: Tuple[int, ...]) -> "Impl":
     #     # TODO: DirectConv acts as though it has a rank-2 output because of

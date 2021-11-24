@@ -97,12 +97,20 @@ def sample_perturbed(
     impl = hole.tile_out((m, n))
     impl = impl.split(k)
     impl = impl.move_input(0, 0, specs.Layout.ROW_MAJOR)
-    m_ = _sample_randint_on_boundary(impl.innermost.output.dim_sizes[0])
-    n_ = _sample_randint_on_boundary(impl.innermost.output.dim_sizes[1])
+    m_ = _sample_randint_on_boundary(_get_innermost(impl).output.dim_sizes[0])
+    n_ = _sample_randint_on_boundary(_get_innermost(impl).output.dim_sizes[1])
     impl = impl.tile_out((m_, n_))
     impl = impl.move_input(1, 0, specs.Layout.ROW_MAJOR)
     impl = impl.move_output(0, specs.Layout.ROW_MAJOR)
     return impl.complete(), "perturbed3"
+
+
+def _get_innermost(impl: morello.impl.base.Impl) -> morello.impl.base.Impl:
+    cur = impl
+    while len(cur.children):
+        assert hasattr(cur, "inner")
+        cur = cur.inner
+    return cur
 
 
 def sample_and_benchmark(

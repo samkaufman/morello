@@ -54,17 +54,6 @@ class Impl(abc.ABC):
         raise NotImplementedError()
 
     @property
-    def innermost(self) -> "Impl":
-        """Returns the innermost Impl.
-
-        This should be a Matmul. This property will not longer make sense once we've
-        implemented schedules with multiple leaves.
-        """
-        if hasattr(self, "inner"):
-            return getattr(self, "inner").innermost
-        raise NotImplementedError()
-
-    @property
     def is_scheduled(self) -> bool:
         if hasattr(self, "inner"):
             return getattr(self, "inner").is_scheduled

@@ -120,9 +120,7 @@ class ComposeHole(Impl):
         # passed to sliding_tile_out are over the *output* Tile, not either
         # input; this only works because they're one-to-one for DirectConv.
         if allow_sliding_windows.get():
-            first_head_input = self.inputs[
-                -self.spec.subspec_classes[-1].inputs_count()
-            ]
+            first_head_input = self.inputs[-self.spec.subspec_classes[-1].inputs_count]
             for sliding_dim in range(len(first_head_input.dim_sizes)):
                 for slide_size in dim_range(
                     self.output.dim_sizes[sliding_dim], include_end=False
@@ -272,7 +270,7 @@ class ComposeHole(Impl):
 
         # The head of a Compose corresponds to the last function evaluated
         head_inps = (intermediate_tensor,)
-        hi = self.spec.subspec_classes[0].inputs_count() - 1
+        hi = self.spec.subspec_classes[0].inputs_count - 1
         if hi:
             head_inps += self.inputs[:hi]
         head_hole = spec_to_hole(
@@ -455,9 +453,9 @@ class ComposeHole(Impl):
             popped_cls = subspec_classes.pop(0)
             intermediate_shapes.pop(0)
             if subspec_classes:
-                inputs = inputs[popped_cls.inputs_count() - 1 :]
+                inputs = inputs[popped_cls.inputs_count - 1 :]
             else:
-                inputs = inputs[popped_cls.inputs_count() :]
+                inputs = inputs[popped_cls.inputs_count :]
             skip_first -= 1
         return ComposeHole._compute_partial_inputs_inner(
             tuple(subspec_classes),
@@ -490,7 +488,7 @@ class ComposeHole(Impl):
             inputs_shapes = ()
             if subspec_output_shapes:
                 inputs_shapes = (subspec_output_shapes.pop(0),)
-            take = subspec_cls.inputs_count() - len(inputs_shapes)
+            take = subspec_cls.inputs_count - len(inputs_shapes)
             inputs_shapes += flattened_inputs_shapes[:take]
             flattened_inputs_shapes = flattened_inputs_shapes[take:]
             # We're tracing the type and shape of each subspec's first tile up through the

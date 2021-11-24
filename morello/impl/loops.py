@@ -432,7 +432,6 @@ class MatmulSplitLoop(_TilingMixin, Impl):
     inner: Impl
 
     def __post_init__(self):
-        assert isinstance(self.innermost.spec, specs.Matmul)
         assert self.output.dim_sizes == (
             self.lhs.dim_sizes[0],
             self.rhs.dim_sizes[1],

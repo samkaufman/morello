@@ -312,27 +312,6 @@ class ConvolutionImageTile(Tile):
         out_boundary = out_total % out_for_tile
         return out_boundary + filt - 1
 
-    @property
-    def steps(self) -> int:
-        result = super().steps
-        assert result == self._dumb_steps
-        return result
-
-    # TODO: Remove this, and filter_shape, if the other calculation works
-    @property
-    def _dumb_steps(self) -> int:
-        origin_out_shape = (
-            self._s(self.origin.dim_sizes[0], self.filter_shape[0]),
-            self._s(self.origin.dim_sizes[1], self.filter_shape[1]),
-        )
-        inner_out_shape = (
-            self._s(self.dim_sizes[0], self.filter_shape[0]),
-            self._s(self.dim_sizes[1], self.filter_shape[1]),
-        )
-        return math.ceil(origin_out_shape[0] / inner_out_shape[0]) * math.ceil(
-            origin_out_shape[1] / inner_out_shape[1]
-        )
-
     @staticmethod
     def _s(img_size: int, filter_size: int) -> int:
         return 1 + img_size - filter_size

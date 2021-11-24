@@ -139,8 +139,7 @@ def pprint(
 
 def pformat(*args, **kwargs) -> str:
     if "file" in kwargs:
-        # TODO: Use a more precise exception
-        raise Exception("file kwarg not supported by pformat")
+        raise ValueError("`file` keyword argument is not supported by pformat")
     kwargs = dict(kwargs)
     with io.StringIO() as buf:
         kwargs["file"] = buf

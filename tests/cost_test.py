@@ -38,9 +38,18 @@ def _move_operand(
 @st.composite
 def _tile_schedule_op(draw, b: impl.Impl):
     b = draw(b)
-    height = draw(st.integers(min_value=1, max_value=b.innermost.output_height))
-    width = draw(st.integers(min_value=1, max_value=b.innermost.output_width))
+    height = draw(st.integers(min_value=1, max_value=_get_innermost(b).output_height))
+    width = draw(st.integers(min_value=1, max_value=_get_innermost(b).output_width))
+    # TODO: This can just draw from the Fpf, once tile_out is an Fpf
     return b.tile_out((height, width))
+
+
+def _get_innermost(impl: morello.impl.base.Impl) -> morello.impl.base.Impl:
+    cur = impl
+    while len(cur.children):
+        assert hasattr(cur, "inner")
+        cur = cur.inner
+    return cur
 
 
 def full_schedule_st(

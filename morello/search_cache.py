@@ -219,8 +219,7 @@ def persistent_cache(path: Optional[Union[str, pathlib.Path]], save: bool = True
 
     if path.exists():
         if not path.is_file():
-            # TODO: Is ValueError the correct exception here?
-            raise ValueError(f"Expected a path to a file; got: {str(path)}")
+            raise ValueError(f"Path was not a file: {str(path)}")
         with path.open(mode="rb") as fo:
             cache = pickle.load(fo)
     else:

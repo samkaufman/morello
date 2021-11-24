@@ -50,10 +50,6 @@ class ReduceSum(Impl):
         )
 
     @property
-    def innermost(self) -> Impl:
-        return self
-
-    @property
     def is_scheduled(self) -> bool:
         # TODO: Drop these RF constants. Instead, use target-specific Impls.
         return (

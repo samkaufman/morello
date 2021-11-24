@@ -59,10 +59,6 @@ class MatmulBase(Impl):
     def children(self) -> Tuple["Impl", ...]:
         return tuple()
 
-    @property
-    def innermost(self) -> "Impl":
-        return self
-
     @assert_stable_spec
     def replace_children(self, replacements: Iterable[Impl]) -> Impl:
         replacements = list(replacements)

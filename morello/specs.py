@@ -4,10 +4,10 @@ In Morello, a program's algorithm is independent of its schedule. A schedule's
 logical semantics are described by a Spec.
 """
 import abc
-import operator
 import dataclasses
 import enum
 import functools
+import operator
 import typing
 import warnings
 from collections.abc import Sequence
@@ -255,9 +255,8 @@ class Spec(abc.ABC):
     ) -> Tuple[int, ...]:
         raise NotImplementedError()
 
-    # TODO: Pin to Python 3.9, then convert to property
     @classmethod
-    @abc.abstractmethod
+    @property
     def inputs_count(cls) -> int:
         raise NotImplementedError()
 
@@ -303,7 +302,6 @@ class Compose(Spec):
         ), f"Given non-tuple inputs: {repr(self.inputs)}"
         assert len(self.inputs) == self.calculate_inputs_count(self.subspec_classes)
         assert len(self.intermediate_dtypes) + 1 == len(self.subspec_classes)
-        # TODO: Confirm output shape matches the outermost (first) subspec's output
 
     def replace_io(
         self,
@@ -325,14 +323,25 @@ class Compose(Spec):
     def operands(self) -> Tuple[TensorSpec, ...]:
         return self.inputs + (self.output,)
 
+    @typing.final
     @property
     def intermediate_shapes(self) -> tuple[tuple[int, ...], ...]:
-        # TODO: Add docs. This is in Compose order, not evaluation order.
+        """The shapes of stage outputs other than the final output.
+
+        This is in Compose order, which is the inverse of evaluation order. For example,
+        `intermediate_shapes[-1]` is the shape of the output of `subspec_classes[-1]`.
+
+        This is equivalent to `subspec_outputs[1:]`.
+        """
         return self.subspec_outputs[1:]
 
     @property
     def subspec_outputs(self) -> tuple[tuple[int, ...], ...]:
-        # TODO: Add docs. This is in Compose order, not evaluation order.
+        """The shapes of each output, including intermediate outputs.
+
+        This is in Compose order, which is the inverse of evaluation order. For example,
+        `compose.subspec_outputs[0] == compose.output.shape`.
+        """
         return tuple(
             self.calculate_subspec_outputs(
                 self.subspec_classes, [inp.dim_sizes for inp in self.inputs]
@@ -359,7 +368,7 @@ class Compose(Spec):
             inps = []
             if accum:
                 inps = [accum[-1]]
-            to_grab = kls.inputs_count() - len(inps)
+            to_grab = kls.inputs_count - len(inps)
             if to_grab:
                 inps += inputs_shapes[-to_grab:]
                 inputs_shapes = inputs_shapes[:-to_grab]
@@ -370,7 +379,7 @@ class Compose(Spec):
     def calculate_inputs_count(
         subspec_classes: Tuple[Callable[..., Spec], ...],
     ) -> int:
-        return 1 + sum(c.inputs_count() for c in subspec_classes) - len(subspec_classes)
+        return 1 + sum(c.inputs_count for c in subspec_classes) - len(subspec_classes)
 
     def shrink_for_tile_out(
         self, output_shape: Tuple[int, ...], serial_only: Optional[bool] = None
@@ -416,7 +425,7 @@ class Compose(Spec):
         accum: list[tuple[tuple[int, ...], ...]] = [
             tuple(
                 t.dim_sizes
-                for t in self.inputs[-self.subspec_classes[-1].inputs_count() :]
+                for t in self.inputs[-self.subspec_classes[-1].inputs_count :]
             )
         ]
         partials_gathered = len(accum[0])
@@ -427,11 +436,11 @@ class Compose(Spec):
             kls_prev = self.subspec_classes[kls_idx + 1]
             prev_output = kls_prev.calculate_output_shape_cls(accum[-1])
             accum.append((prev_output,))
-            assert kls.inputs_count() >= 1, "Compose not defined on nullary ops"
+            assert kls.inputs_count >= 1, "Compose not defined on nullary ops"
             accum[-1] = accum[-1] + tuple(
                 t.dim_sizes
                 for t in self.inputs[
-                    1 - kls.inputs_count() - partials_gathered : -partials_gathered
+                    1 - kls.inputs_count - partials_gathered : -partials_gathered
                 ]
             )
         accum.reverse()
@@ -449,6 +458,7 @@ class Compose(Spec):
         raise NotImplementedError("Use calculate_output_shape instead")
 
     @classmethod
+    @property
     def inputs_count(cls) -> int:
         raise NotImplementedError("Use calculate_inputs_count instead")
 
@@ -587,6 +597,7 @@ class Matmul(Spec):
 
     # noinspection PyPropertyDefinition
     @classmethod
+    @property
     def inputs_count(cls) -> int:
         return 2
 
@@ -696,6 +707,7 @@ class Convolution(Spec):
         )
 
     @classmethod
+    @property
     def inputs_count(cls) -> int:
         return 2
 
@@ -797,6 +809,7 @@ class ReduceSum(Spec):
 
     # noinspection PyPropertyDefinition
     @classmethod
+    @property
     def inputs_count(cls) -> int:
         return 1
 

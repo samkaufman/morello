@@ -99,7 +99,6 @@ class CpuTarget(Target):
             with open(source_path, mode="w") as fo:
                 fo.write(source_code)
 
-            # TODO: Is there a more secure way to depend on clang?
             clang_cmd = [
                 _clang_path(),
                 "-O3",
