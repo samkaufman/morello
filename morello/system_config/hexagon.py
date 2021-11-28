@@ -13,14 +13,15 @@ import sys
 import tempfile
 import typing
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Callable, Optional, Union, cast
 
-import morello.impl.base
-from .base import MemoryBankConfig, RunResult, SystemDescription, Target
-from .. import dtypes, impl, specs, tensor
+from .. import dtypes, specs, tensor
 from ..codegen import gen
+from ..impl import Impl
+from . import base
+from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
 _WORKAROUND_CRASH_STR = "CRASH from thread 0!"
 
@@ -315,7 +316,7 @@ class HvxVmemSimpleTile(HvxVmemTensorlike, tensor.SimpleTile):
 
 @contextlib.contextmanager
 def _build_for_hexagon(
-    impl: morello.impl.base.Impl,
+    impl: Impl,
     *,
     source_cb: Callable[[str], None],
     print_output: bool,

@@ -5,8 +5,11 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from morello import cost, dtypes, impl, specs, system_config, tensor
+import morello.impl
+from morello import cost, dtypes, specs, system_config, tensor
+from morello.impl import Impl
 from morello.system_config import cpu
+
 from . import strategies
 
 strategies.register_default_strategies()
@@ -23,9 +26,7 @@ def tile_st(draw):
 
 
 @st.composite
-def _move_operand(
-    draw, b: impl.Impl, underlying_system: system_config.SystemDescription
-):
+def _move_operand(draw, b: Impl, underlying_system: system_config.SystemDescription):
     operand_idx = draw(st.integers(low=0, high=len(b.inputs) + 1))
     bank = draw(st.sampled_from(sorted(underlying_system.banks)))
     layout = draw(st.from_type(specs.Layout))
@@ -36,7 +37,7 @@ def _move_operand(
 
 
 @st.composite
-def _tile_schedule_op(draw, b: impl.Impl):
+def _tile_schedule_op(draw, b: Impl):
     b = draw(b)
     height = draw(st.integers(min_value=1, max_value=_get_innermost(b).output_height))
     width = draw(st.integers(min_value=1, max_value=_get_innermost(b).output_width))
@@ -44,7 +45,7 @@ def _tile_schedule_op(draw, b: impl.Impl):
     return b.tile_out((height, width))
 
 
-def _get_innermost(impl: morello.impl.base.Impl) -> morello.impl.base.Impl:
+def _get_innermost(impl: Impl) -> Impl:
     cur = impl
     while len(cur.children):
         assert hasattr(cur, "inner")
@@ -58,7 +59,7 @@ def full_schedule_st(
     if not underlying_system:
         underlying_system = system_config.current_system()
     return st.recursive(
-        base=st.from_type(impl.Matmul),
+        base=st.from_type(morello.impl.Matmul),
         extend=lambda b: st.one_of(
             [_move_operand(b, underlying_system), _tile_schedule_op(b)]
         ),
@@ -67,7 +68,7 @@ def full_schedule_st(
 
 def _make_tiled_matmul(
     maximize_register_use: bool, c: int, m: int, dtype: dtypes.Dtype
-) -> impl.Impl:
+) -> Impl:
     target = system_config.current_target()
 
     m_dim = 2 ** c
@@ -79,7 +80,7 @@ def _make_tiled_matmul(
     b = target.tensor(spec=target.tensor_spec((m_dim, m_dim), dtype), name=None)
     o = target.tensor(spec=target.tensor_spec((m_dim, m_dim), dtype), name=None)
 
-    schedule = impl.MatmulHole(a, b, o).tile_out((m_dim, tile_width))
+    schedule = morello.impl.MatmulHole(a, b, o).tile_out((m_dim, tile_width))
     # if make_contiguous:
     #    schedule = schedule.move_input(1, 0, matrix.Layout.COL_MAJOR)
     #    n = tile_width
@@ -122,13 +123,13 @@ def test_trivial_tilings_are_same_cost_as_untiled_matmul(matmul_spec):
 
     m, k, n = out.dim_sizes[0], lhs.dim_sizes[1], out.dim_sizes[1]
     trivial_tiled_schedule = (
-        impl.MatmulHole(lhs, rhs, out, matmul_spec.serial_only)
+        morello.impl.MatmulHole(lhs, rhs, out, matmul_spec.serial_only)
         .tile_out((m, n))
         .split(k)
         .complete()
     )
 
-    trivial_untiled_schedule = impl.MatmulHole(
+    trivial_untiled_schedule = morello.impl.MatmulHole(
         lhs, rhs, out, serial_only=False
     ).complete()
     assert cost.analytical_cost(trivial_tiled_schedule) == cost.analytical_cost(

@@ -1,13 +1,10 @@
 import functools
 from typing import Any, Generator, Iterable, Optional
 
-import morello.impl.base
-import morello.impl.pruning
-from morello import system_config
-from . import common
-from .. import impl, pruning, replace, specs
+from .. import impl, pruning, replace, specs, system_config
 from ..impl import Impl
 from ..search_cache import CachedSchedule, ScheduleCache
+from . import common
 
 
 def _best_schedule(
@@ -60,7 +57,7 @@ def schedule_search(
     output: Optional[Any] = None,
     memory_limits: Optional[pruning.MemoryLimits] = None,
     cache: Optional[ScheduleCache] = None,
-    parent_summary: Optional[morello.impl.pruning.ParentSummary] = None,
+    parent_summary: Optional[impl.ParentSummary] = None,
     stats: Optional[common.SearchStats] = None,
     callbacks: Optional[common.SearchCallbacks] = None,
 ) -> Optional[Impl]:
@@ -114,7 +111,7 @@ def schedule_search(
         callbacks.enter_unseen(spec, memory_limits)
 
     # Create a an Impl hole corresponding to the query spec
-    leaf = morello.impl.base.spec_to_hole(spec, inputs, output)
+    leaf = impl.spec_to_hole(spec, inputs, output)
     assert leaf.depth == 1, f"Expected hole to have depth 1; had {leaf.depth}"
 
     # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
@@ -144,7 +141,7 @@ def schedule_search(
             if callbacks:
                 callbacks.applied_action(act, new_tree)
 
-            new_parent_summary = morello.impl.pruning.ParentSummary.update(
+            new_parent_summary = impl.ParentSummary.update(
                 parent_summary, parent=new_tree
             )
 

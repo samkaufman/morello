@@ -98,30 +98,30 @@ def _mutating_replace(
             output=_mutating_replace(subject.output, replacements),
             serial_only=subject.serial_only,
         )
-    elif type(subject) is morello.impl.directconv.DirectConv:
-        return morello.impl.directconv.DirectConv(
+    elif type(subject) is impl.DirectConv:
+        return impl.DirectConv(
             lhs=_mutating_replace(subject.lhs, replacements),
             rhs=_mutating_replace(subject.rhs, replacements),
             output=_mutating_replace(subject.output, replacements),
             serial_only=subject.serial_only,
         )
-    elif type(subject) is morello.impl.moves.MoveLet:
-        return morello.impl.moves.MoveLet(
+    elif type(subject) is impl.MoveLet:
+        return impl.MoveLet(
             source=_mutating_replace(subject.source, replacements),
             destination=_mutating_replace(subject.destination, replacements),
             prefetching=subject.prefetching,
             input_idx=subject.input_idx,
             inner=_mutating_replace(subject.inner, replacements),
         )
-    elif type(subject) is morello.impl.loops.MatmulSplitLoop:
-        return morello.impl.loops.MatmulSplitLoop(
+    elif type(subject) is impl.MatmulSplitLoop:
+        return impl.MatmulSplitLoop(
             lhs=_mutating_replace(subject.lhs, replacements),
             rhs=_mutating_replace(subject.rhs, replacements),
             output=_mutating_replace(subject.output, replacements),
             inner=_mutating_replace(subject.inner, replacements),
         )
-    elif type(subject) is morello.impl.loops.Loop:
-        return morello.impl.loops.Loop(
+    elif type(subject) is impl.loops.Loop:
+        return impl.Loop(
             driving_tile=_mutating_replace(subject.driving_tile, replacements),
             dependent_tiles=frozenset(
                 _mutating_replace(t, replacements) for t in subject.dependent_tiles
@@ -129,13 +129,13 @@ def _mutating_replace(
             inner=_mutating_replace(subject.inner, replacements),
             parallel=subject.parallel,
         )
-    elif type(subject) is morello.impl.loops.SlidingWindowLoop:
+    elif type(subject) is impl.SlidingWindowLoop:
         new_inputs = tuple(_mutating_replace(t, replacements) for t in subject.inputs)
         new_output = _mutating_replace(subject.output, replacements)
         new_spec = subject.spec.replace_io(
             tuple(inp.spec for inp in new_inputs), new_output.spec
         )
-        return morello.impl.loops.SlidingWindowLoop(
+        return impl.SlidingWindowLoop(
             inputs=new_inputs,
             output=new_output,
             live_tensor=_mutating_replace(subject.live_tensor, replacements),
@@ -146,17 +146,17 @@ def _mutating_replace(
             spec=new_spec,
             inner=_mutating_replace(subject.inner, replacements),
         )
-    elif type(subject) is morello.impl.reducesum.ReduceSum:
-        return morello.impl.reducesum.ReduceSum(
+    elif type(subject) is impl.ReduceSum:
+        return impl.ReduceSum(
             source=_mutating_replace(subject.source, replacements),
             output=_mutating_replace(subject.output, replacements),
             serial_only=subject.serial_only,
         )
-    elif type(subject) is morello.impl.compose.Pipeline:
-        return morello.impl.compose.Pipeline(
+    elif type(subject) is impl.Pipeline:
+        return impl.Pipeline(
             stages=tuple(_mutating_replace(s, replacements) for s in subject.stages)
         )
-    elif type(subject) is morello.impl.compose.ComposeHole:
+    elif type(subject) is impl.ComposeHole:
         new_inputs = tuple(_mutating_replace(t, replacements) for t in subject.inputs)
         new_output = _mutating_replace(subject.output, replacements)
         new_spec = specs.Compose(
@@ -166,7 +166,7 @@ def _mutating_replace(
             intermediate_dtypes=subject.spec.intermediate_dtypes,
             serial_only=subject.spec.serial_only,
         )
-        return morello.impl.compose.ComposeHole(
+        return impl.ComposeHole(
             spec=new_spec,
             inputs=new_inputs,
             output=new_output,

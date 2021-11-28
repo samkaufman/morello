@@ -8,7 +8,7 @@ from .actions import (
 from .base import Impl, spec_to_hole
 from .compose import ComposeHole, Pipeline
 from .directconv import DirectConv
-from .loops import Loop, MatmulSplitLoop
+from .loops import Loop, MatmulSplitLoop, SlidingWindowLoop
 from .matmuls import MatmulHole, Mult, HvxVrmpyaccVuwVubRub, HvxGemvmpybbwAsm
 from .moves import MoveLet
 from .pruning import ParentSummary
@@ -45,11 +45,12 @@ __all__ = [
     "PeelAction",
     "Pipeline",
     "ReduceSum",
-    "spec_to_hole",
     "SlidingTileOutAction",
+    "SlidingWindowLoop",
     "TileOutAction",
     "TileSizeMode",
     "allow_reduce_splits",
     "allow_sliding_windows",
+    "spec_to_hole",
     "tile_size_mode",
 ]

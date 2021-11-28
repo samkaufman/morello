@@ -687,7 +687,7 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
             elif not imp.is_store and imp.destination.bank == "L1":
                 assert imp.source.bank == "L2"
                 _emit_hvx_dcfetch(imp, imp.operands[source_idx], op_details[source_idx])
-                _inner_generate_c(impl.inner, op_details)
+                _inner_generate_c(imp.inner, op_details)
             elif imp.is_store and imp.destination.bank == "L2":
                 # Generate no code for moves from L2 to global.
                 assert imp.source.bank == "GL"
@@ -792,23 +792,23 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
             writer.writeline(");")
             writer.writeline(f"free({kout_name});")
         writer.writeline("}")
-    elif isinstance(impl, impl.PadTranspack):
+    elif isinstance(imp, impl.PadTranspack):
         # Make a _CHeapArray for the result of the pad2d_and_transpack call.
-        source_op_details = op_details[impl.input_idx]
+        source_op_details = op_details[imp.input_idx]
         concrete_shape = source_op_details.concrete_origin_shape
         assert len(concrete_shape) == 2
         result = _CUnsizedHeapArray(namer.fresh_name("tp"), Uint8)
         result_index_expr = indexexpr.buffer_indexing_expr(
-            impl.destination, concrete_shape
+            imp.destination, concrete_shape
         )
 
         new_op_details = list(op_details)
-        new_op_details[impl.input_idx] = _OperandDetails(
+        new_op_details[imp.input_idx] = _OperandDetails(
             result, result_index_expr, concrete_origin_shape=concrete_shape
         )
 
-        op_txt = op_details[impl.input_idx].c_tensor.c_index_ptr(
-            expr_utils.zero_points(op_details[impl.input_idx].index_expr)
+        op_txt = op_details[imp.input_idx].c_tensor.c_index_ptr(
+            expr_utils.zero_points(op_details[imp.input_idx].index_expr)
         )
 
         struct_name = namer.fresh_name("tst")
@@ -823,11 +823,11 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         writer.writeline(
             f"uint8_t *{result.name} = pad2d_and_transpack({struct_name});"
         )
-        _inner_generate_c(impl.inner, new_op_details)
+        _inner_generate_c(imp.inner, new_op_details)
         writer.writeline(f"free({result.name});")
         writer.writeline(f"free({struct_name});")
     else:
-        raise NotImplementedError(f"Not implemented for {type(impl).__name__}")
+        raise NotImplementedError(f"Not implemented for {type(imp).__name__}")
 
 
 def _pipeline_emit_stage(
