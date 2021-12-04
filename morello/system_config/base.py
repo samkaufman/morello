@@ -35,7 +35,7 @@ class Target(abc.ABC):
         dim_sizes: tuple[int, ...],
         dtype: "dtypes.Dtype",
         bank: Optional[str] = None,
-        *args,
+        layout: Optional["Layout"] = None,
         **kwargs,
     ) -> "TensorSpec":
         raise NotImplementedError()

@@ -11,6 +11,7 @@ from typing import Optional, Union
 from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 from .. import dtypes, specs
 from ..codegen import gen
+from ..specs import Layout
 from ..tensor import Tensor, Tile
 
 _OUTPUT_RE = re.compile(r"cpu:\s+(\d+)s\s*(\d+)ns")
@@ -41,9 +42,11 @@ class CpuTarget(Target):
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
         bank: Optional[str] = None,
-        layout: specs.Layout = specs.Layout.ROW_MAJOR,
+        layout: Optional[specs.Layout] = None,
         **kwargs,
     ) -> specs.TensorSpec:
+        if layout is None:
+            layout = specs.Layout.ROW_MAJOR
         return specs.TensorSpec(dim_sizes, dtype, bank, layout)
 
     @functools.cached_property

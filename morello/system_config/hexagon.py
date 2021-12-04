@@ -66,9 +66,11 @@ class HvxSimulatorTarget(Target):
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
         bank: Optional[str] = None,
-        layout: specs.Layout = specs.Layout.ROW_MAJOR,
+        layout: Optional[specs.Layout] = None,
         **kwargs,
     ) -> "TensorSpec":
+        if layout is None:
+            layout = specs.Layout.ROW_MAJOR
         if bank == "VMEM":
             return specs.HvxVmemTensorSpec(dim_sizes, dtype, bank, layout, **kwargs)
         return specs.TensorSpec(dim_sizes, dtype, bank, layout)
