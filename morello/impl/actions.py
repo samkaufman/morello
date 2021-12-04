@@ -88,7 +88,7 @@ class SlidingTileOutAction:
 @dataclasses.dataclass(frozen=True)
 class MatmulSplitAction:
     func: Callable[[int], "Impl"]
-    k: int
+    size: int
 
     def __call__(self):
-        return self.func(self.k)
+        return self.func(self.size)

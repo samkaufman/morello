@@ -98,7 +98,7 @@ class MatmulHole(MatmulBase):
         if self.lhs.dim_sizes[1] > 1:
             for k in dim_range(self.lhs.dim_sizes[1], include_end=False):
                 if self._split_valid(k):
-                    yield MatmulSplitAction(self.split, k=k)
+                    yield MatmulSplitAction(self.split, size=k)
 
         yield from common_operand_move_actions(self)
 
