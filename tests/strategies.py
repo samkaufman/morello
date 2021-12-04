@@ -2,13 +2,7 @@ from typing import Optional, Tuple
 
 from hypothesis import strategies as st
 
-import morello.impl.base
-import morello.impl.compose
-import morello.impl.directconv
-import morello.impl.loops
-import morello.impl.moves
-import morello.impl.reducesum
-from morello import dtypes, specs, system_config, tensor
+from morello import dtypes, specs, system_config, tensor, impl
 from morello.system_config import cpu, hexagon
 
 dtype_st = st.sampled_from([dtypes.Uint8, dtypes.Uint32])
@@ -128,7 +122,9 @@ def reduce_spec_st(draw, max_dim_size: Optional[int] = 32):
         layout=draw(layout_st(dim_sizes=output_dim_sizes)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
-    return specs.ReduceSum(source=source, output=output)
+    return specs.ReduceSum(
+        source=source, output=output, serial_only=draw(st.booleans())
+    )
 
 
 @st.composite
@@ -177,14 +173,15 @@ def compose_spec_st(draw) -> specs.Compose:
         inputs=inputs_specs,
         output=output_spec,
         intermediate_dtypes=intermediate_dtypes,
+        serial_only=draw(st.booleans()),
     )
 
 
 @st.composite
-def composehole_op_st(draw) -> morello.impl.compose.ComposeHole:
+def composehole_op_st(draw) -> impl.ComposeHole:
     target = system_config.current_target()
     spec = draw(compose_spec_st())
-    return morello.impl.compose.ComposeHole(
+    return impl.ComposeHole(
         spec=spec,
         inputs=tuple(target.tensor(s, name=None) for s in spec.inputs),
         output=target.tensor(spec.output, name="output"),
@@ -192,7 +189,7 @@ def composehole_op_st(draw) -> morello.impl.compose.ComposeHole:
 
 
 @st.composite
-def pipeline_op_st(draw) -> morello.impl.compose.Pipeline:
+def pipeline_op_st(draw) -> impl.Pipeline:
     raise NotImplementedError()
 
 
@@ -206,7 +203,6 @@ def register_default_strategies():
     st.register_type_strategy(specs.Matmul, matmul_spec_st())
     st.register_type_strategy(specs.Convolution, convolution_spec_st())
     st.register_type_strategy(specs.ReduceSum, reduce_spec_st())
-
     st.register_type_strategy(
         specs.Spec,
         st.one_of(
@@ -217,18 +213,17 @@ def register_default_strategies():
         ),
     )
 
-    st.register_type_strategy(morello.impl.compose.ComposeHole, composehole_op_st())
-    st.register_type_strategy(morello.impl.compose.Pipeline, pipeline_op_st())
-
+    st.register_type_strategy(impl.ComposeHole, composehole_op_st())
+    st.register_type_strategy(impl.Pipeline, pipeline_op_st())
     st.register_type_strategy(
-        morello.impl.base.Impl,
+        impl.Impl,
         st.one_of(
-            st.from_type(morello.impl.compose.ComposeHole),
-            st.from_type(morello.impl.compose.Pipeline),
-            st.from_type(morello.impl.directconv.DirectConv),
-            st.from_type(morello.impl.reducesum.ReduceSum),
-            st.from_type(morello.impl.loops.Loop),
-            st.from_type(morello.impl.loops.MatmulSplitLoop),
-            st.from_type(morello.impl.moves.MoveLet),
+            st.from_type(impl.ComposeHole),
+            st.from_type(impl.Pipeline),
+            st.from_type(impl.DirectConv),
+            st.from_type(impl.ReduceSum),
+            st.from_type(impl.Loop),
+            st.from_type(impl.MatmulSplitLoop),
+            st.from_type(impl.MoveLet),
         ),
     )
