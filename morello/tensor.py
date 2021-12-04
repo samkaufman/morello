@@ -41,6 +41,12 @@ class TensorLike(abc.ABC):
         return self.spec.dtype
 
     @property
+    @typing.final
+    def bank(self) -> str:
+        # Just a sugar getter for the underlying Spec.
+        return self.spec.bank
+
+    @property
     def bytes_used(self) -> int:
         return self.volume * self.dtype.size
 
