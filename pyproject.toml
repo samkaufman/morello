@@ -1,2 +1,11 @@
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+minversion = 6.0
+addopts = "--strict-markers --doctest-modules"
+testpaths = [ "tests" ]
+markers = [
+    "slow: mark test as slow.",
+    "hexagon: run tests that need hexagon-sim.",
+]
