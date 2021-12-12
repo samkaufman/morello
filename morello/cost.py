@@ -4,20 +4,14 @@ from operator import mul
 from typing import Union
 
 from . import specs, utils
-from .impl import (
-    DirectConv,
-    Loop,
-    MoveLet,
-    ReduceSum,
-    Impl,
-    MatmulHole,
-    ComposeHole,
-)
+from .impl import ComposeHole, DirectConv, Impl, Loop, MatmulHole, MoveLet, ReduceSum
 from .impl.compose import Pipeline
-from .impl.loops import SlidingWindowLoop, MatmulSplitLoop
-from .impl.matmuls import Mult, HvxVrmpyaccVuwVubRub
+from .impl.loops import MatmulSplitLoop, SlidingWindowLoop
+from .impl.matmuls import HvxVrmpyaccVuwVubRub, Mult
 from .system_config import current_system
 from .tensor import Tensor, Tile
+
+COST_ATTR = "_cost"
 
 
 def move_cost(
@@ -101,6 +95,7 @@ def detailed_analytical_cost(
             )
             cost_dict.update(sub_cd)
             sum_cost += sub_cd[stage][0]
+        assert op.cost == sum_cost
         cost_dict[op] = (sum_cost, f"{sum_cost} (sum of {len(op.stages)})")
         return cost_dict
     elif isinstance(op, (MatmulSplitLoop, Loop)):
@@ -115,6 +110,7 @@ def detailed_analytical_cost(
 
         new_cost = factor * cost_dict[op.inner][0]
         cost_expl = f"{new_cost:5d} = {factor} * _"
+        assert op.cost == new_cost
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
     elif isinstance(op, SlidingWindowLoop):
@@ -141,12 +137,15 @@ def detailed_analytical_cost(
             f"{op.update_loads}({update_cost}) + {op.steps}(_)"
         )
         cost_dict[op] = (new_cost, cost_expl)
+        assert op.cost == new_cost
         return cost_dict
     elif isinstance(op, (DirectConv, ReduceSum)) and (op.is_scheduled or holes_ok):
+        assert op.cost == 0
         return {op: (0, "    0")}
     elif isinstance(op, (Mult, HvxVrmpyaccVuwVubRub)):
         # Tensor multiplication is free but its operands must be in memory.
         # (This cost model is only interested in the cost of moving data.)
+        assert op.cost == 0
         return {op: (0, "    0")}
     elif isinstance(op, MoveLet):
         # This is the core of the cost model; the cost of a schedule is derived
@@ -160,13 +159,47 @@ def detailed_analytical_cost(
         )
         new_cost = mcost + cost_dict[op.inner][0]
         cost_expl = f"{new_cost:5d} = {mcost} + _"
+        assert op.cost == new_cost
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
     elif holes_ok and isinstance(op, (ComposeHole, MatmulHole)):
+        assert op.cost == 0
         return {op: (0, "")}
     else:
-        raise ValueError(f"Unsupported op. {type(op)}")
+        raise TypeError(f"Unsupported op. {type(op)}")
 
 
-def analytical_cost(op: Impl, *args, **kwargs) -> int:
-    return detailed_analytical_cost(op, *args, **kwargs)[op][0]
+# TODO: Reduce code duplication with detailed_analytical_cost
+def compute_cost(op: Impl) -> int:
+    # Return if already computed
+    try:
+        return getattr(op, COST_ATTR)
+    except AttributeError:
+        pass
+
+    if isinstance(op, Pipeline):
+        return _assign_cost(op, sum(compute_cost(s) for s in op.stages))
+    elif isinstance(op, (MatmulSplitLoop, Loop)):
+        factor = op.steps
+        if op.parallel:
+            factor = math.ceil(op.steps / current_system().processors)
+        return _assign_cost(op, factor * compute_cost(op.inner))
+    elif isinstance(op, SlidingWindowLoop):
+        raise NotImplementedError()
+    elif isinstance(op, (DirectConv, ReduceSum)):
+        # Reminder: these types can be either holes or scheduled
+        return _assign_cost(op, 0)
+    elif isinstance(op, (Mult, HvxVrmpyaccVuwVubRub)):
+        return _assign_cost(op, 0)
+    elif isinstance(op, MoveLet):
+        mcost = move_cost(op.source, op.destination.layout, op.prefetching)
+        return _assign_cost(op, mcost + compute_cost(op.inner))
+    elif isinstance(op, (ComposeHole, MatmulHole)):
+        return _assign_cost(op, 0)
+    else:
+        raise TypeError(f"Unsupported op. {type(op)}")
+
+
+def _assign_cost(impl: Impl, val: int) -> int:
+    setattr(impl, COST_ATTR, val)
+    return val

@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 
 import morello.impl.actions
 import morello.impl.base
+
 from .. import cost, pruning, specs, system_config
 
 prune_column_major: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -48,7 +49,7 @@ def schedule_key(schedule: morello.impl.base.Impl) -> tuple[int, Sequence[int], 
     system = system_config.current_system()
     base_cost = sys.maxsize
     if schedule.is_scheduled:
-        base_cost = cost.analytical_cost(schedule)
+        base_cost = cost.compute_cost(schedule)
     peaks = [schedule.peak_memory[b] for b in system.ordered_banks]
     return base_cost, tuple(peaks), schedule.depth
 

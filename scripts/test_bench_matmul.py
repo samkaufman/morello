@@ -14,15 +14,7 @@ import numpy as np
 
 import morello.impl.actions
 import morello.impl.base
-from morello import (
-    cost,
-    dtypes,
-    op_pprint,
-    search,
-    search_cache,
-    specs,
-    system_config,
-)
+from morello import cost, dtypes, op_pprint, search, search_cache, specs, system_config
 
 RUNS = 5
 DTYPE = dtypes.Uint32
@@ -142,6 +134,7 @@ def benchmark_numpy_impl() -> float:
 
 
 def _benchmark(impl):
+    assert impl.is_scheduled
     runtime_secs = None
     for _ in range(RUNS):
         secs = system_config.current_target().time_impl(impl)
@@ -149,7 +142,7 @@ def _benchmark(impl):
         if runtime_secs is None or secs < runtime_secs:
             runtime_secs = secs
     impl_str = op_pprint.pformat(impl)
-    c = cost.analytical_cost(impl)
+    c = cost.compute_cost(impl)
     peak = impl.peak_memory
     return runtime_secs, impl_str, c, peak
 

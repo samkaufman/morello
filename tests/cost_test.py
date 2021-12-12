@@ -104,8 +104,8 @@ def _make_tiled_matmul(
 def test_contiguous_copy_lowers_matmul_cost(c: int, m: int, dtype: dtypes.Dtype):
     contiguous_matmul = _make_tiled_matmul(True, c, m, dtype)
     noncontiguous_matmul = _make_tiled_matmul(False, c, m, dtype)
-    fast_cost = cost.analytical_cost(contiguous_matmul)
-    slow_cost = cost.analytical_cost(noncontiguous_matmul)
+    fast_cost = cost.compute_cost(contiguous_matmul)
+    slow_cost = cost.compute_cost(noncontiguous_matmul)
     hypothesis.note(f"Speeds fast/slow are {fast_cost} and {slow_cost}")
     hypothesis.note(f"Slow, non-contiguous model is {str(noncontiguous_matmul)}")
     hypothesis.note(f"Fast, contig. model is {str(contiguous_matmul)}")
@@ -132,7 +132,7 @@ def test_trivial_tilings_are_same_cost_as_untiled_matmul(matmul_spec):
     trivial_untiled_schedule = morello.impl.MatmulHole(
         lhs, rhs, out, serial_only=False
     ).complete()
-    assert cost.analytical_cost(trivial_tiled_schedule) == cost.analytical_cost(
+    assert cost.compute_cost(trivial_tiled_schedule) == cost.compute_cost(
         trivial_untiled_schedule
     )
 

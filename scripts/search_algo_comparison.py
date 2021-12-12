@@ -12,7 +12,7 @@ import os
 import pathlib
 import sys
 import time
-from typing import Iterable, Literal, Optional, Union, Sequence
+from typing import Iterable, Literal, Optional, Sequence, Union
 
 import pandas as pd
 
@@ -199,7 +199,7 @@ def dp_task(
     best_cost = None
     best_pretty_formatted = None
     if search_result:
-        best_cost = cost.analytical_cost(search_result)
+        best_cost = cost.compute_cost(search_result)
         best_pretty_formatted = op_pprint.pformat(search_result)
     else:
         print("No schedule found by DP search")
@@ -262,7 +262,7 @@ def _beam_task_job(spec_name, budget, spec, seq_num, beam_width, progress_bar):
     if beam_result is not None:
         assert isinstance(beam_result, tuple)
         search_result, beam_run_costs = beam_result
-        best_cost = cost.analytical_cost(search_result)
+        best_cost = cost.compute_cost(search_result)
         best_pretty_formatted = op_pprint.pformat(search_result)
     else:
         print("No schedule found by beam search")
@@ -345,7 +345,7 @@ def random_search(
         scheduled_impl, steps_taken = random.randomly_schedule_impl(hole, budget)
         assert steps_taken <= budget
         if scheduled_impl is not None:
-            c = cost.analytical_cost(scheduled_impl)
+            c = cost.compute_cost(scheduled_impl)
             run_costs.append(c)
             if best_cost is None or c < best_cost:
                 best_cost = c
@@ -377,7 +377,7 @@ def _randomly_schedule_impls_job(
     while not should_stop.is_set():
         scheduled_impl, steps_taken = random.randomly_schedule_impl(root_impl, None)
         assert scheduled_impl and steps_taken
-        c = cost.analytical_cost(scheduled_impl)
+        c = cost.compute_cost(scheduled_impl)
         try:
             results_queue.put((op_pprint.pformat(scheduled_impl), c, steps_taken))
         except ValueError:

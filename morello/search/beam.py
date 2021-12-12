@@ -10,8 +10,9 @@ import numpy as np
 import tqdm
 
 import morello.impl.base
-from . import common, random
+
 from .. import cost, pruning, specs
+from . import common, random
 
 HEURISTIC_SAMPLES_PER_SPEC = 10
 HEURISTIC_MAX_RESTARTS = int(os.getenv("HEURISTIC_MAX_RESTARTS", 100))
@@ -24,7 +25,7 @@ def _cost(
     schedule: morello.impl.base.Impl, limits: Sequence[pruning.MemoryLimits]
 ) -> Union[int, float]:
     """Returns a cost to use as a heuristic."""
-    return cost.analytical_cost(schedule, holes_ok=True)
+    return cost.compute_cost(schedule)
 
 
 def sampling_heuristic(
@@ -55,7 +56,7 @@ def sampling_heuristic(
         assert isinstance(
             sampled_impl, morello.impl.base.Impl
         ), f"Impl was unexpectedly {sampled_impl}"
-        sampled_cost = cost.analytical_cost(sampled_impl, holes_ok=True)
+        sampled_cost = cost.compute_cost(sampled_impl)
         best_cost = min(best_cost, sampled_cost)
     return best_cost
 

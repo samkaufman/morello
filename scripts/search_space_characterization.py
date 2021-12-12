@@ -52,8 +52,7 @@ def job(spec_name: str, root_spec: specs.Spec) -> dict[str, list[int]]:
     root_impl = morello.impl.base.spec_to_hole(root_spec, inputs, output)
     return {
         spec_name: [
-            cost.analytical_cost(impl)
-            for impl in enumerate_impls(root_impl, None, None)
+            cost.compute_cost(impl) for impl in enumerate_impls(root_impl, None, None)
         ]
     }
 
