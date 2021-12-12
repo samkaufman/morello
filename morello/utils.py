@@ -1,9 +1,10 @@
-import itertools
 import functools
+import itertools
+import math
 from collections.abc import Mapping
-from typing import TypeVar, Iterable
+from typing import Iterable, TypeVar
 
-from . import tensor, specs
+from . import specs, tensor
 from .tensor import TensorLike
 
 T = TypeVar("T")
@@ -104,3 +105,13 @@ def factors(n: int) -> Iterable[int]:
             )
         )
     )
+
+
+def next_power_of_two(x: int) -> int:
+    """Return next highest power of 2, or self if a power of two or zero."""
+    if x == 0:
+        return 0
+    assert x >= 1, f"x must be 1 or greater; was: {x}"
+    result = int(2 ** math.ceil(math.log2(x)))
+    assert result >= x
+    return result

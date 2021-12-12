@@ -11,22 +11,12 @@ from frozendict import frozendict
 from . import pruning
 from .impl import Impl
 from .specs import Spec
-from .utils import zip_dict
+from .utils import next_power_of_two, zip_dict
 
 # If True, schedules will be saved as if they had memory limits, for all banks,
 # that are the next highest power of 2. This discretizes the cache a bit, even
 # though it
 SNAP_CAP_TO_POWER_OF_TWO = False
-
-
-def _next_power_of_two(x: int) -> int:
-    """Return next highest power of 2, or self if a power of two or zero."""
-    if x == 0:
-        return 0
-    assert x >= 1, f"x must be 1 or greater; was: {x}"
-    result = int(2 ** math.ceil(math.log2(x)))
-    assert result >= x
-    return result
 
 
 class CachedSchedule(NamedTuple):
@@ -57,7 +47,7 @@ class _TableEntry(NamedTuple):
         if not SNAP_CAP_TO_POWER_OF_TWO:
             return self
         new_caps = frozendict(
-            {bank: _next_power_of_two(c) for bank, c in self.caps.items()}
+            {bank: next_power_of_two(c) for bank, c in self.caps.items()}
         )
         return _TableEntry(self.spec, self.schedule, new_caps)
 
@@ -231,6 +221,7 @@ def persistent_cache(path: Optional[Union[str, pathlib.Path]], save: bool = True
         if save:
             with atomicwrites.atomic_write(path, mode="wb", overwrite=True) as fo:
                 pickle.dump(cache, fo)
+
 
 def _validate_cache(cache) -> None:
     if not isinstance(cache, ScheduleCache):
