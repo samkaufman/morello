@@ -16,7 +16,7 @@ from .utils import zip_dict
 # If True, schedules will be saved as if they had memory limits, for all banks,
 # that are the next highest power of 2. This discretizes the cache a bit, even
 # though it
-SNAP_CAP_TO_POWER_OF_TWO = True
+SNAP_CAP_TO_POWER_OF_TWO = False
 
 
 def _next_power_of_two(x: int) -> int:
@@ -231,3 +231,9 @@ def persistent_cache(path: Optional[Union[str, pathlib.Path]], save: bool = True
         if save:
             with atomicwrites.atomic_write(path, mode="wb", overwrite=True) as fo:
                 pickle.dump(cache, fo)
+
+def _validate_cache(cache) -> None:
+    if not isinstance(cache, ScheduleCache):
+        raise TypeError(f"Expected ScheduleCache, got {type(cache)}")
+    # TODO: Make sure all the important contextvars match
+    raise NotImplementedError()

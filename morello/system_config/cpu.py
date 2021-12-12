@@ -8,11 +8,11 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Union
 
-from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 from .. import dtypes, specs
 from ..codegen import gen
 from ..specs import Layout
 from ..tensor import Tensor, Tile
+from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
 _OUTPUT_RE = re.compile(r"cpu:\s+(\d+)s\s*(\d+)ns")
 
@@ -102,13 +102,7 @@ class CpuTarget(Target):
             with open(source_path, mode="w") as fo:
                 fo.write(source_code)
 
-            clang_cmd = [
-                _clang_path(),
-                "-O3",
-                "-o",
-                binary_path,
-                source_path,
-            ]
+            clang_cmd = [_clang_path(), "-O3", "-o", binary_path, source_path]
             subprocess.run(clang_cmd, check=True)
 
             # Run the compiled binary
