@@ -1,14 +1,15 @@
 import abc
 import dataclasses
 import typing
-from typing import Tuple, Union, Callable, Iterable, Optional, Sequence, cast, Any
+from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union, cast
 
 from morello import specs, tiling
-from .pruning import ParentSummary
-from .utils import assert_stable_spec
+
 from ..specs import Layout
 from ..system_config import current_target
-from ..tensor import Tensor, Tile, SimpleTile, TensorLike
+from ..tensor import SimpleTile, Tensor, TensorLike, Tile
+from .pruning import ParentSummary
+from .utils import assert_stable_spec
 
 
 class Impl(abc.ABC):
@@ -388,10 +389,10 @@ def spec_to_hole(
     """
     # Import some Impls here to avoid import cycle
     # TODO: Can we move this to its own file instead?
-    from .matmuls import MatmulHole
-    from .directconv import DirectConv
-    from .reducesum import ReduceSum
     from .compose import ComposeHole
+    from .directconv import DirectConv
+    from .matmuls import MatmulHole
+    from .reducesum import ReduceSum
 
     if inputs is None:
         target = current_target()

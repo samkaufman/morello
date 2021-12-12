@@ -201,5 +201,5 @@ def compute_cost(op: Impl) -> int:
 
 
 def _assign_cost(impl: Impl, val: int) -> int:
-    setattr(impl, COST_ATTR, val)
+    object.__setattr__(impl, COST_ATTR, val)
     return val
