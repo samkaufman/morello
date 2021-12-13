@@ -52,6 +52,11 @@ parser_conv.add_argument(
     "sizes", metavar="N", type=int, nargs="+", help="image sizes to benchmark"
 )
 
+parser_cnn = subparsers.add_parser("cnn", help="Benchmark small CNN")
+parser_cnn.add_argument(
+    "sizes", metavar="N", type=int, nargs="+", help="image sizes to benchmark"
+)
+
 
 def make_matmul_spec(d: int) -> specs.Matmul:
     target = system_config.current_target()
@@ -88,6 +93,22 @@ def make_conv_spec(d: int) -> specs.Convolution:
         target.tensor_spec((d, d), dtype=DTYPE),
         target.tensor_spec((fh, fw, fc), dtype=DTYPE),
         output=target.tensor_spec((out_h, out_w, fc), dtype=DTYPE),
+        serial_only=True,
+    )
+
+
+def make_cnn_spec(d: int) -> specs.Spec:
+    target = system_config.current_target()
+
+    img = target.tensor_spec((8, 8), dtype=DTYPE)
+    filters_a = target.tensor_spec((3, 3, 4), dtype=DTYPE)
+    filters_b = target.tensor_spec((3, 3, 4), dtype=DTYPE)
+    output = target.tensor_spec((4, 4, 4), dtype=DTYPE)
+    return specs.Compose(
+        (specs.Convolution, specs.ReduceSum, specs.Convolution),
+        (filters_b, img, filters_a),
+        output,
+        intermediate_dtypes=(DTYPE, DTYPE),
         serial_only=True,
     )
 
@@ -206,21 +227,52 @@ def benchmark_baseline(spec: specs.Spec) -> float:
 
         # Use signed int32 with PyTorch.
         assert DTYPE == dtypes.Uint32
-        torch_dtype = np.int32
+        torch_dtype_np = np.int32
 
         img = torch.tensor(
-            np.arange(h * w, dtype=torch_dtype).reshape((1, 1, h, w)),
+            np.arange(h * w, dtype=torch_dtype_np).reshape((1, 1, h, w)),
         )
         filters = torch.tensor(
-            np.arange(fh * fw * fc, dtype=torch_dtype).reshape((fc, 1, fh, fw)),
+            np.arange(fh * fw * fc, dtype=torch_dtype_np).reshape((fc, 1, fh, fw)),
         )
-        
+
         # PyTorch execution on the CPU is synchronous. Useful for this benchmar
         F.conv2d(img, filters)
 
         start = time.time()
         for _ in range(gen.BENCH_ITERS):
             F.conv2d(img, filters)
+        end = time.time()
+        return (end - start) / gen.BENCH_ITERS
+    elif isinstance(spec, specs.Compose) and spec.subspec_classes == (
+        specs.Convolution,
+        specs.ReduceSum,
+        specs.Convolution,
+    ):
+        h, w = spec.inputs[-2].dim_sizes
+        fh_a, fw_a, fc_a = spec.inputs[-1].dim_sizes
+        fh_b, fw_b, fc_b = spec.inputs[-3].dim_sizes
+
+        # Use signed int32 with PyTorch.
+        assert DTYPE == dtypes.Uint32
+        torch_dtype_np = np.int32
+        torch_dtype = torch.int32
+
+        img = torch.tensor(
+            np.arange(h * w, dtype=torch_dtype_np).reshape((1, 1, h, w)),
+        )
+        filters_a = torch.tensor(
+            np.arange(fh_a * fw_a * fc_a, dtype=torch_dtype_np).reshape((fc_a, 1, fh_a, fw_a)),
+        )
+        filters_b = torch.tensor(
+            np.arange(fh_b * fw_b * fc_b, dtype=torch_dtype_np).reshape((fc_b, 1, fh_b, fw_b)),
+        )
+
+        F.conv2d(F.conv2d(img, filters_a).sum(dim=1, dtype=torch_dtype).unsqueeze(0), filters_b)
+
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            F.conv2d(F.conv2d(img, filters_a).sum(dim=1, dtype=torch_dtype).unsqueeze(0), filters_b)
         end = time.time()
         return (end - start) / gen.BENCH_ITERS
     else:
@@ -320,6 +372,8 @@ def main():
             spec = make_gemm3_spec(n)
         elif args.spec == "conv":
             spec = make_conv_spec(n)
+        elif args.spec == "cnn":
+            spec = make_cnn_spec(n)
         else:
             raise NotImplementedError(f"{args.spec} not implemented")
 
