@@ -89,7 +89,7 @@ jobs:
       - name: Run benchmarks
         run: |
           docker run --rm -t  -v ~/container_out:/out "$DOCKER_IMAGE_TAG" scripts/bench_compare.py --target=cpu --db_path=/out/samples.db --cache=/out/cache.pkl --best --numpy "$SPEC" 128 192 256 384 512 768
-          chmod -R ugo+r ~/container_out
+          sudo chmod -R ugo+r ~/container_out
         env:
           SPEC: ${{ matrix.spec }}
       - name: Upload samples.db as artifact
