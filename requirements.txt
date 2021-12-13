@@ -10,3 +10,4 @@ termcolor==1.1.0
 sympy
 typeguard
 frozendict~=2.0
+torch~=1.10

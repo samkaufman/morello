@@ -11,6 +11,8 @@ import sqlite3
 import time
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 import morello.impl.actions
 import morello.impl.base
@@ -28,11 +30,10 @@ parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=pathlib.Path, default=None)
 parser.add_argument("--n_cpus", type=int, default=1)
 parser.add_argument("--db_path", type=pathlib.Path, default="samples.db")
-# parser.add_argument("mode", choices=["best", "sample", "perturb", "numpy"])
 parser.add_argument("--best", action="store_true")
+parser.add_argument("--baseline", action="store_true")
 parser.add_argument("--sample", action="store_true")
 parser.add_argument("--perturb", action="store_true")
-parser.add_argument("--numpy", action="store_true")
 
 subparsers = parser.add_subparsers(dest="spec")
 
@@ -44,6 +45,11 @@ parser_matmul.add_argument(
 parser_gemm3 = subparsers.add_parser("gemm3", help="Benchmark GEMM3")
 parser_gemm3.add_argument(
     "sizes", metavar="N", type=int, nargs="+", help="mkn sizes to benchmark"
+)
+
+parser_conv = subparsers.add_parser("conv", help="Benchmark convolution")
+parser_conv.add_argument(
+    "sizes", metavar="N", type=int, nargs="+", help="image sizes to benchmark"
 )
 
 
@@ -68,6 +74,20 @@ def make_gemm3_spec(d: int) -> specs.Spec:
         ),
         output=target.tensor_spec((d, d), dtype=DTYPE),
         intermediate_dtypes=(DTYPE,),
+        serial_only=True,
+    )
+
+
+def make_conv_spec(d: int) -> specs.Convolution:
+    target = system_config.current_target()
+
+    fh, fw, fc = 5, 5, 32
+    out_h, out_w = 1 + d - fh, 1 + d - fw
+
+    return specs.Convolution(
+        target.tensor_spec((d, d), dtype=DTYPE),
+        target.tensor_spec((fh, fw, fc), dtype=DTYPE),
+        output=target.tensor_spec((out_h, out_w, fc), dtype=DTYPE),
         serial_only=True,
     )
 
@@ -150,7 +170,7 @@ def sample_and_benchmark(
     return r, procedure
 
 
-def benchmark_numpy(spec: specs.Spec) -> float:
+def benchmark_baseline(spec: specs.Spec) -> float:
     if isinstance(spec, specs.Matmul):
         # Make arbitrary args
         (m, n), k = spec.output.dim_sizes, spec.lhs.dim_sizes[1]
@@ -178,6 +198,29 @@ def benchmark_numpy(spec: specs.Spec) -> float:
         start = time.time()
         for _ in range(gen.BENCH_ITERS):
             (a @ b) @ c
+        end = time.time()
+        return (end - start) / gen.BENCH_ITERS
+    elif isinstance(spec, specs.Convolution):
+        h, w = spec.lhs.dim_sizes
+        fh, fw, fc = spec.rhs.dim_sizes
+
+        # Use signed int32 with PyTorch.
+        assert DTYPE == dtypes.Uint32
+        torch_dtype = np.int32
+
+        img = torch.tensor(
+            np.arange(h * w, dtype=torch_dtype).reshape((1, 1, h, w)),
+        )
+        filters = torch.tensor(
+            np.arange(fh * fw * fc, dtype=torch_dtype).reshape((fc, 1, fh, fw)),
+        )
+        
+        # PyTorch execution on the CPU is synchronous. Useful for this benchmar
+        F.conv2d(img, filters)
+
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            F.conv2d(img, filters)
         end = time.time()
         return (end - start) / gen.BENCH_ITERS
     else:
@@ -212,12 +255,12 @@ def _open_db(args, *, check_same_thread: bool):
         yield db_conn
 
 
-def _run_numpy(args, matmul_spec):
-    runtime_secs = benchmark_numpy(matmul_spec)
-    print(f"numpy took {runtime_secs:.7f}s")
+def _run_baseline(args, matmul_spec):
+    runtime_secs = benchmark_baseline(matmul_spec)
+    print(f"baseline took {runtime_secs:.7f}s")
     with _open_db(args, check_same_thread=False) as db_conn:
         db_conn.execute(
-            "INSERT INTO samples VALUES ('numpy', time('now'), NULL, NULL, NULL, ?)",
+            "INSERT INTO samples VALUES ('baseline', time('now'), NULL, NULL, NULL, ?)",
             (runtime_secs,),
         )
         db_conn.commit()
@@ -265,6 +308,9 @@ def main():
 
     system_config.set_current_target(system_config.target_by_name(args.target))
 
+    # Disable sliding windows, since we can't use them with codegen yet.
+    morello.impl.allow_sliding_windows.set(False)
+
     print(f"Spec: {args.spec}")
     for n in args.sizes:
         print(f"Size: {n}")
@@ -272,11 +318,13 @@ def main():
             spec = make_matmul_spec(n)
         elif args.spec == "gemm3":
             spec = make_gemm3_spec(n)
+        elif args.spec == "conv":
+            spec = make_conv_spec(n)
         else:
             raise NotImplementedError(f"{args.spec} not implemented")
 
-        if args.numpy:
-            _run_numpy(args, spec)
+        if args.baseline:
+            _run_baseline(args, spec)
         if args.best:
             _run_best(args, spec)
         if args.sample:
