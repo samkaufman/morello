@@ -1,17 +1,20 @@
 import abc
+import warnings
 from collections.abc import Mapping
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from frozendict import frozendict
 
 import morello.impl.base
 import morello.impl.compose
+
 from . import system_config, utils
 from .tensor import Tensor
 
-
-def _zero_banks() -> dict[str, int]:
-    return {bank: 0 for bank in system_config.current_system().banks}
+# If True, schedules will be saved as if they had memory limits, for all banks,
+# that are the next highest power of 2. This discretizes the cache a bit, even
+# though it
+SNAP_CAP_TO_POWER_OF_TWO = True
 
 
 class AvailableIsNegativeError(ValueError):
@@ -106,6 +109,7 @@ class StandardMemoryLimits(MemoryLimits):
                     f"Given negative available memory: {available_memory}"
                 )
             self._available = frozendict(available_memory)
+        self._available = _snap_availables(self._available)
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, StandardMemoryLimits):
@@ -184,8 +188,52 @@ class PipelineChildMemoryLimits(MemoryLimits):
             raise IntermediatesTooBigError("output tensor doesn't fit in available")
 
         self.base_available = base
-        self.input_consumption = input_consumption
-        self.output_consumption = output_consumption
+
+        # Update input and output consumptions using the adjustments
+        snapped_base_available = _snap_availables(self.base_available)
+        adjustments: Mapping[str, int] = {
+            k: orig - v
+            for k, (orig, v) in utils.zip_dict(
+                self.base_available, snapped_base_available, same_keys=True
+            ).items()
+        }
+
+        self.input_consumption = {
+            k: max(0, orig - adjustment)
+            for k, (orig, adjustment) in utils.zip_dict(
+                input_consumption, adjustments, same_keys=True
+            ).items()
+        }
+        self.output_consumption = {
+            k: max(0, orig - adjustment)
+            for k, (orig, adjustment) in utils.zip_dict(
+                output_consumption, adjustments, same_keys=True
+            ).items()
+        }
+
+        # Assert that the important, observable numbers are snapped. (The actual
+        # snapping should happen in the transition function.)
+        # assert not SNAP_CAP_TO_POWER_OF_TWO or all(
+        #     _is_snapped(v) for v in self.base_available.values()
+        # )
+        # assert not SNAP_CAP_TO_POWER_OF_TWO or all(
+        #     _is_snapped(v) for v in self.available.values()
+        # )
+        # assert not SNAP_CAP_TO_POWER_OF_TWO or all(
+        #     _is_snapped(a - b) and _is_snapped(a - c)
+        #     for (a, b, c) in utils.zip_dict(
+        #         self.base_available,
+        #         self.input_consumption,
+        #         self.output_consumption,
+        #         same_keys=True,
+        #     ).values()
+        # )
+        warnings.warn(
+            "PipelineChildMemoryLimits snapping behavior isn't very "
+            "well-defined yet. Base available memory is snapped, but input- and "
+            "output-specific memory adjustments just have the snap differences "
+            "removed."
+        )
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, PipelineChildMemoryLimits):
@@ -248,3 +296,45 @@ class PipelineChildMemoryLimits(MemoryLimits):
             self.input_consumption,
             self.output_consumption,
         )
+
+
+def _snap_availables(available: Mapping[str, int]) -> frozendict[str, int]:
+    """Returns limits that are snapped down according to the snapping strategy."""
+    # If SNAP_CAP_TO_POWER_OF_TWO isn't set, don't rebuild the data structure.
+    if not SNAP_CAP_TO_POWER_OF_TWO:
+        return available
+    return frozendict((k, _snap_down(v)) for k, v in available.items())
+
+
+def _snap_down(n: int) -> int:
+    """Snaps an integer down according to the snapping strategy.
+
+    No-op for already-snapped integers.
+    """
+    assert SNAP_CAP_TO_POWER_OF_TWO
+    assert n >= 0
+    if n == 0:
+        return 0
+    # Return the greatest power of two equal to or less than n
+    return 2 ** (n.bit_length() - 1)
+
+
+def _is_snapped(n: int) -> bool:
+    assert SNAP_CAP_TO_POWER_OF_TWO
+    return n == _snap_down(n)
+
+
+class _SubSnapResult(NamedTuple):
+    difference: int
+    snapped_subtrahend: int
+
+
+def _sub_snap(n: int, subtrahend: int) -> _SubSnapResult:
+    assert _is_snapped(n)
+    raw_result = n - subtrahend
+    snapped_result = _snap_down(raw_result)
+    return _SubSnapResult(snapped_result, n - snapped_result)
+
+
+def _zero_banks() -> dict[str, int]:
+    return {bank: 0 for bank in system_config.current_system().banks}

@@ -13,11 +13,6 @@ from .impl import Impl
 from .specs import Spec
 from .utils import next_power_of_two, zip_dict
 
-# If True, schedules will be saved as if they had memory limits, for all banks,
-# that are the next highest power of 2. This discretizes the cache a bit, even
-# though it
-SNAP_CAP_TO_POWER_OF_TWO = False
-
 
 class CachedSchedule(NamedTuple):
     """A container for schedules stored in the cache.
@@ -41,15 +36,6 @@ class _TableEntry(NamedTuple):
     spec: Spec
     schedule: Optional[CachedSchedule]
     caps: frozendict[str, int]
-
-    def snap(self) -> "_TableEntry":
-        """Raises caps to the next power of two if SNAP_CAP_TO_POWER_TO_TWO."""
-        if not SNAP_CAP_TO_POWER_OF_TWO:
-            return self
-        new_caps = frozendict(
-            {bank: next_power_of_two(c) for bank, c in self.caps.items()}
-        )
-        return _TableEntry(self.spec, self.schedule, new_caps)
 
     @property
     def peak_memory(self) -> frozendict[str, int]:
@@ -145,7 +131,7 @@ class ScheduleCache:
                                 ).items()
                             }
                         ),
-                    ).snap()
+                    )
                     return
             else:
                 if rects[idx].schedule is None:
@@ -170,13 +156,13 @@ class ScheduleCache:
                                 ).items()
                             }
                         ),
-                    ).snap()
+                    )
                     return
             # TODO: Assert that there is at most one intersection
 
         # If we haven't returned at this point, then we didn't find a _TableEntry to
         # update, so add one.
-        rects.append(_TableEntry(spec, schedule, memory_caps).snap())
+        rects.append(_TableEntry(spec, schedule, memory_caps))
 
     def update(self, other: "ScheduleCache") -> None:
         """Update with the contents of another cache.

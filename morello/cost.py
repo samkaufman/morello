@@ -95,7 +95,7 @@ def detailed_analytical_cost(
             )
             cost_dict.update(sub_cd)
             sum_cost += sub_cd[stage][0]
-        assert op.cost == sum_cost
+        assert compute_cost(op) == sum_cost
         cost_dict[op] = (sum_cost, f"{sum_cost} (sum of {len(op.stages)})")
         return cost_dict
     elif isinstance(op, (MatmulSplitLoop, Loop)):
@@ -110,7 +110,7 @@ def detailed_analytical_cost(
 
         new_cost = factor * cost_dict[op.inner][0]
         cost_expl = f"{new_cost:5d} = {factor} * _"
-        assert op.cost == new_cost
+        assert compute_cost(op) == new_cost
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
     elif isinstance(op, SlidingWindowLoop):
@@ -137,15 +137,15 @@ def detailed_analytical_cost(
             f"{op.update_loads}({update_cost}) + {op.steps}(_)"
         )
         cost_dict[op] = (new_cost, cost_expl)
-        assert op.cost == new_cost
+        assert compute_cost(op) == new_cost
         return cost_dict
     elif isinstance(op, (DirectConv, ReduceSum)) and (op.is_scheduled or holes_ok):
-        assert op.cost == 0
+        assert compute_cost(op) == 0
         return {op: (0, "    0")}
     elif isinstance(op, (Mult, HvxVrmpyaccVuwVubRub)):
         # Tensor multiplication is free but its operands must be in memory.
         # (This cost model is only interested in the cost of moving data.)
-        assert op.cost == 0
+        assert compute_cost(op) == 0
         return {op: (0, "    0")}
     elif isinstance(op, MoveLet):
         # This is the core of the cost model; the cost of a schedule is derived
@@ -159,11 +159,11 @@ def detailed_analytical_cost(
         )
         new_cost = mcost + cost_dict[op.inner][0]
         cost_expl = f"{new_cost:5d} = {mcost} + _"
-        assert op.cost == new_cost
+        assert compute_cost(op) == new_cost
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
     elif holes_ok and isinstance(op, (ComposeHole, MatmulHole)):
-        assert op.cost == 0
+        assert compute_cost(op) == 0
         return {op: (0, "")}
     else:
         raise TypeError(f"Unsupported op. {type(op)}")
