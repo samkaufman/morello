@@ -309,7 +309,7 @@ def _open_db(args, *, check_same_thread: bool):
 
 def _run_baseline(args, matmul_spec):
     runtime_secs = benchmark_baseline(matmul_spec)
-    print(f"baseline took {runtime_secs:.7f}s")
+    print(f"Baseline took {runtime_secs:.7f}s")
     with _open_db(args, check_same_thread=False) as db_conn:
         db_conn.execute(
             "INSERT INTO samples VALUES ('baseline', time('now'), NULL, NULL, NULL, ?)",
@@ -323,7 +323,8 @@ def _run_best(args, spec):
         impl = search.schedule_search(spec, cache=cache)
     assert impl is not None
     runtime_secs, impl_str, c, peak = _benchmark(impl)
-    print(f"best took {runtime_secs:.7f}s")
+    print(f"Best took {runtime_secs:.7f}s")
+    print("Impl:\n" + impl_str)
     with _open_db(args, check_same_thread=False) as db_conn:
         db_conn.execute(
             "INSERT INTO samples VALUES (?, time('now'), ?, ?, ?, ?)",
@@ -345,7 +346,7 @@ def _run_sample(sample_fn, args, matmul_spec):
                 range(SAMPLE_CNT),
             ):
                 (runtime_secs, impl_str, c, peak), procedure = result
-                print(f"(other) took {runtime_secs:.7f}s")
+                print(f"{sample_fn.__name__} took {runtime_secs:.7f}s")
                 db_conn.execute(
                     "INSERT INTO samples VALUES (?, time('now'), ?, ?, ?, ?)",
                     (procedure, impl_str, c, str(peak), runtime_secs),
@@ -365,6 +366,7 @@ def main():
 
     print(f"Spec: {args.spec}")
     for n in args.sizes:
+        print("")
         print(f"Size: {n}")
         if args.spec == "matmul":
             spec = make_matmul_spec(n)
