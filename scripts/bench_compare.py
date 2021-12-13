@@ -265,7 +265,9 @@ def main():
 
     system_config.set_current_target(system_config.target_by_name(args.target))
 
+    print(f"Spec: {args.spec}")
     for n in args.sizes:
+        print(f"Size: {n}")
         if args.spec == "matmul":
             spec = make_matmul_spec(n)
         elif args.spec == "gemm3":
