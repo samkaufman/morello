@@ -100,10 +100,10 @@ def make_conv_spec(d: int) -> specs.Convolution:
 def make_cnn_spec(d: int) -> specs.Spec:
     target = system_config.current_target()
 
-    img = target.tensor_spec((8, 8), dtype=DTYPE)
-    filters_a = target.tensor_spec((3, 3, 4), dtype=DTYPE)
-    filters_b = target.tensor_spec((3, 3, 4), dtype=DTYPE)
-    output = target.tensor_spec((4, 4, 4), dtype=DTYPE)
+    img = target.tensor_spec((d, d), dtype=DTYPE)
+    filters_a = target.tensor_spec((5, 5, 16), dtype=DTYPE)
+    filters_b = target.tensor_spec((5, 5, 16), dtype=DTYPE)
+    output = target.tensor_spec((d - 8, d - 8, 16), dtype=DTYPE)
     return specs.Compose(
         (specs.Convolution, specs.ReduceSum, specs.Convolution),
         (filters_b, img, filters_a),
