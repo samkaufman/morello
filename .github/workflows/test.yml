@@ -6,7 +6,7 @@ env:
   DOCKER_BUILDKIT: 1
   DOCKER_IMAGE_NAME: morello-img-${{ github.sha }}
   DOCKER_IMAGE_TAG: morello-${{ github.sha }}
-  DOCKER_IMAGE_PATH: image.tar  # TODO: Use home directory instead.
+  DOCKER_IMAGE_PATH: image.tar.gz  # TODO: Use home directory instead.
 jobs:
   build-img:
     runs-on: ubuntu-latest
@@ -38,18 +38,18 @@ jobs:
       - name: Cache Docker layers
         uses: actions/cache@v2
         with:
-          path: ~/.buildx-cache
+          path: /tmp/buildx-cache
           key: ${{ runner.os }}-buildx-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-buildx-
       - name: Build Docker image
         run: |
-          docker buildx build --tag "$DOCKER_IMAGE_TAG" --cache-from type=local,src=~/.buildx-cache --cache-to type=local,dest=/tmp/buildx-cache-new -o "type=docker,dest=$DOCKER_IMAGE_PATH" .
+          docker buildx build --tag "$DOCKER_IMAGE_TAG" --cache-from type=local,src=/tmp/buildx-cache --cache-to type=local,dest=/tmp/buildx-cache-new -o type=docker,dest=- . | gzip > "$DOCKER_IMAGE_PATH" # TODO: Don't use /tmp
       # Fix for https://github.com/docker/build-push-action/issues/252
       - name: Move Docker cache
         run: |
-          rm -rf ~/.buildx-cache
-          mv /tmp/buildx-cache-new ~/.buildx-cache
+          rm -rf /tmp/buildx-cache
+          mv /tmp/buildx-cache-new /tmp/buildx-cache
       - name: Upload Docker image as an artifact
         uses: actions/upload-artifact@v2
         with:
@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: Download the image artifact
+      - name: Download the Docker image
         uses: actions/download-artifact@v2
         with:
           name: ${{ env.DOCKER_IMAGE_NAME }}
@@ -71,3 +71,35 @@ jobs:
       - name: Run tests
         run: |
           docker run --rm -t "$DOCKER_IMAGE_TAG" pytest -n auto
+  bench:
+    needs: build-img
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      matrix:
+        spec: ["matmul", "gemm3"]
+    steps:
+      - name: Download the Docker image
+        uses: actions/download-artifact@v2
+        with:
+          name: ${{ env.DOCKER_IMAGE_NAME }}
+      - name: Load the image
+        run: |
+          docker load -i "$DOCKER_IMAGE_PATH"
+      - name: Run tests
+        run: |
+          docker run --rm -t  -v ~/container_out:/out "$DOCKER_IMAGE_TAG" scripts/bench_compare.py --target=cpu --db_path=/out/samples.db --cache=/out/cache.pkl --best --numpy "$SPEC" 128 192 256 384 512 768 1024
+        env:
+          SPEC: ${{ matrix.spec }}
+      - name: Upload samples.db as artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: bench-${{ matrix.spec }}-samples
+          path: ~/container_out/samples.db
+          retention-days: 30
+      - name: Upload scheduling cache as artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: bench-${{ matrix.spec }}-cache
+          path: ~/container_out/cache.pkl
+          retention-days: 14
