@@ -262,17 +262,27 @@ def benchmark_baseline(spec: specs.Spec) -> float:
             np.arange(h * w, dtype=torch_dtype_np).reshape((1, 1, h, w)),
         )
         filters_a = torch.tensor(
-            np.arange(fh_a * fw_a * fc_a, dtype=torch_dtype_np).reshape((fc_a, 1, fh_a, fw_a)),
+            np.arange(fh_a * fw_a * fc_a, dtype=torch_dtype_np).reshape(
+                (fc_a, 1, fh_a, fw_a)
+            ),
         )
         filters_b = torch.tensor(
-            np.arange(fh_b * fw_b * fc_b, dtype=torch_dtype_np).reshape((fc_b, 1, fh_b, fw_b)),
+            np.arange(fh_b * fw_b * fc_b, dtype=torch_dtype_np).reshape(
+                (fc_b, 1, fh_b, fw_b)
+            ),
         )
 
-        F.conv2d(F.conv2d(img, filters_a).sum(dim=1, dtype=torch_dtype).unsqueeze(0), filters_b)
+        F.conv2d(
+            F.conv2d(img, filters_a).sum(dim=1, dtype=torch_dtype).unsqueeze(0),
+            filters_b,
+        )
 
         start = time.time()
         for _ in range(gen.BENCH_ITERS):
-            F.conv2d(F.conv2d(img, filters_a).sum(dim=1, dtype=torch_dtype).unsqueeze(0), filters_b)
+            F.conv2d(
+                F.conv2d(img, filters_a).sum(dim=1, dtype=torch_dtype).unsqueeze(0),
+                filters_b,
+            )
         end = time.time()
         return (end - start) / gen.BENCH_ITERS
     else:
@@ -364,6 +374,10 @@ def main():
     # Disable sliding windows, since we can't use them with codegen yet.
     morello.impl.allow_sliding_windows.set(False)
 
+    print("")
+    print(torch.__config__.show())
+
+    print("")
     print(f"Spec: {args.spec}")
     for n in args.sizes:
         print("")
