@@ -13,6 +13,7 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import profiler
 
 import morello.impl.actions
 import morello.impl.base
@@ -236,8 +237,17 @@ def benchmark_baseline(spec: specs.Spec) -> float:
             np.arange(fh * fw * fc, dtype=torch_dtype_np).reshape((fc, 1, fh, fw)),
         )
 
-        # PyTorch execution on the CPU is synchronous. Useful for this benchmar
-        F.conv2d(img, filters)
+        # Which backend is PyTorch using?
+        # backend = torch._C._select_conv_backend(
+        #     img, filters, None, (1, 1), (0, 0), (1, 1), False, (0, 0), 1
+        # )
+        # print("Conv PyTorch backend:", backend)
+
+        # PyTorch execution on the CPU is synchronous. Useful for this benchmark
+        with profiler.profile(activities=[profiler.ProfilerActivity.CPU]) as prof:
+            with profiler.record_function("conv2d"):
+                F.conv2d(img, filters)
+        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
 
         start = time.time()
         for _ in range(gen.BENCH_ITERS):
@@ -317,8 +327,8 @@ def _open_db(args, *, check_same_thread: bool):
         yield db_conn
 
 
-def _run_baseline(args, matmul_spec):
-    runtime_secs = benchmark_baseline(matmul_spec)
+def _run_baseline(args, spec: specs.Spec):
+    runtime_secs = benchmark_baseline(spec)
     print(f"Baseline took {runtime_secs:.7f}s")
     with _open_db(args, check_same_thread=False) as db_conn:
         db_conn.execute(

@@ -10,4 +10,8 @@ termcolor==1.1.0
 sympy
 typeguard
 frozendict~=2.0
-torch~=1.10
+torch==1.10.1
+
+# Optionally, use a recent nightly PyTorch build to get access to the private
+# torch._C._select_conv_backend function. (Runtimes matched 1.10.1.)
+# https://download.pytorch.org/whl/nightly/cu102/torch-1.11.0.dev20220107%2Bcu102-cp39-cp39-linux_x86_64.whl
