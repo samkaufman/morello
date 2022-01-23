@@ -2,17 +2,26 @@
 
 import argparse
 import contextlib
+import datetime
 import functools
 import logging
 import multiprocessing
+import os
 import pathlib
 import random
+import socket
 import sqlite3
 import time
 
+import gspread
+import jax
+import jax.lib
+import jax.numpy as jnp
 import numpy as np
 import torch
 import torch.nn.functional as F
+from jax import lax
+from jax.tools import jax_to_ir
 from torch import profiler
 
 import morello.impl.actions
@@ -23,6 +32,8 @@ from morello.codegen import gen
 RUNS = 5
 SAMPLE_CNT = 100
 DTYPE = dtypes.Uint32
+TORCH_DTYPE_NP = np.int32  # Signed version of DTYPE
+TORCH_DTYPE = torch.int32
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +43,13 @@ parser.add_argument("--cache", type=pathlib.Path, default=None)
 parser.add_argument("--n_cpus", type=int, default=1)
 parser.add_argument("--db_path", type=pathlib.Path, default="samples.db")
 parser.add_argument("--best", action="store_true")
-parser.add_argument("--baseline", action="store_true")
+parser.add_argument("--baselines", action="store_true")
 parser.add_argument("--sample", action="store_true")
 parser.add_argument("--perturb", action="store_true")
+parser.add_argument("--print_graphs", action="store_true")
+parser.add_argument("--log_to_sheet", type=str, default=None)
+parser.add_argument("--gsheet_key", type=pathlib.Path, default=None)
+parser.add_argument("--hostname", type=str, default=None)
 
 subparsers = parser.add_subparsers(dest="spec")
 
@@ -57,6 +72,14 @@ parser_cnn = subparsers.add_parser("cnn", help="Benchmark small CNN")
 parser_cnn.add_argument(
     "sizes", metavar="N", type=int, nargs="+", help="image sizes to benchmark"
 )
+
+
+def _to_torch(arr: np.ndarray) -> torch.Tensor:
+    # Some dtypes aren't supported by PyTorch, but it's fine to convert them to the
+    # closest supported type. This shouldn't affect benchmark results meaningfully.
+    if arr.dtype == np.uint32:
+        arr = arr.astype("int32")
+    return torch.from_numpy(arr)
 
 
 def make_matmul_spec(d: int) -> specs.Matmul:
@@ -192,7 +215,11 @@ def sample_and_benchmark(
     return r, procedure
 
 
-def benchmark_baseline(spec: specs.Spec) -> float:
+def benchmark_baseline(
+    spec: specs.Spec, print_graphs: bool = False
+) -> dict[str, float]:
+    result = {}
+
     if isinstance(spec, specs.Matmul):
         # Make arbitrary args
         (m, n), k = spec.output.dim_sizes, spec.lhs.dim_sizes[1]
@@ -204,7 +231,14 @@ def benchmark_baseline(spec: specs.Spec) -> float:
         for _ in range(gen.BENCH_ITERS):
             lhs @ rhs
         end = time.time()
-        return (end - start) / gen.BENCH_ITERS
+        result["numpy"] = (end - start) / gen.BENCH_ITERS
+
+        lhs_t, rhs_t = _to_torch(lhs), _to_torch(rhs)
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            torch.matmul(lhs_t, rhs_t)
+        end = time.time()
+        result["pytorch"] = (end - start) / gen.BENCH_ITERS
     elif isinstance(spec, specs.Compose) and all(
         s == specs.Matmul for s in spec.subspec_classes
     ):
@@ -221,21 +255,36 @@ def benchmark_baseline(spec: specs.Spec) -> float:
         for _ in range(gen.BENCH_ITERS):
             (a @ b) @ c
         end = time.time()
-        return (end - start) / gen.BENCH_ITERS
+        result["numpy"] = (end - start) / gen.BENCH_ITERS
+
+        a_t, b_t, c_t = [_to_torch(x) for x in (a, b, c)]
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            torch.matmul(torch.matmul(a_t, b_t), c_t)
+        end = time.time()
+        result["pytorch"] = (end - start) / gen.BENCH_ITERS
+
+        @torch.jit.script
+        def jit_gemm3(a, b, c):
+            return torch.matmul(torch.matmul(a, b), c)
+
+        torch.jit.wait(torch.jit.fork(jit_gemm3, a_t, b_t, c_t))
+
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            torch.jit.wait(torch.jit.fork(jit_gemm3, a_t, b_t, c_t))
+        end = time.time()
+        result["torchscript"] = (end - start) / gen.BENCH_ITERS
     elif isinstance(spec, specs.Convolution):
         h, w = spec.lhs.dim_sizes
         fh, fw, fc = spec.rhs.dim_sizes
 
         # Use signed int32 with PyTorch.
         assert DTYPE == dtypes.Uint32
-        torch_dtype_np = np.int32
 
-        img = torch.tensor(
-            np.arange(h * w, dtype=torch_dtype_np).reshape((1, 1, h, w)),
-        )
-        filters = torch.tensor(
-            np.arange(fh * fw * fc, dtype=torch_dtype_np).reshape((fc, 1, fh, fw)),
-        )
+        img = np.arange(h * w, dtype=TORCH_DTYPE_NP).reshape((1, 1, h, w))
+        filters = np.arange(fh * fw * fc, dtype=TORCH_DTYPE_NP).reshape((fc, 1, fh, fw))
+        img_t, filters_t = torch.tensor(img), torch.tensor(filters)
 
         # Which backend is PyTorch using?
         # backend = torch._C._select_conv_backend(
@@ -246,14 +295,53 @@ def benchmark_baseline(spec: specs.Spec) -> float:
         # PyTorch execution on the CPU is synchronous. Useful for this benchmark
         with profiler.profile(activities=[profiler.ProfilerActivity.CPU]) as prof:
             with profiler.record_function("conv2d"):
-                F.conv2d(img, filters)
+                F.conv2d(img_t, filters_t)
         print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
 
         start = time.time()
         for _ in range(gen.BENCH_ITERS):
-            F.conv2d(img, filters)
+            F.conv2d(img_t, filters_t)
         end = time.time()
-        return (end - start) / gen.BENCH_ITERS
+        result["pytorch"] = (end - start) / gen.BENCH_ITERS
+
+        @torch.jit.script
+        def jit_conv(i, f):
+            return F.conv2d(i, f)
+
+        torch.jit.wait(torch.jit.fork(jit_conv, img_t, filters_t))
+
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            torch.jit.wait(torch.jit.fork(jit_conv, img_t, filters_t))
+        end = time.time()
+        result["torchscript"] = (end - start) / gen.BENCH_ITERS
+
+        if print_graphs:
+            print(torch.jit.last_executed_optimized_graph())
+
+        def jax_conv(i, f):
+            return lax.conv(i, f, (1, 1), "SAME")
+
+        jax_conv_fast = jax.jit(jax_conv)
+        jax_conv_fast(img, filters)
+
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            jax_conv_fast(img, filters)
+        end = time.time()
+        result["jax"] = (end - start) / gen.BENCH_ITERS
+
+        if print_graphs:
+            print(
+                jax_to_ir.jax_to_ir(
+                    jax_conv_fast,
+                    input_shapes=[
+                        ("i", jax.ShapedArray(img.shape, img.dtype)),
+                        ("f", jax.ShapedArray(filters.shape, filters.dtype)),
+                    ],
+                    format="HLO",
+                )[1]
+            )
     elif isinstance(spec, specs.Compose) and spec.subspec_classes == (
         specs.Convolution,
         specs.ReduceSum,
@@ -263,40 +351,75 @@ def benchmark_baseline(spec: specs.Spec) -> float:
         fh_a, fw_a, fc_a = spec.inputs[-1].dim_sizes
         fh_b, fw_b, fc_b = spec.inputs[-3].dim_sizes
 
-        # Use signed int32 with PyTorch.
-        assert DTYPE == dtypes.Uint32
-        torch_dtype_np = np.int32
-        torch_dtype = torch.int32
-
-        img = torch.tensor(
-            np.arange(h * w, dtype=torch_dtype_np).reshape((1, 1, h, w)),
+        img = np.arange(h * w, dtype=TORCH_DTYPE_NP).reshape((1, 1, h, w))
+        filters_a = np.arange(fh_a * fw_a * fc_a, dtype=TORCH_DTYPE_NP).reshape(
+            (fc_a, 1, fh_a, fw_a)
         )
-        filters_a = torch.tensor(
-            np.arange(fh_a * fw_a * fc_a, dtype=torch_dtype_np).reshape(
-                (fc_a, 1, fh_a, fw_a)
-            ),
+        filters_b = np.arange(fh_b * fw_b * fc_b, dtype=TORCH_DTYPE_NP).reshape(
+            (fc_b, 1, fh_b, fw_b)
         )
-        filters_b = torch.tensor(
-            np.arange(fh_b * fw_b * fc_b, dtype=torch_dtype_np).reshape(
-                (fc_b, 1, fh_b, fw_b)
-            ),
-        )
+        img_t, filters_a_t, filters_b_t = [
+            torch.tensor(x) for x in (img, filters_a, filters_b)
+        ]
 
         F.conv2d(
-            F.conv2d(img, filters_a).sum(dim=1, dtype=torch_dtype).unsqueeze(0),
-            filters_b,
+            F.conv2d(img_t, filters_a_t).sum(dim=1, dtype=TORCH_DTYPE).unsqueeze(0),
+            filters_b_t,
         )
 
         start = time.time()
         for _ in range(gen.BENCH_ITERS):
             F.conv2d(
-                F.conv2d(img, filters_a).sum(dim=1, dtype=torch_dtype).unsqueeze(0),
-                filters_b,
+                F.conv2d(img_t, filters_a_t).sum(dim=1, dtype=TORCH_DTYPE).unsqueeze(0),
+                filters_b_t,
             )
         end = time.time()
-        return (end - start) / gen.BENCH_ITERS
+        result["pytorch"] = (end - start) / gen.BENCH_ITERS
+
+        assert (
+            torch.int32 == TORCH_DTYPE
+        ), "Expected torch.int32, which is inlined into jit_conv"
+
+        @torch.jit.script
+        def jit_conv(i, fa, fb):
+            return F.conv2d(
+                F.conv2d(i, fa).sum(dim=1, dtype=torch.int32).unsqueeze(0), fb
+            )
+
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            torch.jit.wait(torch.jit.fork(jit_conv, img_t, filters_a_t, filters_b_t))
+        end = time.time()
+        result["torchscript"] = (end - start) / gen.BENCH_ITERS
+
+        if print_graphs:
+            print(torch.jit.last_executed_optimized_graph())
+
+        def jax_cnn(i, fa, fb):
+            a = lax.conv(i, fa, (1, 1), "SAME")
+            b = jnp.sum(a, axis=1, keepdims=True)
+            c = lax.conv(b, fb, (1, 1), "SAME")
+            return c
+
+        jax_cnn_fast = jax.jit(jax_cnn)
+        jax_cnn_fast(img, filters_a, filters_b).block_until_ready()
+
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            jax_cnn_fast(img, filters_a, filters_b).block_until_ready()
+        end = time.time()
+        result["jax"] = (end - start) / gen.BENCH_ITERS
+
+        # Print the *optimized* HLO. (This API is not stable.)
+        if print_graphs:
+            c = jax.xla_computation(jax_cnn_fast)(img, filters_a, filters_b)
+            print(
+                jax.lib.xla_bridge.get_backend().compile(c).hlo_modules()[0].to_string()
+            )
     else:
         raise ValueError(f"Unrecognized spec: {spec}")
+
+    return result
 
 
 def _benchmark(impl):
@@ -327,18 +450,24 @@ def _open_db(args, *, check_same_thread: bool):
         yield db_conn
 
 
-def _run_baseline(args, spec: specs.Spec):
-    runtime_secs = benchmark_baseline(spec)
-    print(f"Baseline took {runtime_secs:.7f}s")
-    with _open_db(args, check_same_thread=False) as db_conn:
-        db_conn.execute(
-            "INSERT INTO samples VALUES ('baseline', time('now'), NULL, NULL, NULL, ?)",
-            (runtime_secs,),
-        )
-        db_conn.commit()
+def _run_baselines(args, spec: specs.Spec, print_graphs: bool = False) -> dict:
+    results = {}
+    for baseline_name, runtime_secs in benchmark_baseline(
+        spec, print_graphs=print_graphs
+    ).items():
+        print(f"{baseline_name} baseline took {runtime_secs:.7f}s")
+        assert baseline_name not in results
+        results[baseline_name] = runtime_secs
+        with _open_db(args, check_same_thread=False) as db_conn:
+            db_conn.execute(
+                "INSERT INTO samples VALUES (?, time('now'), NULL, NULL, NULL, ?)",
+                (baseline_name, runtime_secs),
+            )
+            db_conn.commit()
+    return results
 
 
-def _run_best(args, spec):
+def _run_best(args, spec) -> dict:
     with search_cache.persistent_cache(args.cache, save=True) as cache:
         impl = search.schedule_search(spec, cache=cache)
     assert impl is not None
@@ -351,6 +480,8 @@ def _run_best(args, spec):
             ("best", impl_str, c, str(peak), runtime_secs),
         )
         db_conn.commit()
+
+    return {"morello": runtime_secs}
 
 
 def _run_sample(sample_fn, args, matmul_spec):
@@ -379,6 +510,14 @@ def main():
 
     args = parser.parse_args()
 
+    if args.log_to_sheet:
+        gc_kwargs = {}
+        if args.gsheet_key:
+            assert isinstance(args.gsheet_key, pathlib.Path)
+            gc_kwargs["filename"] = args.gsheet_key
+        gc = gspread.service_account(**gc_kwargs)
+        sheet = gc.open(args.log_to_sheet).worksheet("Log")
+
     system_config.set_current_target(system_config.target_by_name(args.target))
 
     # Disable sliding windows, since we can't use them with codegen yet.
@@ -386,6 +525,12 @@ def main():
 
     print("")
     print(torch.__config__.show())
+
+    start_time = str(datetime.datetime.now())
+    if args.hostname:
+        hostname = args.hostname
+    else:
+        hostname = os.uname().nodename
 
     print("")
     print(f"Spec: {args.spec}")
@@ -403,14 +548,24 @@ def main():
         else:
             raise NotImplementedError(f"{args.spec} not implemented")
 
-        if args.baseline:
-            _run_baseline(args, spec)
+        results = {}
+        if args.baselines:
+            results.update(_run_baselines(args, spec, print_graphs=args.print_graphs))
         if args.best:
-            _run_best(args, spec)
+            results.update(_run_best(args, spec))
         if args.sample:
             _run_sample(sample_completion, args, spec)
         if args.perturb:
             _run_sample(sample_perturbed, args, spec)
+
+        if args.log_to_sheet:
+            sheet.append_rows(
+                [
+                    [start_time, hostname, args.spec, n, name, secs]
+                    for name, secs in results.items()
+                ],
+                value_input_option="USER_ENTERED",
+            )
 
 
 if __name__ == "__main__":
