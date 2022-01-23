@@ -320,7 +320,7 @@ def benchmark_baseline(
             print(torch.jit.last_executed_optimized_graph())
 
         def jax_conv(i, f):
-            return lax.conv(i, f, (1, 1), "SAME")
+            return lax.conv(i, f, (1, 1), "VALID")
 
         jax_conv_fast = jax.jit(jax_conv)
         jax_conv_fast(img, filters)
@@ -396,9 +396,9 @@ def benchmark_baseline(
             print(torch.jit.last_executed_optimized_graph())
 
         def jax_cnn(i, fa, fb):
-            a = lax.conv(i, fa, (1, 1), "SAME")
+            a = lax.conv(i, fa, (1, 1), "VALID")
             b = jnp.sum(a, axis=1, keepdims=True)
-            c = lax.conv(b, fb, (1, 1), "SAME")
+            c = lax.conv(b, fb, (1, 1), "VALID")
             return c
 
         jax_cnn_fast = jax.jit(jax_cnn)
