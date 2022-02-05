@@ -1,10 +1,10 @@
 import dataclasses
-from typing import Callable, Optional, Union, Mapping, Any, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Tuple, Union
 
-from .base import Impl
 from .. import specs, system_config
 from ..specs import Layout
 from ..tensor import Tensor, Tile
+from .base import Impl
 
 if TYPE_CHECKING:
     from .compose import ComposeHole
@@ -55,7 +55,7 @@ class PeelAction:
     impl: "ComposeHole"
     bank: Optional[str] = None
     layout: Optional[specs.Layout] = None
-    kwargs: Mapping[Any, Any] = None
+    kwargs: Optional[Mapping[Any, Any]] = None
 
     def __call__(self):
         kws = {}

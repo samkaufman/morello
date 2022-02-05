@@ -1,24 +1,26 @@
 import dataclasses
 import functools
 import sys
-from typing import FrozenSet, Union, Optional
+from typing import FrozenSet, Optional, Union
 
+from .. import impl, system_config
+from ..tensor import Tensor, Tile
 from .settings import (
-    PRUNE_RELAYOUT_CYCLES,
     BREAK_MOVE_SYMMETRIES,
     BREAK_SEQUENTIAL_TILES,
+    PRUNE_RELAYOUT_CYCLES,
 )
-from .. import system_config
-from ..tensor import Tensor, Tile
 
 
 @dataclasses.dataclass
 class ParentSummary:
-    parent: "Impl"
+    parent: "impl.Impl"
     movements: FrozenSet[tuple[Union[Tensor, Tile], str]]
 
     @staticmethod
-    def update(original: Optional["ParentSummary"], parent: "Impl") -> "ParentSummary":
+    def update(
+        original: Optional["ParentSummary"], parent: "impl.Impl"
+    ) -> "ParentSummary":
         from . import moves
 
         if original is None:

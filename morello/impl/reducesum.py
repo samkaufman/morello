@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 
 import dataclass_abc
 
+from .. import specs
 from ..specs import Layout
 from ..tensor import Tensor, Tile
 from .actions import TileOutAction
@@ -94,7 +95,7 @@ class ReduceSum(NonAllocatingLeaf):
         layout: Optional[Layout] = None,
         prefetching: bool = False,
         **kwargs,
-    ) -> MoveLet:
+    ) -> "MoveLet":
         if input_idx == 0:
             return common_move(self, "source", bank, layout, prefetching, **kwargs)
         else:

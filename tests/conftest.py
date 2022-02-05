@@ -1,7 +1,7 @@
-from morello import system_config
-from morello.system_config import cpu
-
-
 def pytest_sessionstart(session):
-    # TODO: Ideally, this is set on a per-test/suite basis. No default should be needed.
+    # Import morello inside pytest_sessionstart to make sure it's delayed until after
+    # a potential typeguard injection on the command line (e.g., `--typeguard-packages`)
+    from morello import system_config
+    from morello.system_config import cpu
+
     system_config.set_current_target(cpu.CpuTarget())

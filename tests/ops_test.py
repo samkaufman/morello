@@ -1,11 +1,12 @@
-from typing import Iterable, cast, Optional
+from typing import Iterable, Optional, cast
 
 import hypothesis
 import pytest
 from hypothesis import strategies as st
 
 import morello.impl.utils
-from morello import op_pprint, impl, specs, tensor, dtypes
+from morello import dtypes, impl, op_pprint, specs, tensor
+from morello.impl import Impl
 
 
 def test_dim_range():
@@ -79,6 +80,7 @@ def test_gen_vector_shapes_4():
     ) == [(16,)]
 
 
+@pytest.mark.skip
 @pytest.mark.parametrize(
     "intermed_shapes,dtype,op_mems,expected_peaks,expected_additionals",
     [
@@ -140,7 +142,7 @@ def test_pipeline_peak_and_additional_memory(
 
     pipeline = morello.impl.compose.Pipeline(
         tuple(
-            cast(morello.impl.base.Impl, SubImplStub(m, intermed))
+            cast(Impl, SubImplStub(m, intermed))
             for m, intermed in zip(op_mems, intermediates)
         )
     )
@@ -247,7 +249,7 @@ def test_nested_convs_outputs_constant(
 
 
 @pytest.mark.parametrize(
-    "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
+    "dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"]
 )
 def test_tile_compose_hole_out(dtype):
     img = tensor.Tensor(specs.TensorSpec((8, 8), dtype=dtype), name="image")
@@ -277,8 +279,8 @@ def test_tile_compose_hole_out(dtype):
 
 
 def _walk_actions(
-    op: impl.Impl, depth: int = 1, parents=None, parent_summary=None
-) -> Iterable[impl.Impl]:
+    op: Impl, depth: int = 1, parents=None, parent_summary=None
+) -> Iterable[Impl]:
     if depth == 0:
         return
     if parents is None:
@@ -297,7 +299,7 @@ def _walk_actions(
 
 # TODO: Extend to all Specs, not just a single ComposeHole
 @pytest.mark.parametrize(
-    "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
+    "dtype", [dtypes.Uint8,dtypes.Uint32], ids=["u8", "u32"]
 )
 def test_composehole_actions_change_spec(dtype):
     # This doesn't test for cycles introduced by sequences of more than one

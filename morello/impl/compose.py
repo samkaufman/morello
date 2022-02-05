@@ -2,34 +2,28 @@ import dataclasses
 import functools
 import itertools
 import math
-from typing import TypeVar
-from typing import Union, Callable, Tuple, Iterable, Optional, List
+from typing import Callable, Iterable, List, Optional, Tuple, TypeVar, Union
 
 import dataclass_abc
 import termcolor
 
-from .actions import PeelAction, TileOutAction, SlidingTileOutAction
+from .. import specs, system_config, tiling, utils
+from ..specs import Layout
+from ..system_config import current_target
+from ..tensor import SimpleTile, Tensor, Tile
+from .actions import PeelAction, SlidingTileOutAction, TileOutAction
 from .base import Impl, spec_to_hole
 from .loops import Loop
 from .moves import MoveLet, common_operand_move_actions
 from .pruning import (
     ParentSummary,
-    prune_relayout_cycles,
+    break_matmul_split_symmetries,
     break_moves_symmetries,
     break_tile_out_symmetries,
-    break_matmul_split_symmetries,
+    prune_relayout_cycles,
 )
-from .settings import allow_sliding_windows, allow_reduce_splits
-from .utils import (
-    assert_stable_spec,
-    dim_range,
-    gen_tile_sizes,
-    gen_vector_shapes,
-)
-from .. import specs, system_config, utils, tiling
-from ..specs import Layout
-from ..system_config import current_target
-from ..tensor import Tensor, Tile, SimpleTile
+from .settings import allow_reduce_splits, allow_sliding_windows
+from .utils import assert_stable_spec, dim_range, gen_tile_sizes, gen_vector_shapes
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -219,7 +213,7 @@ class ComposeHole(Impl):
             inner=dataclasses.replace(self, spec=new_inner_spec, output=new_mat),
         )
 
-    def _can_peel(self, bank: str, layout: str, **kwargs) -> bool:
+    def _can_peel(self, bank: str, layout: Layout, **kwargs) -> bool:
         # Check if we can peel by just trying to make the intermediate tensor that peel
         # would make and seeing if we get a ValueError. This isn't a great solution:
         # catching all ValueErrors might become overbroad as the code evolves, and the
