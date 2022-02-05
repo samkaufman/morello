@@ -9,24 +9,30 @@ import multiprocessing
 import os
 import pathlib
 import random
-import socket
+import re
 import sqlite3
 import time
 
 import gspread
+import halide as hl
 import jax
 import jax.lib
 import jax.numpy as jnp
 import numpy as np
+import termcolor
 import torch
 import torch.nn.functional as F
+import tvm
+import tvm.contrib.graph_executor
 from jax import lax
 from jax.tools import jax_to_ir
 from torch import profiler
+from tvm import relay
 
 import morello.impl.actions
 import morello.impl.base
 from morello import cost, dtypes, op_pprint, search, search_cache, specs, system_config
+from morello.benchmarks.toy_cnn import halide as toyhl
 from morello.codegen import gen
 
 RUNS = 5
@@ -34,6 +40,8 @@ SAMPLE_CNT = 100
 DTYPE = dtypes.Uint32
 TORCH_DTYPE_NP = np.int32  # Signed version of DTYPE
 TORCH_DTYPE = torch.int32
+
+RELAY_VERSION_RE = re.compile(r'^\s*#\[version = "[\d\.]+"\]\s*$')
 
 logger = logging.getLogger(__name__)
 
@@ -317,6 +325,8 @@ def benchmark_baseline(
         result["torchscript"] = (end - start) / gen.BENCH_ITERS
 
         if print_graphs:
+            print("")
+            termcolor.cprint("Torch:", attrs=["bold"])
             print(torch.jit.last_executed_optimized_graph())
 
         def jax_conv(i, f):
@@ -380,11 +390,12 @@ def benchmark_baseline(
             torch.int32 == TORCH_DTYPE
         ), "Expected torch.int32, which is inlined into jit_conv"
 
-        @torch.jit.script
         def jit_conv(i, fa, fb):
             return F.conv2d(
                 F.conv2d(i, fa).sum(dim=1, dtype=torch.int32).unsqueeze(0), fb
             )
+
+        jit_conv = torch.jit.trace(jit_conv, (img_t, filters_a_t, filters_b_t))
 
         start = time.time()
         for _ in range(gen.BENCH_ITERS):
@@ -393,7 +404,54 @@ def benchmark_baseline(
         result["torchscript"] = (end - start) / gen.BENCH_ITERS
 
         if print_graphs:
+            print("")
+            termcolor.cprint("Torch:", attrs=["bold"])
             print(torch.jit.last_executed_optimized_graph())
+
+        # PyTorch graph on Relay/TVM
+        shape_list = [
+            ("input", img_t.shape),
+            ("filters_a", filters_a_t.shape),
+            ("filters_b", filters_b_t.shape),
+        ]
+        tvm_target = tvm.target.Target("llvm")
+        relay_mod, relay_params = relay.frontend.from_pytorch(jit_conv, shape_list)
+
+        tvm_mod_text = None
+
+        class PIR(tvm.instrument.PassInstrument):
+            def run_after_pass(self, mod, info):
+                nonlocal tvm_mod_text
+                # Save the Relay module if the result of this pass has a useful
+                # text representation---in particular, it's not *just* something
+                # like '#[version = "0.0.5"]'---and seems to have not yet
+                # stripped the definition of the '@main' function.
+                new_text = mod.astext(show_meta_data=True)
+                if not RELAY_VERSION_RE.match(new_text) and "@main" in new_text:
+                    tvm_mod_text = new_text
+
+        instruments = []
+        if print_graphs:
+            instruments.append(PIR())
+
+        with tvm.transform.PassContext(opt_level=3, instruments=instruments):
+            tvm_lib = relay.build(relay_mod, target=tvm_target, params=relay_params)
+
+        tvm_m = tvm.contrib.graph_executor.GraphModule(tvm_lib["default"](tvm.cpu(0)))
+        tvm_m.set_input("input", img_t)
+        tvm_m.set_input("filters_a", filters_a_t)
+        tvm_m.set_input("filters_b", filters_b_t)
+
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            tvm_m.run()
+        end = time.time()
+        result["relay"] = (end - start) / gen.BENCH_ITERS
+
+        if print_graphs:
+            print("")
+            termcolor.cprint("Relay:", attrs=["bold"])
+            print(tvm_mod_text)
 
         def jax_cnn(i, fa, fb):
             a = lax.conv(i, fa, (1, 1), "VALID")
@@ -412,10 +470,32 @@ def benchmark_baseline(
 
         # Print the *optimized* HLO. (This API is not stable.)
         if print_graphs:
+            print("")
+            termcolor.cprint("JAX:", attrs=["bold"])
             c = jax.xla_computation(jax_cnn_fast)(img, filters_a, filters_b)
             print(
                 jax.lib.xla_bridge.get_backend().compile(c).hlo_modules()[0].to_string()
             )
+
+        # Benchmark a Halide equivalent.
+        img_hl, filters_a_hl, filters_b_hl = (
+            hl.Buffer(img, name="img"),
+            hl.Buffer(filters_a, name="filters_a"),
+            hl.Buffer(filters_b, name="filters_b"),
+        )
+        fn = toyhl.halide_small_cnn(img_hl, filters_a_hl, filters_b_hl)
+        fn = hl.Pipeline(fn)
+        fn.auto_schedule("Adams2019", hl.get_jit_target_from_environment())
+        fn.compile_jit()
+        if print_graphs:
+            fn.print_loop_nest()
+        print(f"output dims: {spec.output.dim_sizes}")
+        start = time.time()
+        for _ in range(gen.BENCH_ITERS):
+            # TODO: Remove the leading (1,) once batching is added.
+            fn.realize((1,) + spec.output.dim_sizes)
+        end = time.time()
+        result["halide (Adams2019)"] = (end - start) / gen.BENCH_ITERS
     else:
         raise ValueError(f"Unrecognized spec: {spec}")
 
@@ -523,7 +603,7 @@ def main():
     # Disable sliding windows, since we can't use them with codegen yet.
     morello.impl.allow_sliding_windows.set(False)
 
-    print("")
+    termcolor.cprint("PyTorch Configuration:", attrs=["bold"])
     print(torch.__config__.show())
 
     start_time = str(datetime.datetime.now())

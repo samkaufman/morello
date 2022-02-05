@@ -13,6 +13,7 @@ frozendict~=2.0
 torch==1.10.1
 jax[cpu]
 gspread
+tvm
 
 # Optionally, use a recent nightly PyTorch build to get access to the private
 # torch._C._select_conv_backend function. (Runtimes matched 1.10.1.)
