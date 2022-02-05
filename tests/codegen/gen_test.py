@@ -15,6 +15,7 @@ import morello.impl.moves
 from morello import dtypes, op_pprint, specs, system_config, tensor
 from morello.codegen import indexexpr
 from morello.system_config import cpu, hexagon
+
 from .. import strategies
 
 CC_DEADLINE = 60 * 1000
@@ -23,7 +24,7 @@ CC_SANITIZE = True
 strategies.register_default_strategies()
 
 
-def test_can_manually_schedule_generate_and_run_matmul_without_raise() -> None:
+def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
     """Manually schedule a Matmul, generate code, compile, and run.
 
     This test's goals are subsumed by the property-based tests in codegen/gen_test.py.
@@ -32,10 +33,10 @@ def test_can_manually_schedule_generate_and_run_matmul_without_raise() -> None:
     target = cpu.CpuTarget()
     with system_config.with_target(target):
         spec = specs.Matmul(
-            target.tensor_spec((16, 4), dtype=dtypes.Uint32),
-            target.tensor_spec((4, 16), dtype=dtypes.Uint32),
-            target.tensor_spec((16, 16), dtype=dtypes.Uint32),
-            serial_only=True,
+            target.tensor_spec((256, 256), dtype=dtypes.Uint32),
+            target.tensor_spec((256, 256), dtype=dtypes.Uint32),
+            target.tensor_spec((256, 256), dtype=dtypes.Uint32),
+            serial_only=False,
         )
         hole = morello.impl.base.spec_to_hole(
             spec,
@@ -43,7 +44,7 @@ def test_can_manually_schedule_generate_and_run_matmul_without_raise() -> None:
             target.tensor(spec.output),
         )
         imp = (
-            hole.tile_out((8, 8))
+            hole.tile_out((8, 8), parallel=True)
             .move_input(0, bank="RF")
             .move_input(1, bank="RF")
             .move_output(bank="RF")

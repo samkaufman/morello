@@ -12,12 +12,12 @@ from typing import Callable, Iterable, Literal, Optional, Union, cast
 
 import sympy
 
-from . import expr_utils, indexexpr
 from .. import impl, specs, tensor, utils
 from ..dtypes import Dtype, Uint8, Uint32
 from ..system_config import hexagon
 from ..system_config.state import current_system
 from ..tensor import Tensor, TensorBase, TensorLike, Tile
+from . import expr_utils, indexexpr
 
 _namer: contextvars.ContextVar["_Namer"] = contextvars.ContextVar("_namer")
 _writer: contextvars.ContextVar["_Writer"] = contextvars.ContextVar("_writer")
@@ -154,6 +154,7 @@ def _emit_tile_out_loop_nest(
     remaining_subscripts: list[int],  # Reduces each step; base case = empty
     op_details: Sequence[_OperandDetailsExt],
     driving_tile_idx: int,
+    parallel: bool,
     inner_codegen: Callable[[Sequence[_OperandDetails]], None],
 ) -> None:
     driving_tile = op_details[driving_tile_idx].operand
@@ -190,6 +191,10 @@ def _emit_tile_out_loop_nest(
             # Emit the loop opener.
             it_var = 0
             if full_steps > 1:
+                if parallel:
+                    # TODO: Rewrite loop to be perfectly nested, then collapse instead
+                    #  of using nested parallelism.
+                    writer.writeline(f"#pragma omp parallel")
                 it_var = namer.fresh_name("t")
                 writer.writeline(
                     f"for (int {it_var} = 0; {it_var} < {full_steps}; {it_var}++) {{"
@@ -210,10 +215,11 @@ def _emit_tile_out_loop_nest(
                     )
                 ],
                 driving_tile_idx,
+                parallel,
                 inner_codegen,
             )
 
-            # Emit loop closer.
+            # Close loop.
             if full_steps > 1:
                 writer.dedent()
                 writer.writeline("}")
@@ -235,6 +241,7 @@ def _emit_tile_out_loop_nest(
                         )
                     ],
                     driving_tile_idx,
+                    parallel,
                     inner_codegen,
                 )
 
@@ -275,6 +282,7 @@ def _emit_tile_out_loop_nest(
                 )
             ],
             driving_tile_idx,
+            parallel,
             inner_codegen,
         )
 
@@ -538,9 +546,6 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
     writer.set_impl(imp)
 
     if isinstance(imp, (impl.Loop, impl.MatmulSplitLoop)):
-        if imp.parallel:
-            warnings.warn("Parallel loops not implemented")
-
         # TODO: Add a comment about why the following is `imp.inner`, not `imp`.
         driving_tile_idx = imp.inner.operands.index(imp.driving_tile)
         _emit_tile_out_loop_nest(
@@ -556,6 +561,7 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
                 )
             ],
             imp.inner.operands.index(imp.driving_tile),
+            imp.parallel,
             inner_codegen=lambda details: _inner_generate_c(imp.inner, details),
         )
     elif isinstance(imp, impl.Pipeline):

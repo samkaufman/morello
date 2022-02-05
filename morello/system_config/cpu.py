@@ -102,7 +102,15 @@ class CpuTarget(Target):
             with open(source_path, mode="w") as fo:
                 fo.write(source_code)
 
-            clang_cmd = [_clang_path(), "-O3", "-o", binary_path, source_path]
+            # TODO: Don't need to link OpenMP if the Impl has no parallel loops.
+            clang_cmd = [
+                _clang_path(),
+                "-fopenmp",
+                "-O3",
+                "-o",
+                binary_path,
+                source_path,
+            ]
             subprocess.run(clang_cmd, check=True)
 
             # Run the compiled binary
@@ -113,6 +121,7 @@ class CpuTarget(Target):
             )
             stdout = binary_result.stdout.decode("utf8")
             stderr = binary_result.stderr.decode("utf8")
+            print(stderr)
             return RunResult(stdout, stderr)
 
     def time_impl(self, impl) -> float:
