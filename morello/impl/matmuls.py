@@ -1,29 +1,29 @@
 import functools
 import warnings
-from typing import Union, Callable, Tuple, Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import dataclass_abc
 
-from .actions import TileOutAction, MatmulSplitAction
-from .base import Impl
-from .loops import MatmulSplitLoop
-from .moves import MoveLet, PadTranspack, common_operand_move_actions, common_move
-from .pruning import (
-    prune_relayout_cycles,
-    break_moves_symmetries,
-    break_tile_out_symmetries,
-    break_matmul_split_symmetries,
-    ParentSummary,
-)
-from .utils import assert_stable_spec, gen_tile_sizes, dim_range
-from .. import specs, system_config, dtypes
+from .. import dtypes, specs, system_config
 from ..specs import Layout
 from ..system_config import current_target
 from ..tensor import Tensor, Tile
+from .actions import MatmulSplitAction, TileOutAction
+from .base import Impl, NonAllocatingLeaf
+from .loops import MatmulSplitLoop
+from .moves import MoveLet, PadTranspack, common_move, common_operand_move_actions
+from .pruning import (
+    ParentSummary,
+    break_matmul_split_symmetries,
+    break_moves_symmetries,
+    break_tile_out_symmetries,
+    prune_relayout_cycles,
+)
+from .utils import assert_stable_spec, dim_range, gen_tile_sizes
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
-class MatmulBase(Impl):
+class MatmulBase(NonAllocatingLeaf):
     lhs: Union[Tensor, Tile]  # n-by-m
     rhs: Union[Tensor, Tile]  # m-by-p
     output: Union[Tensor, Tile]  # m-by-n
@@ -55,20 +55,6 @@ class MatmulBase(Impl):
             f"{name_tensor_fn(self.output)})"
         )
 
-    @property
-    def children(self) -> Tuple["Impl", ...]:
-        return tuple()
-
-    @assert_stable_spec
-    def replace_children(self, replacements: Iterable[Impl]) -> Impl:
-        replacements = list(replacements)
-        if replacements:
-            raise Exception("Matmul has no children to replace")
-        return self
-
-    @property
-    def peak_memory(self) -> dict[str, int]:
-        return {k: 0 for k in system_config.current_system().banks}
 
     def replace_io(
         self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
@@ -216,10 +202,6 @@ class MatmulHole(MatmulBase):
     def place_hvx_vrmpyacc(self) -> "HvxVrmpyaccVuwVubRub":
         return HvxVrmpyaccVuwVubRub(self.lhs, self.rhs, self.output, self.serial_only)
 
-    @property
-    def additional_memories(self) -> list[dict[str, int]]:
-        return [{k: 0 for k in system_config.current_system().banks}]
-
 
 @dataclass_abc.dataclass_abc(frozen=True)
 class MatmulLeaf(MatmulBase):
@@ -255,9 +237,6 @@ class MatmulLeaf(MatmulBase):
     ) -> "MoveLet":
         raise NotImplementedError()
 
-    @property
-    def additional_memories(self) -> list[dict[str, int]]:
-        return []
 
 
 @dataclass_abc.dataclass_abc(frozen=True)

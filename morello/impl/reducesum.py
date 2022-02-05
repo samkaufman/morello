@@ -1,27 +1,29 @@
 import functools
-from typing import Union, Tuple, Callable, Optional, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 
 import dataclass_abc
 
-from .actions import TileOutAction
-from .base import Impl
-from .loops import Loop
-from .moves import common_operand_move_actions, common_move
-from .pruning import (
-    ParentSummary,
-    prune_relayout_cycles,
-    break_moves_symmetries,
-    break_tile_out_symmetries,
-)
-from .settings import allow_reduce_splits
-from .utils import gen_tile_sizes, assert_stable_spec, dim_range
-from .. import specs, system_config
 from ..specs import Layout
 from ..tensor import Tensor, Tile
+from .actions import TileOutAction
+from .base import Impl, NonAllocatingLeaf
+from .loops import Loop
+from .moves import common_move, common_operand_move_actions
+from .pruning import (
+    ParentSummary,
+    break_moves_symmetries,
+    break_tile_out_symmetries,
+    prune_relayout_cycles,
+)
+from .settings import allow_reduce_splits
+from .utils import assert_stable_spec, dim_range, gen_tile_sizes
+
+if TYPE_CHECKING:
+    from .moves import MoveLet
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
-class ReduceSum(Impl):
+class ReduceSum(NonAllocatingLeaf):
     source: Union[Tensor, Tile]
     "The tensor to reduce."
     output: Union[Tensor, Tile]
@@ -34,10 +36,6 @@ class ReduceSum(Impl):
     @property
     def inputs(self):
         return (self.source,)
-
-    @property
-    def children(self) -> Tuple["Impl", ...]:
-        return tuple()
 
     def env_str(
         self,
@@ -96,7 +94,7 @@ class ReduceSum(Impl):
         layout: Optional[Layout] = None,
         prefetching: bool = False,
         **kwargs,
-    ) -> "impl.MoveLet":
+    ) -> MoveLet:
         if input_idx == 0:
             return common_move(self, "source", bank, layout, prefetching, **kwargs)
         else:
@@ -142,12 +140,6 @@ class ReduceSum(Impl):
 
         return self
 
-    @assert_stable_spec
-    def replace_children(self, replacements: Iterable[Impl]) -> Impl:
-        if replacements:
-            raise Exception("Reduce has no children to replace")
-        return self
-
     def replace_io(
         self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
     ) -> "Impl":
@@ -155,11 +147,3 @@ class ReduceSum(Impl):
         if len(inputs) != 1:
             raise ValueError("Expected 1 input")
         return ReduceSum(inputs[0], output, serial_only=self.serial_only)
-
-    @property
-    def additional_memories(self) -> list[dict[str, int]]:
-        return [{k: 0 for k in system_config.current_system().banks}]
-
-    @property
-    def peak_memory(self) -> dict[str, int]:
-        return {k: 0 for k in system_config.current_system().banks}

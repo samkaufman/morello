@@ -6,7 +6,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union, ca
 from morello import specs, tiling
 
 from ..specs import Layout
-from ..system_config import current_target
+from ..system_config import current_system, current_target
 from ..tensor import SimpleTile, Tensor, TensorLike, Tile
 from .pruning import ParentSummary
 from .utils import assert_stable_spec
@@ -377,6 +377,37 @@ class Impl(abc.ABC):
     @abc.abstractmethod
     def peak_memory(self) -> dict[str, int]:
         raise NotImplementedError()
+
+
+class Leaf(Impl):
+    """A helper base class for Impls that have no children (i.e., are leaves)."""
+
+    @property
+    def children(self) -> tuple[Impl, ...]:
+        return tuple()
+
+    def replace_children(self, replacements: Iterable[Impl]) -> Impl:
+        try:
+            next(iter(replacements))
+        except StopIteration:
+            return self
+        else:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not have children, "
+                "but was given a non-empty iterable"
+            )
+
+
+class NonAllocatingLeaf(Leaf):
+    """A helper base class for leaf Impls that do not allocate memory."""
+
+    @property
+    def additional_memories(self) -> list[dict[str, int]]:
+        return []
+
+    @property
+    def peak_memory(self) -> dict[str, int]:
+        return {k: 0 for k in current_system().banks}
 
 
 def spec_to_hole(

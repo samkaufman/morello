@@ -1,30 +1,30 @@
 import functools
 import itertools
-from typing import Union, Tuple, Callable, Optional, Iterable
+from typing import Callable, Iterable, Optional, Tuple, Union
 
 import dataclass_abc
 
-from .actions import TileOutAction, SlidingTileOutAction
-from .base import Impl
-from .moves import _move_arguments, common_operand_move_actions, common_move
-from .pruning import (
-    ParentSummary,
-    prune_relayout_cycles,
-    break_moves_symmetries,
-    break_tile_out_symmetries,
-)
-from .settings import allow_sliding_windows
-from .utils import assert_stable_spec, gen_tile_sizes, dim_range
 from .. import specs, system_config
 from ..specs import Layout
 from ..tensor import Tensor, Tile
+from .actions import SlidingTileOutAction, TileOutAction
+from .base import Impl, NonAllocatingLeaf
+from .moves import _move_arguments, common_move, common_operand_move_actions
+from .pruning import (
+    ParentSummary,
+    break_moves_symmetries,
+    break_tile_out_symmetries,
+    prune_relayout_cycles,
+)
+from .settings import allow_sliding_windows
+from .utils import assert_stable_spec, dim_range, gen_tile_sizes
 
 _directconv_tile_out_params_cache = {}
 _directconv_sliding_tile_out_params_cache = {}
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
-class DirectConv(Impl):
+class DirectConv(NonAllocatingLeaf):
     """A stride-1, no-padding convolution over a single-channel 2-D image."""
 
     # TODO: Add support for multi-channel images
@@ -43,8 +43,8 @@ class DirectConv(Impl):
         if len(self.rhs.dim_sizes) != 3:
             raise ValueError("rhs is not a rank-3 tensor")
         if (
-            self.image_width < self.kernel_width
-            or self.image_height < self.kernel_height
+            self.lhs.dim_sizes[1] < self.rhs.dim_sizes[1]
+            or self.lhs.dim_sizes[0] < self.rhs.dim_sizes[0]
         ):
             raise Exception("Image too small to apply a filter without padding")
         # Check output shape
@@ -55,10 +55,6 @@ class DirectConv(Impl):
         )
 
     @property
-    def children(self) -> Tuple["Impl", ...]:
-        return tuple()
-
-    @property
     def inputs(self):
         return self.lhs, self.rhs
 
@@ -67,26 +63,6 @@ class DirectConv(Impl):
         return specs.Convolution(
             self.lhs.spec, self.rhs.spec, self.output.spec, self.serial_only
         )
-
-    @property
-    def image_height(self):
-        return self.lhs.dim_sizes[0]
-
-    @property
-    def image_width(self):
-        return self.lhs.dim_sizes[1]
-
-    @property
-    def kernel_height(self):
-        return self.rhs.dim_sizes[0]
-
-    @property
-    def kernel_width(self):
-        return self.rhs.dim_sizes[1]
-
-    @property
-    def kernel_count(self):
-        return self.rhs.dim_sizes[2]
 
     def env_str(
         self,
@@ -234,28 +210,11 @@ class DirectConv(Impl):
 
         yield from common_operand_move_actions(self)
 
-    @assert_stable_spec
-    def replace_children(self, replacements: Iterable[Impl]) -> Impl:
-        r = list(replacements)
-        if r:
-            raise ValueError(
-                f"DirectConv has no children, but given {len(r)} replacements"
-            )
-        return self
-
     def replace_io(
         self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
     ) -> "Impl":
         lhs, rhs = inputs
         return DirectConv(lhs, rhs, output, serial_only=self.serial_only)
-
-    @property
-    def additional_memories(self) -> list[dict[str, int]]:
-        return [{k: 0 for k in system_config.current_system().banks}]
-
-    @property
-    def peak_memory(self) -> dict[str, int]:
-        return {k: 0 for k in system_config.current_system().banks}
 
     def __str__(self) -> str:
         epi = ", serial" if self.serial_only else ""
