@@ -334,7 +334,7 @@ def _calculator_to_test(spec_st):
                     .flatmap(_arb_zip_values_for_impl)
                 )
                 _test_impl(impl, inp_values, calc_fn)
-                return wrapper
+        return wrapper
 
     return decorator_wrapper
 
