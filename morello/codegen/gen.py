@@ -194,7 +194,8 @@ def _emit_tile_out_loop_nest(
                 if parallel:
                     # TODO: Rewrite loop to be perfectly nested, then collapse instead
                     #  of using nested parallelism.
-                    writer.writeline(f"#pragma omp parallel")
+                    # writer.writeline(f"#pragma omp parallel")
+                    warnings.warn("Parallel loop generation disabled.")
                 it_var = namer.fresh_name("t")
                 writer.writeline(
                     f"for (int {it_var} = 0; {it_var} < {full_steps}; {it_var}++) {{"

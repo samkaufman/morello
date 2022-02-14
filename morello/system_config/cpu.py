@@ -121,7 +121,6 @@ class CpuTarget(Target):
             )
             stdout = binary_result.stdout.decode("utf8")
             stderr = binary_result.stderr.decode("utf8")
-            print(stderr)
             return RunResult(stdout, stderr)
 
     def time_impl(self, impl) -> float:
