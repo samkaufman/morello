@@ -96,7 +96,7 @@ def make_matmul_spec(d: int) -> specs.Matmul:
         target.tensor_spec((d, d), dtype=DTYPE),
         target.tensor_spec((d, d), dtype=DTYPE),
         target.tensor_spec((d, d), dtype=DTYPE),
-        serial_only=True,
+        serial_only=False,
     )
 
 
@@ -111,7 +111,7 @@ def make_gemm3_spec(d: int) -> specs.Spec:
         ),
         output=target.tensor_spec((d, d), dtype=DTYPE),
         intermediate_dtypes=(DTYPE,),
-        serial_only=True,
+        serial_only=False,
     )
 
 
@@ -125,7 +125,7 @@ def make_conv_spec(d: int) -> specs.Convolution:
         target.tensor_spec((d, d), dtype=DTYPE),
         target.tensor_spec((fh, fw, fc), dtype=DTYPE),
         output=target.tensor_spec((out_h, out_w, fc), dtype=DTYPE),
-        serial_only=True,
+        serial_only=False,
     )
 
 
@@ -141,7 +141,7 @@ def make_cnn_spec(d: int) -> specs.Spec:
         (filters_b, img, filters_a),
         output,
         intermediate_dtypes=(DTYPE, DTYPE),
-        serial_only=True,
+        serial_only=False,
     )
 
 
