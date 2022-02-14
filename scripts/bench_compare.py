@@ -11,6 +11,7 @@ import pathlib
 import random
 import re
 import sqlite3
+import tempfile
 import time
 
 import gspread
@@ -488,7 +489,17 @@ def benchmark_baseline(
         fn.auto_schedule("Adams2019", hl.get_jit_target_from_environment())
         fn.compile_jit()
         if print_graphs:
+            print("")
+            print("Halide: Basic Loop Nest")
             fn.print_loop_nest()
+            print("")
+            print("Halide: Detailed")
+            with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as t:
+                fn.compile_to_lowered_stmt(t.name, [], format=hl.StmtOutputFormat.Text)
+            with open(t.name, "r") as fo:
+                print(t.name)
+                print(fo.read())
+        print("")
         print(f"output dims: {spec.output.dim_sizes}")
         start = time.time()
         for _ in range(gen.BENCH_ITERS):
