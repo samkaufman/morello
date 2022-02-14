@@ -901,26 +901,26 @@ def _pipeline_emit_stage(
 
 
 def _emit_hvx_l2fetch(
-    impl: impl.MoveLet, is_store: bool, source_operand: _OperandDetails
+    imp: impl.MoveLet, is_store: bool, source_operand: _OperandDetails
 ) -> None:
-    assert isinstance(impl, impl.MoveLet)
+    assert isinstance(imp, impl.MoveLet)
 
     writer = _writer.get()
 
     # TODO: Assert we're *not* in a boundary loop
-    assert not impl.is_store
-    if not impl.prefetching:
+    assert not imp.is_store
+    if not imp.prefetching:
         warnings.warn("l2fetch prefetching not implemented")
 
-    if impl.destination.layout == specs.Layout.HEXAGON_TRANSPACKED:
-        if len(impl.destination.dim_sizes) != 2:
+    if imp.destination.layout == specs.Layout.HEXAGON_TRANSPACKED:
+        if len(imp.destination.dim_sizes) != 2:
             warnings.warn("Not emitting l2fetch for transpacked, non-rank-2 tensor")
             return
-        h, w = impl.destination.dim_sizes
+        h, w = imp.destination.dim_sizes
         assert h % 4 == 0 and w % 32 == 0, f"Unexpected shape: {h}-by-{w}"
 
         # Compute the *packed* logical width
-        outer_w = impl.source.address_root.dim_sizes[1]
+        outer_w = imp.source.address_root.dim_sizes[1]
         outer_w = outer_w % -16
 
         # Set `w`, `h`, and `outer_w` to correspond to underlying memory layout.
@@ -931,12 +931,12 @@ def _emit_hvx_l2fetch(
     else:
         # Swap w and h if column-major.
         # TODO: Add test for following parameter choices.
-        lod = utils.layout_ordered_dims(impl.destination)
+        lod = utils.layout_ordered_dims(imp.destination)
         head, w = lod[:-1], lod[-1]
         h = functools.reduce(operator.mul, head, 1)
         assert w < 256, f"Maximum size of l2fetch is 255; tile width is: {w}"
         assert h < 256, f"Maximum size of l2fetch is 255; tile height is: {h}"
-        outer_w = utils.layout_ordered_dims(impl.source.address_root)[1]
+        outer_w = utils.layout_ordered_dims(imp.source.address_root)[1]
 
     stride = outer_w
     assert stride < 65536
@@ -950,7 +950,7 @@ def _emit_hvx_l2fetch(
 
 
 def _emit_hvx_dcfetch(
-    impl: impl.MoveLet, source: TensorLike, source_operand: _OperandDetails
+    imp: impl.MoveLet, source: TensorLike, source_operand: _OperandDetails
 ) -> None:
     writer = _writer.get()
 
@@ -958,7 +958,7 @@ def _emit_hvx_dcfetch(
         # TODO: Add support for HEXAGON_TRANSPACKED.
         raise NotImplementedError("dcfetch doesn't support HEXAGON_TRANSPACKED")
 
-    if not impl.prefetching:
+    if not imp.prefetching:
         warnings.warn("dcfetch prefetching not implemented")
     # TODO: Assert we're *not* in a boundary loop
 

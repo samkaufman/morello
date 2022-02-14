@@ -319,10 +319,6 @@ class Compose(Spec):
             serial_only=serial_only,
         )
 
-    @property
-    def operands(self) -> Tuple[TensorSpec, ...]:
-        return self.inputs + (self.output,)
-
     @typing.final
     @property
     def intermediate_shapes(self) -> tuple[tuple[int, ...], ...]:
@@ -560,10 +556,6 @@ class Matmul(Spec):
     ) -> "Matmul":
         lhs, rhs = inputs
         return Matmul(lhs, rhs, output, serial_only=serial_only)
-
-    @property
-    def operands(self) -> Tuple[TensorSpec, ...]:
-        return self.lhs, self.rhs, self.output
 
     @property
     def inputs(self) -> Tuple[TensorSpec, ...]:
