@@ -642,8 +642,7 @@ class Convolution(Spec):
         # The following is important enough that we don't want it disabled with
         # the interpreter's -O flag, so raise a ValueError rather than assert.
         expected_output_shape = self.output_shape(
-            cast(Tuple[int, int], self.lhs.dim_sizes),
-            cast(Tuple[int, int, int], self.rhs.dim_sizes),
+            self.lhs.dim_sizes, self.rhs.dim_sizes
         )
         if self.output.dim_sizes != expected_output_shape:
             raise ValueError(
@@ -665,12 +664,13 @@ class Convolution(Spec):
     # TODO: Merge with calculate_output_shape
     @staticmethod
     def output_shape(
-        image_shape: Tuple[int, int], filters_shape: Tuple[int, int, int]
-    ) -> Tuple[int, ...]:
-        return (
-            1 + image_shape[0] - filters_shape[0],
-            1 + image_shape[1] - filters_shape[1],
-            filters_shape[2],
+        image_shape: tuple[int, ...], filters_shape: tuple[int, ...]
+    ) -> tuple[int, ...]:
+        batch_size, channels = image_shape[:2]
+        filters_count, c_ = filters_shape[:2]
+        assert channels == c_
+        return (batch_size, filters_count) + tuple(
+            1 + i - f for i, f in zip(image_shape[2:], filters_shape[2:])
         )
 
     def shrink_for_tile_out(
@@ -696,15 +696,17 @@ class Convolution(Spec):
 
     @classmethod
     def calculate_output_shape_cls(
-        cls, input_shapes: Iterable[Tuple[int, ...]]
+        cls, input_shapes: Iterable[tuple[int, ...]]
     ) -> Tuple[int, ...]:
         lhs, rhs = input_shapes
-        img_height, img_width = lhs
-        kernel_height, kernel_width, filter_count = rhs
+        batch_count, channels, img_height, img_width = lhs
+        filter_count, channels_, kernel_height, kernel_width = rhs
+        assert channels == channels_
         return (
+            batch_count,
+            filter_count,
             1 + img_height - kernel_height,
             1 + img_width - kernel_width,
-            filter_count,
         )
 
     @classmethod

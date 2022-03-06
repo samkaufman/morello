@@ -38,21 +38,8 @@ class DirectConv(NonAllocatingLeaf):
     serial_only: bool
 
     def __post_init__(self):
-        if len(self.lhs.dim_sizes) != 2:
-            raise ValueError("lhs is not a matrix")
-        if len(self.rhs.dim_sizes) != 3:
-            raise ValueError("rhs is not a rank-3 tensor")
-        if (
-            self.lhs.dim_sizes[1] < self.rhs.dim_sizes[1]
-            or self.lhs.dim_sizes[0] < self.rhs.dim_sizes[0]
-        ):
-            raise Exception("Image too small to apply a filter without padding")
-        # Check output shape
-        assert self.output.dim_sizes == (
-            1 + self.lhs.dim_sizes[0] - self.rhs.dim_sizes[0],
-            1 + self.lhs.dim_sizes[1] - self.rhs.dim_sizes[1],
-            self.rhs.dim_sizes[2],
-        )
+        # Construct the Spec so that any errors get thrown early.
+        self.spec
 
     @property
     def inputs(self):

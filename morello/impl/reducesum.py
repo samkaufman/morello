@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 
 import dataclass_abc
 
-from .. import specs
+from .. import specs, system_config
 from ..specs import Layout
 from ..tensor import Tensor, Tile
 from .actions import TileOutAction
@@ -115,9 +115,10 @@ class ReduceSum(NonAllocatingLeaf):
         if k == self.source.dim_sizes[-1]:
             return self
         source_tile = self.source.simple_tile(self.source.dim_sizes[:-1] + (k,))
+        driving_subscript = self.spec.operands_dim_subscripts()[0][-1]
         return Loop(
-            driving_tile=source_tile,
-            dependent_tiles=frozenset(),
+            subscripts=(driving_subscript,),
+            tiles=frozenset([source_tile]),
             inner=ReduceSum(
                 source=source_tile, output=self.output, serial_only=self.serial_only
             ),

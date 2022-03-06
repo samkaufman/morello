@@ -1,3 +1,8 @@
+import hypothesis
+
+hypothesis.settings.register_profile("ci", max_examples=10000)
+
+
 def pytest_sessionstart(session):
     # Import morello inside pytest_sessionstart to make sure it's delayed until after
     # a potential typeguard injection on the command line (e.g., `--typeguard-packages`)

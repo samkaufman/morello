@@ -200,6 +200,7 @@ def test_evenly_divisible_matmul_tiling():
     assert schedule.inner.lhs.dim_sizes[1] == 4
 
 
+@hypothesis.settings(deadline=10 * 1000)
 @hypothesis.given(
     st.integers(min_value=1, max_value=11),
     st.integers(min_value=1, max_value=11),
@@ -248,14 +249,16 @@ def test_nested_convs_outputs_constant(
     assert tiled_schedule_b.output.dim_sizes[1] == expected_output_width
 
 
-@pytest.mark.parametrize(
-    "dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"]
-)
+@pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 def test_tile_compose_hole_out(dtype):
-    img = tensor.Tensor(specs.TensorSpec((8, 8), dtype=dtype), name="image")
-    filters_a = tensor.Tensor(specs.TensorSpec((3, 3, 4), dtype=dtype), name="filtersA")
-    filters_b = tensor.Tensor(specs.TensorSpec((3, 3, 4), dtype=dtype), name="filtersB")
-    output = tensor.Tensor(specs.TensorSpec((4, 4, 4), dtype=dtype), name="output")
+    img = tensor.Tensor(specs.TensorSpec((2, 3, 8, 8), dtype=dtype), name="image")
+    filters_a = tensor.Tensor(
+        specs.TensorSpec((4, 3, 3, 3), dtype=dtype), name="filtersA"
+    )
+    filters_b = tensor.Tensor(
+        specs.TensorSpec((4, 3, 3, 3), dtype=dtype), name="filtersB"
+    )
+    output = tensor.Tensor(specs.TensorSpec((2, 4, 4, 4), dtype=dtype), name="output")
 
     compose_spec = specs.Compose(
         (specs.Convolution, specs.ReduceSum, specs.Convolution),
@@ -270,11 +273,11 @@ def test_tile_compose_hole_out(dtype):
         inputs=(filters_b, img, filters_a),
         output=output,
     )
-    tiled_compose = compose_hole.tile_out((2, 2, 4))
+    tiled_compose = compose_hole.tile_out((1, 4, 2, 2))
     assert isinstance(tiled_compose, impl.Loop)
     assert tiled_compose.spec == compose_spec
     assert isinstance(tiled_compose.inner, impl.ComposeHole)
-    assert tiled_compose.inner.output.dim_sizes == (2, 2, 4)
+    assert tiled_compose.inner.output.dim_sizes == (1, 4, 2, 2)
     # TODO: Add checks for intermediate shape correctness
 
 
@@ -298,26 +301,24 @@ def _walk_actions(
 
 
 # TODO: Extend to all Specs, not just a single ComposeHole
-@pytest.mark.parametrize(
-    "dtype", [dtypes.Uint8,dtypes.Uint32], ids=["u8", "u32"]
-)
+@pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 def test_composehole_actions_change_spec(dtype):
     # This doesn't test for cycles introduced by sequences of more than one
     # action, but it makes sure that at least every individual step changes the
     # spec.
-    img = tensor.Tensor(specs.TensorSpec((8, 8), dtype=dtype), name="image")
+    img = tensor.Tensor(specs.TensorSpec((2, 3, 8, 8), dtype=dtype), name="image")
     filters_a = tensor.Tensor(
-        specs.TensorSpec((3, 3, 10), dtype=dtype), name="filtersA"
+        specs.TensorSpec((7, 3, 3, 3), dtype=dtype), name="filtersA"
     )
     filters_b = tensor.Tensor(
-        specs.TensorSpec((3, 3, 10), dtype=dtype), name="filtersB"
+        specs.TensorSpec((6, 7, 3, 3), dtype=dtype), name="filtersB"
     )
-    output = tensor.Tensor(specs.TensorSpec((4, 4, 10), dtype=dtype), name="output")
+    output = tensor.Tensor(specs.TensorSpec((2, 6, 4, 4), dtype=dtype), name="output")
     initial_spec = specs.Compose(
-        (specs.Convolution, specs.ReduceSum, specs.Convolution),
+        (specs.Convolution, specs.Convolution),
         (filters_b.spec, img.spec, filters_a.spec),
         output.spec,
-        intermediate_dtypes=(dtype, dtype),
+        intermediate_dtypes=(dtype,),
         serial_only=False,
     )
     initial_op = morello.impl.compose.ComposeHole(

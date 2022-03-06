@@ -103,23 +103,16 @@ class _TilingMixin:
 
 @dataclass_abc.dataclass_abc(frozen=False, unsafe_hash=True, eq=True)
 class Loop(Impl):
-    driving_tile: Tile
-    dependent_tiles: frozenset[Tile]
+    """Iterate over subscripts of the inner Impl's operand tiles."""
+
+    subscripts: tuple[int]
+    tiles: frozenset[Tile]
     inner: Impl
     parallel: bool
 
     def __post_init__(self):
-        assert isinstance(self.driving_tile, Tile)
-        assert all(isinstance(t, Tile) for t in self.dependent_tiles)
-        if not self.tiles:
-            raise ValueError("tiles is empty")
-        # TODO: Assert that all tiles are used by inner's inputs or output
         if self.parallel and not self.inner.spec.serial_only:
             raise ValueError("Parallel loop's child must be serial only")
-
-    @functools.cached_property
-    def tiles(self) -> frozenset[Tile]:
-        return frozenset([self.driving_tile]) | self.dependent_tiles
 
     @functools.cached_property
     def spec(self) -> specs.Spec:
@@ -165,12 +158,11 @@ class Loop(Impl):
             istr = f", {self.inner.env_str(name_tensor_fn, fancy=fancy)})"
 
         left_strs, right_strs = [], []
-        for tile_set in [self.dependent_tiles, {self.driving_tile}]:
-            for it in sorted(tile_set, key=str):
-                left_strs.append(
-                    _loop_operand_str(it, name_tensor_fn=name_tensor_fn, fancy=fancy)
-                )
-                right_strs.append(name_tensor_fn(it.origin))
+        for it in sorted(self.tiles, key=str):
+            left_strs.append(
+                _loop_operand_str(it, name_tensor_fn=name_tensor_fn, fancy=fancy)
+            )
+            right_strs.append(name_tensor_fn(it.origin))
         assert left_strs and right_strs
 
         keyword = "tile"
@@ -187,21 +179,51 @@ class Loop(Impl):
 
     @property
     def steps(self) -> int:
-        return self.driving_tile.steps
+        val = 1
+        for s in self.subscripts:
+            val *= self.steps_subscript(s)
+        return val
 
     def steps_subscript(
         self, subscript, concrete_outer_size: Optional[int] = None
     ) -> int:
-        driving_tile_idx = self.inner.operands.index(self.driving_tile)
-        dim = self.spec.operands_dim_subscripts()[driving_tile_idx].index(subscript)
-        return self.driving_tile.steps_dim(dim, concrete_outer_size)
+        return self._apply_to_subscripts(
+            lambda t: t.steps_dim, subscript, concrete_outer_size
+        )
 
     def boundary_size(
         self, subscript, concrete_outer_size: Optional[int] = None
     ) -> int:
-        driving_tile_idx = self.inner.operands.index(self.driving_tile)
-        dim = self.spec.operands_dim_subscripts()[driving_tile_idx].index(subscript)
-        return self.driving_tile.boundary_size(dim, concrete_outer_size)
+        return self._apply_to_subscripts(
+            lambda t: t.boundary_size, subscript, concrete_outer_size
+        )
+
+    def _apply_to_subscripts(self, fn, subscript, *args) -> int:
+        """Apply `fn` to a dimension matching the given subscript.
+
+        `fn` will be called once on the tile and the return value will be called
+        with the dimension and any provided additional arguments.
+
+        It may be called multiple times on multiple tiles and/or multiple
+        dimensions to check that the results match.
+        """
+        # TODO: Raise a warning if the given subscript is not one over which
+        #  this loop iterates.
+
+        value: Optional[int] = None
+        for tile, subs in zip(self.inner.operands, self.spec.operands_dim_subscripts()):
+            if not isinstance(tile, Tile):
+                continue
+            for dim, sub in enumerate(subs):
+                if sub == subscript:
+                    if value is None:
+                        value = fn(tile)(dim, *args)
+                    assert value == fn(tile)(dim, *args)
+
+        if value is None:
+            raise ValueError(f"No subscript {subscript} found among tiles")
+
+        return value
 
     @property
     def additional_memories(self) -> list[dict[str, int]]:

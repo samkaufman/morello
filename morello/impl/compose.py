@@ -10,7 +10,7 @@ import termcolor
 from .. import specs, system_config, tiling, utils
 from ..specs import Layout
 from ..system_config import current_target
-from ..tensor import SimpleTile, Tensor, Tile
+from ..tensor import SimpleTile, Tensor, TensorLike, Tile
 from .actions import PeelAction, SlidingTileOutAction, TileOutAction
 from .base import Impl, spec_to_hole
 from .loops import Loop
@@ -329,8 +329,9 @@ class ComposeHole(Impl):
 
         # Construct the spec for the smaller ComposeHole
         return Loop(
-            driving_tile=shrunken_output_tile,
-            dependent_tiles=frozenset(self._filter_unchanged_inputs(reified_inputs)),
+            subscripts=self.spec.operands_dim_subscripts()[-1],
+            tiles=frozenset([shrunken_output_tile])
+            | frozenset(t for _, t in self._filter_unchanged_inputs(reified_inputs)),
             inner=ComposeHole(
                 specs.Compose(
                     subspec_classes=self.spec.subspec_classes,
@@ -391,17 +392,18 @@ class ComposeHole(Impl):
 
         filtered_reified_inputs = list(self._filter_unchanged_inputs(reified_inputs))
 
-        # Select the driving tile by just selecting the inputs with the expected number
+        # Select the tile from which we'll grab the subscripts (i.e., the
+        # driving tile) by just selecting the inputs with the expected number
         # of steps.
-        # TODO: This is extremely ad-hoc. We need a solution for arbitrary accumulating
-        #  loops. Fix this.
+        # TODO: This is extremely ad-hoc. We need a solution for arbitrary
+        #  accumulating loops. Fix this.
         expected_steps = math.ceil(orig_reduce_input_shape[-1] / k)
-        driving_tile = None
-        for inp in filtered_reified_inputs:
+        driving_subs = None
+        for inp_idx, inp in filtered_reified_inputs:
             if inp.steps == expected_steps:
-                driving_tile = inp
+                driving_subs = self.spec.operands_dim_subscripts()[inp_idx]
                 break
-        assert driving_tile, f"No tile had expected number of steps: {expected_steps}"
+        assert driving_subs, f"No tile had expected number of steps: {expected_steps}"
 
         # Build the loop
         new_inner = ComposeHole(
@@ -416,20 +418,19 @@ class ComposeHole(Impl):
             output=self.output,
         )
         return Loop(
-            driving_tile=driving_tile,
-            dependent_tiles=frozenset(
-                t for t in filtered_reified_inputs if t is not driving_tile
-            ),
+            subscripts=driving_subs,
+            tiles=frozenset(t for _, t in filtered_reified_inputs),
             inner=new_inner,
             parallel=parallel,
         )
 
     def _filter_unchanged_inputs(
-        self, source: Iterable[Union[Tensor, Tile]]
-    ) -> Iterable[Union[Tensor, Tile]]:
-        for original_input, tiled_input in zip(self.inputs, source):
+        self, source: Iterable[TensorLike]
+    ) -> Iterable[tuple[int, TensorLike]]:
+        """Return given tensors different from self's corresponding inputs."""
+        for idx, (original_input, tiled_input) in enumerate(zip(self.inputs, source)):
             if original_input != tiled_input:
-                yield tiled_input
+                yield idx, tiled_input
 
     def _calculate_partial_inputs_for_tile_out(
         self,

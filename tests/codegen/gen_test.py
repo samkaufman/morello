@@ -194,6 +194,8 @@ def _arb_reduce_conv_spec(draw):
     target = system_config.current_target()
 
     dtype = draw(st.from_type(dtypes.Dtype))
+    batch_count = draw(st.integers(min_value=1, max_value=9))
+    channels = draw(st.integers(min_value=1, max_value=9))
     inp_h = draw(st.integers(min_value=1, max_value=9))
     inp_w = draw(st.integers(min_value=1, max_value=9))
     fh = draw(st.integers(min_value=1, max_value=inp_h))
@@ -204,10 +206,10 @@ def _arb_reduce_conv_spec(draw):
     return specs.Compose(
         (specs.ReduceSum, specs.Convolution),
         inputs=(
-            target.tensor_spec((inp_h, inp_w), dtype=dtype),
-            target.tensor_spec((fh, fw, fc), dtype=dtype),
+            target.tensor_spec((batch_count, channels, inp_h, inp_w), dtype=dtype),
+            target.tensor_spec((fc, channels, fh, fw), dtype=dtype),
         ),
-        output=target.tensor_spec((out_h, out_w), dtype=dtype),
+        output=target.tensor_spec((batch_count, fc, out_h, out_w), dtype=dtype),
         intermediate_dtypes=(draw(st.from_type(dtypes.Dtype)),),
         serial_only=draw(st.booleans()),
     )
@@ -222,6 +224,8 @@ def _arb_conv_reduce_conv_spec(draw):
     target = system_config.current_target()
 
     dtype = draw(st.from_type(dtypes.Dtype))
+    batch_count = draw(st.integers(min_value=1, max_value=9))
+    channels = draw(st.integers(min_value=1, max_value=9))
     inp_h = draw(st.integers(min_value=1, max_value=9))
     inp_w = draw(st.integers(min_value=1, max_value=9))
     fa_h = draw(st.integers(min_value=1, max_value=inp_h))
@@ -237,11 +241,11 @@ def _arb_conv_reduce_conv_spec(draw):
     return specs.Compose(
         (specs.Convolution, specs.ReduceSum, specs.Convolution),
         inputs=(
-            target.tensor_spec((fb_h, fb_w, fb_c), dtype=dtype),
-            target.tensor_spec((inp_h, inp_w), dtype=dtype),
-            target.tensor_spec((fa_h, fa_w, fa_c), dtype=dtype),
+            target.tensor_spec((fb_c, channels, fb_h, fb_w), dtype=dtype),
+            target.tensor_spec((batch_count, channels, inp_h, inp_w), dtype=dtype),
+            target.tensor_spec((fa_c, channels, fa_h, fa_w), dtype=dtype),
         ),
-        output=target.tensor_spec((out_h, out_w, fb_c), dtype=dtype),
+        output=target.tensor_spec((batch_count, fb_c, out_h, out_w), dtype=dtype),
         intermediate_dtypes=(
             draw(st.from_type(dtypes.Dtype)),
             draw(st.from_type(dtypes.Dtype)),
@@ -335,6 +339,7 @@ def _calculator_to_test(spec_st):
                     .flatmap(_arb_zip_values_for_impl)
                 )
                 _test_impl(impl, inp_values, calc_fn)
+
         return wrapper
 
     return decorator_wrapper

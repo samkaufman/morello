@@ -131,8 +131,8 @@ class Impl(abc.ABC):
         unchanged_input_tiles = frozenset(unchanged_input_tiles)
 
         return Loop(
-            driving_tile=smaller_output,
-            dependent_tiles=frozenset(unchanged_input_tiles),
+            subscripts=self.spec.operands_dim_subscripts()[-1],
+            tiles=frozenset([smaller_output]) | frozenset(unchanged_input_tiles),
             inner=inner,
             parallel=parallel,
         )

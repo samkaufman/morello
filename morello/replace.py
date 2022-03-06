@@ -122,10 +122,8 @@ def _mutating_replace(
         )
     elif type(subject) is impl.loops.Loop:
         return impl.Loop(
-            driving_tile=_mutating_replace(subject.driving_tile, replacements),
-            dependent_tiles=frozenset(
-                _mutating_replace(t, replacements) for t in subject.dependent_tiles
-            ),
+            subscripts=subject.subscripts,
+            tiles=frozenset(_mutating_replace(t, replacements) for t in subject.tiles),
             inner=_mutating_replace(subject.inner, replacements),
             parallel=subject.parallel,
         )

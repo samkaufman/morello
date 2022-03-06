@@ -1,10 +1,10 @@
 import functools
 import itertools
 import operator
-from typing import Iterable, Sequence, Optional, Callable
+from typing import Callable, Iterable, Optional, Sequence
 
+from .. import dtypes, system_config, utils
 from . import settings
-from .. import system_config, dtypes, utils
 
 
 def assert_stable_spec(func):

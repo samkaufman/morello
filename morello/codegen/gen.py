@@ -150,16 +150,30 @@ class _OperandDetailsExt(_OperandDetails):
     operand: TensorLike
 
 
+def _get_concrete_dim_size_from_operands(
+    subscript: int, op_details: Sequence[_OperandDetailsExt]
+) -> int:
+    val = None
+    for details in op_details:
+        for idx, s in enumerate(details.subscripts):
+            if s == subscript:
+                if val is None:
+                    val = details.concrete_origin_shape[idx]
+                assert val == details.concrete_origin_shape[idx], (
+                    f"{val} != {details.concrete_origin_shape[idx]};\n"
+                    f"{subscript};\n{op_details}"
+                )
+    assert val is not None
+    return val
+
+
 def _emit_tile_out_loop_nest(
+    loop: impl.Loop,
     remaining_subscripts: list[int],  # Reduces each step; base case = empty
     op_details: Sequence[_OperandDetailsExt],
-    driving_tile_idx: int,
     parallel: bool,
     inner_codegen: Callable[[Sequence[_OperandDetails]], None],
 ) -> None:
-    driving_tile = op_details[driving_tile_idx].operand
-    assert isinstance(driving_tile, Tile), f"driving_tile was {type(driving_tile)}"
-
     namer, writer = _namer.get(), _writer.get()
 
     # If given no subscripts, jump to generating the body of the loop. This is the base
@@ -169,12 +183,11 @@ def _emit_tile_out_loop_nest(
         return
 
     it_subscript = remaining_subscripts[0]
-    tile_dim = op_details[driving_tile_idx].subscripts.index(it_subscript)
-    concrete_dim_size = op_details[driving_tile_idx].concrete_origin_shape[tile_dim]
+    concrete_dim_size = _get_concrete_dim_size_from_operands(it_subscript, op_details)
+    partial_steps = loop.steps_subscript(it_subscript, concrete_dim_size)
+    has_boundary = loop.boundary_size(it_subscript, concrete_dim_size) > 0
 
-    partial_steps = driving_tile.steps_dim(tile_dim, concrete_dim_size)
-    driving_boundary_size = driving_tile.boundary_size(tile_dim, concrete_dim_size)
-    full_steps = partial_steps - 1 if driving_boundary_size else partial_steps
+    full_steps = partial_steps - 1 if has_boundary else partial_steps
 
     if full_steps:
         main_concrete_sizes: list[tuple[int, ...]] = [
@@ -208,6 +221,7 @@ def _emit_tile_out_loop_nest(
 
             # Recurse to process the remaining iterators
             _emit_tile_out_loop_nest(
+                loop,
                 remaining_subscripts[1:],
                 [
                     _OperandDetailsExt(d.c_tensor, e, s, d.subscripts, d.operand)
@@ -215,7 +229,6 @@ def _emit_tile_out_loop_nest(
                         op_details, full_new_index_exprs, main_concrete_sizes
                     )
                 ],
-                driving_tile_idx,
                 parallel,
                 inner_codegen,
             )
@@ -234,6 +247,7 @@ def _emit_tile_out_loop_nest(
 
                 # Recurse to process the remaining iterators
                 _emit_tile_out_loop_nest(
+                    loop,
                     remaining_subscripts[1:],
                     [
                         _OperandDetailsExt(d.c_tensor, e, s, d.subscripts, d.operand)
@@ -241,13 +255,12 @@ def _emit_tile_out_loop_nest(
                             op_details, full_new_index_exprs, main_concrete_sizes
                         )
                     ],
-                    driving_tile_idx,
                     parallel,
                     inner_codegen,
                 )
 
     # Generate boundary epilogue here
-    if driving_boundary_size:
+    if has_boundary:
         # We don't check _unroll in the boundary case because it is already effectively
         # "unrolled" (it doesn't generate a loop).
         boundary_new_index_exprs = _update_index_exprs(
@@ -275,6 +288,7 @@ def _emit_tile_out_loop_nest(
             boundary_concrete_shapes.append(tuple(orig_concrete_shape))
 
         _emit_tile_out_loop_nest(
+            loop,
             remaining_subscripts[1:],
             [
                 _OperandDetailsExt(d.c_tensor, e, s, d.subscripts, d.operand)
@@ -282,7 +296,6 @@ def _emit_tile_out_loop_nest(
                     op_details, boundary_new_index_exprs, boundary_concrete_shapes
                 )
             ],
-            driving_tile_idx,
             parallel,
             inner_codegen,
         )
@@ -548,9 +561,9 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
 
     if isinstance(imp, (impl.Loop, impl.MatmulSplitLoop)):
         # TODO: Add a comment about why the following is `imp.inner`, not `imp`.
-        driving_tile_idx = imp.inner.operands.index(imp.driving_tile)
         _emit_tile_out_loop_nest(
-            list(imp.spec.operands_dim_subscripts()[driving_tile_idx]),
+            imp,
+            list(imp.subscripts),
             [
                 _OperandDetailsExt(
                     o.c_tensor, o.index_expr, o.concrete_origin_shape, subs, operand
@@ -561,7 +574,6 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
                     imp.inner.operands,
                 )
             ],
-            imp.inner.operands.index(imp.driving_tile),
             imp.parallel,
             inner_codegen=lambda details: _inner_generate_c(imp.inner, details),
         )

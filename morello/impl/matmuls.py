@@ -10,7 +10,7 @@ from ..system_config import current_target
 from ..tensor import Tensor, Tile
 from .actions import MatmulSplitAction, TileOutAction
 from .base import Impl, NonAllocatingLeaf
-from .loops import MatmulSplitLoop
+from .loops import Loop
 from .moves import MoveLet, PadTranspack, common_move, common_operand_move_actions
 from .pruning import (
     ParentSummary,
@@ -54,7 +54,6 @@ class MatmulBase(NonAllocatingLeaf):
             f"{name_tensor_fn(self.rhs)}, "
             f"{name_tensor_fn(self.output)})"
         )
-
 
     def replace_io(
         self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
@@ -151,12 +150,15 @@ class MatmulHole(MatmulBase):
             return self
         left_view = self.lhs.simple_tile((self.lhs.dim_sizes[0], size))
         right_view = self.rhs.simple_tile((size, self.rhs.dim_sizes[1]))
+
+        split_subscript = self.spec.operands_dim_subscripts()[0][-1]
+
         warnings.warn("Not yet specializing spec for split Matmuls")
-        return MatmulSplitLoop(
-            lhs=self.lhs,
-            rhs=self.rhs,
-            output=self.output,
+        return Loop(
+            subscripts=[split_subscript],
+            tiles=frozenset([left_view, right_view]),
             inner=MatmulHole(left_view, right_view, self.output, self.serial_only),
+            parallel=False,  # TODO: Is this parallel correct?
         )
 
     def _split_valid(self, k: int) -> bool:
@@ -236,7 +238,6 @@ class MatmulLeaf(MatmulBase):
         **kwargs,
     ) -> "MoveLet":
         raise NotImplementedError()
-
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
