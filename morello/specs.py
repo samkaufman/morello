@@ -283,6 +283,13 @@ class Spec(abc.ABC):
         raise NotImplementedError()
 
 
+@dataclasses.dataclass
+class _ComposeSubspec:
+    kls: Callable[..., Spec]
+    inputs: tuple[tuple[int, ...]]
+    output: tuple[int, ...]
+
+
 @dataclass_abc.dataclass_abc(frozen=True)
 class Compose(Spec):
     """Multiple specs where the first operand of each spec is the result of the next."""
@@ -326,11 +333,7 @@ class Compose(Spec):
         This is in Compose order, which is the inverse of evaluation order. For example,
         `compose.subspec_outputs[0] == compose.output.shape`.
         """
-        return tuple(
-            self.calculate_subspec_outputs(
-                self.subspec_classes, [inp.dim_sizes for inp in self.inputs]
-            )
-        )
+        return tuple(s.output for s in self._list_subspecs())
 
     @classmethod
     def calculate_output(
@@ -343,9 +346,12 @@ class Compose(Spec):
     @classmethod
     def calculate_subspec_outputs(
         cls,
-        subspec_classes: Tuple[Callable[..., Spec], ...],
-        inputs_shapes: Iterable[Tuple[int, ...]],
+        subspec_classes: tuple[Callable[..., Spec], ...],
+        inputs_shapes: Iterable[tuple[int, ...]],
     ) -> tuple[tuple[int, ...], ...]:
+        # This implementation has a lot in common with _list_subspecs. It exists
+        # so that callers---notable codegen handling a tile boundary---can pass
+        # in explicit inputs_shapes.
         accum = []
         inputs_shapes = list(inputs_shapes)
         for kls in reversed(subspec_classes):
@@ -404,31 +410,46 @@ class Compose(Spec):
             serial_only=serial_only,
         )
 
-    def _expand_inputs(self) -> list[tuple[tuple[int, ...], ...]]:
-        # Initialize with the first/innermost function's inputs
-        accum: list[tuple[tuple[int, ...], ...]] = [
-            tuple(
-                t.dim_sizes
-                for t in self.inputs[-self.subspec_classes[-1].inputs_count :]
+    # TODO: Rename & document _list_subspecs
+    def _list_subspecs(self) -> list[_ComposeSubspec]:
+        # Initialize with the first/innermost function's inputs. We'll lift
+        # TensorSpecs into _ComposeTensorSpecs, which drops layout, bank, and
+        # dtype information, because we can't know those in general for
+        # intermediate outputs.
+        innermost_spec_inputs = tuple(
+            s.dim_sizes for s in self.inputs[-self.subspec_classes[-1].inputs_count :]
+        )
+        prev_output = self.subspec_classes[-1].calculate_output_shape_cls(
+            innermost_spec_inputs
+        )
+        accum = [
+            _ComposeSubspec(
+                kls=self.subspec_classes[-1],
+                inputs=innermost_spec_inputs,
+                output=prev_output,
             )
         ]
-        partials_gathered = len(accum[0])
+        partials_gathered = len(innermost_spec_inputs)
 
         # Add the inputs for all following subspecs
         for kls_idx in range(len(self.subspec_classes) - 2, -1, -1):
             kls = self.subspec_classes[kls_idx]
-            kls_prev = self.subspec_classes[kls_idx + 1]
-            prev_output = kls_prev.calculate_output_shape_cls(accum[-1])
-            accum.append((prev_output,))
             assert kls.inputs_count >= 1, "Compose not defined on nullary ops"
-            accum[-1] = accum[-1] + tuple(
-                t.dim_sizes
-                for t in self.inputs[
+            new_inputs: tuple[int, ...] = (prev_output,) + tuple(
+                s.dim_sizes
+                for s in self.inputs[
                     1 - kls.inputs_count - partials_gathered : -partials_gathered
                 ]
             )
+            prev_output = kls.calculate_output_shape_cls(new_inputs)
+            accum.append(_ComposeSubspec(kls, new_inputs, prev_output))
         accum.reverse()
+
+        assert len(accum) == len(self.subspec_classes)
         return accum
+
+    def _expand_inputs(self) -> list[tuple[tuple[int, ...], ...]]:
+        return [tuple(i.dim_sizes for i in s.inputs) for s in self._list_subspecs()]
 
     def calculate_output_shape(
         self, input_shapes: Iterable[tuple[int, ...]]
