@@ -1,15 +1,15 @@
 import dataclasses
 import functools
 import math
-from typing import Union, Callable, Optional, Tuple, Iterable
+from typing import Callable, Iterable, Optional, Tuple, Union
 
 import dataclass_abc
 import termcolor
 
+from .. import specs, system_config
+from ..tensor import ConvolutionImageTile, Tensor, Tile
 from .base import Impl
 from .utils import assert_stable_spec
-from .. import specs, system_config
-from ..tensor import Tile, Tensor, ConvolutionImageTile
 
 
 # noinspection PyTypeChecker, PyArgumentList, PyUnresolvedReferences

@@ -319,18 +319,6 @@ class Compose(Spec):
             serial_only=serial_only,
         )
 
-    @typing.final
-    @property
-    def intermediate_shapes(self) -> tuple[tuple[int, ...], ...]:
-        """The shapes of stage outputs other than the final output.
-
-        This is in Compose order, which is the inverse of evaluation order. For example,
-        `intermediate_shapes[-1]` is the shape of the output of `subspec_classes[-1]`.
-
-        This is equivalent to `subspec_outputs[1:]`.
-        """
-        return self.subspec_outputs[1:]
-
     @property
     def subspec_outputs(self) -> tuple[tuple[int, ...], ...]:
         """The shapes of each output, including intermediate outputs.

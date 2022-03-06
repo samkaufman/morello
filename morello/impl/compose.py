@@ -92,7 +92,7 @@ class ComposeHole(Impl):
                 peel_kwargs = (
                     {"vector_shape": shape}
                     for shape in gen_vector_shapes(
-                        self.spec.intermediate_shapes[0],
+                        self.spec.subspec_outputs[1],
                         dtype=self.spec.intermediate_dtypes[0],
                     )
                 )
@@ -219,12 +219,12 @@ class ComposeHole(Impl):
         # catching all ValueErrors might become overbroad as the code evolves, and the
         # object construction is inefficient and unneeded. However, it'll work for now.
         intermediate_tensor_layout = layout
-        if all(d == 1 for d in self.spec.intermediate_shapes[0]):
+        if all(d == 1 for d in self.spec.subspec_outputs[1]):
             intermediate_tensor_layout = Layout.ROW_MAJOR
         try:
             current_target().tensor(
                 current_target().tensor_spec(
-                    dim_sizes=self.spec.intermediate_shapes[0],
+                    dim_sizes=self.spec.subspec_outputs[1],
                     dtype=self.spec.intermediate_dtypes[0],
                     bank=bank,
                     layout=intermediate_tensor_layout,
@@ -248,11 +248,11 @@ class ComposeHole(Impl):
 
         # TODO: Using ALPHABET_PRODUCT here will fail for long programs
         intermediate_tensor_layout = layout
-        if all(d == 1 for d in self.spec.intermediate_shapes[0]):
+        if all(d == 1 for d in self.spec.subspec_outputs[1]):
             intermediate_tensor_layout = Layout.ROW_MAJOR
         intermediate_tensor = current_target().tensor(
             current_target().tensor_spec(
-                dim_sizes=self.spec.intermediate_shapes[0],
+                dim_sizes=self.spec.subspec_outputs[1],
                 dtype=self.spec.intermediate_dtypes[0],
                 bank=bank,
                 layout=intermediate_tensor_layout,
@@ -356,8 +356,8 @@ class ComposeHole(Impl):
     def split_sizes(self) -> Iterable[int]:
         if self.spec.subspec_classes[0] == specs.ReduceSum:
             # TODO: This should defer to the inner op
-            for k in dim_range(self.spec.intermediate_shapes[0][-1], include_end=False):
-                if k != self.spec.intermediate_shapes[0][-1]:
+            for k in dim_range(self.spec.subspec_outputs[1][-1], include_end=False):
+                if k != self.spec.subspec_outputs[1][-1]:
                     yield k
         else:
             return
@@ -369,7 +369,7 @@ class ComposeHole(Impl):
             raise ValueError("Serial-only Spec prevents parallel tiling")
 
         # A no-op if `k` is already the max size.
-        orig_reduce_input_shape: tuple[int, ...] = self.spec.intermediate_shapes[0]
+        orig_reduce_input_shape: tuple[int, ...] = self.spec.subspec_outputs[1]
         if k == orig_reduce_input_shape[-1]:
             return self
 
@@ -441,7 +441,7 @@ class ComposeHole(Impl):
         Accepts either a PartialTile or a Tile which will be converted into a PartialTile.
         """
         subspec_classes = list(self.spec.subspec_classes)
-        intermediate_shapes = list(self.spec.intermediate_shapes)
+        intermediate_shapes = list(self.spec.subspec_outputs[1:])
         inputs = list(self.inputs)
         while skip_first > 0:
             popped_cls = subspec_classes.pop(0)
