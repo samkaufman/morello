@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Callable, Optional, Union
 
 if TYPE_CHECKING:
     from .. import dtypes
-    from ..specs import TensorSpec
-    from ..tensor import TensorBase, Tensor, Tile
+    from ..specs import Layout, TensorSpec
+    from ..tensor import Tensor, TensorBase, Tile
 
 logger = logging.getLogger(__name__)
 
