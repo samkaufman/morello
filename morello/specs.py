@@ -771,9 +771,11 @@ class ReduceSum(Spec):
         for dim, dim_size in enumerate(output_shape):
             if dim_size <= 0:
                 raise ValueError("All dimensions must be size 1 or greater")
-            elif dim > self.output.dim_sizes[dim]:
+            elif dim_size > self.output.dim_sizes[dim]:
                 raise ValueError(
-                    f"Dimensions {dim} was larger than {self.output.dim_sizes[dim]}"
+                    f"Dimensions {dim} was larger than "
+                    f"{self.output.dim_sizes[dim]} ({dim_size} > "
+                    f"{self.output.dim_sizes[dim]})"
                 )
         return cast(ReduceSum, super().shrink_for_tile_out(output_shape, serial_only))
 
@@ -802,8 +804,7 @@ class ReduceSum(Spec):
 
     @classmethod
     def operands_dim_subscripts(cls) -> Sequence[tuple[int, ...]]:
-        raise NotImplementedError("Not implemented. Requires ReduceSum shape.")
-        return ((0, 1, 2), (0, 1))
+        return ((0, 1, 2, 3), (0, 1, 2))
 
     def __str__(self):
         epi = ""

@@ -196,7 +196,7 @@ def _arb_reduce_conv_spec(draw):
             target.tensor_spec((batch_count, channels, inp_h, inp_w), dtype=dtype),
             target.tensor_spec((fc, channels, fh, fw), dtype=dtype),
         ),
-        output=target.tensor_spec((batch_count, fc, out_h, out_w), dtype=dtype),
+        output=target.tensor_spec((batch_count, fc, out_h), dtype=dtype),
         intermediate_dtypes=(draw(st.from_type(dtypes.Dtype)),),
         serial_only=draw(st.booleans()),
     )

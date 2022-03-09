@@ -114,18 +114,17 @@ class ComposeHole(Impl):
         # passed to sliding_tile_out are over the *output* Tile, not either
         # input; this only works because they're one-to-one for DirectConv.
         if allow_sliding_windows.get():
-            first_head_input = self.inputs[-self.spec.subspec_classes[-1].inputs_count]
-            for sliding_dim in range(len(first_head_input.dim_sizes)):
+            for slide_dim in self._get_output_dimensions_matching_first_input():
                 for slide_size in dim_range(
-                    self.output.dim_sizes[sliding_dim], include_end=False
+                    self.output.dim_sizes[slide_dim], include_end=False
                 ):
                     # TODO: Range over multiple choices of bank
                     if self._can_sliding_tile_out(
-                        sliding_dim, slide_size, system.default_fast_bank
+                        slide_dim, slide_size, system.default_fast_bank
                     ):
                         yield SlidingTileOutAction(
                             self.sliding_tile_out,
-                            sliding_dim,
+                            slide_dim,
                             slide_size,
                             system.default_fast_bank,
                         )
@@ -136,6 +135,17 @@ class ComposeHole(Impl):
             for k in self.split_sizes():
                 for parallel in [False] if self.spec.serial_only else [True, False]:
                     yield functools.partial(self.split, k, parallel=parallel)
+
+    def _get_output_dimensions_matching_first_input(self) -> Iterable[int]:
+        """Returns the dimensions matching subscripts of the first head input."""
+        first_head_idx = -self.spec.subspec_classes[-1].inputs_count
+        first_head_subs = self.spec.operands_dim_subscripts()[first_head_idx - 1]
+        output_subs = self.spec.operands_dim_subscripts()[-1]
+        for sub in first_head_subs:
+            try:
+                yield output_subs.index(sub)
+            except ValueError:
+                pass
 
     @assert_stable_spec
     def move_input(
