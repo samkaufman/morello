@@ -25,16 +25,14 @@ _directconv_sliding_tile_out_params_cache = {}
 
 @dataclass_abc.dataclass_abc(frozen=True)
 class DirectConv(NonAllocatingLeaf):
-    """A stride-1, no-padding convolution over a single-channel 2-D image."""
+    """A native implementation of a convolution.
 
-    # TODO: Add support for multi-channel images
+    Stride is 1. No padding.
+    """
 
     lhs: Union[Tensor, Tile]
-    "An image over which to convolve."
     rhs: Union[Tensor, Tile]
-    "An (m, n, k) tensor of m-by-n filters."
     output: Union[Tensor, Tile]
-    "The (_, _, k) output tensor."
     serial_only: bool
 
     def __post_init__(self):

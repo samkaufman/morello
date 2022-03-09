@@ -44,3 +44,31 @@ def test_tensors_and_tiles_can_be_pickled_and_unpickled_losslessly(
     read_tensor = pickle.load(buf)
     # TODO: Add a deep equality method
     assert str(t) == str(read_tensor)
+
+
+@pytest.mark.parametrize(
+    "outer_shp, tile_shp, filt_shp, expected_batch, expected_height, expected_width",
+    [
+        ((10, 3, 3), (4, 3, 3), (1, 1), 2, 0, 0),
+        ((1, 3, 3), (1, 3, 3), (1, 1), 0, 0, 0),
+        ((1, 3, 3), (1, 3, 3), (3, 3), 0, 0, 0),
+        ((1, 3, 3), (1, 2, 2), (1, 1), 0, 1, 1),
+        ((1, 3, 3), (1, 2, 2), (2, 2), 0, 0, 0),
+    ],
+)
+def test_convolution_image_tile_boundary_size(
+    outer_shp, tile_shp, filt_shp, expected_batch, expected_height, expected_width
+):
+    # TODO: any_level should be something arbitrary from the system_config
+    any_level = "GL"
+    outer = tensor.Tensor(
+        specs.TensorSpec(outer_shp, dtypes.Uint8, any_level, specs.Layout.ROW_MAJOR),
+        name=None,
+        origin=None,
+    )
+    tile = tensor.ConvolutionImageTile(
+        tile_shp, filter_shape=filt_shp, name=None, origin=outer
+    )
+    assert tile.boundary_size(0) == expected_batch
+    assert tile.boundary_size(1) == expected_height
+    assert tile.boundary_size(2) == expected_width

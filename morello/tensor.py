@@ -92,7 +92,7 @@ class TensorLike(abc.ABC):
         return self._tile(SimpleTile, tile_shape)
 
     def conv_image_tile(
-        self, tile_shape: tuple[int, ...], filter_shape: tuple[int, int]
+        self, tile_shape: tuple[int, ...], filter_shape: tuple[int, ...]
     ) -> "TensorLike":
         return self._tile(ConvolutionImageTile, tile_shape, filter_shape=filter_shape)
 
@@ -216,6 +216,7 @@ class Tile(TensorLike):
     def bank(self) -> str:
         return self.origin.bank
 
+    @typing.final
     @property
     def steps(self) -> int:
         return functools.reduce(
@@ -223,6 +224,9 @@ class Tile(TensorLike):
         )
 
     def steps_dim(self, dim: int, origin_size: Optional[int] = None) -> int:
+        raise NotImplementedError()
+
+    def boundary_size(self, dim: int, origin_size: Optional[int] = None) -> int:
         raise NotImplementedError()
 
     @functools.cached_property
@@ -300,33 +304,51 @@ class SimpleTile(Tile):
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class ConvolutionImageTile(Tile):
-    filter_shape: tuple[int, int]
+
+    filter_shape: tuple[int, ...]
+
+    def __post_init__(self):
+        super().__post_init__()
+        assert len(self.dim_sizes) >= 3
+        assert len(self.filter_shape) + 1 == len(
+            self.dim_sizes
+        ), f"Incompatible ranks; filters was {self.filter_shape} and image was {self.dim_sizes}"
 
     def steps_dim(self, dim: int, origin_size: Optional[int] = None) -> int:
         if origin_size is None:
             origin_size = self.origin.dim_sizes[dim]
+
+        # Batch should be a normal tiling.
+        if dim == 0:
+            return math.ceil(origin_size / self.dim_sizes[dim])
+
         inner = self.dim_sizes[dim]
-        f = self.filter_shape[dim]
-        return int(math.ceil(self._s(origin_size, f) / self._s(inner, f)))
+        f = self.filter_shape[dim - 1]
+        return int(math.ceil(_s(origin_size, f) / _s(inner, f)))
 
     def boundary_size(self, dim: int, origin_size: Optional[int] = None) -> int:
         if origin_size is None:
             origin_size = self.origin.dim_sizes[dim]
-        filt = self.filter_shape[dim]
-        out_total = 1 + origin_size - filt
-        out_for_tile = 1 + self.dim_sizes[dim] - filt
-        out_boundary = out_total % out_for_tile
-        return out_boundary + filt - 1
 
-    @staticmethod
-    def _s(img_size: int, filter_size: int) -> int:
-        return 1 + img_size - filter_size
+        # Non-spatial dimensions (batch) should be simple tilings.
+        if dim == 0:
+            return origin_size % self.dim_sizes[dim]
+
+        filt = self.filter_shape[dim - 1]
+        total_filter_applications = 1 + origin_size - filt
+        tile_filter_applications = 1 + self.dim_sizes[dim] - filt
+        boundary_applications = total_filter_applications % tile_filter_applications
+        if boundary_applications == 0:
+            return 0
+        return boundary_applications + filt - 1
 
     @property
     def frontiers(self) -> tuple[int, ...]:
         # Step size is one, so the frontier in each dimension equals the output
         # size in that dimension.
-        return tuple(self._s(w, f) for w, f in zip(self.dim_sizes, self.filter_shape))
+        return (0, 0) + tuple(
+            _s(w, f) for w, f in zip(self.dim_sizes[1:], self.filter_shape)
+        )
 
     def __getstate__(self):
         state = super().__getstate__()
@@ -336,3 +358,8 @@ class ConvolutionImageTile(Tile):
     def __setstate__(self, state_dict):
         super().__setstate__(state_dict)
         object.__setattr__(self, "filter_shape", state_dict["filter_shape"])
+
+
+def _s(img_size: int, filter_size: int) -> int:
+    """Calculates the number of output pixels in a single dimension."""
+    return 1 + img_size - filter_size

@@ -88,13 +88,7 @@ def _emit_tensor_print(
     write_name=True,
 ) -> None:
     rank = len(tensor_shape)
-    assert rank in (2, 3)
     assert all(s.name[0] == "p" for s in index_expr.free_symbols)
-
-    # As a hacky way of indicating that the printed dimensions has
-    # a particular rank, even if some of the dimensions are degenerate,
-    # we'll prefix each line with rank - 1 spaces.
-    pre = " " * (rank - 1)
 
     writer.writeline("// Print " + buffer_name)
     writer.writeline("{")
@@ -102,6 +96,9 @@ def _emit_tensor_print(
         if write_name:
             writer.writeline('printf("\\n");')
             writer.writeline(f'printf("{buffer_name}\\n");')
+
+        shape_str = "x".join(str(v) for v in tensor_shape)
+        writer.writeline(f'printf("{shape_str}\\n");')
 
         for idx in range(rank):
             sym = sympy.symbols(f"p{idx}")
@@ -115,13 +112,13 @@ def _emit_tensor_print(
 
         with writer.indent_block():
             writer.writeline(
-                f'printf("{pre}%" {dtype.int_fmt_macro} " ", {buffer_ref_fn(index_expr)});'
+                f'printf("%" {dtype.int_fmt_macro} " ", {buffer_ref_fn(index_expr)});'
             )
 
         if rank:
             writer.writeline("}")
         for idx in range(rank - 1):
-            writer.writeline(f'printf("{pre}\\n");')
+            writer.writeline(f'printf("\\n");')
             writer.writeline("}")
     writer.writeline("}")
 
@@ -134,6 +131,9 @@ class _OperandDetails:
     expression mapping those dimensions to the underlying buffer, and the
     concrete shape of the *origin* of the tensor.
     """
+
+    def __post_init__(self):
+        assert all(d > 0 for d in self.concrete_origin_shape)
 
     c_tensor: "_CTensor"
     index_expr: sympy.Expr
@@ -148,23 +148,6 @@ class _OperandDetails:
 class _OperandDetailsExt(_OperandDetails):
     subscripts: tuple[int, ...]
     operand: TensorLike
-
-
-def _get_concrete_dim_size_from_operands(
-    subscript: int, op_details: Sequence[_OperandDetailsExt]
-) -> int:
-    val = None
-    for details in op_details:
-        for idx, s in enumerate(details.subscripts):
-            if s == subscript:
-                if val is None:
-                    val = details.concrete_origin_shape[idx]
-                assert val == details.concrete_origin_shape[idx], (
-                    f"{val} != {details.concrete_origin_shape[idx]};\n"
-                    f"{subscript};\n{op_details}"
-                )
-    assert val is not None
-    return val
 
 
 def _emit_tile_out_loop_nest(
@@ -183,9 +166,32 @@ def _emit_tile_out_loop_nest(
         return
 
     it_subscript = remaining_subscripts[0]
-    concrete_dim_size = _get_concrete_dim_size_from_operands(it_subscript, op_details)
-    partial_steps = loop.steps_subscript(it_subscript, concrete_dim_size)
-    has_boundary = loop.boundary_size(it_subscript, concrete_dim_size) > 0
+
+    # The following gathers the number of steps (both full and boundary) as well
+    # as whether or not a boundary tile exists. While boundary tile sizes
+    # differ, presence of one should be consistent across all operands.
+    # As a bit of defensive programming, the following also checks that this
+    # is consistent across all operands and matching subscripts.
+    partial_steps = None
+    has_boundary = None
+    for details in op_details:
+        if not isinstance(details.operand, Tile):
+            continue
+        for dim, sub in enumerate(details.subscripts):
+            if sub != it_subscript:
+                continue
+            new_partial_steps = details.operand.steps_dim(
+                dim, details.concrete_origin_shape[dim]
+            )
+            new_has_boundary = bool(
+                details.operand.boundary_size(dim, details.concrete_origin_shape[dim])
+            )
+            if partial_steps is None:
+                partial_steps = new_partial_steps
+                has_boundary = new_has_boundary
+            assert new_partial_steps == partial_steps
+            assert new_has_boundary == has_boundary
+    assert isinstance(partial_steps, int) and isinstance(has_boundary, bool)
 
     full_steps = partial_steps - 1 if has_boundary else partial_steps
 
@@ -268,7 +274,6 @@ def _emit_tile_out_loop_nest(
         )
 
         boundary_concrete_shapes = []
-        # for operand, subscripts, _, concrete_shape in op_details:
         for o in op_details:
             if it_subscript not in o.subscripts:
                 # No boundary if the subscript isn't present. Just forward the
@@ -279,9 +284,9 @@ def _emit_tile_out_loop_nest(
             # NOTE: The following assumes that at most one subscript for an operand
             # matches it_subscript. If multiple matched, that would mean we're
             # iterating diagonally.
-            i = o.subscripts.index(it_subscript)
             orig_concrete_shape = list(o.concrete_origin_shape)
             if isinstance(o.operand, Tile):
+                i = o.subscripts.index(it_subscript)
                 orig_concrete_shape[i] = o.operand.boundary_size(
                     i, o.concrete_origin_shape[i]
                 )
@@ -654,25 +659,21 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         tensor_ref_fns = [d.c_tensor.c_index for d in op_details]
 
         img, _, _ = imp.operands
-        i_name = namer.fresh_name("pt")
-        j_name = namer.fresh_name("pt")
         if _unroll.get():
             raise NotImplementedError("unrolling not implemented for DirectConv")
-        writer.writeline(
-            f"for (int {i_name} = 0; {i_name} < {img.dim_sizes[0]}; {i_name}++) {{"
-        )
-        writer.writeline(
-            f"for (int {j_name} = 0; {j_name} < {img.dim_sizes[1]}; {j_name}++) {{"
-        )
-        in_i = operand_index_exprs[0].subs([("p0", "_" + i_name), ("p1", "_" + j_name)])
-        in_f = operand_index_exprs[1].subs([("p0", "_" + i_name), ("p1", "_" + j_name)])
-        o = operand_index_exprs[2]
-        with writer.indent_block():
-            writer.writeline(
-                f"{tensor_ref_fns[2](o)} += {tensor_ref_fns[0](in_i)} * {tensor_ref_fns[1](in_f)};"
-            )
-        writer.writeline("}")
-        writer.writeline("}")
+
+        with _emit_loop_nest_for_shape(img.dim_sizes[1:]) as it_names:
+            # Add 1 to dim because we're slicing off the first (batch) dim.
+            substitutions = {
+                f"p{dim + 1}": (s if isinstance(s, int) else f"_{s}")
+                for dim, s in enumerate(it_names)
+            }
+            new_op_idx_exprs = [ie.subs(substitutions) for ie in operand_index_exprs]
+            with writer.indent_block():
+                in_i, in_f, o = new_op_idx_exprs
+                writer.writeline(
+                    f"{tensor_ref_fns[2](o)} += {tensor_ref_fns[0](in_i)} * {tensor_ref_fns[1](in_f)};"
+                )
     elif isinstance(imp, impl.ReduceSum):
         if not all(d == 1 for d in imp.output.dim_sizes):
             raise Exception("Only 1x1x1 ReduceSums supported")

@@ -88,14 +88,17 @@ def logical_indexing_expr(source: Tile, dim: int) -> sympy.Expr:
     # to the constant 0
     if source.steps_dim(dim) == 1:
         idx = sympy.core.numbers.Zero()
-    if isinstance(source, SimpleTile):
+    if isinstance(source, SimpleTile) or (
+        isinstance(source, ConvolutionImageTile) and dim == 0
+    ):
         w = source.dim_sizes[dim]
-        # If w == 1, pt must be 0 an w == 1, so we can simplify.
+        # If w == 1, pt must be 0, so we can simplify.
         if w == 1:
             return idx
         return (w * idx) + pt
     elif isinstance(source, ConvolutionImageTile):
-        c = 1 + source.dim_sizes[dim] - source.filter_shape[dim]
+        assert dim > 0, f"dim ({dim}) was expected to be handled by prior case"
+        c = 1 + source.dim_sizes[dim] - source.filter_shape[dim - 1]
         return c * idx + pt
     else:
         raise NotImplementedError(f"Not defined for {type(source).__name__}")

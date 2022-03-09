@@ -169,7 +169,7 @@ class Spec(abc.ABC):
 
     def replace_io(
         self,
-        inputs: Tuple[TensorSpec, ...],
+        inputs: tuple[TensorSpec, ...],
         output: TensorSpec,
         serial_only: Optional[bool] = None,
     ) -> "Spec":
@@ -233,15 +233,27 @@ class Spec(abc.ABC):
     def serial_only(self) -> bool:
         raise NotImplementedError()
 
-    @abc.abstractmethod
     def shrink_for_tile_out(
         self, output_shape: Tuple[int, ...], serial_only: Optional[bool] = None
     ) -> "Spec":
         """Reduces the Spec to dimensions needed to compute the given output tile.
 
+        The default implementation relies on `shrink_inputs_for_output_shape`.
+
         :returns: A copy of the callee with modified input and output dimensions.
         """
-        raise NotImplementedError()
+        if serial_only is None:
+            serial_only = self.serial_only
+
+        input_shapes = tuple(inp.dim_sizes for inp in self.inputs)
+        new_inp_shapes = self.shrink_inputs_for_output_shape(input_shapes, output_shape)
+
+        new_inputs = tuple(
+            inp.shrink(new_shape) for inp, new_shape in zip(self.inputs, new_inp_shapes)
+        )
+        new_output = self.output.shrink(output_shape)
+
+        return self.replace_io(new_inputs, new_output, serial_only=serial_only)
 
     def calculate_output_shape(
         self, input_shapes: Iterable[tuple[int, ...]]
@@ -570,23 +582,6 @@ class Matmul(Spec):
     def inputs(self) -> Tuple[TensorSpec, ...]:
         return self.lhs, self.rhs
 
-    def shrink_for_tile_out(
-        self, output_shape: Tuple[int, ...], serial_only: Optional[bool] = None
-    ) -> "Matmul":
-        # TODO: Lots of overlap with shrink_inputs_for_output_shape
-        if len(output_shape) != 2:
-            raise ValueError(f"Expected rank-2 output; got: {output_shape}")
-        m, n = output_shape
-        k = self.lhs.dim_sizes[1]
-        if serial_only is None:
-            serial_only = self.serial_only
-        return Matmul(
-            lhs=self.lhs.shrink((m, k)),
-            rhs=self.rhs.shrink((k, n)),
-            output=self.output.shrink((m, n)),
-            serial_only=serial_only,
-        )
-
     @classmethod
     def calculate_output_shape_cls(
         cls, input_shapes: Iterable[Tuple[int, ...]]
@@ -609,7 +604,7 @@ class Matmul(Spec):
         if len(output_shape) != 2:
             raise ValueError(f"Expected rank-2 output; got: {output_shape}")
         m, n = output_shape
-        k = input_shapes[0][1]
+        k = list(input_shapes)[0][1]
         return ((m, k), (k, n))
 
     @classmethod
@@ -625,10 +620,10 @@ class Matmul(Spec):
 
 @dataclass_abc.dataclass_abc(frozen=True)
 class Convolution(Spec):
-    """Convolution.
+    """A batched, any-dimensional convolution.
 
-    The lhs operand is a single-channel image (a matrix). The rhs operand is a
-    3-dimensional tensor of shape (m, n, k) representing k filters of size m-by-n.
+    The lhs operand is an image of shape (batch, channels, spatial dims...).
+    The rhs operand is filters of shape: (filters, channels, spatial dims...).
 
     Stride is 1. Padding is 0.
     """
@@ -658,56 +653,29 @@ class Convolution(Spec):
         return Convolution(lhs, rhs, output, serial_only=serial_only)
 
     @property
-    def inputs(self) -> Tuple[TensorSpec, ...]:
+    def inputs(self) -> tuple[TensorSpec, ...]:
         return self.lhs, self.rhs
 
-    # TODO: Merge with calculate_output_shape
     @staticmethod
     def output_shape(
         image_shape: tuple[int, ...], filters_shape: tuple[int, ...]
     ) -> tuple[int, ...]:
-        batch_size, channels = image_shape[:2]
-        filters_count, c_ = filters_shape[:2]
-        assert channels == c_
-        return (batch_size, filters_count) + tuple(
-            1 + i - f for i, f in zip(image_shape[2:], filters_shape[2:])
+        batch_cnt, channels = image_shape[:2]
+        filter_cnt = filters_shape[0]
+        assert channels == filters_shape[1]
+        output_spatials = tuple(
+            (
+                (img_dim - filt_dim + 1)
+                for img_dim, filt_dim in zip(image_shape[2:], filters_shape[2:])
+            )
         )
-
-    def shrink_for_tile_out(
-        self, output_shape: tuple[int, ...], serial_only: Optional[bool] = None
-    ) -> Spec:
-        # TODO: Lots of overlap with shrink_inputs_for_output_shape
-        if len(output_shape) != 3:
-            raise ValueError(f"Expected rank-3 output; got: {output_shape}")
-        h, w, k = output_shape
-        assert k <= self.rhs.dim_sizes[2]
-        kernel_height, kernel_width = self.rhs.dim_sizes[:2]
-        smaller_lhs_dims = ((h + kernel_height - 1), (w + kernel_width - 1))
-        smaller_rhs_dims = (kernel_height, kernel_width, k)
-        if serial_only is None:
-            serial_only = self.serial_only
-        return dataclasses.replace(
-            self,
-            lhs=self.lhs.shrink(smaller_lhs_dims),
-            rhs=self.rhs.shrink(smaller_rhs_dims),
-            output=self.output.shrink(output_shape),
-            serial_only=serial_only,
-        )
+        return (batch_cnt, filter_cnt) + output_spatials
 
     @classmethod
     def calculate_output_shape_cls(
         cls, input_shapes: Iterable[tuple[int, ...]]
-    ) -> Tuple[int, ...]:
-        lhs, rhs = input_shapes
-        batch_count, channels, img_height, img_width = lhs
-        filter_count, channels_, kernel_height, kernel_width = rhs
-        assert channels == channels_
-        return (
-            batch_count,
-            filter_count,
-            1 + img_height - kernel_height,
-            1 + img_width - kernel_width,
-        )
+    ) -> tuple[int, ...]:
+        return Convolution.output_shape(*input_shapes)
 
     @classmethod
     @property
@@ -716,19 +684,30 @@ class Convolution(Spec):
 
     @classmethod
     def shrink_inputs_for_output_shape(
-        cls, input_shapes: Iterable[Tuple[int, ...]], output_shape: Tuple[int, ...]
-    ) -> Tuple[Tuple[int, ...], ...]:
-        h, w, k = output_shape
-        assert k <= input_shapes[1][2]
-        kernel_height, kernel_width = input_shapes[1][:2]
-        return (
-            ((h + kernel_height - 1), (w + kernel_width - 1)),
-            (kernel_height, kernel_width, k),
+        cls, input_shapes: Iterable[tuple[int, ...]], output_shape: tuple[int, ...]
+    ) -> tuple[tuple[int, ...], ...]:
+        if len(output_shape) < 3:
+            raise ValueError(
+                f"Expected output shape to have at least 3 dimensions: {output_shape}"
+            )
+
+        input_img_shape, input_filter_shape = input_shapes
+        batch_cnt, filter_cnt = output_shape[:2]
+        smaller_lhs_dims = (batch_cnt, input_img_shape[1]) + tuple(
+            i + f - 1 for i, f in zip(output_shape[2:], input_filter_shape[2:])
         )
+        smaller_rhs_dims = (filter_cnt,) + input_filter_shape[1:]
+        return (smaller_lhs_dims, smaller_rhs_dims)
 
     @classmethod
     def operands_dim_subscripts(cls) -> Sequence[tuple[int, ...]]:
-        return ((0, 1), (3, 4, 2), (0, 1, 2))
+        # Currently, this supports just 2 dimensions.
+        # TODO: Extend this to arbitrary number of spatial dimensions.
+        b, f, c, h, w, fh, fw = 0, 1, 2, 3, 4, 5, 6
+        img = (b, c, h, w)
+        filt = (f, c, fh, fw)
+        out = (b, f, h, w)
+        return (img, filt, out)
 
     @classmethod
     def short_name(cls):
@@ -755,7 +734,11 @@ class ReduceSum(Spec):
 
     def __post_init__(self):
         assert len(self.source.dim_sizes) >= 2
-        assert len(self.output.dim_sizes) == len(self.source.dim_sizes) - 1
+        assert len(self.output.dim_sizes) == len(self.source.dim_sizes) - 1, (
+            "Expected output shape to have one fewer dimensions than source; "
+            f"source and output shapes were: {self.source.dim_sizes} and "
+            f"{self.output.dim_sizes}"
+        )
         assert self.output.dim_sizes == self.output_shape(self.source.dim_sizes), (
             f"Given output shape was {self.output.dim_sizes} but the computed "
             f"output shape is {self.output_shape(self.source.dim_sizes)} "
@@ -792,15 +775,7 @@ class ReduceSum(Spec):
                 raise ValueError(
                     f"Dimensions {dim} was larger than {self.output.dim_sizes[dim]}"
                 )
-        new_source_dims = output_shape + (self.source.dim_sizes[-1],)
-        if serial_only is None:
-            serial_only = self.serial_only
-        return dataclasses.replace(
-            self,
-            source=self.source.shrink(new_source_dims),
-            output=self.output.shrink(output_shape),
-            serial_only=serial_only,
-        )
+        return cast(ReduceSum, super().shrink_for_tile_out(output_shape, serial_only))
 
     @classmethod
     def calculate_output_shape_cls(
@@ -827,6 +802,7 @@ class ReduceSum(Spec):
 
     @classmethod
     def operands_dim_subscripts(cls) -> Sequence[tuple[int, ...]]:
+        raise NotImplementedError("Not implemented. Requires ReduceSum shape.")
         return ((0, 1, 2), (0, 1))
 
     def __str__(self):

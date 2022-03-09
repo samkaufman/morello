@@ -210,20 +210,13 @@ class Loop(Impl):
         # TODO: Raise a warning if the given subscript is not one over which
         #  this loop iterates.
 
-        value: Optional[int] = None
         for tile, subs in zip(self.inner.operands, self.spec.operands_dim_subscripts()):
             if not isinstance(tile, Tile):
                 continue
             for dim, sub in enumerate(subs):
                 if sub == subscript:
-                    if value is None:
-                        value = fn(tile)(dim, *args)
-                    assert value == fn(tile)(dim, *args)
-
-        if value is None:
-            raise ValueError(f"No subscript {subscript} found among tiles")
-
-        return value
+                    return fn(tile)(dim, *args)
+        raise ValueError(f"No subscript {subscript} found among tiles")
 
     @property
     def additional_memories(self) -> list[dict[str, int]]:

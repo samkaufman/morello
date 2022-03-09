@@ -152,38 +152,54 @@ def test_pipeline_peak_and_additional_memory(
 
 
 @pytest.mark.parametrize(
-    "img_size,filter_size,patch,out_size,tile_size,steps,dtype",
+    "outer_batch,inner_batch,img_size,filter_size,channels,patch,out_size,tile_size,steps,dtype",
     [
-        (3, 3, 3, 1, 1, 1, dtypes.Uint32),
-        (3, 1, 1, 3, 1, 9, dtypes.Uint32),
-        (10, 3, 5, 8, 3, 9, dtypes.Uint8),
-        (5, 3, 4, 3, 2, 4, dtypes.Uint8),
+        (1, 1, 3, 3, 1, 3, 1, 1, 1, dtypes.Uint32),
+        (3, 1, 3, 1, 1, 1, 3, 1, 9 * 3, dtypes.Uint32),
+        (3, 1, 10, 3, 1, 5, 8, 3, 9 * 3, dtypes.Uint8),
+        (1, 1, 5, 3, 1, 4, 3, 2, 4, dtypes.Uint8),
     ],
 )
 def test_convolution_steps(
-    img_size, filter_size, patch, out_size, tile_size, steps, dtype
+    outer_batch,
+    inner_batch,
+    img_size,
+    filter_size,
+    channels,
+    patch,
+    out_size,
+    tile_size,
+    steps,
+    dtype,
 ):
+    print(f"Testing square {tile_size}")
     filter_cnt = 4
     img = tensor.Tensor(
-        spec=specs.TensorSpec((img_size, img_size), dtype=dtype), name="image"
+        spec=specs.TensorSpec((outer_batch, channels, img_size, img_size), dtype=dtype),
+        name="image",
     )
     filters = tensor.Tensor(
-        spec=specs.TensorSpec((filter_size, filter_size, filter_cnt), dtype=dtype),
+        spec=specs.TensorSpec(
+            (filter_cnt, channels, filter_size, filter_size), dtype=dtype
+        ),
         name="filters",
     )
     out = tensor.Tensor(
-        spec=specs.TensorSpec((out_size, out_size, filter_cnt), dtype=dtype),
+        spec=specs.TensorSpec(
+            (outer_batch, filter_cnt, out_size, out_size), dtype=dtype
+        ),
         name="output",
     )
     conv = morello.impl.directconv.DirectConv(
         lhs=img, rhs=filters, output=out, serial_only=False
     )
-    loop = conv.tile_out((tile_size, tile_size, filter_cnt))
+    print("On a conv: " + str(conv))
+    print(f"Calling conv.tile_out({(inner_batch, filter_cnt, tile_size, tile_size)})")
+    loop = conv.tile_out((inner_batch, filter_cnt, tile_size, tile_size))
     print(f"Loop:\n{op_pprint.pformat(loop, show_utilization=False, show_cost=False)}")
     if steps == 1:
         assert isinstance(loop, morello.impl.directconv.DirectConv)
     else:
-        assert loop.inner.lhs.dim_sizes == (patch, patch)
         assert loop.steps == steps
 
 
@@ -218,53 +234,58 @@ def test_evenly_divisible_matmul_tiling():
 def test_nested_convs_outputs_constant(
     h, w, a, b, fa, fb, th1, tw1, th2, tw2, fi, dtype
 ):
+    # TODO: Update to try different batches counts
     image = tensor.Tensor(
-        specs.TensorSpec((h + a + fa, w + b + fb), dtype=dtype), name=None
+        specs.TensorSpec((1, 1, h + a + fa, w + b + fb), dtype=dtype), name=None
     )
-    filters = tensor.Tensor(specs.TensorSpec((h, w, fi), dtype=dtype), name=None)
+    # TODO: Update to try different channels counts
+    filters = tensor.Tensor(specs.TensorSpec((fi, 1, h, w), dtype=dtype), name=None)
     expected_output_height = 1 + a + fa
     expected_output_width = 1 + b + fb
     output = tensor.Tensor(
         specs.TensorSpec(
-            (expected_output_height, expected_output_width, fi), dtype=dtype
+            (1, fi, expected_output_height, expected_output_width), dtype=dtype
         ),
         name=None,
     )
     schedule = morello.impl.directconv.DirectConv(
         image, filters, output, serial_only=False
     )
-    assert schedule.output.dim_sizes[0] == expected_output_height
-    assert schedule.output.dim_sizes[1] == expected_output_width
+    assert schedule.output.dim_sizes[:2] == (1, fi)
+    assert schedule.output.dim_sizes[2] == expected_output_height
+    assert schedule.output.dim_sizes[3] == expected_output_width
 
-    hypothesis.assume(th1 <= 1 + image.dim_sizes[0] - filters.dim_sizes[0])
-    hypothesis.assume(tw1 <= 1 + image.dim_sizes[1] - filters.dim_sizes[1])
-    tiled_schedule_a = schedule.tile_out((th1, tw1, filters.dim_sizes[-1]))
-    assert tiled_schedule_a.output.dim_sizes[0] == expected_output_height
-    assert tiled_schedule_a.output.dim_sizes[1] == expected_output_width
+    hypothesis.assume(th1 <= 1 + image.dim_sizes[2] - filters.dim_sizes[2])
+    hypothesis.assume(tw1 <= 1 + image.dim_sizes[3] - filters.dim_sizes[3])
+    tiled_schedule_a = schedule.tile_out((1, fi, th1, tw1))
+    assert tiled_schedule_a.output.dim_sizes[:2] == (1, fi)
+    assert tiled_schedule_a.output.dim_sizes[2] == expected_output_height
+    assert tiled_schedule_a.output.dim_sizes[3] == expected_output_width
 
     hypothesis.assume(th2 <= th1)
     hypothesis.assume(tw2 <= tw1)
-    tiled_schedule_b = schedule.tile_out((th2, tw2, filters.dim_sizes[-1]))
-    assert tiled_schedule_b.output.dim_sizes[0] == expected_output_height
-    assert tiled_schedule_b.output.dim_sizes[1] == expected_output_width
+    tiled_schedule_b = schedule.tile_out((1, fi, th2, tw2))
+    assert tiled_schedule_b.output.dim_sizes[:2] == (1, fi)
+    assert tiled_schedule_b.output.dim_sizes[2] == expected_output_height
+    assert tiled_schedule_b.output.dim_sizes[3] == expected_output_width
 
 
 @pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 def test_tile_compose_hole_out(dtype):
-    img = tensor.Tensor(specs.TensorSpec((2, 3, 8, 8), dtype=dtype), name="image")
+    img = tensor.Tensor(specs.TensorSpec((1, 1, 8, 8), dtype=dtype), name="image")
     filters_a = tensor.Tensor(
-        specs.TensorSpec((4, 3, 3, 3), dtype=dtype), name="filtersA"
+        specs.TensorSpec((4, 1, 3, 3), dtype=dtype), name="filtersA"
     )
     filters_b = tensor.Tensor(
-        specs.TensorSpec((4, 3, 3, 3), dtype=dtype), name="filtersB"
+        specs.TensorSpec((4, 4, 3, 3), dtype=dtype), name="filtersB"
     )
-    output = tensor.Tensor(specs.TensorSpec((2, 4, 4, 4), dtype=dtype), name="output")
+    output = tensor.Tensor(specs.TensorSpec((1, 4, 4, 4), dtype=dtype), name="output")
 
     compose_spec = specs.Compose(
-        (specs.Convolution, specs.ReduceSum, specs.Convolution),
+        (specs.Convolution, specs.Convolution),
         (filters_b.spec, img.spec, filters_a.spec),
         output.spec,
-        intermediate_dtypes=(dtype, dtype),
+        intermediate_dtypes=(dtype,),
         serial_only=False,
     )
 
@@ -306,14 +327,14 @@ def test_composehole_actions_change_spec(dtype):
     # This doesn't test for cycles introduced by sequences of more than one
     # action, but it makes sure that at least every individual step changes the
     # spec.
-    img = tensor.Tensor(specs.TensorSpec((2, 3, 8, 8), dtype=dtype), name="image")
+    img = tensor.Tensor(specs.TensorSpec((1, 1, 8, 8), dtype=dtype), name="image")
     filters_a = tensor.Tensor(
-        specs.TensorSpec((7, 3, 3, 3), dtype=dtype), name="filtersA"
+        specs.TensorSpec((10, 1, 3, 3), dtype=dtype), name="filtersA"
     )
     filters_b = tensor.Tensor(
-        specs.TensorSpec((6, 7, 3, 3), dtype=dtype), name="filtersB"
+        specs.TensorSpec((7, 10, 3, 3), dtype=dtype), name="filtersB"
     )
-    output = tensor.Tensor(specs.TensorSpec((2, 6, 4, 4), dtype=dtype), name="output")
+    output = tensor.Tensor(specs.TensorSpec((1, 7, 4, 4), dtype=dtype), name="output")
     initial_spec = specs.Compose(
         (specs.Convolution, specs.Convolution),
         (filters_b.spec, img.spec, filters_a.spec),

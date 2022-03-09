@@ -4,6 +4,9 @@ from typing import Sequence
 from . import specs
 from .tensor import ConvolutionImageTile, SimpleTile, TensorLike, Tile
 
+# TODO: Just make PartialTiles a superclass of Tile or something. That lets us
+#   drop tile_to_partial.
+
 
 @dataclasses.dataclass(frozen=True)
 class PartialTile:
@@ -22,7 +25,13 @@ class PartialSimpleTile(PartialTile):
 
 @dataclasses.dataclass(frozen=True)
 class PartialConvolutionImageTile(PartialTile):
-    filter_shape: tuple[int, int]
+    # TODO: Rename to something more general. This is just a sliding window.
+    filter_shape: tuple[int, ...]
+
+    def __post_init__(self):
+        assert len(self.filter_shape) + 1 == len(
+            self.dim_sizes
+        ), f"Incompatible ranks; filters was {self.filter_shape} and image was {self.dim_sizes}"
 
     def tile(self, source: TensorLike) -> TensorLike:
         return source.conv_image_tile(self.dim_sizes, self.filter_shape)
@@ -51,7 +60,7 @@ def tile_out(
     the outer tiling, while the spec_output refers to the Tile produced by tiling.
 
     Compose is not directly represented because tiling a Compose depends on its
-    subspecs, which are members of the Compose object. As a result, the tile_out
+    sub-Specs, which are members of the Compose object. As a result, the tile_out
     logic can't be fully defined by the *type* Compose; only by a specific Compose
     instance.
     """
@@ -73,18 +82,35 @@ def tile_out(
     elif spec_type == specs.Convolution and isinstance(
         spec_output, (PartialSimpleTile, PartialConvolutionImageTile)
     ):
-        _, (fh, fw, _) = input_shapes
-        oh, ow, oc = spec_output.dim_sizes
-        tile_shape = (oh + fh - 1, ow + fw - 1)
+        new_batch_size, new_filter_cnt = spec_output.dim_sizes[:2]
+        channels = input_shapes[0][1]
+        orig_filter_spatials = input_shapes[1][2:]
+        new_out_spatials = spec_output.dim_sizes[2:]
 
-        soh, sow = 1, 1
+        assert channels == input_shapes[1][1], (
+            f"Image had {input_shapes[0][1]} channels, but filters had "
+            f"{input_shapes[1][1]} channels"
+        )
+
+        tile_shape = tuple(
+            o + f - 1 for o, f in zip(new_out_spatials, orig_filter_spatials)
+        )
+
+        # If the output is a convolution, ensure the input filter/window size
+        # is large enough to gather the inputs for the entire output window.
+        new_window_spatial_dims = orig_filter_spatials
         if isinstance(spec_output, PartialConvolutionImageTile):
-            soh, sow = spec_output.filter_shape
+            new_window_spatial_dims = tuple(
+                o + i - 1
+                for o, i in zip(spec_output.filter_shape[1:], orig_filter_spatials)
+            )
 
-        window_shape = soh + fh - 1, sow + fw - 1
         return (
-            PartialConvolutionImageTile(tile_shape, window_shape),
-            PartialSimpleTile((fh, fw, oc)),
+            PartialConvolutionImageTile(
+                (new_batch_size, channels) + tile_shape,
+                (channels,) + new_window_spatial_dims,
+            ),
+            PartialSimpleTile((new_filter_cnt, channels) + orig_filter_spatials),
         )
     elif spec_type == specs.Matmul and isinstance(spec_output, PartialSimpleTile):
         (_, k), _ = input_shapes

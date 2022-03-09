@@ -69,48 +69,31 @@ def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
 
 
 def _read_from_output(output: str) -> np.ndarray:
-    reported_rank: Optional[int] = None
+    # Read the shape from the first line. The remainder of the lines are the
+    # flattened values; read until we have the reported number of values.
 
-    is_3d = False
-    accum = []
-    for line in output.splitlines():
-        # Use leading whitespace to determine intended rank
-        if line.strip() and reported_rank is None:
-            reported_rank = 1 + len(line) - len(line.lstrip(" "))
+    lines = (l for l in output.splitlines() if l.strip() and l.strip()[:2] != "//")
+    shape = [int(v) for v in next(lines).strip().split("x")]
 
-        if is_3d:
-            if not line.strip():
-                accum.append([])
-            else:
-                row = [float(s) for s in line.split()]
-                accum[-1].append(row)
-        else:
-            if not line.strip():
-                is_3d = True
-                accum = [accum, []]
-            else:
-                row = [float(s) for s in line.split()]
-                accum.append(row)
-    if is_3d and len(accum[-1]) == 0:
-        accum.pop()
-
-    result_arr = np.array(accum)
-    if reported_rank:
-        while len(result_arr.shape) < reported_rank:
-            result_arr = result_arr[np.newaxis, :]
-    return result_arr
+    values: list[float] = []
+    for line in lines:
+        values.extend(float(v) for v in line.strip().split(" "))
+    return np.array(values).reshape(shape)
 
 
 def _conv2d(img: np.ndarray, filters: np.ndarray, out_type) -> np.ndarray:
-    fh, fw, fc = filters.shape
-    h_out = img.shape[0] - filters.shape[0] + 1
-    w_out = img.shape[1] - filters.shape[1] + 1
-    out = np.zeros((h_out, w_out, fc), dtype=out_type)
-    for i in range(1 + img.shape[0] - filters.shape[0]):
-        for j in range(1 + img.shape[1] - filters.shape[1]):
-            acts = img[i : i + fh, j : j + fw, np.newaxis] * filters
-            acts = acts.sum(axis=(0, 1), keepdims=True)
-            out[i, j, :] = acts
+    batch, chans, img_h, img_w = img.shape
+    fc, _, fh, fw = filters.shape
+    assert chans == filters.shape[1]
+    h_out = img_h - fh + 1
+    w_out = img_w - fw + 1
+    out = np.zeros((batch, fc, h_out, w_out), dtype=out_type)
+    for b in range(batch):
+        for i in range(h_out):
+            for j in range(w_out):
+                acts = img[b, np.newaxis, :, i : i + fh, j : j + fw] * filters
+                acts = acts.sum(axis=(1, 2, 3), keepdims=False)
+                out[b, :, i, j] = acts
     return out
 
 
@@ -170,17 +153,21 @@ def _arb_conv_spec(draw):
     target = system_config.current_target()
 
     dtype = draw(st.from_type(dtypes.Dtype))
+    batch_size = draw(st.integers(min_value=1, max_value=7))
+    filter_count = draw(st.integers(min_value=1, max_value=7))
     inp_h = draw(st.integers(min_value=1, max_value=9))
     inp_w = draw(st.integers(min_value=1, max_value=9))
     fh = draw(st.integers(min_value=1, max_value=inp_h))
     fw = draw(st.integers(min_value=1, max_value=inp_w))
-    fc = draw(st.integers(min_value=1, max_value=9))
+    channels = draw(st.integers(min_value=1, max_value=9))
     out_h, out_w = 1 + inp_h - fh, 1 + inp_w - fw
 
     return specs.Convolution(
-        target.tensor_spec((inp_h, inp_w), dtype=dtype),
-        target.tensor_spec((fh, fw, fc), dtype=dtype),
-        output=target.tensor_spec((out_h, out_w, fc), dtype=dtype),
+        target.tensor_spec((batch_size, channels, inp_h, inp_w), dtype=dtype),
+        target.tensor_spec((filter_count, channels, fh, fw), dtype=dtype),
+        output=target.tensor_spec(
+            (batch_size, filter_count, out_h, out_w), dtype=dtype
+        ),
         serial_only=draw(st.booleans()),
     )
 
@@ -532,9 +519,12 @@ def test_codegen_for_reduce_conv(spec, inp_values):
     return expected_result
 
 
+@pytest.mark.skip("Conv-ReduceSum-Conv are no longer compatible")
 @_calculator_to_test(_arb_conv_reduce_conv_spec())
 def test_codegen_for_conv_reduce_conv(spec, inp_values):
-    expected_result = _conv2d(*inp_values[1:3], spec.intermediate_dtypes[1].np_type)
+    expected_result = _conv2d(
+        inp_values[1], inp_values[2], spec.intermediate_dtypes[1].np_type
+    )
     expected_result = np.sum(
         expected_result, axis=-1, dtype=spec.intermediate_dtypes[0].np_type
     )

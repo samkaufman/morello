@@ -1,6 +1,7 @@
 import hypothesis
 
 hypothesis.settings.register_profile("ci", max_examples=10000)
+hypothesis.settings.register_profile("debug", deadline=None, print_blob=True)
 
 
 def pytest_sessionstart(session):
