@@ -186,10 +186,6 @@ class Spec(abc.ABC):
     ) -> "Spec":
         raise NotImplementedError()
 
-    @classmethod
-    def subscripts(cls) -> set[int]:
-        return {s for pair in cls.operands_dim_subscripts() for s in pair}
-
     def dim_size_for_subscript(self, subscript) -> int:
         result = None
         for op_idx, operand_sub in enumerate(self.operands_dim_subscripts()):

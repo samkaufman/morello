@@ -113,13 +113,6 @@ def _mutating_replace(
             input_idx=subject.input_idx,
             inner=_mutating_replace(subject.inner, replacements),
         )
-    elif type(subject) is impl.MatmulSplitLoop:
-        return impl.MatmulSplitLoop(
-            lhs=_mutating_replace(subject.lhs, replacements),
-            rhs=_mutating_replace(subject.rhs, replacements),
-            output=_mutating_replace(subject.output, replacements),
-            inner=_mutating_replace(subject.inner, replacements),
-        )
     elif type(subject) is impl.loops.Loop:
         return impl.Loop(
             subscripts=subject.subscripts,

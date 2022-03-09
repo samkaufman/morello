@@ -564,7 +564,7 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
 
     writer.set_impl(imp)
 
-    if isinstance(imp, (impl.Loop, impl.MatmulSplitLoop)):
+    if isinstance(imp, impl.Loop):
         # TODO: Add a comment about why the following is `imp.inner`, not `imp`.
         _emit_tile_out_loop_nest(
             imp,

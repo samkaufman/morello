@@ -6,7 +6,7 @@ from typing import Union
 from . import specs, utils
 from .impl import ComposeHole, DirectConv, Impl, Loop, MatmulHole, MoveLet, ReduceSum
 from .impl.compose import Pipeline
-from .impl.loops import MatmulSplitLoop, SlidingWindowLoop
+from .impl.loops import SlidingWindowLoop
 from .impl.matmuls import HvxVrmpyaccVuwVubRub, Mult
 from .system_config import current_system
 from .tensor import Tensor, Tile
@@ -98,7 +98,7 @@ def detailed_analytical_cost(
         assert compute_cost(op) == sum_cost
         cost_dict[op] = (sum_cost, f"{sum_cost} (sum of {len(op.stages)})")
         return cost_dict
-    elif isinstance(op, (MatmulSplitLoop, Loop)):
+    elif isinstance(op, Loop):
         # Non-sliding loops are just the inner cost times the number of iterations.
         cost_dict = detailed_analytical_cost(
             op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
@@ -179,7 +179,7 @@ def compute_cost(op: Impl) -> int:
 
     if isinstance(op, Pipeline):
         return _assign_cost(op, sum(compute_cost(s) for s in op.stages))
-    elif isinstance(op, (MatmulSplitLoop, Loop)):
+    elif isinstance(op, Loop):
         factor = op.steps
         if op.parallel:
             factor = math.ceil(op.steps / current_system().processors)

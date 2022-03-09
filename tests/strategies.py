@@ -2,7 +2,7 @@ from typing import Optional, Tuple
 
 from hypothesis import strategies as st
 
-from morello import dtypes, specs, system_config, tensor, impl
+from morello import dtypes, impl, specs, system_config, tensor
 from morello.system_config import cpu, hexagon
 
 dtype_st = st.sampled_from([dtypes.Uint8, dtypes.Uint32])
@@ -223,7 +223,6 @@ def register_default_strategies():
             st.from_type(impl.DirectConv),
             st.from_type(impl.ReduceSum),
             st.from_type(impl.Loop),
-            st.from_type(impl.MatmulSplitLoop),
             st.from_type(impl.MoveLet),
         ),
     )
