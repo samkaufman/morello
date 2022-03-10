@@ -658,7 +658,10 @@ class Convolution(Spec):
     ) -> tuple[int, ...]:
         batch_cnt, channels = image_shape[:2]
         filter_cnt = filters_shape[0]
-        assert channels == filters_shape[1]
+        assert channels == filters_shape[1], (
+            f"Image had {channels} channels but filters had {filters_shape[1]} "
+            f"channels"
+        )
         output_spatials = tuple(
             (
                 (img_dim - filt_dim + 1)
