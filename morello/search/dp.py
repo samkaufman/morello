@@ -71,12 +71,6 @@ def schedule_search(
     if output is None:
         output = system_config.current_target().tensor(spec.output)
 
-    if common.prune_column_major.get():
-        if any(inp.layout == specs.Layout.COL_MAJOR for inp in spec.inputs):
-            return None
-        if spec.output.layout == specs.Layout.COL_MAJOR:
-            return None
-
     # If no cache is provided, initialize a new cache
     if cache is None:
         cache = ScheduleCache()
@@ -86,6 +80,29 @@ def schedule_search(
     # line size when initializing the limit.
     if memory_limits is None:
         memory_limits = pruning.StandardMemoryLimits()
+
+    return _inner_schedule_search(
+        spec, inputs, output, memory_limits, cache, parent_summary, stats, callbacks
+    )
+
+
+def _inner_schedule_search(
+    spec: specs.Spec,
+    inputs: tuple,
+    output,
+    memory_limits: pruning.MemoryLimits,
+    cache: ScheduleCache,
+    parent_summary: Optional[impl.ParentSummary] = None,
+    stats: Optional[common.SearchStats] = None,
+    callbacks: Optional[common.SearchCallbacks] = None,
+) -> Optional[Impl]:
+    """Implements most of the logic of schedule_search."""
+
+    if common.prune_column_major.get():
+        if any(inp.layout == specs.Layout.COL_MAJOR for inp in spec.inputs):
+            return None
+        if spec.output.layout == specs.Layout.COL_MAJOR:
+            return None
 
     if stats:
         stats.expansions += 1
@@ -154,7 +171,7 @@ def schedule_search(
             # be filled, short-circuit because this action is a dead end.
             subsearch_results = []
             for child, mem in zip(new_tree.children, new_child_memory_limits):
-                child_result = schedule_search(
+                child_result = _inner_schedule_search(
                     child.spec,
                     inputs=child.inputs,
                     output=child.output,
