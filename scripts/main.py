@@ -5,7 +5,7 @@ import doctest
 import logging
 import sys
 import time
-from typing import TypeVar
+from typing import Optional, TypeVar
 
 import morello.impl.base
 from morello import dtypes, impl, op_pprint, search, search_cache, specs, system_config
@@ -73,22 +73,23 @@ def _conv_main(
     filter_height,
     filter_count,
     cache: search_cache.ScheduleCache,
-) -> tuple[morello.impl.base.Impl, float]:
+) -> tuple[Optional[morello.impl.base.Impl], float]:
     target = system_config.current_target()
     assert filter_width <= image_width and filter_height <= image_height
     left = target.tensor(
-        target.tensor_spec((image_width, image_height), dtype=DTYPE), name="image"
+        target.tensor_spec((1, 3, image_width, image_height), dtype=DTYPE), name="image"
     )
     right = target.tensor(
-        target.tensor_spec((filter_width, filter_height, filter_count), dtype=DTYPE),
+        target.tensor_spec((filter_count, 3, filter_width, filter_height), dtype=DTYPE),
         name="filters",
     )
     output = target.tensor(
         target.tensor_spec(
             (
+                1,
+                filter_count,
                 image_width - filter_width + 1,
                 image_height - filter_height + 1,
-                filter_count,
             ),
             dtype=DTYPE,
         ),
@@ -106,22 +107,27 @@ def _conv_main(
 
 def _convnet_main(cache: search_cache.ScheduleCache):
     target = system_config.current_target()
-    img = target.tensor(target.tensor_spec((8, 8), dtype=DTYPE), name="image")
+
+    d = 32
+
+    img = target.tensor(target.tensor_spec((2, 3, d, d), dtype=DTYPE), name="img")
     filters_a = target.tensor(
-        target.tensor_spec((3, 3, 4), dtype=DTYPE), name="filtersA"
+        target.tensor_spec((32, 3, 5, 5), dtype=DTYPE), name="filters_a"
     )
     filters_b = target.tensor(
-        target.tensor_spec((3, 3, 4), dtype=DTYPE), name="filtersB"
+        target.tensor_spec((32, 32, 5, 5), dtype=DTYPE), name="filters_b"
     )
-    output = target.tensor(target.tensor_spec((4, 4, 4), dtype=DTYPE), name="output")
+    output = target.tensor(
+        target.tensor_spec((2, 32, d - 8, d - 8), dtype=DTYPE), name="output"
+    )
 
     start = time.time()
     s = schedule_search(
         specs.Compose(
-            (specs.Convolution, specs.ReduceSum, specs.Convolution),
+            (specs.Convolution, specs.Convolution),
             (filters_b.spec, img.spec, filters_a.spec),
             output.spec,
-            intermediate_dtypes=(DTYPE, DTYPE),
+            intermediate_dtypes=(DTYPE,),
             serial_only=False,
         ),
         inputs=(filters_b, img, filters_a),
@@ -181,15 +187,19 @@ def main() -> int:
                 )
             elif parsed_args.spec == "convnet":
                 sched, runtime = _convnet_main(cache)
+            else:
+                raise Exception("Unknown spec argument: " + parsed_args.spec)
     finally:
         search.prune_column_major.reset(col_major_token)
         impl.tile_size_mode.reset(tile_size_mode_token)
 
-    op_pprint.pprint(sched)
-
-    if parsed_args.generate_code:
-        print("")
-        gen.generate_c("kernel_only", sched, sys.stdout)
+    if sched:
+        op_pprint.pprint(sched)
+        if parsed_args.generate_code:
+            print("")
+            gen.generate_c("kernel_only", sched, sys.stdout)
+    else:
+        print("No schedule found")
 
     print("")
     print(f"Took {runtime:.2f}s")

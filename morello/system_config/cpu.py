@@ -105,6 +105,7 @@ class CpuTarget(Target):
             # TODO: Don't need to link OpenMP if the Impl has no parallel loops.
             clang_cmd = [
                 _clang_path(),
+                "-std=gnu99",
                 "-fopenmp",
                 "-O3",
                 "-o",
