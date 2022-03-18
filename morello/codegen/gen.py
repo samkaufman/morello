@@ -7,7 +7,7 @@ import itertools
 import operator
 import string
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from os import name
 from typing import Callable, Iterable, Literal, Optional, Union, cast
 
@@ -150,148 +150,117 @@ class _OperandDetailsExt(_OperandDetails):
     operand: TensorLike
 
 
+@dataclasses.dataclass(frozen=True)
+class _LoopNestDescription:
+    """Structures returned by _compute_tile_out_loop_nest."""
+
+    subscripts_to_steps: Sequence[tuple[int, int]]
+    body_index_exprs: Sequence[sympy.Expr]
+    body_shapes: Sequence[tuple[int, ...]]
+
+
 def _emit_tile_out_loop_nest(
     loop: impl.Loop,
     remaining_subscripts: list[int],  # Reduces each step; base case = empty
     op_details: Sequence[_OperandDetailsExt],
     parallel: bool,
     inner_codegen: Callable[[Sequence[_OperandDetails]], None],
-    inside_parallel_pragma: bool = False,
 ) -> None:
     namer, writer = _namer.get(), _writer.get()
 
-    # If given no subscripts, jump to generating the body of the loop. This is the base
-    # case for recursive calls below.
-    if not remaining_subscripts:
-        inner_codegen(op_details)
-        return
+    # Compute steps and drop subscripts that have no full steps.
+    # We do this first so that we know how many loops we're going to
+    # emit.
+    #
+    # TODO: Move emitting_steps into compute.
+    emitting_steps: list[tuple[int, int, int]] = []
+    for subscript in remaining_subscripts:
+        full_steps, has_boundary = _calc_steps(subscript, op_details)
+        # TODO: Remove comment below.
+        # assert (
+        #     full_steps > 0 or not has_boundary
+        # ), f"full_steps was {full_steps} but has_boundary was {has_boundary}"
+        if full_steps != 0:
+            emitting_steps.append((subscript, full_steps, has_boundary))
 
-    it_subscript = remaining_subscripts[0]
-    full_steps, has_boundary = _calc_steps(it_subscript, op_details)
+    # Generate new names for loop iterators.
+    it_var_names = None
+    if not _unroll.get():
+        it_var_names = {s: namer.fresh_name("t") for s, _, _ in emitting_steps}
 
-    if full_steps:
-        main_concrete_sizes: list[tuple[int, ...]] = [
-            tuple(
-                (min(ts, cos) if s == it_subscript else cos)
-                for ts, cos, s in zip(
-                    d.operand.dim_sizes, d.concrete_origin_shape, d.subscripts
-                )
-            )
-            for d in op_details
-        ]
+    # Emit the boundary cases.
+    for loop_plan in _compute_tile_out_loop_nest(
+        emitting_steps, it_var_names, op_details
+    ):
+        assert it_var_names is not None
 
-        if not _unroll.get():
-            # Emit the loop opener.
-            it_var = 0
-            if full_steps > 1:
-                if parallel and not inside_parallel_pragma:
-                    inside_parallel_pragma = True
-                    # TODO: Reintroduce collapsing after all boundaries are unrolled out
-                    # to_collapse = sum(
-                    #     1
-                    #     for s in remaining_subscripts
-                    #     if _calc_steps(s, op_details)[0] > 1
-                    # )
-                    to_collapse = 1
-                    writer.writeline(
-                        f"#pragma omp parallel for collapse({to_collapse}) schedule(static)"
-                    )
-                it_var = namer.fresh_name("t")
-                writer.writeline(
-                    f"for (int {it_var} = 0; {it_var} < {full_steps}; {it_var}++) {{"
-                )
-                writer.indent()
-
-            # Update all indexing expressions where dimensions share a subscript with
-            # the one we're modifying.
-            full_new_index_exprs = _update_index_exprs(it_subscript, it_var, op_details)
-
-            # Recurse to process the remaining iterators
-            _emit_tile_out_loop_nest(
-                loop,
-                remaining_subscripts[1:],
-                [
-                    _OperandDetailsExt(d.c_tensor, e, s, d.subscripts, d.operand)
-                    for d, e, s in zip(
-                        op_details, full_new_index_exprs, main_concrete_sizes
-                    )
-                ],
-                parallel,
-                inner_codegen,
-                inside_parallel_pragma=inside_parallel_pragma
+        for sub, steps in loop_plan.subscripts_to_steps:
+            it_var = it_var_names[sub]
+            writer.writeline(
+                f"for (int {it_var} = 0; {it_var} < {steps}; {it_var}++) {{"
             )
 
-            # Close loop.
-            if full_steps > 1:
-                writer.dedent()
-                writer.writeline("}")
-        else:
-            if parallel:
-                warnings.warn("Parallel loop generation skipped for unrolled loop.")
-
-            for it_var_idx in range(full_steps):
-                # Sub. in the concrete step index instead of a reference to a generated
-                # iterator name.
-                full_new_index_exprs = _update_index_exprs(
-                    it_subscript, it_var_idx, op_details
-                )
-
-                # Recurse to process the remaining iterators
-                _emit_tile_out_loop_nest(
-                    loop,
-                    remaining_subscripts[1:],
-                    [
-                        _OperandDetailsExt(d.c_tensor, e, s, d.subscripts, d.operand)
-                        for d, e, s in zip(
-                            op_details, full_new_index_exprs, main_concrete_sizes
-                        )
-                    ],
-                    False,
-                    inner_codegen,
-                    inside_parallel_pragma=inside_parallel_pragma
-                )
-
-    # Generate boundary epilogue here
-    if has_boundary:
-        # We don't check _unroll in the boundary case because it is already effectively
-        # "unrolled" (it doesn't generate a loop).
-        boundary_new_index_exprs = _update_index_exprs(
-            it_subscript, full_steps, op_details
-        )
-
-        boundary_concrete_shapes = []
-        for o in op_details:
-            if it_subscript not in o.subscripts:
-                # No boundary if the subscript isn't present. Just forward the
-                # concrete shape.
-                boundary_concrete_shapes.append(o.concrete_origin_shape)
-                continue
-
-            # NOTE: The following assumes that at most one subscript for an operand
-            # matches it_subscript. If multiple matched, that would mean we're
-            # iterating diagonally.
-            orig_concrete_shape = list(o.concrete_origin_shape)
-            if isinstance(o.operand, Tile):
-                i = o.subscripts.index(it_subscript)
-                orig_concrete_shape[i] = o.operand.boundary_size(
-                    i, o.concrete_origin_shape[i]
-                )
-            boundary_concrete_shapes.append(tuple(orig_concrete_shape))
-
-        _emit_tile_out_loop_nest(
-            loop,
-            remaining_subscripts[1:],
+        if len(loop_plan.subscripts_to_steps):
+            writer.indent()
+        inner_codegen(
             [
-                _OperandDetailsExt(d.c_tensor, e, s, d.subscripts, d.operand)
+                _OperandDetailsExt(d.c_tensor, e, tuple(s), d.subscripts, d.operand)
                 for d, e, s in zip(
-                    op_details, boundary_new_index_exprs, boundary_concrete_shapes
+                    op_details, loop_plan.body_index_exprs, loop_plan.body_shapes
                 )
-            ],
-            parallel,
-            inner_codegen,
-            inside_parallel_pragma=inside_parallel_pragma
+            ]
         )
+        if len(loop_plan.subscripts_to_steps):
+            writer.dedent()
+        for _ in loop_plan.subscripts_to_steps:
+            writer.writeline("}")
 
+
+def _compute_tile_out_loop_nest(
+    emitting_steps: Sequence[tuple[int, int, int]],
+    it_var_names: Optional[Mapping[int, str]],
+    op_details: Sequence[_OperandDetailsExt],
+) -> Iterable[_LoopNestDescription]:
+    # The following would be much faster if we sharing prefixes and didn't
+    # enumerate combos where boundaries are impossible.
+    if _unroll.get():
+        raise NotImplementedError()
+    assert it_var_names is not None
+
+    for combo in itertools.product([False, True], repeat=len(emitting_steps)):
+        # Ignore any combo. where at least one selected boundary dim. is empty.
+        if any(b and not hb for b, (_, _, hb) in zip(combo, emitting_steps)):
+            continue
+
+        subscripts_to_loop_over: list[tuple[int, int]] = []
+        boundary_new_index_exprs = [d.index_expr for d in op_details]
+        boundary_concrete_shapes = [list(d.concrete_origin_shape) for d in op_details]
+        for bit, (sub, full_steps, _) in zip(combo, emitting_steps):
+            if bit:
+                new_size = full_steps
+            else:
+                new_size = it_var_names[sub]
+                subscripts_to_loop_over.append((sub, full_steps))
+
+            boundary_new_index_exprs = _update_index_exprs(
+                boundary_new_index_exprs, sub, new_size, op_details
+            )
+            for bcs, o in zip(boundary_concrete_shapes, op_details):
+                if not isinstance(o.operand, Tile):
+                    continue
+                for sidx, s in enumerate(o.subscripts):
+                    if s == sub:
+                        if bit:
+                            bcs[sidx] = o.operand.boundary_size(
+                                sidx, o.concrete_origin_shape[sidx]
+                            )
+                        else:
+                            bcs[sidx] = o.operand.dim_sizes[sidx]
+        yield _LoopNestDescription(
+            subscripts_to_loop_over,
+            boundary_new_index_exprs,
+            list(map(tuple, boundary_concrete_shapes)),
+        )
 
 
 def _calc_steps(
@@ -329,7 +298,10 @@ def _calc_steps(
 
 
 def _update_index_exprs(
-    it_subscript: int, it_var: Union[str, int], op_details: Iterable[_OperandDetailsExt]
+    orig_index_exprs: Iterable[sympy.Expr],
+    it_subscript: int,
+    it_var: Union[str, int],
+    op_details: Iterable[_OperandDetailsExt],
 ) -> Sequence[sympy.Expr]:
     """Update operand indexing expressions for an introduced C loop.
 
@@ -345,11 +317,11 @@ def _update_index_exprs(
         it_var = "_" + it_var
 
     new_index_exprs = []
-    for d in op_details:
+    for d, orig_idx_expr in zip(op_details, orig_index_exprs):
         # No logical indexing expressions defined for Tensors. Forward their
         # (buffer) indexing expressions.
         if isinstance(d.operand, Tensor):
-            new_index_exprs.append(d.index_expr)
+            new_index_exprs.append(orig_idx_expr)
             continue
         assert isinstance(d.operand, Tile)
         # For each subscript-matching dimension in this operand, update
@@ -363,7 +335,7 @@ def _update_index_exprs(
             new_expr = indexexpr.logical_indexing_expr(d.operand, idx)
             new_expr = new_expr.subs(sympy.symbols(f"i{idx}"), it_var)
             all_substitutions[sympy.symbols(f"p{idx}")] = new_expr
-        new_index_exprs.append(d.index_expr.subs(all_substitutions))
+        new_index_exprs.append(orig_idx_expr.subs(all_substitutions))
     return new_index_exprs
 
 
