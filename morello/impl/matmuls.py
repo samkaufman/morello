@@ -1,6 +1,6 @@
 import functools
 import warnings
-from typing import Callable, Iterable, Optional, Sequence, Tuple, Union
+from typing import Callable, Iterable, Optional, Sequence, Union
 
 import dataclass_abc
 
@@ -155,7 +155,7 @@ class MatmulHole(MatmulBase):
 
         warnings.warn("Not yet specializing spec for split Matmuls")
         return Loop(
-            subscripts=[split_subscript],
+            subscripts=(split_subscript,),
             tiles=frozenset([left_view, right_view]),
             inner=MatmulHole(left_view, right_view, self.output, self.serial_only),
             parallel=False,  # TODO: Is this parallel correct?
