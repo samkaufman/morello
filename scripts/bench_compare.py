@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import datetime
 import functools
+import itertools
 import logging
 import multiprocessing
 import os
@@ -59,6 +60,7 @@ parser.add_argument("--print_graphs", action="store_true")
 parser.add_argument("--log_to_sheet", type=str, default=None)
 parser.add_argument("--gsheet_key", type=pathlib.Path, default=None)
 parser.add_argument("--hostname", type=str, default=None)
+parser.add_argument("-b", "--batch", type=int, action="append")
 
 subparsers = parser.add_subparsers(dest="spec")
 
@@ -91,7 +93,9 @@ def _to_torch(arr: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(arr)
 
 
-def make_matmul_spec(d: int) -> specs.Matmul:
+def make_matmul_spec(batch_size: int, d: int) -> specs.Matmul:
+    if batch_size != 1:
+        raise NotImplementedError("Batched matrix multiplication not yet supported")
     target = system_config.current_target()
     return specs.Matmul(
         target.tensor_spec((d, d), dtype=DTYPE),
@@ -101,7 +105,9 @@ def make_matmul_spec(d: int) -> specs.Matmul:
     )
 
 
-def make_gemm3_spec(d: int) -> specs.Spec:
+def make_gemm3_spec(batch_size: int, d: int) -> specs.Spec:
+    if batch_size != 1:
+        raise NotImplementedError("Batched matrix multiplication not yet supported")
     target = system_config.current_target()
     return specs.Compose(
         (specs.Matmul, specs.Matmul),
@@ -116,32 +122,32 @@ def make_gemm3_spec(d: int) -> specs.Spec:
     )
 
 
-def make_conv_spec(d: int) -> specs.Convolution:
+def make_conv_spec(batch_size: int, d: int) -> specs.Convolution:
     target = system_config.current_target()
 
     fh, fw, fc = 5, 5, 32
     out_h, out_w = 1 + d - fh, 1 + d - fw
 
     return specs.Convolution(
-        target.tensor_spec((d, d), dtype=DTYPE),
-        target.tensor_spec((fh, fw, fc), dtype=DTYPE),
-        output=target.tensor_spec((out_h, out_w, fc), dtype=DTYPE),
+        target.tensor_spec((batch_size, 1, d, d), dtype=DTYPE),
+        target.tensor_spec((fc, 1, fh, fw), dtype=DTYPE),
+        output=target.tensor_spec((batch_size, fc, out_h, out_w), dtype=DTYPE),
         serial_only=False,
     )
 
 
-def make_cnn_spec(d: int) -> specs.Spec:
+def make_cnn_spec(batch_size: int, d: int) -> specs.Spec:
     target = system_config.current_target()
 
-    img = target.tensor_spec((d, d), dtype=DTYPE)
-    filters_a = target.tensor_spec((5, 5, 16), dtype=DTYPE)
-    filters_b = target.tensor_spec((5, 5, 16), dtype=DTYPE)
-    output = target.tensor_spec((d - 8, d - 8, 16), dtype=DTYPE)
+    img = target.tensor_spec((batch_size, 3, d, d), dtype=DTYPE)
+    filters_a = target.tensor_spec((32, 3, 5, 5), dtype=DTYPE)
+    filters_b = target.tensor_spec((32, 32, 5, 5), dtype=DTYPE)
+    output = target.tensor_spec((batch_size, 32, d - 8, d - 8), dtype=DTYPE)
     return specs.Compose(
-        (specs.Convolution, specs.ReduceSum, specs.Convolution),
+        (specs.Convolution, specs.Convolution),
         (filters_b, img, filters_a),
         output,
-        intermediate_dtypes=(DTYPE, DTYPE),
+        intermediate_dtypes=(DTYPE,),
         serial_only=False,
     )
 
@@ -285,14 +291,18 @@ def benchmark_baseline(
         end = time.time()
         result["torchscript"] = (end - start) / gen.BENCH_ITERS
     elif isinstance(spec, specs.Convolution):
-        h, w = spec.lhs.dim_sizes
-        fh, fw, fc = spec.rhs.dim_sizes
+        batch, channels, h, w = spec.lhs.dim_sizes
+        filters_count, _, fh, fw = spec.rhs.dim_sizes
 
         # Use signed int32 with PyTorch.
         assert DTYPE == dtypes.Uint32
 
-        img = np.arange(h * w, dtype=TORCH_DTYPE_NP).reshape((1, 1, h, w))
-        filters = np.arange(fh * fw * fc, dtype=TORCH_DTYPE_NP).reshape((fc, 1, fh, fw))
+        img = np.arange(batch * channels * h * w, dtype=TORCH_DTYPE_NP).reshape(
+            (batch, channels, h, w)
+        )
+        filters = np.arange(
+            filters_count * channels * fh * fw, dtype=TORCH_DTYPE_NP
+        ).reshape((filters_count, channels, fh, fw))
         img_t, filters_t = torch.tensor(img), torch.tensor(filters)
 
         # Which backend is PyTorch using?
@@ -355,35 +365,30 @@ def benchmark_baseline(
             )
     elif isinstance(spec, specs.Compose) and spec.subspec_classes == (
         specs.Convolution,
-        specs.ReduceSum,
         specs.Convolution,
     ):
-        h, w = spec.inputs[-2].dim_sizes
-        fh_a, fw_a, fc_a = spec.inputs[-1].dim_sizes
-        fh_b, fw_b, fc_b = spec.inputs[-3].dim_sizes
+        batch_size, channels, h, w = spec.inputs[-2].dim_sizes
+        fc_a, _, fh_a, fw_a = spec.inputs[-1].dim_sizes
+        fc_b, _, fh_b, fw_b = spec.inputs[-3].dim_sizes
 
-        img = np.arange(h * w, dtype=TORCH_DTYPE_NP).reshape((1, 1, h, w))
-        filters_a = np.arange(fh_a * fw_a * fc_a, dtype=TORCH_DTYPE_NP).reshape(
-            (fc_a, 1, fh_a, fw_a)
+        img = np.arange(batch_size * channels * h * w, dtype=TORCH_DTYPE_NP).reshape(
+            (batch_size, channels, h, w)
         )
-        filters_b = np.arange(fh_b * fw_b * fc_b, dtype=TORCH_DTYPE_NP).reshape(
-            (fc_b, 1, fh_b, fw_b)
+        filters_a = np.arange(
+            fh_a * fw_a * fc_a * channels, dtype=TORCH_DTYPE_NP
+        ).reshape((fc_a, channels, fh_a, fw_a))
+        filters_b = np.arange(fh_b * fw_b * fc_b * fc_a, dtype=TORCH_DTYPE_NP).reshape(
+            (fc_b, fc_a, fh_b, fw_b)
         )
         img_t, filters_a_t, filters_b_t = [
             torch.tensor(x) for x in (img, filters_a, filters_b)
         ]
 
-        F.conv2d(
-            F.conv2d(img_t, filters_a_t).sum(dim=1, dtype=TORCH_DTYPE).unsqueeze(0),
-            filters_b_t,
-        )
+        F.conv2d(F.conv2d(img_t, filters_a_t), filters_b_t)
 
         start = time.time()
         for _ in range(gen.BENCH_ITERS):
-            F.conv2d(
-                F.conv2d(img_t, filters_a_t).sum(dim=1, dtype=TORCH_DTYPE).unsqueeze(0),
-                filters_b_t,
-            )
+            F.conv2d(F.conv2d(img_t, filters_a_t), filters_b_t)
         end = time.time()
         result["pytorch"] = (end - start) / gen.BENCH_ITERS
 
@@ -392,9 +397,7 @@ def benchmark_baseline(
         ), "Expected torch.int32, which is inlined into jit_conv"
 
         def jit_conv(i, fa, fb):
-            return F.conv2d(
-                F.conv2d(i, fa).sum(dim=1, dtype=torch.int32).unsqueeze(0), fb
-            )
+            return F.conv2d(F.conv2d(i, fa), fb)
 
         jit_conv = torch.jit.trace(jit_conv, (img_t, filters_a_t, filters_b_t))
 
@@ -456,9 +459,8 @@ def benchmark_baseline(
 
         def jax_cnn(i, fa, fb):
             a = lax.conv(i, fa, (1, 1), "VALID")
-            b = jnp.sum(a, axis=1, keepdims=True)
-            c = lax.conv(b, fb, (1, 1), "VALID")
-            return c
+            b = lax.conv(a, fb, (1, 1), "VALID")
+            return b
 
         jax_cnn_fast = jax.jit(jax_cnn)
         jax_cnn_fast(img, filters_a, filters_b).block_until_ready()
@@ -503,8 +505,7 @@ def benchmark_baseline(
         print(f"output dims: {spec.output.dim_sizes}")
         start = time.time()
         for _ in range(gen.BENCH_ITERS):
-            # TODO: Remove the leading (1,) once batching is added.
-            fn.realize((1,) + spec.output.dim_sizes)
+            fn.realize(spec.output.dim_sizes)
         end = time.time()
         result["halide (Adams2019)"] = (end - start) / gen.BENCH_ITERS
     else:
@@ -601,6 +602,10 @@ def main():
 
     args = parser.parse_args()
 
+    batch_sizes = args.batch
+    if not batch_sizes:
+        batch_sizes = [1]
+
     if args.log_to_sheet:
         gc_kwargs = {}
         if args.gsheet_key:
@@ -625,17 +630,17 @@ def main():
 
     print("")
     print(f"Spec: {args.spec}")
-    for n in args.sizes:
+    for b, n in itertools.product(batch_sizes, args.sizes):
         print("")
-        print(f"Size: {n}")
+        print(f"Size: {n} (Batch Size: {b})")
         if args.spec == "matmul":
-            spec = make_matmul_spec(n)
+            spec = make_matmul_spec(b, n)
         elif args.spec == "gemm3":
-            spec = make_gemm3_spec(n)
+            spec = make_gemm3_spec(b, n)
         elif args.spec == "conv":
-            spec = make_conv_spec(n)
+            spec = make_conv_spec(b, n)
         elif args.spec == "cnn":
-            spec = make_cnn_spec(n)
+            spec = make_cnn_spec(b, n)
         else:
             raise NotImplementedError(f"{args.spec} not implemented")
 
@@ -652,7 +657,7 @@ def main():
         if args.log_to_sheet:
             sheet.append_rows(
                 [
-                    [start_time, hostname, args.spec, n, name, secs]
+                    [start_time, hostname, args.spec, n, b, name, secs]
                     for name, secs in results.items()
                 ],
                 value_input_option="USER_ENTERED",
