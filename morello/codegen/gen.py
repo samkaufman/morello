@@ -8,6 +8,7 @@ import operator
 import string
 import warnings
 from collections.abc import Sequence
+from os import name
 from typing import Callable, Iterable, Literal, Optional, Union, cast
 
 import sympy
@@ -143,7 +144,6 @@ class _OperandDetails:
     concrete_origin_shape: tuple[int, ...]
 
 
-# TODO: Do we want this? Only used for _emit_tile_out_loop_nest.
 @dataclasses.dataclass(frozen=True)
 class _OperandDetailsExt(_OperandDetails):
     subscripts: tuple[int, ...]
@@ -156,6 +156,7 @@ def _emit_tile_out_loop_nest(
     op_details: Sequence[_OperandDetailsExt],
     parallel: bool,
     inner_codegen: Callable[[Sequence[_OperandDetails]], None],
+    inside_parallel_pragma: bool = False,
 ) -> None:
     namer, writer = _namer.get(), _writer.get()
 
@@ -166,34 +167,7 @@ def _emit_tile_out_loop_nest(
         return
 
     it_subscript = remaining_subscripts[0]
-
-    # The following gathers the number of steps (both full and boundary) as well
-    # as whether or not a boundary tile exists. While boundary tile sizes
-    # differ, presence of one should be consistent across all operands.
-    # As a bit of defensive programming, the following also checks that this
-    # is consistent across all operands and matching subscripts.
-    partial_steps = None
-    has_boundary = None
-    for details in op_details:
-        if not isinstance(details.operand, Tile):
-            continue
-        for dim, sub in enumerate(details.subscripts):
-            if sub != it_subscript:
-                continue
-            new_partial_steps = details.operand.steps_dim(
-                dim, details.concrete_origin_shape[dim]
-            )
-            new_has_boundary = bool(
-                details.operand.boundary_size(dim, details.concrete_origin_shape[dim])
-            )
-            if partial_steps is None:
-                partial_steps = new_partial_steps
-                has_boundary = new_has_boundary
-            assert new_partial_steps == partial_steps
-            assert new_has_boundary == has_boundary
-    assert isinstance(partial_steps, int) and isinstance(has_boundary, bool)
-
-    full_steps = partial_steps - 1 if has_boundary else partial_steps
+    full_steps, has_boundary = _calc_steps(it_subscript, op_details)
 
     if full_steps:
         main_concrete_sizes: list[tuple[int, ...]] = [
@@ -210,11 +184,18 @@ def _emit_tile_out_loop_nest(
             # Emit the loop opener.
             it_var = 0
             if full_steps > 1:
-                if parallel:
-                    # TODO: Rewrite loop to be perfectly nested, then collapse instead
-                    #  of using nested parallelism.
-                    # writer.writeline(f"#pragma omp parallel")
-                    warnings.warn("Parallel loop generation disabled.")
+                if parallel and not inside_parallel_pragma:
+                    inside_parallel_pragma = True
+                    # TODO: Reintroduce collapsing after all boundaries are unrolled out
+                    # to_collapse = sum(
+                    #     1
+                    #     for s in remaining_subscripts
+                    #     if _calc_steps(s, op_details)[0] > 1
+                    # )
+                    to_collapse = 1
+                    writer.writeline(
+                        f"#pragma omp parallel for collapse({to_collapse}) schedule(static)"
+                    )
                 it_var = namer.fresh_name("t")
                 writer.writeline(
                     f"for (int {it_var} = 0; {it_var} < {full_steps}; {it_var}++) {{"
@@ -237,6 +218,7 @@ def _emit_tile_out_loop_nest(
                 ],
                 parallel,
                 inner_codegen,
+                inside_parallel_pragma=inside_parallel_pragma
             )
 
             # Close loop.
@@ -244,6 +226,9 @@ def _emit_tile_out_loop_nest(
                 writer.dedent()
                 writer.writeline("}")
         else:
+            if parallel:
+                warnings.warn("Parallel loop generation skipped for unrolled loop.")
+
             for it_var_idx in range(full_steps):
                 # Sub. in the concrete step index instead of a reference to a generated
                 # iterator name.
@@ -261,8 +246,9 @@ def _emit_tile_out_loop_nest(
                             op_details, full_new_index_exprs, main_concrete_sizes
                         )
                     ],
-                    parallel,
+                    False,
                     inner_codegen,
+                    inside_parallel_pragma=inside_parallel_pragma
                 )
 
     # Generate boundary epilogue here
@@ -303,7 +289,43 @@ def _emit_tile_out_loop_nest(
             ],
             parallel,
             inner_codegen,
+            inside_parallel_pragma=inside_parallel_pragma
         )
+
+
+
+def _calc_steps(
+    it_subscript: int, op_details: Sequence[_OperandDetailsExt]
+) -> tuple[int, bool]:
+    # The following gathers the number of steps (both full and boundary) as well
+    # as whether or not a boundary tile exists. While boundary tile sizes
+    # differ, presence of one should be consistent across all operands.
+    # As a bit of defensive programming, the following also checks that this
+    # is consistent across all operands and matching subscripts.
+    partial_steps = None
+    has_boundary = None
+    for details in op_details:
+        if not isinstance(details.operand, Tile):
+            continue
+        for dim, sub in enumerate(details.subscripts):
+            if sub != it_subscript:
+                continue
+            new_partial_steps = details.operand.steps_dim(
+                dim, details.concrete_origin_shape[dim]
+            )
+            new_has_boundary = bool(
+                details.operand.boundary_size(dim, details.concrete_origin_shape[dim])
+            )
+            if partial_steps is None:
+                partial_steps = new_partial_steps
+                has_boundary = new_has_boundary
+            assert new_partial_steps == partial_steps
+            assert new_has_boundary == has_boundary
+    assert isinstance(partial_steps, int) and isinstance(has_boundary, bool)
+
+    full_steps = partial_steps - 1 if has_boundary else partial_steps
+
+    return full_steps, has_boundary
 
 
 def _update_index_exprs(
@@ -357,12 +379,39 @@ class _CTensor(abc.ABC):
         return ptr_str
 
     @abc.abstractmethod
+    def emit(self, zero_init=True) -> "_CNameTensor":
+        raise NotImplementedError()
+
+    @abc.abstractmethod
     def emit_free(self):
         raise NotImplementedError()
 
 
 class _CNameTensor(_CTensor):
     name: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _CPtr(_CNameTensor):
+    name: str
+    backing_tensor: _CTensor
+
+    @property
+    def dtype(self) -> Dtype:
+        return self.backing_tensor.dtype
+
+    def c_index(self, expr):
+        return f"{self.name}[{_expr_to_c(expr)}]"
+
+    def c_index_ptr(self, expr):
+        return f"{self.name} + {_expr_to_c(expr)}"
+
+    def emit_free(self):
+        raise NotImplementedError()
+
+    def emit(self):
+        # return self
+        raise NotImplementedError()
 
 
 # TODO: Merge with _CHeapArray.
@@ -418,6 +467,9 @@ class _CStackArray(_CNameTensor):
     def c_index(self, expr):
         return f"{self.name}[{_expr_to_c(expr)}]"
 
+    def c_index_ptr(self, expr):
+        return "&" + self.c_index(expr)
+
     def emit_free(self):
         pass
 
@@ -445,16 +497,14 @@ class _CValueVar(_CNameTensor):
         return self
 
 
-def _emit_buffer_alloc(size: int, dtype: Dtype) -> _CNameTensor:
-    namer, writer = _namer.get(), _writer.get()
-
-    name = namer.fresh_name("buf")
+def _make_buffer(size: int, dtype: Dtype) -> _CNameTensor:
+    name = _namer.get().fresh_name("buf")
     if (size * dtype.size) > STACK_CUTOFF:
-        return _CHeapArray(name, size, dtype).emit()
+        return _CHeapArray(name, size, dtype)
     elif size > 1:
-        return _CStackArray(name, size, dtype).emit()
+        return _CStackArray(name, size, dtype)
     else:
-        return _CValueVar(name, dtype).emit()
+        return _CValueVar(name, dtype)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -589,9 +639,9 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         # First stage
         assert isinstance(imp.stages[0].output, Tensor)
 
-        last_c_buf = _emit_buffer_alloc(
+        last_c_buf = _make_buffer(
             imp.stages[0].output.volume, imp.stages[0].output.dtype
-        )
+        ).emit()
         cur_slice = slice(-len(imp.stages[0].inputs), len(inps_op_details))
         cur_out = _pipeline_emit_stage(
             imp.stages[0], inps_op_details[cur_slice], last_c_buf, None, None
@@ -604,7 +654,7 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         for stage, next_stage in zip(imp.stages[1:], imp.stages[2:]):
             assert isinstance(stage.output, Tensor)
 
-            new_c_buf = _emit_buffer_alloc(stage.output.volume, stage.output.dtype)
+            new_c_buf = _make_buffer(stage.output.volume, stage.output.dtype).emit()
             cur_out = _pipeline_emit_stage(
                 stage, inps_op_details[cur_slice], new_c_buf, cur_out, None
             )
@@ -695,13 +745,13 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
 
         concrete_shape = op_details[source_idx].concrete_origin_shape
 
-        is_store = imp.input_idx is None
+        is_store = imp.input_idx is None  # TODO: Can remove?
 
         # On the Hexagon target:
         if current_system().has_hvx:
             if not imp.is_store and imp.destination.bank == "L2":
                 assert imp.source.bank == "GL"
-                _emit_hvx_l2fetch(imp, is_store, op_details[source_idx])
+                _emit_hvx_l2fetch(imp, imp.is_store, op_details[source_idx])
                 _inner_generate_c(imp.inner, op_details)
             # HVX scalar L1/dc-to-register case
             elif not imp.is_store and imp.destination.bank == "L1":
@@ -739,13 +789,7 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         # On CPU and Hexagon targets: code is only generated (after the
         # previous cases) for MoveLet if there is a layout or contiguity change.
         # Otherwise, we just recurse.
-        elif imp.destination.bank == "RF" and (
-            not imp.source.contiguous
-            or (
-                imp.source.layout != imp.destination.layout
-                and functools.reduce(operator.mul, concrete_shape, 1) != 1
-            )
-        ):
+        elif imp.destination.bank == "RF":
             _move_registers(
                 imp,
                 source_idx,
@@ -1137,10 +1181,10 @@ def _move_registers(impl, source_idx, c_tensors, operand_index_exprs, concrete_s
     assert (source_idx < len(impl.operands) - 1) == (not impl.is_store)
     assert (source_idx >= len(impl.operands) - 1) == impl.is_store
 
-    c_buf = _emit_buffer_alloc(
+    c_buf = _make_buffer(
         functools.reduce(operator.mul, concrete_shapes[source_idx], 1),
         impl.destination.dtype,
-    )
+    ).emit()
 
     # TODO: All of the below could be one _OperandDetails update
 
@@ -1513,37 +1557,61 @@ def generate_c(
             writer.writeline("}")
             writer.writeline("")
 
+    # Construct the program inputs, but don't emit anything yet.
+    # NOTE: Names are assigned to each buffer here, and that name is used
+    #   both as the parameter name for the kernel function and as the name
+    #   inside main where it is allocated. (There's no treatment of aliasing.)
+    tensor_names = []
+    c_tensors = []
+    index_exprs = []
+    for operand, initial_value in zip(imp.operands, values):
+        assert isinstance(operand, tensor.Tensor)
+        c_buf = _make_buffer(operand.volume, operand.dtype)
+        index_exprs.append(indexexpr.buffer_indexing_expr(operand))
+        tensor_names.append(c_buf.name)
+        c_tensors.append(c_buf)
+
+    # Emit the kernel function
+    writer.writeline("__attribute__((noinline))")
+    writer.writeline("void kernel(")
+    for operand_idx in range(len(imp.operands)):
+        operand = imp.operands[operand_idx]
+        c_buf = c_tensors[operand_idx]
+        term = ", " if operand_idx + 1 < len(imp.operands) else ")"
+        writer.writeline(f"  {operand.dtype.c_type} *restrict {c_buf.name}{term}")
+    writer.writeline("{")
+    with writer.indent_block():
+        operand_details = [
+            _OperandDetails(_CPtr(c_buf.name, c_buf), index_expr, shape)
+            for c_buf, index_expr, shape in zip(
+                c_tensors,
+                index_exprs,
+                (op.dim_sizes for op in imp.operands),
+            )
+        ]
+        _inner_generate_c(imp, operand_details)
+    writer.writeline("}")
+    writer.writeline("")
+
+    # Emit the main function
     writer.writeline("int main() {")
     with writer.indent_block():
-        tensor_names = []
-        c_tensors = []
-        index_exprs = []
-        for operand, initial_value in zip(imp.operands, values):
-            assert isinstance(operand, tensor.Tensor)
-            c_buf = _emit_buffer_alloc(operand.volume, operand.dtype)
-            ref_fn, free_fn = c_buf.c_index, c_buf.emit_free
-            index_exprs.append(indexexpr.buffer_indexing_expr(operand))
-            tensor_names.append(c_buf.name)
-            c_tensors.append(c_buf)
+        for operand, c_buf, initial_value in zip(imp.operands, c_tensors, values):
+            c_buf.emit()
             if initial_value is not None:
                 if operand.layout != specs.Layout.ROW_MAJOR:
                     raise NotImplementedError(
                         "Initializing non-row-major tensors not yet implemented"
                     )
                 for idx, el in enumerate(utils.flatten(initial_value)):
-                    writer.writeline(f"{ref_fn(idx)} = ({operand.dtype.c_type})({el});")
+                    writer.writeline(
+                        f"{c_buf.c_index(idx)} = ({operand.dtype.c_type})({el});"
+                    )
 
         def kernel():
-            nonlocal imp, c_tensors, index_exprs
-            operand_details = [
-                _OperandDetails(c_tensor, index_expr, shape)
-                for c_tensor, index_expr, shape in zip(
-                    c_tensors,
-                    index_exprs,
-                    (op.dim_sizes for op in imp.operands),
-                )
-            ]
-            _inner_generate_c(imp, operand_details)
+            nonlocal c_tensors
+            call_args_str = ", ".join(c_buf.c_index_ptr(0) for c_buf in c_tensors)
+            writer.writeline(f"kernel({call_args_str});")
 
         if mode == "kernel_only":
             kernel()
@@ -1560,10 +1628,12 @@ def generate_c(
             else:
                 writer.writeline("")
                 writer.writeline("struct timespec start, end;")
-                writer.writeline("clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start);")
+                writer.writeline("clock_gettime(CLOCK_MONOTONIC, &start);")
+                writer.writeline("#pragma clang loop unroll(disable)")
                 writer.writeline(
                     f"for (unsigned long benchiter = 0; benchiter < {BENCH_ITERS}; ++benchiter) {{"
                 )
+
             with writer.indent_block():
                 kernel()
             if current_system().has_hvx:
@@ -1571,7 +1641,7 @@ def generate_c(
                 writer.writeline('printf("pcycles: %llu\\n", end - start);')
             else:
                 writer.writeline("}")
-                writer.writeline("clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end);")
+                writer.writeline("clock_gettime(CLOCK_MONOTONIC, &end);")
                 writer.writeline("struct timespec delta = ts_diff(start, end);")
                 writer.writeline(
                     'printf("cpu: %llds %lldns\\n", (long long)delta.tv_sec, (long long)delta.tv_nsec);'
