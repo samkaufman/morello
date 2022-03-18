@@ -69,15 +69,16 @@ RUN cd tvm/python && python3 setup.py bdist_wheel
 
 
 #FROM teeks99/clang-ubuntu@sha256:8caa3a9c5c904dc276e52275ee74df57d6b873c6fa2ef7e8f4bc15b59c74efb7 AS halide
-FROM ubuntu:impish as halide
+FROM ubuntu:focal as halide
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    clang-tools lld llvm-dev libclang-dev liblld-13-dev \
+    clang-tools-12 lld llvm-12-dev libclang-12-dev liblld-12-dev \
     libpng-dev libjpeg-dev libgl-dev \
-    python3-dev python3-numpy python3-scipy python3-imageio python3-pybind11 \
+    python3.9-dev python3-numpy python3-scipy python3-imageio python3-pybind11 \
+    python3-distutils \
     libopenblas-dev libeigen3-dev libatlas-base-dev \
-    cmake wget && \
+    cmake wget git && \
     apt-get clean
 RUN wget -O /usr/src/halide.tar.gz https://github.com/halide/Halide/archive/refs/tags/v13.0.4.tar.gz && \
     tar -C /usr/src -xzvf /usr/src/halide.tar.gz && \
@@ -90,7 +91,7 @@ RUN cd /usr/src/Halide-13.0.4 && \
     cmake --install ./build --prefix /halide
 
 #FROM teeks99/clang-ubuntu@sha256:8caa3a9c5c904dc276e52275ee74df57d6b873c6fa2ef7e8f4bc15b59c74efb7
-FROM ubuntu:impish
+FROM ubuntu:focal
 COPY --from=hexagon /Hexagon_SDK /Hexagon_SDK
 COPY --from=tvm /tvm/build/libtvm.so /tvm/build/libtvm_runtime.so /usr/lib/
 COPY --from=tvm /tvm/python/dist/*.whl /
