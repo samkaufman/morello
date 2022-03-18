@@ -157,10 +157,10 @@ class _LoopNestDescription:
     subscripts_to_steps: Sequence[tuple[int, int]]
     body_index_exprs: Sequence[sympy.Expr]
     body_shapes: Sequence[tuple[int, ...]]
+    is_boundary: bool
 
 
 def _emit_tile_out_loop_nest(
-    loop: impl.Loop,
     remaining_subscripts: list[int],  # Reduces each step; base case = empty
     op_details: Sequence[_OperandDetailsExt],
     parallel: bool,
@@ -176,10 +176,6 @@ def _emit_tile_out_loop_nest(
     emitting_steps: list[tuple[int, int, int]] = []
     for subscript in remaining_subscripts:
         full_steps, has_boundary = _calc_steps(subscript, op_details)
-        # TODO: Remove comment below.
-        # assert (
-        #     full_steps > 0 or not has_boundary
-        # ), f"full_steps was {full_steps} but has_boundary was {has_boundary}"
         if full_steps != 0:
             emitting_steps.append((subscript, full_steps, has_boundary))
 
@@ -188,12 +184,19 @@ def _emit_tile_out_loop_nest(
     if not _unroll.get():
         it_var_names = {s: namer.fresh_name("t") for s, _, _ in emitting_steps}
 
-    # Emit the boundary cases.
+    # Emit loops.
     for loop_plan in _compute_tile_out_loop_nest(
         emitting_steps, it_var_names, op_details
     ):
         assert it_var_names is not None
 
+        if not loop_plan.is_boundary and parallel:
+            assert len(loop_plan.subscripts_to_steps)
+            writer.writeline(
+                "#pragma omp parallel for "
+                f"collapse({len(loop_plan.subscripts_to_steps)}) "
+                "schedule(static)"
+            )
         for sub, steps in loop_plan.subscripts_to_steps:
             it_var = it_var_names[sub]
             writer.writeline(
@@ -233,19 +236,19 @@ def _compute_tile_out_loop_nest(
             continue
 
         subscripts_to_loop_over: list[tuple[int, int]] = []
-        boundary_new_index_exprs = [d.index_expr for d in op_details]
-        boundary_concrete_shapes = [list(d.concrete_origin_shape) for d in op_details]
+        new_index_exprs = [d.index_expr for d in op_details]
+        concrete_shapes = [list(d.concrete_origin_shape) for d in op_details]
         for bit, (sub, full_steps, _) in zip(combo, emitting_steps):
             if bit:
-                new_size = full_steps
+                tile_idx_symbol = full_steps
             else:
-                new_size = it_var_names[sub]
+                tile_idx_symbol = it_var_names[sub]
                 subscripts_to_loop_over.append((sub, full_steps))
 
-            boundary_new_index_exprs = _update_index_exprs(
-                boundary_new_index_exprs, sub, new_size, op_details
+            new_index_exprs = _update_index_exprs(
+                new_index_exprs, sub, tile_idx_symbol, op_details
             )
-            for bcs, o in zip(boundary_concrete_shapes, op_details):
+            for bcs, o in zip(concrete_shapes, op_details):
                 if not isinstance(o.operand, Tile):
                     continue
                 for sidx, s in enumerate(o.subscripts):
@@ -258,8 +261,9 @@ def _compute_tile_out_loop_nest(
                             bcs[sidx] = o.operand.dim_sizes[sidx]
         yield _LoopNestDescription(
             subscripts_to_loop_over,
-            boundary_new_index_exprs,
-            list(map(tuple, boundary_concrete_shapes)),
+            new_index_exprs,
+            list(map(tuple, concrete_shapes)),
+            is_boundary=any(combo),
         )
 
 
@@ -589,7 +593,6 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
     if isinstance(imp, impl.Loop):
         # TODO: Add a comment about why the following is `imp.inner`, not `imp`.
         _emit_tile_out_loop_nest(
-            imp,
             list(imp.subscripts),
             [
                 _OperandDetailsExt(
