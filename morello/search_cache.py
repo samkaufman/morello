@@ -27,7 +27,7 @@ class CachedSchedule(NamedTuple):
 class _TableEntry(NamedTuple):
     """Stores the best schedule for a region from its used memory to `caps`.
 
-    A _TabelEntry is a record of the best schedule that exists up to `caps`.
+    A _TableEntry is a record of the best schedule that exists up to `caps`.
     That schedule is no longer the best as soon as any memory capacity is above
     its corresponding level in `caps` or below the memory used at that level by
     the schedule.
@@ -199,6 +199,9 @@ def persistent_cache(path: Optional[Union[str, pathlib.Path]], save: bool = True
         with path.open(mode="rb") as fo:
             cache = pickle.load(fo)
     else:
+        # If we're going to save the cache, make any parent directories
+        if save:
+            path.parent.mkdir(parents=True, exist_ok=True)
         cache = ScheduleCache()
 
     try:
