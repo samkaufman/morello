@@ -54,7 +54,10 @@ class CpuTarget(Target):
         return SystemDescription(
             line_size=64,
             banks={
-                "RF": MemoryBankConfig(cache_hit_cost=0, capacity=6400),
+                # Selecting 4096 because that's a power of two. We normally
+                # overapproximate the peak memory usage of an Impl to the next
+                # power of two.
+                "RF": MemoryBankConfig(cache_hit_cost=0, capacity=4096),
                 "GL": MemoryBankConfig(cache_hit_cost=10, capacity=sys.maxsize),
             },
             default_bank="GL",
