@@ -8,7 +8,6 @@ import operator
 import string
 import warnings
 from collections.abc import Mapping, Sequence
-from os import name
 from typing import Callable, Iterable, Literal, Optional, Union, cast
 
 import sympy
@@ -190,21 +189,22 @@ def _emit_tile_out_loop_nest(
     ):
         assert it_var_names is not None
 
-        if not loop_plan.is_boundary and parallel:
-            assert len(loop_plan.subscripts_to_steps)
-            writer.writeline(
-                "#pragma omp parallel for "
-                f"collapse({len(loop_plan.subscripts_to_steps)}) "
-                "schedule(static)"
-            )
-        for sub, steps in loop_plan.subscripts_to_steps:
-            it_var = it_var_names[sub]
-            writer.writeline(
-                f"for (int {it_var} = 0; {it_var} < {steps}; {it_var}++) {{"
-            )
-
         if len(loop_plan.subscripts_to_steps):
-            writer.indent()
+            if parallel and not loop_plan.is_boundary:
+                writer.writeline(
+                    "#pragma omp parallel for "
+                    f"collapse({len(loop_plan.subscripts_to_steps)}) "
+                    "schedule(static)"
+                )
+            for sub, steps in loop_plan.subscripts_to_steps:
+                it_var = it_var_names[sub]
+                writer.writeline(
+                    f"for (int {it_var} = 0; {it_var} < {steps}; {it_var}++) {{"
+                )
+
+            if len(loop_plan.subscripts_to_steps):
+                writer.indent()
+
         inner_codegen(
             [
                 _OperandDetailsExt(d.c_tensor, e, tuple(s), d.subscripts, d.operand)
@@ -215,8 +215,8 @@ def _emit_tile_out_loop_nest(
         )
         if len(loop_plan.subscripts_to_steps):
             writer.dedent()
-        for _ in loop_plan.subscripts_to_steps:
-            writer.writeline("}")
+            for _ in loop_plan.subscripts_to_steps:
+                writer.writeline("}")
 
 
 def _compute_tile_out_loop_nest(
@@ -764,7 +764,15 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         # On CPU and Hexagon targets: code is only generated (after the
         # previous cases) for MoveLet if there is a layout or contiguity change.
         # Otherwise, we just recurse.
-        elif imp.destination.bank == "RF":
+        #
+        elif imp.destination.bank == "RF" and (
+            not imp.source.contiguous
+            or (
+                imp.source.layout != imp.destination.layout
+                and functools.reduce(operator.mul, concrete_shape, 1) != 1
+            )
+        ):
+            # elif imp.destination.bank == "RF":
             _move_registers(
                 imp,
                 source_idx,
