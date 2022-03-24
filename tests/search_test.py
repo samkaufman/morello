@@ -51,6 +51,33 @@ class CountingCache(search_cache.ScheduleCache):
         return super().put(spec, schedule)
 
 
+@pytest.mark.skip("Need structural Impl equality for assert")
+@pytest.mark.slow
+@given(st.from_type(specs.Spec))
+def test_nested_loop_pruning_doesnt_change_solutions(spec):
+    token = impl.settings.prune_nested_parallel_loops.set(False)
+    try:
+        no_pruning_solution = search.schedule_search(spec)
+        if no_pruning_solution:
+            hypothesis.note(
+                f"no_pruning_solution:\n{op_pprint.pformat(no_pruning_solution)}"
+            )
+    finally:
+        impl.settings.prune_nested_parallel_loops.reset(token)
+
+    token = impl.settings.prune_nested_parallel_loops.set(True)
+    try:
+        with_pruning_solution = search.schedule_search(spec)
+        if with_pruning_solution:
+            hypothesis.note(
+                f"with_pruning_solution:\n{op_pprint.pformat(with_pruning_solution)}"
+            )
+    finally:
+        impl.settings.prune_nested_parallel_loops.reset(token)
+
+    assert no_pruning_solution == with_pruning_solution
+
+
 # TODO: Generalize beyond just one Compose spec
 # The minimum capacity is 5 because that's the number of cache lines required to
 # move a single filter and its corresponding image window into registers

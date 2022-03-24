@@ -20,6 +20,7 @@ from .pruning import (
     break_matmul_split_symmetries,
     break_moves_symmetries,
     break_tile_out_symmetries,
+    prune_nested_parallel_loops,
     prune_relayout_cycles,
 )
 from .settings import allow_reduce_splits, allow_sliding_windows
@@ -67,6 +68,7 @@ class ComposeHole(Impl):
         new_spec = self.spec.replace_io(tuple(inp.spec for inp in inputs), output.spec)
         return ComposeHole(new_spec, inputs, output)
 
+    @prune_nested_parallel_loops
     @prune_relayout_cycles
     @break_moves_symmetries
     @break_tile_out_symmetries

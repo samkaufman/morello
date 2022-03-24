@@ -17,6 +17,9 @@ allow_sliding_windows: contextvars.ContextVar[bool] = contextvars.ContextVar(
 allow_reduce_splits: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "allow_reduce_splits", default=True
 )
+prune_nested_parallel_loops: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "prune_nested_parallel_loops", default=True
+)
 PRUNE_RELAYOUT_CYCLES = True
 BREAK_MOVE_SYMMETRIES = False  # TODO: Remove this code entirely
 BREAK_SEQUENTIAL_TILES = False

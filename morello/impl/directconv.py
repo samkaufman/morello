@@ -14,6 +14,7 @@ from .pruning import (
     ParentSummary,
     break_moves_symmetries,
     break_tile_out_symmetries,
+    prune_nested_parallel_loops,
     prune_relayout_cycles,
 )
 from .settings import allow_sliding_windows
@@ -128,6 +129,7 @@ class DirectConv(NonAllocatingLeaf):
 
         return self
 
+    @prune_nested_parallel_loops
     @prune_relayout_cycles
     @break_moves_symmetries
     @break_tile_out_symmetries

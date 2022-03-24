@@ -5,6 +5,7 @@ from typing import FrozenSet, Optional, Union
 
 from .. import impl, system_config
 from ..tensor import Tensor, Tile
+from . import settings
 from .settings import (
     BREAK_MOVE_SYMMETRIES,
     BREAK_SEQUENTIAL_TILES,
@@ -16,6 +17,7 @@ from .settings import (
 class ParentSummary:
     parent: "impl.Impl"
     movements: FrozenSet[tuple[Union[Tensor, Tile], str]]
+    loop_depth: int
 
     @staticmethod
     def update(
@@ -25,13 +27,43 @@ class ParentSummary:
 
         if original is None:
             movements = set()
+            loop_depth = 0
         else:
             movements = set(original.movements)
+            loop_depth = original.loop_depth
+            if isinstance(parent, impl.Loop):
+                loop_depth += 1
 
         if isinstance(parent, moves.MoveLet):
             movements.add((parent.destination, parent.destination.bank))
 
-        return ParentSummary(parent=parent, movements=frozenset(movements))
+        return ParentSummary(
+            parent=parent, movements=frozenset(movements), loop_depth=loop_depth
+        )
+
+
+def prune_nested_parallel_loops(func):
+    if not settings.prune_nested_parallel_loops.get():
+        return func
+
+    @functools.wraps(func)
+    def wrapper_decorator(*args, **kwargs):
+        from . import actions
+
+        parent_summary: Optional[ParentSummary] = kwargs.get("parent_summary")
+        if parent_summary is None:
+            yield from func(*args, **kwargs)
+            return
+
+        for action in func(*args, **kwargs):
+            if (
+                not isinstance(action, actions.TileOutAction)
+                or not action.parallel
+                or parent_summary.loop_depth == 0
+            ):
+                yield action
+
+    return wrapper_decorator
 
 
 def prune_relayout_cycles(func):

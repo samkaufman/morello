@@ -17,6 +17,7 @@ from .pruning import (
     break_matmul_split_symmetries,
     break_moves_symmetries,
     break_tile_out_symmetries,
+    prune_nested_parallel_loops,
     prune_relayout_cycles,
 )
 from .utils import assert_stable_spec, dim_range, gen_tile_sizes
@@ -68,6 +69,7 @@ class MatmulHole(MatmulBase):
     def is_scheduled(self) -> bool:
         return False
 
+    @prune_nested_parallel_loops
     @prune_relayout_cycles
     @break_moves_symmetries
     @break_tile_out_symmetries
@@ -211,6 +213,7 @@ class MatmulLeaf(MatmulBase):
     def is_scheduled(self) -> bool:
         return True
 
+    @prune_nested_parallel_loops
     @prune_relayout_cycles
     @break_moves_symmetries
     @break_tile_out_symmetries

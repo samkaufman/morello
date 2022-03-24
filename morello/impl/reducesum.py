@@ -14,6 +14,7 @@ from .pruning import (
     ParentSummary,
     break_moves_symmetries,
     break_tile_out_symmetries,
+    prune_nested_parallel_loops,
     prune_relayout_cycles,
 )
 from .settings import allow_reduce_splits
@@ -57,6 +58,7 @@ class ReduceSum(NonAllocatingLeaf):
             and all(d == 1 for d in self.source.dim_sizes)
         )
 
+    @prune_nested_parallel_loops
     @prune_relayout_cycles
     @break_moves_symmetries
     @break_tile_out_symmetries
