@@ -765,14 +765,7 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         # previous cases) for MoveLet if there is a layout or contiguity change.
         # Otherwise, we just recurse.
         #
-        elif imp.destination.bank == "RF" and (
-            not imp.source.contiguous
-            or (
-                imp.source.layout != imp.destination.layout
-                and functools.reduce(operator.mul, concrete_shape, 1) != 1
-            )
-        ):
-            # elif imp.destination.bank == "RF":
+        elif imp.destination.bank == "RF":
             _move_registers(
                 imp,
                 source_idx,
