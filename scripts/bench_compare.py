@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 parser = argparse.ArgumentParser()
 parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=pathlib.Path, default=None)
+parser.add_argument("--no-save-cache", action="store_false", dest="save_cache")
 parser.add_argument("--n_cpus", type=int, default=1)
 parser.add_argument("--db_path", type=pathlib.Path, default="samples.db")
 parser.add_argument("--best", action="store_true")
@@ -560,7 +561,7 @@ def _run_baselines(args, spec: specs.Spec, print_graphs: bool = False) -> dict:
 
 
 def _run_best(args, spec) -> dict:
-    with search_cache.persistent_cache(args.cache, save=True) as cache:
+    with search_cache.persistent_cache(args.cache, save=args.save_cache) as cache:
         impl = search.schedule_search(spec, cache=cache)
     assert impl is not None
     runtime_secs, impl_str, c, peak = _benchmark(impl)
