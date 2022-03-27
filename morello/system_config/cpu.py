@@ -61,7 +61,7 @@ class CpuTarget(Target):
                 "GL": MemoryBankConfig(cache_hit_cost=10, capacity=sys.maxsize),
             },
             default_bank="GL",
-            processors=4,
+            processors=32,
             has_hvx=False,
             faster_destination_banks=self._faster_destination_banks,
             next_general_bank=self._next_general_bank,
