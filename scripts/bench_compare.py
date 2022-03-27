@@ -141,9 +141,9 @@ def make_cnn_spec(batch_size: int, d: int) -> specs.Spec:
     target = system_config.current_target()
 
     img = target.tensor_spec((batch_size, 3, d, d), dtype=DTYPE)
-    filters_a = target.tensor_spec((32, 3, 5, 5), dtype=DTYPE)
-    filters_b = target.tensor_spec((32, 32, 5, 5), dtype=DTYPE)
-    output = target.tensor_spec((batch_size, 32, d - 8, d - 8), dtype=DTYPE)
+    filters_a = target.tensor_spec((32, 3, 3, 3), dtype=DTYPE)
+    filters_b = target.tensor_spec((32, 32, 3, 3), dtype=DTYPE)
+    output = target.tensor_spec((batch_size, 32, d - 4, d - 4), dtype=DTYPE)
     return specs.Compose(
         (specs.Convolution, specs.Convolution),
         (filters_b, img, filters_a),
