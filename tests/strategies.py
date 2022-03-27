@@ -89,11 +89,12 @@ def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
 @st.composite
 def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
     target = system_config.current_target()
-    image = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=2))
+    image = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=4, max_dims=4))
     filters_dim_sizes = (
-        draw(dim_st(max_size=image.dim_sizes[0])),
-        draw(dim_st(max_size=image.dim_sizes[1])),
         draw(dim_st(max_size=max_dim_size)),
+        image.dim_sizes[1],
+        draw(dim_st(max_size=image.dim_sizes[2])),
+        draw(dim_st(max_size=image.dim_sizes[3])),
     )
     filters = target.tensor_spec(
         dim_sizes=filters_dim_sizes,
@@ -108,7 +109,7 @@ def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
         layout=draw(layout_st(dim_sizes=out_dim_sizes)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
-    return specs.Convolution(image, filters, out)
+    return specs.Convolution(image, filters, out, serial_only=draw(st.booleans()))
 
 
 @st.composite
