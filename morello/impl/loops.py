@@ -184,6 +184,17 @@ class Loop(Impl):
             val *= self.steps_subscript(s)
         return val
 
+    @property
+    def full_steps(self) -> int:
+        val = 1
+        for s in self.subscripts:
+            all_steps = self.steps_subscript(s)
+            if self.boundary_size(s):
+                val *= all_steps - 1
+            else:
+                val *= all_steps
+        return val
+
     def steps_subscript(
         self, subscript, concrete_outer_size: Optional[int] = None
     ) -> int:

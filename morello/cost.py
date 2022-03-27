@@ -60,7 +60,7 @@ def move_cost(
 
     # Add a 10% to penalize a lack of hardware prefetching
     if not src.contiguous or meaningful_layout_difference:
-        cost = int(1.1 * cost)
+        cost = int(2 * cost)
     return cost
 
 
@@ -104,9 +104,12 @@ def detailed_analytical_cost(
             op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
         )
 
-        factor = op.steps
-        if op.parallel:
-            factor = math.ceil(op.steps / current_system().processors)
+        if not op.parallel:
+            factor = op.steps
+        else:
+            main_steps = op.full_steps
+            factor = math.ceil(main_steps / current_system().processors)
+            factor += op.steps - main_steps
 
         new_cost = factor * cost_dict[op.inner][0]
         cost_expl = f"{new_cost:5d} = {factor} * _"
@@ -180,9 +183,12 @@ def compute_cost(op: Impl) -> int:
     if isinstance(op, Pipeline):
         return _assign_cost(op, sum(compute_cost(s) for s in op.stages))
     elif isinstance(op, Loop):
-        factor = op.steps
-        if op.parallel:
-            factor = math.ceil(op.steps / current_system().processors)
+        if not op.parallel:
+            factor = op.steps
+        else:
+            main_steps = op.full_steps
+            factor = math.ceil(main_steps / current_system().processors)
+            factor += op.steps - main_steps
         return _assign_cost(op, factor * compute_cost(op.inner))
     elif isinstance(op, SlidingWindowLoop):
         raise NotImplementedError()
@@ -203,3 +209,4 @@ def compute_cost(op: Impl) -> int:
 def _assign_cost(impl: Impl, val: int) -> int:
     object.__setattr__(impl, COST_ATTR, val)
     return val
+
