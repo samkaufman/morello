@@ -9,6 +9,8 @@ from . import common
 
 def _best_schedule(
     it: Iterable[Impl],
+    spec: specs.Spec,
+    callbacks: Optional[common.SearchCallbacks],
 ) -> Optional[tuple[Impl, tuple[int, Any, Any, Any]]]:
     """Returns the best schedule if `it` is non-empty; `None` if it is.
 
@@ -16,6 +18,16 @@ def _best_schedule(
     breaking ties as described in schedule_key's docstring.
     """
     it = ((s, common.schedule_key(s)) for s in it)
+
+    def _cb_wrap(it):
+        for item in it:
+            imp, imp_cost_tuple = item
+            callbacks.visit_impl(spec, imp, imp_cost_tuple[0])
+            yield item
+
+    if callbacks:
+        it = _cb_wrap(it)
+
     return min(it, key=lambda x: x[1], default=None)
 
 
@@ -197,9 +209,12 @@ def _inner_schedule_search(
 
             yield completed
 
-    best_result = _best_schedule(yield_options())
+    best_result = _best_schedule(yield_options(), spec, callbacks)
+
     if callbacks:
-        callbacks.exit(spec, best_result[1][0] if best_result else None)
+        callbacks.exit(
+            spec, (best_result[0], best_result[1][0]) if best_result else None
+        )
 
     if best_result is not None:
         schedule_to_return, (cost_ret, _, _) = best_result

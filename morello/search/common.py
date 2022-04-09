@@ -3,10 +3,11 @@ import dataclasses
 import functools
 import sys
 from collections.abc import Iterable, Sequence
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
-import morello.impl.actions
-import morello.impl.base
+if TYPE_CHECKING:
+    from morello.impl.actions import SlidingTileOutAction
+    from morello.impl.base import Impl
 
 from .. import cost, pruning, specs, system_config
 
@@ -25,10 +26,13 @@ class SearchCallbacks:
         """Called when scheduling an uncached spec."""
         pass
 
-    def applied_action(self, action, impl: morello.impl.base.Impl) -> None:
+    def applied_action(self, action, impl: "Impl") -> None:
         pass
 
-    def exit(self, spec: specs.Spec, cost: Optional[int]) -> None:
+    def visit_impl(self, spec: specs.Spec, imp: "Impl", impl_cost: int) -> None:
+        pass
+
+    def exit(self, spec: specs.Spec, best: Optional[tuple["Impl", int]]) -> None:
         """Called when finished scheduling an uncached spec."""
         pass
 
@@ -38,7 +42,7 @@ class SearchStats:
     expansions: int = 0
 
 
-def schedule_key(schedule: morello.impl.base.Impl) -> tuple[int, Sequence[int], Any]:
+def schedule_key(schedule: "Impl") -> tuple[int, Sequence[int], Any]:
     """Returns a key for ordering schedules during search.
 
     The returned key is a tuple of the schedule cost, peak memory usage, and
@@ -57,7 +61,7 @@ def schedule_key(schedule: morello.impl.base.Impl) -> tuple[int, Sequence[int], 
 # TODO: Consider making this a default implementation of `actions` itself.
 # TODO: Remove skip_sliding in favor of a global ContextVar for actions
 def hole_actions(
-    root: morello.impl.base.Impl, include_inner_impl=False, skip_sliding=False
+    root: "Impl", include_inner_impl=False, skip_sliding=False
 ) -> Iterable[tuple[Callable, int]]:
     """Yields callables for each action possible in root's leaf holes.
 
@@ -67,9 +71,7 @@ def hole_actions(
     """
     if not root.children:
         for act in root.actions():
-            if skip_sliding and isinstance(
-                act, morello.impl.actions.SlidingTileOutAction
-            ):
+            if skip_sliding and isinstance(act, SlidingTileOutAction):
                 continue
             if include_inner_impl:
                 yield functools.partial(_double_result, act), 0
@@ -93,7 +95,7 @@ def hole_actions(
 # TODO: Consider making this a default implementation of `actions` itself.
 # TODO: Remove skip_sliding in favor of a global ContextVar for actions
 def leaf_actions(
-    root: morello.impl.base.Impl, include_inner_impl=False, skip_sliding=False
+    root: "Impl", include_inner_impl=False, skip_sliding=False
 ) -> Iterable[tuple[Callable, int]]:
     """Yields callables for each action possible in root's leaves.
 
@@ -103,9 +105,7 @@ def leaf_actions(
     """
     if not root.children:
         for act in root.actions():
-            if skip_sliding and isinstance(
-                act, morello.impl.actions.SlidingTileOutAction
-            ):
+            if skip_sliding and isinstance(act, SlidingTileOutAction):
                 continue
             if include_inner_impl:
                 yield functools.partial(_double_result, act), 0
@@ -135,7 +135,7 @@ def _double_result(action):
 class _WrappedRecurAction:
     # This class could just be a partially applied, (nullary) function, but
     # debugging is a lot easier with a custom __str__ implementation.
-    root: morello.impl.base.Impl
+    root: "Impl"
     include_inner_impl: bool
     idx: int
     action: Callable
