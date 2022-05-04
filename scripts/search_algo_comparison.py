@@ -114,15 +114,15 @@ def _make_cnn(depth: int = 6) -> specs.Spec:
 
     # ResNet-18 uses 224-by-224 image inputs. Let's borrow that.
     inputs = [
-        target.tensor_spec((224, 224), dtype=dtypes.Uint8),
-        target.tensor_spec((5, 5, 64), dtype=dtypes.Uint8),
+        target.tensor_spec((1, 3, 224, 224), dtype=dtypes.Uint8),
+        target.tensor_spec((128, 3, 5, 5), dtype=dtypes.Uint8),
     ]
     for _ in range(depth - 1):
-        inputs.insert(0, target.tensor_spec((5, 5, 128), dtype=dtypes.Uint8))
+        inputs.insert(0, target.tensor_spec((128, 128, 5, 5), dtype=dtypes.Uint8))
     inputs = tuple(inputs)
 
     output_dim = 512 - 4 * depth
-    output = target.tensor_spec((output_dim, output_dim), dtype=dtypes.Uint8)
+    output = target.tensor_spec((128, output_dim, output_dim), dtype=dtypes.Uint8)
 
     intermediate_dtypes = (dtypes.Uint8,) * (len(subspecs) - 1)
 
@@ -149,9 +149,9 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec, Optional[int]]]:
         serial_only=True,
     ), None
     yield "conv-256x256-5x5-32", specs.Convolution(
-        target.tensor_spec((256, 256), dtype=DTYPE),
-        target.tensor_spec((5, 5, 32), dtype=DTYPE),
-        target.tensor_spec((256 - 4, 256 - 4, 32), dtype=DTYPE),
+        target.tensor_spec((1, 3, 256, 256), dtype=DTYPE),
+        target.tensor_spec((32, 3, 5, 5), dtype=DTYPE),
+        target.tensor_spec((1, 32, 256 - 4, 256 - 4), dtype=DTYPE),
         serial_only=True,
     ), None
     yield "gemm3-256", specs.Compose(
