@@ -615,7 +615,7 @@ def main():
         gc = gspread.service_account(**gc_kwargs)
         sheet = gc.open(args.log_to_sheet).worksheet("Log")
 
-    system_config.set_current_target(system_config.target_by_name(args.target))
+    system_config.set_current_target(args.target)
 
     # Disable sliding windows, since we can't use them with codegen yet.
     morello.impl.allow_sliding_windows.set(False)

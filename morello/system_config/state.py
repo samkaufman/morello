@@ -1,7 +1,8 @@
 import contextlib
 from contextvars import ContextVar
+from typing import Union
 
-from .base import Target, SystemDescription
+from .base import SystemDescription, Target
 
 _CURRENT_TARGET: ContextVar["Target"] = ContextVar("_CURRENT_TARGET")
 
@@ -17,7 +18,9 @@ def current_target() -> Target:
         raise NoTargetSetException("No target set. Call set_current_target.")
 
 
-def set_current_target(target: Target):
+def set_current_target(target: Union[str, Target]):
+    if isinstance(target, str):
+        return set_current_target(target_by_name(target))
     _CURRENT_TARGET.set(target)
 
 
