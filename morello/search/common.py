@@ -6,10 +6,10 @@ from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
-    from morello.impl.actions import SlidingTileOutAction
     from morello.impl.base import Impl
 
 from .. import cost, pruning, specs, system_config
+from ..impl import actions
 
 prune_column_major: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "prune_column_major", default=False
@@ -71,7 +71,7 @@ def hole_actions(
     """
     if not root.children:
         for act in root.actions():
-            if skip_sliding and isinstance(act, SlidingTileOutAction):
+            if skip_sliding and isinstance(act, actions.SlidingTileOutAction):
                 continue
             if include_inner_impl:
                 yield functools.partial(_double_result, act), 0
@@ -105,7 +105,7 @@ def leaf_actions(
     """
     if not root.children:
         for act in root.actions():
-            if skip_sliding and isinstance(act, SlidingTileOutAction):
+            if skip_sliding and isinstance(act, actions.SlidingTileOutAction):
                 continue
             if include_inner_impl:
                 yield functools.partial(_double_result, act), 0
