@@ -1,7 +1,7 @@
 import functools
 from typing import Any, Generator, Iterable, Optional
 
-from .. import impl, pruning, replace, specs, system_config
+from .. import impl, layouts, pruning, replace, specs, system_config
 from ..impl import Impl
 from ..search_cache import CachedSchedule, ScheduleCache
 from . import common
@@ -111,9 +111,9 @@ def _inner_schedule_search(
     """Implements most of the logic of schedule_search."""
 
     if common.prune_column_major.get():
-        if any(isinstance(inp.layout, specs.ColMajor) for inp in spec.inputs):
+        if any(isinstance(inp.layout, layouts.ColMajor) for inp in spec.inputs):
             return None
-        if isinstance(spec.output.layout, specs.ColMajor):
+        if isinstance(spec.output.layout, layouts.ColMajor):
             return None
 
     if stats:

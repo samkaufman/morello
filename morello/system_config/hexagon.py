@@ -17,7 +17,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Callable, Optional, Union, cast
 
-from .. import dtypes, specs, tensor
+from .. import dtypes, layouts, specs, tensor
 from ..codegen import gen
 from ..impl import Impl
 from . import base
@@ -66,13 +66,13 @@ class HvxSimulatorTarget(Target):
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
         bank: Optional[str] = None,
-        layout: Optional[specs.Layout] = None,
+        layout: Optional[layouts.Layout] = None,
         **kwargs,
     ) -> "TensorSpec":
         if layout is None:
-            layout = specs.ROW_MAJOR
+            layout = layouts.ROW_MAJOR
         if bank == "VMEM":
-            return specs.HvxVmemTensorSpec(dim_sizes, dtype, bank, layout, **kwargs)
+            return layouts.HvxVmemTensorSpec(dim_sizes, dtype, bank, layout, **kwargs)
         return specs.TensorSpec(dim_sizes, dtype, bank, layout)
 
     @functools.cached_property
@@ -96,8 +96,8 @@ class HvxSimulatorTarget(Target):
         )
 
     @property
-    def all_layouts(self) -> Iterable[specs.Layout]:
-        return [specs.ROW_MAJOR, specs.COL_MAJOR, specs.HEXAGON_TRANSPACKED]
+    def all_layouts(self) -> Iterable[layouts.Layout]:
+        return [layouts.ROW_MAJOR, layouts.COL_MAJOR, layouts.HEXAGON_TRANSPACKED]
 
     def _faster_destination_banks(self, source: str) -> set[str]:
         if source in ("HexagonRF", "VMEM"):
@@ -264,7 +264,7 @@ class HvxVmemTensor(HvxVmemTensorlike, tensor.TensorBase):
 
     def __str__(self):
         layout_epi = ""
-        if isinstance(self.layout, specs.RowMajor):
+        if isinstance(self.layout, layouts.RowMajor):
             layout_epi = f", {self.layout}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         vec_part = "×".join(str(s) for s in self.vector_shape)
@@ -302,7 +302,7 @@ class HvxVmemSimpleTile(HvxVmemTensorlike, tensor.SimpleTile):
 
     @functools.cached_property
     def spec(self) -> specs.HvxVmemTensorSpec:
-        layout = specs.ROW_MAJOR
+        layout = layouts.ROW_MAJOR
         if any(d != 1 for d in self.dim_sizes):
             layout = self.root.layout
         return specs.HvxVmemTensorSpec(

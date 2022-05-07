@@ -5,8 +5,8 @@ from typing import Any, Callable, Iterable, Optional, Union
 import dataclass_abc
 import termcolor
 
-from .. import specs, system_config
-from ..specs import Layout
+from .. import layouts, specs, system_config
+from ..layouts import Layout
 from ..system_config import current_target
 from ..tensor import Tensor, TensorLike, Tile
 from . import MoveAction
@@ -125,7 +125,7 @@ class MoveLet(_OperandWrapper):
             self.inner.operands[(-1 if self.input_idx is None else self.input_idx)]
             is self.destination
         )
-        assert self.destination.layout != specs.HEXAGON_TRANSPACKED
+        assert self.destination.layout != layouts.HEXAGON_TRANSPACKED
 
     def env_str(
         self,
@@ -234,9 +234,9 @@ class PadTranspack(_OperandWrapper):
             raise ValueError(f"Source must be in GL, but is in {self.source.bank}")
         if self.destination.bank != "GL":
             raise ValueError(f"Dest. must be in GL, but is in {self.destination.bank}")
-        if self.source.layout != specs.ROW_MAJOR:
+        if self.source.layout != layouts.ROW_MAJOR:
             raise ValueError("Source must have a row-major layout")
-        if self.destination.layout != specs.HEXAGON_TRANSPACKED:
+        if self.destination.layout != layouts.HEXAGON_TRANSPACKED:
             raise ValueError("Destination must be HEXAGON_TRANSPACKED")
 
     def env_str(
@@ -268,14 +268,14 @@ def _move_arguments(
 
     # If the tensor has only one element, row-major is the only available
     # layout. Otherwise, all layouts are available.
-    allowable_layouts = [specs.ROW_MAJOR]
+    allowable_layouts = [layouts.ROW_MAJOR]
     if any(d > 1 for d in operand.dim_sizes):
         allowable_layouts = list(target.all_layouts)
 
     # TODO: Moves into HEXAGON_TRANSPACKED are handled by pad_transpack, not
     #   move_{input, output} at the moment.
     allowable_layouts = [
-        l for l in allowable_layouts if not isinstance(l, specs.HexagonTranspacked)
+        l for l in allowable_layouts if not isinstance(l, layouts.HexagonTranspacked)
     ]
 
     # Yield actions for movement with register file destination, which

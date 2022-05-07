@@ -5,7 +5,7 @@ from typing import Callable, Iterable, Optional, Tuple, Union
 import dataclass_abc
 
 from .. import specs, system_config
-from ..specs import Layout
+from ..layouts import Layout
 from ..tensor import Tensor, Tile
 from .actions import SlidingTileOutAction, TileOutAction
 from .base import Impl, NonAllocatingLeaf

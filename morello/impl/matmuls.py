@@ -5,7 +5,7 @@ from typing import Callable, Iterable, Optional, Sequence, Union
 import dataclass_abc
 
 from .. import dtypes, specs, system_config
-from ..specs import Layout
+from ..layouts import Layout
 from ..system_config import current_target
 from ..tensor import Tensor, Tile
 from .actions import MatmulSplitAction, TileOutAction
@@ -128,7 +128,7 @@ class MatmulHole(MatmulBase):
                 dim_sizes=source.dim_sizes,
                 dtype=source.dtype,
                 bank="GL",
-                layout=specs.HEXAGON_TRANSPACKED,
+                layout=layouts.HEXAGON_TRANSPACKED,
             ),
             origin=source,
         )
@@ -289,11 +289,11 @@ class HvxGemvmpybbwAsm(MatmulLeaf):
         if out.bank != "L2":
             return "out must be in L2"
 
-        if lhs.layout != specs.ROW_MAJOR:
+        if lhs.layout != layouts.ROW_MAJOR:
             return "lhs must be in row-major"
-        if rhs.layout != specs.HEXAGON_TRANSPACKED:
+        if rhs.layout != layouts.HEXAGON_TRANSPACKED:
             return "rhs must be transpacked"
-        if out.layout != specs.ROW_MAJOR:
+        if out.layout != layouts.ROW_MAJOR:
             return "out must be in row-major"
 
         if lhs.dtype != dtypes.Uint8:

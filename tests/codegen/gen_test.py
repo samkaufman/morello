@@ -12,7 +12,7 @@ import morello.impl.actions
 import morello.impl.base
 import morello.impl.compose
 import morello.impl.moves
-from morello import dtypes, op_pprint, specs, system_config, tensor
+from morello import dtypes, layouts, op_pprint, specs, system_config, tensor
 from morello.codegen import indexexpr
 from morello.system_config import cpu, hexagon
 
@@ -370,7 +370,7 @@ def _st_test_index_exprs_consistent_with_contiguous_props(draw):
     # TODO: Test column-major as well.
     tensor_spec = draw(
         strategies.tensorspec_st(
-            max_dim_size=9, min_dims=1, max_dims=4, layout=specs.ROW_MAJOR
+            max_dim_size=9, min_dims=1, max_dims=4, layout=layouts.ROW_MAJOR
         )
     )
     t = target.tensor(spec=tensor_spec, name=None, origin=None)

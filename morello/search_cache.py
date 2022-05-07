@@ -1,5 +1,4 @@
 import contextlib
-import math
 import pathlib
 import pickle
 import warnings
@@ -11,7 +10,7 @@ from frozendict import frozendict
 from . import pruning
 from .impl import Impl
 from .specs import Spec
-from .utils import next_power_of_two, zip_dict
+from .utils import zip_dict
 
 
 class CachedSchedule(NamedTuple):

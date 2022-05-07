@@ -1,8 +1,8 @@
 import dataclasses
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Tuple, Union
 
-from .. import specs, system_config
-from ..specs import Layout
+from .. import layouts, specs, system_config
+from ..layouts import Layout
 from ..tensor import Tensor, Tile
 from .base import Impl
 
@@ -23,12 +23,12 @@ class MoveAction:
     input_idx: Optional[int]
     prefetching: bool
     bank: Optional[str] = None
-    layout: Optional[specs.Layout] = None
+    layout: Optional[Layout] = None
     kwargs: Optional[Mapping[Any, Any]] = None
 
     def __post_init__(self):
         assert any(d > 1 for d in self.source.dim_sizes) or isinstance(
-            self.layout, specs.RowMajor
+            self.layout, layouts.RowMajor
         ), f"Layout was {self.layout} for dims. {self.source.dim_sizes}"
         assert (
             self.bank is None
@@ -54,7 +54,7 @@ class MoveAction:
 class PeelAction:
     impl: "ComposeHole"
     bank: Optional[str] = None
-    layout: Optional[specs.Layout] = None
+    layout: Optional[Layout] = None
     kwargs: Optional[Mapping[Any, Any]] = None
 
     def __call__(self):

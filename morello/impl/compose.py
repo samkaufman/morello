@@ -7,8 +7,8 @@ from typing import Callable, Iterable, List, Optional, Tuple, TypeVar, Union
 import dataclass_abc
 import termcolor
 
-from .. import specs, system_config, tiling, utils
-from ..specs import Layout
+from .. import layouts, specs, system_config, tiling, utils
+from ..layouts import Layout
 from ..system_config import current_target
 from ..tensor import SimpleTile, Tensor, TensorLike, Tile
 from .actions import PeelAction, SlidingTileOutAction, TileOutAction
@@ -83,7 +83,7 @@ class ComposeHole(Impl):
         # TODO: Reintroduce splitting on non-index 0
         for bank, layout in itertools.product(system.banks, target.all_layouts):
             # TODO: Remove following check once cost.move_cost handles it correctly.
-            if not system.has_hvx and layout == specs.HEXAGON_TRANSPACKED:
+            if not system.has_hvx and layout == layouts.HEXAGON_TRANSPACKED:
                 continue
 
             # TODO: The below special-casing for VMEM stinks. If we had partial
@@ -233,7 +233,7 @@ class ComposeHole(Impl):
         # object construction is inefficient and unneeded. However, it'll work for now.
         intermediate_tensor_layout = layout
         if all(d == 1 for d in self.spec.subspec_outputs[1]):
-            intermediate_tensor_layout = specs.ROW_MAJOR
+            intermediate_tensor_layout = layouts.ROW_MAJOR
         try:
             current_target().tensor(
                 current_target().tensor_spec(
@@ -262,7 +262,7 @@ class ComposeHole(Impl):
         # TODO: Using ALPHABET_PRODUCT here will fail for long programs
         intermediate_tensor_layout = layout
         if all(d == 1 for d in self.spec.subspec_outputs[1]):
-            intermediate_tensor_layout = specs.ROW_MAJOR
+            intermediate_tensor_layout = layouts.ROW_MAJOR
         intermediate_tensor = current_target().tensor(
             current_target().tensor_spec(
                 dim_sizes=self.spec.subspec_outputs[1],
@@ -517,7 +517,7 @@ class ComposeHole(Impl):
     @assert_stable_spec
     def complete(self) -> "Impl":
         next_bank = system_config.current_system().default_bank
-        return self.peel(bank=next_bank, layout=specs.ROW_MAJOR).complete()
+        return self.peel(bank=next_bank, layout=layouts.ROW_MAJOR).complete()
 
     @assert_stable_spec
     def replace_children(self, replacements: Iterable[Impl]) -> Impl:

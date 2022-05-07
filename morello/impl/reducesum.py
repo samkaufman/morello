@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 import dataclass_abc
 
 from .. import specs, system_config
-from ..specs import Layout
+from ..layouts import Layout
 from ..tensor import Tensor, Tile
 from .actions import TileOutAction
 from .base import Impl, NonAllocatingLeaf

@@ -7,7 +7,7 @@ import typing
 from operator import mul
 from typing import Mapping, Optional, Union
 
-from . import dtypes, specs, system_config
+from . import dtypes, layouts, specs, system_config
 
 
 class DisallowedTileShapeError(ValueError):
@@ -31,7 +31,7 @@ class TensorLike(abc.ABC):
 
     @property
     @typing.final
-    def layout(self) -> specs.Layout:
+    def layout(self) -> layouts.Layout:
         return self.spec.layout
 
     @property
@@ -67,10 +67,12 @@ class TensorLike(abc.ABC):
         """
         raise NotImplementedError()
 
-    def can_move_to(self, bank: Optional[str], layout: Optional[specs.Layout]) -> bool:
+    def can_move_to(
+        self, bank: Optional[str], layout: Optional[layouts.Layout]
+    ) -> bool:
         if bank is None:
             bank = self.bank
-        if isinstance(layout, specs.HexagonTranspacked):
+        if isinstance(layout, layouts.HexagonTranspacked):
             if self.dtype != dtypes.Uint8:
                 return False
             if len(self.dim_sizes) != 2:
@@ -173,7 +175,7 @@ class Tensor(TensorBase):
 
     def __str__(self):
         layout_epi = ""
-        if not isinstance(self.layout, specs.RowMajor):
+        if not isinstance(self.layout, layouts.RowMajor):
             layout_epi = f", {self.layout}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         return f"{type(self).__name__}({dims_part}{layout_epi}, {self.bank})"
@@ -232,7 +234,7 @@ class Tile(TensorLike):
     @functools.cached_property
     def spec(self) -> specs.TensorSpec:
         target = system_config.current_target()
-        layout = specs.ROW_MAJOR
+        layout = layouts.ROW_MAJOR
         if any(d != 1 for d in self.dim_sizes):
             layout = self.root.layout
         return target.tensor_spec(
@@ -246,7 +248,7 @@ class Tile(TensorLike):
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         layout_epi = ""
         bank_epi = ""
-        if not isinstance(self.root.layout, specs.RowMajor):
+        if not isinstance(self.root.layout, layouts.RowMajor):
             layout_epi = f", {self.root.layout}"
         if self.bank != system_config.current_system().default_bank:
             bank_epi = f", {self.bank}"

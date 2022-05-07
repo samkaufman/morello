@@ -12,7 +12,7 @@ from typing import Callable, Iterable, Literal, Optional, Union, cast
 
 import sympy
 
-from .. import impl, specs, tensor, utils
+from .. import impl, layouts, tensor, utils
 from ..dtypes import Dtype, Uint8, Uint32
 from ..system_config import hexagon
 from ..system_config.state import current_system
@@ -943,7 +943,7 @@ def _emit_hvx_l2fetch(
     if not imp.prefetching:
         warnings.warn("l2fetch prefetching not implemented")
 
-    if isinstance(imp.destination.layout, specs.HexagonTranspacked):
+    if isinstance(imp.destination.layout, layouts.HexagonTranspacked):
         if len(imp.destination.dim_sizes) != 2:
             warnings.warn("Not emitting l2fetch for transpacked, non-rank-2 tensor")
             return
@@ -985,7 +985,7 @@ def _emit_hvx_dcfetch(
 ) -> None:
     writer = _writer.get()
 
-    if isinstance(source.layout, specs.HexagonTranspacked):
+    if isinstance(source.layout, layouts.HexagonTranspacked):
         # TODO: Add support for HEXAGON_TRANSPACKED.
         raise NotImplementedError("dcfetch doesn't support HEXAGON_TRANSPACKED")
 
@@ -1006,7 +1006,7 @@ def _emit_hvx_dcfetch(
             *[range(0, dim_max + 1) for dim_max in sizes_to_scan]
         ):
             enumerated = list(enumerate(dims))
-            if isinstance(source.layout, specs.ColMajor) and len(enumerated) > 1:
+            if isinstance(source.layout, layouts.ColMajor) and len(enumerated) > 1:
                 enumerated = [enumerated[1], enumerated[0]] + enumerated[2:]
             subs = {f"p{i}": d for i, d in enumerated}
             for i in range(len(source.dim_sizes)):
@@ -1573,7 +1573,7 @@ def generate_c(
         for operand, c_buf, initial_value in zip(imp.operands, c_tensors, values):
             c_buf.emit()
             if initial_value is not None:
-                if not isinstance(operand.layout, specs.RowMajor):
+                if not isinstance(operand.layout, layouts.RowMajor):
                     raise NotImplementedError(
                         "Initializing non-row-major tensors not yet implemented"
                     )

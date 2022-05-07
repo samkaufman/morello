@@ -14,111 +14,13 @@ from collections.abc import Sequence
 from typing import Callable, Iterable, Optional, Tuple, TypeVar, cast
 
 import dataclass_abc
-import sympy
 
+from . import layouts
 from .codegen.expr_utils import FloorDiv
 from .dtypes import Dtype, Uint8
 from .system_config.state import current_system
 
 T = TypeVar("T")
-
-
-class Layout(abc.ABC):
-    """The layout of a tensor."""
-
-    @abc.abstractmethod
-    def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        pass
-
-    def __hash__(self):
-        return hash(type(self))
-
-    def __eq__(self, other):
-        return type(other) == type(self)
-
-
-class RowMajor(Layout):
-    def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        return _rm_cm_buffer_indexing_expr(
-            _tensor_row_major_indexing_expr, concrete_shape
-        )
-
-    def __str__(self) -> str:
-        return "RM"
-
-
-ROW_MAJOR = RowMajor()  # singleton
-
-
-class ColMajor(Layout):
-    def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        return _rm_cm_buffer_indexing_expr(
-            _tensor_col_major_indexing_expr, concrete_shape
-        )
-
-    def __str__(self) -> str:
-        return "CM"
-
-
-COL_MAJOR = ColMajor()  # singleton
-
-
-class HexagonTranspacked(Layout):
-    def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        # This layout is only used for Uint8, so the following will index
-        # 128-bit blocks (vectors in HVX VMEM).
-        orig_rows, orig_cols = concrete_shape
-        padded_rows = orig_rows - orig_rows % -32
-        p0, p1 = sympy.symbols("p0 p1")
-        # Logical sizes for the 128-byte vectors.
-        row_block = FloorDiv(p0, 4)
-        col_block = FloorDiv(p1, 32)
-        # The blocks in each dimension might differ because of padding, and this
-        # can affect the offsets (e.g., by added intervening all-zero vectors).
-        inner_offset = 4 * sympy.UnevaluatedExpr(p1 % 32) + sympy.UnevaluatedExpr(
-            p0 % 4
-        )
-        block_rows = padded_rows // 4
-        block_offset = (128 * block_rows * col_block) + row_block  # block offset
-        return block_offset + inner_offset
-
-    def __str__(self) -> str:
-        return "TP"
-
-
-HEXAGON_TRANSPACKED = HexagonTranspacked()  # singleton
-
-
-def _rm_cm_buffer_indexing_expr(iefn, concrete_shape) -> sympy.Expr:
-    substitutions = {}
-    for idx, dim in enumerate(concrete_shape):
-        substitutions[sympy.symbols(f"s{idx}")] = dim
-        if dim == 1:
-            substitutions[sympy.symbols(f"p{idx}")] = 0
-    index_expr = iefn(len(concrete_shape))
-    index_expr = index_expr.subs(substitutions, simultaneous=True)
-    assert isinstance(index_expr, sympy.Expr)
-    return index_expr
-
-
-def _tensor_row_major_indexing_expr(rank: int) -> sympy.Expr:
-    assert rank > 0
-    if rank == 1:
-        return sympy.symbols("p0")
-    else:
-        s, p = sympy.symbols(f"s{rank - 1}, p{rank - 1}")
-        return _tensor_row_major_indexing_expr(rank - 1) * s + p
-
-
-def _tensor_col_major_indexing_expr(rank: int) -> sympy.Expr:
-    if rank == 2:
-        p0, p1, s0 = sympy.symbols("p0 p1 s0")
-        return (p1 * s0) + p0
-    elif rank > 2:
-        s, p = sympy.symbols(f"s{rank - 1}, p{rank - 1}")
-        return _tensor_col_major_indexing_expr(rank - 1) * s + p
-    else:
-        raise ValueError("rank must be at least 2, but was " + str(rank))
 
 
 @dataclasses.dataclass(frozen=True, init=False)
@@ -132,14 +34,14 @@ class TensorSpec:
     dim_sizes: Tuple[int, ...]
     dtype: Dtype
     bank: str
-    layout: Layout
+    layout: layouts.Layout
 
     def __init__(
         self,
         dim_sizes: tuple[int, ...],
         dtype: Dtype,
         bank: Optional[str] = None,
-        layout: Layout = ROW_MAJOR,
+        layout: layouts.Layout = layouts.ROW_MAJOR,
     ):
         object.__setattr__(self, "dim_sizes", dim_sizes)
         object.__setattr__(self, "dtype", dtype)
@@ -154,10 +56,10 @@ class TensorSpec:
         object.__setattr__(self, "layout", layout)
         if not len(self.dim_sizes):
             raise ValueError("dim_sizes cannot be empty")
-        if all(d == 1 for d in self.dim_sizes) and self.layout != ROW_MAJOR:
+        if all(d == 1 for d in self.dim_sizes) and self.layout != layouts.ROW_MAJOR:
             raise ValueError("If all dimensions are 1, layout must be row-major")
 
-        if isinstance(self.layout, HexagonTranspacked):
+        if isinstance(self.layout, layouts.HexagonTranspacked):
             if self.dtype != Uint8:
                 raise ValueError(
                     f"Cannot create transpacked tensor with type {self.dtype}"
@@ -179,7 +81,7 @@ class TensorSpec:
         """
         new_layout = self.layout
         if all(d == 1 for d in new_dim_sizes):
-            new_layout = ROW_MAJOR
+            new_layout = layouts.ROW_MAJOR
         return TensorSpec(
             new_dim_sizes, dtype=self.dtype, bank=self.bank, layout=new_layout
         )
@@ -190,7 +92,7 @@ class TensorSpec:
             return False
         if not all(i <= o for (i, o) in zip(shape, self.dim_sizes)):
             return False
-        if isinstance(self.layout, HexagonTranspacked):
+        if isinstance(self.layout, layouts.HexagonTranspacked):
             if self.dtype != Uint8:
                 return False
             if shape[0] % 4 != 0 or shape[1] % 32 != 0:
@@ -200,7 +102,7 @@ class TensorSpec:
     def __str__(self):
         layout_epi = ""
         bank_epi = ""
-        if not isinstance(self.layout, RowMajor):
+        if not isinstance(self.layout, layouts.RowMajor):
             layout_epi = f", {self.layout}"
         if self.bank != current_system().default_bank:
             bank_epi = f", {self.bank}"

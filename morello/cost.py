@@ -3,7 +3,7 @@ import math
 from operator import mul
 from typing import Union
 
-from . import specs, utils
+from . import layouts, utils
 from .impl import ComposeHole, DirectConv, Impl, Loop, MatmulHole, MoveLet, ReduceSum
 from .impl.compose import Pipeline
 from .impl.loops import SlidingWindowLoop
@@ -15,7 +15,7 @@ COST_ATTR = "_cost"
 
 
 def move_cost(
-    src: Union[Tensor, Tile], dest_layout: specs.Layout, prefetching: bool
+    src: Union[Tensor, Tile], dest_layout: layouts.Layout, prefetching: bool
 ) -> int:
     """Estimate a cost of moving all data in `src` to a new matrix with `dest_layout`.
 

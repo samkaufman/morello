@@ -33,7 +33,16 @@ from tvm import relay
 
 import morello.impl.actions
 import morello.impl.base
-from morello import cost, dtypes, op_pprint, search, search_cache, specs, system_config
+from morello import (
+    cost,
+    dtypes,
+    layouts,
+    op_pprint,
+    search,
+    search_cache,
+    specs,
+    system_config,
+)
 from morello.benchmarks.toy_cnn import halide as toyhl
 from morello.codegen import gen
 
@@ -168,7 +177,7 @@ def sample_completion(
             not isinstance(
                 a, (morello.impl.actions.MoveAction, morello.impl.actions.PeelAction)
             )
-            or a.layout == specs.Layout.ROW_MAJOR
+            or isinstance(a.layout, layouts.RowMajor)
         )
         and not isinstance(a, morello.impl.actions.SlidingTileOutAction)
     ]
@@ -204,12 +213,12 @@ def sample_perturbed(
     ]
     impl = hole.tile_out((m, n))
     impl = impl.split(k)
-    impl = impl.move_input(0, "RF", specs.Layout.ROW_MAJOR)
+    impl = impl.move_input(0, "RF", layouts.ROW_MAJOR)
     m_ = _sample_randint_on_boundary(_get_innermost(impl).output.dim_sizes[0])
     n_ = _sample_randint_on_boundary(_get_innermost(impl).output.dim_sizes[1])
     impl = impl.tile_out((m_, n_))
-    impl = impl.move_input(1, "RF", specs.Layout.ROW_MAJOR)
-    impl = impl.move_output("RF", specs.Layout.ROW_MAJOR)
+    impl = impl.move_input(1, "RF", layouts.ROW_MAJOR)
+    impl = impl.move_output("RF", layouts.ROW_MAJOR)
     return impl.complete(), "perturbed3"
 
 

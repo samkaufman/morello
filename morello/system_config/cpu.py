@@ -8,9 +8,9 @@ import tempfile
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
-from .. import dtypes, specs
+from .. import dtypes, layouts, specs
 from ..codegen import gen
-from ..specs import Layout
+from ..layouts import Layout
 from ..tensor import Tensor, Tile
 from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
@@ -42,11 +42,11 @@ class CpuTarget(Target):
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
         bank: Optional[str] = None,
-        layout: Optional[specs.Layout] = None,
+        layout: Optional[Layout] = None,
         **kwargs,
     ) -> specs.TensorSpec:
         if layout is None:
-            layout = specs.ROW_MAJOR
+            layout = layouts.ROW_MAJOR
         return specs.TensorSpec(dim_sizes, dtype, bank, layout)
 
     @functools.cached_property
@@ -69,8 +69,8 @@ class CpuTarget(Target):
         )
 
     @property
-    def all_layouts(self) -> Iterable[specs.Layout]:
-        return [specs.ROW_MAJOR, specs.COL_MAJOR]
+    def all_layouts(self) -> Iterable[Layout]:
+        return [layouts.ROW_MAJOR, layouts.COL_MAJOR]
 
     def _faster_destination_banks(self, source: str) -> set[str]:
         assert isinstance(source, str)

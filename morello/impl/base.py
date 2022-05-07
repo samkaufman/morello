@@ -5,7 +5,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union, ca
 
 from morello import specs, tiling
 
-from ..specs import Layout
+from ..layouts import Layout
 from ..system_config import current_system, current_target
 from ..tensor import SimpleTile, Tensor, TensorLike, Tile
 from .pruning import ParentSummary

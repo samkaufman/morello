@@ -11,7 +11,7 @@ import tqdm
 
 import morello.impl.base
 
-from .. import cost, pruning, specs
+from .. import cost, layouts, pruning, specs
 from . import common, random
 
 HEURISTIC_SAMPLES_PER_SPEC = 10
@@ -94,9 +94,9 @@ def beam_schedule_search(
         select_fn = _select_new_states
 
     if common.prune_column_major.get():
-        if any(isinstance(inp.layout, specs.ColMajor) for inp in specs.inputs):
+        if any(isinstance(inp.layout, layouts.ColMajor) for inp in spec.inputs):
             return None
-        if isinstance(spec.output.layout, specs.ColMajor):
+        if isinstance(spec.output.layout, layouts.ColMajor):
             return None
 
     pb_ctx_a = contextlib.nullcontext(None)

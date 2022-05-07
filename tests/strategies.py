@@ -2,7 +2,7 @@ from typing import Optional, Tuple
 
 from hypothesis import strategies as st
 
-from morello import dtypes, impl, specs, system_config, tensor
+from morello import dtypes, impl, layouts, specs, system_config, tensor
 from morello.system_config import cpu, hexagon
 
 dtype_st = st.sampled_from([dtypes.Uint8, dtypes.Uint32])
@@ -20,7 +20,7 @@ def layout_st(
     draw,
     numels_ones: Optional[bool] = None,
     dim_sizes: Optional[tuple[int, ...]] = None,
-) -> specs.Layout:
+) -> layouts.Layout:
     assert numels_ones is not None or dim_sizes
     if numels_ones is None:
         assert dim_sizes
@@ -28,7 +28,7 @@ def layout_st(
 
     target = system_config.current_target()
     if numels_ones:
-        return specs.ROW_MAJOR
+        return layouts.ROW_MAJOR
     available_layouts = list(target.all_layouts)
     return draw(st.sampled_from(available_layouts))
 
@@ -45,7 +45,7 @@ def tensorspec_st(
     max_dim_size: Optional[int] = 128,
     min_dims: int = 1,
     max_dims: Optional[int] = None,
-    layout: Optional[specs.Layout] = None,
+    layout: Optional[layouts.Layout] = None,
 ) -> specs.TensorSpec:
     target = system_config.current_target()
 
@@ -194,7 +194,7 @@ def pipeline_op_st(draw) -> impl.Pipeline:
 
 
 def register_default_strategies():
-    st.register_type_strategy(specs.Layout, layout_st(numels_ones=False))
+    st.register_type_strategy(layouts.Layout, layout_st(numels_ones=False))
     st.register_type_strategy(dtypes.Dtype, dtype_st)
     st.register_type_strategy(specs.TensorSpec, tensorspec_st())
 

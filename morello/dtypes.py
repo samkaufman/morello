@@ -27,11 +27,3 @@ Uint32 = Dtype(
 )
 
 ALL_DTYPES = [Uint8, Uint32]
-
-
-def dtype_from_numpy(np_type) -> Dtype:
-    if np_type == np.uint8:
-        return Uint8
-    elif np_type == np.uint32:
-        return Uint32
-    raise ValueError(f"No dtype for {np_type}")

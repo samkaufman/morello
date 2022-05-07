@@ -6,7 +6,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import morello.impl
-from morello import cost, dtypes, specs, system_config, tensor
+from morello import cost, dtypes, layouts, system_config, tensor
 from morello.impl import Impl
 from morello.system_config import cpu
 
@@ -29,7 +29,7 @@ def tile_st(draw):
 def _move_operand(draw, b: Impl, underlying_system: system_config.SystemDescription):
     operand_idx = draw(st.integers(low=0, high=len(b.inputs) + 1))
     bank = draw(st.sampled_from(sorted(underlying_system.banks)))
-    layout = draw(st.from_type(specs.Layout))
+    layout = draw(st.from_type(layouts.Layout))
     b = draw(b)
     if operand_idx == len(b.inputs):
         return b.move_output(operand_idx, bank=bank, layout=layout)
@@ -142,7 +142,7 @@ def test_trivial_tilings_are_same_cost_as_untiled_matmul(matmul_spec):
     st.from_type(dtypes.Dtype),
     st.integers(min_value=0, max_value=1),
     st.integers(min_value=2, max_value=64),
-    st.from_type(specs.Layout),
+    st.from_type(layouts.Layout),
     st.booleans(),
 )
 def test_cost_is_invariant_to_panel_layouts_cpu(
@@ -154,13 +154,13 @@ def test_cost_is_invariant_to_panel_layouts_cpu(
         dim_sizes = tuple(elements if dim_idx == i else 1 for i in range(2))
         left = target.tensor(
             spec=target.tensor_spec(
-                dim_sizes, dtype=dtype, layout=specs.ROW_MAJOR, bank=bank
+                dim_sizes, dtype=dtype, layout=layouts.ROW_MAJOR, bank=bank
             ),
             name=None,
         )
         right = target.tensor(
             spec=target.tensor_spec(
-                dim_sizes, dtype=dtype, layout=specs.COL_MAJOR, bank=bank
+                dim_sizes, dtype=dtype, layout=layouts.COL_MAJOR, bank=bank
             ),
             name=None,
         )
