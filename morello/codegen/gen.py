@@ -838,9 +838,7 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         concrete_shape = source_op_details.concrete_origin_shape
         assert len(concrete_shape) == 2
         result = _CUnsizedHeapArray(namer.fresh_name("tp"), Uint8)
-        result_index_expr = indexexpr.buffer_indexing_expr(
-            imp.destination, concrete_shape
-        )
+        imp.destination.layout.buffer_indexing_expr(concrete_shape)
 
         new_op_details = list(op_details)
         new_op_details[imp.input_idx] = _OperandDetails(
@@ -916,8 +914,8 @@ def _pipeline_emit_stage(
         output_index_expr = final_output.index_expr
     else:
         assert isinstance(stage.output, Tensor)
-        output_index_expr = indexexpr.buffer_indexing_expr(
-            stage.output, cur_concrete_shapes[-1]
+        output_index_expr = stage.output.layout.buffer_indexing_expr(
+            cur_concrete_shapes[-1]
         )
     cur_index_exprs.append(output_index_expr)
 
@@ -945,7 +943,7 @@ def _emit_hvx_l2fetch(
     if not imp.prefetching:
         warnings.warn("l2fetch prefetching not implemented")
 
-    if imp.destination.layout == specs.Layout.HEXAGON_TRANSPACKED:
+    if isinstance(imp.destination.layout, specs.HexagonTranspacked):
         if len(imp.destination.dim_sizes) != 2:
             warnings.warn("Not emitting l2fetch for transpacked, non-rank-2 tensor")
             return
@@ -987,7 +985,7 @@ def _emit_hvx_dcfetch(
 ) -> None:
     writer = _writer.get()
 
-    if source.layout == specs.Layout.HEXAGON_TRANSPACKED:
+    if isinstance(source.layout, specs.HexagonTranspacked):
         # TODO: Add support for HEXAGON_TRANSPACKED.
         raise NotImplementedError("dcfetch doesn't support HEXAGON_TRANSPACKED")
 
@@ -1008,7 +1006,7 @@ def _emit_hvx_dcfetch(
             *[range(0, dim_max + 1) for dim_max in sizes_to_scan]
         ):
             enumerated = list(enumerate(dims))
-            if source.layout == specs.Layout.COL_MAJOR and len(enumerated) > 1:
+            if isinstance(source.layout, specs.ColMajor) and len(enumerated) > 1:
                 enumerated = [enumerated[1], enumerated[0]] + enumerated[2:]
             subs = {f"p{i}": d for i, d in enumerated}
             for i in range(len(source.dim_sizes)):
@@ -1049,8 +1047,8 @@ def _move_hvx_vmem(
 
     new_operand_index_exprs = list(operand_index_exprs)
     # TODO: Do we need to call this both here and in _emit_assignment_copy?
-    new_operand_index_exprs[source_idx] = indexexpr.buffer_indexing_expr(
-        imp.destination, concrete_shapes[source_idx]
+    new_operand_index_exprs[source_idx] = imp.destination.layout.buffer_indexing_expr(
+        concrete_shapes[source_idx]
     )
 
     slice_idx_exprs, slices_contig = _iter_vectors(imp.destination, source_index_expr)
@@ -1086,8 +1084,8 @@ def _move_hvx_vmem(
             # TODO: Can we use vgather here?
             # We don't assign with Q6_V_vzero() because this is a load, so it'll be
             # immediately filled.
-            destination_index_expr = indexexpr.buffer_indexing_expr(
-                imp.destination, concrete_shape
+            destination_index_expr = imp.destination.layout.buffer_indexing_expr(
+                concrete_shape
             )
 
             with _emit_assignment_copy(
@@ -1166,15 +1164,15 @@ def _move_registers(impl, source_idx, c_tensors, operand_index_exprs, concrete_s
 
     new_operand_index_exprs = list(operand_index_exprs)
     # TODO: Do we need to call this both here and in _emit_assignment_copy?
-    new_operand_index_exprs[source_idx] = indexexpr.buffer_indexing_expr(
-        impl.destination, concrete_shapes[source_idx]
+    new_operand_index_exprs[source_idx] = impl.destination.layout.buffer_indexing_expr(
+        concrete_shapes[source_idx]
     )
 
     new_concrete_shapes = list(concrete_shapes)
     new_concrete_shapes[source_idx] = concrete_shapes[source_idx]
 
-    destination_index_expr = indexexpr.buffer_indexing_expr(
-        impl.destination, concrete_shapes[source_idx]
+    destination_index_expr = impl.destination.layout.buffer_indexing_expr(
+        concrete_shapes[source_idx]
     )
 
     with _emit_assignment_copy(
@@ -1543,7 +1541,7 @@ def generate_c(
     for operand, initial_value in zip(imp.operands, values):
         assert isinstance(operand, tensor.Tensor)
         c_buf = _make_buffer(operand.volume, operand.dtype)
-        index_exprs.append(indexexpr.buffer_indexing_expr(operand))
+        index_exprs.append(operand.layout.buffer_indexing_expr(operand.dim_sizes))
         tensor_names.append(c_buf.name)
         c_tensors.append(c_buf)
 
@@ -1575,7 +1573,7 @@ def generate_c(
         for operand, c_buf, initial_value in zip(imp.operands, c_tensors, values):
             c_buf.emit()
             if initial_value is not None:
-                if operand.layout != specs.Layout.ROW_MAJOR:
+                if not isinstance(operand.layout, specs.RowMajor):
                     raise NotImplementedError(
                         "Initializing non-row-major tensors not yet implemented"
                     )

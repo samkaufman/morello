@@ -16,21 +16,20 @@ def dim_st(draw, max_size: Optional[int] = None) -> int:
 
 
 @st.composite
-def layout_st(draw, dim_sizes: Optional[Tuple[int, ...]] = None) -> specs.Layout:
-    target = system_config.current_target()
-    if all(d == 1 for d in dim_sizes):
-        return specs.Layout.ROW_MAJOR
+def layout_st(
+    draw,
+    numels_ones: Optional[bool] = None,
+    dim_sizes: Optional[tuple[int, ...]] = None,
+) -> specs.Layout:
+    assert numels_ones is not None or dim_sizes
+    if numels_ones is None:
+        assert dim_sizes
+        numels_ones = all(d == 1 for d in dim_sizes)
 
-    if isinstance(target, cpu.CpuTarget):
-        available_layouts = [
-            l for l in specs.Layout if l != specs.Layout.HEXAGON_TRANSPACKED
-        ]
-    elif isinstance(target, hexagon.HvxSimulatorTarget):
-        available_layouts = list(specs.Layout)
-    else:
-        raise NotImplementedError(
-            f"layout_st not implemented for target {type(target).__name__}"
-        )
+    target = system_config.current_target()
+    if numels_ones:
+        return specs.ROW_MAJOR
+    available_layouts = list(target.all_layouts)
     return draw(st.sampled_from(available_layouts))
 
 
@@ -160,7 +159,7 @@ def compose_spec_st(draw) -> specs.Compose:
         dim_sizes=output_dim_sizes,
         dtype=draw(st.from_type(dtypes.Dtype)),
         bank=draw(st.sampled_from(sorted(system_config.current_system().banks))),
-        layout=draw(layout_st(output_dim_sizes)),
+        layout=draw(layout_st(dim_sizes=output_dim_sizes)),
     )
     intermediate_dtypes = draw(
         st.lists(
@@ -195,6 +194,7 @@ def pipeline_op_st(draw) -> impl.Pipeline:
 
 
 def register_default_strategies():
+    st.register_type_strategy(specs.Layout, layout_st(numels_ones=False))
     st.register_type_strategy(dtypes.Dtype, dtype_st)
     st.register_type_strategy(specs.TensorSpec, tensorspec_st())
 

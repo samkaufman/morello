@@ -1,17 +1,17 @@
 import dataclasses
 import functools
-from typing import Union, Optional, Callable, Iterable, Any
+from typing import Any, Callable, Iterable, Optional, Union
 
 import dataclass_abc
 import termcolor
 
-from . import MoveAction
-from .base import Impl
-from .utils import gen_vector_shapes, assert_stable_spec
-from .. import system_config, specs
+from .. import specs, system_config
 from ..specs import Layout
 from ..system_config import current_target
-from ..tensor import Tensor, Tile, TensorLike
+from ..tensor import Tensor, TensorLike, Tile
+from . import MoveAction
+from .base import Impl
+from .utils import assert_stable_spec, gen_vector_shapes
 
 
 class _OperandWrapper(Impl):
@@ -125,7 +125,7 @@ class MoveLet(_OperandWrapper):
             self.inner.operands[(-1 if self.input_idx is None else self.input_idx)]
             is self.destination
         )
-        assert self.destination.layout != Layout.HEXAGON_TRANSPACKED
+        assert self.destination.layout != specs.HEXAGON_TRANSPACKED
 
     def env_str(
         self,
@@ -234,9 +234,9 @@ class PadTranspack(_OperandWrapper):
             raise ValueError(f"Source must be in GL, but is in {self.source.bank}")
         if self.destination.bank != "GL":
             raise ValueError(f"Dest. must be in GL, but is in {self.destination.bank}")
-        if self.source.layout != Layout.ROW_MAJOR:
+        if self.source.layout != specs.ROW_MAJOR:
             raise ValueError("Source must have a row-major layout")
-        if self.destination.layout != Layout.HEXAGON_TRANSPACKED:
+        if self.destination.layout != specs.HEXAGON_TRANSPACKED:
             raise ValueError("Destination must be HEXAGON_TRANSPACKED")
 
     def env_str(
@@ -264,24 +264,24 @@ class PadTranspack(_OperandWrapper):
 def _move_arguments(
     operand: Union[Tile, Tensor]
 ) -> Iterable[tuple[str, Layout, dict[str, Any]]]:
-    system = system_config.current_system()
+    target = system_config.current_target()
 
     # If the tensor has only one element, row-major is the only available
     # layout. Otherwise, all layouts are available.
-    allowable_layouts = [specs.Layout.ROW_MAJOR]
+    allowable_layouts = [specs.ROW_MAJOR]
     if any(d > 1 for d in operand.dim_sizes):
-        allowable_layouts = list(specs.Layout)
+        allowable_layouts = list(target.all_layouts)
 
     # TODO: Moves into HEXAGON_TRANSPACKED are handled by pad_transpack, not
     #   move_{input, output} at the moment.
     allowable_layouts = [
-        l for l in allowable_layouts if l != specs.Layout.HEXAGON_TRANSPACKED
+        l for l in allowable_layouts if not isinstance(l, specs.HexagonTranspacked)
     ]
 
     # Yield actions for movement with register file destination, which
     # includes relayouts in registers and movements from level 1 to RF.
     for layout in allowable_layouts:
-        for bank in system.faster_destination_banks(operand.bank):
+        for bank in target.system.faster_destination_banks(operand.bank):
             # TODO: Hacky check for VMEM.
             if bank == "VMEM":
                 for vector_shape in gen_vector_shapes(operand.dim_sizes, operand.dtype):

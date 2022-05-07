@@ -2,7 +2,7 @@ import abc
 import dataclasses
 import functools
 import logging
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 
 if TYPE_CHECKING:
     from .. import dtypes
@@ -43,6 +43,11 @@ class Target(abc.ABC):
     @property
     @abc.abstractmethod
     def system(self) -> "SystemDescription":
+        raise NotImplementedError()
+
+    @property
+    @abc.abstractmethod
+    def all_layouts(self) -> Iterable["Layout"]:
         raise NotImplementedError()
 
     def run_impl(

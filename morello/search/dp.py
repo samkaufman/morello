@@ -111,9 +111,9 @@ def _inner_schedule_search(
     """Implements most of the logic of schedule_search."""
 
     if common.prune_column_major.get():
-        if any(inp.layout == specs.Layout.COL_MAJOR for inp in spec.inputs):
+        if any(isinstance(inp.layout, specs.ColMajor) for inp in spec.inputs):
             return None
-        if spec.output.layout == specs.Layout.COL_MAJOR:
+        if isinstance(spec.output.layout, specs.ColMajor):
             return None
 
     if stats:

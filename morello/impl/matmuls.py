@@ -128,7 +128,7 @@ class MatmulHole(MatmulBase):
                 dim_sizes=source.dim_sizes,
                 dtype=source.dtype,
                 bank="GL",
-                layout=Layout.HEXAGON_TRANSPACKED,
+                layout=specs.HEXAGON_TRANSPACKED,
             ),
             origin=source,
         )
@@ -289,11 +289,11 @@ class HvxGemvmpybbwAsm(MatmulLeaf):
         if out.bank != "L2":
             return "out must be in L2"
 
-        if lhs.layout != Layout.ROW_MAJOR:
+        if lhs.layout != specs.ROW_MAJOR:
             return "lhs must be in row-major"
-        if rhs.layout != Layout.HEXAGON_TRANSPACKED:
+        if rhs.layout != specs.HEXAGON_TRANSPACKED:
             return "rhs must be transpacked"
-        if out.layout != Layout.ROW_MAJOR:
+        if out.layout != specs.ROW_MAJOR:
             return "out must be in row-major"
 
         if lhs.dtype != dtypes.Uint8:

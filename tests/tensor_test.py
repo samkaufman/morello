@@ -23,7 +23,7 @@ strategies.register_default_strategies()
 def test_tile_contiguous(tensor_shape, tile_shape, expected):
     # TODO: Vary the following three parameters with hypothesis
     target = system_config.current_target()
-    dtype, bank, layout = dtypes.Uint8, "RF", specs.Layout.ROW_MAJOR
+    dtype, bank, layout = dtypes.Uint8, "RF", specs.ROW_MAJOR
     tensor_spec = target.tensor_spec(tensor_shape, dtype, bank, layout)
     t = target.tensor(tensor_spec, name=None, origin=None)
     tile = t.simple_tile(tile_shape)
@@ -62,7 +62,7 @@ def test_convolution_image_tile_boundary_size(
     # TODO: any_level should be something arbitrary from the system_config
     any_level = "GL"
     outer = tensor.Tensor(
-        specs.TensorSpec(outer_shp, dtypes.Uint8, any_level, specs.Layout.ROW_MAJOR),
+        specs.TensorSpec(outer_shp, dtypes.Uint8, any_level, specs.ROW_MAJOR),
         name=None,
         origin=None,
     )

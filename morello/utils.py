@@ -69,6 +69,7 @@ def contiguous(t, address_root):
     return True
 
 
+# TODO: Can we merge this into Layout?
 def layout_ordered_dims(*args) -> tuple[int, ...]:
     """Returns tuple of operand's height and width; or vice versa if column-major."""
     dim_sizes: tuple[int, ...]
@@ -82,9 +83,9 @@ def layout_ordered_dims(*args) -> tuple[int, ...]:
 
     if len(dim_sizes) == 1:
         return (dim_sizes[0],)
-    if root_layout == specs.Layout.ROW_MAJOR:
+    if root_layout == specs.ROW_MAJOR:
         lead = [dim_sizes[0], dim_sizes[1]]
-    elif root_layout == specs.Layout.COL_MAJOR:
+    elif root_layout == specs.COL_MAJOR:
         lead = [dim_sizes[1], dim_sizes[0]]
     else:
         raise NotImplementedError(f"Unknown layout {root_layout}")

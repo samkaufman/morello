@@ -70,7 +70,7 @@ class HvxSimulatorTarget(Target):
         **kwargs,
     ) -> "TensorSpec":
         if layout is None:
-            layout = specs.Layout.ROW_MAJOR
+            layout = specs.ROW_MAJOR
         if bank == "VMEM":
             return specs.HvxVmemTensorSpec(dim_sizes, dtype, bank, layout, **kwargs)
         return specs.TensorSpec(dim_sizes, dtype, bank, layout)
@@ -94,6 +94,10 @@ class HvxSimulatorTarget(Target):
             next_general_bank=self._next_general_bank,
             ordered_banks=["HexagonRF", "VMEM", "L1", "L2", "GL"],
         )
+
+    @property
+    def all_layouts(self) -> Iterable[specs.Layout]:
+        return [specs.ROW_MAJOR, specs.COL_MAJOR, specs.HEXAGON_TRANSPACKED]
 
     def _faster_destination_banks(self, source: str) -> set[str]:
         if source in ("HexagonRF", "VMEM"):
@@ -260,7 +264,7 @@ class HvxVmemTensor(HvxVmemTensorlike, tensor.TensorBase):
 
     def __str__(self):
         layout_epi = ""
-        if self.layout != specs.Layout.ROW_MAJOR:
+        if isinstance(self.layout, specs.RowMajor):
             layout_epi = f", {self.layout}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         vec_part = "×".join(str(s) for s in self.vector_shape)
@@ -298,7 +302,7 @@ class HvxVmemSimpleTile(HvxVmemTensorlike, tensor.SimpleTile):
 
     @functools.cached_property
     def spec(self) -> specs.HvxVmemTensorSpec:
-        layout = specs.Layout.ROW_MAJOR
+        layout = specs.ROW_MAJOR
         if any(d != 1 for d in self.dim_sizes):
             layout = self.root.layout
         return specs.HvxVmemTensorSpec(

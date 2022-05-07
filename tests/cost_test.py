@@ -154,13 +154,13 @@ def test_cost_is_invariant_to_panel_layouts_cpu(
         dim_sizes = tuple(elements if dim_idx == i else 1 for i in range(2))
         left = target.tensor(
             spec=target.tensor_spec(
-                dim_sizes, dtype=dtype, layout=specs.Layout.ROW_MAJOR, bank=bank
+                dim_sizes, dtype=dtype, layout=specs.ROW_MAJOR, bank=bank
             ),
             name=None,
         )
         right = target.tensor(
             spec=target.tensor_spec(
-                dim_sizes, dtype=dtype, layout=specs.Layout.COL_MAJOR, bank=bank
+                dim_sizes, dtype=dtype, layout=specs.COL_MAJOR, bank=bank
             ),
             name=None,
         )

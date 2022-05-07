@@ -70,7 +70,7 @@ class TensorLike(abc.ABC):
     def can_move_to(self, bank: Optional[str], layout: Optional[specs.Layout]) -> bool:
         if bank is None:
             bank = self.bank
-        if layout == specs.Layout.HEXAGON_TRANSPACKED:
+        if isinstance(layout, specs.HexagonTranspacked):
             if self.dtype != dtypes.Uint8:
                 return False
             if len(self.dim_sizes) != 2:
@@ -173,7 +173,7 @@ class Tensor(TensorBase):
 
     def __str__(self):
         layout_epi = ""
-        if self.layout != specs.Layout.ROW_MAJOR:
+        if not isinstance(self.layout, specs.RowMajor):
             layout_epi = f", {self.layout}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         return f"{type(self).__name__}({dims_part}{layout_epi}, {self.bank})"
@@ -232,7 +232,7 @@ class Tile(TensorLike):
     @functools.cached_property
     def spec(self) -> specs.TensorSpec:
         target = system_config.current_target()
-        layout = specs.Layout.ROW_MAJOR
+        layout = specs.ROW_MAJOR
         if any(d != 1 for d in self.dim_sizes):
             layout = self.root.layout
         return target.tensor_spec(
@@ -246,7 +246,7 @@ class Tile(TensorLike):
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         layout_epi = ""
         bank_epi = ""
-        if self.root.layout != specs.Layout.ROW_MAJOR:
+        if not isinstance(self.root.layout, specs.RowMajor):
             layout_epi = f", {self.root.layout}"
         if self.bank != system_config.current_system().default_bank:
             bank_epi = f", {self.bank}"

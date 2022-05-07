@@ -6,9 +6,9 @@ import multiprocessing
 from collections.abc import Sequence
 from typing import Any, Generator, Iterable, Optional
 
-from . import common
 from .. import impl, pruning, specs
 from ..impl import Impl
+from . import common
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +78,9 @@ def naive_search(
       enumerate subschedules available at the top level.
     """
     if common.prune_column_major.get():
-        if any(inp.layout == specs.Layout.COL_MAJOR for inp in spec.inputs):
+        if any(isinstance(inp.layout, specs.ColMajor) for inp in spec.inputs):
             return None
-        if spec.output.layout == specs.Layout.COL_MAJOR:
+        if isinstance(spec.output.layout, specs.ColMajor):
             return None
 
     # The default available memory is the capacities of current_system().

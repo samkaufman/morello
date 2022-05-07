@@ -2,29 +2,9 @@ from typing import Optional
 
 import sympy
 
-from ..specs import Layout
+from .. import specs
 from ..tensor import ConvolutionImageTile, SimpleTile, TensorBase, Tile
 from .expr_utils import FloorDiv
-
-
-def _tensor_row_major_indexing_expr(rank: int) -> sympy.Expr:
-    assert rank > 0
-    if rank == 1:
-        return sympy.symbols("p0")
-    else:
-        s, p = sympy.symbols(f"s{rank - 1}, p{rank - 1}")
-        return _tensor_row_major_indexing_expr(rank - 1) * s + p
-
-
-def _tensor_col_major_indexing_expr(rank: int) -> sympy.Expr:
-    if rank == 2:
-        p0, p1, s0 = sympy.symbols("p0 p1 s0")
-        return (p1 * s0) + p0
-    elif rank > 2:
-        s, p = sympy.symbols(f"s{rank - 1}, p{rank - 1}")
-        return _tensor_col_major_indexing_expr(rank - 1) * s + p
-    else:
-        raise ValueError("rank must be at least 2, but was " + str(rank))
 
 
 def buffer_indexing_expr(
@@ -34,22 +14,22 @@ def buffer_indexing_expr(
     if concrete_shape is None:
         concrete_shape = tensor.dim_sizes
     assert len(concrete_shape) == len(tensor.dim_sizes)
-    if tensor.spec.layout in (Layout.ROW_MAJOR, Layout.COL_MAJOR):
+    if tensor.spec.layout in (specs.ROW_MAJOR, specs.COL_MAJOR):
         substitutions = {}
         for idx, dim in enumerate(concrete_shape):
             substitutions[sympy.symbols(f"s{idx}")] = dim
             if dim == 1:
                 substitutions[sympy.symbols(f"p{idx}")] = 0
-        if tensor.layout == Layout.ROW_MAJOR:
+        if tensor.layout == specs.ROW_MAJOR:
             index_expr = _tensor_row_major_indexing_expr(len(concrete_shape))
-        elif tensor.layout == Layout.COL_MAJOR:
+        elif tensor.layout == specs.COL_MAJOR:
             index_expr = _tensor_col_major_indexing_expr(len(concrete_shape))
         else:
             raise NotImplementedError(f"Unsupported layout: {tensor.layout}")
         index_expr = index_expr.subs(substitutions, simultaneous=True)
         assert isinstance(index_expr, sympy.Expr)
         return index_expr
-    elif tensor.spec.layout == Layout.HEXAGON_TRANSPACKED:
+    elif tensor.spec.layout == specs.HEXAGON_TRANSPACKED:
         # This layout is only used for Uint8, so the following will index
         # 128-bit blocks (vectors in HVX VMEM).
         orig_rows, orig_cols = concrete_shape

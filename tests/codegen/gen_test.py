@@ -370,7 +370,7 @@ def _st_test_index_exprs_consistent_with_contiguous_props(draw):
     # TODO: Test column-major as well.
     tensor_spec = draw(
         strategies.tensorspec_st(
-            max_dim_size=9, min_dims=1, max_dims=4, layout=specs.Layout.ROW_MAJOR
+            max_dim_size=9, min_dims=1, max_dims=4, layout=specs.ROW_MAJOR
         )
     )
     t = target.tensor(spec=tensor_spec, name=None, origin=None)
@@ -414,7 +414,7 @@ def test_index_exprs_consistent_with_contiguous_props(inp):
     stack: list[tensor.Tile] = [tile]
     while isinstance(stack[0].origin, tensor.Tile):
         stack.insert(0, stack[0].origin)
-    expr = indexexpr.buffer_indexing_expr(stack[0].origin)
+    expr = stack[0].origin.layout.buffer_indexing_expr(stack[0].origin.dim_sizes)
     while stack:
         operand = stack[0]
         del stack[0]

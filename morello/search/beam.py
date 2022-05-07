@@ -94,9 +94,9 @@ def beam_schedule_search(
         select_fn = _select_new_states
 
     if common.prune_column_major.get():
-        if any(inp.layout == specs.Layout.COL_MAJOR for inp in spec.inputs):
+        if any(isinstance(inp.layout, specs.ColMajor) for inp in specs.inputs):
             return None
-        if spec.output.layout == specs.Layout.COL_MAJOR:
+        if isinstance(spec.output.layout, specs.ColMajor):
             return None
 
     pb_ctx_a = contextlib.nullcontext(None)

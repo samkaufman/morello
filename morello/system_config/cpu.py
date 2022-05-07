@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional, Union
+from typing import Iterable, Optional, Union
 
 from .. import dtypes, specs
 from ..codegen import gen
@@ -46,7 +46,7 @@ class CpuTarget(Target):
         **kwargs,
     ) -> specs.TensorSpec:
         if layout is None:
-            layout = specs.Layout.ROW_MAJOR
+            layout = specs.ROW_MAJOR
         return specs.TensorSpec(dim_sizes, dtype, bank, layout)
 
     @functools.cached_property
@@ -67,6 +67,10 @@ class CpuTarget(Target):
             next_general_bank=self._next_general_bank,
             ordered_banks=["RF", "GL"],
         )
+
+    @property
+    def all_layouts(self) -> Iterable[specs.Layout]:
+        return [specs.ROW_MAJOR, specs.COL_MAJOR]
 
     def _faster_destination_banks(self, source: str) -> set[str]:
         assert isinstance(source, str)
