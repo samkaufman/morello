@@ -16,7 +16,6 @@ from typing import Callable, Iterable, Optional, Tuple, TypeVar, cast
 import dataclass_abc
 
 from . import layouts
-from .codegen.expr_utils import FloorDiv
 from .dtypes import Dtype, Uint8
 from .system_config.state import current_system
 

@@ -60,43 +60,9 @@ def schedule_key(schedule: "Impl") -> tuple[int, Sequence[int], Any]:
 
 # TODO: Consider making this a default implementation of `actions` itself.
 # TODO: Remove skip_sliding in favor of a global ContextVar for actions
-def hole_actions(
-    root: "Impl", include_inner_impl=False, skip_sliding=False
-) -> Iterable[tuple[Callable, int]]:
-    """Yields callables for each action possible in root's leaf holes.
-
-    More specifically, this yields from a concatenation of all leaves' actions wrapped
-    in functions that yield, not the result of the action itself, but `root` with the
-    result substituted for the leaf.
-    """
-    if not root.children:
-        for act in root.actions():
-            if skip_sliding and isinstance(act, actions.SlidingTileOutAction):
-                continue
-            if include_inner_impl:
-                yield functools.partial(_double_result, act), 0
-            else:
-                yield act, 0
-        return
-
-    idx_offset = 0
-    for idx, c in enumerate(root.children):
-        seen_idx = 0
-        for action, sub_idx in hole_actions(
-            c, include_inner_impl=include_inner_impl, skip_sliding=skip_sliding
-        ):
-            seen_idx = max(seen_idx, sub_idx)
-            yield _WrappedRecurAction(
-                root, include_inner_impl, idx, action
-            ), sub_idx + idx_offset
-        idx_offset += seen_idx
-
-
-# TODO: Consider making this a default implementation of `actions` itself.
-# TODO: Remove skip_sliding in favor of a global ContextVar for actions
 def leaf_actions(
     root: "Impl", include_inner_impl=False, skip_sliding=False
-) -> Iterable[tuple[Callable, int]]:
+) -> tuple[Sequence[tuple[Callable, int]], int]:
     """Yields callables for each action possible in root's leaves.
 
     More specifically, this yields from a concatenation of all leaves' actions wrapped
@@ -104,26 +70,31 @@ def leaf_actions(
     result substituted for the leaf.
     """
     if not root.children:
+        to_return = []
         for act in root.actions():
             if skip_sliding and isinstance(act, actions.SlidingTileOutAction):
                 continue
             if include_inner_impl:
-                yield functools.partial(_double_result, act), 0
+                to_return.append((functools.partial(_double_result, act), 0))
             else:
-                yield act, 0
-        return
+                to_return.append((act, 0))
+        return to_return, 1
 
+    to_return = []
     idx_offset = 0
-    for idx, c in enumerate(root.children):
-        seen_idx = 0
-        for action, sub_idx in leaf_actions(
-            c, include_inner_impl=include_inner_impl, skip_sliding=skip_sliding
-        ):
-            seen_idx = max(seen_idx, sub_idx)
-            yield _WrappedRecurAction(
-                root, include_inner_impl, idx, action
-            ), sub_idx + idx_offset
-        idx_offset += seen_idx + 1
+    for child_idx, child in enumerate(root.children):
+        inner, inner_leaf_cnt = leaf_actions(
+            child, include_inner_impl=include_inner_impl, skip_sliding=skip_sliding
+        )
+        for action, sub_idx in inner:
+            to_return.append(
+                (
+                    _WrappedRecurAction(root, include_inner_impl, child_idx, action),
+                    sub_idx + idx_offset,
+                )
+            )
+        idx_offset += inner_leaf_cnt
+    return to_return, idx_offset
 
 
 def _double_result(action):

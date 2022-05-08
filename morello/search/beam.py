@@ -33,31 +33,25 @@ def sampling_heuristic(
 ) -> Union[int, float]:
     best_cost = sys.maxsize
     for _ in range(HEURISTIC_SAMPLES_PER_SPEC):
-        # We're not adding memory limits restrictions here, which suggests the
-        # simulated model for our heuristic has not learned to encode that
-        # information.
-        sampled_impl = None
-        while not sampled_impl:
-            try:
-                sampled_impl = random.randomly_schedule_impl(
-                    schedule,
-                    budget=None,
-                    memory_limits=limits,
-                    max_restarts=HEURISTIC_MAX_RESTARTS,
-                    skip_sliding=True,
-                )[0]
-            except random.MaxRestartsExceeded:
-                logger.info("MaxRestartsExceeded; switching to no memory limits")
-                sampled_impl = random.randomly_schedule_impl(
-                    schedule,
-                    budget=None,
-                    skip_sliding=True,
-                )[0]
-        assert isinstance(
-            sampled_impl, morello.impl.base.Impl
-        ), f"Impl was unexpectedly {sampled_impl}"
-        sampled_cost = cost.compute_cost(sampled_impl)
-        best_cost = min(best_cost, sampled_cost)
+        try:
+            sampled_impl = random.randomly_schedule_impl(
+                schedule,
+                budget=None,
+                memory_limits=limits,
+                max_restarts=HEURISTIC_MAX_RESTARTS,
+                skip_sliding=True,
+            )[0]
+        except random.MaxRestartsExceeded:
+            # If we keep restarting (this can happen if random exploration has
+            # trouble completing the schedule), then drop this one sample out of
+            # HEURISTIC_SAMPLES_PER_SPEC.
+            continue
+        else:
+            assert isinstance(
+                sampled_impl, morello.impl.base.Impl
+            ), f"Impl was unexpectedly {sampled_impl}"
+            sampled_cost = cost.compute_cost(sampled_impl)
+            best_cost = min(best_cost, sampled_cost)
     return best_cost
 
 
@@ -75,8 +69,10 @@ def beam_schedule_search(
     k: int = 10000,
     budget: Optional[int] = None,
     stats: Optional[common.SearchStats] = None,
-    cost_fn: Callable[
-        [morello.impl.base.Impl, Sequence[pruning.MemoryLimits]], Union[int, float]
+    cost_fn: Optional[
+        Callable[
+            [morello.impl.base.Impl, Sequence[pruning.MemoryLimits]], Union[int, float]
+        ]
     ] = None,
     progress_bar: bool = False,
     return_run_costs: bool = False,
@@ -99,9 +95,12 @@ def beam_schedule_search(
         if isinstance(spec.output.layout, layouts.ColMajor):
             return None
 
+    pb_ctx_budget = contextlib.nullcontext(None)
     pb_ctx_a = contextlib.nullcontext(None)
     pb_ctx_b = contextlib.nullcontext(None)
     if progress_bar:
+        if budget:
+            pb_ctx_budget = tqdm.tqdm(unit="budget", total=budget)
         pb_ctx_a = tqdm.tqdm(unit="state")
         pb_ctx_b = tqdm.tqdm(unit="action")
 
@@ -116,7 +115,7 @@ def beam_schedule_search(
 
     all_run_costs = [states[0].cost]
 
-    with pb_ctx_a as pb_a, pb_ctx_b as pb_b:
+    with pb_ctx_budget as pb_budget, pb_ctx_a as pb_a, pb_ctx_b as pb_b:
         while True:
             if pb_a is not None:
                 pb_a.reset(total=len(states))
@@ -125,7 +124,7 @@ def beam_schedule_search(
             new_states: list[_State] = []
             for state in states:
                 hole_actions = list(
-                    common.hole_actions(state.schedule, include_inner_impl=True)
+                    common.leaf_actions(state.schedule, include_inner_impl=True)[0]
                 )
                 if pb_b is not None:
                     pb_b.reset(total=len(hole_actions))
@@ -138,6 +137,9 @@ def beam_schedule_search(
 
                     # Ignore the action if it exceeds our memory limits.
                     if introduced_limits is not None:
+                        if not len(introduced_limits):
+                            introduced_limits = [None]
+
                         updated_limits = (
                             state.child_limits[:child_idx]
                             + tuple(introduced_limits)
@@ -166,6 +168,8 @@ def beam_schedule_search(
                                 return best_found[0], all_run_costs
                             return best_found[0]
                         budget -= 1
+                        if pb_budget is not None:
+                            pb_budget.update(1)
                     stats.expansions += 1
 
                     if pb_b is not None:
