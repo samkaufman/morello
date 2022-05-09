@@ -1,9 +1,9 @@
-import dataclasses
-
+import cython
 import numpy as np
 
 
-@dataclasses.dataclass(frozen=True)
+@cython.dataclasses.dataclass(frozen=True)
+@cython.cclass
 class Dtype:
     size: int  # in bytes
     c_type: str

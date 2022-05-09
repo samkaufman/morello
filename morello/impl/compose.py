@@ -141,7 +141,7 @@ class ComposeHole(Impl):
 
     def _get_output_dimensions_matching_first_input(self) -> Iterable[int]:
         """Returns the dimensions matching subscripts of the first head input."""
-        first_head_idx = -self.spec.subspec_classes[-1].inputs_count
+        first_head_idx = -self.spec.subspec_classes[-1].inputs_count()
         first_head_subs = self.spec.operands_dim_subscripts()[first_head_idx - 1]
         output_subs = self.spec.operands_dim_subscripts()[-1]
         for sub in first_head_subs:
@@ -179,8 +179,8 @@ class ComposeHole(Impl):
         )
 
         new_inputs = self.inputs[:input_idx] + (new_mat,) + self.inputs[input_idx + 1 :]
-        new_inner_spec = dataclasses.replace(
-            self.spec, inputs=tuple(inp.spec for inp in new_inputs)
+        new_inner_spec = self.spec.replace_io(
+            tuple(inp.spec for inp in new_inputs), self.spec.output
         )
         return MoveLet(
             source=operand,
@@ -217,7 +217,7 @@ class ComposeHole(Impl):
             origin=operand,
         )
 
-        new_inner_spec = dataclasses.replace(self.spec, output=new_mat.spec)
+        new_inner_spec = self.spec.replace_io(self.spec.inputs, new_mat.spec)
         return MoveLet(
             source=operand,
             destination=new_mat,
@@ -277,7 +277,7 @@ class ComposeHole(Impl):
 
         # The head of a Compose corresponds to the last function evaluated
         head_inps = (intermediate_tensor,)
-        hi = self.spec.subspec_classes[0].inputs_count - 1
+        hi = self.spec.subspec_classes[0].inputs_count() - 1
         if hi:
             head_inps += self.inputs[:hi]
         head_hole = spec_to_hole(
@@ -461,9 +461,9 @@ class ComposeHole(Impl):
             popped_cls = subspec_classes.pop(0)
             intermediate_shapes.pop(0)
             if subspec_classes:
-                inputs = inputs[popped_cls.inputs_count - 1 :]
+                inputs = inputs[popped_cls.inputs_count() - 1 :]
             else:
-                inputs = inputs[popped_cls.inputs_count :]
+                inputs = inputs[popped_cls.inputs_count() :]
             skip_first -= 1
         return ComposeHole._compute_partial_inputs_inner(
             tuple(subspec_classes),
@@ -496,7 +496,7 @@ class ComposeHole(Impl):
             inputs_shapes = ()
             if subspec_output_shapes:
                 inputs_shapes = (subspec_output_shapes.pop(0),)
-            take = subspec_cls.inputs_count - len(inputs_shapes)
+            take = subspec_cls.inputs_count() - len(inputs_shapes)
             inputs_shapes += flattened_inputs_shapes[:take]
             flattened_inputs_shapes = flattened_inputs_shapes[take:]
             # We're tracing the type and shape of each subspec's first tile up through the
