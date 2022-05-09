@@ -24,13 +24,19 @@ from morello.system_config import set_current_target, target_by_name
 logger = logging.getLogger(__name__)
 
 arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument("--spec", type=str, action="append", default=None)
+arg_parser.add_argument(
+    "--processes", type=int, default=None, help="Number of processes to use."
+)
+arg_parser.add_argument("--no_random", action="store_true")
+arg_parser.add_argument("--no_beam", action="store_true")
 arg_parser.add_argument("--dp_only", action="store_true")
 arg_parser.add_argument("--cachedir", metavar="CACHEDIR", type=pathlib.Path)
 arg_parser.add_argument("output", metavar="OUTPUT", type=pathlib.Path)
 
-SKIP_DP_IF_BUDGET_KNOWN = True
-PROCS = 26  # None = use all CPUs.
+SKIP_DP_IF_BUDGET_KNOWN = False
 DTYPE = dtypes.Uint32
+BEAM_TRIALS = 10
 BEAM_WIDTHS = [1, 10, 100]
 
 target = target_by_name("cpu")
@@ -67,19 +73,30 @@ def main():
         print(f"Path {results_path} already exits; aborting", file=sys.stderr)
         return 100
 
+    # Filter experiment specs according to args.
+    specs_to_use = []
+    for entry in experiment_specs():
+        spec_name = entry[0]
+        if args.spec is None or spec_name in args.spec:
+            specs_to_use.append(entry)
+
     budgets: dict[str, int] = {}
     if SKIP_DP_IF_BUDGET_KNOWN:
-        for spec_name, _, budget in experiment_specs():
+        for spec_name, _, budget in specs_to_use:
             if budget:
                 budgets[spec_name] = budget
 
+    procs = args.processes
+    if not procs:
+        procs = multiprocessing.cpu_count()
+
     dp_task_partial = functools.partial(dp_task, cache_dir=args.cachedir)
     all_results: list[ExperimentResult] = []
-    with multiprocessing.Pool() as pool:
+    with multiprocessing.Pool(processes=procs) as pool:
         # Do the dynamic programming runs first in parallel
-        experiments_to_run = ((n, s) for n, s, _ in experiment_specs())
+        experiments_to_run = ((n, s) for n, s, _ in specs_to_use)
         if SKIP_DP_IF_BUDGET_KNOWN:
-            experiments_to_run = ((n, s) for n, s, b in experiment_specs() if not b)
+            experiments_to_run = ((n, s) for n, s, b in specs_to_use if not b)
         dp_results = list(pool.starmap(dp_task_partial, experiments_to_run))
         all_results += dp_results
         for r in dp_results:
@@ -87,15 +104,19 @@ def main():
 
     # Run the other searches in serial. They are parallel internally.
     try:
-        for spec_name, spec, _ in experiment_specs():
+        for spec_name, spec, _ in specs_to_use:
             budget = budgets[spec_name]
             if not args.dp_only:
-                for result in beam_task(spec_name, spec, budget=budget, parallel=PROCS):
-                    all_results.append(result)
-                for result in random_task(
-                    spec_name, spec, budget=budget, parallel=PROCS
-                ):
-                    all_results.append(result)
+                if not args.no_beam:
+                    for result in beam_task(
+                        spec_name, spec, budget=budget, parallel=procs
+                    ):
+                        all_results.append(result)
+                if not args.no_random:
+                    for result in random_task(
+                        spec_name, spec, budget=budget, parallel=procs
+                    ):
+                        all_results.append(result)
     except Exception:
         raise
     finally:
@@ -164,7 +185,7 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec, Optional[int]]]:
         target.tensor_spec((256, 256), dtype=DTYPE),
         intermediate_dtypes=(DTYPE,),
         serial_only=True,
-    ), None
+    ), 1039782
     # yield "cnn-3layer", _make_cnn(depth=3), None
     # yield "cnn-6layer", _make_cnn(depth=6), None
 
@@ -229,12 +250,12 @@ def beam_task(
     job_fn = functools.partial(
         _beam_task_job, spec_name, budget, spec, progress_bar=(parallel == 1)
     )
-    job_seq = itertools.product(range(10), BEAM_WIDTHS)
+    job_seq = itertools.product(range(BEAM_TRIALS), BEAM_WIDTHS)
 
-    mp_ctx = multiprocessing.get_context("fork")
     if parallel == 1:
         beam_results = [job_fn(*a) for a in job_seq]
     else:
+        mp_ctx = multiprocessing.get_context("fork")
         with mp_ctx.Pool(processes=parallel) as pool:
             beam_results = list(pool.starmap(job_fn, job_seq))
     return beam_results
