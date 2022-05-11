@@ -11,3 +11,8 @@ hexagon_sdk_lnx_3_5_installer_eval_00005_3.zip
 
 # Not checked in for legal reasons
 comparisons/hexagon/*
+
+# Don't check in Cython output 
+build/
+morello/**/*.c
+morello/**/*.so
