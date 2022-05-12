@@ -40,10 +40,6 @@ BEAM_TRIALS = 10
 BEAM_WIDTHS = [1, 10, 100]
 
 target = target_by_name("cpu")
-set_current_target(target)
-
-
-results_queue = multiprocessing.Queue(maxsize=9000)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,6 +63,8 @@ def main():
     logging.basicConfig()
 
     args = arg_parser.parse_args()
+
+    set_current_target(target)
 
     results_path: pathlib.Path = args.output
     if results_path.exists():
