@@ -161,9 +161,6 @@ def beam_schedule_search(
                     # Decrement budget even if the action exceeds memory limits.
                     if budget is not None:
                         if budget == 0:
-                            assert isinstance(
-                                best_found[0], morello.impl.base.Impl
-                            ), f"Best found was not an Impl; was: {best_found[0]}"
                             if return_run_costs and best_found[0] is not None:
                                 return best_found[0], all_run_costs
                             return best_found[0]

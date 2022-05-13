@@ -17,7 +17,7 @@ from typing import Iterable, Literal, Optional, Sequence, Union
 import pandas as pd
 
 import morello.impl.base
-from morello import cost, dtypes, op_pprint, search, search_cache, specs
+from morello import cost, dtypes, op_pprint, pruning, search, search_cache, specs
 from morello.search import beam, random
 from morello.system_config import set_current_target, target_by_name
 
@@ -36,7 +36,7 @@ arg_parser.add_argument("output", metavar="OUTPUT", type=pathlib.Path)
 
 SKIP_DP_IF_BUDGET_KNOWN = False
 DTYPE = dtypes.Uint32
-BEAM_TRIALS = 10
+BEAM_TRIALS = 100
 BEAM_WIDTHS = [1, 10, 100]
 
 target = target_by_name("cpu")
@@ -173,17 +173,17 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec, Optional[int]]]:
         target.tensor_spec((1, 32, 256 - 4, 256 - 4), dtype=DTYPE),
         serial_only=True,
     ), None
-    yield "gemm3-256", specs.Compose(
+    yield "gemm3-1024", specs.Compose(
         (specs.Matmul, specs.Matmul),
         (
-            target.tensor_spec((256, 256), dtype=DTYPE),
-            target.tensor_spec((256, 256), dtype=DTYPE),
-            target.tensor_spec((256, 256), dtype=DTYPE),
+            target.tensor_spec((1024, 1024), dtype=DTYPE),
+            target.tensor_spec((1024, 1024), dtype=DTYPE),
+            target.tensor_spec((1024, 1024), dtype=DTYPE),
         ),
-        target.tensor_spec((256, 256), dtype=DTYPE),
+        target.tensor_spec((1024, 1024), dtype=DTYPE),
         intermediate_dtypes=(DTYPE,),
         serial_only=True,
-    ), 1039782
+    ), None
     # yield "cnn-3layer", _make_cnn(depth=3), None
     # yield "cnn-6layer", _make_cnn(depth=6), None
 
@@ -197,8 +197,8 @@ def dp_task(
     sys.stdout.flush()
 
     start = time.time()
-    stats = search.common.SearchStats()
-    assert stats.expansions == 0
+
+    cbs = ComposeCountingSearchCallbacks()
 
     cache_context = contextlib.nullcontext(None)
     if cache_dir:
@@ -209,10 +209,10 @@ def dp_task(
             spec,
             tuple(target.tensor(s) for s in spec.inputs),
             target.tensor(spec.output),
-            stats=stats,
+            callbacks=cbs,
             cache=cache,
         )
-    print(f"Explored {stats.expansions} schedules")
+    print(f"Explored {cbs.unseen_compose_visits} Compose sub-problems")
     sys.stdout.flush()
 
     best_cost = None
@@ -231,7 +231,7 @@ def dp_task(
         "dp",
         spec_name,
         best_cost,
-        stats.expansions,
+        cbs.unseen_compose_visits,
         runtime,
         best_pretty_formatted,
         all_run_costs=None,
@@ -401,6 +401,15 @@ def _randomly_schedule_impls_job(
             results_queue.put((op_pprint.pformat(scheduled_impl), c, steps_taken))
         except ValueError:
             break
+
+
+class ComposeCountingSearchCallbacks(search.SearchCallbacks):
+    def __init__(self):
+        self.unseen_compose_visits = 1
+
+    def enter_unseen(self, spec: specs.Spec, _: pruning.MemoryLimits) -> None:
+        if isinstance(spec, specs.Compose):
+            self.unseen_compose_visits += 1
 
 
 if __name__ == "__main__":

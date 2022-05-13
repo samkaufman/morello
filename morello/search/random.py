@@ -45,7 +45,6 @@ def randomly_schedule_impl(
     steps_taken = 0
     impl = root_impl
     restarts = 0
-    edge_case_restarts = 0
     while max_restarts is None or restarts <= max_restarts:
         if budget is not None and budget <= steps_taken:
             assert steps_taken == budget
