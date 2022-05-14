@@ -4,19 +4,21 @@ import logging
 import os
 import sys
 from collections.abc import Sequence
-from typing import Callable, Optional, Union
+from typing import Callable, NamedTuple, Optional, Union
 
 import numpy as np
 import tqdm
 
 import morello.impl.base
+from morello import search_cache
 
 from .. import cost, layouts, pruning, specs
-from . import common, random
+from . import common, dp, random
 
 HEURISTIC_SAMPLES_PER_SPEC = 10
 HEURISTIC_MAX_RESTARTS = int(os.getenv("HEURISTIC_MAX_RESTARTS", 100))
 STOCHASTIC = False
+NOISE_STD_DEV = 0.01
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +30,52 @@ def _cost(
     return cost.compute_cost(schedule)
 
 
-def sampling_heuristic(
+def _iter_empty(it) -> bool:
+    for _ in it:
+        return False
+    return True
+
+
+def _dp_schedule_leaves(
+    schedule: morello.impl.base.Impl,
+    limits_queue: list[pruning.MemoryLimits],
+    cache: search_cache.ScheduleCache,
+) -> Optional[morello.impl.base.Impl]:
+    if not len(schedule.children):
+        sublimits = limits_queue.pop(0)
+        if not _iter_empty(schedule.actions()):
+            return dp.schedule_search(
+                schedule.spec,
+                schedule.inputs,
+                schedule.output,
+                memory_limits=sublimits,
+                cache=cache,
+            )
+        return schedule
+
+    new_children = []
+    for child in schedule.children:
+        child_impl = _dp_schedule_leaves(child, limits_queue, cache)
+        if child_impl is None:
+            return None
+        new_children.append(child_impl)
+    return schedule.replace_children(new_children)
+
+
+def noisy_optimal_heuristic(
+    schedule: morello.impl.base.Impl,
+    limits: Sequence[pruning.MemoryLimits],
+    cache: search_cache.ScheduleCache,
+) -> Union[int, float]:
+    limits_queue = list(limits)
+    optimal_completion = _dp_schedule_leaves(schedule, limits_queue, cache)
+    if optimal_completion is None:
+        return sys.maxsize
+    assert not len(limits_queue)
+    return cost.compute_cost(optimal_completion) * np.random.normal(1, NOISE_STD_DEV)
+
+
+def random_sampling_heuristic(
     schedule: morello.impl.base.Impl, limits: Sequence[pruning.MemoryLimits]
 ) -> Union[int, float]:
     best_cost = sys.maxsize
@@ -62,6 +109,12 @@ class _State:
     cost: Union[int, float]
 
 
+class BeamScheduleSearchResult(NamedTuple):
+    best_impl: morello.impl.base.Impl
+    best_impl_cost: int
+    all_beam_costs: Sequence[Union[int, float]]
+
+
 def beam_schedule_search(
     spec: specs.Spec,
     inputs: tuple,
@@ -75,13 +128,7 @@ def beam_schedule_search(
         ]
     ] = None,
     progress_bar: bool = False,
-    return_run_costs: bool = False,
-) -> Optional[
-    Union[
-        morello.impl.base.Impl,
-        tuple[morello.impl.base.Impl, Sequence[Union[int, float]]],
-    ]
-]:
+) -> Optional[BeamScheduleSearchResult]:
     if cost_fn is None:
         cost_fn = _cost
 
@@ -105,7 +152,7 @@ def beam_schedule_search(
         pb_ctx_b = tqdm.tqdm(unit="action")
 
     # Initialize the beam search with a single state: an Impl hole for the query Spec.
-    best_found: tuple[Optional[morello.impl.base.Impl], Union[int, float]] = (
+    best_found: tuple[Optional[morello.impl.base.Impl], int] = (
         None,
         sys.maxsize,
     )
@@ -161,9 +208,11 @@ def beam_schedule_search(
                     # Decrement budget even if the action exceeds memory limits.
                     if budget is not None:
                         if budget == 0:
-                            if return_run_costs and best_found[0] is not None:
-                                return best_found[0], all_run_costs
-                            return best_found[0]
+                            if best_found[0] is None:
+                                return None
+                            return BeamScheduleSearchResult(
+                                best_found[0], best_found[1], all_run_costs
+                            )
                         budget -= 1
                         if pb_budget is not None:
                             pb_budget.update(1)
@@ -176,14 +225,18 @@ def beam_schedule_search(
                     pb_a.update(1)
 
             if not new_states:
-                if return_run_costs and best_found[0] is not None:
-                    return best_found[0], all_run_costs
-                return best_found[0]
+                if best_found[0] is None:
+                    return None
+                return BeamScheduleSearchResult(
+                    best_found[0], best_found[1], all_run_costs
+                )
             new_states = select_fn(new_states, k)
             if new_states == states:
-                if return_run_costs and best_found[0] is not None:
-                    return best_found[0], all_run_costs
-                return best_found[0]
+                if best_found[0] is None:
+                    return None
+                return BeamScheduleSearchResult(
+                    best_found[0], best_found[1], all_run_costs
+                )
             states = new_states
 
 

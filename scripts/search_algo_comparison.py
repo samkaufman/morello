@@ -2,7 +2,7 @@
 """A script that comparing DP search to beam and random searches."""
 
 import argparse
-import contextlib
+import copy
 import dataclasses
 import functools
 import itertools
@@ -11,15 +11,16 @@ import multiprocessing
 import os
 import pathlib
 import sys
+import tempfile
 import time
-from typing import Iterable, Literal, Optional, Sequence, Union
+from typing import Callable, Iterable, Literal, Optional, Sequence, Union
 
 import pandas as pd
 
 import morello.impl.base
 from morello import cost, dtypes, op_pprint, pruning, search, search_cache, specs
 from morello.search import beam, random
-from morello.system_config import set_current_target, target_by_name
+from morello.system_config import current_target, set_current_target, target_by_name
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,9 @@ arg_parser.add_argument(
 arg_parser.add_argument("--no_random", action="store_true")
 arg_parser.add_argument("--no_beam", action="store_true")
 arg_parser.add_argument("--dp_only", action="store_true")
-arg_parser.add_argument("--cachedir", metavar="CACHEDIR", type=pathlib.Path)
+arg_parser.add_argument(
+    "--heuristic", required=True, choices=["random", "noisy_optimal"]
+)
 arg_parser.add_argument("output", metavar="OUTPUT", type=pathlib.Path)
 
 SKIP_DP_IF_BUDGET_KNOWN = False
@@ -49,6 +52,8 @@ class ExperimentResult:
     best_cost: Optional[int]  # May be None if search failed.
     expansions: int
     runtime: float
+    execution_time: Optional[Union[int, float]]
+    best_impl: Optional[morello.impl.base.Impl]
     best_description: Optional[str]  # pformatted. May be None if search failed.
     all_run_costs: Optional[Sequence[Union[int, float]]]
 
@@ -65,6 +70,12 @@ def main():
     args = arg_parser.parse_args()
 
     set_current_target(target)
+
+    # Make a temporary directory for the cache.
+    tmp_dir = tempfile.TemporaryDirectory()
+    cache_root_dir = pathlib.Path(tmp_dir.name)
+    assert cache_root_dir.is_dir()
+    cache_path = functools.partial(make_cache_path, cache_root_dir)
 
     results_path: pathlib.Path = args.output
     if results_path.exists():
@@ -88,7 +99,7 @@ def main():
     if not procs:
         procs = multiprocessing.cpu_count()
 
-    dp_task_partial = functools.partial(dp_task, cache_dir=args.cachedir)
+    dp_task_partial = functools.partial(dp_task, cache_path=cache_path)
     all_results: list[ExperimentResult] = []
     with multiprocessing.Pool(processes=procs) as pool:
         # Do the dynamic programming runs first in parallel
@@ -106,17 +117,35 @@ def main():
             budget = budgets[spec_name]
             if not args.dp_only:
                 if not args.no_beam:
-                    for result in beam_task(
-                        spec_name, spec, budget=budget, parallel=procs
-                    ):
-                        all_results.append(result)
+                    with search_cache.persistent_cache(
+                        cache_path(spec_name), save=False
+                    ) as cache:
+                        for result in beam_task(
+                            spec_name,
+                            spec,
+                            heuristic_name=args.heuristic,
+                            cache=cache,
+                            budget=budget,
+                            parallel=procs,
+                        ):
+                            all_results.append(result)
                 if not args.no_random:
                     for result in random_task(
                         spec_name, spec, budget=budget, parallel=procs
                     ):
                         all_results.append(result)
-    except Exception:
-        raise
+
+        # Update the cache with real execution times.
+        for idx in range(len(all_results)):
+            assert all_results[idx].execution_time is None
+            if all_results[idx].best_impl:
+                all_results[idx] = dataclasses.replace(
+                    all_results[idx],
+                    execution_time=current_target().time_impl(
+                        all_results[idx].best_impl
+                    ),
+                )
+
     finally:
         print(f"Saving to: {results_path}")
         pd.DataFrame.from_records(map(dataclasses.asdict, all_results)).to_csv(
@@ -173,14 +202,25 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec, Optional[int]]]:
         target.tensor_spec((1, 32, 256 - 4, 256 - 4), dtype=DTYPE),
         serial_only=True,
     ), None
-    yield "gemm3-1024", specs.Compose(
+    yield "gemm3-4", specs.Compose(
         (specs.Matmul, specs.Matmul),
         (
-            target.tensor_spec((1024, 1024), dtype=DTYPE),
-            target.tensor_spec((1024, 1024), dtype=DTYPE),
-            target.tensor_spec((1024, 1024), dtype=DTYPE),
+            target.tensor_spec((4, 4), dtype=DTYPE),
+            target.tensor_spec((4, 4), dtype=DTYPE),
+            target.tensor_spec((4, 4), dtype=DTYPE),
         ),
-        target.tensor_spec((1024, 1024), dtype=DTYPE),
+        target.tensor_spec((4, 4), dtype=DTYPE),
+        intermediate_dtypes=(DTYPE,),
+        serial_only=True,
+    ), None
+    yield "gemm3-2048", specs.Compose(
+        (specs.Matmul, specs.Matmul),
+        (
+            target.tensor_spec((2048, 2048), dtype=DTYPE),
+            target.tensor_spec((2048, 2048), dtype=DTYPE),
+            target.tensor_spec((2048, 2048), dtype=DTYPE),
+        ),
+        target.tensor_spec((2048, 2048), dtype=DTYPE),
         intermediate_dtypes=(DTYPE,),
         serial_only=True,
     ), None
@@ -189,7 +229,7 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec, Optional[int]]]:
 
 
 def dp_task(
-    spec_name: str, spec: specs.Spec, cache_dir: Optional[pathlib.Path]
+    spec_name: str, spec: specs.Spec, cache_path: Callable[[str], pathlib.Path]
 ) -> ExperimentResult:
     """Runs a DP search, then launches beam search with a corresponding budget."""
     print("")
@@ -200,10 +240,8 @@ def dp_task(
 
     cbs = ComposeCountingSearchCallbacks()
 
-    cache_context = contextlib.nullcontext(None)
-    if cache_dir:
-        cache_path = cache_dir / f"cache-{spec_name}.pkl"
-        cache_context = search_cache.persistent_cache(cache_path)
+    cache_context = search_cache.persistent_cache(cache_path(spec_name))
+
     with cache_context as cache:
         search_result = search.dp.schedule_search(
             spec,
@@ -233,20 +271,33 @@ def dp_task(
         best_cost,
         cbs.unseen_compose_visits,
         runtime,
+        None,
+        search_result,
         best_pretty_formatted,
         all_run_costs=None,
     )
 
 
 def beam_task(
-    spec_name: str, spec: specs.Spec, budget: int, parallel: Optional[int] = 1
+    spec_name: str,
+    spec: specs.Spec,
+    budget: int,
+    heuristic_name: str,
+    cache: search_cache.ScheduleCache,
+    parallel: Optional[int] = 1,
 ) -> Sequence[ExperimentResult]:
     print("")
     print(f"Running beam searches {spec_name} with budget {budget}")
     sys.stdout.flush()
 
     job_fn = functools.partial(
-        _beam_task_job, spec_name, budget, spec, progress_bar=(parallel == 1)
+        _beam_task_job,
+        spec_name,
+        budget,
+        spec,
+        progress_bar=(parallel == 1),
+        cache=cache,
+        heuristic_name=heuristic_name,
     )
     job_seq = itertools.product(range(BEAM_TRIALS), BEAM_WIDTHS)
 
@@ -259,32 +310,59 @@ def beam_task(
     return beam_results
 
 
-def _beam_task_job(spec_name, budget, spec, seq_num, beam_width, progress_bar):
-    stats = search.common.SearchStats()
+def _beam_task_job(
+    spec_name,
+    budget,
+    spec,
+    seq_num,
+    beam_width,
+    progress_bar,
+    heuristic_name: str,
+    cache,
+):
+    if heuristic_name == "noisy_optimal":
+        cache = copy.deepcopy(cache)
+        cost_fn = functools.partial(beam.noisy_optimal_heuristic, cache=cache)
+    elif heuristic_name == "random":
+        cost_fn = beam.random_sampling_heuristic
+    else:
+        raise ValueError(f"Unexpected heuristic name: {heuristic_name}")
+
     start = time.time()
 
-    beam_result = beam.beam_schedule_search(
-        spec,
-        tuple(target.tensor(s) for s in spec.inputs),
-        target.tensor(spec.output),
-        k=beam_width,
-        budget=budget,
-        stats=stats,
-        cost_fn=beam.sampling_heuristic,
-        progress_bar=progress_bar,
-        return_run_costs=True,
-    )
+    remaining_budget = budget
+    overall_best_impl = None
+    overall_best_cost = None
+    overall_best_impl_formatted = None
+    all_beam_run_costs = []
+    while remaining_budget > 0:
+        stats = search.common.SearchStats()
+        single_result = beam.beam_schedule_search(
+            spec,
+            tuple(target.tensor(s) for s in spec.inputs),
+            target.tensor(spec.output),
+            k=beam_width,
+            budget=remaining_budget,
+            stats=stats,
+            cost_fn=cost_fn,
+            progress_bar=progress_bar,
+        )
+        assert single_result is None or isinstance(single_result, tuple)
+        remaining_budget -= stats.expansions
+        assert remaining_budget >= 0
 
-    best_cost = None
-    best_pretty_formatted = None
-    beam_run_costs = None
-    if beam_result is not None:
-        assert isinstance(beam_result, tuple)
-        search_result, beam_run_costs = beam_result
-        best_cost = cost.compute_cost(search_result)
-        best_pretty_formatted = op_pprint.pformat(search_result)
-    else:
-        print("No schedule found by beam search")
+        if single_result:
+            all_beam_run_costs += list(single_result.all_beam_costs)
+            if (
+                not overall_best_cost
+                or single_result.best_impl_cost < overall_best_cost
+            ):
+                overall_best_impl = single_result.best_impl
+                overall_best_cost = single_result.best_impl_cost
+                overall_best_impl_formatted = op_pprint.pformat(single_result.best_impl)
+
+    if not overall_best_impl:
+        print("No schedule found by beam search trial")
 
     runtime = time.time() - start
     print(f"Beam search for {spec_name} w/ {beam_width} took {runtime:.2} seconds")
@@ -293,11 +371,13 @@ def _beam_task_job(spec_name, budget, spec, seq_num, beam_width, progress_bar):
     return BeamExperimentResult(
         "beam",
         spec_name,
-        best_cost,
-        stats.expansions,
+        overall_best_cost,
+        budget - remaining_budget,
         runtime,
-        best_pretty_formatted,
-        all_run_costs=beam_run_costs,
+        None,
+        overall_best_impl,
+        overall_best_impl_formatted,
+        all_run_costs=all_beam_run_costs,
         beam_width=beam_width,
         seq_num=seq_num,
     )
@@ -360,6 +440,7 @@ def random_search(
                 p.terminate()
 
     # Second phase: run serially, passing the budget in.
+    best_impl = None
     while budget:
         scheduled_impl, steps_taken = random.randomly_schedule_impl(hole, budget)
         assert steps_taken <= budget
@@ -367,6 +448,7 @@ def random_search(
             c = cost.compute_cost(scheduled_impl)
             run_costs.append(c)
             if best_cost is None or c < best_cost:
+                best_impl = scheduled_impl
                 best_cost = c
                 best_pformatted = op_pprint.pformat(scheduled_impl)
         else:
@@ -383,6 +465,8 @@ def random_search(
         expansions=original_budget - budget,
         # Not recording runtime or descriptions. Implement if needed.
         runtime=runtime,
+        execution_time=None,
+        best_impl=best_impl,
         best_description=best_pformatted,
         all_run_costs=run_costs,
     )
@@ -410,6 +494,10 @@ class ComposeCountingSearchCallbacks(search.SearchCallbacks):
     def enter_unseen(self, spec: specs.Spec, _: pruning.MemoryLimits) -> None:
         if isinstance(spec, specs.Compose):
             self.unseen_compose_visits += 1
+
+
+def make_cache_path(cache_root_dir: pathlib.Path, spec_name: str) -> pathlib.Path:
+    return cache_root_dir / f"cache-{spec_name}.pkl"
 
 
 if __name__ == "__main__":
