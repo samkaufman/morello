@@ -56,6 +56,7 @@ class ExperimentResult:
     best_impl: Optional[morello.impl.base.Impl]
     best_description: Optional[str]  # pformatted. May be None if search failed.
     all_run_costs: Optional[Sequence[Union[int, float]]]
+    log_path: Optional[str]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,10 +78,11 @@ def main():
     assert cache_root_dir.is_dir()
     cache_path = functools.partial(make_cache_path, cache_root_dir)
 
-    results_path: pathlib.Path = args.output
-    if results_path.exists():
-        print(f"Path {results_path} already exits; aborting", file=sys.stderr)
+    out_dir_path: pathlib.Path = args.output
+    if out_dir_path.exists():
+        print(f"Path {out_dir_path} already exits; aborting", file=sys.stderr)
         return 100
+    out_dir_path.mkdir(parents=True)
 
     # Filter experiment specs according to args.
     specs_to_use = []
@@ -127,6 +129,7 @@ def main():
                             cache=cache,
                             budget=budget,
                             parallel=procs,
+                            logs_dir=out_dir_path,
                         ):
                             all_results.append(result)
                 if not args.no_random:
@@ -147,9 +150,10 @@ def main():
                 )
 
     finally:
-        print(f"Saving to: {results_path}")
+        csv_out_path = out_dir_path / "results.csv"
+        print(f"Saving to: {csv_out_path}")
         pd.DataFrame.from_records(map(dataclasses.asdict, all_results)).to_csv(
-            results_path
+            csv_out_path
         )
     return 0
 
@@ -250,7 +254,7 @@ def dp_task(
             callbacks=cbs,
             cache=cache,
         )
-    print(f"Explored {cbs.unseen_compose_visits} Compose sub-problems")
+    print(f"Applied {cbs.compose_visits} actions to Compose sub-problems")
     sys.stdout.flush()
 
     best_cost = None
@@ -269,12 +273,13 @@ def dp_task(
         "dp",
         spec_name,
         best_cost,
-        cbs.unseen_compose_visits,
+        cbs.compose_visits,
         runtime,
         None,
         search_result,
         best_pretty_formatted,
         all_run_costs=None,
+        log_path=None,
     )
 
 
@@ -284,6 +289,7 @@ def beam_task(
     budget: int,
     heuristic_name: str,
     cache: search_cache.ScheduleCache,
+    logs_dir: pathlib.Path,
     parallel: Optional[int] = 1,
 ) -> Sequence[ExperimentResult]:
     print("")
@@ -295,8 +301,8 @@ def beam_task(
         spec_name,
         budget,
         spec,
-        progress_bar=(parallel == 1),
         cache=cache,
+        logs_dir=logs_dir,
         heuristic_name=heuristic_name,
     )
     job_seq = itertools.product(range(BEAM_TRIALS), BEAM_WIDTHS)
@@ -316,9 +322,9 @@ def _beam_task_job(
     spec,
     seq_num,
     beam_width,
-    progress_bar,
     heuristic_name: str,
     cache,
+    logs_dir: pathlib.Path,
 ):
     if heuristic_name == "noisy_optimal":
         cache = copy.deepcopy(cache)
@@ -331,13 +337,12 @@ def _beam_task_job(
     start = time.time()
 
     remaining_budget = budget
-    overall_best_impl = None
-    overall_best_cost = None
-    overall_best_impl_formatted = None
-    all_beam_run_costs = []
+    overall_best_result = None
+    all_beam_estimated_costs = []
+    all_trial_logs = []
     while remaining_budget > 0:
         stats = search.common.SearchStats()
-        single_result = beam.beam_schedule_search(
+        single_result, search_log = beam.beam_schedule_search(
             spec,
             tuple(target.tensor(s) for s in spec.inputs),
             target.tensor(spec.output),
@@ -345,24 +350,31 @@ def _beam_task_job(
             budget=remaining_budget,
             stats=stats,
             cost_fn=cost_fn,
-            progress_bar=progress_bar,
         )
+        all_trial_logs.append(search_log)
         assert single_result is None or isinstance(single_result, tuple)
         remaining_budget -= stats.expansions
         assert remaining_budget >= 0
 
         if single_result:
-            all_beam_run_costs += list(single_result.all_beam_costs)
+            all_beam_estimated_costs += list(single_result.all_estimated_costs)
             if (
-                not overall_best_cost
-                or single_result.best_impl_cost < overall_best_cost
+                not overall_best_result
+                or single_result.best_impl_cost < overall_best_result.best_impl_cost
             ):
-                overall_best_impl = single_result.best_impl
-                overall_best_cost = single_result.best_impl_cost
-                overall_best_impl_formatted = op_pprint.pformat(single_result.best_impl)
+                overall_best_result = single_result
 
-    if not overall_best_impl:
+    if not overall_best_result:
         print("No schedule found by beam search trial")
+
+    log_path = logs_dir / f"beam-{seq_num:03d}-width{beam_width:04d}.txt"
+    assert not log_path.exists()
+    with (log_path).open("w") as f:
+        for trial_num, trial_log in enumerate(all_trial_logs):
+            f.write("==============================\n")
+            f.write(f"Trial {trial_num}\n")
+            f.write("==============================\n")
+            f.write(trial_log)
 
     runtime = time.time() - start
     print(f"Beam search for {spec_name} w/ {beam_width} took {runtime:.2} seconds")
@@ -371,13 +383,18 @@ def _beam_task_job(
     return BeamExperimentResult(
         "beam",
         spec_name,
-        overall_best_cost,
+        None if not overall_best_result else overall_best_result.best_impl_cost,
         budget - remaining_budget,
         runtime,
         None,
-        overall_best_impl,
-        overall_best_impl_formatted,
-        all_run_costs=all_beam_run_costs,
+        None if not overall_best_result else overall_best_result.best_impl,
+        best_description=(
+            None
+            if not overall_best_result
+            else op_pprint.pformat(overall_best_result.best_impl)
+        ),
+        all_run_costs=all_beam_estimated_costs,
+        log_path=str(log_path),
         beam_width=beam_width,
         seq_num=seq_num,
     )
@@ -469,6 +486,7 @@ def random_search(
         best_impl=best_impl,
         best_description=best_pformatted,
         all_run_costs=run_costs,
+        log_path=None,
     )
 
 
@@ -489,11 +507,11 @@ def _randomly_schedule_impls_job(
 
 class ComposeCountingSearchCallbacks(search.SearchCallbacks):
     def __init__(self):
-        self.unseen_compose_visits = 1
+        self.compose_visits = 0
 
-    def enter_unseen(self, spec: specs.Spec, _: pruning.MemoryLimits) -> None:
-        if isinstance(spec, specs.Compose):
-            self.unseen_compose_visits += 1
+    def applied_action(self, action, impl: morello.impl.base.Impl) -> None:
+        if isinstance(impl.spec, specs.Compose):
+            self.compose_visits += 1
 
 
 def make_cache_path(cache_root_dir: pathlib.Path, spec_name: str) -> pathlib.Path:
