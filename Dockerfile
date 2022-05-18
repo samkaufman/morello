@@ -63,7 +63,7 @@ RUN cd tvm && \
     sed -i 's/USE_GRAPH_EXECUTOR_DEBUG OFF/USE_GRAPH_EXECUTOR_DEBUG ON/' config.cmake && \
     sed -i 's/USE_LLVM OFF/USE_LLVM "\/usr\/bin\/llvm-config-12 --link-static"/' config.cmake && \
     cmake .. && \
-    cmake --build . --parallel
+    cmake --build .
 RUN apt-get install python3-wheel
 RUN cd tvm/python && python3 setup.py bdist_wheel
 

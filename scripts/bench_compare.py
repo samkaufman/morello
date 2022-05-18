@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import asyncio
 import contextlib
 import datetime
 import functools
@@ -525,10 +526,11 @@ def benchmark_baseline(
 
 
 def _benchmark(impl):
+    loop = asyncio.get_event_loop()
     assert impl.is_scheduled
     runtime_secs = None
     for _ in range(RUNS):
-        secs = system_config.current_target().time_impl(impl)
+        secs = loop.run_until_complete(system_config.current_target().time_impl(impl))
         logger.info(f"Sample runtime result {secs}s:")
         if runtime_secs is None or secs < runtime_secs:
             runtime_secs = secs

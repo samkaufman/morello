@@ -50,7 +50,7 @@ class Target(abc.ABC):
     def all_layouts(self) -> Iterable["Layout"]:
         raise NotImplementedError()
 
-    def run_impl(
+    async def run_impl(
         self,
         impl,
         print_output=False,
@@ -59,7 +59,7 @@ class Target(abc.ABC):
     ) -> RunResult:
         raise NotImplementedError()
 
-    def time_impl(self, impl) -> float:
+    async def time_impl(self, impl) -> float:
         """Executes and benchmarks an Impl.
 
         Returns a measurement of time in arbitrary units.

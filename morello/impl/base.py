@@ -20,7 +20,7 @@ class Impl(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def children(self) -> Tuple["Impl", ...]:
+    def children(self) -> tuple["Impl", ...]:
         raise NotImplementedError()
 
     @property
@@ -36,6 +36,14 @@ class Impl(abc.ABC):
     @property
     def operands(self) -> tuple[Union[Tensor, Tile], ...]:
         return self.inputs + (self.output,)
+
+    @property
+    def leaves(self) -> Iterable["Impl"]:
+        if len(self.children) == 0:
+            yield self
+        else:
+            for child in self.children:
+                yield from child.leaves
 
     @property
     def depth(self) -> int:
