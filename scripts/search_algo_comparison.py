@@ -19,7 +19,7 @@ from typing import Callable, Iterable, Literal, Optional, Sequence, Union
 import pandas as pd
 
 import morello.impl.base
-from morello import cost, dtypes, op_pprint, pruning, search, search_cache, specs
+from morello import cost, dtypes, op_pprint, search, search_cache, specs
 from morello.search import beam, random
 from morello.system_config import current_target, set_current_target, target_by_name
 

@@ -1,25 +1,29 @@
 import functools
-from typing import Any, Generator, Iterable, Optional
+import heapq
+import itertools
+from typing import Any, Generator, Iterable, Optional, Union
 
 from .. import impl, layouts, pruning, replace, specs, system_config
 from ..impl import Impl
-from ..search_cache import CachedSchedule, ScheduleCache
+from ..search_cache import CachedScheduleSet, ScheduleCache
 from . import common
 
 
-def _best_schedule(
-    it: Iterable[Impl],
+def _best_schedules(
+    options: Iterable[Impl],
     spec: specs.Spec,
+    top_k: int,
     callbacks: Optional[common.SearchCallbacks],
-) -> Optional[tuple[Impl, tuple[int, Any, Any, Any]]]:
-    """Returns the best schedule if `it` is non-empty; `None` if it is.
+) -> Optional[list[tuple[Impl, tuple[int, Any, Any]]]]:
+    """Returns the top-k best schedules if `it` is non-empty; `None` if it is.
 
     This uses schedule_key, so it will return the lowest cost schedule,
     breaking ties as described in schedule_key's docstring.
     """
-    it = ((s, common.schedule_key(s)) for s in it)
+    it = ((s, common.schedule_key(s)) for s in options)
 
     def _cb_wrap(it):
+        assert callbacks is not None
         for item in it:
             imp, imp_cost_tuple = item
             callbacks.visit_impl(spec, imp, imp_cost_tuple[0])
@@ -28,7 +32,8 @@ def _best_schedule(
     if callbacks:
         it = _cb_wrap(it)
 
-    return min(it, key=lambda x: x[1], default=None)
+    best = heapq.nsmallest(top_k, it, key=lambda x: x[1])
+    return best if best else None
 
 
 # TODO: Don't just use a global variable. Use a thread local or contextvars.
@@ -69,10 +74,11 @@ def schedule_search(
     output: Optional[Any] = None,
     memory_limits: Optional[pruning.MemoryLimits] = None,
     cache: Optional[ScheduleCache] = None,
+    top_k: Optional[int] = None,
     parent_summary: Optional[impl.ParentSummary] = None,
     stats: Optional[common.SearchStats] = None,
     callbacks: Optional[common.SearchCallbacks] = None,
-) -> Optional[Impl]:
+) -> Optional[Union[Impl, list[Impl]]]:
     """Returns the best Impl for a given Spec and memory limits.
 
     May return `None` if no Impl satisfies the given Spec and memory limits.
@@ -93,9 +99,22 @@ def schedule_search(
     if memory_limits is None:
         memory_limits = pruning.StandardMemoryLimits()
 
-    return _inner_schedule_search(
-        spec, inputs, output, memory_limits, cache, parent_summary, stats, callbacks
+    inner_result = _inner_schedule_search(
+        spec,
+        inputs,
+        output,
+        memory_limits,
+        cache,
+        top_k=(top_k if top_k is not None else 1),
+        parent_summary=parent_summary,
+        stats=stats,
+        callbacks=callbacks,
     )
+    if top_k is not None:
+        return inner_result
+    if inner_result is not None:
+        return inner_result[0]
+    return None
 
 
 def _inner_schedule_search(
@@ -104,11 +123,16 @@ def _inner_schedule_search(
     output,
     memory_limits: pruning.MemoryLimits,
     cache: ScheduleCache,
+    top_k: int,
     parent_summary: Optional[impl.ParentSummary] = None,
     stats: Optional[common.SearchStats] = None,
     callbacks: Optional[common.SearchCallbacks] = None,
-) -> Optional[Impl]:
-    """Implements most of the logic of schedule_search."""
+) -> Optional[list[Impl]]:
+    """Implements most of the logic of schedule_search.
+
+    Returns a list of Impls which satisfy the given Spec and memory limits,
+    sorted in order of increasing cost, up to `top_k` results.
+    """
 
     if common.prune_column_major.get():
         if any(isinstance(inp.layout, layouts.ColMajor) for inp in spec.inputs):
@@ -134,7 +158,10 @@ def _inner_schedule_search(
         # stored in the cache along with their concrete operands. While these operands
         # have the same TensorSpecs as those of our query Spec, they aren't the same
         # objects, so: swap in the query operands before returning the cached schedule.
-        return _subs_query_operands(spec, inputs, output, wrapped_cached_schedule)
+        return [
+            _subs_query_operands(spec, inputs, output, imp)
+            for imp in wrapped_cached_schedule.impls
+        ]
 
     if callbacks:
         callbacks.enter_unseen(spec, memory_limits)
@@ -181,13 +208,14 @@ def _inner_schedule_search(
 
             # Recurse for all holes (nested Specs) in the new Impl. If any hole cannot
             # be filled, short-circuit because this action is a dead end.
-            subsearch_results = []
+            subsearch_results: list[list[Impl]] = []
             for child, mem in zip(new_tree.children, new_child_memory_limits):
                 child_result = _inner_schedule_search(
                     child.spec,
                     inputs=child.inputs,
                     output=child.output,
                     cache=cache,
+                    top_k=top_k,
                     memory_limits=mem,
                     parent_summary=new_parent_summary,
                     stats=stats,
@@ -201,43 +229,41 @@ def _inner_schedule_search(
             if len(subsearch_results) < len(new_tree.children):
                 continue
 
-            # Fill the holes and yield as a possible Impl
-            completed = new_tree.replace_children(subsearch_results)
-            assert (
-                completed.spec == new_tree.spec
-            ), f"{str(completed.spec)} != {str(new_tree.spec)}"
+            # Yield the product of all possible child Impls as options.
+            for selected_children in itertools.product(*subsearch_results):
+                completed = new_tree.replace_children(selected_children)
+                assert (
+                    completed.spec == new_tree.spec
+                ), f"{str(completed.spec)} != {str(new_tree.spec)}"
+                yield completed
 
-            yield completed
-
-    best_result = _best_schedule(yield_options(), spec, callbacks)
+    best_results = _best_schedules(yield_options(), spec, top_k, callbacks)
 
     if callbacks:
-        callbacks.exit(
-            spec, (best_result[0], best_result[1][0]) if best_result else None
-        )
+        if best_results is not None:
+            callbacks.exit(spec, [(r[0], r[1][0]) for r in best_results])
+        else:
+            callbacks.exit(spec, None)
 
-    if best_result is not None:
-        schedule_to_return, (cost_ret, _, _) = best_result
-        assert (
-            schedule_to_return.spec == spec
-        ), f"{str(schedule_to_return.spec)} != {str(spec)}"
+    if best_results is not None:
+        assert all((im.spec == spec) for im, _ in best_results)
         cache.put(
-            spec, CachedSchedule(schedule_to_return, cost=cost_ret), memory_limits
+            spec,
+            CachedScheduleSet(tuple((im, c) for im, (c, _, _) in best_results)),
+            memory_limits,
         )
-        return best_result[0]
+        return [im for im, _ in best_results]
     else:
         cache.put(spec, None, memory_limits)
         return None
 
 
-def _subs_query_operands(spec, inputs, output, wrapped_cached_schedule):
-    cached_schedule = wrapped_cached_schedule.schedule
-    assert len(inputs) == len(cached_schedule.inputs)
-    operand_replacements = dict(zip(cached_schedule.inputs, inputs))
-    operand_replacements[cached_schedule.output] = output
-    cached_schedule = replace.replace(cached_schedule, operand_replacements)
-    assert cached_schedule.spec == spec, (
+def _subs_query_operands(spec: specs.Spec, inputs, output, imp: Impl):
+    assert len(inputs) + 1 == len(imp.operands)
+    operand_replacements = dict(zip(imp.operands, inputs + (output,)))
+    new_impl = replace.replace(imp, operand_replacements)
+    assert new_impl.spec == spec, (
         "spec doesn't match query after operand replacement; expected "
-        f"{spec} but was {cached_schedule.spec}"
+        f"{spec} but was {new_impl.spec}"
     )
-    return cached_schedule
+    return new_impl

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 parser = argparse.ArgumentParser()
 parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=str)
+parser.add_argument("--top", type=int, default=1)
 parser.add_argument("--no-save-cache", action="store_false", dest="save_cache")
 parser.add_argument("--row-major-only", action="store_true", dest="row_major_only")
 parser.add_argument(
@@ -51,7 +52,7 @@ parser_convnet = subparsers.add_parser(
 )
 
 
-def _matmul_main(m, k, n, cache: search_cache.ScheduleCache):
+def _matmul_main(m, k, n, top_k: int, cache: search_cache.ScheduleCache):
     target = system_config.current_target()
     left = target.tensor(target.tensor_spec((m, k), dtype=DTYPE), name="left")
     right = target.tensor(target.tensor_spec((k, n), dtype=DTYPE), name="right")
@@ -61,6 +62,7 @@ def _matmul_main(m, k, n, cache: search_cache.ScheduleCache):
         specs.Matmul(left.spec, right.spec, output.spec, serial_only=False),
         inputs=(left, right),
         output=output,
+        top_k=top_k,
         cache=cache,
     )
     return s, (time.time() - start)
@@ -72,6 +74,7 @@ def _conv_main(
     filter_width,
     filter_height,
     filter_count,
+    top_k: int,
     cache: search_cache.ScheduleCache,
 ) -> tuple[Optional[morello.impl.base.Impl], float]:
     target = system_config.current_target()
@@ -100,12 +103,13 @@ def _conv_main(
         specs.Convolution(left.spec, right.spec, output.spec, serial_only=False),
         inputs=(left, right),
         output=output,
+        top_k=top_k,
         cache=cache,
     )
     return s, (time.time() - start)
 
 
-def _convnet_main(cache: search_cache.ScheduleCache):
+def _convnet_main(top_k: int, cache: search_cache.ScheduleCache):
     target = system_config.current_target()
 
     d = 32
@@ -132,6 +136,7 @@ def _convnet_main(cache: search_cache.ScheduleCache):
         ),
         inputs=(filters_b, img, filters_a),
         output=output,
+        top_k=top_k,
         cache=cache,
     )
     return s, (time.time() - start)
@@ -173,31 +178,35 @@ def main() -> int:
             parsed_args.cache, save=parsed_args.save_cache
         ) as cache:
             if parsed_args.spec == "matmul":
-                sched, runtime = _matmul_main(
-                    parsed_args.m, parsed_args.k, parsed_args.n, cache
+                scheds, runtime = _matmul_main(
+                    parsed_args.m, parsed_args.k, parsed_args.n, parsed_args.top, cache
                 )
             elif parsed_args.spec == "conv":
-                sched, runtime = _conv_main(
+                scheds, runtime = _conv_main(
                     parsed_args.image_width,
                     parsed_args.image_height,
                     parsed_args.filter_width,
                     parsed_args.filter_height,
                     parsed_args.filter_count,
+                    parsed_args.top,
                     cache,
                 )
             elif parsed_args.spec == "convnet":
-                sched, runtime = _convnet_main(cache)
+                scheds, runtime = _convnet_main(parsed_args.top, cache)
             else:
                 raise Exception("Unknown spec argument: " + parsed_args.spec)
+            assert isinstance(scheds, list)
     finally:
         search.prune_column_major.reset(col_major_token)
         impl.tile_size_mode.reset(tile_size_mode_token)
 
-    if sched:
-        op_pprint.pprint(sched)
-        if parsed_args.generate_code:
-            print("")
-            gen.generate_c("kernel_only", sched, sys.stdout)
+    if scheds:
+        for sched in scheds:
+            op_pprint.pprint(sched)
+        for sched in scheds:
+            if parsed_args.generate_code:
+                print("")
+                gen.generate_c("kernel_only", sched, sys.stdout)
     else:
         print("No schedule found")
 

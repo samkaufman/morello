@@ -1,8 +1,9 @@
 import contextlib
+import dataclasses
 import pathlib
 import pickle
 import warnings
-from typing import Iterable, Iterator, NamedTuple, Optional, Tuple, Union
+from typing import Iterable, Iterator, Mapping, NamedTuple, Optional, Tuple, Union
 
 import atomicwrites
 from frozendict import frozendict
@@ -13,14 +14,39 @@ from .specs import Spec
 from .utils import zip_dict
 
 
-class CachedSchedule(NamedTuple):
+class CachedScheduleSet:
     """A container for schedules stored in the cache.
 
-    Stores, along with the schedule itself, the cost of the schedule.
+    Stores, along with schedules themslves, costs of the schedules.
     """
 
-    schedule: Impl
-    cost: int
+    contents: tuple[tuple[Impl, int], ...]
+
+    def __init__(self, contents: tuple[tuple[Impl, int]]):
+        self.contents = contents
+        self._peak_memory = frozendict(
+            (bank, max(all_bytes))
+            for bank, all_bytes in zip_dict(
+                *(imp.peak_memory for imp in self.impls), same_keys=True
+            ).items()
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, CachedScheduleSet):
+            return NotImplemented
+        return self.contents == other.contents
+
+    def __hash__(self) -> int:
+        return hash(self.contents)
+
+    @property
+    def peak_memory(self) -> frozendict[str, int]:
+        """Returns the peak memory usage of the cached schedules."""
+        return self._peak_memory
+
+    @property
+    def impls(self) -> Iterable[Impl]:
+        return (imp for imp, _ in self.contents)
 
 
 class _TableEntry(NamedTuple):
@@ -33,7 +59,7 @@ class _TableEntry(NamedTuple):
     """
 
     spec: Spec
-    schedule: Optional[CachedSchedule]
+    schedules: Optional[CachedScheduleSet]
     caps: frozendict[str, int]
 
     @property
@@ -42,11 +68,8 @@ class _TableEntry(NamedTuple):
 
         This is just a convenience accessor.
         """
-        assert self.schedule is not None
-        peaks = self.schedule.schedule.peak_memory
-        # If it's a frozendict, we don't need the conversion
-        assert not isinstance(peaks, frozendict)
-        return frozendict(peaks)
+        assert self.schedules is not None
+        return self.schedules.peak_memory
 
 
 class ScheduleCache:
@@ -57,8 +80,8 @@ class ScheduleCache:
 
     def get(
         self, spec: Spec, memory_limits: pruning.MemoryLimits
-    ) -> Optional[CachedSchedule]:
-        """Returns a cached schedule or `None` if no Impl satisfies the given limits.
+    ) -> Optional[CachedScheduleSet]:
+        """Returns cached Impls or `None` if no Impl satisfies the given limits.
 
         Raises KeyError if no Impl meeting the given limits exists and it is unknown
         whether or not such an Impl exists (i.e., search should be done).
@@ -73,7 +96,7 @@ class ScheduleCache:
 
         memory_caps = memory_limits.available
         for entry in self._rects[spec]:
-            if entry.schedule is None:  # No Impl exists for this entry
+            if entry.schedules is None:  # No Impl exists for this entry
                 if all(
                     q <= b
                     for q, b in zip_dict(
@@ -88,16 +111,16 @@ class ScheduleCache:
                         entry.peak_memory, memory_caps, entry.caps, same_keys=True
                     ).values()
                 ):
-                    return entry.schedule
+                    return entry.schedules
         raise KeyError(f"'{str(spec)}'")
 
     def put(
         self,
         spec: Spec,
-        schedule: Optional[CachedSchedule],
+        schedules: Optional[CachedScheduleSet],
         memory_limits: pruning.MemoryLimits,
     ) -> None:
-        assert schedule is None or spec == schedule.schedule.spec
+        assert not schedules or all(spec == imp.spec for imp in schedules.impls)
 
         if not isinstance(memory_limits, pruning.StandardMemoryLimits):
             # TODO: Add support for PipelineChildMemoryLimits
@@ -108,17 +131,16 @@ class ScheduleCache:
             return
 
         memory_caps = memory_limits.available
-        assert schedule is None or all(
+        assert schedules is None or all(
             m <= c
-            for m, c in zip_dict(
-                schedule.schedule.peak_memory, memory_caps, same_keys=True
-            ).values()
+            for im, _ in schedules.contents
+            for m, c in zip_dict(im.peak_memory, memory_caps, same_keys=True).values()
         )
         rects = self._rects.setdefault(spec, [])
 
         for idx in range(len(rects)):
-            if schedule is None:
-                if rects[idx].schedule is None:
+            if schedules is None:
+                if rects[idx].schedules is None:
                     rects[idx] = _TableEntry(
                         spec,
                         None,
@@ -133,20 +155,20 @@ class ScheduleCache:
                     )
                     return
             else:
-                if rects[idx].schedule is None:
+                if rects[idx].schedules is None:
                     continue
                 if all(
                     a <= b <= c
                     for a, b, c in zip_dict(
                         rects[idx].peak_memory,
-                        schedule.schedule.peak_memory,
+                        schedules.peak_memory,
                         rects[idx].caps,
                         same_keys=True,
                     ).values()
                 ):
                     rects[idx] = _TableEntry(
                         spec,
-                        schedule,
+                        schedules,
                         frozendict(
                             {
                                 k: max(a, b)
@@ -161,7 +183,7 @@ class ScheduleCache:
 
         # If we haven't returned at this point, then we didn't find a _TableEntry to
         # update, so add one.
-        rects.append(_TableEntry(spec, schedule, memory_caps))
+        rects.append(_TableEntry(spec, schedules, memory_caps))
 
     def update(self, other: "ScheduleCache") -> None:
         """Update with the contents of another cache.
@@ -176,11 +198,11 @@ class ScheduleCache:
 
     def __iter__(
         self,
-    ) -> Iterator[Tuple[Spec, Optional[CachedSchedule], pruning.MemoryLimits]]:
+    ) -> Iterator[Tuple[Spec, Optional[CachedScheduleSet], pruning.MemoryLimits]]:
         for spec, rects in self._rects.items():
             for rect in rects:
                 assert rect.spec == spec
-                yield spec, rect.schedule, pruning.StandardMemoryLimits(rect.caps)
+                yield spec, rect.schedules, pruning.StandardMemoryLimits(rect.caps)
 
 
 @contextlib.contextmanager
