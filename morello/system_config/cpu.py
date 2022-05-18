@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import io
 import os
@@ -87,7 +88,7 @@ class CpuTarget(Target):
             return "RF"
         raise ValueError("Unknown source: " + source)
 
-    def run_impl(
+    async def run_impl(
         self,
         impl,
         print_output=False,
@@ -119,25 +120,33 @@ class CpuTarget(Target):
                 binary_path,
                 source_path,
             ]
-            subprocess.run(clang_cmd, check=True)
+            clang_proc = await asyncio.create_subprocess_exec(
+                *clang_cmd,
+            )
+            await clang_proc.wait()
+            if clang_proc.returncode != 0:
+                raise Exception(f"Clang exited with code {clang_proc.returncode}")
 
             # Run the compiled binary
-            binary_result = subprocess.run(
-                [binary_path],
-                capture_output=True,
-                check=True,
+            binary_proc = await asyncio.create_subprocess_exec(
+                binary_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            stdout = binary_result.stdout.decode("utf8")
-            stderr = binary_result.stderr.decode("utf8")
+            stdout, stderr = await binary_proc.communicate()
+            if binary_proc.returncode != 0:
+                raise Exception(f"Binary exited with code {binary_proc.returncode}")
+            stdout = stdout.decode("utf8")
+            stderr = stderr.decode("utf8")
             return RunResult(stdout, stderr)
 
-    def time_impl(self, impl) -> float:
+    async def time_impl(self, impl) -> float:
         """Executes and benchmarks an Impl on the local machine using Clang.
 
         Returns the time in seconds. Measured by executing 10 times and
         returning the mean.
         """
-        r = self.run_impl(impl)
+        r = await self.run_impl(impl)
         return _parse_benchmark_output(r.stdout) / gen.BENCH_ITERS
 
 

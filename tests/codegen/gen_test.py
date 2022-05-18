@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import itertools
 import operator
@@ -57,11 +58,13 @@ def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
             np.arange(4 * 16, dtype=np.uint32).reshape((4, 16)),
         ]
 
-        run_result = target.run_impl(
-            imp,
-            print_output=True,
-            source_cb=lambda s: print("Source Code:\n" + s),
-            values=input_values,
+        run_result = asyncio.get_event_loop().run_until_complete(
+            target.run_impl(
+                imp,
+                print_output=True,
+                source_cb=lambda s: print("Source Code:\n" + s),
+                values=input_values,
+            )
         )
         print("stderr of program:\n" + run_result.stderr)
         print("")
@@ -348,11 +351,14 @@ def _test_impl(imp: morello.impl.base.Impl, inp_values, calc_fn):
             "-fsanitize=address",
         ]
 
-    run_result = target.run_impl(
-        imp,
-        print_output=True,
-        source_cb=lambda s: hypothesis.note("Source Code:\n" + s),
-        values=inp_values,
+    loop = asyncio.get_event_loop()
+    run_result = loop.run_until_complete(
+        target.run_impl(
+            imp,
+            print_output=True,
+            source_cb=lambda s: hypothesis.note("Source Code:\n" + s),
+            values=inp_values,
+        )
     )
     hypothesis.note("stderr of program:\n" + run_result.stderr)
     hypothesis.note("stdout of program:\n" + run_result.stdout)

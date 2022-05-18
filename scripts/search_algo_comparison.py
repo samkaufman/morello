@@ -2,6 +2,7 @@
 """A script that comparing DP search to beam and random searches."""
 
 import argparse
+import asyncio
 import copy
 import dataclasses
 import functools
@@ -139,15 +140,26 @@ def main():
                         all_results.append(result)
 
         # Update the cache with real execution times.
-        for idx in range(len(all_results)):
+        #
+        # Run up to MAX_CONCURRENT_BENCHMARK target programs concurrently.
+        # This should probably be kept well below the number of cores on the
+        # system to avoid interference.
+        loop = asyncio.get_event_loop()
+        semaphore = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_BENCHMARKS", "1")))
+
+        async def fill_result(idx):
             assert all_results[idx].execution_time is None
-            if all_results[idx].best_impl:
+            if not all_results[idx].best_impl:
+                return
+            async with semaphore:
+                t = await current_target().time_impl(all_results[idx].best_impl)
                 all_results[idx] = dataclasses.replace(
-                    all_results[idx],
-                    execution_time=current_target().time_impl(
-                        all_results[idx].best_impl
-                    ),
+                    all_results[idx], execution_time=t
                 )
+
+        loop.run_until_complete(
+            asyncio.gather(*(fill_result(i) for i in range(len(all_results))))
+        )
 
     finally:
         csv_out_path = out_dir_path / "results.csv"

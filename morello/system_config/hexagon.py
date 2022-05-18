@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import contextlib
 import dataclasses
 import functools
@@ -121,7 +122,7 @@ class HvxSimulatorTarget(Target):
             return "L2"
         raise ValueError("No general next bank for " + source)
 
-    def run_impl(
+    async def run_impl(
         self,
         impl,
         print_output=False,
@@ -149,15 +150,15 @@ class HvxSimulatorTarget(Target):
                 hexagon_sim_cmd += [
                     "--packet_analyze=" + str(profile_output / "stats.json"),
                 ]
-            result = subprocess.run(
-                hexagon_sim_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
+            sim_proc = await asyncio.create_subprocess_exec(
+                *hexagon_sim_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-
-            stdout = result.stdout.decode("utf8")
-            stderr = result.stderr.decode("utf8")
+            if sim_proc.returncode != 0:
+                raise Exception(f"Simulator exited with code {sim_proc.returncode}")
+            stdout, stderr = await sim_proc.communicate()
+            stdout, stderr = stdout.decode("utf8"), stderr.decode("utf8")
             stdout = _workaround_coredump_in_stdout(stdout)
 
             # objdump_cmd = [
@@ -172,21 +173,23 @@ class HvxSimulatorTarget(Target):
                 profiler_path = (
                     _hexagon_sdk_tools_root() / "Tools" / "bin" / "hexagon-profiler"
                 )
-                subprocess.run(
-                    [
-                        str(profiler_path),
-                        "--packet_analyze",
-                        "--json=" + str(profile_output / "stats.json"),
-                        "--elf=" + binary_path,
-                        "-o",
-                        str(profile_output / "output0.html"),
-                    ],
-                    check=True,
+                profiler_proc = await asyncio.create_subprocess_exec(
+                    str(profiler_path),
+                    "--packet_analyze",
+                    "--json=" + str(profile_output / "stats.json"),
+                    "--elf=" + binary_path,
+                    "-o",
+                    str(profile_output / "output0.html"),
                 )
+                await profiler_proc.wait()
+                if profiler_proc.returncode != 0:
+                    raise Exception(
+                        f"Profiler exited with code {profiler_proc.returncode}"
+                    )
 
             return RunResult(stdout, stderr)
 
-    def time_impl(
+    async def time_impl(
         self,
         impl,
         profile_output: Optional[pathlib.Path] = None,
@@ -202,7 +205,7 @@ class HvxSimulatorTarget(Target):
         with profile_output_ctx as po_path:
             assert po_path is not None
             po_path = pathlib.Path(po_path)
-            run_result = self.run_impl(impl, profile_output=po_path)
+            run_result = await self.run_impl(impl, profile_output=po_path)
             return float(_read_pcycles_from_stats_json(po_path / "stats.json"))
 
 
