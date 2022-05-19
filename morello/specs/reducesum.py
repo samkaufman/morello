@@ -12,7 +12,6 @@ from . import base
 from .tensorspec import TensorSpec
 
 
-@cython.dataclasses.dataclass(frozen=True)
 @cython.cclass
 class ReduceSum(base.Spec):
     """Sums along the the innermost dimension of a tensor.
@@ -23,9 +22,13 @@ class ReduceSum(base.Spec):
 
     source: TensorSpec
     output: TensorSpec
-    serial_only: bool
+    _serial_only: bool
 
-    def __post_init__(self):
+    def __init__(self, source: TensorSpec, output: TensorSpec, serial_only: bool):
+        self.source = source
+        self.output = output
+        self._serial_only = serial_only
+
         assert len(self.source.dim_sizes) >= 2
         assert len(self.output.dim_sizes) == len(self.source.dim_sizes) - 1, (
             "Expected output shape to have one fewer dimensions than source; "
@@ -38,6 +41,18 @@ class ReduceSum(base.Spec):
             f"(input shape: {self.source.dim_sizes})"
         )
 
+    def __eq__(self, other):
+        if type(other) != ReduceSum:
+            return NotImplemented
+        return (
+            self.source == other.source
+            and self.output == other.output
+            and self.serial_only == other.serial_only
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.source, self.output, self.serial_only))
+
     @staticmethod
     def from_io(
         inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
@@ -45,6 +60,10 @@ class ReduceSum(base.Spec):
         if len(inputs) != 1:
             raise ValueError("Expected 1 input; got {len(inputs)}")
         return ReduceSum(inputs[0], output, serial_only=serial_only)
+
+    @property
+    def serial_only(self) -> bool:
+        return self._serial_only
 
     @property
     def inputs(self) -> tuple[TensorSpec, ...]:

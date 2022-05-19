@@ -104,12 +104,9 @@ class MatmulHole(MatmulBase):
         prefetching: bool = False,
         **kwargs,
     ) -> "MoveLet":
-        if input_idx == 0:
-            return common_move(self, "lhs", bank, layout, prefetching, **kwargs)
-        elif input_idx == 1:
-            return common_move(self, "rhs", bank, layout, prefetching, **kwargs)
-        else:
+        if input_idx not in (0, 1):
             raise ValueError("input_idx must be 0 or 1")
+        return common_move(self, input_idx, bank, layout, prefetching, **kwargs)
 
     def move_output(
         self,
@@ -118,7 +115,7 @@ class MatmulHole(MatmulBase):
         prefetching: bool = False,
         **kwargs,
     ) -> "MoveLet":
-        return common_move(self, "output", bank, layout, prefetching, **kwargs)
+        return common_move(self, -1, bank, layout, prefetching, **kwargs)
 
     @assert_stable_spec
     def pad_transpack(self, input_idx: int) -> "Impl":

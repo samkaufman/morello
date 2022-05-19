@@ -310,8 +310,8 @@ def common_operand_move_actions(impl: "Impl") -> Iterable[MoveAction]:
 # TODO: Use this everywhere sliding_tile_out actions are produced
 @assert_stable_spec
 def common_move(
-    op,
-    attr_name: str,
+    op: Impl,
+    operand_idx: int,
     bank: Optional[str],
     layout: Optional[Layout],
     prefetching: bool,
@@ -326,7 +326,7 @@ def common_move(
     :param kwargs: Extra keyword arguments are forwarded the current target's
       `tensor_spec` method while constructing the destination tensor.
     """
-    operand: Union[Tensor, Tile] = getattr(op, attr_name)
+    operand: Union[Tensor, Tile] = op.operands[operand_idx]
     if bank is None:
         bank = operand.spec.bank
     if layout is None:
@@ -359,5 +359,5 @@ def common_move(
         destination=new_mat,
         input_idx=input_idx,
         prefetching=prefetching,
-        inner=dataclasses.replace(op, **{attr_name: new_mat}),
+        inner=op.replace_operand(operand_idx, new_mat),
     )

@@ -66,7 +66,7 @@ class Spec:
 
     @property
     def serial_only(self) -> bool:
-        raise NotImplementedError()
+        raise NotImplementedError(f"serial_only not implemented for {type(self)}")
 
     def shrink_for_tile_out(
         self, output_shape: tuple[int, ...], serial_only=None

@@ -1,8 +1,6 @@
 import functools
 from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 
-import dataclass_abc
-
 from .. import specs, system_config
 from ..layouts import Layout
 from ..tensor import Tensor, Tile
@@ -24,12 +22,33 @@ if TYPE_CHECKING:
     from .moves import MoveLet
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
 class ReduceSum(NonAllocatingLeaf):
-    source: Union[Tensor, Tile]
-    "The tensor to reduce."
-    output: Union[Tensor, Tile]
-    serial_only: bool
+    _source: Union[Tensor, Tile]
+    _output: Union[Tensor, Tile]
+    _serial_only: bool
+
+    def __init__(
+        self,
+        source: Union[Tensor, Tile],
+        output: Union[Tensor, Tile],
+        serial_only: bool,
+    ):
+        super().__init__()
+        self._source = source
+        self._output = output
+        self._serial_only = serial_only
+
+    def __eq__(self, other):
+        if type(other) == ReduceSum:
+            return NotImplemented
+        return (
+            self.source == other.source
+            and self.output == other.output
+            and self.serial_only == other.serial_only
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.source, self.output, self.serial_only))
 
     @functools.cached_property
     def spec(self) -> specs.ReduceSum:
@@ -38,6 +57,18 @@ class ReduceSum(NonAllocatingLeaf):
     @property
     def inputs(self):
         return (self.source,)
+
+    @property
+    def source(self) -> Union[Tensor, Tile]:
+        return self._source
+
+    @property
+    def output(self) -> Union[Tensor, Tile]:
+        return self._output
+
+    @property
+    def serial_only(self) -> bool:
+        return self._serial_only
 
     def env_str(
         self,
@@ -98,10 +129,9 @@ class ReduceSum(NonAllocatingLeaf):
         prefetching: bool = False,
         **kwargs,
     ) -> "MoveLet":
-        if input_idx == 0:
-            return common_move(self, "source", bank, layout, prefetching, **kwargs)
-        else:
+        if input_idx != 0:
             raise ValueError("input_idx must be 0 ")
+        return common_move(self, 0, bank, layout, prefetching, **kwargs)
 
     def move_output(
         self,
@@ -110,7 +140,7 @@ class ReduceSum(NonAllocatingLeaf):
         prefetching: bool = False,
         **kwargs,
     ) -> Impl:
-        return common_move(self, "output", bank, layout, prefetching, **kwargs)
+        return common_move(self, -1, bank, layout, prefetching, **kwargs)
 
     @assert_stable_spec
     def split(self, k: int) -> Union["ReduceSum", "Loop"]:

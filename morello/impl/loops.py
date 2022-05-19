@@ -290,12 +290,13 @@ class Loop(Impl):
     def replace_io(
         self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
     ) -> "Impl":
-        return type(self)(
-            driving_tile=self.driving_tile,
-            dependent_tiles=self.dependent_tiles,
-            inner=self.inner,
-            parallel=self.parallel,
-        )
+        # return type(self)(
+        #     driving_tile=self.driving_tile,
+        #     dependent_tiles=self.dependent_tiles,
+        #     inner=self.inner,
+        #     parallel=self.parallel,
+        # )
+        raise NotImplementedError()
 
     @assert_stable_spec
     def subschedule(self, fn: Callable[["Impl"], "Impl"]) -> "Impl":

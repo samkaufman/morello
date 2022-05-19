@@ -84,6 +84,12 @@ class Impl(abc.ABC):
     ) -> "Impl":
         raise NotImplementedError()
 
+    @typing.final
+    def replace_operand(self, operand_idx: int, new_operand: TensorLike) -> "Impl":
+        ops = list(self.operands)
+        ops[operand_idx] = new_operand
+        return self.replace_io(ops[:-1], ops[-1])
+
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], "Impl"]]:
