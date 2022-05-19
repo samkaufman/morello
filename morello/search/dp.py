@@ -1,7 +1,7 @@
 import functools
 import heapq
 import itertools
-from typing import Any, Generator, Iterable, Optional
+from typing import Any, Generator, Iterable, List, Optional, Tuple
 
 import cython
 
@@ -16,33 +16,6 @@ from .. import impl, layouts, pruning, replace, specs, system_config
 from ..impl import Impl
 from ..search_cache import CachedScheduleSet, ScheduleCache
 from . import common
-
-
-def _best_schedules(
-    options: Iterable[Impl],
-    spec: specs.Spec,
-    top_k: int,
-    callbacks,
-):
-    """Returns the top-k best schedules if `it` is non-empty; `None` if it is.
-
-    This uses schedule_key, so it will return the lowest cost schedule,
-    breaking ties as described in schedule_key's docstring.
-    """
-    it = ((s, common.schedule_key(s)) for s in options)
-
-    def _cb_wrap(it):
-        assert callbacks is not None
-        for item in it:
-            imp, imp_cost_tuple = item
-            callbacks.visit_impl(spec, imp, imp_cost_tuple[0])
-            yield item
-
-    if callbacks:
-        it = _cb_wrap(it)
-
-    best = heapq.nsmallest(top_k, it, key=lambda x: x[1])
-    return best if best else None
 
 
 # TODO: Don't just use a global variable. Use a thread local or contextvars.
@@ -183,82 +156,25 @@ def _inner_schedule_search(
     assert leaf.depth == 1, f"Expected hole to have depth 1; had {leaf.depth}"
 
     # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
-    def yield_options() -> Generator[Impl, None, None]:
-        """Yields best Impls after taking any of leaf's actions (or no action)."""
-        # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
-        if all(m >= 0 for m in memory_limits.available.values()) and leaf.is_scheduled:
-            yield leaf
-
-        # Yield all the complete expansions of the hole by expanding once into
-        # an Impl which may or may not have its own holes. If it does have its
-        # own holes, fill them by recursively calling into schedule_search.
-        for act in leaf.actions(parent_summary=parent_summary):
-            try:
-                new_tree = act()
-            except impl.ActionOutOfDomain:
-                continue
-            except Exception as e:
-                # Re-raise the exception with a little more detail about act.
-                raise common.ActionFailedException(act) from e
-            assert new_tree.spec == spec, f"{str(new_tree.spec)} != {str(spec)}"
-            assert new_tree != leaf, (
-                f"Action returned self: {new_tree}; spec = {str(new_tree.spec)}; "
-                f"action = {act}"
-            )
-
-            if callbacks:
-                callbacks.applied_action(act, new_tree)
-
-            new_parent_summary = impl.ParentSummary.update(
-                parent_summary, parent=new_tree
-            )
-
-            # Ignore the action if it uses more memory than is available for any hole.
-            new_child_memory_limits = memory_limits.transition(new_tree)
-            if new_child_memory_limits is None:
-                continue
-
-            # Recurse for all holes (nested Specs) in the new Impl. If any hole cannot
-            # be filled, short-circuit because this action is a dead end.
-            subsearch_results: list[list[Impl]] = []
-            for child, mem in zip(new_tree.children, new_child_memory_limits):
-                child_result = _inner_schedule_search(
-                    child.spec,
-                    inputs=child.inputs,
-                    output=child.output,
-                    cache=cache,
-                    top_k=top_k,
-                    prune_col_major=prune_col_major,
-                    memory_limits=mem,
-                    parent_summary=new_parent_summary,
-                    stats=stats,
-                    callbacks=callbacks,
-                )
-                # If any hole could not be filled--this can happen, for instance, if
-                # every possible action uses too much memory--then exit the outer loop.
-                if child_result is None:
-                    break
-                subsearch_results.append(child_result)
-            if len(subsearch_results) < len(new_tree.children):
-                continue
-
-            # Yield the product of all possible child Impls as options.
-            for selected_children in itertools.product(*subsearch_results):
-                completed = new_tree.replace_children(selected_children)
-                assert (
-                    completed.spec == new_tree.spec
-                ), f"{str(completed.spec)} != {str(new_tree.spec)}"
-                yield completed
-
-    best_results = _best_schedules(yield_options(), spec, top_k, callbacks)
+    best_results: list[tuple[Impl, tuple]] = _best_options(
+        spec,
+        leaf,
+        memory_limits,
+        cache,
+        top_k,
+        prune_col_major,
+        parent_summary=parent_summary,
+        stats=stats,
+        callbacks=callbacks,
+    )
 
     if callbacks:
-        if best_results is not None:
+        if best_results:
             callbacks.exit(spec, [(r[0], r[1][0]) for r in best_results])
         else:
             callbacks.exit(spec, None)
 
-    if best_results is not None:
+    if best_results:
         assert all((im.spec == spec) for im, _ in best_results)
         cache.put(
             spec,
@@ -269,6 +185,105 @@ def _inner_schedule_search(
     else:
         cache.put(spec, None, memory_limits)
         return None
+
+
+@cython.cfunc
+def _best_options(
+    spec: specs.Spec,
+    leaf: impl.Impl,
+    memory_limits: pruning.MemoryLimits,
+    cache: ScheduleCache,
+    top_k: int,
+    prune_col_major: bool,
+    parent_summary=None,
+    stats=None,
+    callbacks=None,
+) -> List[Tuple[Impl, tuple]]:
+    """Returns best Impls after taking any of leaf's actions (or no action)."""
+    best_results: list[tuple[Impl, Any]] = []
+
+    # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
+    if all(m >= 0 for m in memory_limits.available.values()) and leaf.is_scheduled:
+        _update_best_results(best_results, leaf, spec, callbacks)
+
+    # Yield all the complete expansions of the hole by expanding once into
+    # an Impl which may or may not have its own holes. If it does have its
+    # own holes, fill them by recursively calling into schedule_search.
+    for act in leaf.actions(parent_summary=parent_summary):
+        try:
+            new_tree = act()
+        except impl.ActionOutOfDomain:
+            continue
+        except Exception as e:
+            # Re-raise the exception with a little more detail about act.
+            raise common.ActionFailedException(act) from e
+        assert new_tree.spec == spec, f"{str(new_tree.spec)} != {str(spec)}"
+        assert new_tree != leaf, (
+            f"Action returned self: {new_tree}; spec = {str(new_tree.spec)}; "
+            f"action = {act}"
+        )
+
+        if callbacks:
+            callbacks.applied_action(act, new_tree)
+
+        new_parent_summary = impl.ParentSummary.update(parent_summary, parent=new_tree)
+
+        # Ignore the action if it uses more memory than is available for any hole.
+        new_child_memory_limits = memory_limits.transition(new_tree)
+        if new_child_memory_limits is None:
+            continue
+
+        # Recurse for all holes (nested Specs) in the new Impl. If any hole cannot
+        # be filled, short-circuit because this action is a dead end.
+        subsearch_results: list[list[Impl]] = []
+        for child, mem in zip(new_tree.children, new_child_memory_limits):
+            child_result = _inner_schedule_search(
+                child.spec,
+                inputs=child.inputs,
+                output=child.output,
+                cache=cache,
+                top_k=top_k,
+                prune_col_major=prune_col_major,
+                memory_limits=mem,
+                parent_summary=new_parent_summary,
+                stats=stats,
+                callbacks=callbacks,
+            )
+            # If any hole could not be filled--this can happen, for instance, if
+            # every possible action uses too much memory--then exit the outer loop.
+            if child_result is None:
+                break
+            subsearch_results.append(child_result)
+        if len(subsearch_results) < len(new_tree.children):
+            continue
+
+        # Yield the product of all possible child Impls as options.
+        for selected_children in itertools.product(*subsearch_results):
+            completed = new_tree.replace_children(selected_children)
+            assert (
+                completed.spec == new_tree.spec
+            ), f"{str(completed.spec)} != {str(new_tree.spec)}"
+            _update_best_results(best_results, completed, spec, callbacks)
+
+    return _finalize_best_results(best_results, top_k)
+
+
+@cython.cfunc
+def _update_best_results(
+    results: list[tuple[Impl, Any]], new_impl: impl.Impl, spec, callbacks
+):
+    # TODO: Actually necessary to pass spec *and* new_impl?
+    cost_tuple = common.schedule_key(new_impl)
+    if callbacks:
+        callbacks.visit_impl(spec, new_impl, cost_tuple[0])
+    results.append((new_impl, cost_tuple))
+
+
+@cython.cfunc
+def _finalize_best_results(
+    results: list[tuple[Impl, Any]], top_k: int
+) -> List[Tuple[Impl, Any]]:
+    return heapq.nsmallest(top_k, results, key=lambda x: x[1])
 
 
 def _subs_query_operands(spec: specs.Spec, inputs, output, imp: Impl):
