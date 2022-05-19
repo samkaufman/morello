@@ -1,7 +1,16 @@
 import functools
 import heapq
 import itertools
-from typing import Any, Generator, Iterable, Optional, Union
+from typing import Any, Generator, Iterable, Optional
+
+import cython
+
+from cython.cimports.cpython.ref import PyObject
+
+try:
+    from cython.cimports.morello import layouts, specs
+except ImportError:
+    pass
 
 from .. import impl, layouts, pruning, replace, specs, system_config
 from ..impl import Impl
@@ -106,6 +115,7 @@ def schedule_search(
         memory_limits,
         cache,
         top_k=(top_k if top_k is not None else 1),
+        prune_col_major=common.prune_column_major.get(),
         parent_summary=parent_summary,
         stats=stats,
         callbacks=callbacks,
@@ -117,6 +127,7 @@ def schedule_search(
     return None
 
 
+@cython.cfunc
 def _inner_schedule_search(
     spec: specs.Spec,
     inputs: tuple,
@@ -124,6 +135,7 @@ def _inner_schedule_search(
     memory_limits: pruning.MemoryLimits,
     cache: ScheduleCache,
     top_k: int,
+    prune_col_major: bool,
     parent_summary=None,
     stats=None,
     callbacks=None,
@@ -134,7 +146,7 @@ def _inner_schedule_search(
     sorted in order of increasing cost, up to `top_k` results.
     """
 
-    if common.prune_column_major.get():
+    if prune_col_major:
         if any(isinstance(inp.layout, layouts.ColMajor) for inp in spec.inputs):
             return None
         if isinstance(spec.output.layout, layouts.ColMajor):
@@ -216,6 +228,7 @@ def _inner_schedule_search(
                     output=child.output,
                     cache=cache,
                     top_k=top_k,
+                    prune_col_major=prune_col_major,
                     memory_limits=mem,
                     parent_summary=new_parent_summary,
                     stats=stats,
