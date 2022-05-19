@@ -1,0 +1,13 @@
+__pycache__
+.hypothesis
+joblib_cache
+results_*/**
+a.out
+
+.vim
+.vscode
+
+# Don't check in Cython output 
+build/
+morello/**/*.c
+morello/**/*.so

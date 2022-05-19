@@ -72,7 +72,8 @@ RUN cd tvm/python && python3 setup.py bdist_wheel
 FROM ubuntu:focal as halide
 
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y \
     clang-tools-12 lld llvm-12-dev libclang-12-dev liblld-12-dev \
     libpng-dev libjpeg-dev libgl-dev \
     python3.9-dev python3-numpy python3-scipy python3-imageio python3-pybind11 \
@@ -99,7 +100,9 @@ COPY --from=tvm /tvm/python/dist/*.whl /
 ENV HEXAGON_SDK_ROOT=/Hexagon_SDK/3.5.4 HEXAGON_TOOLS_ROOT=/Hexagon_SDK/3.5.4/tools/HEXAGON_Tools/8.3.07
 
 RUN apt-get update && \
-    apt-get install -y curl clang-12 python3.9 python3.9-distutils lib32z1 libncurses5 lib32ncurses-dev  && \
+    DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y git curl clang-12 python3.9 python3.9-dev \
+    python3.9-distutils lib32z1 libncurses5 lib32ncurses-dev && \
     curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
     python3.9 get-pip.py && \
     rm get-pip.py && \
@@ -119,17 +122,19 @@ ENV LD_LIBRARY_PATH "/halide/lib:${LD_LIBRARY_PATH}"
 RUN python3 -m pip install /tvm-0.9.*-cp39-cp39-linux_x86_64.whl && \
     rm /tvm-0.9.*-cp39-cp39-linux_x86_64.whl
 
+ENV PATH=/hexagon_sdk/Hexagon_SDK/3.5.4/tools/HEXAGON_Tools/8.3.07/Tools/lib:$PATH
+ENV CLANG=/usr/bin/clang-12
+
 WORKDIR /app
 COPY requirements.txt requirements.txt
 RUN pip3 install -r requirements.txt
 
-RUN pip install -U pytest-xdist debugpy
+ENV PYTHONPATH ".:${PYTHONPATH}"
+
 COPY pyproject.toml ./
 COPY tests ./tests
-
+COPY setup.py .
 COPY morello ./morello
-COPY scripts ./scripts
+RUN python3 setup.py build_ext --inplace
 
-ENV PATH=/hexagon_sdk/Hexagon_SDK/3.5.4/tools/HEXAGON_Tools/8.3.07/Tools/lib:$PATH
-ENV PYTHONPATH ".:${PYTHONPATH}"
-ENV CLANG=/usr/bin/clang-12
+COPY scripts ./scripts

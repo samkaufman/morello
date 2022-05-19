@@ -4,6 +4,8 @@ pandas
 tqdm
 dataclass-abc
 pytest
+pytest-xdist
+debugpy
 hypothesis
 atomicwrites==1.4.0
 termcolor==1.1.0
@@ -14,6 +16,7 @@ torch==1.10.1
 jax[cpu]
 gspread
 tvm
+git+https://github.com/cython/cython.git@dc5f0de75638c7b39650c7542ad0779e5eddb38b
 
 # Optionally, use a recent nightly PyTorch build to get access to the private
 # torch._C._select_conv_backend function. (Runtimes matched 1.10.1.)
