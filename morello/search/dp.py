@@ -16,38 +16,7 @@ from ..impl import Impl
 from ..search_cache import CachedScheduleSet, ScheduleCache
 from . import common
 
-# TODO: Don't just use a global variable. Use a thread local or contextvars.
-_specs_on_stack = []
 
-
-def _assert_no_cycles_in_stack(func):
-    """Decorates schedule_search to ensure no spec ever occurs twice on the stack."""
-    global _specs_on_stack
-
-    if not __debug__:
-        return func
-
-    # noinspection PyUnreachableCode
-    @functools.wraps(func)
-    def assert_no_cycles_in_stack_inner(*args, **kwargs):
-        spec = args[0]
-        assert isinstance(spec, specs.Spec)
-        if spec in _specs_on_stack:
-            raise Exception(
-                f"Spec {spec} was in the stack:"
-                + "".join(f"\n - {s}" for s in _specs_on_stack)
-            )
-        _specs_on_stack.append(spec)
-        try:
-            return func(*args, **kwargs)
-        finally:
-            popped = _specs_on_stack.pop()
-            assert popped == spec, "spec on _specs_on_stack doesn't match real stack"
-
-    return assert_no_cycles_in_stack_inner
-
-
-@_assert_no_cycles_in_stack
 def schedule_search(
     spec: specs.Spec,
     inputs: Optional[tuple] = None,
