@@ -1,9 +1,17 @@
 import contextvars
 import dataclasses
 import functools
-import sys
-from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Callable, Tuple
+
+import cython
+
+if cython.compiled:
+    from cython.cimports.libc import limits
+    from cython.cimports.morello import cost
+else:
+    import sys
+
 
 if TYPE_CHECKING:
     from morello.impl.base import Impl
@@ -42,7 +50,8 @@ class SearchStats:
     expansions: int = 0
 
 
-def schedule_key(schedule: "Impl") -> tuple[int, Sequence[int], Any]:
+@cython.ccall
+def schedule_key(schedule: "Impl") -> Tuple[int, Sequence[int], Any]:
     """Returns a key for ordering schedules during search.
 
     The returned key is a tuple of the schedule cost, peak memory usage, and
@@ -51,11 +60,11 @@ def schedule_key(schedule: "Impl") -> tuple[int, Sequence[int], Any]:
     with peak memory and then syntactic depth as tie-breakers.
     """
     system = system_config.current_system()
-    base_cost = sys.maxsize
+    base_cost = limits.INT_MAX if cython.compiled else sys.maxsize
     if schedule.is_scheduled:
         base_cost = cost.compute_cost(schedule)
-    peaks = [schedule.peak_memory[b] for b in system.ordered_banks]
-    return base_cost, tuple(peaks), schedule.depth
+    peaks = tuple([schedule.peak_memory[b] for b in system.ordered_banks])
+    return base_cost, peaks, schedule.depth
 
 
 # TODO: Consider making this a default implementation of `actions` itself.

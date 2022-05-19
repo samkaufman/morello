@@ -3,6 +3,8 @@ import math
 from operator import mul
 from typing import Union
 
+import cython
+
 from . import layouts, utils
 from .impl import ComposeHole, DirectConv, Impl, Loop, MatmulHole, MoveLet, ReduceSum
 from .impl.compose import Pipeline
@@ -14,6 +16,7 @@ from .tensor import Tensor, Tile
 COST_ATTR = "_cost"
 
 
+@cython.returns(cython.long)
 def move_cost(
     src: Union[Tensor, Tile], dest_layout: layouts.Layout, prefetching: bool
 ) -> int:
@@ -173,7 +176,8 @@ def detailed_analytical_cost(
 
 
 # TODO: Reduce code duplication with detailed_analytical_cost
-def compute_cost(op: Impl) -> int:
+@cython.exceptval(-1)
+def compute_cost(op: Impl) -> cython.long:
     # Return if already computed
     try:
         return getattr(op, COST_ATTR)
@@ -181,13 +185,16 @@ def compute_cost(op: Impl) -> int:
         pass
 
     if isinstance(op, Pipeline):
-        return _assign_cost(op, sum(compute_cost(s) for s in op.stages))
+        sum_cost: cython.long = 0
+        for s in op.stages:
+            sum_cost += compute_cost(s)
+        return _assign_cost(op, sum_cost)
     elif isinstance(op, Loop):
         if not op.parallel:
-            factor = op.steps
+            factor: cython.long = op.steps
         else:
-            main_steps = op.full_steps
-            factor = math.ceil(main_steps / current_system().processors)
+            main_steps: cython.long = op.full_steps
+            factor: cython.long = math.ceil(main_steps / current_system().processors)
             factor += op.steps - main_steps
         return _assign_cost(op, factor * compute_cost(op.inner))
     elif isinstance(op, SlidingWindowLoop):
@@ -198,7 +205,7 @@ def compute_cost(op: Impl) -> int:
     elif isinstance(op, (Mult, HvxVrmpyaccVuwVubRub)):
         return _assign_cost(op, 0)
     elif isinstance(op, MoveLet):
-        mcost = move_cost(op.source, op.destination.layout, op.prefetching)
+        mcost: cython.long = move_cost(op.source, op.destination.layout, op.prefetching)
         return _assign_cost(op, mcost + compute_cost(op.inner))
     elif isinstance(op, (ComposeHole, MatmulHole)):
         return _assign_cost(op, 0)
@@ -206,6 +213,7 @@ def compute_cost(op: Impl) -> int:
         raise TypeError(f"Unsupported op. {type(op)}")
 
 
-def _assign_cost(impl: Impl, val: int) -> int:
+@cython.cfunc
+def _assign_cost(impl: Impl, val: cython.long) -> cython.long:
     object.__setattr__(impl, COST_ATTR, val)
     return val
