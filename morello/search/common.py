@@ -60,7 +60,7 @@ def schedule_key(schedule: "Impl") -> Tuple[int, Sequence[int], Any]:
     with peak memory and then syntactic depth as tie-breakers.
     """
     system = system_config.current_system()
-    base_cost = limits.INT_MAX if cython.compiled else sys.maxsize
+    base_cost = limits.LONG_MAX if cython.compiled else sys.maxsize
     if schedule.is_scheduled:
         base_cost = cost.compute_cost(schedule)
     peaks = tuple([schedule.peak_memory[b] for b in system.ordered_banks])
