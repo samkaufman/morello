@@ -1,14 +1,13 @@
 import functools
 import heapq
 import itertools
-from typing import Any, Generator, Iterable, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import cython
 
-from cython.cimports.cpython.ref import PyObject
-
 try:
     from cython.cimports.morello import layouts, specs
+    from ..cython.cimports import common
 except ImportError:
     pass
 
@@ -16,7 +15,6 @@ from .. import impl, layouts, pruning, replace, specs, system_config
 from ..impl import Impl
 from ..search_cache import CachedScheduleSet, ScheduleCache
 from . import common
-
 
 # TODO: Don't just use a global variable. Use a thread local or contextvars.
 _specs_on_stack = []
