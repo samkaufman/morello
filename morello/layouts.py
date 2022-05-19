@@ -1,4 +1,3 @@
-import abc
 from typing import Sequence, Union
 
 import sympy
@@ -6,12 +5,11 @@ import sympy
 from .codegen.expr_utils import FloorDiv
 
 
-class Layout(abc.ABC):
+class Layout:
     """The layout of a tensor."""
 
-    @abc.abstractmethod
     def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        pass
+        raise NotImplementedError()
 
     def __hash__(self):
         return hash(type(self))

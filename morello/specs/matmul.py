@@ -2,13 +2,18 @@ from typing import Iterable, Sequence
 
 import cython
 
-from .base import Spec
+try:
+    from ..cython.cimports import base
+except ImportError:
+    pass
+
+from . import base
 from .tensorspec import TensorSpec
 
 
 @cython.dataclasses.dataclass(unsafe_hash=True)
 @cython.cclass
-class Matmul(Spec):
+class Matmul(base.Spec):
     """A matrix multiplication.
 
     Both lhs and rhs operands must be rank-2 TensorSpecs (matrices).

@@ -1,27 +1,33 @@
+from ast import Import
+import dataclasses
 import functools
 from typing import Callable, Iterable, Optional, Sequence
 
 import cython
 
+try:
+    from ..cython.cimports import base
+except ImportError:
+    pass
+
+from . import base
 from ..dtypes import Dtype
-from .base import Spec
 from .tensorspec import TensorSpec
 
 
 @cython.dataclasses.dataclass
 @cython.cclass
 class _ComposeSubspec:
-    kls: Callable[..., Spec]
+    kls: Callable[..., base.Spec]
     inputs: tuple[tuple[int, ...]]
     output: tuple[int, ...]
 
 
-@cython.dataclasses.dataclass
 @cython.cclass
-class Compose(Spec):
+class Compose(base.Spec):
     """Multiple specs where the first operand of each spec is the result of the next."""
 
-    subspec_classes: tuple[Callable[..., Spec], ...]
+    subspec_classes: tuple[Callable[..., base.Spec], ...]
     _inputs: tuple[TensorSpec, ...]
     _output: TensorSpec
     intermediate_dtypes: tuple[Dtype, ...]
@@ -77,8 +83,8 @@ class Compose(Spec):
         self,
         inputs: tuple[TensorSpec, ...],
         output: TensorSpec,
-        serial_only: Optional[bool] = None,
-    ) -> "Spec":
+        serial_only = None,
+    ) -> base.Spec:
         if serial_only is None:
             serial_only = self.serial_only
         return Compose(
@@ -97,7 +103,7 @@ class Compose(Spec):
     @classmethod
     def calculate_output(
         cls,
-        subspec_classes: tuple[Callable[..., Spec], ...],
+        subspec_classes: tuple[Callable[..., base.Spec], ...],
         inputs_shapes: Iterable[tuple[int, ...]],
     ) -> tuple[int, ...]:
         return cls.calculate_subspec_outputs(subspec_classes, inputs_shapes)[0]
@@ -105,7 +111,7 @@ class Compose(Spec):
     @classmethod
     def calculate_subspec_outputs(
         cls,
-        subspec_classes: tuple[Callable[..., Spec], ...],
+        subspec_classes: tuple[Callable[..., base.Spec], ...],
         inputs_shapes: Iterable[tuple[int, ...]],
     ) -> tuple[tuple[int, ...], ...]:
         # This implementation has a lot in common with _list_subspecs. It exists
@@ -126,13 +132,13 @@ class Compose(Spec):
 
     @staticmethod
     def calculate_inputs_count(
-        subspec_classes: tuple[Callable[..., Spec], ...],
+        subspec_classes: tuple[Callable[..., base.Spec], ...],
     ) -> int:
         return 1 + sum(c.inputs_count() for c in subspec_classes) - len(subspec_classes)
 
     def shrink_for_tile_out(
-        self, output_shape: tuple[int, ...], serial_only: Optional[bool] = None
-    ) -> "Spec":
+        self, output_shape: tuple[int, ...], serial_only = None
+    ) -> base.Spec:
         # Forward pass to compute the initial input and output shapes for every subspec.
         # The initial input shapes  are used to resolve ambiguities in determining input
         # shapes from the new output.
@@ -261,7 +267,7 @@ class Compose(Spec):
         # <subspec idx, subscript> -> new subscript
         max_seen = 0
         accum: list[tuple[int, ...]] = []
-        last_out_subs: Optional[tuple[int, ...]] = None
+        last_out_subs = None
         for kls in reversed(self.subspec_classes):  # start from innermost/first
             # Increment subscripts immediately so that we can replace without
             # worrying about conflicts

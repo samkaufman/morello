@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 import morello.impl.base
 
-from .. import op_pprint, pruning
+from .. import pruning
 from . import common
 
 logger = logging.getLogger(__name__)
@@ -18,9 +18,9 @@ class MaxRestartsExceeded(Exception):
 
 def randomly_schedule_impl(
     root_impl: morello.impl.base.Impl,
-    budget: Optional[int],
-    memory_limits: Optional[Sequence[pruning.MemoryLimits]] = None,
-    max_restarts: Optional[int] = None,
+    budget,
+    memory_limits=None,
+    max_restarts=None,
     skip_sliding=False,
 ) -> tuple[Optional[morello.impl.base.Impl], int]:
     """Randomly schedule an Impl.

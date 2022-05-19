@@ -32,9 +32,7 @@ class SearchCallbacks:
     def visit_impl(self, spec: specs.Spec, imp: "Impl", impl_cost: int) -> None:
         pass
 
-    def exit(
-        self, spec: specs.Spec, best: Optional[Sequence[tuple["Impl", int]]]
-    ) -> None:
+    def exit(self, spec: specs.Spec, best) -> None:
         """Called when finished scheduling an uncached spec."""
         pass
 

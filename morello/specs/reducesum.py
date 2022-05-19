@@ -2,12 +2,19 @@ from typing import Iterable, Optional, Sequence, cast
 
 import cython
 
-from .base import Spec
+try:
+    from ..cython.cimports import base
+except ImportError:
+    pass
+
+from . import base
+
 from .tensorspec import TensorSpec
 
 
 @cython.dataclasses.dataclass(frozen=True)
-class ReduceSum(Spec):
+@cython.cclass
+class ReduceSum(base.Spec):
     """Sums along the the innermost dimension of a tensor.
 
     Not defined for rank-1 tensors. The actual reduction function (sum, max, etc.) is
@@ -48,7 +55,7 @@ class ReduceSum(Spec):
         return source_shape[:-1]
 
     def shrink_for_tile_out(
-        self, output_shape: tuple[int, ...], serial_only: Optional[bool] = None
+        self, output_shape: tuple[int, ...], serial_only=None
     ) -> "ReduceSum":
         if len(output_shape) != len(self.output.dim_sizes):
             raise ValueError(

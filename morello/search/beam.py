@@ -1,10 +1,11 @@
-import dataclasses
 import io
 import logging
 import os
 import sys
 from collections.abc import Sequence
-from typing import Callable, Iterable, NamedTuple, Optional, Union
+from typing import Iterable, NamedTuple, Optional, Union
+
+import cython
 
 import numpy as np
 
@@ -37,7 +38,7 @@ def _dp_schedule_leaves(
     schedule: Impl,
     limits_queue: list[pruning.MemoryLimits],
     cache: search_cache.ScheduleCache,
-) -> Optional[Impl]:
+) -> object:
     if not len(schedule.children):
         sublimits = limits_queue.pop(0)
         if not _iter_empty(schedule.actions()):
@@ -107,7 +108,8 @@ def random_sampling_heuristic(
     )
 
 
-@dataclasses.dataclass(frozen=True)
+@cython.dataclasses.dataclass(frozen=True)
+@cython.cclass
 class _State:
     schedule: Impl
     child_limits: tuple[pruning.MemoryLimits, ...]
@@ -126,14 +128,9 @@ def beam_schedule_search(
     inputs: tuple,
     output,
     k: int = 10000,
-    budget: Optional[int] = None,
-    stats: Optional[common.SearchStats] = None,
-    cost_fn: Optional[
-        Callable[
-            [Impl, Sequence[Optional[pruning.MemoryLimits]]],
-            tuple[Union[int, float], str],
-        ]
-    ] = None,
+    budget=None,
+    stats=None,
+    cost_fn=None,
 ) -> tuple[Optional[BeamScheduleSearchResult], str]:
     if cost_fn is None:
         cost_fn = _cost

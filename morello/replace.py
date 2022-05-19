@@ -8,7 +8,7 @@ re-used during subsequent visits.
 
 import functools
 import threading
-from typing import Optional, TypeVar, Union, cast
+from typing import TypeVar, Union
 
 from . import impl, specs
 from .tensor import ConvolutionImageTile, SimpleTile, Tensor, TensorLike, Tile
@@ -41,28 +41,28 @@ def _assert_no_cycles(func):
 
 @_assert_no_cycles
 def _mutating_replace(
-    subject: Optional[T], replacements: dict[TensorLike, TensorLike]
-) -> Optional[T]:
+    subject: object, replacements: dict[TensorLike, TensorLike]
+) -> object:
     if subject is None:
         return None
 
     if isinstance(subject, TensorLike):
         try:
-            return cast(T, replacements[subject])
+            return replacements[subject]
         except KeyError:
             pass
 
     if type(subject) is Tensor:
         new_origin = _mutating_replace(subject.origin, replacements)
         if new_origin is subject.origin:
-            return cast(T, subject)
+            return subject
         new_tensor = Tensor(
             spec=subject.spec,
             name=subject.name,
             origin=new_origin,
         )
         replacements[subject] = new_tensor
-        return cast(T, new_tensor)
+        return new_tensor
     elif type(subject) in (SimpleTile, ConvolutionImageTile):
         # After replacement, it's possible for what was once the subject Tile's
         # root, which should be a Tensor, to become a Tile. In this case, the
@@ -73,7 +73,7 @@ def _mutating_replace(
         new_origin = _mutating_replace(subject.origin, replacements)
 
         if new_origin is subject.origin:
-            return cast(T, subject)
+            return subject
 
         if isinstance(subject, SimpleTile):
             new_tile = SimpleTile(

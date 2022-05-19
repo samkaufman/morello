@@ -2,13 +2,18 @@ from typing import Iterable, Sequence
 
 import cython
 
-from .base import Spec
+try:
+    from ..cython.cimports import base
+except ImportError:
+    pass
+
+from . import base
 from .tensorspec import TensorSpec
 
 
 @cython.dataclasses.dataclass(unsafe_hash=True)
 @cython.cclass
-class Convolution(Spec):
+class Convolution(base.Spec):
     """A batched, any-dimensional convolution.
 
     The lhs operand is an image of shape (batch, channels, spatial dims...).

@@ -13,8 +13,8 @@ def _best_schedules(
     options: Iterable[Impl],
     spec: specs.Spec,
     top_k: int,
-    callbacks: Optional[common.SearchCallbacks],
-) -> Optional[list[tuple[Impl, tuple[int, Any, Any]]]]:
+    callbacks,
+):
     """Returns the top-k best schedules if `it` is non-empty; `None` if it is.
 
     This uses schedule_key, so it will return the lowest cost schedule,
@@ -71,14 +71,14 @@ def _assert_no_cycles_in_stack(func):
 def schedule_search(
     spec: specs.Spec,
     inputs: Optional[tuple] = None,
-    output: Optional[Any] = None,
-    memory_limits: Optional[pruning.MemoryLimits] = None,
-    cache: Optional[ScheduleCache] = None,
-    top_k: Optional[int] = None,
-    parent_summary: Optional[impl.ParentSummary] = None,
-    stats: Optional[common.SearchStats] = None,
-    callbacks: Optional[common.SearchCallbacks] = None,
-) -> Optional[Union[Impl, list[Impl]]]:
+    output=None,
+    memory_limits=None,
+    cache=None,
+    top_k=None,
+    parent_summary=None,
+    stats=None,
+    callbacks=None,
+):
     """Returns the best Impl for a given Spec and memory limits.
 
     May return `None` if no Impl satisfies the given Spec and memory limits.
@@ -124,10 +124,10 @@ def _inner_schedule_search(
     memory_limits: pruning.MemoryLimits,
     cache: ScheduleCache,
     top_k: int,
-    parent_summary: Optional[impl.ParentSummary] = None,
-    stats: Optional[common.SearchStats] = None,
-    callbacks: Optional[common.SearchCallbacks] = None,
-) -> Optional[list[Impl]]:
+    parent_summary=None,
+    stats=None,
+    callbacks=None,
+):
     """Implements most of the logic of schedule_search.
 
     Returns a list of Impls which satisfy the given Spec and memory limits,

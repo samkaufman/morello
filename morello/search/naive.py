@@ -13,9 +13,7 @@ from . import common
 logger = logging.getLogger(__name__)
 
 
-def _best_schedule(
-    it: Iterable[Impl],
-) -> Optional[tuple[Impl, tuple[int, Sequence[int], Any]]]:
+def _best_schedule(it: Iterable[Impl]):
     """Returns the best schedule if `it` is non-empty; `None` if it is.
 
     This uses schedule_key, so it will return the lowest cost schedule,
@@ -63,10 +61,10 @@ def naive_search(
     spec: specs.Spec,
     inputs: tuple,
     output,
-    memory_limits: Optional[pruning.MemoryLimits] = None,
-    parent_summary: Optional[impl.ParentSummary] = None,
-    parallel_jobs: Optional[int] = 1,
-) -> Optional[Impl]:
+    memory_limits=None,
+    parent_summary=None,
+    parallel_jobs=1,
+):
     """Returns the best Impl for a given Spec and memory limits.
 
     Search explicitly enumerates every possible Impl of the given Spec,
@@ -111,10 +109,7 @@ def naive_search(
 
 @_assert_no_cycles_in_stack
 def enumerate_impls(
-    leaf: impl.Impl,
-    memory_limits: Optional[pruning.MemoryLimits],
-    parent_summary: Optional[impl.ParentSummary],
-    parallel_jobs: Optional[int] = 1,
+    leaf: impl.Impl, memory_limits, parent_summary, parallel_jobs=1
 ) -> Iterable[Impl]:
     """Yields all completions of a given Impl.
 
