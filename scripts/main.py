@@ -51,6 +51,9 @@ parser_convnet = subparsers.add_parser(
     "convnet", help="Impl a Conv-Reduce-Conv pipeline"
 )
 
+parser_gemm3 = subparsers.add_parser("gemm3", help="Impl a GEMM3")
+parser_gemm3.add_argument("matrix_size", type=int)
+
 
 def _matmul_main(m, k, n, top_k: int, cache: search_cache.ScheduleCache):
     target = system_config.current_target()
@@ -142,6 +145,24 @@ def _convnet_main(top_k: int, cache: search_cache.ScheduleCache):
     return s, (time.time() - start)
 
 
+def _gemm3_main(matrix_size: int, top_k: int, cache: search_cache.ScheduleCache):
+    target = system_config.current_target()
+    spec = specs.Compose(
+        (specs.Matmul, specs.Matmul),
+        (
+            target.tensor_spec((matrix_size, matrix_size), dtype=DTYPE),
+            target.tensor_spec((matrix_size, matrix_size), dtype=DTYPE),
+            target.tensor_spec((matrix_size, matrix_size), dtype=DTYPE),
+        ),
+        target.tensor_spec((matrix_size, matrix_size), dtype=DTYPE),
+        intermediate_dtypes=(DTYPE,),
+        serial_only=True,
+    )
+    start = time.time()
+    search_result = schedule_search(spec, top_k=top_k, cache=cache)
+    return search_result, (time.time() - start)
+
+
 def main() -> int:
     logging.basicConfig()
     logger.setLevel(logging.DEBUG)
@@ -193,6 +214,10 @@ def main() -> int:
                 )
             elif parsed_args.spec == "convnet":
                 scheds, runtime = _convnet_main(parsed_args.top, cache)
+            elif parsed_args.spec == "gemm3":
+                scheds, runtime = _gemm3_main(
+                    parsed_args.matrix_size, parsed_args.top, cache
+                )
             else:
                 raise Exception("Unknown spec argument: " + parsed_args.spec)
             assert isinstance(scheds, list)
