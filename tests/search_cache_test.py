@@ -7,9 +7,7 @@ from morello.system_config import current_system, current_target
 # TODO: Add assertion that tests below only put scheduled Impls into the cache.
 
 
-@pytest.mark.parametrize(
-    "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
-)
+@pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 def test_cache_common_scenario(dtype):
     target = current_target()
 
@@ -102,9 +100,7 @@ def test_cache_common_scenario(dtype):
     }
 
 
-@pytest.mark.parametrize(
-    "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
-)
+@pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype):
     t = specs.TensorSpec((8, 8), dtype=dtype, bank="RF")
     spec = specs.Matmul(t, t, t, serial_only=False)
@@ -125,9 +121,7 @@ def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype):
     }
 
 
-@pytest.mark.parametrize(
-    "dtype", [(dtypes.Uint8,), (dtypes.Uint32,)], ids=["u8", "u32"]
-)
+@pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
     target = current_target()
     db = current_system().default_bank
