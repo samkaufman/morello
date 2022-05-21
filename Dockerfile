@@ -123,6 +123,7 @@ RUN python3 -m pip install /tvm-0.9.*-cp39-cp39-linux_x86_64.whl && \
     rm /tvm-0.9.*-cp39-cp39-linux_x86_64.whl
 
 ENV PATH=/hexagon_sdk/Hexagon_SDK/3.5.4/tools/HEXAGON_Tools/8.3.07/Tools/lib:$PATH
+ENV CC=/usr/bin/clang-12
 ENV CLANG=/usr/bin/clang-12
 
 WORKDIR /app
