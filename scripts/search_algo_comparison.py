@@ -36,11 +36,11 @@ arg_parser.add_argument("--dp_only", action="store_true")
 arg_parser.add_argument(
     "--heuristic", required=True, choices=["random", "noisy_optimal"]
 )
+arg_parser.add_argument("--beam_trials", type=int, default=100)
 arg_parser.add_argument("output", metavar="OUTPUT", type=pathlib.Path)
 
 SKIP_DP_IF_BUDGET_KNOWN = False
 DTYPE = dtypes.Uint32
-BEAM_TRIALS = 100
 BEAM_WIDTHS = [1, 10, 100]
 
 target = target_by_name("cpu")
@@ -126,6 +126,7 @@ def main():
                         for result in beam_task(
                             spec_name,
                             spec,
+                            trials=args.beam_trials,
                             heuristic_name=args.heuristic,
                             cache=cache,
                             budget=budget,
@@ -298,6 +299,7 @@ def dp_task(
 def beam_task(
     spec_name: str,
     spec: specs.Spec,
+    trials: int,
     budget: int,
     heuristic_name: str,
     cache: search_cache.ScheduleCache,
@@ -317,7 +319,7 @@ def beam_task(
         logs_dir=logs_dir,
         heuristic_name=heuristic_name,
     )
-    job_seq = itertools.product(range(BEAM_TRIALS), BEAM_WIDTHS)
+    job_seq = itertools.product(range(trials), BEAM_WIDTHS)
 
     if parallel == 1:
         beam_results = [job_fn(*a) for a in job_seq]
