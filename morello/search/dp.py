@@ -250,7 +250,9 @@ def _update_best_results(
 def _finalize_best_results(
     results: list[tuple[Impl, Any]], top_k: int
 ) -> List[Tuple[Impl, Any]]:
-    return heapq.nsmallest(top_k, results, key=lambda x: x[1])
+    # Using sorted here for stability.
+    return sorted(results, key=lambda x: x[1])[:top_k]
+    # return heapq.nsmallest(top_k, results, key=lambda x: x[1])
 
 
 def _subs_query_operands(spec: specs.Spec, inputs, output, imp: Impl):
