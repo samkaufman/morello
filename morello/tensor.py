@@ -4,10 +4,11 @@ import functools
 import math
 import operator
 import typing
-from operator import mul
-from typing import Mapping, Optional, Union
+from typing import Mapping, Optional, Sequence
 
 from . import dtypes, layouts, specs, system_config
+
+OperandIdx = typing.NewType("OperandIdx", int)
 
 
 class DisallowedTileShapeError(ValueError):
@@ -17,17 +18,11 @@ class DisallowedTileShapeError(ValueError):
 class TensorLike(abc.ABC):
     spec: specs.TensorSpec
     dim_sizes: tuple[int, ...]
-    origin: "Optional[TensorLike]"
 
     def _common_init_checks(self):
         for dim_size in self.dim_sizes:
             if dim_size <= 0:
                 raise ValueError("Invalid dimensions: " + str(self.dim_sizes))
-
-    @property
-    @typing.final
-    def volume(self) -> int:
-        return functools.reduce(mul, self.dim_sizes, 1)
 
     @property
     @typing.final
@@ -47,10 +42,6 @@ class TensorLike(abc.ABC):
         return self.spec.bank
 
     @property
-    def bytes_used(self) -> int:
-        return self.volume * self.dtype.size
-
-    @property
     @abc.abstractmethod
     def contiguous(self) -> bool:
         """Whether or not elements are contiguous in the underlying memory."""
@@ -67,64 +58,45 @@ class TensorLike(abc.ABC):
         """
         raise NotImplementedError()
 
-    def can_move_to(
-        self, bank: Optional[str], layout: Optional[layouts.Layout]
-    ) -> bool:
-        if bank is None:
-            bank = self.bank
-        if isinstance(layout, layouts.HexagonTranspacked):
-            if self.dtype != dtypes.Uint8:
-                return False
-            if len(self.dim_sizes) != 2:
-                return False
-            if self.dim_sizes[0] % 4 != 0 or self.dim_sizes[1] % 32 != 0:
-                return False
-        # TODO: Factor the following check out into a Hexagon-specific tensorlike
-        if system_config.current_system().has_hvx and bank == "L2":
-            if len([d for d in self.dim_sizes if d != 1]) != 2:
-                return False
-            if any(d >= 256 for d in self.dim_sizes):
-                return False
-        if bank == "VMEM":
-            if (self.volume * self.dtype.size) % 128 != 0:
-                return False
-        return True
+    def replace_tensors(
+        self, replacements: Mapping["TensorLike", "TensorLike"]
+    ) -> "Tile":
+        raise NotImplementedError("replace_tensors will be removed")
 
-    def simple_tile(self, tile_shape: tuple[int, ...]) -> "TensorLike":
-        return self._tile(SimpleTile, tile_shape)
+    def simple_tile(
+        self, operand_idx: OperandIdx, tile_shape: tuple[int, ...]
+    ) -> "TensorLike":
+        return self._tile(SimpleTile, operand_idx, tile_shape)
 
     def conv_image_tile(
-        self, tile_shape: tuple[int, ...], filter_shape: tuple[int, ...]
-    ) -> "TensorLike":
-        return self._tile(ConvolutionImageTile, tile_shape, filter_shape=filter_shape)
-
-    def replace_tensors(
         self,
-        replacements: "Mapping[TensorLike, TensorLike]",
-    ) -> "Tensor":
-        # Default implementation just replaces the origin.
-        new_origin = None
-        if self.origin is not None:
-            try:
-                new_origin = replacements[self.origin]
-            except KeyError:
-                new_origin = self.origin.replace_tensors(replacements)
-        return dataclasses.replace(self, origin=new_origin)
+        operand_idx: OperandIdx,
+        tile_shape: tuple[int, ...],
+        filter_shape: tuple[int, ...],
+    ) -> "TensorLike":
+        return self._tile(
+            ConvolutionImageTile, operand_idx, tile_shape, filter_shape=filter_shape
+        )
 
-    def _tile(self, tile_cls, tile_shape: tuple[int, ...], **kw) -> "TensorLike":
-        if len(tile_shape) != len(self.dim_sizes):
+    def _tile(
+        self, tile_cls, operand_idx: OperandIdx, new_dims: Sequence[int], **kw
+    ) -> "TensorLike":
+        if new_dims == self.dim_sizes:
+            return self
+
+        if len(new_dims) != len(self.dim_sizes):
             raise ValueError(
-                f"Cannot produce rank-{len(tile_shape)} tile of shape "
-                f"{tile_shape} for rank-{len(self.dim_sizes)} tensor of "
+                f"Cannot produce rank-{len(new_dims)} tile of shape "
+                f"{new_dims} for rank-{len(self.dim_sizes)} tensor of "
                 f"shape {self.dim_sizes}"
             )
-        if any(td > rd for td, rd in zip(tile_shape, self.dim_sizes)):
+        if any(td > rd for td, rd in zip(new_dims, self.dim_sizes)):
             raise ValueError(
-                f"Tile {tile_shape} would be larger than tensor {self.dim_sizes}"
+                f"Tile {new_dims} would be larger than tensor {self.dim_sizes}"
             )
-        if tile_shape == self.dim_sizes:
-            return self
-        return tile_cls(dim_sizes=tile_shape, name=None, origin=self, **kw)
+
+        tile_spec = self.spec.shrink(new_dims)
+        return tile_cls(source=operand_idx, spec=tile_spec, name=None, **kw)
 
     @typing.final
     def __eq__(self, other):
@@ -168,7 +140,6 @@ class Tensor(TensorBase):
 
     spec: specs.TensorSpec
     name: Optional[str]
-    origin: Optional[TensorLike] = None
 
     def __post_init__(self):
         self._common_init_checks()
@@ -184,7 +155,6 @@ class Tensor(TensorBase):
         return {
             "spec": self.spec,
             "name": self.name,
-            "origin": self.origin,
         }
 
     def __setstate__(self, state_dict):
@@ -193,30 +163,28 @@ class Tensor(TensorBase):
         else:
             object.__setattr__(self, "spec", state_dict["spec"])
         object.__setattr__(self, "name", state_dict["name"])
-        object.__setattr__(self, "origin", state_dict["origin"])
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class Tile(TensorLike):
-    dim_sizes: tuple[int, ...]
+    source: OperandIdx
+    spec: specs.TensorSpec
     name: Optional[str]
-    # TODO: Rename origin, in Tensor and Tile, `source`, which is more descriptive
-    origin: Union[Tensor, "Tile"]
 
     def __post_init__(self):
         self._common_init_checks()
-        assert isinstance(
-            self.root, TensorBase
-        ), f"root was not a tensor; was: {type(self.root)}"
-        assert self.origin is not None
 
     @property
     def root(self) -> Tensor:
-        return self.origin.root
+        raise NotImplementedError("root will be removed")
+
+    @property
+    def dim_sizes(self) -> tuple[int, ...]:
+        return self.spec.dim_sizes
 
     @property
     def bank(self) -> str:
-        return self.origin.bank
+        return self.spec.bank
 
     @typing.final
     @property
@@ -231,24 +199,11 @@ class Tile(TensorLike):
     def boundary_size(self, dim: int, origin_size: Optional[int] = None) -> int:
         raise NotImplementedError()
 
-    @functools.cached_property
-    def spec(self) -> specs.TensorSpec:
-        target = system_config.current_target()
-        layout = layouts.ROW_MAJOR
-        if any(d != 1 for d in self.dim_sizes):
-            layout = self.root.layout
-        return target.tensor_spec(
-            dim_sizes=self.dim_sizes,
-            dtype=self.origin.dtype,
-            bank=self.origin.bank,
-            layout=layout,
-        )
-
     def __str__(self):
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         layout_epi = ""
         bank_epi = ""
-        if not isinstance(self.root.layout, layouts.RowMajor):
+        if not isinstance(self.spec.layout, layouts.RowMajor):
             layout_epi = f", {self.root.layout}"
         if self.bank != system_config.current_system().default_bank:
             bank_epi = f", {self.bank}"
@@ -289,14 +244,10 @@ class Tile(TensorLike):
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class SimpleTile(Tile):
-    def steps_dim(self, dim: int, origin_size: Optional[int] = None) -> int:
-        if origin_size is None:
-            origin_size = self.origin.dim_sizes[dim]
+    def steps_dim(self, dim: int, origin_size: int) -> int:
         return math.ceil(origin_size / self.dim_sizes[dim])
 
-    def boundary_size(self, dim: int, origin_size: Optional[int] = None) -> int:
-        if origin_size is None:
-            origin_size = self.origin.dim_sizes[dim]
+    def boundary_size(self, dim: int, origin_size: int) -> int:
         return origin_size % self.dim_sizes[dim]
 
     @property

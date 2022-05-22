@@ -2,7 +2,7 @@ import dataclasses
 import functools
 import itertools
 import math
-from typing import Callable, Iterable, List, Optional, Tuple, TypeVar, Union
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple, TypeVar, Union
 
 import dataclass_abc
 import termcolor
@@ -10,7 +10,7 @@ import termcolor
 from .. import layouts, specs, system_config, tiling, utils
 from ..layouts import Layout
 from ..system_config import current_target
-from ..tensor import SimpleTile, Tensor, TensorLike, Tile
+from ..tensor import OperandIdx, SimpleTile, Tensor, TensorLike, Tile
 from .actions import PeelAction, SlidingTileOutAction, TileOutAction
 from .base import Impl, spec_to_hole
 from .loops import Loop
@@ -38,35 +38,13 @@ class SplitNotSupportedByHeadError(NotImplementedError):
 @dataclass_abc.dataclass_abc(frozen=True)
 class ComposeHole(Impl):
     spec: specs.Compose
-    inputs: tuple[Union[Tensor, Tile], ...]
-    output: Union[Tensor, Tile]
 
     def __post_init__(self):
         assert isinstance(self.spec, specs.Compose)
-        assert self.spec.inputs == tuple(inp.spec for inp in self.inputs)
-        assert self.spec.output == self.output.spec
-
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ):
-        if fancy:
-            return termcolor.colored("??compose", attrs=["bold"])
-        else:
-            return "??compose"
 
     @property
-    def children(self) -> Tuple["Impl", ...]:
+    def children(self) -> Tuple[Impl, ...]:
         return tuple()
-
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        inputs = tuple(inputs)
-        new_spec = self.spec.replace_io(tuple(inp.spec for inp in inputs), output.spec)
-        return ComposeHole(new_spec, inputs, output)
 
     @prune_nested_parallel_loops
     @prune_relayout_cycles
@@ -106,7 +84,7 @@ class ComposeHole(Impl):
         yield from common_operand_move_actions(self)
 
         for tile_shape in gen_tile_sizes(
-            self.output.dim_sizes, filter=self._can_tile_out
+            self.spec.output.dim_sizes, filter=self._can_tile_out
         ):
             for parallel in [False] if self.spec.serial_only else [True, False]:
                 yield TileOutAction(self, tile_shape, parallel)
@@ -119,7 +97,7 @@ class ComposeHole(Impl):
         if allow_sliding_windows.get():
             for slide_dim in self._get_output_dimensions_matching_first_input():
                 for slide_size in dim_range(
-                    self.output.dim_sizes[slide_dim], include_end=False
+                    self.spec.output.dim_sizes[slide_dim], include_end=False
                 ):
                     # TODO: Range over multiple choices of bank
                     if self._can_sliding_tile_out(
@@ -175,7 +153,6 @@ class ComposeHole(Impl):
                 **kwargs,
             ),
             name=None,
-            origin=operand,
         )
 
         new_inputs = self.inputs[:input_idx] + (new_mat,) + self.inputs[input_idx + 1 :]
@@ -214,7 +191,6 @@ class ComposeHole(Impl):
                 **kwargs,
             ),
             name=None,
-            origin=operand,
         )
 
         new_inner_spec = self.spec.replace_io(self.spec.inputs, new_mat.spec)
@@ -276,42 +252,35 @@ class ComposeHole(Impl):
         )
 
         # The head of a Compose corresponds to the last function evaluated
-        head_inps = (intermediate_tensor,)
+        head_inps: tuple[specs.TensorSpec] = (intermediate_tensor,)
         hi = self.spec.subspec_classes[0].inputs_count() - 1
         if hi:
-            head_inps += self.inputs[:hi]
+            head_inps += self.spec.inputs[:hi]
         head_hole = spec_to_hole(
             self.spec.subspec_classes[0].from_io(
-                tuple(t.spec for t in head_inps),
-                self.output.spec,
+                head_inps,
+                self.spec.output,
                 serial_only=self.spec.serial_only,
-            ),
-            inputs=head_inps,
-            output=self.output,
+            )
         )
 
         if len(self.spec.subspec_classes) == 2:
             remainder = spec_to_hole(
                 self.spec.subspec_classes[1].from_io(
-                    tuple(t.spec for t in self.inputs[hi:]),
+                    self.spec.inputs[hi:],
                     intermediate_tensor.spec,
                     serial_only=self.spec.serial_only,
-                ),
-                inputs=self.inputs[hi:],
-                output=intermediate_tensor,
+                )
             )
         else:
             remainder = ComposeHole(
                 specs.Compose(
                     subspec_classes=self.spec.subspec_classes[1:],
-                    inputs=tuple(t.spec for t in self.inputs[hi:]),
+                    inputs=self.spec.inputs[hi:],
                     output=intermediate_tensor.spec,
                     intermediate_dtypes=self.spec.intermediate_dtypes[1:],
                     serial_only=self.spec.serial_only,
-                ),
-                inputs=self.inputs[hi:],
-                # output=self.inputs[1][-1],
-                output=intermediate_tensor,
+                )
             )
         return Pipeline((remainder, head_hole))
 
@@ -325,7 +294,9 @@ class ComposeHole(Impl):
             return self
 
         # First, tile self.output.
-        shrunken_output_tile = self.output.simple_tile(output_shape)
+        shrunken_output_tile = self.output.simple_tile(
+            OperandIdx(len(self.inputs)), output_shape
+        )
         assert isinstance(shrunken_output_tile, SimpleTile)
         assert shrunken_output_tile != self.output
 
@@ -595,20 +566,20 @@ class Pipeline(Impl):
         # serial_only flag
         return self.stages[0].spec.serial_only
 
-    @property
-    def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
-        flattened_inputs = list(self.stages[0].inputs)
-        for stage in self.stages[1:]:
-            flattened_inputs = list(stage.inputs[1:]) + flattened_inputs
-        assert len(flattened_inputs) == len(self.spec.inputs)
-        return tuple(flattened_inputs)
+    # @property
+    # def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
+    #     flattened_inputs = list(self.stages[0].inputs)
+    #     for stage in self.stages[1:]:
+    #         flattened_inputs = list(stage.inputs[1:]) + flattened_inputs
+    #     assert len(flattened_inputs) == len(self.spec.inputs)
+    #     return tuple(flattened_inputs)
+
+    # @property
+    # def output(self) -> Union[Tensor, Tile]:
+    #     return self.stages[-1].output
 
     @property
-    def output(self) -> Union[Tensor, Tile]:
-        return self.stages[-1].output
-
-    @property
-    def children(self) -> Tuple["Impl", ...]:
+    def children(self) -> Tuple[Impl, ...]:
         return self.stages
 
     @assert_stable_spec
@@ -617,21 +588,6 @@ class Pipeline(Impl):
         new_stages = list(self.stages)
         new_stages[idx] = fn(new_stages[idx])
         return dataclasses.replace(self, stages=tuple(new_stages))
-
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ) -> str:
-        keyword = "pipeline"
-        if fancy:
-            keyword = termcolor.colored(keyword, attrs=["bold"])
-
-        introduced_strs = []
-        for stage in self.stages[:-1]:
-            introduced_strs.append(f"{name_tensor_fn(stage.output)}: {stage.output}")
-        return f"{keyword} ({', '.join(introduced_strs)})"
 
     @property
     def depth(self) -> int:
@@ -686,11 +642,6 @@ class Pipeline(Impl):
                     "specs differ"
                 )
         return dataclasses.replace(self, stages=replacements)
-
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        raise NotImplementedError()
 
     @property
     def additional_memories(self) -> list[dict[str, int]]:

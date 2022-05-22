@@ -709,7 +709,7 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         i, o = operand_index_exprs
         writer.writeline(f"{tensor_ref_fns[1](o)} += {tensor_ref_fns[0](i)};")
     elif isinstance(imp, impl.MoveLet):
-        source_idx = imp.operands.index(imp.source)
+        source_idx = imp.source_idx
         assert (
             imp.inner.operands[source_idx] is imp.destination
         ), "MoveLet's inner Impl does not use destination tensor"
@@ -1176,7 +1176,7 @@ def _move_registers(impl, source_idx, c_tensors, operand_index_exprs, concrete_s
     )
 
     with _emit_assignment_copy(
-        impl.source,
+        impl.operands[impl.source_idx],
         impl.destination,
         operand_index_exprs[source_idx],
         destination_index_expr,
@@ -1243,7 +1243,7 @@ def generate_c(
     values=None,
 ) -> None:
     if values is None:
-        values = [None] * len(imp.inputs)
+        values = [None] * (imp.operand_count - 1)
     values.append(None)  # for output, which is never initialized by caller
 
     namer = _Namer()
@@ -1540,7 +1540,7 @@ def generate_c(
     index_exprs = []
     for operand, initial_value in zip(imp.operands, values):
         assert isinstance(operand, tensor.Tensor)
-        c_buf = _make_buffer(operand.volume, operand.dtype)
+        c_buf = _make_buffer(operand.spec.volume, operand.dtype)
         index_exprs.append(operand.layout.buffer_indexing_expr(operand.dim_sizes))
         tensor_names.append(c_buf.name)
         c_tensors.append(c_buf)
@@ -1548,7 +1548,7 @@ def generate_c(
     # Emit the kernel function
     writer.writeline("__attribute__((noinline))")
     writer.writeline("void kernel(")
-    for operand_idx in range(len(imp.operands)):
+    for operand_idx in range(len(imp.spec.operands)):
         operand = imp.operands[operand_idx]
         c_buf = c_tensors[operand_idx]
         term = ", " if operand_idx + 1 < len(imp.operands) else ")"

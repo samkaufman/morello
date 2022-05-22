@@ -1,86 +1,80 @@
 import dataclasses
 import functools
-from typing import Any, Callable, Iterable, Optional, Union
+from typing import Any, Callable, Iterable, Optional, Sequence, Union
 
 import dataclass_abc
 import termcolor
+from torch import inner
 
 from .. import layouts, specs, system_config
 from ..layouts import Layout
 from ..system_config import current_target
 from ..tensor import Tensor, TensorLike, Tile
 from . import MoveAction
-from .base import Impl
+from .base import AppliedImpl, Impl, make_applied_impl
 from .utils import assert_stable_spec, gen_vector_shapes
 
 
 class _OperandWrapper(Impl):
-    @property
-    def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
-        new_inputs = []
-        for inner_inp in self.inner.inputs:
-            assert inner_inp is not self.source
-            if inner_inp is self.destination:
-                new_inputs.append(self.source)
-            else:
-                new_inputs.append(inner_inp)
-        return tuple(new_inputs)
+    # @property
+    # def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
+    #     new_inputs = []
+    #     for inner_inp in self.inner.inputs:
+    #         assert inner_inp is not self.source
+    #         if inner_inp is self.destination:
+    #             new_inputs.append(self.source)
+    #         else:
+    #             new_inputs.append(inner_inp)
+    #     return tuple(new_inputs)
 
-    @property
-    def output(self):
-        # A MoveLet can move any operand. This returns the source of the move if output
-        # is the operand being moved; the inner output otherwise.
-        if self.inner.output is self.destination:
-            return self.source
-        return self.inner.output
+    # @property
+    # def output(self):
+    #     # A MoveLet can move any operand. This returns the source of the move if output
+    #     # is the operand being moved; the inner output otherwise.
+    #     if self.inner.output is self.destination:
+    #         return self.source
+    #     return self.inner.output
 
     @property
     def children(self) -> tuple[Impl, ...]:
-        return (self.inner,)
+        return (self.inner,)  # type: ignore
 
     @property
     def is_scheduled(self) -> bool:
-        return self.inner.is_scheduled
+        return self.inner.is_scheduled  # type: ignore
 
     @assert_stable_spec
     def replace_children(self, replacements: Iterable[Impl]) -> Impl:
         replacements = list(replacements)
         if len(replacements) != 1:
             raise ValueError(f"One replacement child expected; got {len(replacements)}")
-        if replacements[0].spec != self.inner.spec:
-            raise ValueError(f"Expected a replacement with spec {self.inner.spec}")
+        inner_spec: specs.Spec = self.inner.spec  # type: ignore
+        if replacements[0].spec != inner_spec:
+            raise ValueError(
+                f"Expected a replacement with spec {inner_spec}, "
+                f"but received {replacements[0].spec}"
+            )
         return dataclasses.replace(self, inner=replacements[0])
-
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        raise NotImplementedError(f"Not implemented for {type(self).__name__}")
-
-    @functools.cached_property
-    def spec(self) -> specs.Spec:
-        return self._spec_with_replaced_operand(self.destination, self.source)
 
     def move_input(self, *args, **kwargs) -> "Impl":
         # Pass move_input through to the inner schedule
-        return dataclasses.replace(self, inner=self.inner.move_input(*args, **kwargs))
+        return self.replace_children((self.children[0].move_input(*args, **kwargs),))
 
     def move_output(self, *args, **kwargs) -> "Impl":
         # Pass move_output through to the inner schedule
-        return dataclasses.replace(self, inner=self.inner.move_output(*args, **kwargs))
+        return self.replace_children((self.children[0].move_output(*args, **kwargs),))
 
     def pad_transpack(self, *args, **kwargs) -> "Impl":
         # Pass pad_transpack through to the inner schedule
-        return dataclasses.replace(
-            self, inner=self.inner.pad_transpack(*args, **kwargs)
-        )
+        return self.replace_children((self.children[0].pad_transpack(*args, **kwargs),))
 
     @assert_stable_spec
     def split(self, size: int) -> "Impl":
-        return dataclasses.replace(self, inner=self.inner.split(size))
+        return self.replace_children((self.children[0].split(*args, **kwargs),))
 
     @assert_stable_spec
     def complete(self) -> Impl:
-        return dataclasses.replace(self, inner=self.inner.complete())
+        return self.replace_children((self.children[0].complete(),))
 
     def _spec_with_replaced_operand(
         self, to_replace: TensorLike, replacement: TensorLike
@@ -106,90 +100,29 @@ class _OperandWrapper(Impl):
 class MoveLet(_OperandWrapper):
     """A Move operation composed with some subsequent Impl."""
 
-    source: Union[Tensor, Tile]
+    spec: specs.Spec
+    source_idx: int
     destination: Tensor
     input_idx: Optional[int]
     prefetching: bool
     inner: Impl
 
     def __post_init__(self):
-        assert self.destination.origin is self.source, (
-            f"Destination's origin {self.destination.origin} was not source"
-            f" {self.source}"
-        )
         assert (
-            self.operands[(-1 if self.input_idx is None else self.input_idx)]
-            is self.source
-        )
-        assert (
-            self.inner.operands[(-1 if self.input_idx is None else self.input_idx)]
-            is self.destination
+            self.inner.spec.operands[(-1 if self.input_idx is None else self.input_idx)]
+            == self.destination.spec
         )
         assert self.destination.layout != layouts.HEXAGON_TRANSPACKED
-
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ):
-        keyword = "move"
-        if self.prefetching:
-            keyword += "*"
-        if self.prefetching:
-            keyword += "[p]"
-
-        arrow = "<-"
-        if fancy:
-            keyword = termcolor.colored(keyword, attrs=["bold"])
-            arrow = termcolor.colored(arrow, attrs=["bold"])
-        return (
-            f"{keyword}[{self.destination.bank}]"
-            f" {name_tensor_fn(self.destination)}"
-            f" {arrow} {name_tensor_fn(self.source)}"
-        )
-
-    def store_env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        fancy: bool = False,
-    ):
-        keyword = "store"
-        arrow = "<-"
-        if fancy:
-            keyword = termcolor.colored(keyword, attrs=["bold"])
-            arrow = termcolor.colored(arrow, attrs=["bold"])
-        return (
-            f"{keyword} {name_tensor_fn(self.source)}"
-            f" {arrow} {name_tensor_fn(self.destination)}"
-        )
+        # TODO: Assert that the inner Spec is expected..
 
     @property
     def is_store(self) -> bool:
-        return self.source == self.output
-
-    @property
-    def lhs(self):
-        # A MoveLet can move any operand. This returns the source of the move if output
-        # is the operand being moved; the inner output otherwise.
-        inner_lhs, _ = self.inner.inputs
-        if inner_lhs is self.destination:
-            return self.source
-        return inner_lhs
-
-    @property
-    def rhs(self):
-        # A MoveLet can move any operand. This returns the source of the move if output
-        # is the operand being moved; the inner output otherwise.
-        _, inner_rhs = self.inner.inputs
-        if inner_rhs is self.destination:
-            return self.source
-        return inner_rhs
+        return self.source_idx == len(self.spec.inputs)
 
     @property
     def additional_memories(self) -> list[dict[str, int]]:
         mem = {k: 0 for k in system_config.current_system().banks}
-        additional = self.destination.bytes_used
+        additional = self.destination.spec.bytes_used
         if self.prefetching:
             additional *= 2
         mem[self.destination.bank] = additional
@@ -198,15 +131,21 @@ class MoveLet(_OperandWrapper):
     @property
     def peak_memory(self) -> dict[str, int]:
         mem = self.inner.peak_memory
-        additional = self.destination.bytes_used
+        additional = self.destination.spec.bytes_used
         if self.prefetching:
             additional *= 2
         mem[self.destination.bank] += additional
         return mem
 
-    def __hash__(self):
-        # A slightly faster hash
-        return hash((self.source, self.destination))
+    def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
+        inner_operands = list(operands)
+        if self.input_idx is None:
+            inner_operands[-1] = self.destination
+        else:
+            inner_operands[self.input_idx] = self.destination
+        return make_applied_impl(
+            self.replace_children([self.inner.apply(inner_operands)]), operands
+        )  # type: ignore
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -220,35 +159,26 @@ class PadTranspack(_OperandWrapper):
     #  without the call to the one-off transpack method. Add padding and remove
     #  this instruction.
 
-    source: TensorLike
+    spec: specs.Spec
+    source_idx: int
     destination: Tensor
     input_idx: int
     inner: Impl
 
     def __post_init__(self):
+        source_spec = self.spec.operands[self.source_idx]
         if self.source is self.destination:
             raise ValueError("Source and destination cannot be the same tensor")
-        if self.source.dim_sizes != self.destination.dim_sizes:
+        if source_spec.dim_sizes != self.destination.dim_sizes:
             raise ValueError("Source and dest. must have matching shapes")
-        if self.source.bank != "GL":
-            raise ValueError(f"Source must be in GL, but is in {self.source.bank}")
+        if source_spec.bank != "GL":
+            raise ValueError(f"Source must be in GL, but is in {source_spec.bank}")
         if self.destination.bank != "GL":
             raise ValueError(f"Dest. must be in GL, but is in {self.destination.bank}")
-        if self.source.layout != layouts.ROW_MAJOR:
+        if source_spec.layout != layouts.ROW_MAJOR:
             raise ValueError("Source must have a row-major layout")
         if self.destination.layout != layouts.HEXAGON_TRANSPACKED:
             raise ValueError("Destination must be HEXAGON_TRANSPACKED")
-
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ):
-        return (
-            f"{type(self).__name__}({name_tensor_fn(self.destination)} <- "
-            f"{name_tensor_fn(self.source)})"
-        )
 
     @property
     def additional_memories(self) -> list[dict[str, int]]:
@@ -262,7 +192,7 @@ class PadTranspack(_OperandWrapper):
 
 
 def _move_arguments(
-    operand: Union[Tile, Tensor]
+    operand: specs.TensorSpec,
 ) -> Iterable[tuple[str, Layout, dict[str, Any]]]:
     target = system_config.current_target()
 
@@ -291,20 +221,23 @@ def _move_arguments(
 
 
 def common_operand_move_actions(impl: "Impl") -> Iterable[MoveAction]:
-    def inner(inp_idx, operand):
-        move_fn, can_move_fn = impl.move_output, impl.output.can_move_to
+    spec = impl.spec
+
+    def inner(inp_idx, operand: specs.TensorSpec) -> Iterable[MoveAction]:
+        assert isinstance(operand, specs.TensorSpec)  # TODO: Remove
+        move_fn, can_move_fn = impl.move_output, operand.can_move_to
         if inp_idx is not None:
             move_fn = functools.partial(impl.move_input, inp_idx)
-            can_move_fn = impl.inputs[inp_idx].can_move_to
+            can_move_fn = operand.can_move_to
 
         for bank, layout, kws in _move_arguments(operand):
             for prf in [True, False]:
                 if can_move_fn(bank, layout):
                     yield MoveAction(move_fn, operand, inp_idx, prf, bank, layout, kws)
 
-    for i, inp in enumerate(impl.inputs):
+    for i, inp in enumerate(spec.inputs):
         yield from inner(i, inp)
-    yield from inner(None, impl.output)
+    yield from inner(None, spec.output)
 
 
 # TODO: Use this everywhere sliding_tile_out actions are produced
@@ -326,12 +259,12 @@ def common_move(
     :param kwargs: Extra keyword arguments are forwarded the current target's
       `tensor_spec` method while constructing the destination tensor.
     """
-    operand: Union[Tensor, Tile] = op.operands[operand_idx]
+    operand: specs.TensorSpec = op.spec.operands[operand_idx]
     if bank is None:
         bank = operand.spec.bank
     if layout is None:
         layout = operand.spec.layout
-    if bank == operand.root.bank and layout == operand.layout:
+    if bank == operand.bank and layout == operand.layout:
         raise ValueError("Either bank or layout must differ from current")
     new_mat = current_target().tensor(
         spec=current_target().tensor_spec(
@@ -342,22 +275,17 @@ def common_move(
             **kwargs,
         ),
         name=None,
-        origin=operand,
     )
 
     # Figure out the input index, if it's an input
-    # TODO: Faster to have the caller pass the index.
-    input_idx = None
-    try:
-        input_idx = op.inputs.index(operand)
-    except ValueError:
-        pass
-    assert input_idx is not None or operand == op.output
+    input_idx = operand_idx if operand_idx < len(op.spec.inputs) else None
+    assert input_idx is not None or operand == op.spec.output
 
     return MoveLet(
-        source=operand,
+        spec=op.spec,
+        source_idx=operand_idx,
         destination=new_mat,
         input_idx=input_idx,
         prefetching=prefetching,
-        inner=op.replace_operand(operand_idx, new_mat),
+        inner=op.replace_spec(op.spec.replace_operand(operand_idx, new_mat.spec)),
     )

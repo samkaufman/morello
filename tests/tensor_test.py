@@ -25,8 +25,8 @@ def test_tile_contiguous(tensor_shape, tile_shape, expected):
     target = system_config.current_target()
     dtype, bank, layout = dtypes.Uint8, "RF", layouts.ROW_MAJOR
     tensor_spec = target.tensor_spec(tensor_shape, dtype, bank, layout)
-    t = target.tensor(tensor_spec, name=None, origin=None)
-    tile = t.simple_tile(tile_shape)
+    t = target.tensor(tensor_spec, name=None)
+    tile = t.simple_tile(tensor.OperandIdx(0), tile_shape)
     assert tile.contiguous == expected
 
 
@@ -36,7 +36,7 @@ def test_tensors_and_tiles_can_be_pickled_and_unpickled_losslessly(
 ):
     t = system_config.current_target().tensor(spec=spec, name=name)
     if should_tile:
-        t = t.simple_tile(tuple(1 for _ in t.dim_sizes))
+        t = t.simple_tile(tensor.OperandIdx(0), tuple(1 for _ in t.dim_sizes))
 
     buf = io.BytesIO()
     pickle.dump(t, buf)
@@ -64,10 +64,9 @@ def test_convolution_image_tile_boundary_size(
     outer = tensor.Tensor(
         specs.TensorSpec(outer_shp, dtypes.Uint8, any_level, layouts.ROW_MAJOR),
         name=None,
-        origin=None,
     )
     tile = tensor.ConvolutionImageTile(
-        tile_shp, filter_shape=filt_shp, name=None, origin=outer
+        tensor.OperandIdx(0), tile_shp, filter_shape=filt_shp, name=None
     )
     assert tile.boundary_size(0) == expected_batch
     assert tile.boundary_size(1) == expected_height

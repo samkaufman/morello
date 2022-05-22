@@ -54,31 +54,21 @@ class ReduceSum(NonAllocatingLeaf):
     def spec(self) -> specs.ReduceSum:
         return specs.ReduceSum(self.source.spec, self.output.spec, self.serial_only)
 
-    @property
-    def inputs(self):
-        return (self.source,)
+    # @property
+    # def inputs(self):
+    #     return (self.source,)
+
+    # @property
+    # def output(self) -> Union[Tensor, Tile]:
+    #     return self._output
 
     @property
     def source(self) -> Union[Tensor, Tile]:
         return self._source
 
     @property
-    def output(self) -> Union[Tensor, Tile]:
-        return self._output
-
-    @property
     def serial_only(self) -> bool:
         return self._serial_only
-
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ):
-        return (
-            f"ReduceSum({name_tensor_fn(self.source)}, {name_tensor_fn(self.output)})"
-        )
 
     @property
     def is_scheduled(self) -> bool:
@@ -149,6 +139,7 @@ class ReduceSum(NonAllocatingLeaf):
         source_tile = self.source.simple_tile(self.source.dim_sizes[:-1] + (k,))
         driving_subscript = self.spec.operands_dim_subscripts()[0][-1]
         return Loop(
+            spec=self.spec,
             subscripts=(driving_subscript,),
             tiles=frozenset([source_tile]),
             inner=ReduceSum(
@@ -173,11 +164,3 @@ class ReduceSum(NonAllocatingLeaf):
             return self.move_output(bank=next_general_out).complete()
 
         return self
-
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        inputs = list(inputs)
-        if len(inputs) != 1:
-            raise ValueError("Expected 1 input")
-        return ReduceSum(inputs[0], output, serial_only=self.serial_only)

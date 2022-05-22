@@ -379,7 +379,7 @@ def _st_test_index_exprs_consistent_with_contiguous_props(draw):
             max_dim_size=9, min_dims=1, max_dims=4, layout=layouts.ROW_MAJOR
         )
     )
-    t = target.tensor(spec=tensor_spec, name=None, origin=None)
+    t = target.tensor(spec=tensor_spec, name=None)
 
     concrete_tile_idxs: list[list[int]] = []
 
@@ -387,7 +387,9 @@ def _st_test_index_exprs_consistent_with_contiguous_props(draw):
     for _ in range(depth):
         # TODO: Use a more generic strategy for producing any tile callable
         # TODO: Test convolution tiles
-        t = t.simple_tile(tuple(draw(st.integers(1, d)) for d in t.dim_sizes))
+        t = t.simple_tile(
+            tensor.OperandIdx(0), tuple(draw(st.integers(1, d)) for d in t.dim_sizes)
+        )
         # The following `assume` avoids the case where simple_tile returns `t`
         # itself.
         hypothesis.assume(not isinstance(t, tensor.Tensor))

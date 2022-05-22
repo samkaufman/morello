@@ -1,51 +1,19 @@
 import dataclasses
 import functools
 import math
-from typing import Callable, Iterable, Optional, Tuple, Union
+from typing import Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import dataclass_abc
 import termcolor
+from torch import inner
 
 from .. import specs, system_config
-from ..tensor import ConvolutionImageTile, Tensor, Tile
-from .base import Impl
+from ..tensor import ConvolutionImageTile, OperandIdx, Tensor, TensorLike, Tile
+from .base import Impl, AppliedImpl, make_applied_impl
 from .utils import assert_stable_spec
 
 
-# noinspection PyTypeChecker, PyArgumentList, PyUnresolvedReferences
 class _TilingMixin:
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ) -> str:
-        istr = ")"
-        if not underscore_inner:
-            istr = f", {self.inner.env_str(name_tensor_fn, fancy=fancy)})"
-
-        left_strs, right_strs = [], []
-        # TODO: Come up with a more readable ordering over tiles
-        for tile, source in self._introduced_env_srt_sorted:
-            left_strs.append(
-                _loop_operand_str(tile, name_tensor_fn=name_tensor_fn, fancy=fancy)
-            )
-            right_strs.append(name_tensor_fn(source))
-        assert left_strs and right_strs
-
-        keyword = self._env_str_keyword
-        extra = self._env_str_extra
-        arrow = "<-"
-        if fancy:
-            keyword = termcolor.colored(keyword, attrs=["bold"])
-            arrow = termcolor.colored(arrow, attrs=["bold"])
-        if extra:
-            keyword += f"[{extra}]"
-
-        left_concat = ", ".join(left_strs)
-        right_concat = ", ".join(right_strs)
-        return f"{keyword} ({left_concat}) {arrow} ({right_concat}{istr}"
-
     @property
     def _introduced_env_srt_sorted(
         self,
@@ -101,81 +69,54 @@ class _TilingMixin:
         return self.replace_children([fn(self.inner)])
 
 
+# TODO: Re-freeze.
 @dataclass_abc.dataclass_abc(frozen=False, unsafe_hash=True, eq=True)
 class Loop(Impl):
     """Iterate over subscripts of the inner Impl's operand tiles."""
 
+    spec: specs.Spec
     subscripts: tuple[int]
     tiles: frozenset[Tile]
     inner: Impl
     parallel: bool
 
-    def __post_init__(self):
+    def __init__(
+        self,
+        spec: specs.Spec,
+        subscripts: Iterable[int],
+        tiles: Iterable[Tile],
+        inner: Impl,
+        parallel: bool,
+    ):
+        self.spec = spec
+        self.subscripts = tuple(subscripts)
+        self.tiles = frozenset(tiles)
+        self.inner = inner
+        self.parallel = parallel
         if self.parallel and not self.inner.spec.serial_only:
             raise ValueError("Parallel loop's child must be serial only")
 
-    @functools.cached_property
-    def spec(self) -> specs.Spec:
-        serial_only = self.inner.spec.serial_only
-        if self.parallel:
-            serial_only = False
-        return self.inner.spec.replace_io(
-            inputs=tuple(inp.spec for inp in self.inputs),
-            output=self.output.spec,
-            serial_only=serial_only,
-        )
+    # @functools.cached_property
+    # def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
+    #     # The inputs of a Loop are inner's inputs, with the introduced
+    #     # tiles substituted for their origins
+    #     new_inputs = []
+    #     for inner_inp in self.inner.inputs:
+    #         input_to_add = inner_inp
+    #         if inner_inp in self.tiles:
+    #             input_to_add = inner_inp.origin
+    #         assert input_to_add is not None
+    #         new_inputs.append(input_to_add)
+    #     return tuple(new_inputs)
 
-    @functools.cached_property
-    def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
-        # The inputs of a Loop are inner's inputs, with the introduced
-        # tiles substituted for their origins
-        new_inputs = []
-        for inner_inp in self.inner.inputs:
-            input_to_add = inner_inp
-            if inner_inp in self.tiles:
-                input_to_add = inner_inp.origin
-            assert input_to_add is not None
-            new_inputs.append(input_to_add)
-        return tuple(new_inputs)
-
-    @property
-    def output(self) -> Union[Tensor, Tile]:
-        # The output of a Loop is inner's output or, if that output is
-        # a tile introduced in this Loop as an tile, the tile itself.
-        o: Union[Tensor, Tile] = self.inner.output
-        if o in self.tiles:
-            o = o.origin
-        return o
-
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ) -> str:
-        istr = ")"
-        if not underscore_inner:
-            istr = f", {self.inner.env_str(name_tensor_fn, fancy=fancy)})"
-
-        left_strs, right_strs = [], []
-        for it in sorted(self.tiles, key=str):
-            left_strs.append(
-                _loop_operand_str(it, name_tensor_fn=name_tensor_fn, fancy=fancy)
-            )
-            right_strs.append(name_tensor_fn(it.origin))
-        assert left_strs and right_strs
-
-        keyword = "tile"
-        if self.parallel:
-            keyword = "par " + keyword
-        arrow = "<-"
-        if fancy:
-            keyword = termcolor.colored(keyword, attrs=["bold"])
-            arrow = termcolor.colored(arrow, attrs=["bold"])
-
-        left_concat = ", ".join(left_strs)
-        right_concat = ", ".join(right_strs)
-        return f"{keyword} ({left_concat}) {arrow} ({right_concat}{istr}"
+    # @property
+    # def output(self) -> Union[Tensor, Tile]:
+    #     # The output of a Loop is inner's output or, if that output is
+    #     # a tile introduced in this Loop as an tile, the tile itself.
+    #     o: Union[Tensor, Tile] = self.inner.output
+    #     if o in self.tiles:
+    #         o = o.origin
+    #     return o
 
     @property
     def steps(self) -> int:
@@ -198,18 +139,14 @@ class Loop(Impl):
     def steps_subscript(
         self, subscript, concrete_outer_size: Optional[int] = None
     ) -> int:
-        return self._apply_to_subscripts(
-            lambda t: t.steps_dim, subscript, concrete_outer_size
-        )
+        return self._apply_to_subscripts(subscript, lambda t: t.steps_dim)
 
     def boundary_size(
         self, subscript, concrete_outer_size: Optional[int] = None
     ) -> int:
-        return self._apply_to_subscripts(
-            lambda t: t.boundary_size, subscript, concrete_outer_size
-        )
+        return self._apply_to_subscripts(subscript, lambda t: t.boundary_size)
 
-    def _apply_to_subscripts(self, fn, subscript, *args) -> int:
+    def _apply_to_subscripts(self, subscript, fn, *args, **kwargs) -> int:
         """Apply `fn` to a dimension matching the given subscript.
 
         `fn` will be called once on the tile and the return value will be called
@@ -220,13 +157,13 @@ class Loop(Impl):
         """
         # TODO: Raise a warning if the given subscript is not one over which
         #  this loop iterates.
-
-        for tile, subs in zip(self.inner.operands, self.spec.operands_dim_subscripts()):
-            if not isinstance(tile, Tile):
-                continue
+        subscripts = self.spec.operands_dim_subscripts()
+        for tile in self.tiles:
+            subs = subscripts[tile.source]
             for dim, sub in enumerate(subs):
                 if sub == subscript:
-                    return fn(tile)(dim, *args)
+                    osize = self.spec.operands[tile.source].dim_sizes[dim]
+                    return fn(tile)(dim, *args, origin_size=osize, **kwargs)
         raise ValueError(f"No subscript {subscript} found among tiles")
 
     @property
@@ -287,20 +224,16 @@ class Loop(Impl):
             raise ValueError(f"Expected a replacement with spec {self.inner.spec}")
         return dataclasses.replace(self, inner=replacements[0])
 
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        # return type(self)(
-        #     driving_tile=self.driving_tile,
-        #     dependent_tiles=self.dependent_tiles,
-        #     inner=self.inner,
-        #     parallel=self.parallel,
-        # )
-        raise NotImplementedError()
-
     @assert_stable_spec
     def subschedule(self, fn: Callable[["Impl"], "Impl"]) -> "Impl":
         return self.replace_children([fn(self.inner)])
+
+    def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
+        inner_operands = list(operands)
+        for tile in self.tiles:
+            inner_operands[tile.source] = tile
+        applied_body = self.inner.apply(inner_operands)
+        return make_applied_impl(self.replace_children([applied_body]), operands)  # type: ignore
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -334,36 +267,12 @@ class SlidingWindowLoop(_TilingMixin, Impl):
     inner: Impl
 
     def __post_init__(self):
-        assert (
-            self.live_tensor.origin in self.inputs
-            or self.live_tensor.origin == self.output
-        ), f"{str(self.live_tensor.origin)} not in {tuple(str(i) for i in self.inputs)} or {str(self.output)}"
-        assert all(
-            self.live_tensor.dim_sizes[d] == self.live_tensor.origin.dim_sizes[d]
-            for d in range(len(self.live_tensor.dim_sizes))
-            if d != self._sliding_dim
-        ), f"sliding_dim was {self._sliding_dim} but shapes were {self.live_tensor.dim_sizes} and {self.live_tensor.origin.dim_sizes}"
         assert self.spec == self._compute_spec()
-
-        # Check that substitution over the self.inner.inputs equals self.inputs
-        assert self.inputs == tuple(
-            self._sub_origin(inp) for inp in self.inner.inputs
-        ), f"{[str(i) for i in self.inputs]} != {[str(self._sub_origin(inp)) for inp in self.inner.inputs]}"
-        assert self.output == self._sub_origin(
-            self.inner.output
-        ), f"{self.output} != {self._sub_origin(self.inner.output)}"
 
     def _compute_spec(self) -> specs.Spec:
         return self.inner.spec.replace_io(
             tuple(inp.spec for inp in self.inputs), self.output.spec
         )
-
-    def _sub_origin(self, t):
-        if self.live_tensor == t:
-            return t.origin
-        elif t in self.other_tiles:
-            return t.origin
-        return t
 
     @functools.cached_property
     def _sliding_dim(self) -> int:
@@ -427,34 +336,14 @@ class SlidingWindowLoop(_TilingMixin, Impl):
             (t, t.origin) for t in self.other_tiles
         )
 
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        raise NotImplementedError()
-
     @property
     def peak_memory(self) -> dict[str, int]:
         inner_peak_memory = dict(self.inner.peak_memory)
-        inner_peak_memory[self.live_tensor.bank] += self.live_tensor.bytes_used
+        inner_peak_memory[self.live_tensor.bank] += self.live_tensor.spec.bytes_used
         return inner_peak_memory
 
     @property
     def additional_memories(self) -> list[dict[str, int]]:
         mem = {k: 0 for k in system_config.current_system().banks}
-        mem[self.live_tensor.bank] = self.live_tensor.bytes_used
+        mem[self.live_tensor.bank] = self.live_tensor.spec.bytes_used
         return [mem]
-
-
-def _loop_operand_str(
-    t, *, name_tensor_fn: Callable[[Union[Tensor, Tile]], str], fancy: bool
-):
-    if isinstance(t, ConvolutionImageTile):
-        prefix = "conv"
-        if fancy:
-            prefix = termcolor.colored(prefix, attrs=["bold"])
-        desc_part = prefix + " " + "×".join(str(s) for s in t.dim_sizes)
-    elif isinstance(t, Tile):
-        desc_part = "×".join(str(s) for s in t.dim_sizes)
-    else:
-        desc_part = str(t)
-    return f"{name_tensor_fn(t)}: {desc_part}"

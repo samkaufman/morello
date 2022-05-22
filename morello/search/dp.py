@@ -19,8 +19,6 @@ from . import common
 
 def schedule_search(
     spec: specs.Spec,
-    inputs: Optional[tuple] = None,
-    output=None,
     memory_limits=None,
     cache=None,
     top_k=None,
@@ -32,12 +30,6 @@ def schedule_search(
 
     May return `None` if no Impl satisfies the given Spec and memory limits.
     """
-    if inputs is None:
-        target = system_config.current_target()
-        inputs = tuple(target.tensor(s) for s in spec.inputs)
-    if output is None:
-        output = system_config.current_target().tensor(spec.output)
-
     # If no cache is provided, initialize a new cache
     if cache is None:
         cache = ScheduleCache()
@@ -50,8 +42,6 @@ def schedule_search(
 
     inner_result = _inner_schedule_search(
         spec,
-        inputs,
-        output,
         memory_limits,
         cache,
         top_k=(top_k if top_k is not None else 1),
@@ -70,8 +60,6 @@ def schedule_search(
 @cython.cfunc
 def _inner_schedule_search(
     spec: specs.Spec,
-    inputs: tuple,
-    output,
     memory_limits: pruning.MemoryLimits,
     cache: ScheduleCache,
     top_k: int,
@@ -105,21 +93,12 @@ def _inner_schedule_search(
             return None
     except KeyError:
         pass
-    else:
-        # Substitute in the correct operands. This is needed because schedules are
-        # stored in the cache along with their concrete operands. While these operands
-        # have the same TensorSpecs as those of our query Spec, they aren't the same
-        # objects, so: swap in the query operands before returning the cached schedule.
-        return [
-            _subs_query_operands(spec, inputs, output, imp)
-            for imp in wrapped_cached_schedule.impls
-        ]
 
     if callbacks:
         callbacks.enter_unseen(spec, memory_limits)
 
     # Create a an Impl hole corresponding to the query spec
-    leaf = impl.spec_to_hole(spec, inputs, output)
+    leaf = impl.spec_to_hole(spec)
     assert leaf.depth == 1, f"Expected hole to have depth 1; had {leaf.depth}"
 
     # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
@@ -206,8 +185,6 @@ def _best_options(
         for child, mem in zip(new_tree.children, new_child_memory_limits):
             child_result = _inner_schedule_search(
                 child.spec,
-                inputs=child.inputs,
-                output=child.output,
                 cache=cache,
                 top_k=top_k,
                 prune_col_major=prune_col_major,
@@ -253,14 +230,3 @@ def _finalize_best_results(
     # Using sorted here for stability.
     return sorted(results, key=lambda x: x[1])[:top_k]
     # return heapq.nsmallest(top_k, results, key=lambda x: x[1])
-
-
-def _subs_query_operands(spec: specs.Spec, inputs, output, imp: Impl):
-    assert len(inputs) + 1 == len(imp.operands)
-    operand_replacements = dict(zip(imp.operands, inputs + (output,)))
-    new_impl = replace.replace(imp, operand_replacements)
-    assert new_impl.spec == spec, (
-        "spec doesn't match query after operand replacement; expected "
-        f"{spec} but was {new_impl.spec}"
-    )
-    return new_impl

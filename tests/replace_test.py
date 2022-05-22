@@ -7,7 +7,6 @@ def test_replace_origin_of_tiles():
     origin = target.tensor(
         target.tensor_spec((10, 10), dtype=dtypes.Uint32, bank="GL"),
         name="origin",
-        origin=None,
     )
     l_and_r = origin.simple_tile((4, 4))
     output = origin.simple_tile((4, 4))
@@ -16,7 +15,6 @@ def test_replace_origin_of_tiles():
     new_origin = target.tensor(
         target.tensor_spec((20, 20), dtype=dtypes.Uint32, bank="GL"),
         name="new_origin",
-        origin=None,
     ).simple_tile((10, 10))
     new_impl = replace.replace(imp, {origin: new_origin})
     assert new_impl.lhs is new_impl.rhs
@@ -29,7 +27,6 @@ def test_replace_is_no_op_with_no_real_changes():
     origin = target.tensor(
         target.tensor_spec((10, 10), dtype=dtypes.Uint32, bank="GL"),
         name="origin",
-        origin=None,
     )
     lhs = origin.simple_tile((4, 4))
     rhs = origin.simple_tile((4, 4))

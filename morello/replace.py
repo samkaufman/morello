@@ -53,16 +53,7 @@ def _mutating_replace(
             pass
 
     if type(subject) is Tensor:
-        new_origin = _mutating_replace(subject.origin, replacements)
-        if new_origin is subject.origin:
-            return subject
-        new_tensor = Tensor(
-            spec=subject.spec,
-            name=subject.name,
-            origin=new_origin,
-        )
-        replacements[subject] = new_tensor
-        return new_tensor
+        return subject
     elif type(subject) in (SimpleTile, ConvolutionImageTile):
         # After replacement, it's possible for what was once the subject Tile's
         # root, which should be a Tensor, to become a Tile. In this case, the
@@ -115,6 +106,7 @@ def _mutating_replace(
         )
     elif type(subject) is impl.loops.Loop:
         return impl.Loop(
+            spec=subject.spec,
             subscripts=subject.subscripts,
             tiles=frozenset(_mutating_replace(t, replacements) for t in subject.tiles),
             inner=_mutating_replace(subject.inner, replacements),

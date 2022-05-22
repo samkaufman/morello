@@ -4,10 +4,9 @@ from typing import Callable, Iterable, Optional, Sequence, Union
 
 import dataclass_abc
 
-from .. import dtypes, specs, system_config
-from ..layouts import Layout
+from .. import dtypes, layouts, specs, system_config
 from ..system_config import current_target
-from ..tensor import Tensor, Tile
+from ..tensor import OperandIdx, Tensor, Tile
 from .actions import MatmulSplitAction, TileOutAction
 from .base import Impl, NonAllocatingLeaf
 from .loops import Loop
@@ -25,42 +24,7 @@ from .utils import assert_stable_spec, dim_range, gen_tile_sizes
 
 @dataclass_abc.dataclass_abc(frozen=True)
 class MatmulBase(NonAllocatingLeaf):
-    lhs: Union[Tensor, Tile]  # n-by-m
-    rhs: Union[Tensor, Tile]  # m-by-p
-    output: Union[Tensor, Tile]  # m-by-n
-    serial_only: bool
-
-    def __post_init__(self):
-        lw, rh = self.lhs.dim_sizes[1], self.rhs.dim_sizes[0]
-        assert lw == rh, f"Inner dims. of Matmul operands don't match: {lw} and {rh}"
-
-    @property
-    def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
-        return self.lhs, self.rhs
-
-    @functools.cached_property
-    def spec(self) -> specs.Matmul:
-        return specs.Matmul(
-            self.lhs.spec, self.rhs.spec, self.output.spec, serial_only=self.serial_only
-        )
-
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ):
-        return (
-            f"{type(self).__name__}({name_tensor_fn(self.lhs)}, "
-            f"{name_tensor_fn(self.rhs)}, "
-            f"{name_tensor_fn(self.output)})"
-        )
-
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        lhs, rhs = inputs
-        return type(self)(lhs, rhs, output, serial_only=self.serial_only)
+    spec: specs.Matmul
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -68,6 +32,10 @@ class MatmulHole(MatmulBase):
     @property
     def is_scheduled(self) -> bool:
         return False
+
+    def replace_spec(self, new_spec: specs.Spec) -> "Impl":
+        assert type(self) is MatmulHole
+        return MatmulHole(new_spec)
 
     @prune_nested_parallel_loops
     @prune_relayout_cycles
@@ -77,30 +45,33 @@ class MatmulHole(MatmulBase):
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Impl]]:
-        # Search only over full line sizes
-        for h, w in gen_tile_sizes(self.output.dim_sizes, filter=self._can_tile_out):
-            for parallel in [False] if self.serial_only else [True, False]:
-                yield TileOutAction(self, (h, w), parallel)
+        lhs, _, out = self.spec.operands
 
-        if self.lhs.dim_sizes[1] > 1:
-            for k in dim_range(self.lhs.dim_sizes[1], include_end=False):
+        # Search only over full line sizes
+        for h, w in gen_tile_sizes(out.dim_sizes, filter=self._can_tile_out):
+            yield TileOutAction(self, (h, w), parallel=False)
+            if not self.spec.serial_only:
+                yield TileOutAction(self, (h, w), parallel=True)
+
+        if lhs.dim_sizes[1] > 1:
+            for k in dim_range(lhs.dim_sizes[1], include_end=False):
                 if self._split_valid(k):
                     yield MatmulSplitAction(self.split, size=k)
 
         yield from common_operand_move_actions(self)
 
-        if Mult.applies_to_operands(self.operands):
+        if Mult.applies_to_operands(self.spec.operands):
             yield self.place_mult
 
         if system_config.current_system().has_hvx:
-            if HvxVrmpyaccVuwVubRub.applies_to_operands(self.operands):
+            if HvxVrmpyaccVuwVubRub.applies_to_operands(self.spec.operands):
                 yield self.place_hvx_vrmpyacc
 
     def move_input(
         self,
         input_idx: int,
         bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
+        layout: Optional[layouts.Layout] = None,
         prefetching: bool = False,
         **kwargs,
     ) -> "MoveLet":
@@ -111,7 +82,7 @@ class MatmulHole(MatmulBase):
     def move_output(
         self,
         bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
+        layout: Optional[layouts.Layout] = None,
         prefetching: bool = False,
         **kwargs,
     ) -> "MoveLet":
@@ -141,43 +112,54 @@ class MatmulHole(MatmulBase):
     @assert_stable_spec
     def split(self, size: int) -> "Impl":
         assert size > 0
-        if size > self.lhs.dim_sizes[1]:
+        lhs, rhs = self.spec.inputs
+        if size > lhs.dim_sizes[1]:
             raise ValueError(
                 f"Cannot split {size} with inner dim. {self.lhs.dim_sizes[1]}"
             )
-        if size == self.lhs.dim_sizes[1]:
+        if size == lhs.dim_sizes[1]:
             return self
-        left_view = self.lhs.simple_tile((self.lhs.dim_sizes[0], size))
-        right_view = self.rhs.simple_tile((size, self.rhs.dim_sizes[1]))
+        left_view = lhs.simple_tile(OperandIdx(0), (lhs.dim_sizes[0], size))
+        right_view = rhs.simple_tile(OperandIdx(1), (size, rhs.dim_sizes[1]))
 
         split_subscript = self.spec.operands_dim_subscripts()[0][-1]
 
         warnings.warn("Not yet specializing spec for split Matmuls")
         return Loop(
+            spec=self.spec,
             subscripts=(split_subscript,),
             tiles=frozenset([left_view, right_view]),
-            inner=MatmulHole(left_view, right_view, self.output, self.serial_only),
+            inner=MatmulHole(
+                specs.Matmul(
+                    left_view.spec,
+                    right_view.spec,
+                    self.spec.output,
+                    self.spec.serial_only,
+                )
+            ),
             parallel=False,  # TODO: Is this parallel correct?
         )
 
     def _split_valid(self, k: int) -> bool:
-        lhs_h, lhs_w = self.lhs.dim_sizes
-        rhs_h, rhs_w = self.rhs.dim_sizes
+        lhs_h, lhs_w = self.spec.inputs[0].dim_sizes
+        rhs_h, rhs_w = self.spec.inputs[1].dim_sizes
         assert lhs_w == rhs_h
         if k > lhs_w:
             return False
-        if not self.lhs.spec.is_valid_tile_shape((lhs_h, k)):
+        if not self.spec.inputs[0].is_valid_tile_shape((lhs_h, k)):
             return False
-        if not self.rhs.spec.is_valid_tile_shape((k, rhs_w)):
+        if not self.spec.inputs[1].is_valid_tile_shape((k, rhs_w)):
             return False
         return True
 
     @assert_stable_spec
     def complete(self) -> Impl:
         system = system_config.current_system()
-        if self.lhs.dim_sizes[0] > 1 or self.rhs.dim_sizes[1] > 1:
+
+        lhs, rhs = self.spec.inputs
+        if lhs.dim_sizes[0] > 1 or rhs.dim_sizes[1] > 1:
             return self.tile_out((1, 1)).complete()
-        if self.lhs.dim_sizes[1] > 1:
+        if lhs.dim_sizes[1] > 1:
             return self.split(1).complete()
 
         next_general_lhs = system.next_general_bank(self.lhs.bank)
@@ -193,15 +175,15 @@ class MatmulHole(MatmulBase):
 
     @assert_stable_spec
     def place_mult(self) -> "Mult":
-        return Mult(self.lhs, self.rhs, self.output, self.serial_only)
+        return Mult(self.spec)
 
     @assert_stable_spec
     def place_hvx_gemvmpebbw(self) -> "HvxGemvmpybbwAsm":
-        return HvxGemvmpybbwAsm(self.lhs, self.rhs, self.output, self.serial_only)
+        return HvxGemvmpybbwAsm(self.spec)
 
     @assert_stable_spec
     def place_hvx_vrmpyacc(self) -> "HvxVrmpyaccVuwVubRub":
-        return HvxVrmpyaccVuwVubRub(self.lhs, self.rhs, self.output, self.serial_only)
+        return HvxVrmpyaccVuwVubRub(self.spec)
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -224,7 +206,7 @@ class MatmulLeaf(MatmulBase):
         self,
         input_idx: int,
         bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
+        layout: Optional[layouts.Layout] = None,
         prefetching: bool = False,
         **kwargs,
     ) -> "MoveLet":
@@ -233,7 +215,7 @@ class MatmulLeaf(MatmulBase):
     def move_output(
         self,
         bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
+        layout: Optional[layouts.Layout] = None,
         prefetching: bool = False,
         **kwargs,
     ) -> "MoveLet":
@@ -245,12 +227,11 @@ class Mult(MatmulLeaf):
     # TODO: Replace whole class w/ target-specific implementations
 
     def __post_init__(self):
-        super().__post_init__()
-        assert all(o.bank in ("RF", "HexagonRF") for o in self.operands)
-        assert all(d == 1 for o in self.operands for d in o.dim_sizes)
+        assert all(o.bank in ("RF", "HexagonRF") for o in self.spec.operands)
+        assert all(d == 1 for o in self.spec.operands for d in o.dim_sizes)
 
     @staticmethod
-    def applies_to_operands(operands: Sequence[Union[Tensor, Tile]]) -> bool:
+    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
         return all(
             o.bank in ("RF", "HexagonRF") and all(d == 1 for d in o.dim_sizes)
             for o in operands
@@ -268,13 +249,13 @@ class HvxGemvmpybbwAsm(MatmulLeaf):
             raise ValueError(check_result)
 
     @staticmethod
-    def applies_to_operands(operands: Sequence[Union[Tensor, Tile]]) -> bool:
+    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
         if HvxGemvmpybbwAsm._check_operands(operands):
             return False
         return True
 
     @staticmethod
-    def _check_operands(operands: Sequence[Union[Tensor, Tile]]) -> Optional[str]:
+    def _check_operands(operands: Sequence[specs.TensorSpec]) -> Optional[str]:
         lhs, rhs, out = operands
 
         if lhs.bank != "L2":
@@ -328,7 +309,7 @@ class HvxVrmpyaccVuwVubRub(MatmulLeaf):
         return True
 
     @staticmethod
-    def _check_operands(operands: Sequence[Union[Tensor, Tile]]) -> Optional[str]:
+    def _check_operands(operands: Sequence[specs.TensorSpec]) -> Optional[str]:
         lhs, rhs, out = operands
 
         if lhs.bank != "VMEM":

@@ -5,11 +5,11 @@ from typing import NewType, Union
 import cython
 
 if cython.compiled:
-    from cython.cimports.libc import math, limits
+    from cython.cimports.libc import limits, math
 else:
     import math
 
-from . import layouts, utils
+from . import layouts, specs, utils
 from .impl import ComposeHole, DirectConv, Impl, Loop, MatmulHole, MoveLet, ReduceSum
 from .impl.compose import Pipeline
 from .impl.loops import SlidingWindowLoop
@@ -25,7 +25,7 @@ if not cython.compiled:
 
 @cython.exceptval(-1)
 def move_cost(
-    src: Union[Tensor, Tile], dest_layout: layouts.Layout, prefetching: bool
+    src: specs.TensorSpec, dest_layout: layouts.Layout, prefetching: bool
 ) -> MainCost:
     """Estimate a cost of moving all data in `src` to a new matrix with `dest_layout`.
 
@@ -73,7 +73,8 @@ def move_cost(
         cost //= 2
 
     # Add a 10% to penalize a lack of hardware prefetching
-    if not src.contiguous or meaningful_layout_difference:
+    # TODO: Add contiguousness to specs; check `not src.contiguous`.
+    if meaningful_layout_difference:
         cost = int(2 * cost)
     return cost
 
@@ -129,7 +130,7 @@ def detailed_analytical_cost(
 
         new_cost = factor * cost_dict[op.inner][0]
         cost_expl = f"{new_cost:5d} = {factor} * _"
-        assert compute_cost(op) == new_cost, f"{compute_cost(op)} != {new_cost}"
+        # assert compute_cost(op) == new_cost, f"{compute_cost(op)} != {new_cost}"
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
     elif isinstance(op, SlidingWindowLoop):
@@ -169,7 +170,9 @@ def detailed_analytical_cost(
     elif isinstance(op, MoveLet):
         # This is the core of the cost model; the cost of a schedule is derived
         # entirely from its moves, which are done by MoveLet operations.
-        mcost = move_cost(op.source, op.destination.layout, op.prefetching)
+        mcost = move_cost(
+            op.spec.operands[op.source_idx], op.destination.layout, op.prefetching
+        )
         cost_dict = detailed_analytical_cost(
             op.inner,
             depth=depth + 1,
@@ -226,7 +229,9 @@ def compute_cost(op: Impl) -> MainCost:
     elif isinstance(op, (Mult, HvxVrmpyaccVuwVubRub)):
         return _assign_cost(op, 0)
     elif isinstance(op, MoveLet):
-        mcost: MainCost = move_cost(op.source, op.destination.layout, op.prefetching)
+        mcost: MainCost = move_cost(
+            op.spec.operands[op.source_idx], op.destination.layout, op.prefetching
+        )
         return _assign_cost(op, _clip_add(mcost, compute_cost(op.inner)))
     elif isinstance(op, (ComposeHole, MatmulHole)):
         return _assign_cost(op, 0)

@@ -5,12 +5,12 @@ from .actions import (
     SlidingTileOutAction,
     TileOutAction,
 )
-from .base import Impl, spec_to_hole
+from .base import AppliedImpl, Impl, spec_to_hole
 from .compose import ComposeHole, Pipeline
 from .directconv import DirectConv
 from .loops import Loop, SlidingWindowLoop
 from .matmuls import HvxGemvmpybbwAsm, HvxVrmpyaccVuwVubRub, MatmulHole, Mult
-from .moves import MoveLet
+from .moves import MoveLet, PadTranspack
 from .pruning import ParentSummary
 from .reducesum import ReduceSum
 from .settings import (
@@ -26,6 +26,9 @@ from .utils import ActionOutOfDomain
 
 __all__ = [
     "ActionOutOfDomain",
+    "allow_reduce_splits",
+    "allow_sliding_windows",
+    "AppliedImpl",
     "BREAK_MOVE_SYMMETRIES",
     "BREAK_SEQUENTIAL_TILES",
     "ComposeHole",
@@ -39,17 +42,16 @@ __all__ = [
     "MoveAction",
     "MoveLet",
     "Mult",
-    "PRUNE_RELAYOUT_CYCLES",
+    "PadTranspack",
     "ParentSummary",
     "PeelAction",
     "Pipeline",
+    "PRUNE_RELAYOUT_CYCLES",
     "ReduceSum",
     "SlidingTileOutAction",
     "SlidingWindowLoop",
-    "TileOutAction",
-    "TileSizeMode",
-    "allow_reduce_splits",
-    "allow_sliding_windows",
     "spec_to_hole",
     "tile_size_mode",
+    "TileOutAction",
+    "TileSizeMode",
 ]
