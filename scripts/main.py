@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 
 import argparse
+import asyncio
+import csv
 import doctest
 import logging
+import os
 import pathlib
 import sys
 import time
-from typing import Optional, TypeVar
+from typing import Optional, TypeVar, Union
 
 import morello.impl.base
-from morello import dtypes, impl, op_pprint, search, search_cache, specs, system_config
+from morello import (
+    cost,
+    dtypes,
+    impl,
+    op_pprint,
+    search,
+    search_cache,
+    specs,
+    system_config,
+)
 from morello.codegen import gen
 from morello.impl import TileSizeMode
 from morello.search import schedule_search
@@ -21,6 +33,7 @@ DTYPE = dtypes.Uint32
 logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--results", type=pathlib.Path, default=None)
 parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=str)
 parser.add_argument("--top", type=int, default=1)
@@ -81,7 +94,7 @@ def _conv_main(
     filter_count,
     top_k: int,
     cache: search_cache.ScheduleCache,
-) -> tuple[Optional[morello.impl.base.Impl], float]:
+) -> tuple[Optional[impl.Impl], float]:
     target = system_config.current_target()
     assert filter_width <= image_width and filter_height <= image_height
     left = target.tensor(
@@ -175,12 +188,10 @@ def main() -> int:
 
     # Parse command line arguments
     parsed_args = parser.parse_args()
-
-    # Make sure --save-code directory exists
     parsed_args.save_code.mkdir(exist_ok=False, parents=True)
 
     # Set a target
-    system_config.set_current_target(system_config.target_by_name(parsed_args.target))
+    system_config.set_current_target(parsed_args.target)
 
     # Configure from args
     if parsed_args.row_major_only:
@@ -230,21 +241,62 @@ def main() -> int:
         search.prune_column_major.reset(col_major_token)
         impl.tile_size_mode.reset(tile_size_mode_token)
 
+    # Update the cache with real execution times.
+    #
+    # Run up to MAX_CONCURRENT_BENCHMARK target programs concurrently.
+    # This should probably be kept well below the number of cores on the
+    # system to avoid interference.
+    #
+    # TODO: Factor this block of code out, which is shared with
+    # search_algo_comparison.py.
+    loop = asyncio.get_event_loop()
+    semaphore = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_BENCHMARKS", "1")))
+
+    async def get_time(imp):
+        async with semaphore:
+            return await system_config.current_target().time_impl(imp)
+
+    benchmarked_runtimes = loop.run_until_complete(
+        asyncio.gather(*(get_time(im) for im in scheds))
+    )
+
+    results_rows = [["Cost", "Runtime", "Impl", "Source Path"]]
     if scheds:
-        for sched in scheds:
+        for sched_idx, (sched, benchmarked_runtime) in enumerate(
+            zip(scheds, benchmarked_runtimes)
+        ):
             op_pprint.pprint(sched)
-        for sched_idx, sched in enumerate(scheds):
             if parsed_args.print_code:
                 print("")
                 gen.generate_c("kernel_only", sched, sys.stdout)
+            print("")
+            print(f"Impl Runtime: {benchmarked_runtime:.2f}s")
+
+            source_path = pathlib.Path("")
             if parsed_args.save_code:
-                with (parsed_args.save_code / f"{sched_idx}.c").open("w") as f:
+                source_path = parsed_args.save_code / f"{sched_idx}.c"
+                with (source_path).open("w") as f:
                     gen.generate_c("kernel_only", sched, f)
+
+            results_rows.append(
+                [
+                    cost.compute_cost(sched),
+                    benchmarked_runtime,
+                    op_pprint.pformat(sched),
+                    str(source_path),
+                ]
+            )
     else:
+        results_rows.append(["", "", "", ""])
         print("No schedule found")
 
     print("")
-    print(f"Took {runtime:.2f}s")
+    print(f"Scheduling took {runtime:.2f}s")
+
+    if parsed_args.results:
+        with parsed_args.results.open("w") as f:
+            writer = csv.writer(f)
+            writer.writerows(results_rows)
 
     return 0
 
