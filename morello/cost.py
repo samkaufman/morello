@@ -1,9 +1,13 @@
 import functools
-import math
 from operator import mul
-from typing import Union
+from typing import NewType, Union
 
 import cython
+
+if cython.compiled:
+    from cython.cimports.libc import math, limits
+else:
+    import math
 
 from . import layouts, utils
 from .impl import ComposeHole, DirectConv, Impl, Loop, MatmulHole, MoveLet, ReduceSum
@@ -15,11 +19,14 @@ from .tensor import Tensor, Tile
 
 COST_ATTR = "_cost"
 
+if not cython.compiled:
+    MainCost = NewType("MainCost", int)
 
-@cython.returns(cython.long)
+
+@cython.exceptval(-1)
 def move_cost(
     src: Union[Tensor, Tile], dest_layout: layouts.Layout, prefetching: bool
-) -> int:
+) -> MainCost:
     """Estimate a cost of moving all data in `src` to a new matrix with `dest_layout`.
 
     Notice that the destination level is not considered. The cache_hit_cost for a
@@ -52,7 +59,11 @@ def move_cost(
         10
         * hit_cost
         * functools.reduce(mul, real_dims[:-1], 1)
-        * math.ceil(real_dims[-1] / current_system().line_size)
+        * cython.cast(
+            cython.int,
+            math.ceil(real_dims[-1] / current_system().line_size),
+            typecheck=True,
+        )
     )
 
     # Remove half the cost for prefetched moves. This is essentially a
@@ -111,12 +122,14 @@ def detailed_analytical_cost(
             factor = op.steps
         else:
             main_steps = op.full_steps
-            factor = math.ceil(main_steps / current_system().processors)
+            factor = cython.cast(
+                cython.int, math.ceil(main_steps / current_system().processors)
+            )
             factor += op.steps - main_steps
 
         new_cost = factor * cost_dict[op.inner][0]
         cost_expl = f"{new_cost:5d} = {factor} * _"
-        assert compute_cost(op) == new_cost
+        assert compute_cost(op) == new_cost, f"{compute_cost(op)} != {new_cost}"
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
     elif isinstance(op, SlidingWindowLoop):
@@ -163,6 +176,8 @@ def detailed_analytical_cost(
             env=env,
             holes_ok=holes_ok,
         )
+        assert isinstance(mcost, int)
+        assert isinstance(cost_dict[op.inner][0], int)
         new_cost = mcost + cost_dict[op.inner][0]
         cost_expl = f"{new_cost:5d} = {mcost} + _"
         assert compute_cost(op) == new_cost
@@ -177,26 +192,32 @@ def detailed_analytical_cost(
 
 # TODO: Reduce code duplication with detailed_analytical_cost
 @cython.exceptval(-1)
-def compute_cost(op: Impl) -> cython.long:
+@cython.cdivision(True)
+def compute_cost(op: Impl) -> MainCost:
     # Return if already computed
     try:
-        return getattr(op, COST_ATTR)
+        return cython.cast(MainCost, getattr(op, COST_ATTR), typecheck=True)
     except AttributeError:
         pass
 
     if isinstance(op, Pipeline):
-        sum_cost: cython.long = 0
+        sum_cost: MainCost = 0
         for s in op.stages:
-            sum_cost += compute_cost(s)
+            sum_cost = _clip_add(sum_cost, compute_cost(s))
         return _assign_cost(op, sum_cost)
     elif isinstance(op, Loop):
         if not op.parallel:
-            factor: cython.long = op.steps
+            factor: MainCost = op.steps
         else:
-            main_steps: cython.long = op.full_steps
-            factor: cython.long = math.ceil(main_steps / current_system().processors)
-            factor += op.steps - main_steps
-        return _assign_cost(op, factor * compute_cost(op.inner))
+            system_processors: cython.int = current_system().processors
+            main_steps: cython.int = op.full_steps
+            op_steps: cython.int = op.steps
+            with cython.nogil:
+                factor = cython.cast(
+                    cython.int, math.ceil(main_steps / system_processors)
+                )
+                factor += _clip_sub(op_steps, main_steps)
+        return _assign_cost(op, _clip_mul(factor, compute_cost(op.inner)))
     elif isinstance(op, SlidingWindowLoop):
         raise NotImplementedError()
     elif isinstance(op, (DirectConv, ReduceSum)):
@@ -205,8 +226,8 @@ def compute_cost(op: Impl) -> cython.long:
     elif isinstance(op, (Mult, HvxVrmpyaccVuwVubRub)):
         return _assign_cost(op, 0)
     elif isinstance(op, MoveLet):
-        mcost: cython.long = move_cost(op.source, op.destination.layout, op.prefetching)
-        return _assign_cost(op, mcost + compute_cost(op.inner))
+        mcost: MainCost = move_cost(op.source, op.destination.layout, op.prefetching)
+        return _assign_cost(op, _clip_add(mcost, compute_cost(op.inner)))
     elif isinstance(op, (ComposeHole, MatmulHole)):
         return _assign_cost(op, 0)
     else:
@@ -214,6 +235,49 @@ def compute_cost(op: Impl) -> cython.long:
 
 
 @cython.cfunc
-def _assign_cost(impl: Impl, val: cython.long) -> cython.long:
+@cython.nogil
+def _clip_add(a: MainCost, b: MainCost) -> MainCost:
+    if not cython.compiled:
+        # This is a functional difference. No clipping happens if interpreted.
+        return a + b
+    result: MainCost
+    overflowed = __builtin_saddl_overflow(a, b, cython.address(result))
+    if overflowed:
+        return _MAX_COST
+    return result
+
+
+@cython.cfunc
+@cython.exceptval(_MAX_COST, check=True)
+@cython.nogil
+def _clip_sub(a: MainCost, b: MainCost) -> MainCost:
+    if not cython.compiled:
+        # This is a functional difference. No clipping happens if interpreted.
+        return a - b
+    result: MainCost
+    underflowed = __builtin_ssubl_overflow(a, b, cython.address(result))
+    if underflowed:
+        with cython.gil:
+            raise OverflowError(f"Subtracting {a} - {b} underflowed")
+    return result
+
+
+@cython.cfunc
+@cython.nogil
+def _clip_mul(a: MainCost, b: MainCost) -> MainCost:
+    if not cython.compiled:
+        # This is a functional difference. No clipping happens if interpreted.
+        return a * b
+    result: MainCost
+    overflowed = __builtin_smull_overflow(a, b, cython.address(result))
+    if overflowed:
+        return _MAX_COST
+    return result
+
+
+@cython.cfunc
+@cython.inline
+def _assign_cost(impl: Impl, val: MainCost) -> MainCost:
+    assert val >= 0, f"val was unexpectedly negative: {val}"
     object.__setattr__(impl, COST_ATTR, val)
     return val

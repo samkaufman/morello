@@ -246,9 +246,6 @@ def main() -> int:
     # Run up to MAX_CONCURRENT_BENCHMARK target programs concurrently.
     # This should probably be kept well below the number of cores on the
     # system to avoid interference.
-    #
-    # TODO: Factor this block of code out, which is shared with
-    # search_algo_comparison.py.
     loop = asyncio.get_event_loop()
     semaphore = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_BENCHMARKS", "1")))
 
