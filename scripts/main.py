@@ -3,6 +3,7 @@
 import argparse
 import doctest
 import logging
+import pathlib
 import sys
 import time
 from typing import Optional, TypeVar
@@ -32,7 +33,8 @@ parser.add_argument(
     default="powers_of_two",
     dest="tile_sizes",
 )
-parser.add_argument("--generate-code", action="store_true", dest="generate_code")
+parser.add_argument("--print-code", action="store_true")
+parser.add_argument("--save-code", type=pathlib.Path)
 subparsers = parser.add_subparsers(dest="spec")
 
 parser_matmul = subparsers.add_parser("matmul", help="Impl a matrix multiplication")
@@ -174,6 +176,9 @@ def main() -> int:
     # Parse command line arguments
     parsed_args = parser.parse_args()
 
+    # Make sure --save-code directory exists
+    parsed_args.save_code.mkdir(exist_ok=False, parents=True)
+
     # Set a target
     system_config.set_current_target(system_config.target_by_name(parsed_args.target))
 
@@ -228,10 +233,13 @@ def main() -> int:
     if scheds:
         for sched in scheds:
             op_pprint.pprint(sched)
-        for sched in scheds:
-            if parsed_args.generate_code:
+        for sched_idx, sched in enumerate(scheds):
+            if parsed_args.print_code:
                 print("")
                 gen.generate_c("kernel_only", sched, sys.stdout)
+            if parsed_args.save_code:
+                with (parsed_args.save_code / f"{sched_idx}.c").open("w") as f:
+                    gen.generate_c("kernel_only", sched, f)
     else:
         print("No schedule found")
 
