@@ -188,7 +188,8 @@ def main() -> int:
 
     # Parse command line arguments
     parsed_args = parser.parse_args()
-    parsed_args.save_code.mkdir(exist_ok=False, parents=True)
+    if parsed_args.save_code:
+        parsed_args.save_code.mkdir(exist_ok=False, parents=True)
 
     # Set a target
     system_config.set_current_target(parsed_args.target)
@@ -271,7 +272,7 @@ def main() -> int:
 
             source_path = pathlib.Path("")
             if parsed_args.save_code:
-                source_path = parsed_args.save_code / f"{sched_idx}.c"
+                source_path = parsed_args.save_code / f"{sched_idx:3d}.c"
                 with (source_path).open("w") as f:
                     gen.generate_c("kernel_only", sched, f)
 
