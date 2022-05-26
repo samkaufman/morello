@@ -1,4 +1,3 @@
-import functools
 import warnings
 from typing import Callable, Iterable, Optional, Sequence, Union
 
@@ -6,9 +5,9 @@ import dataclass_abc
 
 from .. import dtypes, layouts, specs, system_config
 from ..system_config import current_target
-from ..tensor import OperandIdx, Tensor, Tile
+from ..tensor import OperandIdx, Tensor, TensorLike, Tile
 from .actions import MatmulSplitAction, TileOutAction
-from .base import Impl, NonAllocatingLeaf
+from .base import AppliedImpl, Impl, NonAllocatingLeaf
 from .loops import Loop
 from .moves import MoveLet, PadTranspack, common_move, common_operand_move_actions
 from .pruning import (
@@ -162,13 +161,13 @@ class MatmulHole(MatmulBase):
         if lhs.dim_sizes[1] > 1:
             return self.split(1).complete()
 
-        next_general_lhs = system.next_general_bank(self.lhs.bank)
+        next_general_lhs = system.next_general_bank(lhs.bank)
         if next_general_lhs:
             return self.move_input(0, bank=next_general_lhs).complete()
-        next_general_rhs = system.next_general_bank(self.rhs.bank)
+        next_general_rhs = system.next_general_bank(rhs.bank)
         if next_general_rhs:
             return self.move_input(1, bank=next_general_rhs).complete()
-        next_general_out = system.next_general_bank(self.output.bank)
+        next_general_out = system.next_general_bank(self.spec.output.bank)
         if next_general_out:
             return self.move_output(bank=next_general_out).complete()
         return self.place_mult()
@@ -184,6 +183,9 @@ class MatmulHole(MatmulBase):
     @assert_stable_spec
     def place_hvx_vrmpyacc(self) -> "HvxVrmpyaccVuwVubRub":
         return HvxVrmpyaccVuwVubRub(self.spec)
+
+    def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
+        raise NotImplementedError("apply not implemented for holes")
 
 
 @dataclass_abc.dataclass_abc(frozen=True)

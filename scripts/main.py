@@ -236,7 +236,7 @@ def main() -> int:
         impl.tile_size_mode.reset(tile_size_mode_token)
 
     # Let's apply some "concrete" tensors so we can pprint and generate code.
-    scheds = [s.apply_default() for s in scheds]
+    scheds = [s.to_applied() for s in scheds]
 
     # Update the cache with real execution times.
     #

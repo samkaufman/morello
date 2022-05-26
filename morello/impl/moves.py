@@ -108,6 +108,7 @@ class MoveLet(_OperandWrapper):
     inner: Impl
 
     def __post_init__(self):
+        assert self.source_idx >= 0
         assert (
             self.inner.spec.operands[(-1 if self.input_idx is None else self.input_idx)]
             == self.destination.spec
@@ -259,11 +260,16 @@ def common_move(
     :param kwargs: Extra keyword arguments are forwarded the current target's
       `tensor_spec` method while constructing the destination tensor.
     """
+    if operand_idx == -1:
+        operand_idx = len(op.spec.inputs)
+    elif operand_idx < -1:
+        raise ValueError("operand_idx must be in [-1, number of operands)")
+
     operand: specs.TensorSpec = op.spec.operands[operand_idx]
     if bank is None:
-        bank = operand.spec.bank
+        bank = operand.bank
     if layout is None:
-        layout = operand.spec.layout
+        layout = operand.layout
     if bank == operand.bank and layout == operand.layout:
         raise ValueError("Either bank or layout must differ from current")
     new_mat = current_target().tensor(
@@ -281,11 +287,17 @@ def common_move(
     input_idx = operand_idx if operand_idx < len(op.spec.inputs) else None
     assert input_idx is not None or operand == op.spec.output
 
+    new_operands = list(op.spec.operands)
+    new_operands[operand_idx] = new_mat.spec
+    new_inner_spec = op.spec.replace_io(
+        tuple(new_operands[:-1]), new_operands[-1], op.spec.serial_only
+    )
+
     return MoveLet(
         spec=op.spec,
         source_idx=operand_idx,
         destination=new_mat,
         input_idx=input_idx,
         prefetching=prefetching,
-        inner=op.replace_spec(op.spec.replace_operand(operand_idx, new_mat.spec)),
+        inner=op.replace_spec(new_inner_spec),
     )

@@ -10,9 +10,6 @@ from .tensorspec import TensorSpec
 class Spec:
     """The abstract root class for program specifications."""
 
-    def replace_operand(self, operand_idx: int, new_operand: TensorSpec) -> "Spec":
-        raise NotImplementedError()
-
     def replace_io(
         self,
         inputs: tuple[TensorSpec, ...],

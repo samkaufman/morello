@@ -11,7 +11,7 @@ try:
 except ImportError:
     pass
 
-from .. import impl, layouts, pruning, replace, specs, system_config
+from .. import impl, layouts, pruning, specs
 from ..impl import Impl
 from ..search_cache import CachedScheduleSet, ScheduleCache
 from . import common
@@ -65,7 +65,7 @@ def _inner_schedule_search(
     top_k: int,
     prune_col_major: bool,
     parent_summary=None,
-    stats=None,
+    stats: Optional[common.SearchStats] = None,
     callbacks=None,
 ):
     """Implements most of the logic of schedule_search.
@@ -80,7 +80,7 @@ def _inner_schedule_search(
         if isinstance(spec.output.layout, layouts.ColMajor):
             return None
 
-    if stats:
+    if stats is not None:
         stats.expansions += 1
 
     # Do a cache lookup. There are three outcomes: (a) a cached schedule is present and
@@ -96,7 +96,7 @@ def _inner_schedule_search(
             return None
         return [im for im, _ in cache_result.contents]
 
-    if callbacks:
+    if callbacks is not None:
         callbacks.enter_unseen(spec, memory_limits)
 
     # Create a an Impl hole corresponding to the query spec
@@ -116,14 +116,13 @@ def _inner_schedule_search(
         callbacks=callbacks,
     )
 
-    if callbacks:
+    if callbacks is not None:
         if best_results:
             callbacks.exit(spec, [(r[0], r[1][0]) for r in best_results])
         else:
             callbacks.exit(spec, None)
 
-    if best_results:
-        assert all((im.spec == spec) for im, _ in best_results)
+    if len(best_results):
         cache.put(
             spec,
             CachedScheduleSet(tuple((im, c) for im, (c, _, _) in best_results)),

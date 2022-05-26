@@ -180,6 +180,8 @@ def pprint(
     file=sys.stdout,
     holes_ok=False,
 ):
+    op = op.to_applied()
+
     cost_dict = None
     headers = [""]
     if show_spec:
@@ -192,7 +194,7 @@ def pprint(
     if show_scheduled:
         headers.append("scheduled")
     table = []
-    namer = tensor_namer.TensorNamer(op, tensors_to_color=op.inputs + (op.output,))
+    namer = tensor_namer.TensorNamer(op, tensors_to_color=op.operands)
     _build_table(
         op,
         show_spec,

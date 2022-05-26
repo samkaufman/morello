@@ -1,7 +1,6 @@
 import pytest
 
-import morello.impl.matmuls
-from morello import dtypes, pruning, search_cache, specs
+from morello import dtypes, pruning, impl, search_cache, specs
 from morello.system_config import current_system, current_target
 
 # TODO: Add assertion that tests below only put scheduled Impls into the cache.
@@ -11,41 +10,23 @@ from morello.system_config import current_system, current_target
 def test_cache_common_scenario(dtype):
     target = current_target()
 
-    lhs = target.tensor(
-        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
-    )
-    rhs = target.tensor(
-        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
-    )
-    output = target.tensor(
-        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
-    )
-    fast_schedule = morello.impl.matmuls.MatmulHole(lhs, rhs, output, serial_only=False)
+    lhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
+    rhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
+    output = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
+    fast_schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
     fast_wrapped_schedule = search_cache.CachedScheduleSet(((fast_schedule, 10),))
 
-    lhs = target.tensor(
-        spec=target.tensor_spec((100, 100), dtype=dtype, bank="RF"), name=None
-    )
-    rhs = target.tensor(
-        spec=target.tensor_spec((100, 100), dtype=dtype, bank="RF"), name=None
-    )
-    output = target.tensor(
-        spec=target.tensor_spec((100, 100), dtype=dtype, bank="RF"), name=None
-    )
-    slow_schedule = morello.impl.matmuls.MatmulHole(lhs, rhs, output, serial_only=False)
+    lhs = target.tensor_spec((100, 100), dtype=dtype, bank="RF")
+    rhs=target.tensor_spec((100, 100), dtype=dtype, bank="RF")
+    output=target.tensor_spec((100, 100), dtype=dtype, bank="RF")
+    slow_schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
     slow_wrapped_schedule = search_cache.CachedScheduleSet(((slow_schedule, 50),))
 
-    lhs = target.tensor(
-        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
-    )
-    rhs = target.tensor(
-        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
-    )
-    output = target.tensor(
-        spec=target.tensor_spec((8, 8), dtype=dtype, bank="RF"), name=None
-    )
-    impossible_schedule = morello.impl.matmuls.MatmulHole(
-        lhs, rhs, output, serial_only=False
+    lhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
+    rhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
+    output = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
+    impossible_schedule = impl.MatmulHole(
+        specs.Matmul(lhs, rhs, output, serial_only=False)
     )
 
     cache = search_cache.ScheduleCache()
@@ -125,16 +106,10 @@ def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype):
 def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
     target = current_target()
     db = current_system().default_bank
-    lhs = target.tensor(
-        spec=target.tensor_spec((8, 8), dtype=dtype, bank=db), name=None
-    )
-    rhs = target.tensor(
-        spec=target.tensor_spec((8, 8), dtype=dtype, bank=db), name=None
-    )
-    output = target.tensor(
-        spec=target.tensor_spec((8, 8), dtype=dtype, bank=db), name=None
-    )
-    schedule = morello.impl.matmuls.MatmulHole(lhs, rhs, output, serial_only=False)
+    lhs=target.tensor_spec((8, 8), dtype=dtype, bank=db)
+    rhs=target.tensor_spec((8, 8), dtype=dtype, bank=db)
+    output=target.tensor_spec((8, 8), dtype=dtype, bank=db)
+    schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
     wrapped_schedule = search_cache.CachedScheduleSet(((schedule, 10),))
 
     cache = search_cache.ScheduleCache()

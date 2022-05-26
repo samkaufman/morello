@@ -41,23 +41,6 @@ class TensorLike(abc.ABC):
         # Just a sugar getter for the underlying Spec.
         return self.spec.bank
 
-    @property
-    @abc.abstractmethod
-    def contiguous(self) -> bool:
-        """Whether or not elements are contiguous in the underlying memory."""
-        # TODO: Expand the above doc to talk about phys. vs. logical contiguousness.
-        raise NotImplementedError()
-
-    @property
-    @abc.abstractmethod
-    def address_root(self) -> "TensorBase":
-        """Returns the containing tensor with a contiguous address space.
-
-        Essentially, this returns the receiver if in non-cache memory, or its own
-        address_space otherwise.
-        """
-        raise NotImplementedError()
-
     def replace_tensors(
         self, replacements: Mapping["TensorLike", "TensorLike"]
     ) -> "Tile":
@@ -119,17 +102,6 @@ class TensorBase(TensorLike):
         return self
 
     @property
-    def contiguous(self) -> bool:
-        return True
-
-    @property
-    def address_root(self) -> "TensorBase":
-        # TODO: Don't hardcode cache names here.
-        if self.bank in ("L1", "L2") and self.origin:
-            return self.origin.address_root
-        return self
-
-    @property
     def bank(self) -> str:
         return self.spec.bank
 
@@ -187,16 +159,18 @@ class Tile(TensorLike):
         return self.spec.bank
 
     @typing.final
-    @property
-    def steps(self) -> int:
-        return functools.reduce(
-            operator.mul, map(self.steps_dim, range(len(self.dim_sizes))), 1
-        )
+    def steps(self, origin_shape: Sequence[int]) -> int:
+        if len(origin_shape) != len(self.spec.dim_sizes):
+            raise ValueError("origin_shape rank did not match Tile rank")
+        s = 1
+        for i, origin_dim_size in enumerate(origin_shape):
+            s *= self.steps_dim(i, origin_dim_size)
+        return s
 
-    def steps_dim(self, dim: int, origin_size: Optional[int] = None) -> int:
+    def steps_dim(self, dim: int, origin_size: int) -> int:
         raise NotImplementedError()
 
-    def boundary_size(self, dim: int, origin_size: Optional[int] = None) -> int:
+    def boundary_size(self, dim: int, origin_size: int) -> int:
         raise NotImplementedError()
 
     def __str__(self):
@@ -204,21 +178,10 @@ class Tile(TensorLike):
         layout_epi = ""
         bank_epi = ""
         if not isinstance(self.spec.layout, layouts.RowMajor):
-            layout_epi = f", {self.root.layout}"
+            layout_epi = f", {self.spec.layout}"
         if self.bank != system_config.current_system().default_bank:
             bank_epi = f", {self.bank}"
         return f"{type(self).__name__}({dims_part}{layout_epi}{bank_epi})"
-
-    @property
-    def contiguous(self) -> bool:
-        """Whether or not elements are contiguous in the underlying memory."""
-        from . import utils
-
-        return utils.contiguous(self, self.address_root)
-
-    @property
-    def address_root(self) -> "TensorBase":
-        return self.origin.address_root
 
     @property
     def frontiers(self) -> tuple[int, ...]:
@@ -227,19 +190,15 @@ class Tile(TensorLike):
 
     def __getstate__(self):
         return {
-            "dim_sizes": self.dim_sizes,
+            "source": self.source,
+            "spec": self.spec,
             "name": self.name,
-            "origin": self.origin,
         }
 
     def __setstate__(self, state_dict):
-        if "__dim_sizes" in state_dict:
-            object.__setattr__(self, "dim_sizes", state_dict["__dim_sizes"])
-        else:
-            object.__setattr__(self, "dim_sizes", state_dict["dim_sizes"])
-
+        object.__setattr__(self, "source", state_dict["source"])
+        object.__setattr__(self, "spec", state_dict["spec"])
         object.__setattr__(self, "name", state_dict["name"])
-        object.__setattr__(self, "origin", state_dict["origin"])
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -267,10 +226,7 @@ class ConvolutionImageTile(Tile):
             self.dim_sizes
         ), f"Incompatible ranks; filters was {self.filter_shape} and image was {self.dim_sizes}"
 
-    def steps_dim(self, dim: int, origin_size: Optional[int] = None) -> int:
-        if origin_size is None:
-            origin_size = self.origin.dim_sizes[dim]
-
+    def steps_dim(self, dim: int, origin_size: int) -> int:
         # Batch should be a normal tiling.
         if dim == 0:
             return math.ceil(origin_size / self.dim_sizes[dim])
@@ -279,10 +235,7 @@ class ConvolutionImageTile(Tile):
         f = self.filter_shape[dim - 1]
         return int(math.ceil(_s(origin_size, f) / _s(inner, f)))
 
-    def boundary_size(self, dim: int, origin_size: Optional[int] = None) -> int:
-        if origin_size is None:
-            origin_size = self.origin.dim_sizes[dim]
-
+    def boundary_size(self, dim: int, origin_size: int) -> int:
         # Non-spatial dimensions (batch) should be simple tilings.
         if dim == 0:
             return origin_size % self.dim_sizes[dim]

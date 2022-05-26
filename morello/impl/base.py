@@ -2,15 +2,12 @@ import abc
 import dataclasses
 import functools
 import typing
-from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union, cast
+from typing import Callable, Iterable, Optional, Sequence, Tuple, Union, cast
 
-from abc_delegation import delegation_metaclass
-
-from morello import specs, tiling
-
+from .. import specs, tiling
 from ..layouts import Layout
 from ..system_config import current_system, current_target
-from ..tensor import OperandIdx, SimpleTile, Tensor, TensorLike, Tile
+from ..tensor import OperandIdx, TensorLike, Tile
 from .pruning import ParentSummary
 from .utils import assert_stable_spec
 
@@ -224,11 +221,9 @@ class Impl(abc.ABC):
         # (i.e. a ConvolutionImageTile) for a sliding Tensor managed by the
         # resulting SlidingWindowLoop. This method doesn't yet support the
         # case that multiple introduced inputs have non-zero frontiers.
-        impl = cast(Loop, self.tile_out(output_shape))
+        impl = self.tile_out(output_shape)
         assert isinstance(impl, Loop)
-        assert impl.spec == self.spec
-        assert impl.inputs == self.inputs
-        assert impl.output == self.output
+        assert len(impl.inner.children) == 0, "Expected inner to be a leaf"
 
         # Sort the tiles into those to preserve and the one over which
         # to slide
@@ -259,28 +254,13 @@ class Impl(abc.ABC):
             ),
             name=None,
         )
-
-        assert len(impl.inner.children) == 0, "Expected inner to be a leaf"
-        inner = impl.inner.replace_io(
-            inputs=(
-                live_tensor if inp == tile_to_convert else inp
-                for inp in impl.inner.inputs
-            ),
-            output=(
-                live_tensor
-                if impl.inner.output == tile_to_convert
-                else impl.inner.output
-            ),
-        )
-
         return SlidingWindowLoop(
-            inputs=self.inputs,
-            output=self.output,
             live_tensor=live_tensor,
+            live_tensor_idx=tile_to_convert.source,
             frontier_size=tile_to_convert.frontiers[sliding_dim],
             other_tiles=tuple(other_tiles),
             spec=self.spec,
-            inner=inner,
+            inner=impl.inner,
         )
 
     @assert_stable_spec
@@ -350,8 +330,7 @@ class Impl(abc.ABC):
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
         pass
 
-    @typing.final
-    def apply_default(self) -> "AppliedImpl":
+    def to_applied(self) -> "AppliedImpl":
         return self.apply([current_target().tensor(o) for o in self.spec.operands])
 
     @property
@@ -446,6 +425,9 @@ class AppliedImpl(Impl):
             raise ValueError("Cannot apply again.")
         return self
 
+    def to_applied(self) -> "AppliedImpl":
+        return self
+
     def __getattr__(self, name):
         return getattr(self.unapplied, name)
 
@@ -497,11 +479,11 @@ def spec_to_hole(spec: specs.Spec) -> "Impl":
     from .reducesum import ReduceSum
 
     if isinstance(spec, specs.Convolution):
-        return DirectConv(serial_only=spec.serial_only)
+        return DirectConv(spec)
     elif isinstance(spec, specs.Matmul):
         return MatmulHole(spec)
     elif isinstance(spec, specs.ReduceSum):
-        return ReduceSum(serial_only=spec.serial_only)
+        return ReduceSum(spec)
     elif isinstance(spec, specs.Compose):
         return ComposeHole(spec)
     else:

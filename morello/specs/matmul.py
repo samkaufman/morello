@@ -54,16 +54,6 @@ class Matmul(base.Spec):
     def serial_only(self) -> bool:
         return self._serial_only
 
-    def replace_operand(self, operand_idx: int, new_operand: TensorSpec) -> "Matmul":
-        if operand_idx == 0:
-            return Matmul(new_operand, self.rhs, self.output, self.serial_only)
-        elif operand_idx == 1:
-            return Matmul(self.lhs, new_operand, self.output, self.serial_only)
-        elif operand_idx in (2, -1):
-            return Matmul(self.lhs, self.rhs, new_operand, self.serial_only)
-        else:
-            raise ValueError(f"Invalid operand index {operand_idx}")
-
     @staticmethod
     def from_io(
         inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool

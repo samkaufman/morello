@@ -59,7 +59,7 @@ def logical_indexing_expr(source: Tile, dim: int) -> sympy.Expr:
         * p0, p1, ... pn: the point in `source`
         * i0, i1, ... in: the index of a concrete tile in the given dimension
 
-    :param dim: The dimension in `source.origin` into which the returned Expr result
+    :param dim: The dimension in `source`'s origin into which the returned Expr result
         translates. Normally, this function is called once for each dimension in the
         origin.
     """

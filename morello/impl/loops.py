@@ -9,7 +9,7 @@ from torch import inner
 
 from .. import specs, system_config
 from ..tensor import ConvolutionImageTile, OperandIdx, Tensor, TensorLike, Tile
-from .base import Impl, AppliedImpl, make_applied_impl
+from .base import AppliedImpl, Impl, make_applied_impl
 from .utils import assert_stable_spec
 
 
@@ -75,7 +75,7 @@ class Loop(Impl):
     """Iterate over subscripts of the inner Impl's operand tiles."""
 
     spec: specs.Spec
-    subscripts: tuple[int]
+    subscripts: tuple[int, ...]
     tiles: frozenset[Tile]
     inner: Impl
     parallel: bool
@@ -96,28 +96,6 @@ class Loop(Impl):
         if self.parallel and not self.inner.spec.serial_only:
             raise ValueError("Parallel loop's child must be serial only")
 
-    # @functools.cached_property
-    # def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
-    #     # The inputs of a Loop are inner's inputs, with the introduced
-    #     # tiles substituted for their origins
-    #     new_inputs = []
-    #     for inner_inp in self.inner.inputs:
-    #         input_to_add = inner_inp
-    #         if inner_inp in self.tiles:
-    #             input_to_add = inner_inp.origin
-    #         assert input_to_add is not None
-    #         new_inputs.append(input_to_add)
-    #     return tuple(new_inputs)
-
-    # @property
-    # def output(self) -> Union[Tensor, Tile]:
-    #     # The output of a Loop is inner's output or, if that output is
-    #     # a tile introduced in this Loop as an tile, the tile itself.
-    #     o: Union[Tensor, Tile] = self.inner.output
-    #     if o in self.tiles:
-    #         o = o.origin
-    #     return o
-
     @property
     def steps(self) -> int:
         val = 1
@@ -136,14 +114,10 @@ class Loop(Impl):
                 val *= all_steps
         return val
 
-    def steps_subscript(
-        self, subscript, concrete_outer_size: Optional[int] = None
-    ) -> int:
+    def steps_subscript(self, subscript) -> int:
         return self._apply_to_subscripts(subscript, lambda t: t.steps_dim)
 
-    def boundary_size(
-        self, subscript, concrete_outer_size: Optional[int] = None
-    ) -> int:
+    def boundary_size(self, subscript) -> int:
         return self._apply_to_subscripts(subscript, lambda t: t.boundary_size)
 
     def _apply_to_subscripts(self, subscript, fn, *args, **kwargs) -> int:
@@ -251,36 +225,22 @@ class SlidingWindowLoop(_TilingMixin, Impl):
     general.
     """
 
-    inputs: Tuple[Union[Tile, Tensor]]
-    output: Union[Tile, Tensor]
-
-    # TODO: Replace live_tensor with an index into inner's inputs?
     live_tensor: Tensor  # Tensor taken as input by inner. Its origin should be the source.
+    live_tensor_idx: OperandIdx
 
-    # sliding_dim is the only dim between live_tensor and live_tensor.origin
+    # sliding_dim is the only dim between live_tensor and live_tensor's origin
     # that is non-equal.
 
     frontier_size: int
     other_tiles: tuple[Tile, ...]
-    # TODO: replace spec w/ property
     spec: specs.Spec
     inner: Impl
 
-    def __post_init__(self):
-        assert self.spec == self._compute_spec()
-
-    def _compute_spec(self) -> specs.Spec:
-        return self.inner.spec.replace_io(
-            tuple(inp.spec for inp in self.inputs), self.output.spec
-        )
-
     @functools.cached_property
     def _sliding_dim(self) -> int:
+        live_tensor_origin = self.spec.operands[self.live_tensor_idx]
         for dim in range(len(self.live_tensor.dim_sizes)):
-            if (
-                self.live_tensor.dim_sizes[dim]
-                != self.live_tensor.origin.dim_sizes[dim]
-            ):
+            if self.live_tensor.dim_sizes[dim] != live_tensor_origin.dim_sizes[dim]:
                 return dim
         raise Exception("All dimensions were equal")
 
@@ -307,9 +267,10 @@ class SlidingWindowLoop(_TilingMixin, Impl):
     @property
     def _introduced_env_srt_sorted(
         self,
-    ) -> Iterable[tuple[Union[Tensor, Tile], Union[Tensor, Tile]]]:
-        return [(self.live_tensor, self.live_tensor.origin)] + [
-            (t, t.origin) for t in self.other_tiles
+    ) -> Iterable[tuple[Union[Tensor, Tile], specs.TensorSpec]]:
+        live_tensor_origin = self.spec.operands[self.live_tensor_idx]
+        return [(self.live_tensor, live_tensor_origin)] + [
+            (t, self.spec.operands[t.source]) for t in self.other_tiles
         ]
 
     @property
@@ -322,7 +283,8 @@ class SlidingWindowLoop(_TilingMixin, Impl):
 
     @property
     def update_loads(self) -> int:
-        size = self.live_tensor.origin.dim_sizes[self._sliding_dim]
+        live_tensor_origin = self.spec.operands[self.live_tensor_idx]
+        size = live_tensor_origin.dim_sizes[self._sliding_dim]
         size -= self.live_tensor.dim_sizes[self._sliding_dim]
         return math.ceil(size / self.frontier_size)
 
@@ -331,9 +293,10 @@ class SlidingWindowLoop(_TilingMixin, Impl):
         return self.whole_loads + self.update_loads
 
     @functools.cached_property
-    def introduced(self) -> frozenset[tuple[Union[Tensor, Tile], Union[Tensor, Tile]]]:
-        return frozenset([(self.live_tensor, self.live_tensor.origin)]) | frozenset(
-            (t, t.origin) for t in self.other_tiles
+    def introduced(self) -> frozenset[tuple[Union[Tensor, Tile], specs.TensorSpec]]:
+        live_tensor_origin = self.spec.operands[self.live_tensor_idx]
+        return frozenset([(self.live_tensor, live_tensor_origin)]) | frozenset(
+            (t, self.spec.operands[t.source]) for t in self.other_tiles
         )
 
     @property
@@ -347,3 +310,10 @@ class SlidingWindowLoop(_TilingMixin, Impl):
         mem = {k: 0 for k in system_config.current_system().banks}
         mem[self.live_tensor.bank] = self.live_tensor.spec.bytes_used
         return [mem]
+
+    def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
+        inner_operands = list(operands)
+        for tile in self.other_tiles:
+            inner_operands[tile.source] = tile
+        applied_body = self.inner.apply(inner_operands)
+        return make_applied_impl(self.replace_children([applied_body]), operands)  # type: ignore

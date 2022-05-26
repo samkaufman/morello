@@ -75,7 +75,7 @@ def _assign_tensor_name(
     if tensor_source:
         if isinstance(tensor, Tile):
             preferred_suffix = "t"
-        elif "RF" in tensor.root.bank:
+        elif "RF" in tensor.spec.bank:
             preferred_suffix = "r"
         else:
             # 's' is an arbitrary choice, but this case hardly ever occurs in
@@ -114,7 +114,7 @@ def _map_tensors_to_sources(imp, _accum=None) -> Mapping[TensorLike, TensorLike]
 class TensorNamer:
     def __init__(
         self,
-        imp: impl.Impl,
+        imp: impl.AppliedImpl,
         tensors_to_color: Optional[Iterable[TensorLike]] = None,
     ) -> None:
         self.name_assignments = dict()

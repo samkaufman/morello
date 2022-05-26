@@ -144,8 +144,8 @@ def detailed_analytical_cost(
         )
         # The moves are implicit in SlidingWindowLoop, so we'll construct
         # Tiles to serve as operands to `move_cost`.
-        whole_window_tile = op.live_tensor.origin.simple_tile(op.live_tensor.dim_sizes)
-        frontier_tile = op.live_tensor.origin.simple_tile(op.frontier_shape)
+        whole_window_tile = op.operands[op.live_tensor_idx].simple_tile(op.live_tensor.dim_sizes)
+        frontier_tile = op.operands[op.live_tensor_idx].simple_tile(op.frontier_shape)
         # TODO: Should support prefetching for sliding windows.
         whole_load_cost = move_cost(whole_window_tile, op.live_tensor.layout, False)
         update_cost = move_cost(frontier_tile, op.live_tensor.layout, False)

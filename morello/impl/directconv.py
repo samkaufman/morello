@@ -33,6 +33,10 @@ class DirectConv(NonAllocatingLeaf):
 
     spec: specs.Spec
 
+    def replace_spec(self, new_spec: specs.Spec) -> "Impl":
+        assert type(self) is DirectConv
+        return DirectConv(new_spec)
+
     @property
     def is_scheduled(self) -> bool:
         # TODO: Drop these RF constants. Instead, use target-specific impls.
@@ -161,7 +165,4 @@ class DirectConv(NonAllocatingLeaf):
         yield from common_operand_move_actions(self)
 
     def __str__(self) -> str:
-        epi = ", serial" if self.spec.serial_only else ""
-        return (
-            f"{type(self).__name__}({self.lhs}, {self.rhs}, " f"out={self.output}{epi})"
-        )
+        return f"{type(self).__name__}({self.spec})"
