@@ -1,11 +1,12 @@
 import functools
+import sys
 from operator import mul
 from typing import NewType, Union
 
 import cython
 
 if cython.compiled:
-    from cython.cimports.libc import math, limits
+    from cython.cimports.libc import math
 else:
     import math
 
@@ -20,6 +21,7 @@ from .tensor import Tensor, Tile
 COST_ATTR = "_cost"
 
 if not cython.compiled:
+    _MAX_COST = sys.maxsize
     MainCost = NewType("MainCost", int)
 
 
