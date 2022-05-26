@@ -216,7 +216,7 @@ def compute_cost(op: Impl) -> MainCost:
             op_steps: cython.int = op.steps
             with cython.nogil:
                 factor = cython.cast(
-                    cython.int, math.ceil(main_steps / system_processors)
+                    cython.int, (main_steps + system_processors - 1) / system_processors
                 )
                 factor += _clip_sub(op_steps, main_steps)
         return _assign_cost(op, _clip_mul(factor, compute_cost(op.inner)))
