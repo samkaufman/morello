@@ -88,11 +88,13 @@ def _inner_schedule_search(
     # exists and we can propagate that fact to the caller, and (c) the cache has no
     # information for us and search can proceed.
     try:
-        wrapped_cached_schedule = cache.get(spec, memory_limits)
-        if wrapped_cached_schedule is None:
-            return None
+        cache_result = cache.get(spec, memory_limits)
     except KeyError:
         pass
+    else:
+        if cache_result is None:
+            return None
+        return [im for im, _ in cache_result.contents]
 
     if callbacks:
         callbacks.enter_unseen(spec, memory_limits)
