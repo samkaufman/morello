@@ -252,7 +252,7 @@ def main() -> int:
 
     async def get_time(imp):
         async with semaphore:
-            return await system_config.current_target().time_impl(imp)
+            return await system_config.current_target().time_impl_robustly(imp)
 
     benchmarked_runtimes = loop.run_until_complete(
         asyncio.gather(*(get_time(im) for im in scheds))

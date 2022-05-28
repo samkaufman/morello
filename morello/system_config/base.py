@@ -3,6 +3,7 @@ import dataclasses
 import functools
 import logging
 from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
+import typing
 
 if TYPE_CHECKING:
     from .. import dtypes
@@ -65,6 +66,13 @@ class Target(abc.ABC):
         Returns a measurement of time in arbitrary units.
         """
         raise NotImplementedError()
+
+    @typing.final
+    async def time_impl_robustly(self, impl, repeat=10) -> float:
+        means = []
+        for _ in range(repeat):
+            means.append(await self.time_impl(impl))
+        return min(means)
 
 
 # TODO: Re-freeze. (Need a way to cache properties.)
