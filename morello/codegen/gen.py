@@ -26,6 +26,13 @@ _unroll: contextvars.ContextVar["bool"] = contextvars.ContextVar(
 )
 
 _DCFETCH_EMIT_STRATEGY = "first-pt"
+_SIMD_MOVES = True
+_GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str]] = {
+    (Uint32, 8): (32, "vui8"),  # TODO: Add
+    # TODO: Add more, incl. the following two, and fix _BROADCAST_VEC_MULT_WIDTH
+    # (Uint32, 16): (16, "vui16"),
+    # (Uint8, 32): (4, "vub32"),
+}
 
 
 # TODO: Choose a more principled STACK_CUTOFF.
@@ -345,10 +352,17 @@ def _update_index_exprs(
 
 class _CTensor(abc.ABC):
     @abc.abstractmethod
-    def c_index(self, expr):
+    def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
+        """Return a C expression referring to the value at a given expression.
+
+        Additionally, `reinterpret` may be provided to introduce a type cast.
+        This is useful for interpreting a (partial) buffer as a vector type.
+        """
         raise NotImplementedError()
 
-    def c_index_ptr(self, expr):
+    def c_index_ptr(self, expr, reinterpret: Optional[str] = None):
+        if reinterpret:
+            raise NotImplementedError()
         ptr_str = f"&{self.c_index(expr)}"
         if ptr_str.endswith("[0]"):
             ptr_str = ptr_str[:-3]
@@ -360,6 +374,10 @@ class _CTensor(abc.ABC):
 
     @abc.abstractmethod
     def emit_free(self):
+        raise NotImplementedError()
+
+    @property
+    def declared_type(self) -> str:
         raise NotImplementedError()
 
 
@@ -376,10 +394,33 @@ class _CPtr(_CNameTensor):
     def dtype(self) -> Dtype:
         return self.backing_tensor.dtype
 
-    def c_index(self, expr):
+    def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
+        s = f"{self.name}[{_expr_to_c(expr)}]"
+        if reinterpret:
+            s = f"*({reinterpret} *)(&{s})"
+        return s
+
+    def _bad_new_c_index(self, expr, run=1) -> str:
+        # TODO: How's this prototype implementation where we just substitute the name and dereference?
+        new_backing_tensor = dataclasses.replace(self.backing_tensor, name=self.name)
+        # extra = " /* run={run} */" if run > 1 else ""
+        extra = ""
+        s = f"*({new_backing_tensor.c_index(expr, run=run)}{extra})"
+        o = self._orig_c_index(expr, run=run)
+        # assert s == o, f"{s} != {o}"
+        # if s != o:
+        #     o = f"({o} /* alt={s} */)"
+        return o
+
+    def _orig_c_index(self, expr, run=1) -> str:
+        # TODO: Specialize below.
+        if run != 1:
+            return f"({self.name}[{_expr_to_c(expr)}])"
         return f"{self.name}[{_expr_to_c(expr)}]"
 
-    def c_index_ptr(self, expr):
+    def c_index_ptr(self, expr, reinterpret: Optional[str] = None):
+        if reinterpret:
+            raise NotImplementedError()
         return f"{self.name} + {_expr_to_c(expr)}"
 
     def emit_free(self):
@@ -396,14 +437,22 @@ class _CUnsizedHeapArray(_CNameTensor):
     name: str
     dtype: Dtype
 
-    def c_index(self, expr):
+    def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
+        if reinterpret:
+            raise NotImplementedError()
         return f"{self.name}[{_expr_to_c(expr)}]"
 
-    def c_index_ptr(self, expr):
+    def c_index_ptr(self, expr, reinterpret: Optional[str] = None):
+        if reinterpret:
+            raise NotImplementedError()
         return f"{self.name} + {_expr_to_c(expr)}"
 
     def emit_free(self):
         _writer.get().writeline(f"free({self.name});")
+
+    @property
+    def declared_type(self) -> str:
+        return self.dtype.c_type
 
 
 @dataclasses.dataclass(frozen=True)
@@ -424,14 +473,22 @@ class _CHeapArray(_CNameTensor):
             )
         return self
 
-    def c_index(self, expr):
+    def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
+        if reinterpret:
+            raise NotImplementedError()
         return f"{self.name}[{_expr_to_c(expr)}]"
 
-    def c_index_ptr(self, expr):
-        return f"{self.name} + {_expr_to_c(expr)}"
+    def c_index_ptr(self, expr, reinterpret: Optional[str] = None):
+        if reinterpret:
+            raise NotImplementedError()
+        return f"({self.name} + {_expr_to_c(expr)})"
 
     def emit_free(self):
         _writer.get().writeline(f"free({self.name});")
+
+    @property
+    def declared_type(self) -> str:
+        return self.dtype.c_type
 
 
 @dataclasses.dataclass(frozen=True)
@@ -440,10 +497,14 @@ class _CStackArray(_CNameTensor):
     size: int
     dtype: Dtype
 
-    def c_index(self, expr):
+    def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
+        if reinterpret:
+            raise NotImplementedError()
         return f"{self.name}[{_expr_to_c(expr)}]"
 
-    def c_index_ptr(self, expr):
+    def c_index_ptr(self, expr, reinterpret: Optional[str] = None):
+        if reinterpret:
+            raise NotImplementedError()
         return "&" + self.c_index(expr)
 
     def emit_free(self):
@@ -457,12 +518,54 @@ class _CStackArray(_CNameTensor):
 
 
 @dataclasses.dataclass(frozen=True)
+class _CVecVar(_CNameTensor):
+    name: str
+    size: int
+    dtype: Dtype
+
+    def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
+        if reinterpret:
+            assert expr == sympy.core.numbers.Zero()
+            return f"*({reinterpret} *)(&{self.name})"
+        return f"{self.name}[{_expr_to_c(expr)}]"
+
+    def c_index_ptr(self, expr, reinterpret: Optional[str] = None):
+        if reinterpret:
+            raise NotImplementedError()
+        if expr == sympy.core.numbers.Zero():
+            return "&" + self.name
+        return "&" + self.c_index(expr)
+
+    def emit_free(self):
+        pass
+
+    def emit(self) -> "_CVecVar":
+        # Allocate and zero the register.
+        _writer.get().writeline(f"{self.declared_type} {self.name} = {{0}};")
+        return self
+
+    def vec(self) -> str:
+        return self.c_index(0, reinterpret=self.declared_type)
+
+    @property
+    def declared_type(self) -> str:
+        return _GCC_VEC_TYPES[(self.dtype, self.size)][1]
+
+    @staticmethod
+    def accepts(dtype: Dtype, size: int) -> bool:
+        """Returns True if there exists a vector type for dtype and byte count."""
+        return (dtype, size) in _GCC_VEC_TYPES
+
+
+@dataclasses.dataclass(frozen=True)
 class _CValueVar(_CNameTensor):
     name: str
     dtype: Dtype
 
-    def c_index(self, expr):
-        # TODO: Assert that expr evaluates to 0
+    def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
+        if reinterpret:
+            raise NotImplementedError()
+        # TODO: Check that expr evaluates to 0
         return self.name
 
     def emit_free(self):
@@ -473,12 +576,15 @@ class _CValueVar(_CNameTensor):
         return self
 
 
-def _make_buffer(size: int, dtype: Dtype) -> _CNameTensor:
+def _make_buffer(size: int, dtype: Dtype, bank: str) -> _CNameTensor:
     name = _namer.get().fresh_name("buf")
     if (size * dtype.size) > STACK_CUTOFF:
         return _CHeapArray(name, size, dtype)
     elif size > 1:
-        return _CStackArray(name, size, dtype)
+        if _SIMD_MOVES and bank == "RF" and _CVecVar.accepts(dtype, size):
+            return _CVecVar(name, size, dtype)
+        else:
+            return _CStackArray(name, size, dtype)
     else:
         return _CValueVar(name, dtype)
 
@@ -500,7 +606,9 @@ class _CHvxVectors(_CTensor):
             names.append(new_name)
         return _CHvxVectors(names=names, dtype_bytes=tensor.dtype.size)
 
-    def c_index(self, expr):
+    def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
+        if reinterpret:
+            raise NotImplementedError()
         offset = int(expr)
         assert 128 % self.dtype_bytes == 0
         increment = 128 // self.dtype_bytes
@@ -523,9 +631,8 @@ def _emit_assignment_copy(
     source_index_expr: sympy.Expr,
     destination_index_expr: sympy.Expr,
     concrete_shape: tuple[int, ...],
-    source_ref_fn: Callable[[Union[sympy.Expr, int]], str],
-    dest_ref_fn: Callable[[Union[sympy.Expr, int]], str],
-    dest_free_fn: Callable[[], None],
+    source_c_buf: _CTensor,
+    dest_c_buf: _CNameTensor,
     is_input: bool,
     is_output: bool,
 ):
@@ -534,8 +641,8 @@ def _emit_assignment_copy(
 
     writer = _writer.get()
 
-    def inner_emit(for_output: bool):
-        nonlocal source_index_expr, destination_index_expr, source_ref_fn
+    def inner_emit_standard(for_output: bool):
+        nonlocal source_index_expr, destination_index_expr, source_c_buf, dest_c_buf
         with _emit_loop_nest_for_shape(concrete_shape) as loop_subs:
             # Substitute the loop iterator names into the source and destination
             # index expressions.
@@ -546,17 +653,33 @@ def _emit_assignment_copy(
             subbed_source_index_expr = source_index_expr.subs(substitutions)
             subbed_destination_index_expr = destination_index_expr.subs(substitutions)
 
-            left = dest_ref_fn(subbed_destination_index_expr)
-            right = source_ref_fn(subbed_source_index_expr)
+            left = dest_c_buf.c_index(subbed_destination_index_expr)
+            right = source_c_buf.c_index(subbed_source_index_expr)
             if for_output:
                 left, right = right, left
             writer.writeline(f"{left} = {right};")
+
+    def inner_emit_vec(for_output: bool):
+        nonlocal source_index_expr, source_c_buf, dest_c_buf
+        assert isinstance(dest_c_buf, _CVecVar)
+        left = dest_c_buf.vec()
+        right = source_c_buf.c_index(
+            expr_utils.zero_points(source_index_expr),
+            reinterpret=dest_c_buf.declared_type,
+        )
+        if for_output:
+            left, right = right, left
+        writer.writeline(f"{left} = {right};")
+
+    inner_emit = inner_emit_standard
+    # if isinstance(dest_c_buf, _CVecVar):
+    #     inner_emit = inner_emit_vec
 
     inner_emit(False)
     yield
     if is_output:
         inner_emit(True)
-    dest_free_fn()
+    dest_c_buf.emit_free()
 
 
 @contextlib.contextmanager
@@ -615,7 +738,9 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         assert isinstance(imp.stages[0].output, Tensor)
 
         last_c_buf = _make_buffer(
-            imp.stages[0].output.volume, imp.stages[0].output.dtype
+            imp.stages[0].output.volume,
+            imp.stages[0].output.dtype,
+            imp.stages[0].output.bank,
         ).emit()
         cur_slice = slice(-len(imp.stages[0].inputs), len(inps_op_details))
         cur_out = _pipeline_emit_stage(
@@ -629,7 +754,9 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         for stage, next_stage in zip(imp.stages[1:], imp.stages[2:]):
             assert isinstance(stage.output, Tensor)
 
-            new_c_buf = _make_buffer(stage.output.volume, stage.output.dtype).emit()
+            new_c_buf = _make_buffer(
+                stage.output.volume, stage.output.dtype, stage.output.bank
+            ).emit()
             cur_out = _pipeline_emit_stage(
                 stage, inps_op_details[cur_slice], new_c_buf, cur_out, None
             )
@@ -654,7 +781,53 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
     elif isinstance(imp, impl.Mult):
         l_ref, r_ref, o_ref = (d.c_tensor.c_index for d in op_details)
         l, r, o = (d.index_expr for d in op_details)
-        writer.writeline(f"{o_ref(o)} += {l_ref(l)} * {r_ref(r)};")
+        # Zeroing the points below is safe because these Impls are applied only
+        # to contiguous TensorSpecs. Zeroing produces a reference to the
+        # beginning of those buffers.
+        l = expr_utils.zero_points(l)
+        r = expr_utils.zero_points(r)
+        o = expr_utils.zero_points(o)
+        writer.writeline(f"{o_ref(o)} += {l_ref(l)} * {r_ref(r)};  /* Mult */")
+    elif isinstance(imp, impl.BroadcastVecMult):
+        l, r, o = (d.index_expr for d in op_details)
+        # Zeroing the points below is safe because these Impls are applied only
+        # to contiguous TensorSpecs. Zeroing produces a reference to the
+        # beginning of those buffers.
+        r = expr_utils.zero_points(r)
+        o = expr_utils.zero_points(o)
+        out_shape = op_details[2].concrete_origin_shape
+        rhs_volume = functools.reduce(
+            operator.mul, op_details[1].concrete_origin_shape, 1
+        )
+        if rhs_volume < 8:  # TODO: <-- Get more general size
+            # In the boundary case, we can't apply the vectorized op., so we'll
+            # insert a naive multiplication loop.
+            with _emit_loop_nest_for_shape(out_shape) as it_names:
+                substitutions = {
+                    f"p{dim}": (s if isinstance(s, int) else f"_{s}")
+                    for dim, s in enumerate(it_names)
+                }
+                l, r, o = [d.index_expr.subs(substitutions) for d in op_details]
+                l_ref, r_ref, o_ref = (d.c_tensor.c_index for d in op_details)
+                writer.writeline(f"{o_ref(o)} += {l_ref(l)} * {r_ref(r)};  /* Mult */")
+        else:
+            assert rhs_volume == 8
+            try:
+                vtype = _GCC_VEC_TYPES[(imp.spec.operands[2].dtype, rhs_volume)][1]
+            except Exception as e:
+                print(
+                    f"Got a {type(e)} for output operand: {op_details[-1].c_tensor}\n"
+                    f"and spec {imp.spec}"
+                )
+                raise
+            writer.writeline(
+                f"*({vtype} *)({op_details[-1].c_tensor.c_index_ptr(o)}) "
+                "+= "
+                # f"{l_ref(l)} * "
+                f"{op_details[0].c_tensor.c_index(l)} * "
+                f"(*({vtype} *)({op_details[1].c_tensor.c_index_ptr(r)}));"
+                " /* BroadcastVecMult */"
+            )
     elif isinstance(imp, impl.HvxVrmpyaccVuwVubRub):
         lhs, rhs, out = op_details
         lhs_ref_fn, rhs_ref_fn, out_ref_fn = (
@@ -696,8 +869,19 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
             new_op_idx_exprs = [ie.subs(substitutions) for ie in operand_index_exprs]
             with writer.indent_block():
                 in_i, in_f, o = new_op_idx_exprs
+
+                # TODO: Remove following debug comment.
+                writer.writeline(f"//  dest: {tensor_ref_fns[2]}")
+                writer.writeline(f"//  left: {tensor_ref_fns[0]}")
+                writer.writeline(f"// right: {tensor_ref_fns[1]}")
+                writer.writeline(f"// in_i")
+                writer.writeline(f"// in_i: {in_i}")
+                writer.writeline(f"// in_f: {in_f}")
+                writer.writeline(f"//    o: {o}")
+
                 writer.writeline(
-                    f"{tensor_ref_fns[2](o)} += {tensor_ref_fns[0](in_i)} * {tensor_ref_fns[1](in_f)};"
+                    f"{tensor_ref_fns[2](o)} += {tensor_ref_fns[0](in_i)} * "
+                    f"{tensor_ref_fns[1](in_f)};  /* DirectConv */"
                 )
     elif isinstance(imp, impl.ReduceSum):
         if not all(d == 1 for d in imp.output.dim_sizes):
@@ -1095,8 +1279,7 @@ def _move_hvx_vmem(
                 destination_index_expr,
                 concrete_shapes[source_idx],
                 source_ref_fn,
-                dest_ref_fn=vectors.c_index,
-                dest_free_fn=vectors.emit_free,
+                vectors,
                 is_input=(not imp.is_store),
                 is_output=imp.is_store,
             ):
@@ -1151,13 +1334,20 @@ def _iter_vectors(
     return exprs, contiguous
 
 
-def _move_registers(impl, source_idx, c_tensors, operand_index_exprs, concrete_shapes):
+def _move_registers(
+    impl,
+    source_idx,
+    c_tensors: Sequence[_CTensor],
+    operand_index_exprs,
+    concrete_shapes,
+):
     assert (source_idx < len(impl.operands) - 1) == (not impl.is_store)
     assert (source_idx >= len(impl.operands) - 1) == impl.is_store
 
-    c_buf = _make_buffer(
+    dest_c_buf = _make_buffer(
         functools.reduce(operator.mul, concrete_shapes[source_idx], 1),
         impl.destination.dtype,
+        impl.destination.bank,
     ).emit()
 
     # TODO: All of the below could be one _OperandDetails update
@@ -1181,14 +1371,13 @@ def _move_registers(impl, source_idx, c_tensors, operand_index_exprs, concrete_s
         operand_index_exprs[source_idx],
         destination_index_expr,
         concrete_shapes[source_idx],
-        c_tensors[source_idx].c_index,
-        c_buf.c_index,
-        c_buf.emit_free,
+        c_tensors[source_idx],
+        dest_c_buf,
         is_input=(not impl.is_store),
         is_output=impl.is_store,
     ):
         new_c_tensors = list(c_tensors)
-        new_c_tensors[source_idx] = c_buf
+        new_c_tensors[source_idx] = dest_c_buf
         _inner_generate_c(
             impl.inner,
             [
@@ -1258,6 +1447,8 @@ def generate_c(
     writer.writeline("#include <stdio.h>")
     writer.writeline("#include <string.h>")
     writer.writeline("#include <time.h>")
+    if _SIMD_MOVES:
+        writer.writeline("#include <immintrin.h>")
     if current_system().has_hvx:
         writer.writeline("#include <hexagon_types.h>")
         writer.writeline("#include <hexagon_protos.h>")
@@ -1266,6 +1457,12 @@ def generate_c(
 
     writer.writeline("#define is_aligned(POINTER, BYTE_COUNT) \\")
     writer.writeline("  (((uintptr_t)(const void *)(POINTER)) % (BYTE_COUNT) == 0)")
+
+    if _SIMD_MOVES:
+        for (dt, bytes), (cnt, name) in _GCC_VEC_TYPES.items():
+            writer.writeline(
+                f"typedef {dt.c_type} {name} __attribute__ ((vector_size ({cnt})));"
+            )
 
     # TODO: The following prelude is a mess. Include decls/defs on demand, and
     #  don't embed them here, in Python.
@@ -1540,7 +1737,7 @@ def generate_c(
     index_exprs = []
     for operand, initial_value in zip(imp.operands, values):
         assert isinstance(operand, tensor.Tensor)
-        c_buf = _make_buffer(operand.volume, operand.dtype)
+        c_buf = _make_buffer(operand.volume, operand.dtype, operand.bank)
         index_exprs.append(operand.layout.buffer_indexing_expr(operand.dim_sizes))
         tensor_names.append(c_buf.name)
         c_tensors.append(c_buf)

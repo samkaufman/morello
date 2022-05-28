@@ -14,7 +14,7 @@ from . import layouts, utils
 from .impl import ComposeHole, DirectConv, Impl, Loop, MatmulHole, MoveLet, ReduceSum
 from .impl.compose import Pipeline
 from .impl.loops import SlidingWindowLoop
-from .impl.matmuls import HvxVrmpyaccVuwVubRub, Mult
+from .impl.matmuls import BroadcastVecMult, HvxVrmpyaccVuwVubRub, Mult
 from .system_config import current_system
 from .tensor import Tensor, Tile
 
@@ -161,13 +161,13 @@ def detailed_analytical_cost(
         assert compute_cost(op) == new_cost
         return cost_dict
     elif isinstance(op, (DirectConv, ReduceSum)) and (op.is_scheduled or holes_ok):
-        assert compute_cost(op) == 0
-        return {op: (0, "    0")}
-    elif isinstance(op, (Mult, HvxVrmpyaccVuwVubRub)):
+        assert compute_cost(op) == 1
+        return {op: (1, "    1")}
+    elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
         # Tensor multiplication is free but its operands must be in memory.
         # (This cost model is only interested in the cost of moving data.)
-        assert compute_cost(op) == 0
-        return {op: (0, "    0")}
+        assert compute_cost(op) == 1
+        return {op: (1, "    1")}
     elif isinstance(op, MoveLet):
         # This is the core of the cost model; the cost of a schedule is derived
         # entirely from its moves, which are done by MoveLet operations.
@@ -224,9 +224,9 @@ def compute_cost(op: Impl) -> MainCost:
         raise NotImplementedError()
     elif isinstance(op, (DirectConv, ReduceSum)):
         # Reminder: these types can be either holes or scheduled
-        return _assign_cost(op, 0)
-    elif isinstance(op, (Mult, HvxVrmpyaccVuwVubRub)):
-        return _assign_cost(op, 0)
+        return _assign_cost(op, 1)
+    elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
+        return _assign_cost(op, 1)
     elif isinstance(op, MoveLet):
         mcost: MainCost = move_cost(op.source, op.destination.layout, op.prefetching)
         return _assign_cost(op, _clip_add(mcost, compute_cost(op.inner)))

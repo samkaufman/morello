@@ -326,6 +326,14 @@ class Impl(abc.ABC):
         )
 
     @assert_stable_spec
+    def place_broadcastvecmult(self, *args, **kwargs):
+        if len(self.children) != 1:
+            raise NotImplementedError()
+        return self.replace_children(
+            [next(iter(self.children)).place_broadcastvecmult(*args, **kwargs)]
+        )
+
+    @assert_stable_spec
     def place_hvx_vrmpyacc(self, *args, **kwargs):
         if len(self.children) != 1:
             raise NotImplementedError()

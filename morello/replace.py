@@ -91,7 +91,12 @@ def _mutating_replace(
         replacements[subject] = new_tile
         return new_tile
 
-    if type(subject) in (impl.MatmulHole, impl.Mult, impl.HvxVrmpyaccVuwVubRub):
+    if type(subject) in (
+        impl.MatmulHole,
+        impl.BroadcastVecMult,
+        impl.Mult,
+        impl.HvxVrmpyaccVuwVubRub,
+    ):
         return type(subject)(
             lhs=_mutating_replace(subject.lhs, replacements),
             rhs=_mutating_replace(subject.rhs, replacements),

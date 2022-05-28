@@ -9,7 +9,13 @@ from .base import Impl, spec_to_hole
 from .compose import ComposeHole, Pipeline
 from .directconv import DirectConv
 from .loops import Loop, SlidingWindowLoop
-from .matmuls import HvxGemvmpybbwAsm, HvxVrmpyaccVuwVubRub, MatmulHole, Mult
+from .matmuls import (
+    BroadcastVecMult,
+    HvxGemvmpybbwAsm,
+    HvxVrmpyaccVuwVubRub,
+    MatmulHole,
+    Mult,
+)
 from .moves import MoveLet
 from .pruning import ParentSummary
 from .reducesum import ReduceSum
@@ -26,8 +32,11 @@ from .utils import ActionOutOfDomain
 
 __all__ = [
     "ActionOutOfDomain",
+    "allow_reduce_splits",
+    "allow_sliding_windows",
     "BREAK_MOVE_SYMMETRIES",
     "BREAK_SEQUENTIAL_TILES",
+    "BroadcastVecMult",
     "ComposeHole",
     "DirectConv",
     "HvxGemvmpybbwAsm",
@@ -39,17 +48,15 @@ __all__ = [
     "MoveAction",
     "MoveLet",
     "Mult",
-    "PRUNE_RELAYOUT_CYCLES",
     "ParentSummary",
     "PeelAction",
     "Pipeline",
+    "PRUNE_RELAYOUT_CYCLES",
     "ReduceSum",
     "SlidingTileOutAction",
     "SlidingWindowLoop",
-    "TileOutAction",
-    "TileSizeMode",
-    "allow_reduce_splits",
-    "allow_sliding_windows",
     "spec_to_hole",
     "tile_size_mode",
+    "TileOutAction",
+    "TileSizeMode",
 ]

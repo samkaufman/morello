@@ -4,7 +4,7 @@ from typing import Callable, Iterable, Optional, Sequence, Union
 
 import dataclass_abc
 
-from .. import dtypes, specs, system_config
+from .. import dtypes, layouts, specs, system_config
 from ..layouts import Layout
 from ..system_config import current_target
 from ..tensor import Tensor, Tile
@@ -91,6 +91,9 @@ class MatmulHole(MatmulBase):
 
         if Mult.applies_to_operands(self.operands):
             yield self.place_mult
+
+        if BroadcastVecMult.applies_to_operands(self.operands):
+            yield self.place_broadcastvecmult
 
         if system_config.current_system().has_hvx:
             if HvxVrmpyaccVuwVubRub.applies_to_operands(self.operands):
@@ -196,6 +199,10 @@ class MatmulHole(MatmulBase):
         return Mult(self.lhs, self.rhs, self.output, self.serial_only)
 
     @assert_stable_spec
+    def place_broadcastvecmult(self) -> "BroadcastVecMult":
+        return BroadcastVecMult(self.lhs, self.rhs, self.output, self.serial_only)
+
+    @assert_stable_spec
     def place_hvx_gemvmpebbw(self) -> "HvxGemvmpybbwAsm":
         return HvxGemvmpybbwAsm(self.lhs, self.rhs, self.output, self.serial_only)
 
@@ -250,11 +257,58 @@ class Mult(MatmulLeaf):
         assert all(d == 1 for o in self.operands for d in o.dim_sizes)
 
     @staticmethod
-    def applies_to_operands(operands: Sequence[Union[Tensor, Tile]]) -> bool:
+    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
         return all(
             o.bank in ("RF", "HexagonRF") and all(d == 1 for d in o.dim_sizes)
             for o in operands
         )
+
+
+_BROADCAST_VEC_MULT_WIDTH = 256 // 8  # bytes
+
+
+@dataclass_abc.dataclass_abc(frozen=True)
+class BroadcastVecMult(MatmulLeaf):
+    def __post_init__(self):
+        super().__post_init__()
+        check_result = BroadcastVecMult._check_operands(self.operands)
+        if check_result:
+            raise ValueError(check_result)
+
+    @staticmethod
+    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
+        return BroadcastVecMult._check_operands(operands) is None
+
+    @staticmethod
+    def _check_operands(operands: Sequence[specs.TensorSpec]) -> Optional[str]:
+        lhs, rhs, out = operands
+
+        # TODO: Maybe model the AVX registers explicitly instead of using RF.
+        if lhs.bank != "RF" or rhs.bank != "RF" or out.bank != "RF":
+            return "BroadcastVecMult only supports RF operands"
+
+        if rhs.layout != layouts.ROW_MAJOR:
+            return "rhs must be row-major"
+        if out.layout != layouts.ROW_MAJOR:
+            return "out must be in row-major"
+
+        if lhs.dtype != rhs.dtype:
+            return f"Operand value types must match; lhs and rhs were {lhs.dtype} and {rhs.dtype}"
+        if lhs.dtype != out.dtype:
+            return f"Operand value types must match; lhs and out were {lhs.dtype} and {out.dtype}"
+
+        if any(d != 1 for d in lhs.dim_sizes):
+            return f"lhs must have one value, but had shape: {lhs.dim_sizes}"
+        if len(rhs.dim_sizes) != 2 or rhs.dim_sizes[0] != 1:
+            return f"rhs should have shape 1xn, but had shape: {rhs.dim_sizes}"
+        if out.dim_sizes != (1, rhs.dim_sizes[1]):
+            return f"out should have shape 1x{rhs.dim_sizes[1]}, but had shape: {out.dim_sizes}"
+
+        assert _BROADCAST_VEC_MULT_WIDTH % out.dtype.size == 0
+        if out.dim_sizes[1] != _BROADCAST_VEC_MULT_WIDTH // (out.dtype.size):
+            return f"Expects {_BROADCAST_VEC_MULT_WIDTH}-byte operands"
+
+        return None
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -298,7 +352,7 @@ class HvxGemvmpybbwAsm(MatmulLeaf):
         if rhs.dtype != dtypes.Uint8:
             return "rhs should be uint8"
         if out.dtype != dtypes.Uint32:
-            return "out should be uint8"
+            return "out should be uint32"
 
         # The n dimension below is called m by the implementation.
         m, _ = lhs.dim_sizes
