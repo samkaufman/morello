@@ -4,5 +4,6 @@ from . cimport base
 from .tensorspec cimport TensorSpec
 
 cdef class ReduceSum(base.Spec):
-    cdef readonly TensorSpec source, output
+    cdef readonly TensorSpec source
+    cdef readonly TensorSpec output
     cdef bint _serial_only

@@ -268,7 +268,7 @@ def main() -> int:
                 print("")
                 gen.generate_c("kernel_only", sched, sys.stdout)
             print("")
-            print(f"Impl Runtime: {benchmarked_runtime:.2f}s")
+            print(f"Impl Runtime: {benchmarked_runtime:.4f}s")
 
             source_path = pathlib.Path("")
             if parsed_args.save_code:
