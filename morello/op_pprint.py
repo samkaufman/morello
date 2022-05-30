@@ -19,10 +19,11 @@ def _build_table(
     table: List[List[str]],
     tensor_name_fn: Callable[[Union[tensor.Tensor, tensor.Tile]], str],
     indent_depth: int,
+    color: bool,
 ) -> None:
     system = current_system()
     ds = " " * (indent_depth * 2)
-    new_row = [f"{ds}{op.env_str(tensor_name_fn, underscore_inner=True, fancy=True)}"]
+    new_row = [f"{ds}{op.env_str(tensor_name_fn, underscore_inner=True, fancy=color)}"]
     if show_spec:
         new_row.append(str(op.spec))
     if cost_dict:
@@ -44,6 +45,7 @@ def _build_table(
                 table,
                 tensor_name_fn,
                 indent_depth + 1,
+                color=color,
             )
     else:
         for child in op.children:
@@ -59,11 +61,12 @@ def _build_table(
                 table,
                 tensor_name_fn,
                 indent_depth + 1 if should_indent else indent_depth,
+                color=color,
             )
 
     # As the stack unwinds, insert a "store" line if this was a Move for an output
     if isinstance(op, impl.MoveLet) and op.is_store:
-        store_row = [f"{ds}{op.store_env_str(tensor_name_fn, fancy=True)}"]
+        store_row = [f"{ds}{op.store_env_str(tensor_name_fn, fancy=color)}"]
         while len(store_row) < len(table[-1]):
             store_row.append("")
         table.append(store_row)
@@ -83,9 +86,15 @@ def pprint(
     show_cost: bool = True,
     show_utilization: bool = True,
     show_scheduled: bool = False,
+    color: bool = True,
     file=sys.stdout,
-    holes_ok=False,
+    holes_ok: bool = False,
 ):
+    def _cfmt(text, **kwargs):
+        if not color:
+            return text
+        return termcolor.colored(text, **kwargs)
+
     cost_dict = None
     headers = [""]
     if show_spec:
@@ -106,22 +115,23 @@ def pprint(
         show_utilization,
         show_scheduled,
         table,
-        tensor_name_fn=functools.partial(namer.name, color=True),
+        tensor_name_fn=functools.partial(namer.name, color=color),
         indent_depth=0,
+        color=color,
     )
 
     # Print a simple, static header.
-    print(termcolor.colored("Impl", attrs=["bold", "underline"]), file=file)
+    print(_cfmt("Impl", attrs=["bold", "underline"]), file=file)
 
     # Print the inputs and output
-    inputs_str = termcolor.colored("Inputs: ", attrs=["bold"])
+    inputs_str = _cfmt("Inputs: ", attrs=["bold"])
     inputs_str += ", ".join(
-        f"{namer.name(inp, color=True)}: {str(inp)}" for inp in op.inputs
+        f"{namer.name(inp, color=color)}: {str(inp)}" for inp in op.inputs
     )
     print(inputs_str, file=file)
     print(
-        f"{termcolor.colored('Output:', attrs=['bold'])} "
-        f"{namer.name(op.output, color=True)}: {str(op.output)}",
+        f"{_cfmt('Output:', attrs=['bold'])} "
+        f"{namer.name(op.output, color=color)}: {str(op.output)}",
         file=file,
     )
 
@@ -130,8 +140,8 @@ def pprint(
 
     # Print an epilogue
     print(
-        termcolor.colored("Note: ", attrs=["bold"])
-        + termcolor.colored("move*", attrs=["bold"])
+        _cfmt("Note: ", attrs=["bold"])
+        + _cfmt("move*", attrs=["bold"])
         + " is a MoveLet scope where the introduced tensor is an output.",
         file=file,
     )

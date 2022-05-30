@@ -280,7 +280,7 @@ def main() -> int:
                 [
                     cost.compute_cost(sched),
                     benchmarked_runtime,
-                    op_pprint.pformat(sched),
+                    op_pprint.pformat(sched, color=False),
                     str(source_path),
                 ]
             )
