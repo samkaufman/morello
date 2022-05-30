@@ -134,13 +134,13 @@ def _convnet_main(top_k: int, cache: search_cache.ScheduleCache):
 
     img = target.tensor(target.tensor_spec((2, 3, d, d), dtype=DTYPE), name="img")
     filters_a = target.tensor(
-        target.tensor_spec((32, 3, 5, 5), dtype=DTYPE), name="filters_a"
+        target.tensor_spec((16, 3, 5, 5), dtype=DTYPE), name="filters_a"
     )
     filters_b = target.tensor(
-        target.tensor_spec((32, 32, 5, 5), dtype=DTYPE), name="filters_b"
+        target.tensor_spec((16, 16, 5, 5), dtype=DTYPE), name="filters_b"
     )
     output = target.tensor(
-        target.tensor_spec((2, 32, d - 8, d - 8), dtype=DTYPE), name="output"
+        target.tensor_spec((2, 16, d - 8, d - 8), dtype=DTYPE), name="output"
     )
 
     start = time.time()

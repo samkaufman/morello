@@ -225,6 +225,7 @@ def _best_options(
             continue
 
         # Yield the product of all possible child Impls as options.
+        # TODO: There's almost certainly a smarter way to enumerate these.
         for selected_children in itertools.product(*subsearch_results):
             completed = new_tree.replace_children(selected_children)
             assert (
