@@ -66,9 +66,9 @@ def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
                 values=input_values,
             )
         )
-        print("stderr of program:\n" + run_result.stderr)
+        print("Stderr of program:\n" + run_result.stderr)
         print("")
-        print("stdout of program:\n" + run_result.stdout)
+        print("Stdout of program:\n" + run_result.stdout)
 
 
 def _read_from_output(output: str) -> np.ndarray:
