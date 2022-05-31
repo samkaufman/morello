@@ -148,12 +148,15 @@ def _spec_to_applied_hole(spec: specs.Spec) -> morello.impl.base.Impl:
 
 
 @st.composite
-def _arb_conv_spec(draw):
+def _arb_conv_spec(draw, parallel: Optional[bool] = None):
     """A strategy that yields Convolution specs.
 
     All tensors will have the same type.
     """
     target = system_config.current_target()
+
+    if parallel is None:
+        parallel = draw(st.booleans())
 
     dtype = draw(st.from_type(dtypes.Dtype))
     batch_size = draw(st.integers(min_value=1, max_value=7))
@@ -171,17 +174,20 @@ def _arb_conv_spec(draw):
         output=target.tensor_spec(
             (batch_size, filter_count, out_h, out_w), dtype=dtype
         ),
-        serial_only=draw(st.booleans()),
+        serial_only=(not parallel),
     )
 
 
 @st.composite
-def _arb_reduce_conv_spec(draw):
+def _arb_reduce_conv_spec(draw, parallel: Optional[bool] = None):
     """A strategy that yields Conv-then-Reduce specs.
 
     All tensors will have the same type.
     """
     target = system_config.current_target()
+
+    if parallel is None:
+        parallel = draw(st.booleans())
 
     dtype = draw(st.from_type(dtypes.Dtype))
     batch_count = draw(st.integers(min_value=1, max_value=9))
@@ -201,17 +207,20 @@ def _arb_reduce_conv_spec(draw):
         ),
         output=target.tensor_spec((batch_count, fc, out_h), dtype=dtype),
         intermediate_dtypes=(draw(st.from_type(dtypes.Dtype)),),
-        serial_only=draw(st.booleans()),
+        serial_only=(not parallel),
     )
 
 
 @st.composite
-def _arb_conv_reduce_conv_spec(draw):
+def _arb_conv_reduce_conv_spec(draw, parallel: Optional[bool] = None):
     """A strategy that yields Conv-Reduce-Conv specs.
 
     All tensors will have the same dtype.
     """
     target = system_config.current_target()
+
+    if parallel is None:
+        parallel = draw(st.booleans())
 
     dtype = draw(st.from_type(dtypes.Dtype))
     batch_count = draw(st.integers(min_value=1, max_value=9))
@@ -240,18 +249,21 @@ def _arb_conv_reduce_conv_spec(draw):
             draw(st.from_type(dtypes.Dtype)),
             draw(st.from_type(dtypes.Dtype)),
         ),
-        serial_only=draw(st.booleans()),
+        serial_only=(not parallel),
     )
 
 
 @st.composite
-def _arb_matmul_spec(draw):
+def _arb_matmul_spec(draw, parallel: Optional[bool] = None):
     """A strategy that yields Matmul specs.
 
     All tensors will have the same dtype.
     """
     # The max sizes should be at least 16 to explore vectorized ops
     target = system_config.current_target()
+
+    if parallel is None:
+        parallel = draw(st.booleans())
 
     dtype = draw(st.from_type(dtypes.Dtype))
     m = draw(st.integers(min_value=1, max_value=32))
@@ -261,15 +273,18 @@ def _arb_matmul_spec(draw):
         target.tensor_spec((m, k), dtype=dtype),
         target.tensor_spec((k, n), dtype=dtype),
         output=target.tensor_spec((m, n), dtype=dtype),
-        serial_only=draw(st.booleans()),
+        serial_only=(not parallel),
     )
 
 
 @st.composite
-def _arb_matmul_matmul_spec(draw):
+def _arb_matmul_matmul_spec(draw, parallel: Optional[bool] = None):
     """A strategy that yields Matmul-Matmul specs."""
     # The max sizes should be at least 16 to explore vectorized ops
     target = system_config.current_target()
+
+    if parallel is None:
+        parallel = draw(st.booleans())
 
     dtype = draw(st.from_type(dtypes.Dtype))
     m = draw(st.integers(min_value=1, max_value=32))
@@ -285,7 +300,7 @@ def _arb_matmul_matmul_spec(draw):
         ),
         output=target.tensor_spec((m, second_n), dtype=dtype),
         intermediate_dtypes=(draw(st.from_type(dtypes.Dtype)),),
-        serial_only=draw(st.booleans()),
+        serial_only=(not parallel),
     )
 
 
@@ -307,7 +322,7 @@ def _arb_zip_values_for_impl(draw, imp: morello.impl.base.Impl):
     return imp, [_value(op.dim_sizes, op.dtype) for op in imp.inputs]
 
 
-def _calculator_to_test(spec_st):
+def _calculator_to_test(spec_st_fn):
     def decorator_wrapper(calc_fn):
         @pytest.mark.slow
         @pytest.mark.parametrize(
@@ -318,13 +333,15 @@ def _calculator_to_test(spec_st):
             ],
             ids=["cpu", "hexagon"],
         )
+        @pytest.mark.parametrize("parallel", [True, False], ids=["parallel", "serial"])
         @hypothesis.given(st.data())
         @hypothesis.settings(deadline=CC_DEADLINE)
         @functools.wraps(calc_fn)
-        def wrapper(target, data):
+        def wrapper(target, parallel, data):
             with system_config.with_target(target):
                 impl, inp_values = data.draw(
-                    spec_st.map(_spec_to_applied_hole)
+                    spec_st_fn(parallel=parallel)
+                    .map(_spec_to_applied_hole)
                     .flatmap(_arb_impls_from_actions)
                     .flatmap(_arb_zip_values_for_impl)
                 )
@@ -450,7 +467,7 @@ def test_index_exprs_consistent_with_contiguous_props(inp):
     assert tile.contiguous == is_contiguous
 
 
-@_calculator_to_test(_arb_matmul_spec())
+@_calculator_to_test(_arb_matmul_spec)
 def test_codegen_for_matmul(_, inp_values):
     return inp_values[0] @ inp_values[1]
 
@@ -502,7 +519,7 @@ def test_codegen_for_matmul_with_hvx_gemvmpebbw_with_aligned_k_without_split(
         _test_impl(imp, inp_values, lambda _, v: v[0] @ v[1])
 
 
-@_calculator_to_test(_arb_matmul_matmul_spec())
+@_calculator_to_test(_arb_matmul_matmul_spec)
 def test_codegen_for_matmul_matmul(spec, inp_values):
     first_result = np.matmul(
         inp_values[1], inp_values[2], dtype=spec.intermediate_dtypes[0].np_type
@@ -510,13 +527,13 @@ def test_codegen_for_matmul_matmul(spec, inp_values):
     return np.matmul(first_result, inp_values[0], dtype=spec.output.dtype.np_type)
 
 
-@_calculator_to_test(_arb_conv_spec())
+@_calculator_to_test(_arb_conv_spec)
 def test_codegen_for_conv(spec, inp_values):
     out_type = spec.output.dtype.np_type
     return _conv2d(*inp_values, out_type)
 
 
-@_calculator_to_test(_arb_reduce_conv_spec())
+@_calculator_to_test(_arb_reduce_conv_spec)
 def test_codegen_for_reduce_conv(spec, inp_values):
     conv_out_type = spec.intermediate_dtypes[0].np_type
     expected_result = _conv2d(*inp_values, conv_out_type)
@@ -526,7 +543,7 @@ def test_codegen_for_reduce_conv(spec, inp_values):
 
 
 @pytest.mark.skip("Conv-ReduceSum-Conv are no longer compatible")
-@_calculator_to_test(_arb_conv_reduce_conv_spec())
+@_calculator_to_test(_arb_conv_reduce_conv_spec)
 def test_codegen_for_conv_reduce_conv(spec, inp_values):
     expected_result = _conv2d(
         inp_values[1], inp_values[2], spec.intermediate_dtypes[1].np_type
