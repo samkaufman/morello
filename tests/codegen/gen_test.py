@@ -375,6 +375,7 @@ def _test_impl(imp: morello.impl.base.Impl, inp_values, calc_fn):
             print_output=True,
             source_cb=lambda s: hypothesis.note("Source Code:\n" + s),
             values=inp_values,
+            check_flakiness=100,
         )
     )
     hypothesis.note("stderr of program:\n" + run_result.stderr)

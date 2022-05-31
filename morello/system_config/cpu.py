@@ -94,6 +94,7 @@ class CpuTarget(Target):
         print_output=False,
         source_cb=None,
         values=None,
+        check_flakiness: int = 1,
     ) -> RunResult:
         with tempfile.TemporaryDirectory() as dirname:
             source_path = os.path.join(dirname, "main.c")
@@ -121,24 +122,33 @@ class CpuTarget(Target):
                 binary_path,
                 source_path,
             ]
-            clang_proc = await asyncio.create_subprocess_exec(
-                *clang_cmd,
-            )
+            clang_proc = await asyncio.create_subprocess_exec(*clang_cmd)
             await clang_proc.wait()
             if clang_proc.returncode != 0:
                 raise Exception(f"Clang exited with code {clang_proc.returncode}")
 
             # Run the compiled binary
-            binary_proc = await asyncio.create_subprocess_exec(
-                binary_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await binary_proc.communicate()
-            if binary_proc.returncode != 0:
-                raise Exception(f"Binary exited with code {binary_proc.returncode}")
-            stdout = stdout.decode("utf8")
-            stderr = stderr.decode("utf8")
+            last_stdout = None
+            for it in range(check_flakiness):
+                binary_proc = subprocess.run(
+                    binary_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = binary_proc.stdout, binary_proc.stderr
+
+                if binary_proc.returncode != 0:
+                    raise Exception(f"Binary exited with code {binary_proc.returncode}")
+                stdout = stdout.decode("utf8")
+                stderr = stderr.decode("utf8")
+
+                if last_stdout is not None:
+                    assert stdout == last_stdout, (
+                        f"On iteration {it}, received inconsistent stdouts:"
+                        f"\n\n{stdout}\n\n{last_stdout}"
+                    )
+                last_stdout = stdout
+
             return RunResult(stdout, stderr)
 
     async def time_impl(self, impl) -> float:

@@ -57,6 +57,7 @@ class Target(abc.ABC):
         print_output=False,
         source_cb=None,
         values=None,
+        check_flakiness: int = 1
     ) -> RunResult:
         raise NotImplementedError()
 
