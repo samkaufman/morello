@@ -135,7 +135,7 @@ def test_pipeline_peak_and_additional_memory(
     assert len(intermed_shapes) + 1 == len(op_mems)
 
     intermediates: list[Optional[tensor.Tensor]] = [
-        tensor.Tensor(spec=specs.TensorSpec(shp, dtype=dtype, bank="RF"), name=None)
+        tensor.Tensor(spec=specs.TensorSpec(shp, dtype, True, bank="RF"), name=None)
         for shp in intermed_shapes
     ]
     intermediates.append(None)
@@ -175,18 +175,18 @@ def test_convolution_steps(
     print(f"Testing square {tile_size}")
     filter_cnt = 4
     img = tensor.Tensor(
-        spec=specs.TensorSpec((outer_batch, channels, img_size, img_size), dtype=dtype),
+        spec=specs.TensorSpec((outer_batch, channels, img_size, img_size), dtype, True),
         name="image",
     )
     filters = tensor.Tensor(
         spec=specs.TensorSpec(
-            (filter_cnt, channels, filter_size, filter_size), dtype=dtype
+            (filter_cnt, channels, filter_size, filter_size), dtype, True
         ),
         name="filters",
     )
     out = tensor.Tensor(
         spec=specs.TensorSpec(
-            (outer_batch, filter_cnt, out_size, out_size), dtype=dtype
+            (outer_batch, filter_cnt, out_size, out_size), dtype, True
         ),
         name="output",
     )
@@ -204,9 +204,9 @@ def test_convolution_steps(
 
 
 def test_evenly_divisible_matmul_tiling():
-    lhs = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
-    rhs = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
-    out = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
+    lhs = tensor.Tensor(specs.TensorSpec((4, 4), dtypes.Uint32, True), name=None)
+    rhs = tensor.Tensor(specs.TensorSpec((4, 4), dtypes.Uint32, True), name=None)
+    out = tensor.Tensor(specs.TensorSpec((4, 4), dtypes.Uint32, True), name=None)
     schedule = morello.impl.matmuls.MatmulHole(
         lhs, rhs, out, serial_only=False
     ).tile_out((2, 2))
@@ -236,15 +236,15 @@ def test_nested_convs_outputs_constant(
 ):
     # TODO: Update to try different batches counts
     image = tensor.Tensor(
-        specs.TensorSpec((1, 1, h + a + fa, w + b + fb), dtype=dtype), name=None
+        specs.TensorSpec((1, 1, h + a + fa, w + b + fb), dtype, True), name=None
     )
     # TODO: Update to try different channels counts
-    filters = tensor.Tensor(specs.TensorSpec((fi, 1, h, w), dtype=dtype), name=None)
+    filters = tensor.Tensor(specs.TensorSpec((fi, 1, h, w), dtype, True), name=None)
     expected_output_height = 1 + a + fa
     expected_output_width = 1 + b + fb
     output = tensor.Tensor(
         specs.TensorSpec(
-            (1, fi, expected_output_height, expected_output_width), dtype=dtype
+            (1, fi, expected_output_height, expected_output_width), dtype, True
         ),
         name=None,
     )
@@ -272,14 +272,14 @@ def test_nested_convs_outputs_constant(
 
 @pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 def test_tile_compose_hole_out(dtype):
-    img = tensor.Tensor(specs.TensorSpec((1, 1, 8, 8), dtype=dtype), name="image")
+    img = tensor.Tensor(specs.TensorSpec((1, 1, 8, 8), dtype, True), name="image")
     filters_a = tensor.Tensor(
-        specs.TensorSpec((4, 1, 3, 3), dtype=dtype), name="filtersA"
+        specs.TensorSpec((4, 1, 3, 3), dtype, True), name="filtersA"
     )
     filters_b = tensor.Tensor(
-        specs.TensorSpec((4, 4, 3, 3), dtype=dtype), name="filtersB"
+        specs.TensorSpec((4, 4, 3, 3), dtype, True), name="filtersB"
     )
-    output = tensor.Tensor(specs.TensorSpec((1, 4, 4, 4), dtype=dtype), name="output")
+    output = tensor.Tensor(specs.TensorSpec((1, 4, 4, 4), dtype, True), name="output")
 
     compose_spec = specs.Compose(
         (specs.Convolution, specs.Convolution),
@@ -327,14 +327,14 @@ def test_composehole_actions_change_spec(dtype):
     # This doesn't test for cycles introduced by sequences of more than one
     # action, but it makes sure that at least every individual step changes the
     # spec.
-    img = tensor.Tensor(specs.TensorSpec((1, 1, 8, 8), dtype=dtype), name="image")
+    img = tensor.Tensor(specs.TensorSpec((1, 1, 8, 8), dtype, True), name="image")
     filters_a = tensor.Tensor(
-        specs.TensorSpec((10, 1, 3, 3), dtype=dtype), name="filtersA"
+        specs.TensorSpec((10, 1, 3, 3), dtype, True), name="filtersA"
     )
     filters_b = tensor.Tensor(
-        specs.TensorSpec((7, 10, 3, 3), dtype=dtype), name="filtersB"
+        specs.TensorSpec((7, 10, 3, 3), dtype, True), name="filtersB"
     )
-    output = tensor.Tensor(specs.TensorSpec((1, 7, 4, 4), dtype=dtype), name="output")
+    output = tensor.Tensor(specs.TensorSpec((1, 7, 4, 4), dtype, True), name="output")
     initial_spec = specs.Compose(
         (specs.Convolution, specs.Convolution),
         (filters_b.spec, img.spec, filters_a.spec),

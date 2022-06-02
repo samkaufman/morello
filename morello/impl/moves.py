@@ -5,9 +5,9 @@ from typing import Any, Callable, Iterable, Optional, Union
 import dataclass_abc
 import termcolor
 
-from .. import layouts, specs, system_config
+from .. import layouts, specs, utils, system_config
 from ..layouts import Layout
-from ..system_config import current_target
+from ..system_config import current_target, current_system
 from ..tensor import Tensor, TensorLike, Tile
 from . import MoveAction
 from .base import Impl
@@ -333,10 +333,18 @@ def common_move(
         layout = operand.spec.layout
     if bank == operand.root.bank and layout == operand.layout:
         raise ValueError("Either bank or layout must differ from current")
+
+    # Will the result be contiguous? If the move is into "non-addressed"
+    # memory, then no. If it is, then it might be.
+    contiguous = False
+    if bank in current_system().addressed_banks:
+        contiguous = utils.contiguous((operand.dim_sizes, layout), operand.spec)
+
     new_mat = current_target().tensor(
         spec=current_target().tensor_spec(
             dim_sizes=operand.dim_sizes,
             dtype=operand.dtype,
+            contiguous=contiguous,
             layout=layout,
             bank=bank,
             **kwargs,

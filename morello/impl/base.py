@@ -128,7 +128,9 @@ class Impl(abc.ABC):
         if parallel:
             inner_serial = True
         inner = spec_to_hole(
-            self.spec.shrink_for_tile_out(output_shape, serial_only=inner_serial),
+            self.spec.shrink_for_tile_out(output_shape,
+                [op.address_root.spec for op in self.operands],
+                serial_only=inner_serial),
             inputs=smaller_inputs,
             output=smaller_output,
         )

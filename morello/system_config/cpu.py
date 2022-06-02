@@ -42,13 +42,14 @@ class CpuTarget(Target):
         self,
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
+        contiguous: bool = True,
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         **kwargs,
     ) -> specs.TensorSpec:
         if layout is None:
             layout = layouts.ROW_MAJOR
-        return specs.TensorSpec(dim_sizes, dtype, bank, layout)
+        return specs.TensorSpec(dim_sizes, dtype, contiguous, bank, layout)
 
     @functools.cached_property
     def system(self) -> "SystemDescription":
@@ -67,6 +68,7 @@ class CpuTarget(Target):
             faster_destination_banks=self._faster_destination_banks,
             next_general_bank=self._next_general_bank,
             ordered_banks=["RF", "GL"],
+            addressed_banks=frozenset(["RF", "GL"]),
         )
 
     @property

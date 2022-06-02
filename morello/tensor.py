@@ -51,11 +51,11 @@ class TensorLike(abc.ABC):
         return self.volume * self.dtype.size
 
     @property
-    @abc.abstractmethod
+    @typing.final
     def contiguous(self) -> bool:
         """Whether or not elements are contiguous in the underlying memory."""
         # TODO: Expand the above doc to talk about phys. vs. logical contiguousness.
-        raise NotImplementedError()
+        return self.spec.contiguous
 
     @property
     @abc.abstractmethod
@@ -147,10 +147,6 @@ class TensorBase(TensorLike):
         return self
 
     @property
-    def contiguous(self) -> bool:
-        return True
-
-    @property
     def address_root(self) -> "TensorBase":
         # TODO: Don't hardcode cache names here.
         if self.bank in ("L1", "L2") and self.origin:
@@ -233,13 +229,19 @@ class Tile(TensorLike):
 
     @functools.cached_property
     def spec(self) -> specs.TensorSpec:
+        from . import utils
+
         target = system_config.current_target()
         layout = layouts.ROW_MAJOR
         if any(d != 1 for d in self.dim_sizes):
             layout = self.root.layout
+        contiguous = utils.contiguous(
+            (self.dim_sizes, layout),
+            (self.address_root.spec.dim_sizes, self.address_root.spec.layout))
         return target.tensor_spec(
             dim_sizes=self.dim_sizes,
             dtype=self.origin.dtype,
+            contiguous=contiguous,
             bank=self.origin.bank,
             layout=layout,
         )
@@ -253,13 +255,6 @@ class Tile(TensorLike):
         if self.bank != system_config.current_system().default_bank:
             bank_epi = f", {self.bank}"
         return f"{type(self).__name__}({dims_part}{layout_epi}{bank_epi})"
-
-    @property
-    def contiguous(self) -> bool:
-        """Whether or not elements are contiguous in the underlying memory."""
-        from . import utils
-
-        return utils.contiguous(self, self.address_root)
 
     @property
     def address_root(self) -> "TensorBase":

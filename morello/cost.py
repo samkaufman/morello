@@ -46,7 +46,7 @@ def move_cost(
 
     hit_cost = current_system().banks[src.bank].cache_hit_cost
 
-    lodims = utils.layout_ordered_dims(src)
+    lodims = utils.layout_ordered_dims(src.spec)
     meaningful_layout_difference = (
         src.layout != dest_layout and lodims[0] != 1 and lodims[1] != 1
     )

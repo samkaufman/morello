@@ -14,12 +14,16 @@ from ..system_config import current_system
 class TensorSpec:
     """A TensorSpec describes an operand to a Spec.
 
-    This class is distinct from impl.Tensor and impl.Tile, which describe operands in
-    the scheduling language.
+    `contiguous' means that there is some way to iterate over the elements of
+    the tensor without skipping bytes.
+
+    This class is distinct from impl.Tensor and impl.Tile, which describe
+    operands in Impl.
     """
 
     dim_sizes: tuple[int, ...]
     dtype: Dtype
+    contiguous: bool
     bank: str
     layout: layouts.Layout
 
@@ -27,6 +31,7 @@ class TensorSpec:
         self,
         dim_sizes: tuple[int, ...],
         dtype: Dtype,
+        contiguous: bool,
         bank: Optional[str] = None,
         layout: layouts.Layout = layouts.ROW_MAJOR,
     ):
@@ -37,6 +42,7 @@ class TensorSpec:
         else:
             self.bank = bank
         self.layout = layout
+        self.contiguous = contiguous
 
         if not len(self.dim_sizes):
             raise ValueError("dim_sizes cannot be empty")
@@ -58,7 +64,7 @@ class TensorSpec:
                     f"{self.dim_sizes}. Must be multiple of 4×32."
                 )
 
-    def shrink(self, new_dim_sizes: tuple[int, ...]) -> "TensorSpec":
+    def shrink(self, new_dim_sizes: tuple[int, ...], contiguous: bool) -> "TensorSpec":
         """Returns a clone with new dimensions.
 
         If new_dim_sizes is all ones, the layout may be changed to row-major.
@@ -67,7 +73,11 @@ class TensorSpec:
         if all(d == 1 for d in new_dim_sizes):
             new_layout = layouts.ROW_MAJOR
         return TensorSpec(
-            new_dim_sizes, dtype=self.dtype, bank=self.bank, layout=new_layout
+            new_dim_sizes,
+            dtype=self.dtype,
+            bank=self.bank,
+            layout=new_layout,
+            contiguous=contiguous,
         )
 
     def is_valid_tile_shape(self, shape: tuple[int, ...]) -> bool:
@@ -86,12 +96,15 @@ class TensorSpec:
     def __str__(self):
         layout_epi = ""
         bank_epi = ""
+        c_epi = ""
         if not isinstance(self.layout, layouts.RowMajor):
             layout_epi = f", {self.layout}"
         if self.bank != current_system().default_bank:
             bank_epi = f", {self.bank}"
+        if not self.contiguous:
+            c_epi = ", nc"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
-        return f"({dims_part}, {self.dtype}{bank_epi}{layout_epi})"
+        return f"({dims_part}, {self.dtype}{bank_epi}{layout_epi}{c_epi})"
 
 
 @cython.dataclasses.dataclass(unsafe_hash=True)
@@ -116,12 +129,18 @@ class HvxVmemTensorSpec(TensorSpec):
             return False
         return True
 
-    def shrink(self, new_dim_sizes: tuple[int, ...]) -> "HvxVmemTensorSpec":
+    def shrink(
+        self, new_dim_sizes: tuple[int, ...], contiguous: bool
+    ) -> "HvxVmemTensorSpec":
         new_layout = self.layout
         if all(d == 1 for d in new_dim_sizes):
             new_layout = layouts.ROW_MAJOR
         return HvxVmemTensorSpec(
-            new_dim_sizes, dtype=self.dtype, bank=self.bank, layout=new_layout
+            new_dim_sizes,
+            dtype=self.dtype,
+            contiguous=contiguous,
+            bank=self.bank,
+            layout=new_layout,
         )
 
     def __str__(self):

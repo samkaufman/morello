@@ -66,6 +66,7 @@ class HvxSimulatorTarget(Target):
         self,
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
+        contiguous: bool = True,
         bank: Optional[str] = None,
         layout: Optional[layouts.Layout] = None,
         **kwargs,
@@ -73,8 +74,10 @@ class HvxSimulatorTarget(Target):
         if layout is None:
             layout = layouts.ROW_MAJOR
         if bank == "VMEM":
-            return layouts.HvxVmemTensorSpec(dim_sizes, dtype, bank, layout, **kwargs)
-        return specs.TensorSpec(dim_sizes, dtype, bank, layout)
+            return layouts.HvxVmemTensorSpec(
+                dim_sizes, dtype, contiguous, bank, layout, **kwargs
+            )
+        return specs.TensorSpec(dim_sizes, dtype, contiguous, bank, layout)
 
     @functools.cached_property
     def system(self) -> "SystemDescription":
@@ -94,6 +97,7 @@ class HvxSimulatorTarget(Target):
             faster_destination_banks=self._faster_destination_banks,
             next_general_bank=self._next_general_bank,
             ordered_banks=["HexagonRF", "VMEM", "L1", "L2", "GL"],
+            addressed_banks=frozenset(["HexagonRF", "VMEM", "GL"])
         )
 
     @property

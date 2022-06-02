@@ -3,6 +3,7 @@ from typing import Iterable, Sequence
 
 import cython
 
+from .. import utils
 from .tensorspec import TensorSpec
 
 
@@ -69,12 +70,17 @@ class Spec:
         raise NotImplementedError(f"serial_only not implemented for {type(self)}")
 
     def shrink_for_tile_out(
-        self, output_shape: tuple[int, ...], serial_only=None
+        self,
+        output_shape: tuple[int, ...],
+        operand_address_roots: Sequence[TensorSpec],
+        serial_only=None,
     ) -> "Spec":
         """Reduces the Spec to dimensions needed to compute the given output tile.
 
         The default implementation relies on `shrink_inputs_for_output_shape`.
 
+        :param operand_address_roots: The TensorSpecs for the address roots of the
+          operands. This is used to determine the contiguousness of the new tiles.
         :returns: A copy of the callee with modified input and output dimensions.
         """
         if serial_only is None:
@@ -84,9 +90,17 @@ class Spec:
         new_inp_shapes = self.shrink_inputs_for_output_shape(input_shapes, output_shape)
 
         new_inputs = tuple(
-            inp.shrink(new_shape) for inp, new_shape in zip(self.inputs, new_inp_shapes)
+            inp.shrink(new_shape, utils.contiguous((new_shape, inp.layout), ar))
+            for inp, new_shape, ar in zip(
+                self.inputs, new_inp_shapes, operand_address_roots
+            )
         )
-        new_output = self.output.shrink(output_shape)
+        new_output = self.output.shrink(
+            output_shape,
+            utils.contiguous(
+                (output_shape, self.output.layout), operand_address_roots[-1]
+            ),
+        )
 
         return self.replace_io(new_inputs, new_output, serial_only=serial_only)
 

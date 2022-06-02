@@ -8,7 +8,6 @@ except ImportError:
     pass
 
 from . import base
-
 from .tensorspec import TensorSpec
 
 
@@ -21,24 +20,24 @@ class ReduceSum(base.Spec):
     """
 
     source: TensorSpec
-    output: TensorSpec
+    _output: TensorSpec
     _serial_only: bool
 
     def __init__(self, source: TensorSpec, output: TensorSpec, serial_only: bool):
         self.source = source
-        self.output = output
+        self._output = output
         self._serial_only = serial_only
 
-        assert len(self.source.dim_sizes) >= 2
-        assert len(self.output.dim_sizes) == len(self.source.dim_sizes) - 1, (
+        assert len(source.dim_sizes) >= 2
+        assert len(output.dim_sizes) == len(source.dim_sizes) - 1, (
             "Expected output shape to have one fewer dimensions than source; "
-            f"source and output shapes were: {self.source.dim_sizes} and "
-            f"{self.output.dim_sizes}"
+            f"source and output shapes were: {source.dim_sizes} and "
+            f"{output.dim_sizes}"
         )
-        assert self.output.dim_sizes == self.output_shape(self.source.dim_sizes), (
-            f"Given output shape was {self.output.dim_sizes} but the computed "
+        assert output.dim_sizes == self.output_shape(source.dim_sizes), (
+            f"Given output shape was {output.dim_sizes} but the computed "
             f"output shape is {self.output_shape(self.source.dim_sizes)} "
-            f"(input shape: {self.source.dim_sizes})"
+            f"(input shape: {source.dim_sizes})"
         )
 
     def __eq__(self, other):
@@ -62,6 +61,10 @@ class ReduceSum(base.Spec):
         return ReduceSum(inputs[0], output, serial_only=serial_only)
 
     @property
+    def output(self) -> TensorSpec:
+        return self._output
+
+    @property
     def serial_only(self) -> bool:
         return self._serial_only
 
@@ -74,7 +77,10 @@ class ReduceSum(base.Spec):
         return source_shape[:-1]
 
     def shrink_for_tile_out(
-        self, output_shape: tuple[int, ...], serial_only=None
+        self,
+        output_shape: tuple[int, ...],
+        operand_address_roots: Sequence[TensorSpec],
+        serial_only=None,
     ) -> "ReduceSum":
         if len(output_shape) != len(self.output.dim_sizes):
             raise ValueError(
@@ -89,7 +95,12 @@ class ReduceSum(base.Spec):
                     f"{self.output.dim_sizes[dim]} ({dim_size} > "
                     f"{self.output.dim_sizes[dim]})"
                 )
-        return cast(ReduceSum, super().shrink_for_tile_out(output_shape, serial_only))
+        return cast(
+            ReduceSum,
+            super().shrink_for_tile_out(
+                output_shape, operand_address_roots, serial_only
+            ),
+        )
 
     @classmethod
     def calculate_output_shape_cls(

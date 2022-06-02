@@ -9,7 +9,7 @@ import termcolor
 
 from .. import layouts, specs, system_config, tiling, utils
 from ..layouts import Layout
-from ..system_config import current_target
+from ..system_config import current_system, current_target
 from ..tensor import SimpleTile, Tensor, TensorLike, Tile
 from .actions import PeelAction, SlidingTileOutAction, TileOutAction
 from .base import Impl, spec_to_hole
@@ -81,7 +81,7 @@ class ComposeHole(Impl):
 
         # TODO: Remove this symmetry: lots of ways to iteratively split the pipeline
         # TODO: Reintroduce splitting on non-index 0
-        for bank, layout in itertools.product(system.banks, target.all_layouts):
+        for bank, layout in itertools.product(system.addressed_banks, target.all_layouts):
             # TODO: Remove following check once cost.move_cost handles it correctly.
             if not system.has_hvx and layout == layouts.HEXAGON_TRANSPACKED:
                 continue
@@ -166,10 +166,19 @@ class ComposeHole(Impl):
             layout = operand.layout
         if bank == operand.root.bank and layout == operand.layout:
             raise ValueError("Either bank or layout must differ from current")
+
+        # TODO: Share this block with common_move?
+        # Will the result be contiguous? If the move is into "non-addressed"
+        # memory, then no. If it is, then it might be.
+        contiguous = False
+        if bank in current_system().addressed_banks:
+            contiguous = utils.contiguous((operand.dim_sizes, layout), operand.spec)
+
         new_mat = current_target().tensor(
             spec=current_target().tensor_spec(
                 operand.dim_sizes,
                 dtype=operand.dtype,
+                contiguous=contiguous,
                 layout=layout,
                 bank=bank,
                 **kwargs,
@@ -205,10 +214,19 @@ class ComposeHole(Impl):
             layout = operand.layout
         if bank == operand.root.bank and layout == operand.layout:
             raise ValueError("Either bank or layout must differ from current")
+
+        # TODO: Share this block with common_move?
+        # Will the result be contiguous? If the move is into "non-addressed"
+        # memory, then no. If it is, then it might be.
+        contiguous = False
+        if bank in current_system().addressed_banks:
+            contiguous = utils.contiguous((operand.dim_sizes, layout), operand.spec)
+
         new_mat = current_target().tensor(
             spec=current_target().tensor_spec(
                 operand.dim_sizes,
                 dtype=operand.dtype,
+                contiguous=contiguous,
                 layout=layout,
                 bank=bank,
                 **kwargs,
@@ -239,6 +257,7 @@ class ComposeHole(Impl):
                 current_target().tensor_spec(
                     dim_sizes=self.spec.subspec_outputs[1],
                     dtype=self.spec.intermediate_dtypes[0],
+                    contiguous=True,
                     bank=bank,
                     layout=intermediate_tensor_layout,
                     **kwargs,
@@ -267,6 +286,7 @@ class ComposeHole(Impl):
             current_target().tensor_spec(
                 dim_sizes=self.spec.subspec_outputs[1],
                 dtype=self.spec.intermediate_dtypes[0],
+                contiguous=True,
                 bank=bank,
                 layout=intermediate_tensor_layout,
                 **kwargs,

@@ -140,13 +140,14 @@ def test_trivial_tilings_are_same_cost_as_untiled_matmul(matmul_spec):
 @given(
     st.sampled_from(sorted(cpu.CpuTarget().system.banks)),
     st.from_type(dtypes.Dtype),
+    st.booleans(),
     st.integers(min_value=0, max_value=1),
     st.integers(min_value=2, max_value=64),
     st.from_type(layouts.Layout),
     st.booleans(),
 )
 def test_cost_is_invariant_to_panel_layouts_cpu(
-    bank, dtype, dim_idx, elements, dest_layout, prefetching
+    bank, dtype, contiguous, dim_idx, elements, dest_layout, prefetching
 ):
     # TODO: Add a version of this test for Hexagon targets
     target = cpu.CpuTarget()
@@ -154,13 +155,13 @@ def test_cost_is_invariant_to_panel_layouts_cpu(
         dim_sizes = tuple(elements if dim_idx == i else 1 for i in range(2))
         left = target.tensor(
             spec=target.tensor_spec(
-                dim_sizes, dtype=dtype, layout=layouts.ROW_MAJOR, bank=bank
+                dim_sizes, dtype, contiguous, layout=layouts.ROW_MAJOR, bank=bank
             ),
             name=None,
         )
         right = target.tensor(
             spec=target.tensor_spec(
-                dim_sizes, dtype=dtype, layout=layouts.COL_MAJOR, bank=bank
+                dim_sizes, dtype, contiguous, layout=layouts.COL_MAJOR, bank=bank
             ),
             name=None,
         )

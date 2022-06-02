@@ -2,10 +2,9 @@ import functools
 import itertools
 import math
 from collections.abc import Mapping
-from typing import Iterable, TypeVar
+from typing import Iterable, Sequence, TypeVar
 
-from . import layouts, tensor
-from .tensor import TensorLike
+from . import layouts, specs
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -44,15 +43,19 @@ def flatten(src):
 
 
 def contiguous(t, address_root):
-    if isinstance(t, tensor.TensorLike):
+    if isinstance(t, specs.TensorSpec):
         self_ordered_dims = layout_ordered_dims(t)
-    else:
+    elif isinstance(t, Sequence):
         self_ordered_dims = layout_ordered_dims(*t)
-
-    if isinstance(address_root, tensor.TensorLike):
-        address_root_ordered_dims = layout_ordered_dims(address_root)
     else:
+        raise TypeError(f"Unexpected first argument type: {type(t).__name__}")
+
+    if isinstance(address_root, specs.TensorSpec):
+        address_root_ordered_dims = layout_ordered_dims(address_root)
+    elif isinstance(t, Sequence):
         address_root_ordered_dims = layout_ordered_dims(*address_root)
+    else:
+        raise TypeError(f"Unexpected second argument type: {type(t).__name__}")
 
     pairs = zip(self_ordered_dims, address_root_ordered_dims)
 
@@ -74,12 +77,12 @@ def layout_ordered_dims(*args) -> tuple[int, ...]:
     """Returns tuple of operand's height and width; or vice versa if column-major."""
     dim_sizes: tuple[int, ...]
     root_layout: layouts.Layout
-    if len(args) == 1 and isinstance(args[0], TensorLike):
-        dim_sizes, root_layout = args[0].dim_sizes, args[0].root.layout
+    if len(args) == 1 and isinstance(args[0], specs.TensorSpec):
+        dim_sizes, root_layout = args[0].dim_sizes, args[0].layout
     elif len(args) == 2:
         dim_sizes, root_layout = args
     else:
-        raise TypeError("Unknown arguments")
+        raise TypeError(f"Unexpected arguments: {args}")
 
     if len(dim_sizes) == 1:
         return (dim_sizes[0],)

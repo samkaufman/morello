@@ -35,6 +35,7 @@ class Target(abc.ABC):
         self,
         dim_sizes: tuple[int, ...],
         dtype: "dtypes.Dtype",
+        contiguous: bool = True,
         bank: Optional[str] = None,
         layout: Optional["Layout"] = None,
         **kwargs,
@@ -57,7 +58,7 @@ class Target(abc.ABC):
         print_output=False,
         source_cb=None,
         values=None,
-        check_flakiness: int = 1
+        check_flakiness: int = 1,
     ) -> RunResult:
         raise NotImplementedError()
 
@@ -89,6 +90,7 @@ class SystemDescription:
     faster_destination_banks: Callable[[str], set[str]]
     next_general_bank: Callable[[str], Optional[str]]
     ordered_banks: list[str]
+    addressed_banks: frozenset[str]  # TODO: Replace w/ lack of Alloc Specs
 
     def __post_init__(self):
         assert self.processors >= 1
