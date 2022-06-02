@@ -47,7 +47,7 @@ from morello import (
 from morello.benchmarks.toy_cnn import halide as toyhl
 from morello.codegen import gen
 
-RUNS = 5
+RUNS = 100
 SAMPLE_CNT = 100
 DTYPE = dtypes.Uint32
 TORCH_DTYPE_NP = np.int32  # Signed version of DTYPE
