@@ -92,12 +92,9 @@ RUN cd /usr/src/Halide-13.0.4 && \
     cmake --install ./build --prefix /halide
 
 #FROM teeks99/clang-ubuntu@sha256:8caa3a9c5c904dc276e52275ee74df57d6b873c6fa2ef7e8f4bc15b59c74efb7
-FROM ubuntu:focal
-COPY --from=hexagon /Hexagon_SDK /Hexagon_SDK
+FROM ubuntu:focal as cpu-only
 COPY --from=tvm /tvm/build/libtvm.so /tvm/build/libtvm_runtime.so /usr/lib/
 COPY --from=tvm /tvm/python/dist/*.whl /
-
-ENV HEXAGON_SDK_ROOT=/Hexagon_SDK/3.5.4 HEXAGON_TOOLS_ROOT=/Hexagon_SDK/3.5.4/tools/HEXAGON_Tools/8.3.07
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
@@ -122,7 +119,6 @@ ENV LD_LIBRARY_PATH "/halide/lib:${LD_LIBRARY_PATH}"
 RUN python3 -m pip install /tvm-0.9.*-cp39-cp39-linux_x86_64.whl && \
     rm /tvm-0.9.*-cp39-cp39-linux_x86_64.whl
 
-ENV PATH=/hexagon_sdk/Hexagon_SDK/3.5.4/tools/HEXAGON_Tools/8.3.07/Tools/lib:$PATH
 ENV CC=/usr/bin/clang-12
 ENV CLANG=/usr/bin/clang-12
 
@@ -139,3 +135,10 @@ COPY morello ./morello
 RUN python3 setup.py build_ext --inplace
 
 COPY scripts ./scripts
+
+
+FROM cpu-only as with-hexagon
+
+COPY --from=hexagon /Hexagon_SDK /Hexagon_SDK
+ENV HEXAGON_SDK_ROOT=/Hexagon_SDK/3.5.4 HEXAGON_TOOLS_ROOT=/Hexagon_SDK/3.5.4/tools/HEXAGON_Tools/8.3.07
+ENV PATH=/hexagon_sdk/Hexagon_SDK/3.5.4/tools/HEXAGON_Tools/8.3.07/Tools/lib:$PATH
