@@ -6,6 +6,8 @@ channels:
 dependencies:
   - python=3.9
   - pip
+  - clang==14.0.4
+  - llvm-openmp
   - tabulate
   - frozendict~=2.0
   - pyarrow
@@ -24,7 +26,9 @@ dependencies:
   - jax==0.3.13
   - tvm-py==0.7.0
   - gcc  # Required to build Cython
-#   - tlcpack  # tvm
   - pip:
     - dataclass-abc
     - git+https://github.com/cython/cython.git@dc5f0de75638c7b39650c7542ad0779e5eddb38b
+variables:
+  - CLANG: $CONDA_PREFIX/bin/clang
+  - LIBRARY_PATH: $CONDA_PREFIX/lib:$LIBRARY_PATH

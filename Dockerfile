@@ -76,7 +76,7 @@ FROM ubuntu:focal as cpu-only
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y git curl clang-12 lib32z1 libncurses5 lib32ncurses-dev && \
+    apt-get install -y git curl lib32z1 libncurses5 lib32ncurses-dev && \
     curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
     curl -LO http://mirrors.kernel.org/ubuntu/pool/main/libf/libffi/libffi6_3.2.1-8_amd64.deb && \
     dpkg -i libffi6_3.2.1-8_amd64.deb && \
@@ -85,6 +85,9 @@ RUN apt-get update && \
 
 COPY --from=conda /env /env
 ENV PATH=/env/bin:$PATH
+ENV CLANG=/env/bin/clang
+ENV LD_LIBRARY_PATH=/env/lib:$LD_LIBRARY_PATH
+ENV LIBRARY_PATH=/env/lib:$LIBRARY_PATH
 
 COPY --from=halide /usr/src/Halide-13.0.4/python_bindings/requirements.txt /halide-reqs.txt
 RUN python3 -m pip install -r /halide-reqs.txt && \
@@ -92,9 +95,6 @@ RUN python3 -m pip install -r /halide-reqs.txt && \
 COPY --from=halide /halide /halide
 ENV PYTHONPATH "/halide/lib/python3/site-packages:${PYTHONPATH}"
 ENV LD_LIBRARY_PATH "/halide/lib:${LD_LIBRARY_PATH}"
-
-ENV CC=/usr/bin/clang-12
-ENV CLANG=/usr/bin/clang-12
 
 WORKDIR /app
 
@@ -104,7 +104,7 @@ COPY pyproject.toml ./
 COPY tests ./tests
 COPY setup.py .
 COPY morello ./morello
-RUN python3 setup.py build_ext --inplace
+RUN python3 setup.py build_ext -j $(nproc) --inplace
 
 COPY scripts ./scripts
 
