@@ -97,8 +97,6 @@ ENV CC=/usr/bin/clang-12
 ENV CLANG=/usr/bin/clang-12
 
 WORKDIR /app
-COPY requirements.txt requirements.txt
-RUN pip3 install -r requirements.txt
 
 ENV PYTHONPATH ".:${PYTHONPATH}"
 
