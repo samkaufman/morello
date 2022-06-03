@@ -25,6 +25,7 @@ CC_SANITIZE = True
 strategies.register_default_strategies()
 
 
+@pytest.mark.parallelspec
 def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
     """Manually schedule a Matmul, generate code, compile, and run.
 
@@ -333,7 +334,10 @@ def _calculator_to_test(spec_st_fn):
             ],
             ids=["cpu", "hexagon"],
         )
-        @pytest.mark.parametrize("parallel", [True, False], ids=["parallel", "serial"])
+        @pytest.mark.parametrize("parallel", [
+            pytest.param(True, marks=pytest.mark.parallelspec),
+            False,
+        ], ids=["parallel", "serial"])
         @hypothesis.given(st.data())
         @hypothesis.settings(deadline=CC_DEADLINE)
         @functools.wraps(calc_fn)

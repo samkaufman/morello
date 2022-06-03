@@ -7,6 +7,7 @@ minversion = 6.0
 addopts = "--strict-markers --doctest-modules"
 testpaths = [ "tests" ]
 markers = [
-    "slow: mark test as slow.",
-    "hexagon: run tests that need hexagon-sim.",
+    "slow: test is time-consuming.",
+    "hexagon: test needs hexagon-sim.",
+    "parallelspec: test of is a Spec/Impl with a parallel loop.",
 ]
