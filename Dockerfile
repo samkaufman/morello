@@ -43,32 +43,6 @@ RUN /bin/bash -c "cd /Hexagon_SDK/3.5.4 && \
     make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v66 V66=1"
 
 
-#FROM ubuntu:focal AS tvm
-FROM teeks99/clang-ubuntu@sha256:8caa3a9c5c904dc276e52275ee74df57d6b873c6fa2ef7e8f4bc15b59c74efb7 AS tvm
-
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y git python3.9 python3.9-dev python3-setuptools python3-wheel \
-    libtinfo-dev zlib1g-dev build-essential cmake gcc libedit-dev \
-    libxml2-dev && \
-    apt-get clean
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1
-RUN git clone --recursive https://github.com/apache/tvm tvm
-# TODO: Add LLVM support if not present in Makefile
-# TODO: Add NNPACK support if not present in Makefile
-RUN cd tvm && \
-    mkdir build && \
-    cp cmake/config.cmake build && \
-    cd build && \
-    sed -i 's/USE_GRAPH_EXECUTOR_DEBUG OFF/USE_GRAPH_EXECUTOR_DEBUG ON/' config.cmake && \
-    sed -i 's/USE_LLVM OFF/USE_LLVM "\/usr\/bin\/llvm-config-12 --link-static"/' config.cmake && \
-    cmake .. && \
-    cmake --build .
-RUN apt-get install python3-wheel
-RUN cd tvm/python && python3 setup.py bdist_wheel
-
-
-#FROM teeks99/clang-ubuntu@sha256:8caa3a9c5c904dc276e52275ee74df57d6b873c6fa2ef7e8f4bc15b59c74efb7 AS halide
 FROM ubuntu:focal as halide
 
 RUN apt-get update && \
@@ -91,23 +65,26 @@ RUN cd /usr/src/Halide-13.0.4 && \
 RUN cd /usr/src/Halide-13.0.4 && \
     cmake --install ./build --prefix /halide
 
-#FROM teeks99/clang-ubuntu@sha256:8caa3a9c5c904dc276e52275ee74df57d6b873c6fa2ef7e8f4bc15b59c74efb7
+
+FROM condaforge/mambaforge:4.11.0-2 as conda
+
+COPY environment.yml .
+RUN --mount=type=cache,target=/opt/conda/pkgs mamba env create -p /env -f environment.yml 
+
+
 FROM ubuntu:focal as cpu-only
-COPY --from=tvm /tvm/build/libtvm.so /tvm/build/libtvm_runtime.so /usr/lib/
-COPY --from=tvm /tvm/python/dist/*.whl /
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y git curl clang-12 python3.9 python3.9-dev \
-    python3.9-distutils lib32z1 libncurses5 lib32ncurses-dev && \
+    apt-get install -y git curl clang-12 lib32z1 libncurses5 lib32ncurses-dev && \
     curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
-    python3.9 get-pip.py && \
-    rm get-pip.py && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1 && \
     curl -LO http://mirrors.kernel.org/ubuntu/pool/main/libf/libffi/libffi6_3.2.1-8_amd64.deb && \
     dpkg -i libffi6_3.2.1-8_amd64.deb && \
     rm libffi6_3.2.1-8_amd64.deb && \
     apt-get clean
+
+COPY --from=conda /env /env
+ENV PATH=/env/bin:$PATH
 
 COPY --from=halide /usr/src/Halide-13.0.4/python_bindings/requirements.txt /halide-reqs.txt
 RUN python3 -m pip install -r /halide-reqs.txt && \
@@ -115,9 +92,6 @@ RUN python3 -m pip install -r /halide-reqs.txt && \
 COPY --from=halide /halide /halide
 ENV PYTHONPATH "/halide/lib/python3/site-packages:${PYTHONPATH}"
 ENV LD_LIBRARY_PATH "/halide/lib:${LD_LIBRARY_PATH}"
-
-RUN python3 -m pip install /tvm-0.9.*-cp39-cp39-linux_x86_64.whl && \
-    rm /tvm-0.9.*-cp39-cp39-linux_x86_64.whl
 
 ENV CC=/usr/bin/clang-12
 ENV CLANG=/usr/bin/clang-12

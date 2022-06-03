@@ -1,0 +1,30 @@
+name: morello
+channels:
+  - tlcpack
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - tabulate
+  - frozendict~=2.0
+  - pyarrow
+  - pandas
+  - tqdm
+  - pytest
+  - pytest-xdist
+  - debugpy
+  - hypothesis
+  - atomicwrites==1.4.0
+  - termcolor==1.1.0
+  - sympy
+  - typeguard
+  - gspread
+  - pytorch==1.11.0
+  - jax==0.3.13
+  - tvm-py==0.7.0
+  - gcc  # Required to build Cython
+#   - tlcpack  # tvm
+  - pip:
+    - dataclass-abc
+    - git+https://github.com/cython/cython.git@dc5f0de75638c7b39650c7542ad0779e5eddb38b
