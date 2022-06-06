@@ -21,12 +21,12 @@ class ReduceSum(base.Spec):
     """
 
     source: TensorSpec
-    output: TensorSpec
+    _output: TensorSpec
     _serial_only: bool
 
     def __init__(self, source: TensorSpec, output: TensorSpec, serial_only: bool):
         self.source = source
-        self.output = output
+        self._output = output
         self._serial_only = serial_only
 
         assert len(self.source.dim_sizes) >= 2
@@ -60,6 +60,10 @@ class ReduceSum(base.Spec):
         if len(inputs) != 1:
             raise ValueError("Expected 1 input; got {len(inputs)}")
         return ReduceSum(inputs[0], output, serial_only=serial_only)
+
+    @property
+    def output(self) -> TensorSpec:
+        return self._output
 
     @property
     def serial_only(self) -> bool:
