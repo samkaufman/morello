@@ -9,7 +9,7 @@ from ..layouts import Layout
 from ..tensor import Tensor, Tile
 from .actions import SlidingTileOutAction, TileOutAction
 from .base import Impl, NonAllocatingLeaf
-from .moves import _move_arguments, common_move, common_operand_move_actions
+from .moves import MoveLet, _move_arguments, common_move, common_operand_move_actions
 from .pruning import (
     ParentSummary,
     break_moves_symmetries,
@@ -31,56 +31,25 @@ class DirectConv(NonAllocatingLeaf):
     Stride is 1. No padding.
     """
 
-    lhs: Union[Tensor, Tile]
-    rhs: Union[Tensor, Tile]
-    output: Union[Tensor, Tile]
-    serial_only: bool
+    spec: specs.Spec
 
-    def __post_init__(self):
-        # Construct the Spec so that any errors get thrown early.
-        self.spec
-
-    @property
-    def inputs(self):
-        return self.lhs, self.rhs
-
-    @functools.cached_property
-    def spec(self) -> specs.Convolution:
-        return specs.Convolution(
-            self.lhs.spec, self.rhs.spec, self.output.spec, self.serial_only
-        )
-
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ):
-        return (
-            f"DirectConv({name_tensor_fn(self.lhs)}, "
-            f"{name_tensor_fn(self.rhs)}, "
-            f"{name_tensor_fn(self.output)})"
-        )
+    def replace_spec(self, new_spec: specs.Spec) -> "Impl":
+        assert type(self) is DirectConv
+        return DirectConv(new_spec)
 
     @property
     def is_scheduled(self) -> bool:
         # TODO: Drop these RF constants. Instead, use target-specific impls.
-        if not all(op.bank in ("RF", "HexagonRF") for op in self.operands):
+        if not all(op.bank in ("RF", "HexagonRF") for op in self.spec.operands):
             return False
-        if any(d > 1 for d in self.output.dim_sizes):
+        if any(d > 1 for d in self.spec.output.dim_sizes):
             return False
         return True
-
-    # @assert_stable_spec
-    # def tile_out(self, output_shape: Tuple[int, ...]) -> "Impl":
-    #     # TODO: DirectConv acts as though it has a rank-2 output because of
-    #     #   split_filters. Fix this.
-    #     return super().tile_out(output_shape + (self.rhs.dim_sizes[-1],))
 
     # TODO: Remove split_filters
     @assert_stable_spec
     def split_filters(self, k: int) -> "Impl":
-        return self.tile_out(self.output.dim_sizes[:-1] + (k,))
+        return self.tile_out(self.spec.output.dim_sizes[:-1] + (k,))
 
     def move_input(
         self,
@@ -109,18 +78,19 @@ class DirectConv(NonAllocatingLeaf):
 
     @assert_stable_spec
     def complete(self) -> Impl:
-        if any(d > 1 for d in self.output.dim_sizes):
+        if any(d > 1 for d in self.spec.output.dim_sizes):
             return self.tile_out((1, 1, 1)).complete()
 
         system = system_config.current_system()
 
-        next_general_lhs = system.next_general_bank(self.lhs.bank)
+        lhs, rhs, out = self.spec.operands
+        next_general_lhs = system.next_general_bank(lhs.bank)
         if next_general_lhs:
             return self.move_input(0, bank=next_general_lhs).complete()
-        next_general_rhs = system.next_general_bank(self.rhs.bank)
+        next_general_rhs = system.next_general_bank(rhs.bank)
         if next_general_rhs:
             return self.move_input(1, bank=next_general_rhs).complete()
-        next_general_out = system.next_general_bank(self.output.bank)
+        next_general_out = system.next_general_bank(out.bank)
         if next_general_out:
             return self.move_output(bank=next_general_out).complete()
 
@@ -144,17 +114,17 @@ class DirectConv(NonAllocatingLeaf):
         # to do with a non-composed Spec and for DirectConv, which has no subclasses.
         try:
             gen_tile_sizes_results = _directconv_tile_out_params_cache[
-                (self.output.dim_sizes, self.spec)
+                (self.spec.output.dim_sizes, self.spec)
             ]
         except KeyError:
             gen_tile_sizes_results = []
             for shape in gen_tile_sizes(
-                self.output.dim_sizes, filter=self._can_tile_out
+                self.spec.output.dim_sizes, filter=self._can_tile_out
             ):
-                for parallel in [False] if self.serial_only else [True, False]:
+                for parallel in [False] if self.spec.serial_only else [True, False]:
                     gen_tile_sizes_results.append((shape, parallel))
             _directconv_tile_out_params_cache[
-                (self.output.dim_sizes, self.spec)
+                (self.spec.output.dim_sizes, self.spec)
             ] = gen_tile_sizes_results
         yield from (TileOutAction(self, *a) for a in gen_tile_sizes_results)
 
@@ -164,22 +134,22 @@ class DirectConv(NonAllocatingLeaf):
         if allow_sliding_windows.get():
             try:
                 sliding_tile_out_results = _directconv_sliding_tile_out_params_cache[
-                    (self.output.dim_sizes, self.spec)
+                    (self.spec.output.dim_sizes, self.spec)
                 ]
             except KeyError:
                 sliding_tile_out_results = []
                 for bank, sliding_dim in itertools.product(
-                    set(b for b, _, _ in _move_arguments(self.lhs)), [0, 1]
+                    set(b for b, _, _ in _move_arguments(self.spec.inputs[0])), [0, 1]
                 ):
                     for slide_size in dim_range(
-                        self.output.dim_sizes[sliding_dim], include_end=False
+                        self.spec.output.dim_sizes[sliding_dim], include_end=False
                     ):
                         if self._can_sliding_tile_out(sliding_dim, slide_size, bank):
                             sliding_tile_out_results.append(
                                 (sliding_dim, slide_size, bank)
                             )
                 _directconv_sliding_tile_out_params_cache[
-                    (self.output.dim_sizes, self.spec)
+                    (self.spec.output.dim_sizes, self.spec)
                 ] = sliding_tile_out_results
             yield from (
                 SlidingTileOutAction(self.sliding_tile_out, *a)
@@ -194,14 +164,5 @@ class DirectConv(NonAllocatingLeaf):
 
         yield from common_operand_move_actions(self)
 
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        lhs, rhs = inputs
-        return DirectConv(lhs, rhs, output, serial_only=self.serial_only)
-
     def __str__(self) -> str:
-        epi = ", serial" if self.serial_only else ""
-        return (
-            f"{type(self).__name__}({self.lhs}, {self.rhs}, " f"out={self.output}{epi})"
-        )
+        return f"{type(self).__name__}({self.spec})"

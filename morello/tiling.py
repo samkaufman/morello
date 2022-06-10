@@ -2,7 +2,7 @@ import dataclasses
 from typing import Sequence
 
 from . import specs
-from .tensor import ConvolutionImageTile, SimpleTile, TensorLike, Tile
+from .tensor import ConvolutionImageTile, OperandIdx, SimpleTile, TensorLike, Tile
 
 # TODO: Just make PartialTiles a superclass of Tile or something. That lets us
 #   drop tile_to_partial.
@@ -13,14 +13,14 @@ class PartialTile:
     # Shouldn't initialize this base class. Instantiate a subclass instead.
     dim_sizes: tuple[int, ...]
 
-    def tile(self, source: TensorLike) -> TensorLike:
+    def tile(self, source_idx: OperandIdx, source: specs.TensorSpec) -> TensorLike:
         raise NotImplementedError()
 
 
 @dataclasses.dataclass(frozen=True)
 class PartialSimpleTile(PartialTile):
-    def tile(self, source: TensorLike) -> TensorLike:
-        return source.simple_tile(self.dim_sizes)
+    def tile(self, source_idx: OperandIdx, source: specs.TensorSpec) -> TensorLike:
+        return source.simple_tile(source_idx, self.dim_sizes)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -33,8 +33,8 @@ class PartialConvolutionImageTile(PartialTile):
             self.dim_sizes
         ), f"Incompatible ranks; filters was {self.filter_shape} and image was {self.dim_sizes}"
 
-    def tile(self, source: TensorLike) -> TensorLike:
-        return source.conv_image_tile(self.dim_sizes, self.filter_shape)
+    def tile(self, source_idx: OperandIdx, source: specs.TensorSpec) -> TensorLike:
+        return source.conv_image_tile(source_idx, self.dim_sizes, self.filter_shape)
 
 
 def tile_to_partial(tile: Tile) -> PartialTile:
@@ -56,8 +56,8 @@ def tile_out(
 ) -> tuple[PartialTile, ...]:
     """Maps a Spec's type, input shapes, and output tile to PartialTiles for its inputs.
 
-    Notice that, if tiling, the input_shapes are the shapes of the spec's inputs in
-    the outer tiling, while the spec_output refers to the Tile produced by tiling.
+    Note that input_shapes refers to original, untiled input shapes, while the
+    spec_output describes the final, already-tiled output.
 
     Compose is not directly represented because tiling a Compose depends on its
     sub-Specs, which are members of the Compose object. As a result, the tile_out

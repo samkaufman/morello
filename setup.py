@@ -11,13 +11,7 @@ extensions = [
     setuptools.Extension("morello.search.dp", ["morello/search/dp.py"]),
     setuptools.Extension("morello.search.naive", ["morello/search/naive.py"]),
     setuptools.Extension("morello.search.random", ["morello/search/random.py"]),
-    setuptools.Extension("morello.specs", ["morello/specs/__init__.py"]),
-    setuptools.Extension("morello.specs.base", ["morello/specs/base.py"]),
-    setuptools.Extension("morello.specs.compose", ["morello/specs/compose.py"]),
-    setuptools.Extension("morello.specs.conv", ["morello/specs/conv.py"]),
-    setuptools.Extension("morello.specs.matmul", ["morello/specs/matmul.py"]),
-    setuptools.Extension("morello.specs.reducesum", ["morello/specs/reducesum.py"]),
-    setuptools.Extension("morello.specs.tensorspec", ["morello/specs/tensorspec.py"]),
+    setuptools.Extension("morello.specs", ["morello/specs/*.py"]),
     setuptools.Extension("morello.replace", ["morello/replace.py"]),
 ]
 

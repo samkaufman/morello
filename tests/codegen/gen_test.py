@@ -13,7 +13,7 @@ import morello.impl.actions
 import morello.impl.base
 import morello.impl.compose
 import morello.impl.moves
-from morello import dtypes, layouts, op_pprint, specs, system_config, tensor
+from morello import dtypes, layouts, op_pprint, specs, system_config, tensor, utils
 from morello.codegen import indexexpr
 from morello.system_config import cpu, hexagon
 
@@ -39,11 +39,7 @@ def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
             target.tensor_spec((256, 256), dtype=dtypes.Uint32),
             serial_only=False,
         )
-        hole = morello.impl.base.spec_to_hole(
-            spec,
-            (target.tensor(spec.lhs), target.tensor(spec.rhs)),
-            target.tensor(spec.output),
-        )
+        hole = morello.impl.base.spec_to_hole(spec)
         imp = (
             hole.tile_out((8, 8), parallel=True)
             .move_input(0, bank="RF")
@@ -60,7 +56,7 @@ def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
 
         run_result = asyncio.get_event_loop().run_until_complete(
             target.run_impl(
-                imp,
+                imp.to_applied(),
                 print_output=True,
                 source_cb=lambda s: print("Source Code:\n" + s),
                 values=input_values,
@@ -128,22 +124,14 @@ def _arb_impls_from_actions(draw, partial_impl: morello.impl.base.Impl):
         if not actions or draw(st.booleans()):
             return partial_impl
 
-    # If we hit a dead end (no actions), then this isn't a viable example
+    # If we hit a dead end (no actions), and we haven't already returned, then
+    # this isn't a viable example
     hypothesis.assume(len(actions))
 
     action_idx = draw(st.integers(min_value=0, max_value=len(actions) - 1))
     expanded = actions[action_idx]()
     return expanded.replace_children(
         draw(_arb_impls_from_actions(c)) for c in expanded.children
-    )
-
-
-def _spec_to_applied_hole(spec: specs.Spec) -> morello.impl.base.Impl:
-    target = system_config.current_target()
-    return morello.impl.base.spec_to_hole(
-        spec,
-        tuple(target.tensor(inp_spec, name=None) for inp_spec in spec.inputs),
-        target.tensor(spec.output, name=None),
     )
 
 
@@ -319,7 +307,7 @@ def _arb_zip_values_for_impl(draw, imp: morello.impl.base.Impl):
             dtype=dtype.np_type,
         ).reshape(shape)
 
-    return imp, [_value(op.dim_sizes, op.dtype) for op in imp.inputs]
+    return imp, [_value(op.dim_sizes, op.dtype) for op in imp.spec.inputs]
 
 
 def _calculator_to_test(spec_st_fn):
@@ -341,7 +329,7 @@ def _calculator_to_test(spec_st_fn):
             with system_config.with_target(target):
                 impl, inp_values = data.draw(
                     spec_st_fn(parallel=parallel)
-                    .map(_spec_to_applied_hole)
+                    .map(morello.impl.base.spec_to_hole)
                     .flatmap(_arb_impls_from_actions)
                     .flatmap(_arb_zip_values_for_impl)
                 )
@@ -354,6 +342,8 @@ def _calculator_to_test(spec_st_fn):
 
 def _test_impl(imp: morello.impl.base.Impl, inp_values, calc_fn):
     target = system_config.current_target()
+
+    imp = imp.to_applied()
 
     pformatted = op_pprint.pformat(imp, show_utilization=False, show_cost=False)
     hypothesis.note("Impl:\n" + pformatted)
@@ -388,34 +378,42 @@ def _test_impl(imp: morello.impl.base.Impl, inp_values, calc_fn):
 def _st_test_index_exprs_consistent_with_contiguous_props(draw):
     target = system_config.current_target()
 
-    t = draw(st.from_type(tensor.Tensor))
-
     # TODO: Test column-major as well.
     tensor_spec = draw(
         strategies.tensorspec_st(
             max_dim_size=9, min_dims=1, max_dims=4, layout=layouts.ROW_MAJOR
         )
     )
-    t = target.tensor(spec=tensor_spec, name=None, origin=None)
+    root_tensor = target.tensor(spec=tensor_spec, name=None)
 
+    stack = [root_tensor]
     concrete_tile_idxs: list[list[int]] = []
 
     depth = draw(st.integers(1, 2))
     for _ in range(depth):
         # TODO: Use a more generic strategy for producing any tile callable
         # TODO: Test convolution tiles
-        t = t.simple_tile(tuple(draw(st.integers(1, d)) for d in t.dim_sizes))
-        # The following `assume` avoids the case where simple_tile returns `t`
-        # itself.
-        hypothesis.assume(not isinstance(t, tensor.Tensor))
-        assert not isinstance(t, tensor.Tensor)
+        new_tile_size = tuple(draw(st.integers(1, d)) for d in stack[-1].dim_sizes)
+
+        hypothesis.assume(stack[-1].dim_sizes != new_tile_size)
+        # Avoids the case where simple_tile returns `t` itself.
+        stack.append(stack[-1].simple_tile(tensor.OperandIdx(0), new_tile_size))
+        assert not isinstance(stack[-1], tensor.Tensor)
         concrete_tile_idxs.append(
             [
-                draw(st.integers(min_value=0, max_value=t.steps_dim(dim_idx) - 1))
-                for dim_idx in range(len(t.dim_sizes))
+                draw(
+                    st.integers(
+                        min_value=0,
+                        max_value=stack[-1].steps_dim(
+                            dim_idx, tensor_spec.dim_sizes[dim_idx]
+                        )
+                        - 1,
+                    )
+                )
+                for dim_idx in range(len(stack[-1].dim_sizes))
             ]
         )
-    return t, concrete_tile_idxs
+    return stack, concrete_tile_idxs
 
 
 @hypothesis.settings(max_examples=1000, deadline=4000)
@@ -427,33 +425,31 @@ def test_index_exprs_consistent_with_contiguous_props(inp):
     logical index (`p1` in a 2-dim. tensor) in an innermost loop returns
     adjacent buffer indices.
     """
-    tile, concrete_tile_idxs = inp
-
-    # TODO: Modify the strategy so that it always returns a Tile.
-    hypothesis.assume(isinstance(tile, tensor.Tile))
+    stack, concrete_tile_idxs = inp
+    first_spec = stack[0].spec
 
     # Compose indexing expressions so that we have a mapping from the final
     # tile's coordinates all the way back to its root tensor.
-    stack: list[tensor.Tile] = [tile]
-    while isinstance(stack[0].origin, tensor.Tile):
-        stack.insert(0, stack[0].origin)
-    expr = stack[0].origin.layout.buffer_indexing_expr(stack[0].origin.dim_sizes)
+    last_spec = stack[0].spec
+    del stack[0]
+    expr = stack[0].spec.layout.buffer_indexing_expr(last_spec.dim_sizes)
     while stack:
         operand = stack[0]
         del stack[0]
         all_substitutions = {}
         tile_it_vars = concrete_tile_idxs[-1]
         del concrete_tile_idxs[-1]
-        for dim_idx, it_var in zip(range(len(tile.dim_sizes)), tile_it_vars):
+        for dim_idx, it_var in zip(range(len(operand.dim_sizes)), tile_it_vars):
             e = indexexpr.logical_indexing_expr(operand, dim_idx)
             e = e.subs(f"i{dim_idx}", it_var)
             all_substitutions[f"p{dim_idx}"] = e
         expr = expr.subs(all_substitutions)
+        last_spec = operand.spec
 
     # Walk the elements.
     is_contiguous = True
     last_offset: Optional[int] = None
-    for pts in itertools.product(*map(range, tile.dim_sizes)):
+    for pts in itertools.product(*map(range, operand.dim_sizes)):
         offset = int(expr.evalf(subs={f"p{idx}": pt for idx, pt in enumerate(pts)}))
         assert isinstance(offset, int), f"offset was type {type(offset)}"
         if last_offset is None:
@@ -464,7 +460,7 @@ def test_index_exprs_consistent_with_contiguous_props(inp):
             break
         last_offset = offset
 
-    assert tile.contiguous == is_contiguous
+    assert utils.contiguous(operand, first_spec) == is_contiguous
 
 
 @_calculator_to_test(_arb_matmul_spec)

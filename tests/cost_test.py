@@ -117,21 +117,15 @@ def test_contiguous_copy_lowers_matmul_cost(c: int, m: int, dtype: dtypes.Dtype)
 def test_trivial_tilings_are_same_cost_as_untiled_matmul(matmul_spec):
     target = system_config.current_target()
 
-    lhs = target.tensor(matmul_spec.lhs, name=None)
-    rhs = target.tensor(matmul_spec.rhs, name=None)
-    out = target.tensor(matmul_spec.output, name=None)
+    ((_, k), (m, n)) = matmul_spec.inputs[0].dim_sizes, matmul_spec.output.dim_sizes
 
-    m, k, n = out.dim_sizes[0], lhs.dim_sizes[1], out.dim_sizes[1]
     trivial_tiled_schedule = (
-        morello.impl.MatmulHole(lhs, rhs, out, matmul_spec.serial_only)
+        morello.impl.MatmulHole(matmul_spec)
         .tile_out((m, n))
         .split(k)
         .complete()
     )
-
-    trivial_untiled_schedule = morello.impl.MatmulHole(
-        lhs, rhs, out, serial_only=False
-    ).complete()
+    trivial_untiled_schedule = morello.impl.MatmulHole(matmul_spec).complete()
     assert cost.compute_cost(trivial_tiled_schedule) == cost.compute_cost(
         trivial_untiled_schedule
     )

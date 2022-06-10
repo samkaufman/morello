@@ -4,8 +4,7 @@ import math
 from collections.abc import Mapping
 from typing import Iterable, TypeVar
 
-from . import layouts, tensor
-from .tensor import TensorLike
+from . import layouts, specs, tensor
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -44,12 +43,12 @@ def flatten(src):
 
 
 def contiguous(t, address_root):
-    if isinstance(t, tensor.TensorLike):
+    if isinstance(t, (specs.TensorSpec, tensor.TensorLike)):
         self_ordered_dims = layout_ordered_dims(t)
     else:
         self_ordered_dims = layout_ordered_dims(*t)
 
-    if isinstance(address_root, tensor.TensorLike):
+    if isinstance(address_root, (specs.TensorSpec, tensor.TensorLike)):
         address_root_ordered_dims = layout_ordered_dims(address_root)
     else:
         address_root_ordered_dims = layout_ordered_dims(*address_root)
@@ -74,12 +73,14 @@ def layout_ordered_dims(*args) -> tuple[int, ...]:
     """Returns tuple of operand's height and width; or vice versa if column-major."""
     dim_sizes: tuple[int, ...]
     root_layout: layouts.Layout
-    if len(args) == 1 and isinstance(args[0], TensorLike):
-        dim_sizes, root_layout = args[0].dim_sizes, args[0].root.layout
+    if len(args) == 1 and isinstance(args[0], specs.TensorSpec):
+        dim_sizes, root_layout = args[0].dim_sizes, args[0].layout
+    elif len(args) == 1 and hasattr(args[0], "spec"):
+        return layout_ordered_dims(args[0].spec)
     elif len(args) == 2:
         dim_sizes, root_layout = args
     else:
-        raise TypeError("Unknown arguments")
+        raise TypeError(f"Unknown arguments: {args}")
 
     if len(dim_sizes) == 1:
         return (dim_sizes[0],)

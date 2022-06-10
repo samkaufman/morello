@@ -1,9 +1,9 @@
-from typing import Union, Iterable, Optional
+from typing import Mapping, Union, Iterable, Optional
 
 import termcolor
 
-from . import utils
-from .tensor import Tensor, Tile
+from . import impl, utils
+from .tensor import Tensor, TensorLike, Tile
 
 
 _COLORS = ["blue", "green", "magenta", "red", "yellow", "cyan"]
@@ -18,23 +18,27 @@ def _concat_word(left: str, word: str) -> str:
 
 
 def _assign_tensor_color(
-    tensor: Union[Tensor, Tile],
-    assignments: dict[Union[Tensor, Tile], Optional[str]] = {},
-    tensors_to_color: Optional[frozenset[Union[Tensor, Tile]]] = None,
+    tensor: TensorLike,
+    tensors_to_sources: Mapping[TensorLike, TensorLike],
+    assignments: dict[TensorLike, Optional[str]] = {},
+    tensors_to_color: Optional[frozenset[TensorLike]] = None,
 ) -> None:
     # If a color has been assigned, do nothing
     if tensor in assignments:
         return
 
-    # If possible, choose the same color as the origin
-    if tensor.origin:
-        _assign_tensor_color(tensor.origin, assignments)
-        assignments[tensor] = assignments[tensor.origin]
+    # If possible, choose the same color as the source
+    source = tensors_to_sources.get(tensor)
+    if source:
+        _assign_tensor_color(source, tensors_to_sources, assignments)
+        assignments[tensor] = assignments[source]
         return
-    if tensor.root and tensor.root != tensor:
-        _assign_tensor_color(tensor.root, assignments)
-        assignments[tensor] = assignments[tensor.root]
-        return
+
+    # TODO: Do we actually need the following block.
+    # if tensor.root and tensor.root != tensor:
+    #     _assign_tensor_color(tensor.root, tensors_to_sources, assignments)
+    #     assignments[tensor] = assignments[tensor.root]
+    #     return
 
     # Otherwise, we are handling a root tensor, so choose a new color if this
     # tensor is in the list of tensors to color, or assign None if not
@@ -48,7 +52,9 @@ def _assign_tensor_color(
 
 
 def _assign_tensor_name(
-    tensor: Union[Tensor, Tile], assignments: dict[Union[Tensor, Tile], str] = {}
+    tensor: TensorLike,
+    tensors_to_sources: Mapping[TensorLike, TensorLike],
+    assignments: dict[TensorLike, str] = {},
 ) -> None:
     if tensor in assignments:
         return
@@ -65,18 +71,19 @@ def _assign_tensor_name(
         assignments[tensor] = extend_name(tensor.name)
         return
 
-    if tensor.origin:
+    tensor_source = tensors_to_sources.get(tensor)
+    if tensor_source:
         if isinstance(tensor, Tile):
             preferred_suffix = "t"
-        elif "RF" in tensor.root.bank:
+        elif "RF" in tensor.spec.bank:
             preferred_suffix = "r"
         else:
             # 's' is an arbitrary choice, but this case hardly ever occurs in
             # practice.
             preferred_suffix = "s"
-        _assign_tensor_name(tensor.origin, assignments)
+        _assign_tensor_name(tensor_source, tensors_to_sources, assignments)
         assignments[tensor] = extend_name(
-            _concat_word(assignments[tensor.origin], preferred_suffix)
+            _concat_word(assignments[tensor_source], preferred_suffix)
         )
         return
 
@@ -89,18 +96,36 @@ def _assign_tensor_name(
     raise Exception("Exhausted the alphabet")
 
 
+def _map_tensors_to_sources(imp, _accum=None) -> Mapping[TensorLike, TensorLike]:
+    """Returns a mapping from tensor/tile to its move source or outer tensor."""
+    if _accum is None:
+        _accum = {}
+    for op in imp.operands:
+        source = getattr(op, "origin", None)
+        if source:
+            _accum[op] = source
+    if isinstance(imp, impl.MoveLet):
+        _accum[imp.destination] = imp.operands[imp.source_idx]
+    for child in imp.children:
+        _map_tensors_to_sources(child, _accum)
+    return _accum
+
+
 class TensorNamer:
     def __init__(
-        self, tensors_to_color: Optional[Iterable[Union[Tensor, Tile]]] = None
+        self,
+        imp: impl.AppliedImpl,
+        tensors_to_color: Optional[Iterable[TensorLike]] = None,
     ) -> None:
         self.name_assignments = dict()
         self.color_assignments = dict()
+        self._tensors_to_source = _map_tensors_to_sources(imp)
         self._tensors_to_color = None
         if tensors_to_color:
             self._tensors_to_color = frozenset(tensors_to_color)
 
-    def name(self, tensor: Union[Tensor, Tile], color: bool = False) -> str:
-        _assign_tensor_name(tensor, self.name_assignments)
+    def name(self, tensor: TensorLike, color: bool = False) -> str:
+        _assign_tensor_name(tensor, self._tensors_to_source, self.name_assignments)
         result = self.name_assignments[tensor]
         if color:
             color_to_use = self._color(tensor)
@@ -108,6 +133,11 @@ class TensorNamer:
                 result = termcolor.colored(result, color=color_to_use)
         return result
 
-    def _color(self, tensor: Union[Tensor, Tile]) -> Optional[str]:
-        _assign_tensor_color(tensor, self.color_assignments, self._tensors_to_color)
+    def _color(self, tensor: TensorLike) -> Optional[str]:
+        _assign_tensor_color(
+            tensor,
+            self._tensors_to_source,
+            self.color_assignments,
+            self._tensors_to_color,
+        )
         return self.color_assignments[tensor]

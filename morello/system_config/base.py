@@ -25,7 +25,6 @@ class Target(abc.ABC):
         self,
         spec: "TensorSpec",
         name: Optional[str] = None,
-        origin: Optional[Union["Tensor", "Tile"]] = None,
         **kwargs,
     ) -> "TensorBase":
         raise NotImplementedError()

@@ -174,46 +174,37 @@ def test_convolution_steps(
 ):
     print(f"Testing square {tile_size}")
     filter_cnt = 4
-    img = tensor.Tensor(
-        spec=specs.TensorSpec((outer_batch, channels, img_size, img_size), dtype=dtype),
-        name="image",
+    img = specs.TensorSpec((outer_batch, channels, img_size, img_size), dtype=dtype)
+    filters = specs.TensorSpec(
+        (filter_cnt, channels, filter_size, filter_size), dtype=dtype
     )
-    filters = tensor.Tensor(
-        spec=specs.TensorSpec(
-            (filter_cnt, channels, filter_size, filter_size), dtype=dtype
-        ),
-        name="filters",
+    out=specs.TensorSpec(
+        (outer_batch, filter_cnt, out_size, out_size), dtype=dtype
     )
-    out = tensor.Tensor(
-        spec=specs.TensorSpec(
-            (outer_batch, filter_cnt, out_size, out_size), dtype=dtype
-        ),
-        name="output",
-    )
-    conv = morello.impl.directconv.DirectConv(
-        lhs=img, rhs=filters, output=out, serial_only=False
+    conv = impl.DirectConv(
+      specs.Convolution(img, filters, out, serial_only=False)
     )
     print("On a conv: " + str(conv))
     print(f"Calling conv.tile_out({(inner_batch, filter_cnt, tile_size, tile_size)})")
     loop = conv.tile_out((inner_batch, filter_cnt, tile_size, tile_size))
     print(f"Loop:\n{op_pprint.pformat(loop, show_utilization=False, show_cost=False)}")
     if steps == 1:
-        assert isinstance(loop, morello.impl.directconv.DirectConv)
+        assert isinstance(loop, impl.DirectConv)
     else:
         assert loop.steps == steps
 
 
 def test_evenly_divisible_matmul_tiling():
-    lhs = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
-    rhs = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
-    out = tensor.Tensor(specs.TensorSpec((4, 4), dtype=dtypes.Uint32), name=None)
-    schedule = morello.impl.matmuls.MatmulHole(
+    lhs = specs.TensorSpec((4, 4), dtype=dtypes.Uint32)
+    rhs = specs.TensorSpec((4, 4), dtype=dtypes.Uint32)
+    out = specs.TensorSpec((4, 4), dtype=dtypes.Uint32)
+    schedule = impl.MatmulHole(specs.Matmul(
         lhs, rhs, out, serial_only=False
-    ).tile_out((2, 2))
-    assert schedule.output.dim_sizes == (4, 4)
+    )).tile_out((2, 2))
+    assert schedule.spec.output.dim_sizes == (4, 4)
     assert isinstance(schedule.inner, morello.impl.matmuls.MatmulBase)
-    assert schedule.inner.output.dim_sizes == (2, 2)
-    assert schedule.inner.lhs.dim_sizes[1] == 4
+    assert schedule.inner.spec.output.dim_sizes == (2, 2)
+    assert schedule.inner.spec.inputs[0].dim_sizes[1] == 4
 
 
 @hypothesis.settings(deadline=10 * 1000)
@@ -249,25 +240,27 @@ def test_nested_convs_outputs_constant(
         name=None,
     )
     schedule = morello.impl.directconv.DirectConv(
-        image, filters, output, serial_only=False
+        specs.Convolution(
+            image.spec, filters.spec, output.spec, serial_only=False
+        )
     )
-    assert schedule.output.dim_sizes[:2] == (1, fi)
-    assert schedule.output.dim_sizes[2] == expected_output_height
-    assert schedule.output.dim_sizes[3] == expected_output_width
+    assert schedule.spec.output.dim_sizes[:2] == (1, fi)
+    assert schedule.spec.output.dim_sizes[2] == expected_output_height
+    assert schedule.spec.output.dim_sizes[3] == expected_output_width
 
     hypothesis.assume(th1 <= 1 + image.dim_sizes[2] - filters.dim_sizes[2])
     hypothesis.assume(tw1 <= 1 + image.dim_sizes[3] - filters.dim_sizes[3])
     tiled_schedule_a = schedule.tile_out((1, fi, th1, tw1))
-    assert tiled_schedule_a.output.dim_sizes[:2] == (1, fi)
-    assert tiled_schedule_a.output.dim_sizes[2] == expected_output_height
-    assert tiled_schedule_a.output.dim_sizes[3] == expected_output_width
+    assert tiled_schedule_a.spec.output.dim_sizes[:2] == (1, fi)
+    assert tiled_schedule_a.spec.output.dim_sizes[2] == expected_output_height
+    assert tiled_schedule_a.spec.output.dim_sizes[3] == expected_output_width
 
     hypothesis.assume(th2 <= th1)
     hypothesis.assume(tw2 <= tw1)
     tiled_schedule_b = schedule.tile_out((1, fi, th2, tw2))
-    assert tiled_schedule_b.output.dim_sizes[:2] == (1, fi)
-    assert tiled_schedule_b.output.dim_sizes[2] == expected_output_height
-    assert tiled_schedule_b.output.dim_sizes[3] == expected_output_width
+    assert tiled_schedule_b.spec.output.dim_sizes[:2] == (1, fi)
+    assert tiled_schedule_b.spec.output.dim_sizes[2] == expected_output_height
+    assert tiled_schedule_b.spec.output.dim_sizes[3] == expected_output_width
 
 
 @pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
@@ -289,16 +282,12 @@ def test_tile_compose_hole_out(dtype):
         serial_only=False,
     )
 
-    compose_hole = morello.impl.compose.ComposeHole(
-        spec=compose_spec,
-        inputs=(filters_b, img, filters_a),
-        output=output,
-    )
+    compose_hole = impl.ComposeHole(compose_spec)
     tiled_compose = compose_hole.tile_out((1, 4, 2, 2))
     assert isinstance(tiled_compose, impl.Loop)
     assert tiled_compose.spec == compose_spec
     assert isinstance(tiled_compose.inner, impl.ComposeHole)
-    assert tiled_compose.inner.output.dim_sizes == (1, 4, 2, 2)
+    assert tiled_compose.inner.spec.output.dim_sizes == (1, 4, 2, 2)
     # TODO: Add checks for intermediate shape correctness
 
 
@@ -343,9 +332,7 @@ def test_composehole_actions_change_spec(dtype):
         serial_only=False,
     )
     initial_op = morello.impl.compose.ComposeHole(
-        initial_spec,
-        inputs=(filters_b, img, filters_a),
-        output=output,
+        initial_spec
     )
 
     for child in _walk_actions(initial_op, depth=3):

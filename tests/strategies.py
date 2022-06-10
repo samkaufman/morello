@@ -36,7 +36,7 @@ def layout_st(
 @st.composite
 def tensor_st(draw):
     target = system_config.current_target()
-    return target.tensor(spec=draw(tensorspec_st()), name=draw(st.text()), origin=None)
+    return target.tensor(spec=draw(tensorspec_st()), name=draw(st.text()))
 
 
 @st.composite

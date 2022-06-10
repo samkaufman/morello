@@ -45,7 +45,8 @@ class SearchCallbacks:
         pass
 
 
-@dataclasses.dataclass(frozen=False)
+@cython.dataclasses.dataclass(frozen=False)
+@cython.cclass
 class SearchStats:
     expansions: int = 0
 

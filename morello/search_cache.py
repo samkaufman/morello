@@ -92,7 +92,7 @@ class ScheduleCache:
                 "ScheduleCache only supports StandardMemoryLimits. Queries with"
                 " other MemoryLimits implementations always miss."
             )
-            raise KeyError(f"'{str(spec)}'")
+            raise KeyError()
 
         memory_caps = memory_limits.available
         for entry in self._rects[spec]:
@@ -112,7 +112,7 @@ class ScheduleCache:
                     ).values()
                 ):
                     return entry.schedules
-        raise KeyError(f"'{str(spec)}'")
+        raise KeyError()
 
     def put(
         self,

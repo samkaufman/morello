@@ -5,11 +5,7 @@ from typing import NamedTuple, Optional
 
 from frozendict import frozendict
 
-import morello.impl.base
-import morello.impl.compose
-
-from . import system_config, utils
-from .tensor import Tensor
+from . import impl, specs, system_config, utils
 
 # If True, schedules will be saved as if they had memory limits, for all banks,
 # that are the next highest power of 2. This discretizes the cache a bit, even
@@ -27,11 +23,11 @@ class IntermediatesTooBigError(ValueError):
 
 def _pipeline_transition(
     base_available: dict[str, int],
-    pipeline: morello.impl.compose.Pipeline,
+    pipeline: impl.Pipeline,
     carried_input_consumption: dict[str, int],
     carried_output_consumption: dict[str, int],
 ) -> Optional[list["MemoryLimits"]]:
-    def _tensor_mem(tensor: Tensor) -> dict[str, int]:
+    def _tensor_mem(tensor: specs.TensorSpec) -> dict[str, int]:
         mem = _zero_banks()
         mem[tensor.bank] = tensor.bytes_used
         return mem
@@ -43,15 +39,15 @@ def _pipeline_transition(
             PipelineChildMemoryLimits(
                 base_available,
                 carried_input_consumption,
-                _tensor_mem(pipeline.stages[0].output),
+                _tensor_mem(pipeline.stages[0].spec.output),
             )
         )
 
         # The intermediate children carry the base available, as well as their
         # input and output intermediate tensors' limits
         for child_idx in range(1, len(pipeline.stages) - 1):
-            before = _tensor_mem(pipeline.stages[child_idx - 1].output)
-            after = _tensor_mem(pipeline.stages[child_idx].output)
+            before = _tensor_mem(pipeline.stages[child_idx - 1].spec.output)
+            after = _tensor_mem(pipeline.stages[child_idx].spec.output)
             child_limits.append(
                 PipelineChildMemoryLimits(base_available, before, after)
             )
@@ -60,7 +56,7 @@ def _pipeline_transition(
         child_limits.append(
             PipelineChildMemoryLimits(
                 base_available,
-                _tensor_mem(pipeline.stages[-2].output),
+                _tensor_mem(pipeline.stages[-2].spec.output),
                 carried_output_consumption,
             )
         )
@@ -76,9 +72,7 @@ class MemoryLimits(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def transition(
-        self, schedule: morello.impl.base.Impl
-    ) -> Optional[list["MemoryLimits"]]:
+    def transition(self, schedule: impl.Impl) -> Optional[list["MemoryLimits"]]:
         """Returns new limits for the children of the given schedule.
 
         Returns `None` if the given schedule violates limits and therefore cannot be
@@ -128,11 +122,9 @@ class StandardMemoryLimits(MemoryLimits):
     def available(self) -> frozendict[str, int]:
         return self._available
 
-    def transition(
-        self, schedule: morello.impl.base.Impl
-    ) -> Optional[list["MemoryLimits"]]:
+    def transition(self, schedule: impl.Impl) -> Optional[list["MemoryLimits"]]:
         # base->pipeline
-        if isinstance(schedule, morello.impl.compose.Pipeline):
+        if isinstance(schedule, impl.Pipeline):
             return _pipeline_transition(
                 dict(self.available), schedule, _zero_banks(), _zero_banks()
             )
@@ -272,12 +264,10 @@ class PipelineChildMemoryLimits(MemoryLimits):
             }
         )
 
-    def transition(
-        self, schedule: morello.impl.base.Impl
-    ) -> Optional[list["MemoryLimits"]]:
+    def transition(self, schedule: impl.Impl) -> Optional[list["MemoryLimits"]]:
         # pipeline->base; treat self as a StandardMemoryLimits and transition
         # normally.
-        if not isinstance(schedule, morello.impl.compose.Pipeline):
+        if not isinstance(schedule, impl.Pipeline):
             # If we're transitioning to a non-Pipeline, we lose the precision of a
             # PipelineChildMemoryLimits. It's possible, at this point, that the uniform
             # lower bound on available memory becomes negative, in which case we'll

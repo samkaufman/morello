@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import argparse
 import asyncio
 import csv
@@ -78,8 +77,6 @@ def _matmul_main(m, k, n, top_k: int, cache: search_cache.ScheduleCache):
     start = time.time()
     s = schedule_search(
         specs.Matmul(left.spec, right.spec, output.spec, serial_only=False),
-        inputs=(left, right),
-        output=output,
         top_k=top_k,
         cache=cache,
     )
@@ -119,8 +116,6 @@ def _conv_main(
     start = time.time()
     s = schedule_search(
         specs.Convolution(left.spec, right.spec, output.spec, serial_only=False),
-        inputs=(left, right),
-        output=output,
         top_k=top_k,
         cache=cache,
     )
@@ -152,8 +147,6 @@ def _convnet_main(top_k: int, cache: search_cache.ScheduleCache):
             intermediate_dtypes=(DTYPE,),
             serial_only=False,
         ),
-        inputs=(filters_b, img, filters_a),
-        output=output,
         top_k=top_k,
         cache=cache,
     )
@@ -241,6 +234,9 @@ def main() -> int:
     finally:
         search.prune_column_major.reset(col_major_token)
         impl.tile_size_mode.reset(tile_size_mode_token)
+
+    # Let's apply some "concrete" tensors so we can pprint and generate code.
+    scheds = [s.to_applied() for s in scheds]
 
     # Update the cache with real execution times.
     #

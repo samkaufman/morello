@@ -26,12 +26,25 @@ class Matmul(base.Spec):
 
     def __init__(self, lhs, rhs, output, serial_only) -> None:
         super().__init__()
+
+        # TODO: Remove below type checks
+        assert isinstance(lhs, TensorSpec), f"lhs must be a TensorSpec, got {lhs}"
+        assert isinstance(rhs, TensorSpec), f"rhs must be a TensorSpec, got {rhs}"
+        assert isinstance(
+            output, TensorSpec
+        ), f"output must be a TensorSpec, got {output}"
+
         self.lhs = lhs
         self.rhs = rhs
         self._output = output
         self._serial_only = serial_only
-        if self.output.dim_sizes != (self.lhs.dim_sizes[0], self.rhs.dim_sizes[1]):
-            raise ValueError(f"Incorrect shape for matmul output: {self.output}")
+
+        expected_output_shape = (self.lhs.dim_sizes[0], self.rhs.dim_sizes[1])
+        if self.output.dim_sizes != expected_output_shape:
+            raise ValueError(
+                f"Incorrect shape for matmul output: {self.output}; expected "
+                f"{expected_output_shape}"
+            )
 
     @property
     def output(self) -> TensorSpec:
