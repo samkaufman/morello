@@ -18,7 +18,7 @@ def test_tensors_and_tiles_can_be_pickled_and_unpickled_losslessly(
 ):
     t = system_config.current_target().tensor(spec=spec, name=name)
     if should_tile:
-        t = t.simple_tile(tensor.OperandIdx(0), tuple(1 for _ in t.dim_sizes))
+        t = t.spec.simple_tile(tensor.OperandIdx(0), tuple(1 for _ in t.dim_sizes))
 
     buf = io.BytesIO()
     pickle.dump(t, buf)

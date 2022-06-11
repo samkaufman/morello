@@ -397,7 +397,7 @@ def _st_test_index_exprs_consistent_with_contiguous_props(draw):
 
         hypothesis.assume(stack[-1].dim_sizes != new_tile_size)
         # Avoids the case where simple_tile returns `t` itself.
-        stack.append(stack[-1].simple_tile(tensor.OperandIdx(0), new_tile_size))
+        stack.append(stack[-1].spec.simple_tile(tensor.OperandIdx(0), new_tile_size))
         assert not isinstance(stack[-1], tensor.Tensor)
         concrete_tile_idxs.append(
             [

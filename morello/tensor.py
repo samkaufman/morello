@@ -46,41 +46,6 @@ class TensorLike(abc.ABC):
     ) -> "Tile":
         raise NotImplementedError("replace_tensors will be removed")
 
-    def simple_tile(
-        self, operand_idx: OperandIdx, tile_shape: tuple[int, ...]
-    ) -> "TensorLike":
-        return self._tile(SimpleTile, operand_idx, tile_shape)
-
-    def conv_image_tile(
-        self,
-        operand_idx: OperandIdx,
-        tile_shape: tuple[int, ...],
-        filter_shape: tuple[int, ...],
-    ) -> "TensorLike":
-        return self._tile(
-            ConvolutionImageTile, operand_idx, tile_shape, filter_shape=filter_shape
-        )
-
-    def _tile(
-        self, tile_cls, operand_idx: OperandIdx, new_dims: Sequence[int], **kw
-    ) -> "TensorLike":
-        if new_dims == self.dim_sizes:
-            return self
-
-        if len(new_dims) != len(self.dim_sizes):
-            raise ValueError(
-                f"Cannot produce rank-{len(new_dims)} tile of shape "
-                f"{new_dims} for rank-{len(self.dim_sizes)} tensor of "
-                f"shape {self.dim_sizes}"
-            )
-        if any(td > rd for td, rd in zip(new_dims, self.dim_sizes)):
-            raise ValueError(
-                f"Tile {new_dims} would be larger than tensor {self.dim_sizes}"
-            )
-
-        tile_spec = self.spec.shrink(new_dims)
-        return tile_cls(source=operand_idx, spec=tile_spec, name=None, **kw)
-
     @typing.final
     def __eq__(self, other):
         return self is other

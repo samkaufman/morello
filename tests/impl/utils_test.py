@@ -25,7 +25,7 @@ def test_tile_contiguous(tensor_shape, tile_shape, expected):
     dtype, bank, layout = dtypes.Uint8, "RF", layouts.ROW_MAJOR
     tensor_spec = target.tensor_spec(tensor_shape, dtype, bank, layout)
     t = target.tensor(tensor_spec, name=None)
-    tile = t.simple_tile(tensor.OperandIdx(0), tile_shape)
+    tile = t.spec.simple_tile(tensor.OperandIdx(0), tile_shape)
     assert morello.utils.contiguous(tile, t) == expected
 
 
