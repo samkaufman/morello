@@ -7,3 +7,4 @@ cdef class ReduceSum(base.Spec):
     cdef readonly TensorSpec source
     cdef readonly TensorSpec _output
     cdef bint _serial_only
+    cdef bint _serial_only

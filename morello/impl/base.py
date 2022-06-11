@@ -1,13 +1,13 @@
 import abc
 import dataclasses
+import functools
 import typing
-from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union, cast
+from typing import Callable, Iterable, Optional, Sequence, Tuple, cast
 
-from morello import specs, tiling
-
+from .. import specs, tiling
 from ..layouts import Layout
 from ..system_config import current_system, current_target
-from ..tensor import SimpleTile, Tensor, TensorLike, Tile
+from ..tensor import OperandIdx, TensorLike, Tile
 from .pruning import ParentSummary
 from .utils import assert_stable_spec
 
@@ -24,18 +24,9 @@ class Impl(abc.ABC):
         raise NotImplementedError()
 
     @property
-    @abc.abstractmethod
-    def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
-        raise NotImplementedError()
-
-    @property
-    @abc.abstractmethod
-    def output(self) -> Union[Tensor, Tile]:
-        raise NotImplementedError()
-
-    @property
-    def operands(self) -> tuple[Union[Tensor, Tile], ...]:
-        return self.inputs + (self.output,)
+    @typing.final
+    def operand_count(self) -> int:
+        return len(self.spec.inputs) + 1
 
     @property
     def leaves(self) -> Iterable["Impl"]:
@@ -53,20 +44,17 @@ class Impl(abc.ABC):
             inners.append(getattr(self, "inner"))
         return 1 + sum(s.depth for s in inners)
 
-    @abc.abstractmethod
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ):
-        raise NotImplementedError()
-
     @property
     def is_scheduled(self) -> bool:
         if hasattr(self, "inner"):
             return getattr(self, "inner").is_scheduled
         raise NotImplementedError(f"No is_scheduled implementation for {type(self)}")
+
+    def replace_spec(self, new_spec: specs.Spec) -> "Impl":
+        raise NotImplementedError(
+            f"Not implemented for {type(self).__name__}. (This method should "
+            "be implemented for holes.)"
+        )
 
     @typing.final
     def replace_child(self, child_idx: int, new_child: "Impl") -> "Impl":
@@ -77,18 +65,6 @@ class Impl(abc.ABC):
     @abc.abstractmethod
     def replace_children(self, replacements: Iterable["Impl"]) -> "Impl":
         raise NotImplementedError()
-
-    @abc.abstractmethod
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        raise NotImplementedError()
-
-    @typing.final
-    def replace_operand(self, operand_idx: int, new_operand: TensorLike) -> "Impl":
-        ops = list(self.operands)
-        ops[operand_idx] = new_operand
-        return self.replace_io(ops[:-1], ops[-1])
 
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
@@ -110,29 +86,31 @@ class Impl(abc.ABC):
             )
 
         # A no-op if the given shape is already the output shape.
-        if self.output.dim_sizes == output_shape:
+        if self.spec.output.dim_sizes == output_shape:
             return self
 
-        # Tile the output first
-        smaller_output = self.output.simple_tile(output_shape)
-        assert smaller_output != self.output
-        assert isinstance(smaller_output, SimpleTile)
-
-        # Tile the corresponding inputs.
-        smaller_inputs = self._calculate_inputs_for_tile_out(
-            tiling.tile_to_partial(smaller_output)
+        # Tile the output and inputs.
+        smaller_output = self.spec.output.simple_tile(
+            OperandIdx(len(self.spec.inputs)), output_shape
         )
+        smaller_inputs = [
+            partial_tile.tile(OperandIdx(input_idx), inp)
+            for input_idx, (inp, partial_tile) in enumerate(
+                zip(
+                    self.spec.inputs,
+                    self._calculate_partial_inputs_for_tile_out(
+                        tiling.tile_to_partial(smaller_output)
+                    ),
+                )
+            )
+        ]
 
         # Make an inner hole for the now-smaller Spec.
         inner_serial = None
         if parallel:
             inner_serial = True
         inner = spec_to_hole(
-            self.spec.shrink_for_tile_out(output_shape,
-                [op.address_root.spec for op in self.operands],
-                serial_only=inner_serial),
-            inputs=smaller_inputs,
-            output=smaller_output,
+            self.spec.shrink_for_tile_out(output_shape, serial_only=inner_serial)
         )
 
         # Construct the list of tiles, which is every tile_out result that just
@@ -140,15 +118,16 @@ class Impl(abc.ABC):
         # original. (Note that the output, unlike the inputs, is known to have
         # been tiled or this method would have short-circuited.)
         # TODO: Can we share this code with same block in ComposeHole.tile_out?
-        unchanged_input_tiles = set()
-        for original_input, tiled_input in zip(self.inputs, smaller_inputs):
-            if original_input != tiled_input:
-                unchanged_input_tiles.add(tiled_input)
-        unchanged_input_tiles = frozenset(unchanged_input_tiles)
+        changed_input_tiles = set()
+        for original_input, tiled_input in zip(self.spec.inputs, smaller_inputs):
+            if original_input != tiled_input.spec:
+                changed_input_tiles.add(tiled_input)
+        changed_input_tiles = frozenset(changed_input_tiles)
 
         return Loop(
+            spec=self.spec,
             subscripts=self.spec.operands_dim_subscripts()[-1],
-            tiles=frozenset([smaller_output]) | frozenset(unchanged_input_tiles),
+            tiles=frozenset([smaller_output]) | frozenset(changed_input_tiles),
             inner=inner,
             parallel=parallel,
         )
@@ -161,17 +140,15 @@ class Impl(abc.ABC):
         can be tiled to the corresponding input shapes.
         """
         output_shape = tuple(output_shape)
-        if not self.output.spec.is_valid_tile_shape(output_shape):
+        if not self.spec.output.is_valid_tile_shape(output_shape):
             return False
-        # TODO: It'd be nice to not need to tile the output to get its PartialTile
-        smaller_partial_out = tiling.tile_to_partial(
-            self.output.simple_tile(output_shape)
-        )
+
+        smaller_partial_out = tiling.PartialSimpleTile(output_shape)
         for inp, partial_input in zip(
-            self.inputs,
+            self.spec.inputs,
             self._calculate_partial_inputs_for_tile_out(smaller_partial_out),
         ):
-            if not inp.spec.is_valid_tile_shape(partial_input.dim_sizes):
+            if not inp.is_valid_tile_shape(partial_input.dim_sizes):
                 return False
         return True
 
@@ -189,11 +166,11 @@ class Impl(abc.ABC):
 
         # If the given shape is already the output shape, this is trivially permitted.
         output_shape = (
-            self.output.dim_sizes[:sliding_dim]
+            self.spec.output.dim_sizes[:sliding_dim]
             + (output_size,)
-            + self.output.dim_sizes[sliding_dim + 1 :]
+            + self.spec.output.dim_sizes[sliding_dim + 1 :]
         )
-        if output_shape == self.output.dim_sizes:
+        if output_shape == self.spec.output.dim_sizes:
             return True
 
         # We cannot introduce a sliding tile if there is no overlap in the corresponding
@@ -204,24 +181,13 @@ class Impl(abc.ABC):
 
         return True
 
-    @typing.final
-    def _calculate_inputs_for_tile_out(
-        self, output_tile: Union[SimpleTile, tiling.PartialTile]
-    ) -> list[TensorLike]:
-        return [
-            partial_tile.tile(inp)
-            for inp, partial_tile in zip(
-                self.inputs, self._calculate_partial_inputs_for_tile_out(output_tile)
-            )
-        ]
-
     def _calculate_partial_inputs_for_tile_out(
-        self, output_tile: Union[SimpleTile, tiling.PartialTile]
+        self, output_tile: tiling.PartialTile
     ) -> list[tiling.PartialTile]:
         return list(
             tiling.tile_out(
                 type(self.spec),
-                [inp.dim_sizes for inp in self.inputs],
+                [inp.dim_sizes for inp in self.spec.inputs],
                 output_tile,
             )
         )
@@ -243,11 +209,11 @@ class Impl(abc.ABC):
 
         # A no-op if the given shape is already the output shape.
         output_shape = (
-            self.output.dim_sizes[:sliding_dim]
+            self.spec.output.dim_sizes[:sliding_dim]
             + (output_size,)
-            + self.output.dim_sizes[sliding_dim + 1 :]
+            + self.spec.output.dim_sizes[sliding_dim + 1 :]
         )
-        if output_shape == self.output.dim_sizes:
+        if output_shape == self.spec.output.dim_sizes:
             return self
 
         # We produce a SlidingWindowLoop by first doing a normal tile_out,
@@ -255,11 +221,9 @@ class Impl(abc.ABC):
         # (i.e. a ConvolutionImageTile) for a sliding Tensor managed by the
         # resulting SlidingWindowLoop. This method doesn't yet support the
         # case that multiple introduced inputs have non-zero frontiers.
-        impl = cast(Loop, self.tile_out(output_shape))
+        impl = self.tile_out(output_shape)
         assert isinstance(impl, Loop)
-        assert impl.spec == self.spec
-        assert impl.inputs == self.inputs
-        assert impl.output == self.output
+        assert len(impl.inner.children) == 0, "Expected inner to be a leaf"
 
         # Sort the tiles into those to preserve and the one over which
         # to slide
@@ -289,30 +253,14 @@ class Impl(abc.ABC):
                 layout=tile_to_convert.layout,
             ),
             name=None,
-            origin=tile_to_convert.origin,
         )
-
-        assert len(impl.inner.children) == 0, "Expected inner to be a leaf"
-        inner = impl.inner.replace_io(
-            inputs=(
-                live_tensor if inp == tile_to_convert else inp
-                for inp in impl.inner.inputs
-            ),
-            output=(
-                live_tensor
-                if impl.inner.output == tile_to_convert
-                else impl.inner.output
-            ),
-        )
-
         return SlidingWindowLoop(
-            inputs=self.inputs,
-            output=self.output,
             live_tensor=live_tensor,
+            live_tensor_idx=tile_to_convert.source,
             frontier_size=tile_to_convert.frontiers[sliding_dim],
             other_tiles=tuple(other_tiles),
             spec=self.spec,
-            inner=inner,
+            inner=impl.inner,
         )
 
     @assert_stable_spec
@@ -386,6 +334,13 @@ class Impl(abc.ABC):
     def complete(self) -> "Impl":
         return dataclasses.replace(self, inner=self.inner.complete())
 
+    @abc.abstractmethod
+    def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
+        pass
+
+    def to_applied(self) -> "AppliedImpl":
+        return self.apply([current_target().tensor(o) for o in self.spec.operands])
+
     @property
     @abc.abstractmethod
     def additional_memories(self) -> list[dict[str, int]]:
@@ -421,6 +376,9 @@ class Leaf(Impl):
                 "but was given a non-empty iterable"
             )
 
+    def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
+        return make_applied_impl(self, operands)
+
 
 class NonAllocatingLeaf(Leaf):
     """A helper base class for leaf Impls that do not allocate memory."""
@@ -434,9 +392,93 @@ class NonAllocatingLeaf(Leaf):
         return {k: 0 for k in current_system().banks}
 
 
-def spec_to_hole(
-    spec: specs.Spec, inputs: Optional[Iterable] = None, output: Optional[Any] = None
-) -> "Impl":
+class AppliedImpl(Impl):
+    unapplied: Impl
+    operands: tuple[TensorLike, ...]
+
+    def __init__(self, unapplied, operands):
+        assert isinstance(unapplied, Impl)
+
+        object.__setattr__(self, "unapplied", unapplied)
+        object.__setattr__(self, "operands", tuple(operands))
+
+        assert not hasattr(self.unapplied, "operands")
+        assert not hasattr(self.unapplied, "inputs")
+        assert not hasattr(self.unapplied, "output")
+        assert len(self.operands) == self.unapplied.operand_count
+        assert all(
+            a.spec == b for a, b in zip(self.operands, self.unapplied.spec.inputs)
+        ), (
+            f"Operand specs didn't match: {', '.join(str(a.spec) for a in self.operands[:-1])} != "
+            f"{', '.join(map(str, self.unapplied.spec.inputs))}"
+        )
+        assert (
+            self.operands[-1].spec == self.unapplied.spec.output
+        ), f"{self.operands[-1].spec} != {self.unapplied.spec.output}"
+        assert all(isinstance(c, AppliedImpl) for c in self.unapplied.children)
+
+    def __eq__(self, other):
+        if not isinstance(other, AppliedImpl):
+            return NotImplemented
+        return self.unapplied == other.unapplied and self.operands == other.operands
+
+    def __hash__(self) -> int:
+        return hash((self.unapplied, self.operands))
+
+    @property
+    def inputs(self):
+        return self.operands[:-1]
+
+    @property
+    def output(self):
+        return self.operands[-1]
+
+    def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
+        if len(operands):
+            raise ValueError("Cannot apply again.")
+        return self
+
+    def to_applied(self) -> "AppliedImpl":
+        return self
+
+    def __getattr__(self, name):
+        return getattr(self.unapplied, name)
+
+    def __setattr__(self, name, value):
+        setattr(self.unapplied, name, value)
+
+
+def make_delegator(method_name):
+    if isinstance(getattr(AppliedImpl, method_name, None), property):
+
+        def prop_get(self, *args, **kwargs):
+            return getattr(self.unapplied, method_name)
+
+        return property(fget=prop_get)
+
+    def delegator(self, *args, **kwargs):
+        return getattr(self.unapplied, method_name)(*args, **kwargs)
+
+    return delegator
+
+
+for method_name in AppliedImpl.__abstractmethods__:
+    setattr(AppliedImpl, method_name, make_delegator(method_name))
+AppliedImpl.__abstractmethods__ = frozenset()
+
+
+@functools.lru_cache(maxsize=None)
+def _make_applied_impl_cls(delegate_cls) -> type:
+    name = f"Applied{delegate_cls.__name__}"
+    new_cls = type(name, (AppliedImpl, delegate_cls), {})
+    return new_cls
+
+
+def make_applied_impl(unapplied: Impl, operands: Sequence[TensorLike]) -> AppliedImpl:
+    return _make_applied_impl_cls(type(unapplied))(unapplied, operands)
+
+
+def spec_to_hole(spec: specs.Spec) -> "Impl":
     """Returns a default, incomplete schedule for a Spec which consume given inputs.
 
     If either `inputs` or `output` is None, default Tensors from the corresponding
@@ -449,27 +491,13 @@ def spec_to_hole(
     from .matmuls import MatmulHole
     from .reducesum import ReduceSum
 
-    if inputs is None:
-        target = current_target()
-        inputs = tuple(target.tensor(s) for s in spec.inputs)
-    if output is None:
-        output = current_target().tensor(spec.output)
-
-    inputs = tuple(inputs)
     if isinstance(spec, specs.Convolution):
-        assert len(inputs) == 2, f"Expected 2 Tensor/Tile operands; got {len(inputs)}"
-        return DirectConv(
-            lhs=inputs[0], rhs=inputs[1], output=output, serial_only=spec.serial_only
-        )
+        return DirectConv(spec)
     elif isinstance(spec, specs.Matmul):
-        assert len(inputs) == 2, f"Expected 2 Tensor/Tile operands; got {len(inputs)}"
-        return MatmulHole(
-            lhs=inputs[0], rhs=inputs[1], output=output, serial_only=spec.serial_only
-        )
+        return MatmulHole(spec)
     elif isinstance(spec, specs.ReduceSum):
-        assert len(inputs) == 1, f"Expected 1 Tensor/Tile operands; got {len(inputs)}"
-        return ReduceSum(source=inputs[0], output=output, serial_only=spec.serial_only)
+        return ReduceSum(spec)
     elif isinstance(spec, specs.Compose):
-        return ComposeHole(spec, inputs=inputs, output=output)
+        return ComposeHole(spec)
     else:
         raise NotImplementedError()

@@ -23,7 +23,7 @@ def _build_table(
 ) -> None:
     system = current_system()
     ds = " " * (indent_depth * 2)
-    new_row = [f"{ds}{op.env_str(tensor_name_fn, underscore_inner=True, fancy=color)}"]
+    new_row = [f"{ds}{_env_str(op, tensor_name_fn, underscore_inner=True, fancy=True)}"]
     if show_spec:
         new_row.append(str(op.spec))
     if cost_dict:
@@ -66,7 +66,7 @@ def _build_table(
 
     # As the stack unwinds, insert a "store" line if this was a Move for an output
     if isinstance(op, impl.MoveLet) and op.is_store:
-        store_row = [f"{ds}{op.store_env_str(tensor_name_fn, fancy=color)}"]
+        store_row = [f"{ds}{_store_env_str(op, tensor_name_fn, fancy=True)}"]
         while len(store_row) < len(table[-1]):
             store_row.append("")
         table.append(store_row)
@@ -78,6 +78,100 @@ def _whitespace_preserving_tabulate(*args, **kwargs):
     result = tabulate.tabulate(*args, **kwargs)
     tabulate.PRESERVE_WHITESPACE = original_preserve_whitespace
     return result
+
+
+def _env_str(
+    imp: impl.AppliedImpl,
+    name_tensor_fn: Callable[[tensor.TensorLike], str],
+    underscore_inner: bool = False,
+    fancy: bool = False,
+) -> str:
+    if isinstance(imp, impl.Pipeline):
+        keyword = "pipeline"
+        if fancy:
+            keyword = termcolor.colored(keyword, attrs=["bold"])
+
+        introduced_strs = []
+        for stage in imp.stages[:-1]:
+            introduced_strs.append(f"{name_tensor_fn(stage.output)}: {stage.output}")
+        return f"{keyword} ({', '.join(introduced_strs)})"
+    elif isinstance(imp, (impl.Loop, impl.SlidingWindowLoop)):
+        istr = ")"
+        if not underscore_inner:
+            istr = f", {_env_str(imp.inner, name_tensor_fn, fancy=fancy)})"
+
+        left_strs, right_strs = [], []
+        for it in sorted(imp.tiles, key=str):
+            left_strs.append(
+                _loop_operand_str(it, name_tensor_fn=name_tensor_fn, fancy=fancy)
+            )
+            # TODO: Fix the following
+            right_strs.append(name_tensor_fn(imp.operands[it.source]))
+        assert left_strs and right_strs
+
+        keyword = "tile"
+        if imp.parallel:
+            keyword = "par " + keyword
+        arrow = "<-"
+        if fancy:
+            keyword = termcolor.colored(keyword, attrs=["bold"])
+            arrow = termcolor.colored(arrow, attrs=["bold"])
+
+        left_concat = ", ".join(left_strs)
+        right_concat = ", ".join(right_strs)
+        return f"{keyword} ({left_concat}) {arrow} ({right_concat}{istr}"
+    elif isinstance(imp, (impl.MoveLet, impl.PadTranspack)):
+        keyword = "move"
+        if isinstance(imp, impl.PadTranspack):
+            keyword = "padtranspack"
+        elif imp.prefetching:
+            keyword += "[p]"
+
+        arrow = "<-"
+        if fancy:
+            keyword = termcolor.colored(keyword, attrs=["bold"])
+            arrow = termcolor.colored(arrow, attrs=["bold"])
+        return (
+            f"{keyword}[{imp.destination.bank}]"
+            f" {name_tensor_fn(imp.destination)}"
+            f" {arrow} {name_tensor_fn(imp.operands[imp.source_idx])}"
+        )
+    elif isinstance(imp, impl.AppliedImpl):
+        operands_str = ", ".join(name_tensor_fn(o) for o in imp.operands)
+        return f"{type(imp).__name__}({operands_str})"
+    else:
+        raise ValueError(f"Unsupported type: {type(imp)}")
+
+
+def _store_env_str(
+    op,
+    name_tensor_fn: Callable[[tensor.TensorLike], str],
+    fancy: bool = False,
+):
+    keyword = "store"
+    arrow = "<-"
+    if fancy:
+        keyword = termcolor.colored(keyword, attrs=["bold"])
+        arrow = termcolor.colored(arrow, attrs=["bold"])
+    return (
+        f"{keyword} {name_tensor_fn(op.operands[op.source_idx])}"
+        f" {arrow} {name_tensor_fn(op.destination)}"
+    )
+
+
+def _loop_operand_str(
+    t, *, name_tensor_fn: Callable[[tensor.TensorLike], str], fancy: bool
+):
+    if isinstance(t, tensor.ConvolutionImageTile):
+        prefix = "conv"
+        if fancy:
+            prefix = termcolor.colored(prefix, attrs=["bold"])
+        desc_part = prefix + " " + "×".join(str(s) for s in t.dim_sizes)
+    elif isinstance(t, tensor.Tile):
+        desc_part = "×".join(str(s) for s in t.dim_sizes)
+    else:
+        desc_part = str(t)
+    return f"{name_tensor_fn(t)}: {desc_part}"
 
 
 def pprint(
@@ -95,6 +189,8 @@ def pprint(
             return text
         return termcolor.colored(text, **kwargs)
 
+    op = op.to_applied()
+
     cost_dict = None
     headers = [""]
     if show_spec:
@@ -107,7 +203,7 @@ def pprint(
     if show_scheduled:
         headers.append("scheduled")
     table = []
-    namer = tensor_namer.TensorNamer(tensors_to_color=op.inputs + (op.output,))
+    namer = tensor_namer.TensorNamer(op, tensors_to_color=op.operands)
     _build_table(
         op,
         show_spec,

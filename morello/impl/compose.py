@@ -2,19 +2,18 @@ import dataclasses
 import functools
 import itertools
 import math
-from typing import Callable, Iterable, List, Optional, Tuple, TypeVar, Union
+from typing import Callable, Iterable, Optional, Sequence, Tuple, TypeVar, Union, cast
 
 import dataclass_abc
-import termcolor
 
 from .. import layouts, specs, system_config, tiling, utils
 from ..layouts import Layout
 from ..system_config import current_system, current_target
-from ..tensor import SimpleTile, Tensor, TensorLike, Tile
+from ..tensor import OperandIdx, SimpleTile, Tensor, TensorBase, TensorLike, Tile
 from .actions import PeelAction, SlidingTileOutAction, TileOutAction
-from .base import Impl, spec_to_hole
+from .base import AppliedImpl, Impl, make_applied_impl, spec_to_hole
 from .loops import Loop
-from .moves import MoveLet, common_operand_move_actions
+from .moves import common_move, common_operand_move_actions
 from .pruning import (
     ParentSummary,
     break_matmul_split_symmetries,
@@ -38,35 +37,13 @@ class SplitNotSupportedByHeadError(NotImplementedError):
 @dataclass_abc.dataclass_abc(frozen=True)
 class ComposeHole(Impl):
     spec: specs.Compose
-    inputs: tuple[Union[Tensor, Tile], ...]
-    output: Union[Tensor, Tile]
 
     def __post_init__(self):
         assert isinstance(self.spec, specs.Compose)
-        assert self.spec.inputs == tuple(inp.spec for inp in self.inputs)
-        assert self.spec.output == self.output.spec
-
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ):
-        if fancy:
-            return termcolor.colored("??compose", attrs=["bold"])
-        else:
-            return "??compose"
 
     @property
-    def children(self) -> Tuple["Impl", ...]:
+    def children(self) -> Tuple[Impl, ...]:
         return tuple()
-
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        inputs = tuple(inputs)
-        new_spec = self.spec.replace_io(tuple(inp.spec for inp in inputs), output.spec)
-        return ComposeHole(new_spec, inputs, output)
 
     @prune_nested_parallel_loops
     @prune_relayout_cycles
@@ -106,7 +83,7 @@ class ComposeHole(Impl):
         yield from common_operand_move_actions(self)
 
         for tile_shape in gen_tile_sizes(
-            self.output.dim_sizes, filter=self._can_tile_out
+            self.spec.output.dim_sizes, filter=self._can_tile_out
         ):
             for parallel in [False] if self.spec.serial_only else [True, False]:
                 yield TileOutAction(self, tile_shape, parallel)
@@ -119,7 +96,7 @@ class ComposeHole(Impl):
         if allow_sliding_windows.get():
             for slide_dim in self._get_output_dimensions_matching_first_input():
                 for slide_size in dim_range(
-                    self.output.dim_sizes[slide_dim], include_end=False
+                    self.spec.output.dim_sizes[slide_dim], include_end=False
                 ):
                     # TODO: Range over multiple choices of bank
                     if self._can_sliding_tile_out(
@@ -159,45 +136,7 @@ class ComposeHole(Impl):
         prefetching: bool = False,
         **kwargs,
     ):
-        operand = self.inputs[input_idx]
-        if bank is None:
-            bank = operand.root.bank
-        if layout is None:
-            layout = operand.layout
-        if bank == operand.root.bank and layout == operand.layout:
-            raise ValueError("Either bank or layout must differ from current")
-
-        # TODO: Share this block with common_move?
-        # Will the result be contiguous? If the move is into "non-addressed"
-        # memory, then no. If it is, then it might be.
-        contiguous = False
-        if bank in current_system().addressed_banks:
-            contiguous = utils.contiguous((operand.dim_sizes, layout), operand.spec)
-
-        new_mat = current_target().tensor(
-            spec=current_target().tensor_spec(
-                operand.dim_sizes,
-                dtype=operand.dtype,
-                contiguous=contiguous,
-                layout=layout,
-                bank=bank,
-                **kwargs,
-            ),
-            name=None,
-            origin=operand,
-        )
-
-        new_inputs = self.inputs[:input_idx] + (new_mat,) + self.inputs[input_idx + 1 :]
-        new_inner_spec = self.spec.replace_io(
-            tuple(inp.spec for inp in new_inputs), self.spec.output
-        )
-        return MoveLet(
-            source=operand,
-            destination=new_mat,
-            input_idx=input_idx,
-            prefetching=prefetching,
-            inner=dataclasses.replace(self, spec=new_inner_spec, inputs=new_inputs),
-        )
+        return common_move(self, input_idx, bank, layout, prefetching, **kwargs)
 
     @assert_stable_spec
     def move_output(
@@ -207,42 +146,7 @@ class ComposeHole(Impl):
         prefetching: bool = False,
         **kwargs,
     ) -> "Impl":
-        operand = self.output
-        if bank is None:
-            bank = operand.root.bank
-        if layout is None:
-            layout = operand.layout
-        if bank == operand.root.bank and layout == operand.layout:
-            raise ValueError("Either bank or layout must differ from current")
-
-        # TODO: Share this block with common_move?
-        # Will the result be contiguous? If the move is into "non-addressed"
-        # memory, then no. If it is, then it might be.
-        contiguous = False
-        if bank in current_system().addressed_banks:
-            contiguous = utils.contiguous((operand.dim_sizes, layout), operand.spec)
-
-        new_mat = current_target().tensor(
-            spec=current_target().tensor_spec(
-                operand.dim_sizes,
-                dtype=operand.dtype,
-                contiguous=contiguous,
-                layout=layout,
-                bank=bank,
-                **kwargs,
-            ),
-            name=None,
-            origin=operand,
-        )
-
-        new_inner_spec = self.spec.replace_io(self.spec.inputs, new_mat.spec)
-        return MoveLet(
-            source=operand,
-            destination=new_mat,
-            input_idx=None,
-            prefetching=prefetching,
-            inner=dataclasses.replace(self, spec=new_inner_spec, output=new_mat),
-        )
+        return common_move(self, -1, bank, layout, prefetching, **kwargs)
 
     def _can_peel(self, bank: str, layout: Layout, **kwargs) -> bool:
         # Check if we can peel by just trying to make the intermediate tensor that peel
@@ -286,7 +190,7 @@ class ComposeHole(Impl):
             current_target().tensor_spec(
                 dim_sizes=self.spec.subspec_outputs[1],
                 dtype=self.spec.intermediate_dtypes[0],
-                contiguous=True,
+                contiguous=(bank in current_system().addressed_banks),
                 bank=bank,
                 layout=intermediate_tensor_layout,
                 **kwargs,
@@ -296,44 +200,37 @@ class ComposeHole(Impl):
         )
 
         # The head of a Compose corresponds to the last function evaluated
-        head_inps = (intermediate_tensor,)
+        head_inps: tuple[specs.TensorSpec, ...] = (intermediate_tensor.spec,)
         hi = self.spec.subspec_classes[0].inputs_count() - 1
         if hi:
-            head_inps += self.inputs[:hi]
+            head_inps += self.spec.inputs[:hi]
         head_hole = spec_to_hole(
             self.spec.subspec_classes[0].from_io(
-                tuple(t.spec for t in head_inps),
-                self.output.spec,
+                head_inps,
+                self.spec.output,
                 serial_only=self.spec.serial_only,
-            ),
-            inputs=head_inps,
-            output=self.output,
+            )
         )
 
         if len(self.spec.subspec_classes) == 2:
             remainder = spec_to_hole(
                 self.spec.subspec_classes[1].from_io(
-                    tuple(t.spec for t in self.inputs[hi:]),
+                    self.spec.inputs[hi:],
                     intermediate_tensor.spec,
                     serial_only=self.spec.serial_only,
-                ),
-                inputs=self.inputs[hi:],
-                output=intermediate_tensor,
+                )
             )
         else:
             remainder = ComposeHole(
                 specs.Compose(
                     subspec_classes=self.spec.subspec_classes[1:],
-                    inputs=tuple(t.spec for t in self.inputs[hi:]),
+                    inputs=self.spec.inputs[hi:],
                     output=intermediate_tensor.spec,
                     intermediate_dtypes=self.spec.intermediate_dtypes[1:],
                     serial_only=self.spec.serial_only,
-                ),
-                inputs=self.inputs[hi:],
-                # output=self.inputs[1][-1],
-                output=intermediate_tensor,
+                )
             )
-        return Pipeline((remainder, head_hole))
+        return Pipeline((remainder, head_hole), intermediates=(intermediate_tensor,))
 
     @assert_stable_spec
     def tile_out(self, output_shape: tuple[int, ...], parallel=False) -> Impl:
@@ -341,30 +238,35 @@ class ComposeHole(Impl):
             raise ValueError("Serial-only Spec prevents parallel tiling")
 
         # A no-op if the given shape is already the output shape.
-        if self.output.dim_sizes == output_shape:
+        if self.spec.output.dim_sizes == output_shape:
             return self
 
         # First, tile self.output.
-        shrunken_output_tile = self.output.simple_tile(output_shape)
+        shrunken_output_tile = self.spec.output.simple_tile(
+            OperandIdx(len(self.spec.inputs)), output_shape
+        )
         assert isinstance(shrunken_output_tile, SimpleTile)
-        assert shrunken_output_tile != self.output
-
         # Compute new, reified Tiles for the shrunken ComposeHole. Works by computing
         # PartialTiles for the smaller ComposeHole, then applying those to self.inputs,
         # starting with the new output tile.
         reified_inputs = tuple(
-            partial_inp.tile(inp)
-            for inp, partial_inp in zip(
-                self.inputs,
-                self._calculate_partial_inputs_for_tile_out(shrunken_output_tile),
+            partial_inp.tile(OperandIdx(op_idx), inp)
+            for op_idx, (inp, partial_inp) in enumerate(
+                zip(
+                    self.spec.inputs,
+                    self._calculate_partial_inputs_for_tile_out(shrunken_output_tile),
+                )
             )
         )
 
         # Construct the spec for the smaller ComposeHole
         return Loop(
+            spec=self.spec,
             subscripts=self.spec.operands_dim_subscripts()[-1],
             tiles=frozenset([shrunken_output_tile])
-            | frozenset(t for _, t in self._filter_unchanged_inputs(reified_inputs)),
+            | frozenset(
+                cast(Tile, t) for _, t in self._filter_unchanged_inputs(reified_inputs)
+            ),
             inner=ComposeHole(
                 specs.Compose(
                     subspec_classes=self.spec.subspec_classes,
@@ -372,9 +274,7 @@ class ComposeHole(Impl):
                     output=shrunken_output_tile.spec,
                     intermediate_dtypes=self.spec.intermediate_dtypes,
                     serial_only=(parallel or self.spec.serial_only),
-                ),
-                inputs=reified_inputs,
-                output=shrunken_output_tile,
+                )
             ),
             parallel=parallel,
         )
@@ -414,12 +314,14 @@ class ComposeHole(Impl):
             dim_sizes=orig_reduce_input_shape[:-1] + (k,)
         )
         reified_inputs = tuple(
-            partial_inp.tile(inp)
-            for inp, partial_inp in zip(
-                self.inputs,
-                self._calculate_partial_inputs_for_tile_out(
-                    smaller_partial_input_tile, skip_first=1
-                ),
+            partial_inp.tile(OperandIdx(op_idx), inp)
+            for op_idx, (inp, partial_inp) in enumerate(
+                zip(
+                    self.spec.inputs,
+                    self._calculate_partial_inputs_for_tile_out(
+                        smaller_partial_input_tile, skip_first=1
+                    ),
+                )
             )
         )
 
@@ -433,24 +335,26 @@ class ComposeHole(Impl):
         expected_steps = math.ceil(orig_reduce_input_shape[-1] / k)
         driving_subs = None
         for inp_idx, inp in filtered_reified_inputs:
-            if inp.steps == expected_steps:
+            if inp.steps(self.spec.operands[inp_idx].dim_sizes) == expected_steps:
                 driving_subs = self.spec.operands_dim_subscripts()[inp_idx]
                 break
-        assert driving_subs, f"No tile had expected number of steps: {expected_steps}"
+        assert driving_subs, (
+            f"No tile had expected number of steps ({expected_steps}); "
+            f" steps were {[i.steps for _, i in filtered_reified_inputs]}"
+        )
 
         # Build the loop
         new_inner = ComposeHole(
             specs.Compose(
                 subspec_classes=self.spec.subspec_classes,
                 inputs=tuple(inp.spec for inp in reified_inputs),
-                output=self.output.spec,
+                output=self.spec.output,
                 intermediate_dtypes=self.spec.intermediate_dtypes,
                 serial_only=(parallel or self.spec.serial_only),
-            ),
-            inputs=reified_inputs,
-            output=self.output,
+            )
         )
         return Loop(
+            spec=self.spec,
             subscripts=driving_subs,
             tiles=frozenset(t for _, t in filtered_reified_inputs),
             inner=new_inner,
@@ -461,8 +365,8 @@ class ComposeHole(Impl):
         self, source: Iterable[TensorLike]
     ) -> Iterable[tuple[int, TensorLike]]:
         """Return given tensors different from self's corresponding inputs."""
-        for idx, (original_input, tiled_input) in enumerate(zip(self.inputs, source)):
-            if original_input != tiled_input:
+        for idx, (orig_spec, tiled_input) in enumerate(zip(self.spec.inputs, source)):
+            if orig_spec != tiled_input.spec:
                 yield idx, tiled_input
 
     def _calculate_partial_inputs_for_tile_out(
@@ -476,7 +380,7 @@ class ComposeHole(Impl):
         """
         subspec_classes = list(self.spec.subspec_classes)
         intermediate_shapes = list(self.spec.subspec_outputs[1:])
-        inputs = list(self.inputs)
+        inputs = list(self.spec.inputs)
         while skip_first > 0:
             popped_cls = subspec_classes.pop(0)
             intermediate_shapes.pop(0)
@@ -488,7 +392,7 @@ class ComposeHole(Impl):
         return ComposeHole._compute_partial_inputs_inner(
             tuple(subspec_classes),
             tuple(intermediate_shapes),
-            tuple(inputs),
+            tuple(inp.dim_sizes for inp in inputs),
             output_tile,
         )
 
@@ -496,12 +400,14 @@ class ComposeHole(Impl):
     def _compute_partial_inputs_inner(
         subspec_classes: tuple,
         intermediate_shapes: Iterable[tuple[int, ...]],
-        inputs: tuple[Union[Tensor, Tile], ...],
+        flattened_inputs_shapes: tuple[tuple[int, ...], ...],
         output_tile: Union[SimpleTile, tiling.PartialSimpleTile],
     ) -> list[tiling.PartialTile]:
         if isinstance(output_tile, Tile):
-            output_tile = tiling.tile_to_partial(output_tile)
-        assert isinstance(output_tile, tiling.PartialSimpleTile)
+            partial_output_tile = tiling.tile_to_partial(output_tile)
+            assert isinstance(partial_output_tile, tiling.PartialSimpleTile)
+        else:
+            partial_output_tile = output_tile
 
         # We would normally need to do a forward pass first to produce the
         # output shapes so we know what the non-final subspecs' first operand
@@ -511,7 +417,6 @@ class ComposeHole(Impl):
 
         input_tiles: Optional[tuple[tiling.PartialTile, ...]] = None
         all_input_tiles: list[tiling.PartialTile] = []
-        flattened_inputs_shapes = tuple(inp.dim_sizes for inp in inputs)
         for idx, subspec_cls in enumerate(subspec_classes):
             inputs_shapes = ()
             if subspec_output_shapes:
@@ -519,18 +424,20 @@ class ComposeHole(Impl):
             take = subspec_cls.inputs_count() - len(inputs_shapes)
             inputs_shapes += flattened_inputs_shapes[:take]
             flattened_inputs_shapes = flattened_inputs_shapes[take:]
-            # We're tracing the type and shape of each subspec's first tile up through the
-            # pipeline of composed functions, so store the first into output_tile, which will
-            # be an input the next time around the loop. At the end, we'll want input_tiles.
-            input_tiles = tiling.tile_out(subspec_cls, inputs_shapes, output_tile)
+            # We're tracing the type and shape of each subspec's first tile up through
+            # the pipeline of composed functions, so store the first into
+            # partial_output_tile, which will be an input the next time around the loop.
+            # At the end, we'll want input_tiles.
+            input_tiles = tiling.tile_out(
+                subspec_cls, inputs_shapes, partial_output_tile
+            )
             if idx == len(subspec_classes) - 1:
                 all_input_tiles.extend(input_tiles)
             else:
                 all_input_tiles.extend(input_tiles[1:])
             # Because Compose applies the output of a stage to the following stage's
             # first argument, we carry the first input tile into the next iteration.
-            output_tile = input_tiles[0]
-        assert input_tiles is not None and len(all_input_tiles) == len(inputs)
+            partial_output_tile = input_tiles[0]
 
         return all_input_tiles
 
@@ -538,6 +445,10 @@ class ComposeHole(Impl):
     def complete(self) -> "Impl":
         next_bank = system_config.current_system().default_bank
         return self.peel(bank=next_bank, layout=layouts.ROW_MAJOR).complete()
+
+    def replace_spec(self, new_spec: specs.Spec) -> "Impl":
+        assert type(self) is ComposeHole
+        return ComposeHole(new_spec)
 
     @assert_stable_spec
     def replace_children(self, replacements: Iterable[Impl]) -> Impl:
@@ -557,6 +468,9 @@ class ComposeHole(Impl):
     def is_scheduled(self) -> bool:
         return False
 
+    def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
+        raise NotImplementedError("apply not implemented for holes")
+
 
 @dataclasses.dataclass(frozen=True, init=False)
 class Pipeline(Impl):
@@ -565,24 +479,35 @@ class Pipeline(Impl):
     The output of the pipeline is the output of the final stage.
     """
 
-    stages: tuple[Impl, ...]
+    stages: tuple[Impl]
+    intermediates: tuple[TensorBase, ...]
 
-    def __init__(self, stages: tuple[Impl, ...]):
+    def __init__(self, stages: tuple[Impl, ...], intermediates: tuple[TensorBase, ...]):
         assert len(stages) >= 2
+        assert len(stages) == len(intermediates) + 1
         # TODO: Reintroduce check for operand agreement
         # for before, after in zip(self.stages[:-1], self.stages[1:]):
         #     assert (
         #         before.output == after.operands[0]
         #     ), f"Output of {before} didn't match first operand of {after}"
 
-        # Flatten any immediate Pipeline children
-        flattened_stages: List[Impl] = []
-        for stage in stages:
+        # Flatten any immediate Pipeline children and intermediate tensors
+        flattened_stages = []
+        flattened_intermediates = []
+        for stage, intermed in zip(stages, intermediates):
             if isinstance(stage, Pipeline):
                 flattened_stages.extend(stage.stages)
+                flattened_intermediates.extend(stage.intermediates)
             else:
                 flattened_stages.append(stage)
+            flattened_intermediates.append(intermed)
+        if isinstance(stages[-1], Pipeline):
+            flattened_stages.extend(cast(Pipeline, stages[-1]).stages)
+            flattened_intermediates.extend(cast(Pipeline, stages[-1]).intermediates)
+        else:
+            flattened_stages.append(stages[-1])
         object.__setattr__(self, "stages", tuple(flattened_stages))
+        object.__setattr__(self, "intermediates", tuple(flattened_intermediates))
 
     @functools.cached_property
     def spec(self) -> specs.Compose:
@@ -615,20 +540,20 @@ class Pipeline(Impl):
         # serial_only flag
         return self.stages[0].spec.serial_only
 
-    @property
-    def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
-        flattened_inputs = list(self.stages[0].inputs)
-        for stage in self.stages[1:]:
-            flattened_inputs = list(stage.inputs[1:]) + flattened_inputs
-        assert len(flattened_inputs) == len(self.spec.inputs)
-        return tuple(flattened_inputs)
+    # @property
+    # def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
+    #     flattened_inputs = list(self.stages[0].inputs)
+    #     for stage in self.stages[1:]:
+    #         flattened_inputs = list(stage.inputs[1:]) + flattened_inputs
+    #     assert len(flattened_inputs) == len(self.spec.inputs)
+    #     return tuple(flattened_inputs)
+
+    # @property
+    # def output(self) -> Union[Tensor, Tile]:
+    #     return self.stages[-1].output
 
     @property
-    def output(self) -> Union[Tensor, Tile]:
-        return self.stages[-1].output
-
-    @property
-    def children(self) -> Tuple["Impl", ...]:
+    def children(self) -> Tuple[Impl, ...]:
         return self.stages
 
     @assert_stable_spec
@@ -637,21 +562,6 @@ class Pipeline(Impl):
         new_stages = list(self.stages)
         new_stages[idx] = fn(new_stages[idx])
         return dataclasses.replace(self, stages=tuple(new_stages))
-
-    def env_str(
-        self,
-        name_tensor_fn: Callable[[Union[Tensor, Tile]], str],
-        underscore_inner: bool = False,
-        fancy: bool = False,
-    ) -> str:
-        keyword = "pipeline"
-        if fancy:
-            keyword = termcolor.colored(keyword, attrs=["bold"])
-
-        introduced_strs = []
-        for stage in self.stages[:-1]:
-            introduced_strs.append(f"{name_tensor_fn(stage.output)}: {stage.output}")
-        return f"{keyword} ({', '.join(introduced_strs)})"
 
     @property
     def depth(self) -> int:
@@ -706,11 +616,6 @@ class Pipeline(Impl):
                     "specs differ"
                 )
         return dataclasses.replace(self, stages=replacements)
-
-    def replace_io(
-        self, inputs: Iterable[Union[Tensor, Tile]], output: Union[Tensor, Tile]
-    ) -> "Impl":
-        raise NotImplementedError()
 
     @property
     def additional_memories(self) -> list[dict[str, int]]:
@@ -767,6 +672,33 @@ class Pipeline(Impl):
     @property
     def is_scheduled(self) -> bool:
         return all(op.is_scheduled for op in self.stages)
+
+    def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
+        inputs, output = tuple(operands[:-1]), operands[-1]
+
+        applied_stages = []
+        applied_stages.append(
+            self.stages[0].apply(
+                inputs[-len(self.stages[0].spec.inputs) :] + (self.intermediates[0],)
+            )
+        )
+        inputs = inputs[: -len(self.stages[0].spec.inputs)]
+        for stage_idx in range(1, len(self.stages) - 1):
+            applied_stages.append(
+                self.stages[-1].apply(
+                    (self.intermediates[stage_idx],)
+                    + inputs[1 + -len(self.stages[-1].spec.inputs) :]
+                    + (output,)
+                )
+            )
+            inputs = inputs[: 1 + -len(self.stages[-1].spec.inputs)]
+        applied_stages.append(
+            self.stages[-1].apply((self.intermediates[-1],) + inputs + (output,))
+        )
+
+        return make_applied_impl(
+            Pipeline(stages=applied_stages, intermediates=self.intermediates), operands
+        )
 
 
 def _zipply(fn: Callable[[tuple[U]], V], *args: dict[T, U]) -> dict[T, V]:

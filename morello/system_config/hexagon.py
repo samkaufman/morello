@@ -54,13 +54,12 @@ class HvxSimulatorTarget(Target):
         self,
         spec: specs.TensorSpec,
         name: Optional[str] = None,
-        origin: Optional[Union[tensor.Tensor, tensor.Tile]] = None,
         **kwargs,
     ) -> tensor.TensorBase:
         if spec.bank == "VMEM":
             assert isinstance(spec, specs.HvxVmemTensorSpec)
-            return HvxVmemTensor(spec=spec, name=name, origin=origin)
-        return tensor.Tensor(spec=spec, name=name, origin=origin)
+            return HvxVmemTensor(spec=spec, name=name)
+        return tensor.Tensor(spec=spec, name=name)
 
     def tensor_spec(
         self,
@@ -223,9 +222,9 @@ class HvxVmemTensorlike(tensor.TensorLike):
     def _common_post_init(self):
         assert isinstance(self.spec, specs.HvxVmemTensorSpec)
         assert self.spec.bank == "VMEM"
-        if self.bytes_used % 128 != 0:
+        if self.spec.bytes_used % 128 != 0:
             raise tensor.DisallowedTileShapeError(
-                f"Bytes {self.bytes_used} not divisible by 128"
+                f"Bytes {self.spec.bytes_used} not divisible by 128"
             )
 
     @property

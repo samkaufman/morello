@@ -705,7 +705,7 @@ def _emit_loop_nest_for_shape(shape: Sequence[int]):
             writer.writeline("}")
 
 
-def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
+def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[_OperandDetails]):
     assert imp.is_scheduled
     assert len(op_details) == len(imp.inputs) + 1
 
@@ -738,9 +738,9 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         assert isinstance(imp.stages[0].output, Tensor)
 
         last_c_buf = _make_buffer(
-            imp.stages[0].output.volume,
-            imp.stages[0].output.dtype,
-            imp.stages[0].output.bank,
+            imp.stages[0].spec.output.volume,
+            imp.stages[0].spec.output.dtype,
+            imp.stages[0].spec.output.bank,
         ).emit()
         cur_slice = slice(-len(imp.stages[0].inputs), len(inps_op_details))
         cur_out = _pipeline_emit_stage(
@@ -755,7 +755,7 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
             assert isinstance(stage.output, Tensor)
 
             new_c_buf = _make_buffer(
-                stage.output.volume, stage.output.dtype, stage.output.bank
+                stage.spec.output.volume, stage.spec.output.dtype, stage.spec.output.bank
             ).emit()
             cur_out = _pipeline_emit_stage(
                 stage, inps_op_details[cur_slice], new_c_buf, cur_out, None
@@ -893,7 +893,7 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         i, o = operand_index_exprs
         writer.writeline(f"{tensor_ref_fns[1](o)} += {tensor_ref_fns[0](i)};")
     elif isinstance(imp, impl.MoveLet):
-        source_idx = imp.operands.index(imp.source)
+        source_idx = imp.source_idx
         assert (
             imp.inner.operands[source_idx] is imp.destination
         ), "MoveLet's inner Impl does not use destination tensor"
@@ -903,8 +903,6 @@ def _inner_generate_c(imp: impl.Impl, op_details: Sequence[_OperandDetails]):
         concrete_shapes = [d.concrete_origin_shape for d in op_details]
 
         concrete_shape = op_details[source_idx].concrete_origin_shape
-
-        is_store = imp.input_idx is None  # TODO: Can remove?
 
         # On the Hexagon target:
         if current_system().has_hvx:
@@ -1326,7 +1324,7 @@ def _iter_vectors(
         exprs.append(source_index_expr.subs(subs))
     assert len(exprs) == destination.vector_count
 
-    # Calculate whether or not the tiles are contiguous in the backing address space.
+    # Approximate whether or not the tiles are contiguous in the backing address space.
     contiguous = utils.contiguous(
         (destination.vector_shape, destination.layout), destination.address_root
     )
@@ -1366,7 +1364,7 @@ def _move_registers(
     )
 
     with _emit_assignment_copy(
-        impl.source,
+        impl.operands[impl.source_idx],
         impl.destination,
         operand_index_exprs[source_idx],
         destination_index_expr,
@@ -1432,7 +1430,7 @@ def generate_c(
     values=None,
 ) -> None:
     if values is None:
-        values = [None] * len(imp.inputs)
+        values = [None] * (imp.operand_count - 1)
     values.append(None)  # for output, which is never initialized by caller
 
     namer = _Namer()
@@ -1735,8 +1733,7 @@ def generate_c(
     tensor_names = []
     c_tensors = []
     index_exprs = []
-    for operand, initial_value in zip(imp.operands, values):
-        assert isinstance(operand, tensor.Tensor)
+    for operand, initial_value in zip(imp.spec.operands, values):
         c_buf = _make_buffer(operand.volume, operand.dtype, operand.bank)
         index_exprs.append(operand.layout.buffer_indexing_expr(operand.dim_sizes))
         tensor_names.append(c_buf.name)
@@ -1745,10 +1742,9 @@ def generate_c(
     # Emit the kernel function
     writer.writeline("__attribute__((noinline))")
     writer.writeline("void kernel(")
-    for operand_idx in range(len(imp.operands)):
-        operand = imp.operands[operand_idx]
+    for operand_idx, operand in enumerate(imp.spec.operands):
         c_buf = c_tensors[operand_idx]
-        term = ", " if operand_idx + 1 < len(imp.operands) else ")"
+        term = ", " if operand_idx + 1 < len(imp.spec.operands) else ")"
         writer.writeline(f"  {operand.dtype.c_type} *restrict {c_buf.name}{term}")
     writer.writeline("{")
     with writer.indent_block():
@@ -1757,7 +1753,7 @@ def generate_c(
             for c_buf, index_expr, shape in zip(
                 c_tensors,
                 index_exprs,
-                (op.dim_sizes for op in imp.operands),
+                (op.dim_sizes for op in imp.spec.operands),
             )
         ]
         _inner_generate_c(imp, operand_details)
@@ -1767,7 +1763,7 @@ def generate_c(
     # Emit the main function
     writer.writeline("int main() {")
     with writer.indent_block():
-        for operand, c_buf, initial_value in zip(imp.operands, c_tensors, values):
+        for operand, c_buf, initial_value in zip(imp.spec.operands, c_tensors, values):
             c_buf.emit()
             if initial_value is not None:
                 if not isinstance(operand.layout, layouts.RowMajor):

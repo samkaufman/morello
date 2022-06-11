@@ -4,6 +4,8 @@ import math
 from collections.abc import Mapping
 from typing import Iterable, Sequence, TypeVar
 
+from morello.specs.tensorspec import TensorSpec
+
 from . import layouts, specs
 
 T = TypeVar("T")
@@ -42,7 +44,8 @@ def flatten(src):
             yield el
 
 
-def contiguous(t, address_root):
+def contiguous(t, address_root) -> bool:
+    """Test whether a tensor is contiguous in another tensor's address space."""
     if isinstance(t, specs.TensorSpec):
         self_ordered_dims = layout_ordered_dims(t)
     elif isinstance(t, Sequence):
@@ -70,6 +73,29 @@ def contiguous(t, address_root):
         if tile_dim_size != root_dim_size:
             return False
     return True
+
+
+def contiguous_approx(
+    tile_shape: Sequence[int], tile_layout: layouts.Layout, parent: TensorSpec
+) -> bool:
+    """Test whether a tiling breaks contiguousness.
+
+    This is usually used in place of `contiguous`. It has the benefit of being
+    compositional in Impl, but cannot "recover" contiguousness in cases where
+    a tiling degenerates a dimension (e.g., [4, 4] -> [4, 2] -> [1, 2]), unless
+    the new tile has just one value.
+
+    :param tile_shape: The shape of the new tile to test.
+    :param tile_layout: The layout of the new tile to test.
+    :param parent: The spec of the tensorlike being tiled.
+    :returns: `True` if both the parent and its new tile can be determined to be
+      contiguous. `False` otherwise.
+    """
+    if all(d == 1 for d in tile_shape):
+        return True
+    if not parent.contiguous:
+        return False
+    return contiguous((tile_shape, tile_layout), parent)
 
 
 # TODO: Can we merge this into Layout?

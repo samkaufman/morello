@@ -31,12 +31,11 @@ class CpuTarget(Target):
         self,
         spec: specs.TensorSpec,
         name: Optional[str] = None,
-        origin: Optional[Union[Tensor, Tile]] = None,
         **kwargs,
     ) -> Tensor:
         if kwargs:
-            raise TypeError("Unexpected keyword argument(s)")
-        return Tensor(spec=spec, name=name, origin=origin)
+            raise TypeError(f"Unexpected keyword argument(s): {', '.join(kwargs)}")
+        return Tensor(spec=spec, name=name)
 
     def tensor_spec(
         self,

@@ -79,7 +79,6 @@ class ReduceSum(base.Spec):
     def shrink_for_tile_out(
         self,
         output_shape: tuple[int, ...],
-        operand_address_roots: Sequence[TensorSpec],
         serial_only=None,
     ) -> "ReduceSum":
         if len(output_shape) != len(self.output.dim_sizes):
@@ -95,12 +94,7 @@ class ReduceSum(base.Spec):
                     f"{self.output.dim_sizes[dim]} ({dim_size} > "
                     f"{self.output.dim_sizes[dim]})"
                 )
-        return cast(
-            ReduceSum,
-            super().shrink_for_tile_out(
-                output_shape, operand_address_roots, serial_only
-            ),
-        )
+        return cast(ReduceSum, super().shrink_for_tile_out(output_shape, serial_only))
 
     @classmethod
     def calculate_output_shape_cls(
