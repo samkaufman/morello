@@ -23,7 +23,7 @@ def _build_table(
 ) -> None:
     system = current_system()
     ds = " " * (indent_depth * 2)
-    new_row = [f"{ds}{_env_str(op, tensor_name_fn, underscore_inner=True, fancy=True)}"]
+    new_row = [f"{ds}{_env_str(op, tensor_name_fn, underscore_inner=True, color=color)}"]
     if show_spec:
         new_row.append(str(op.spec))
     if cost_dict:
@@ -66,7 +66,7 @@ def _build_table(
 
     # As the stack unwinds, insert a "store" line if this was a Move for an output
     if isinstance(op, impl.MoveLet) and op.is_store:
-        store_row = [f"{ds}{_store_env_str(op, tensor_name_fn, fancy=True)}"]
+        store_row = [f"{ds}{_store_env_str(op, tensor_name_fn, color=True)}"]
         while len(store_row) < len(table[-1]):
             store_row.append("")
         table.append(store_row)
@@ -84,11 +84,11 @@ def _env_str(
     imp: impl.AppliedImpl,
     name_tensor_fn: Callable[[tensor.TensorLike], str],
     underscore_inner: bool = False,
-    fancy: bool = False,
+    color: bool = False,
 ) -> str:
     if isinstance(imp, impl.Pipeline):
         keyword = "pipeline"
-        if fancy:
+        if color:
             keyword = termcolor.colored(keyword, attrs=["bold"])
 
         introduced_strs = []
@@ -98,12 +98,12 @@ def _env_str(
     elif isinstance(imp, (impl.Loop, impl.SlidingWindowLoop)):
         istr = ")"
         if not underscore_inner:
-            istr = f", {_env_str(imp.inner, name_tensor_fn, fancy=fancy)})"
+            istr = f", {_env_str(imp.inner, name_tensor_fn, color=color)})"
 
         left_strs, right_strs = [], []
         for it in sorted(imp.tiles, key=str):
             left_strs.append(
-                _loop_operand_str(it, name_tensor_fn=name_tensor_fn, fancy=fancy)
+                _loop_operand_str(it, name_tensor_fn=name_tensor_fn, color=color)
             )
             # TODO: Fix the following
             right_strs.append(name_tensor_fn(imp.operands[it.source]))
@@ -113,7 +113,7 @@ def _env_str(
         if imp.parallel:
             keyword = "par " + keyword
         arrow = "<-"
-        if fancy:
+        if color:
             keyword = termcolor.colored(keyword, attrs=["bold"])
             arrow = termcolor.colored(arrow, attrs=["bold"])
 
@@ -128,7 +128,7 @@ def _env_str(
             keyword += "[p]"
 
         arrow = "<-"
-        if fancy:
+        if color:
             keyword = termcolor.colored(keyword, attrs=["bold"])
             arrow = termcolor.colored(arrow, attrs=["bold"])
         return (
@@ -146,11 +146,11 @@ def _env_str(
 def _store_env_str(
     op,
     name_tensor_fn: Callable[[tensor.TensorLike], str],
-    fancy: bool = False,
+    color: bool = False,
 ):
     keyword = "store"
     arrow = "<-"
-    if fancy:
+    if color:
         keyword = termcolor.colored(keyword, attrs=["bold"])
         arrow = termcolor.colored(arrow, attrs=["bold"])
     return (
@@ -160,11 +160,11 @@ def _store_env_str(
 
 
 def _loop_operand_str(
-    t, *, name_tensor_fn: Callable[[tensor.TensorLike], str], fancy: bool
+    t, *, name_tensor_fn: Callable[[tensor.TensorLike], str], color: bool
 ):
     if isinstance(t, tensor.ConvolutionImageTile):
         prefix = "conv"
-        if fancy:
+        if color:
             prefix = termcolor.colored(prefix, attrs=["bold"])
         desc_part = prefix + " " + "×".join(str(s) for s in t.dim_sizes)
     elif isinstance(t, tensor.Tile):

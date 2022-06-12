@@ -1,4 +1,4 @@
-from typing import Mapping, Iterable, Optional
+from typing import Mapping, Iterable, Optional, cast
 
 import termcolor
 
@@ -100,12 +100,11 @@ def _map_tensors_to_sources(imp, _accum=None) -> Mapping[TensorLike, TensorLike]
     """Returns a mapping from tensor/tile to its move source or outer tensor."""
     if _accum is None:
         _accum = {}
-    for op in imp.operands:
-        source = getattr(op, "origin", None)
-        if source:
-            _accum[op] = source
     if isinstance(imp, impl.MoveLet):
-        _accum[imp.destination] = imp.operands[imp.source_idx]
+        _accum[imp.destination] = cast(impl.AppliedImpl, imp).operands[imp.source_idx]
+    elif isinstance(imp, impl.Loop):
+        for tile in imp.tiles:
+            _accum[tile] = cast(impl.AppliedImpl, imp).operands[tile.source]
     for child in imp.children:
         _map_tensors_to_sources(child, _accum)
     return _accum
