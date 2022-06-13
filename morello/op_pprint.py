@@ -66,7 +66,7 @@ def _build_table(
 
     # As the stack unwinds, insert a "store" line if this was a Move for an output
     if isinstance(op, impl.MoveLet) and op.is_store:
-        store_row = [f"{ds}{_store_env_str(op, tensor_name_fn, color=True)}"]
+        store_row = [f"{ds}{_store_env_str(op, tensor_name_fn, color=color)}"]
         while len(store_row) < len(table[-1]):
             store_row.append("")
         table.append(store_row)
