@@ -74,6 +74,7 @@ class Loop(Impl):
 
     spec: specs.Spec
     subscripts: tuple[int, ...]
+    operands_subscripts: tuple[tuple[int, ...], ...]
     tiles: frozenset[Tile]
     inner: Impl
     parallel: bool
@@ -85,6 +86,7 @@ class Loop(Impl):
         tiles: Iterable[Tile],
         inner: Impl,
         parallel: bool,
+        operands_subscripts: Optional[tuple[tuple[int, ...], ...]] = None,
     ):
         self.spec = spec
         self.subscripts = tuple(subscripts)
@@ -93,6 +95,11 @@ class Loop(Impl):
         self.parallel = parallel
         if self.parallel and not self.inner.spec.serial_only:
             raise ValueError("Parallel loop's child must be serial only")
+
+        if operands_subscripts is None:
+            self.operands_subscripts = tuple(self.spec.operands_dim_subscripts())
+        else:
+            self.operands_subscripts = operands_subscripts
 
     @property
     def steps(self) -> int:
@@ -129,9 +136,8 @@ class Loop(Impl):
         """
         # TODO: Raise a warning if the given subscript is not one over which
         #  this loop iterates.
-        subscripts = self.spec.operands_dim_subscripts()
         for tile in self.tiles:
-            subs = subscripts[tile.source]
+            subs = self.operands_subscripts[tile.source]
             for dim, sub in enumerate(subs):
                 if sub == subscript:
                     osize = self.spec.operands[tile.source].dim_sizes[dim]

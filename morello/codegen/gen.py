@@ -722,7 +722,7 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[_OperandDetail
                 )
                 for o, subs, operand in zip(
                     op_details,
-                    imp.inner.spec.operands_dim_subscripts(),
+                    imp.inner.operands_subscripts(),
                     imp.inner.operands,
                 )
             ],
