@@ -1,4 +1,5 @@
 import abc
+from collections import defaultdict
 import contextlib
 import contextvars
 import dataclasses
@@ -174,25 +175,14 @@ def _emit_tile_out_loop_nest(
 ) -> None:
     namer, writer = _namer.get(), _writer.get()
 
-    # Compute steps and drop subscripts that have no full steps.
-    # We do this first so that we know how many loops we're going to
-    # emit.
-    #
-    # TODO: Move emitting_steps into compute.
-    emitting_steps: list[tuple[int, int, int]] = []
-    for subscript in remaining_subscripts:
-        full_steps, has_boundary = _calc_steps(subscript, op_details)
-        if full_steps != 0:
-            emitting_steps.append((subscript, full_steps, has_boundary))
-
     # Generate new names for loop iterators.
-    it_var_names = None
+    it_var_names: Optional[defaultdict[int, str]] = None
     if not _unroll.get():
-        it_var_names = {s: namer.fresh_name("t") for s, _, _ in emitting_steps}
+        it_var_names = defaultdict(lambda: namer.fresh_name("t"))
 
     # Emit loops.
     for loop_plan in _compute_tile_out_loop_nest(
-        emitting_steps, it_var_names, op_details
+        remaining_subscripts, it_var_names, op_details
     ):
         assert it_var_names is not None
 
@@ -227,7 +217,7 @@ def _emit_tile_out_loop_nest(
 
 
 def _compute_tile_out_loop_nest(
-    emitting_steps: Sequence[tuple[int, int, int]],
+    remaining_subscripts: list[int],
     it_var_names: Optional[Mapping[int, str]],
     op_details: Sequence[_OperandDetailsExt],
 ) -> Iterable[_LoopNestDescription]:
@@ -237,16 +227,25 @@ def _compute_tile_out_loop_nest(
         raise NotImplementedError()
     assert it_var_names is not None
 
-    for combo in itertools.product([False, True], repeat=len(emitting_steps)):
+    # Compute steps and drop subscripts that have no full steps.
+    # We do this first so that we know how many loops we're going to
+    # emit.
+    emitting_steps: list[tuple[int, int, int]] = []
+    for subscript in remaining_subscripts:
+        full_steps, has_boundary = _calc_steps(subscript, op_details)
+        if full_steps != 0:
+            emitting_steps.append((subscript, full_steps, has_boundary))
+
+    for nest_comb in itertools.product([False, True], repeat=len(emitting_steps)):
         # Ignore any combo. where at least one selected boundary dim. is empty.
-        if any(b and not hb for b, (_, _, hb) in zip(combo, emitting_steps)):
+        if any(b and not hb for b, (_, _, hb) in zip(nest_comb, emitting_steps)):
             continue
 
         subscripts_to_loop_over: list[tuple[int, int]] = []
         new_index_exprs = [d.index_expr for d in op_details]
         concrete_shapes = [list(d.concrete_origin_shape) for d in op_details]
-        for bit, (sub, full_steps, _) in zip(combo, emitting_steps):
-            if bit:
+        for sub_is_boundary, (sub, full_steps, _) in zip(nest_comb, emitting_steps):
+            if sub_is_boundary:
                 tile_idx_symbol = full_steps
             else:
                 tile_idx_symbol = it_var_names[sub]
@@ -260,7 +259,7 @@ def _compute_tile_out_loop_nest(
                     continue
                 for sidx, s in enumerate(o.subscripts):
                     if s == sub:
-                        if bit:
+                        if sub_is_boundary:
                             bcs[sidx] = o.operand.boundary_size(
                                 sidx, o.concrete_origin_shape[sidx]
                             )
@@ -270,7 +269,7 @@ def _compute_tile_out_loop_nest(
             subscripts_to_loop_over,
             new_index_exprs,
             list(map(tuple, concrete_shapes)),
-            is_boundary=any(combo),
+            is_boundary=any(nest_comb),
         )
 
 
