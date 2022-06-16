@@ -12,7 +12,6 @@ extensions = [
     setuptools.Extension("morello.search.naive", ["morello/search/naive.py"]),
     setuptools.Extension("morello.search.random", ["morello/search/random.py"]),
     setuptools.Extension("morello.specs", ["morello/specs/*.py"]),
-    setuptools.Extension("morello.replace", ["morello/replace.py"]),
 ]
 
 setuptools.setup(ext_modules=cythonize(extensions, language_level="3"))
