@@ -7,7 +7,7 @@ dependencies:
   - python=3.9
   - pip
   - clang==12.0.1
-  - llvm-openmp
+  - llvm-openmp==12.0.1
   - tabulate
   - frozendict~=2.0
   - pyarrow
@@ -16,7 +16,7 @@ dependencies:
   - pytest
   - pytest-xdist
   - debugpy
-  - hypothesis
+  - hypothesis==6.47.1
   - atomicwrites==1.4.0
   - termcolor==1.1.0
   - sympy
