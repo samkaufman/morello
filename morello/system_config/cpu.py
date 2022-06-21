@@ -96,6 +96,7 @@ class CpuTarget(Target):
         source_cb=None,
         values=None,
         check_flakiness: int = 1,
+        extra_clang_args: Optional[Iterable[str]] = None,
     ) -> RunResult:
         with tempfile.TemporaryDirectory() as dirname:
             source_path = os.path.join(dirname, "main.c")
@@ -113,8 +114,9 @@ class CpuTarget(Target):
                 fo.write(source_code)
 
             # TODO: Don't need to link OpenMP if the Impl has no parallel loops.
+            extra_clang_args = extra_clang_args or []
             clang_cmd = [
-                _clang_path(),
+                str(_clang_path())] + list(extra_clang_args) + [
                 "-mavx2",
                 "-std=gnu99",
                 "-fopenmp",

@@ -58,6 +58,7 @@ class Target(abc.ABC):
         source_cb=None,
         values=None,
         check_flakiness: int = 1,
+        extra_clang_args: Optional[Iterable[str]] = None,
     ) -> RunResult:
         raise NotImplementedError()
 

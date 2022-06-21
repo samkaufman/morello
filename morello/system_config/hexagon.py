@@ -133,9 +133,12 @@ class HvxSimulatorTarget(Target):
         values=None,
         profile_output: Optional[pathlib.Path] = None,
         check_flakiness: int = 1,
+        extra_clang_args: Optional[Iterable[str]] = None,
     ) -> RunResult:
         if check_flakiness != 1:
             raise NotImplementedError("check_flakiness support not yet implemented")
+        if extra_clang_args:
+            raise NotImplementedError("extra_clang_args support not yet implemented")
 
         if profile_output:
             profile_output.mkdir(parents=True, exist_ok=True)
