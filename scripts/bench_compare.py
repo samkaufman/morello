@@ -76,21 +76,25 @@ parser.add_argument("-b", "--batch", type=int, action="append")
 subparsers = parser.add_subparsers(dest="spec")
 
 parser_matmul = subparsers.add_parser("matmul", help="Benchmark matrix multiplication")
+parser_matmul.add_argument("--serial", action="store_true")
 parser_matmul.add_argument(
     "sizes", metavar="N", type=int, nargs="+", help="An mkn size to benchmark"
 )
 
 parser_gemm3 = subparsers.add_parser("gemm3", help="Benchmark GEMM3")
+parser_gemm3.add_argument("--serial", action="store_true")
 parser_gemm3.add_argument(
     "sizes", metavar="N", type=int, nargs="+", help="mkn sizes to benchmark"
 )
 
 parser_conv = subparsers.add_parser("conv", help="Benchmark convolution")
+parser_conv.add_argument("--serial", action="store_true")
 parser_conv.add_argument(
     "sizes", metavar="N", type=int, nargs="+", help="image sizes to benchmark"
 )
 
 parser_cnn = subparsers.add_parser("cnn", help="Benchmark small CNN")
+parser_cnn.add_argument("--serial", action="store_true")
 parser_cnn.add_argument(
     "sizes", metavar="N", type=int, nargs="+", help="image sizes to benchmark"
 )
@@ -104,7 +108,7 @@ def _to_torch(arr: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(arr)
 
 
-def make_matmul_spec(batch_size: int, d: int) -> specs.Matmul:
+def make_matmul_spec(batch_size: int, d: int, serial: bool) -> specs.Matmul:
     if batch_size != 1:
         raise NotImplementedError("Batched matrix multiplication not yet supported")
     target = system_config.current_target()
@@ -112,11 +116,11 @@ def make_matmul_spec(batch_size: int, d: int) -> specs.Matmul:
         target.tensor_spec((d, d), dtype=DTYPE),
         target.tensor_spec((d, d), dtype=DTYPE),
         target.tensor_spec((d, d), dtype=DTYPE),
-        serial_only=False,
+        serial_only=serial,
     )
 
 
-def make_gemm3_spec(batch_size: int, d: int) -> specs.Spec:
+def make_gemm3_spec(batch_size: int, d: int, serial: bool) -> specs.Spec:
     if batch_size != 1:
         raise NotImplementedError("Batched matrix multiplication not yet supported")
     target = system_config.current_target()
@@ -129,11 +133,11 @@ def make_gemm3_spec(batch_size: int, d: int) -> specs.Spec:
         ),
         output=target.tensor_spec((d, d), dtype=DTYPE),
         intermediate_dtypes=(DTYPE,),
-        serial_only=False,
+        serial_only=serial,
     )
 
 
-def make_conv_spec(batch_size: int, d: int) -> specs.Convolution:
+def make_conv_spec(batch_size: int, d: int, serial: bool) -> specs.Convolution:
     target = system_config.current_target()
 
     fh, fw, fc = 5, 5, 32
@@ -143,11 +147,11 @@ def make_conv_spec(batch_size: int, d: int) -> specs.Convolution:
         target.tensor_spec((batch_size, 1, d, d), dtype=DTYPE),
         target.tensor_spec((fc, 1, fh, fw), dtype=DTYPE),
         output=target.tensor_spec((batch_size, fc, out_h, out_w), dtype=DTYPE),
-        serial_only=False,
+        serial_only=serial,
     )
 
 
-def make_cnn_spec(batch_size: int, d: int) -> specs.Spec:
+def make_cnn_spec(batch_size: int, d: int, serial: bool) -> specs.Spec:
     target = system_config.current_target()
 
     img = target.tensor_spec((batch_size, 3, d, d), dtype=DTYPE)
@@ -159,7 +163,7 @@ def make_cnn_spec(batch_size: int, d: int) -> specs.Spec:
         (filters_b, img, filters_a),
         output,
         intermediate_dtypes=(DTYPE,),
-        serial_only=False,
+        serial_only=serial,
     )
 
 
@@ -646,13 +650,13 @@ def main():
         print("")
         print(f"Size: {n} (Batch Size: {b})")
         if args.spec == "matmul":
-            spec = make_matmul_spec(b, n)
+            spec = make_matmul_spec(b, n, args.serial)
         elif args.spec == "gemm3":
-            spec = make_gemm3_spec(b, n)
+            spec = make_gemm3_spec(b, n, args.serial)
         elif args.spec == "conv":
-            spec = make_conv_spec(b, n)
+            spec = make_conv_spec(b, n, args.serial)
         elif args.spec == "cnn":
-            spec = make_cnn_spec(b, n)
+            spec = make_cnn_spec(b, n, args.serial)
         else:
             raise NotImplementedError(f"{args.spec} not implemented")
 
