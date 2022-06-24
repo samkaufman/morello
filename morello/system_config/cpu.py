@@ -70,10 +70,6 @@ class CpuTarget(Target):
             addressed_banks=frozenset(["RF", "GL"]),
         )
 
-    @property
-    def all_layouts(self) -> Iterable[Layout]:
-        return [layouts.ROW_MAJOR, layouts.COL_MAJOR]
-
     def _faster_destination_banks(self, source: str) -> set[str]:
         assert isinstance(source, str)
         if source == "RF":
@@ -141,7 +137,10 @@ class CpuTarget(Target):
                 stdout, stderr = binary_proc.stdout, binary_proc.stderr
 
                 if binary_proc.returncode != 0:
-                    raise Exception(f"Binary exited with code {binary_proc.returncode}")
+                    raise Exception(
+                        f"Binary exited with code {binary_proc.returncode}. "
+                        f"Standard error: {stderr}"
+                    )
                 stdout = stdout.decode("utf8")
                 stderr = stderr.decode("utf8")
 

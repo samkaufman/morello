@@ -42,7 +42,7 @@ class Matmul(base.Spec):
         expected_output_shape = (self.lhs.dim_sizes[0], self.rhs.dim_sizes[1])
         if self.output.dim_sizes != expected_output_shape:
             raise ValueError(
-                f"Incorrect shape for matmul output: {self.output}; expected "
+                f"Incorrect shape for matmul output {self.output}; expected "
                 f"{expected_output_shape}"
             )
 

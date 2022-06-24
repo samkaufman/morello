@@ -49,7 +49,10 @@ class _OperandWrapper(Impl):
 
     @assert_stable_spec
     def split(self, size: int) -> "Impl":
-        return self.replace_children((self.children[0].split(*args, **kwargs),))
+        return self.replace_children((self.children[0].split(size),))
+
+    def spatial_split(self, *args, **kwargs) -> "Impl":
+        return self.replace_children((self.children[0].spatial_split(*args, **kwargs),))
 
     @assert_stable_spec
     def complete(self) -> Impl:
@@ -180,7 +183,7 @@ def _move_arguments(
     # layout. Otherwise, all layouts are available.
     allowable_layouts = [layouts.ROW_MAJOR]
     if any(d > 1 for d in operand.dim_sizes):
-        allowable_layouts = list(target.all_layouts)
+        allowable_layouts = [l for l in target.all_layouts if l.applies_to_shape(operand.dim_sizes, operand.dtype)]
 
     # TODO: Moves into HEXAGON_TRANSPACKED are handled by pad_transpack, not
     #   move_{input, output} at the moment.
@@ -252,10 +255,10 @@ def common_move(
     if bank == operand.bank and layout == operand.layout:
         raise ValueError("Either bank or layout must differ from current")
 
-    # Will the result be contiguous? If the move is into "non-addressed"
-    # memory, then no. If it is, then it might be.
-    contiguous = False
-    if bank in current_system().addressed_banks:
+    # Will the result be contiguous? If the move is into a cache, it might be.
+    # If it's into memory bank with its own address space, then yes.
+    contiguous = True
+    if bank not in current_system().addressed_banks:
         contiguous = utils.contiguous_approx(operand.dim_sizes, layout, operand)
 
     new_mat = current_target().tensor(

@@ -55,21 +55,12 @@ class TensorSpec:
                 raise ValueError("If all dimensions are 1, TensorSpec must be contiguous")
             if self.layout != layouts.ROW_MAJOR:
                 raise ValueError("If all dimensions are 1, layout must be row-major")
-
-        if isinstance(self.layout, layouts.HexagonTranspacked):
-            if self.dtype != Uint8:
-                raise ValueError(
-                    f"Cannot create transpacked tensor with type {self.dtype}"
-                )
-            if len(self.dim_sizes) != 2:
-                raise ValueError(
-                    f"Cannot create transpacked tensor with rank {len(self.dim_sizes)}"
-                )
-            if self.dim_sizes[0] % 4 != 0 or self.dim_sizes[1] % 32 != 0:
-                raise ValueError(
-                    f"Cannot create transpacked tensor with shape "
-                    f"{self.dim_sizes}. Must be multiple of 4×32."
-                )
+        
+        if not self.layout.applies_to_shape(dim_sizes, dtype):
+            raise ValueError(
+                f"Layout {self.layout} does not apply to shape {dim_sizes} with"
+                f" dtype {dtype}"
+            )
 
     def shrink(self, new_dim_sizes: Sequence[int], contiguous: bool) -> "TensorSpec":
         """Returns a clone with new dimensions.
@@ -121,16 +112,13 @@ class TensorSpec:
         return True
 
     def is_valid_tile_shape(self, shape: tuple[int, ...]) -> bool:
-        """Returns True if self can be tiled in this shape."""
+        """Returns True if can be tiled to this shape."""
         if len(shape) != len(self.dim_sizes):
             return False
         if not all(i <= o for (i, o) in zip(shape, self.dim_sizes)):
             return False
-        if isinstance(self.layout, layouts.HexagonTranspacked):
-            if self.dtype != Uint8:
-                return False
-            if shape[0] % 4 != 0 or shape[1] % 32 != 0:
-                return False
+        if not self.layout.applies_to_shape(shape, self.dtype):
+            return False
         return True
 
     def simple_tile(

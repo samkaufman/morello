@@ -2,7 +2,7 @@ import asyncio
 import functools
 import itertools
 import operator
-from typing import Optional
+from typing import Optional, cast
 
 import hypothesis
 import numpy as np
@@ -435,16 +435,19 @@ def test_index_exprs_consistent_with_contiguous_props(inp):
     logical index (`p1` in a 2-dim. tensor) in an innermost loop returns
     adjacent buffer indices.
     """
-    stack, concrete_tile_idxs = inp
+    stack, concrete_tile_idxs = cast(
+        tuple[list[tensor.TensorLike], list[list[int]]], inp
+    )
     first_spec = stack[0].spec
 
     # Compose indexing expressions so that we have a mapping from the final
     # tile's coordinates all the way back to its root tensor.
+    operand: Optional[tensor.TensorLike] = None
     last_spec = stack[0].spec
-    del stack[0]
-    expr = stack[0].spec.layout.buffer_indexing_expr(last_spec.dim_sizes)
+    expr = stack.pop(0).spec.layout.buffer_indexing_expr(last_spec.dim_sizes)
     while stack:
         operand = stack[0]
+        assert isinstance(operand, tensor.Tile)
         del stack[0]
         all_substitutions = {}
         tile_it_vars = concrete_tile_idxs[-1]
@@ -455,6 +458,7 @@ def test_index_exprs_consistent_with_contiguous_props(inp):
             all_substitutions[f"p{dim_idx}"] = e
         expr = expr.subs(all_substitutions)
         last_spec = operand.spec
+    assert operand is not None
 
     # Walk the elements.
     is_contiguous = True
@@ -470,7 +474,13 @@ def test_index_exprs_consistent_with_contiguous_props(inp):
             break
         last_offset = offset
 
-    assert utils.contiguous(operand.spec, first_spec) == is_contiguous
+    assert operand.spec.layout == first_spec.layout
+    assert (
+        operand.layout.check_tile_contiguity(
+            first_spec.dim_sizes, operand.spec.dim_sizes
+        )
+        == is_contiguous
+    )
 
 
 @_calculator_to_test(_arb_matmul_spec)

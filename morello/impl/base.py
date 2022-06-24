@@ -173,9 +173,12 @@ class Impl(abc.ABC):
         if output_shape == self.spec.output.dim_sizes:
             return True
 
+        if not self._can_tile_out(output_shape):
+            return False
+        impl = cast(Loop, self.tile_out(output_shape))
+
         # We cannot introduce a sliding tile if there is no overlap in the corresponding
         # input dimension.
-        impl = cast(Loop, self.tile_out(output_shape))
         if not any(t.frontiers[sliding_dim] for t in impl.tiles):
             return False
 
@@ -356,6 +359,10 @@ class Impl(abc.ABC):
     @abc.abstractmethod
     def peak_memory(self) -> dict[str, int]:
         raise NotImplementedError()
+    
+    @property
+    def operands_subscripts(self) -> Sequence[tuple[int, ...]]:
+        return self.spec.operands_dim_subscripts()
 
 
 class Leaf(Impl):

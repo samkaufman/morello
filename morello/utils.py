@@ -2,11 +2,10 @@ import functools
 import itertools
 import math
 from collections.abc import Mapping
-from typing import Iterable, Sequence, TypeVar
+from typing import TYPE_CHECKING, Iterable, Sequence, TypeVar
 
-from morello.specs.tensorspec import TensorSpec
-
-from . import layouts, specs
+if TYPE_CHECKING:
+    from . import layouts, specs
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -44,39 +43,8 @@ def flatten(src):
             yield el
 
 
-def contiguous(t, address_root) -> bool:
-    """Test whether a tensor is contiguous in another tensor's address space."""
-    if isinstance(t, specs.TensorSpec):
-        self_ordered_dims = layout_ordered_dims(t)
-    elif isinstance(t, Sequence):
-        self_ordered_dims = layout_ordered_dims(*t)
-    else:
-        raise TypeError(f"Unexpected first argument type: {type(t).__name__}")
-
-    if isinstance(address_root, specs.TensorSpec):
-        address_root_ordered_dims = layout_ordered_dims(address_root)
-    elif isinstance(t, Sequence):
-        address_root_ordered_dims = layout_ordered_dims(*address_root)
-    else:
-        raise TypeError(f"Unexpected second argument type: {type(t).__name__}")
-
-    pairs = zip(self_ordered_dims, address_root_ordered_dims)
-
-    # Drop leading dimensions where the tile size is one
-    pairs = itertools.dropwhile(lambda x: x[0] == 1, pairs)
-
-    # Drop the first
-    pairs = itertools.islice(pairs, 1, None)
-
-    for tile_dim_size, root_dim_size in pairs:
-        # The following includes the case where an underlying dimension is 1.
-        if tile_dim_size != root_dim_size:
-            return False
-    return True
-
-
 def contiguous_approx(
-    tile_shape: Sequence[int], tile_layout: layouts.Layout, parent: TensorSpec
+    tile_shape: Sequence[int], tile_layout: "layouts.Layout", parent: "specs.TensorSpec"
 ) -> bool:
     """Test whether a tiling breaks contiguousness.
 
@@ -91,35 +59,16 @@ def contiguous_approx(
     :returns: `True` if both the parent and its new tile can be determined to be
       contiguous. `False` otherwise.
     """
+    if parent.layout != tile_layout:
+        raise ValueError(
+            f"Only supports same-layout TensorSpecs, but given"
+            f" {parent.layout} and {tile_layout}"
+        )
     if all(d == 1 for d in tile_shape):
         return True
     if not parent.contiguous:
         return False
-    return contiguous((tile_shape, tile_layout), parent)
-
-
-# TODO: Can we merge this into Layout?
-def layout_ordered_dims(*args) -> tuple[int, ...]:
-    """Returns tuple of operand's height and width; or vice versa if column-major."""
-    dim_sizes: tuple[int, ...]
-    root_layout: layouts.Layout
-    if len(args) == 1 and isinstance(args[0], specs.TensorSpec):
-        dim_sizes, root_layout = args[0].dim_sizes, args[0].layout
-    elif len(args) == 2:
-        dim_sizes, root_layout = args
-    else:
-        raise TypeError(f"Unexpected arguments: {args}")
-
-    if len(dim_sizes) == 1:
-        return (dim_sizes[0],)
-    if root_layout == layouts.ROW_MAJOR:
-        lead = [dim_sizes[0], dim_sizes[1]]
-    elif root_layout == layouts.COL_MAJOR:
-        lead = [dim_sizes[1], dim_sizes[0]]
-    else:
-        raise NotImplementedError(f"Unknown layout {root_layout}")
-    lead.extend(dim_sizes[2:])
-    return tuple(lead)
+    return tile_layout.check_tile_contiguity(parent.dim_sizes, tile_shape)
 
 
 def factors(n: int) -> Iterable[int]:

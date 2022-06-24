@@ -3,11 +3,14 @@ from typing import Callable, Iterable, Optional
 
 import dataclass_abc
 
+from morello.impl.matmuls import MatmulHole
+
 from .. import specs, system_config
 from ..layouts import Layout
-from ..tensor import Tensor, Tile
+from ..tensor import OperandIdx, SqueezingTile, Tensor, Tile, TransposingTile
 from .actions import SlidingTileOutAction, TileOutAction
 from .base import Impl, NonAllocatingLeaf
+from .loops import Loop
 from .moves import MoveLet, _move_arguments, common_move, common_operand_move_actions
 from .pruning import (
     ParentSummary,
@@ -23,6 +26,7 @@ _directconv_tile_out_params_cache = {}
 _directconv_sliding_tile_out_params_cache = {}
 
 
+# TODO: Convert this into ConvHole. (No longer needed with spatial splitting.)
 @dataclass_abc.dataclass_abc(frozen=True)
 class DirectConv(NonAllocatingLeaf):
     """A native implementation of a convolution.
@@ -38,6 +42,9 @@ class DirectConv(NonAllocatingLeaf):
 
     @property
     def is_scheduled(self) -> bool:
+        # TODO: Remove this disabling of DirectConv? Or not?
+        return False
+
         # TODO: Drop these RF constants. Instead, use target-specific impls.
         if not all(op.bank in ("RF", "HexagonRF") for op in self.spec.operands):
             return False
@@ -75,10 +82,67 @@ class DirectConv(NonAllocatingLeaf):
     def split(self, size: int) -> "Impl":
         raise NotImplementedError("Split not implemented for DirectConv")
 
+    def spatial_split(self) -> "Impl":
+        if self.spec.inputs[0].dim_sizes[2:] != self.spec.inputs[1].dim_sizes[2:]:
+            raise ValueError(
+                f"spatial_split can only be applied when image patch and filter "
+                f"spatial dimensions match, but dimensions were "
+                f"{self.spec.inputs[0].dim_sizes} and "
+                f"{self.spec.inputs[1].dim_sizes}"
+            )
+        
+        # TODO: This doesn't range over the filters' spatial dims.!
+        spatial_subscripts = self.spec.operands_dim_subscripts()[0][2:]
+
+        spatial_rank = len(spatial_subscripts)
+        dropped_dims = frozenset(range(2, len(self.spec.inputs[0].dim_sizes)))
+        img_view = self.spec.inputs[0].simple_tile(
+            OperandIdx(0),
+            self.spec.inputs[0].dim_sizes[:2] + tuple(1 for _ in range(spatial_rank)),
+        )
+        reinterpreted_img_view = SqueezingTile(OperandIdx(0), img_view, dropped_dims)
+        filters_view = self.spec.inputs[1].simple_tile(
+            OperandIdx(1),
+            self.spec.inputs[1].dim_sizes[:2] + tuple(1 for _ in range(spatial_rank)),
+        )
+        reinterpreted_filters_view = SqueezingTile(OperandIdx(1), filters_view, dropped_dims)
+        if any(d > 1 for d in reinterpreted_filters_view.dim_sizes):
+            reinterpreted_filters_view = TransposingTile(OperandIdx(1), reinterpreted_filters_view, (0, 1))
+
+        # Building a pass-through tile here is inelegant. Can we improve?
+        output_view = self.spec.output.simple_tile(    
+            OperandIdx(2), self.spec.output.dim_sizes
+        )
+        reinterpreted_output_view = SqueezingTile(OperandIdx(2), output_view, dropped_dims)
+
+        # Inner spec applied to produce a simple pixel (cross-batch and channel)
+        matmul_spec = specs.Matmul(
+            reinterpreted_img_view.spec,
+            reinterpreted_filters_view.spec,
+            reinterpreted_output_view.spec,
+            serial_only=self.spec.serial_only,
+        )
+
+        new_operands_subscripts = [
+            [900, 901] + list(range(100, 100 + spatial_rank)),
+            [902, 901] + list(range(100, 100 + spatial_rank)),
+            [900, 902] + ([950] * spatial_rank),
+        ]
+
+        return Loop(
+            spec=self.spec,
+            subscripts=range(100, 100+ spatial_rank),
+            operands_subscripts=tuple(map(tuple, new_operands_subscripts)),
+            tiles=frozenset([img_view, filters_view]),
+            inner_args=(reinterpreted_img_view, reinterpreted_filters_view, reinterpreted_output_view),
+            inner=MatmulHole(matmul_spec),
+            parallel=False,
+        )
+
     @assert_stable_spec
     def complete(self) -> Impl:
         if any(d > 1 for d in self.spec.output.dim_sizes):
-            return self.tile_out((1, 1, 1)).complete()
+            return self.tile_out((1, 1, 1, 1)).complete()
 
         system = system_config.current_system()
 
@@ -162,6 +226,9 @@ class DirectConv(NonAllocatingLeaf):
         #         yield functools.partial(self.split_filters, k)
 
         yield from common_operand_move_actions(self)
+
+        if all(d == 1 for d in self.spec.output.dim_sizes[2:]):
+            yield self.spatial_split
 
     def __str__(self) -> str:
         return f"{type(self).__name__}({self.spec})"

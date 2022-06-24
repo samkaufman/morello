@@ -18,6 +18,7 @@ def dim_st(draw, max_size: Optional[int] = None) -> int:
 @st.composite
 def layout_st(
     draw,
+    dtype = None,
     numels_ones: Optional[bool] = None,
     dim_sizes: Optional[tuple[int, ...]] = None,
 ) -> layouts.Layout:
@@ -29,7 +30,11 @@ def layout_st(
     target = system_config.current_target()
     if numels_ones:
         return layouts.ROW_MAJOR
-    available_layouts = list(target.all_layouts)
+    available_layouts = [
+        l
+        for l in target.all_layouts
+        if dim_sizes is None or dtype is None or l.applies_to_shape(dim_sizes, dtype)
+    ]
     return draw(st.sampled_from(available_layouts))
 
 
@@ -54,11 +59,12 @@ def tensorspec_st(
             dim_st(max_size=max_dim_size), min_size=min_dims, max_size=max_dims
         ).map(tuple)
     )
+    dtype = draw(st.from_type(dtypes.Dtype))
     if layout is None:
-        layout = draw(layout_st(dim_sizes=dim_sizes))
+        layout = draw(layout_st(dim_sizes=dim_sizes, dtype=dtype))
     return target.tensor_spec(
         dim_sizes,
-        dtype=draw(st.from_type(dtypes.Dtype)),
+        dtype=dtype,
         contiguous=all(d == 1 for d in dim_sizes) or draw(st.booleans()),
         layout=layout,
         bank=draw(st.sampled_from(sorted(target.system.banks))),
@@ -68,21 +74,23 @@ def tensorspec_st(
 @st.composite
 def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
     target = system_config.current_target()
+    lhs_dtype = draw(st.from_type(dtypes.Dtype))
+    rhs_dtype = draw(st.from_type(dtypes.Dtype))
     lhs = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=2))
     rhs_dim_sizes = (lhs.dim_sizes[1], draw(dim_st(max_size=max_dim_size)))
     rhs = target.tensor_spec(
         dim_sizes=rhs_dim_sizes,
-        dtype=draw(st.from_type(dtypes.Dtype)),
+        dtype=lhs_dtype,
         contiguous=all(d == 1 for d in rhs_dim_sizes) or draw(st.booleans()),
-        layout=draw(layout_st(dim_sizes=rhs_dim_sizes)),
+        layout=draw(layout_st(dim_sizes=rhs_dim_sizes, dtype=lhs_dtype)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
     out_dim_sizes = (lhs.dim_sizes[0], rhs.dim_sizes[1])
     out = target.tensor_spec(
         dim_sizes=out_dim_sizes,
-        dtype=draw(st.from_type(dtypes.Dtype)),
+        dtype=rhs_dtype,
         contiguous=all(d == 1 for d in out_dim_sizes) or draw(st.booleans()),
-        layout=draw(layout_st(dim_sizes=out_dim_sizes)),
+        layout=draw(layout_st(dim_sizes=out_dim_sizes, dtype=rhs_dtype)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
     return specs.Matmul(lhs, rhs, out, serial_only=draw(st.booleans()))
@@ -91,6 +99,8 @@ def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
 @st.composite
 def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
     target = system_config.current_target()
+    filters_dtype = draw(st.from_type(dtypes.Dtype))
+    out_dtype = draw(st.from_type(dtypes.Dtype))
     image = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=4, max_dims=4))
     filters_dim_sizes = (
         draw(dim_st(max_size=max_dim_size)),
@@ -100,17 +110,17 @@ def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
     )
     filters = target.tensor_spec(
         dim_sizes=filters_dim_sizes,
-        dtype=draw(st.from_type(dtypes.Dtype)),
+        dtype=filters_dtype,
         contiguous=all(d == 1 for d in filters_dim_sizes) or draw(st.booleans()),
-        layout=draw(layout_st(dim_sizes=filters_dim_sizes)),
+        layout=draw(layout_st(dim_sizes=filters_dim_sizes, dtype=filters_dtype)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
     out_dim_sizes = specs.Convolution.output_shape(image.dim_sizes, filters_dim_sizes)
     out = target.tensor_spec(
         dim_sizes=out_dim_sizes,
-        dtype=draw(st.from_type(dtypes.Dtype)),
+        dtype=out_dtype,
         contiguous=all(d == 1 for d in out_dim_sizes) or draw(st.booleans()),
-        layout=draw(layout_st(dim_sizes=out_dim_sizes)),
+        layout=draw(layout_st(dim_sizes=out_dim_sizes, dtype=out_dtype)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
     return specs.Convolution(image, filters, out, serial_only=draw(st.booleans()))
@@ -121,11 +131,12 @@ def reduce_spec_st(draw, max_dim_size: Optional[int] = 32):
     target = system_config.current_target()
     source = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=4))
     output_dim_sizes = source.dim_sizes[:-1]
+    out_dtype = draw(st.from_type(dtypes.Dtype))
     output = target.tensor_spec(
         dim_sizes=output_dim_sizes,
-        dtype=draw(st.from_type(dtypes.Dtype)),
+        dtype=out_dtype,
         contiguous=all(d == 1 for d in output_dim_sizes) or draw(st.booleans()),
-        layout=draw(layout_st(dim_sizes=output_dim_sizes)),
+        layout=draw(layout_st(dim_sizes=output_dim_sizes, dtype=out_dtype)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
     return specs.ReduceSum(
@@ -161,12 +172,13 @@ def compose_spec_st(draw) -> specs.Compose:
     output_dim_sizes = specs.Compose.calculate_output(
         subspec_classes, [inp.dim_sizes for inp in inputs_specs]
     )
+    out_dtype = draw(st.from_type(dtypes.Dtype))
     output_spec = target.tensor_spec(
         dim_sizes=output_dim_sizes,
-        dtype=draw(st.from_type(dtypes.Dtype)),
+        dtype=out_dtype,
         contiguous=all(d == 1 for d in output_dim_sizes) or draw(st.booleans()),
         bank=draw(st.sampled_from(sorted(system_config.current_system().banks))),
-        layout=draw(layout_st(dim_sizes=output_dim_sizes)),
+        layout=draw(layout_st(dim_sizes=output_dim_sizes, dtype=out_dtype)),
     )
     intermediate_dtypes = draw(
         st.lists(

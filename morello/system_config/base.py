@@ -2,13 +2,13 @@ import abc
 import dataclasses
 import functools
 import logging
-from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 import typing
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
 
 if TYPE_CHECKING:
     from .. import dtypes
-    from ..layouts import Layout, TensorSpec
-    from ..tensor import Tensor, TensorBase, Tile
+    from ..layouts import Layout
+    from ..tensor import TensorBase
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +47,10 @@ class Target(abc.ABC):
         raise NotImplementedError()
 
     @property
-    @abc.abstractmethod
     def all_layouts(self) -> Iterable["Layout"]:
-        raise NotImplementedError()
+        from ..layouts import COL_MAJOR, ROW_MAJOR, NCHWc4, NCHWc32, NCHWc64
+
+        return [ROW_MAJOR, COL_MAJOR, NCHWc4, NCHWc32, NCHWc64]
 
     async def run_impl(
         self,

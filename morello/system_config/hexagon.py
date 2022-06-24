@@ -101,7 +101,9 @@ class HvxSimulatorTarget(Target):
 
     @property
     def all_layouts(self) -> Iterable[layouts.Layout]:
-        return [layouts.ROW_MAJOR, layouts.COL_MAJOR, layouts.HEXAGON_TRANSPACKED]
+        from .. import layouts        
+
+        return list(super().all_layouts) + [layouts.HEXAGON_TRANSPACKED]
 
     def _faster_destination_banks(self, source: str) -> set[str]:
         if source in ("HexagonRF", "VMEM"):
@@ -230,9 +232,9 @@ class HvxVmemTensorlike(tensor.TensorLike):
                 f"Bytes {self.spec.bytes_used} not divisible by 128"
             )
 
-    @property
-    def contiguous(self) -> bool:
-        return self.vector_count == 1
+    # @property
+    # def contiguous(self) -> bool:
+    #     return self.vector_count == 1
 
     def simple_tile(self, tile_shape: tuple[int, ...]) -> "HvxVmemTensorlike":
         return self._tile(HvxVmemSimpleTile, tile_shape)

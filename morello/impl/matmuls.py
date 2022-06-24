@@ -7,7 +7,7 @@ from .. import dtypes, layouts, specs, system_config
 from ..system_config import current_target
 from ..tensor import OperandIdx, TensorLike
 from .actions import MatmulSplitAction, TileOutAction
-from .base import AppliedImpl, Impl, NonAllocatingLeaf
+from .base import AppliedImpl, Impl, NonAllocatingLeaf, make_applied_impl
 from .loops import Loop
 from .moves import MoveLet, PadTranspack, common_move, common_operand_move_actions
 from .pruning import (
@@ -181,7 +181,7 @@ class MatmulHole(MatmulBase):
 
     @assert_stable_spec
     def place_broadcastvecmult(self) -> "BroadcastVecMult":
-        return BroadcastVecMult(self.lhs, self.rhs, self.output, self.serial_only)
+        return BroadcastVecMult(self.spec)
 
     @assert_stable_spec
     def place_hvx_gemvmpebbw(self) -> "HvxGemvmpybbwAsm":
@@ -192,7 +192,7 @@ class MatmulHole(MatmulBase):
         return HvxVrmpyaccVuwVubRub(self.spec)
 
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
-        raise NotImplementedError("apply not implemented for holes")
+        return make_applied_impl(self, operands)
 
 
 @dataclass_abc.dataclass_abc(frozen=True)
@@ -253,8 +253,7 @@ _BROADCAST_VEC_MULT_WIDTH = 256 // 8  # bytes
 @dataclass_abc.dataclass_abc(frozen=True)
 class BroadcastVecMult(MatmulLeaf):
     def __post_init__(self):
-        super().__post_init__()
-        check_result = BroadcastVecMult._check_operands(self.operands)
+        check_result = BroadcastVecMult._check_operands(self.spec.operands)
         if check_result:
             raise ValueError(check_result)
 
@@ -270,10 +269,11 @@ class BroadcastVecMult(MatmulLeaf):
         if lhs.bank != "RF" or rhs.bank != "RF" or out.bank != "RF":
             return "BroadcastVecMult only supports RF operands"
 
-        if rhs.layout != layouts.ROW_MAJOR:
-            return "rhs must be row-major"
-        if out.layout != layouts.ROW_MAJOR:
-            return "out must be in row-major"
+        # lhs is contiguous because it's 1 vlaue.
+        if not rhs.contiguous:
+            return "rhs must be contiguous, but was: " + str(rhs)
+        if not out.contiguous:
+            return "out must be contiguous, but was: " + str(out)
 
         if lhs.dtype != rhs.dtype:
             return f"Operand value types must match; lhs and rhs were {lhs.dtype} and {rhs.dtype}"

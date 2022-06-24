@@ -10,7 +10,7 @@ if cython.compiled:
 else:
     import math
 
-from . import layouts, specs, utils
+from . import specs
 from .impl import ComposeHole, DirectConv, Impl, Loop, MatmulHole, MoveLet, ReduceSum
 from .impl.compose import Pipeline
 from .impl.loops import SlidingWindowLoop
@@ -27,8 +27,8 @@ if not cython.compiled:
 
 @cython.exceptval(-1)
 def move_cost(
-    src: specs.TensorSpec, dest_layout: layouts.Layout, prefetching: bool
-) -> MainCost:
+    src: specs.TensorSpec, dest: specs.TensorSpec, prefetching: bool
+) -> MainCost:  # type: ignore
     """Estimate a cost of moving all data in `src` to a new matrix with `dest_layout`.
 
     Notice that the destination level is not considered. The cache_hit_cost for a
@@ -44,38 +44,31 @@ def move_cost(
     #     * src.layout
     #     * dest_layout
 
-    hit_cost = current_system().banks[src.bank].cache_hit_cost
+    src_hit_cost = current_system().banks[src.bank].cache_hit_cost
+    dest_hit_cost = current_system().banks[dest.bank].cache_hit_cost
 
-    lodims = utils.layout_ordered_dims(src)
-    meaningful_layout_difference = (
-        src.layout != dest_layout and lodims[0] != 1 and lodims[1] != 1
-    )
-
-    # Make real_dims, which is all non-1 dimensions
-    real_dims = [d for d in lodims if d > 1]
-    if not real_dims:
-        real_dims = [1]
-
-    # Main cost formula
+    # Cost is the sum of the cost of touching both memories.
     cost = (
         10
-        * hit_cost
-        * functools.reduce(mul, real_dims[:-1], 1)
-        * cython.cast(
-            cython.int,
-            math.ceil(real_dims[-1] / current_system().line_size),
-            typecheck=True,
-        )
+        * src_hit_cost
+        * src.layout.estimate_cache_lines(src.dim_sizes, src.dtype, src.contiguous)
+    )
+    cost += (
+        10
+        * dest_hit_cost
+        * dest.layout.estimate_cache_lines(dest.dim_sizes, dest.dtype, dest.contiguous)
     )
 
     # Remove half the cost for prefetched moves. This is essentially a
-    # tie-breaking hack to get around the fact that we are not modeling both
-    # compute and memory cost.
+    # tie-breaking hack to get around the fact that we are not modeling
+    # pipelining.
     if prefetching:
         cost //= 2
 
-    # Add a 10% to penalize a lack of hardware prefetching
-    if not src.contiguous or meaningful_layout_difference:
+    # Add a 10% to penalize a lack of hardware prefetching. (This is target-
+    # specific!)
+    # TODO: Revise.
+    if not src.contiguous or src.layout != dest.layout:
         cost = int(2 * cost)
     return cost
 
@@ -104,10 +97,7 @@ def detailed_analytical_cost(
         sum_cost = 0
         for stage in op.stages:
             sub_cd = detailed_analytical_cost(
-                stage,
-                depth=depth + 1,
-                env=env,
-                holes_ok=holes_ok,
+                stage, depth=depth + 1, env=env, holes_ok=holes_ok,
             )
             cost_dict.update(sub_cd)
             sum_cost += sub_cd[stage][0]
@@ -136,18 +126,17 @@ def detailed_analytical_cost(
         return cost_dict
     elif isinstance(op, SlidingWindowLoop):
         cost_dict = detailed_analytical_cost(
-            op.inner,
-            depth=depth + 1,
-            env=env,
-            holes_ok=holes_ok,
+            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok,
         )
         # The moves are implicit in SlidingWindowLoop, so we'll construct
         # Tiles to serve as operands to `move_cost`.
-        whole_window_tile = op.operands[op.live_tensor_idx].simple_tile(op.live_tensor.dim_sizes)
+        whole_window_tile = op.operands[op.live_tensor_idx].simple_tile(
+            op.live_tensor.dim_sizes
+        )
         frontier_tile = op.operands[op.live_tensor_idx].simple_tile(op.frontier_shape)
         # TODO: Should support prefetching for sliding windows.
-        whole_load_cost = move_cost(whole_window_tile, op.live_tensor.layout, False)
-        update_cost = move_cost(frontier_tile, op.live_tensor.layout, False)
+        whole_load_cost = move_cost(whole_window_tile.spec, op.live_tensor.spec, False)
+        update_cost = move_cost(frontier_tile.spec, op.live_tensor.spec, False)
         new_cost = (
             (op.whole_loads * whole_load_cost)
             + (op.update_loads * update_cost)
@@ -161,8 +150,8 @@ def detailed_analytical_cost(
         assert compute_cost(op) == new_cost
         return cost_dict
     elif isinstance(op, (DirectConv, ReduceSum)) and (op.is_scheduled or holes_ok):
-        assert compute_cost(op) == 1
-        return {op: (1, "    1")}
+        assert compute_cost(op) == 4999
+        return {op: (4999, "    4999")}
     elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
         # Tensor multiplication is free but its operands must be in memory.
         # (This cost model is only interested in the cost of moving data.)
@@ -172,13 +161,10 @@ def detailed_analytical_cost(
         # This is the core of the cost model; the cost of a schedule is derived
         # entirely from its moves, which are done by MoveLet operations.
         mcost = move_cost(
-            op.spec.operands[op.source_idx], op.destination.layout, op.prefetching
+            op.spec.operands[op.source_idx], op.destination.spec, op.prefetching
         )
         cost_dict = detailed_analytical_cost(
-            op.inner,
-            depth=depth + 1,
-            env=env,
-            holes_ok=holes_ok,
+            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok,
         )
         assert isinstance(mcost, int)
         assert isinstance(cost_dict[op.inner][0], int)
@@ -226,12 +212,12 @@ def compute_cost(op: Impl) -> MainCost:
         raise NotImplementedError()
     elif isinstance(op, (DirectConv, ReduceSum)):
         # Reminder: these types can be either holes or scheduled
-        return _assign_cost(op, 1)
+        return _assign_cost(op, 4999)
     elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
         return _assign_cost(op, 1)
     elif isinstance(op, MoveLet):
-        mcost: MainCost = move_cost(
-            op.spec.operands[op.source_idx], op.destination.layout, op.prefetching
+        mcost: MainCost = move_cost(  # type: ignore
+            op.spec.operands[op.source_idx], op.destination.spec, op.prefetching
         )
         return _assign_cost(op, _clip_add(mcost, compute_cost(op.inner)))
     elif isinstance(op, (ComposeHole, MatmulHole)):

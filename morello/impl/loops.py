@@ -74,8 +74,9 @@ class Loop(Impl):
 
     spec: specs.Spec
     subscripts: tuple[int, ...]
-    operands_subscripts: tuple[tuple[int, ...], ...]
+    _operands_subscripts: tuple[tuple[int, ...], ...]
     tiles: frozenset[Tile]
+    inner_args: tuple[Tile]
     inner: Impl
     parallel: bool
 
@@ -87,6 +88,8 @@ class Loop(Impl):
         inner: Impl,
         parallel: bool,
         operands_subscripts: Optional[tuple[tuple[int, ...], ...]] = None,
+        inner_args: Optional[Iterable[Tile]] = None,
+        **kwargs,
     ):
         self.spec = spec
         self.subscripts = tuple(subscripts)
@@ -95,12 +98,22 @@ class Loop(Impl):
         self.parallel = parallel
         if self.parallel and not self.inner.spec.serial_only:
             raise ValueError("Parallel loop's child must be serial only")
+        self.inner_args = frozenset(inner_args) if inner_args is not None else self.tiles
+
+        # Workaround for dataclasses.replace
+        if "_operands_subscripts" in kwargs:
+            assert operands_subscripts is None
+            operands_subscripts = kwargs["_operands_subscripts"]
 
         if operands_subscripts is None:
-            self.operands_subscripts = tuple(self.spec.operands_dim_subscripts())
+            self._operands_subscripts = tuple(self.spec.operands_dim_subscripts())
         else:
-            self.operands_subscripts = operands_subscripts
-
+            self._operands_subscripts = operands_subscripts
+    
+    @property
+    def operands_subscripts(self) -> Sequence[tuple[int, ...]]:
+        return self._operands_subscripts
+        
     @property
     def steps(self) -> int:
         val = 1
@@ -173,6 +186,9 @@ class Loop(Impl):
             self, inner=self.inner.pad_transpack(*args, **kwargs)
         )
 
+    def spatial_split(self, *args, **kwargs) -> "Impl":
+        return self.replace_children((self.children[0].spatial_split(*args, **kwargs),))
+
     @assert_stable_spec
     def split(self, size: int) -> "Loop":
         # Pass split through to the inner schedule. This method is
@@ -207,10 +223,15 @@ class Loop(Impl):
         return self.replace_children([fn(self.inner)])
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
-        assert [o.spec for o in operands] == list(self.spec.operands)
+        assert [o.spec for o in operands] == list(self.spec.operands), (
+            f"Operands do not match Spec. Spec operands were "
+            f"{', '.join(str(o) for o in self.spec.operands)}, but given "
+            f"{', '.join(str(o.spec) for o in operands)}."
+        )
+
         inner_operands = list(operands)
-        for tile in self.tiles:
-            inner_operands[tile.source] = tile
+        for inner_arg in self.inner_args:
+            inner_operands[inner_arg.source] = inner_arg
         applied_body = self.inner.apply(inner_operands)
         return make_applied_impl(self.replace_children([applied_body]), operands)  # type: ignore
 
