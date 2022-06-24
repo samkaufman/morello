@@ -323,11 +323,11 @@ class HvxGemvmpybbwAsm(MatmulLeaf):
         if out.bank != "L2":
             return "out must be in L2"
 
-        if lhs.layout != layouts.ROW_MAJOR:
+        if not lhs.layout.is_row_major:
             return "lhs must be in row-major"
         if rhs.layout != layouts.HEXAGON_TRANSPACKED:
             return "rhs must be transpacked"
-        if out.layout != layouts.ROW_MAJOR:
+        if not out.layout.is_row_major:
             return "out must be in row-major"
 
         if lhs.dtype != dtypes.Uint8:

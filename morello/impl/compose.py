@@ -58,7 +58,8 @@ class ComposeHole(Impl):
 
         # TODO: Remove this symmetry: lots of ways to iteratively split the pipeline
         # TODO: Reintroduce splitting on non-index 0
-        for bank, layout in itertools.product(system.addressed_banks, target.all_layouts):
+        peeling_shape = self.spec.subspec_outputs[1]
+        for bank, layout in itertools.product(system.addressed_banks, target.all_layouts_for_shape(peeling_shape)):
             # TODO: Remove following check once cost.move_cost handles it correctly.
             if not system.has_hvx and layout == layouts.HEXAGON_TRANSPACKED:
                 continue
@@ -153,13 +154,14 @@ class ComposeHole(Impl):
         # would make and seeing if we get a ValueError. This isn't a great solution:
         # catching all ValueErrors might become overbroad as the code evolves, and the
         # object construction is inefficient and unneeded. However, it'll work for now.
+        peeling_shape = self.spec.subspec_outputs[1]
         intermediate_tensor_layout = layout
-        if all(d == 1 for d in self.spec.subspec_outputs[1]):
-            intermediate_tensor_layout = layouts.ROW_MAJOR
+        if all(d == 1 for d in peeling_shape):
+            intermediate_tensor_layout = layouts.row_major(len(peeling_shape))
         try:
             current_target().tensor(
                 current_target().tensor_spec(
-                    dim_sizes=self.spec.subspec_outputs[1],
+                    dim_sizes=peeling_shape,
                     dtype=self.spec.intermediate_dtypes[0],
                     contiguous=True,
                     bank=bank,
@@ -183,9 +185,10 @@ class ComposeHole(Impl):
             raise NotImplementedError("Auto-selecting bank or layout unimplemented")
 
         # TODO: Using ALPHABET_PRODUCT here will fail for long programs
+        peeling_shape = self.spec.subspec_outputs[1]
         intermediate_tensor_layout = layout
-        if all(d == 1 for d in self.spec.subspec_outputs[1]):
-            intermediate_tensor_layout = layouts.ROW_MAJOR
+        if all(d == 1 for d in peeling_shape):
+            intermediate_tensor_layout = layouts.row_major(len(peeling_shape))
         intermediate_tensor = current_target().tensor(
             current_target().tensor_spec(
                 dim_sizes=self.spec.subspec_outputs[1],
@@ -444,7 +447,9 @@ class ComposeHole(Impl):
     @assert_stable_spec
     def complete(self) -> "Impl":
         next_bank = system_config.current_system().default_bank
-        return self.peel(bank=next_bank, layout=layouts.ROW_MAJOR).complete()
+        shape_to_peel = self.spec.subspec_outputs[1]
+        l = layouts.row_major(len(shape_to_peel))
+        return self.peel(bank=next_bank, layout=l).complete()
 
     def replace_spec(self, new_spec: specs.Spec) -> "Impl":
         assert type(self) is ComposeHole

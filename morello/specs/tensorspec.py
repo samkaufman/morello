@@ -37,7 +37,7 @@ class TensorSpec:
         dtype: Dtype,
         contiguous: bool,
         bank: Optional[str] = None,
-        layout: layouts.Layout = layouts.ROW_MAJOR,
+        layout: Optional[layouts.Layout] = None,
     ):
         self.dim_sizes = dim_sizes
         self.dtype = dtype
@@ -45,7 +45,10 @@ class TensorSpec:
             self.bank = current_system().default_bank
         else:
             self.bank = bank
-        self.layout = layout
+        if layout is None:
+            self.layout = layouts.row_major(len(self.dim_sizes))
+        else:
+            self.layout = layout
         self.contiguous = contiguous
 
         if not len(self.dim_sizes):
@@ -53,7 +56,7 @@ class TensorSpec:
         if all(d == 1 for d in self.dim_sizes):
             if not self.contiguous:
                 raise ValueError("If all dimensions are 1, TensorSpec must be contiguous")
-            if self.layout != layouts.ROW_MAJOR:
+            if not self.layout.is_row_major:
                 raise ValueError("If all dimensions are 1, layout must be row-major")
         
         if not self.layout.applies_to_shape(dim_sizes, dtype):
@@ -69,7 +72,7 @@ class TensorSpec:
         """
         new_layout = self.layout
         if all(d == 1 for d in new_dim_sizes):
-            new_layout = layouts.ROW_MAJOR
+            new_layout = layouts.row_major(len(new_dim_sizes))
         return TensorSpec(
             tuple(new_dim_sizes),
             dtype=self.dtype,
@@ -166,7 +169,7 @@ class TensorSpec:
         layout_epi = ""
         bank_epi = ""
         c_epi = ""
-        if self.layout != layouts.ROW_MAJOR:
+        if not self.layout.is_row_major:
             layout_epi = f", {self.layout}"
         if self.bank != current_system().default_bank:
             bank_epi = f", {self.bank}"
@@ -203,7 +206,7 @@ class HvxVmemTensorSpec(TensorSpec):
     ) -> "HvxVmemTensorSpec":
         new_layout = self.layout
         if all(d == 1 for d in new_dim_sizes):
-            new_layout = layouts.ROW_MAJOR
+            new_layout = layouts.row_major(len(new_dim_sizes))
         return HvxVmemTensorSpec(
             tuple(new_dim_sizes),
             dtype=self.dtype,

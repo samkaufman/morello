@@ -11,14 +11,11 @@ from . import dtypes, system_config
 from .codegen.expr_utils import FloorDiv
 
 if TYPE_CHECKING:
-    from . import dtypes, specs
+    from . import dtypes
 
 
 class Layout:
     """The layout of a tensor."""
-
-    # def applies_to(self, shape: Sequence[int]) -> bool:
-    #     raise NotImplementedError()
 
     def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
         raise NotImplementedError()
@@ -37,6 +34,10 @@ class Layout:
 
     def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
         return True
+    
+    @property
+    def is_row_major(self) -> bool:
+        return False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -114,9 +115,10 @@ class TransposeLayout(Layout):
         return tuple(transposed_shape)
 
 
+@dataclasses.dataclass(frozen=True)
 class StandardLayout(Layout):
-    # def applies_to(self, shape: Sequence[int]) -> bool:
-    #     return True
+
+    dim_order: tuple[int, ...]
 
     def check_tile_contiguity(
         self, outer_shape: Sequence[int], tile_shape: Sequence[int]
@@ -148,34 +150,28 @@ class StandardLayout(Layout):
                 (real_dims[-1] * dtype.size) / line_size
             )
         
-    def physical_order(self, rank: int) -> tuple[int, ...]:
-        raise NotImplementedError()
-    
-    def __eq__(self, other) -> bool:
-        if not isinstance(other, StandardLayout):
-            return NotImplemented
-        # TODO: Hacky! Fix with concrete-rank layouts!
-        return self.physical_order(12) == other.physical_order(12)
-    
     def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        r = _general_index_expr(self.physical_order(len(concrete_shape)), concrete_shape)
+        assert len(concrete_shape) == len(self.dim_order)
+        r = _general_index_expr(self.dim_order, concrete_shape)
         if isinstance(r, int):
             return sympy.Integer(r)
         return r
 
+    @property
+    def is_row_major(self) -> bool:
+        if self.dim_order == tuple(range(len(self.dim_order))):
+            return True
+        return False
+
     def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
-        return tuple(dim_sizes[d] for d in self.physical_order(len(dim_sizes)))
+        assert len(dim_sizes) == len(self.dim_order)
+        return tuple(dim_sizes[d] for d in self.dim_order)
     
-
-@dataclasses.dataclass(frozen=True)
-class RowMajor(StandardLayout):
-
-    def physical_order(self, rank: int) -> tuple[int, ...]:
-        return tuple(range(rank))
-
     def __str__(self) -> str:
-        return "RM"
-
+        if self.is_row_major:
+            return "RM"
+        return f"<{','.join(map(str, self.dim_order))}>"
+    
 
 @dataclasses.dataclass(frozen=True)
 class PackedLayout(Layout):
@@ -202,8 +198,10 @@ class PackedLayout(Layout):
             raise ValueError(f"Expected rank-{self.dim_count} outer shape")
         if len(tile_shape) != self.dim_count:
             raise ValueError(f"Expected rank-{self.dim_count} tile")
-        return ROW_MAJOR.check_tile_contiguity(
-            self._expand_shape(outer_shape), self._expand_shape(tile_shape)
+        expanded_outer = self._expand_shape(outer_shape)
+        expanded_tile = self._expand_shape(tile_shape)
+        return row_major(len(expanded_outer)).check_tile_contiguity(
+            expanded_outer, expanded_tile
         )
 
     def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
@@ -211,11 +209,11 @@ class PackedLayout(Layout):
             raise ValueError(f"Expected rank-{self.dim_count} shape")
         
         if self._should_fall_back_to_row_major(concrete_shape):
-            return ROW_MAJOR.buffer_indexing_expr(concrete_shape)
+            return row_major(self.dim_count).buffer_indexing_expr(concrete_shape)
         
         packing_p, last_p = sympy.symbols(f"p{self.strip_dim} p{len(concrete_shape)}")
         expanded = self._expand_shape(concrete_shape)
-        idx_expr = ROW_MAJOR.buffer_indexing_expr(expanded)
+        idx_expr = row_major(len(expanded)).buffer_indexing_expr(expanded)
         idx_expr = idx_expr.subs(
             [
                 (packing_p, FloorDiv(packing_p, self.strip_size)),
@@ -232,7 +230,7 @@ class PackedLayout(Layout):
         # TODO: Make this more precise. It's always False right now.
         new_contiguous = False
 
-        return ROW_MAJOR.estimate_cache_lines(rm_like_shape, dtype, new_contiguous)
+        return row_major(self.dim_count).estimate_cache_lines(rm_like_shape, dtype, new_contiguous)
 
     def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
         if self.dim_count != len(shape):
@@ -303,11 +301,14 @@ class HexagonTranspacked(Layout):
         return "TP"
 
 
-ROW_MAJOR = RowMajor()  # singleton
 NCHWc4 = PackedLayout(4, 1, 4)
 NCHWc32 = PackedLayout(4, 1, 32)
 NCHWc64 = PackedLayout(4, 1, 64)
 HEXAGON_TRANSPACKED = HexagonTranspacked()  # singleton
+
+
+def row_major(rank: int) -> StandardLayout:
+    return StandardLayout(tuple(range(rank)))
 
 
 def _general_index_expr(

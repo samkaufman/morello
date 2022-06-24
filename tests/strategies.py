@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Callable, Optional
 
 from hypothesis import strategies as st
 
@@ -29,10 +29,10 @@ def layout_st(
 
     target = system_config.current_target()
     if numels_ones:
-        return layouts.ROW_MAJOR
+        return layouts.row_major(len(dim_sizes))
     available_layouts = [
         l
-        for l in target.all_layouts
+        for l in target.all_layouts_for_shape(dim_sizes)
         if dim_sizes is None or dtype is None or l.applies_to_shape(dim_sizes, dtype)
     ]
     return draw(st.sampled_from(available_layouts))
@@ -50,7 +50,7 @@ def tensorspec_st(
     max_dim_size: Optional[int] = 128,
     min_dims: int = 1,
     max_dims: Optional[int] = None,
-    layout: Optional[layouts.Layout] = None,
+    layout_fn: Optional[Callable[[int], layouts.Layout]] = None,
 ) -> specs.TensorSpec:
     target = system_config.current_target()
 
@@ -60,8 +60,10 @@ def tensorspec_st(
         ).map(tuple)
     )
     dtype = draw(st.from_type(dtypes.Dtype))
-    if layout is None:
+    if layout_fn is None:
         layout = draw(layout_st(dim_sizes=dim_sizes, dtype=dtype))
+    else:
+        layout = layout_fn(len(dim_sizes))
     return target.tensor_spec(
         dim_sizes,
         dtype=dtype,

@@ -391,7 +391,7 @@ def _st_test_index_exprs_consistent_with_contiguous_props(draw):
     # TODO: Test column-major as well.
     tensor_spec = draw(
         strategies.tensorspec_st(
-            max_dim_size=9, min_dims=1, max_dims=4, layout=layouts.ROW_MAJOR
+            max_dim_size=9, min_dims=1, max_dims=4, layout_fn=layouts.row_major
         )
     )
     root_tensor = target.tensor(spec=tensor_spec, name=None)

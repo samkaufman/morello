@@ -64,7 +64,7 @@ def test_tiling_across_full_vectors_succeeds(
         tensor = hexagon.HvxVmemTensor(spec, None, origin=None)
         tensor.simple_tile(tile_shape)
 
-    for layout in hexagon.HvxSimulatorTarget().all_layouts:
+    for layout in hexagon.HvxSimulatorTarget().all_layouts_for_shape(tensor_shape):
         inner(layout)
 
 
@@ -92,7 +92,7 @@ def test_tiling_across_partial_vectors_raises(
         with pytest.raises(ValueError):
             tensor.simple_tile(tile_shape)
 
-    for layout in hexagon.HvxSimulatorTarget().all_layouts:
+    for layout in hexagon.HvxSimulatorTarget().all_layouts_for_shape(tensor_shape):
         inner(layout)
 
 
@@ -118,5 +118,5 @@ def test_tiling_always_produces_vector_indices_in_parent_set(shapes):
             tile: hexagon.HvxVmemTensorlike = prev_tensorlike.simple_tile(shape)
             prev_tensorlike = tile
 
-    for layout in hexagon.HvxSimulatorTarget().all_layouts:
+    for layout in hexagon.HvxSimulatorTarget().all_layouts_for_shape(shapes[0]):
         inner(layout)

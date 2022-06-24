@@ -47,7 +47,7 @@ class CpuTarget(Target):
         **kwargs,
     ) -> specs.TensorSpec:
         if layout is None:
-            layout = layouts.ROW_MAJOR
+            layout = layouts.row_major(len(dim_sizes))
         return specs.TensorSpec(dim_sizes, dtype, contiguous, bank, layout)
 
     @functools.cached_property

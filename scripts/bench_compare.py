@@ -182,7 +182,7 @@ def sample_completion(
             not isinstance(
                 a, (morello.impl.actions.MoveAction, morello.impl.actions.PeelAction)
             )
-            or a.layout == layouts.ROW_MAJOR
+            or a.layout.is_row_major
         )
         and not isinstance(a, morello.impl.actions.SlidingTileOutAction)
     ]
@@ -218,12 +218,12 @@ def sample_perturbed(
     ]
     impl = hole.tile_out((m, n))
     impl = impl.split(k)
-    impl = impl.move_input(0, "RF", layouts.ROW_MAJOR)
+    impl = impl.move_input(0, "RF", layouts.row_major(2))
     m_ = _sample_randint_on_boundary(_get_innermost(impl).output.dim_sizes[0])
     n_ = _sample_randint_on_boundary(_get_innermost(impl).output.dim_sizes[1])
     impl = impl.tile_out((m_, n_))
-    impl = impl.move_input(1, "RF", layouts.ROW_MAJOR)
-    impl = impl.move_output("RF", layouts.ROW_MAJOR)
+    impl = impl.move_input(1, "RF", layouts.row_major(2))
+    impl = impl.move_output("RF", layouts.row_major(2))
     return impl.complete(), "perturbed3"
 
 

@@ -4,9 +4,9 @@ from typing import Any, Iterable, Optional, Sequence
 
 import dataclass_abc
 
-from .. import layouts, specs, utils, system_config
+from .. import layouts, specs, system_config, utils
 from ..layouts import Layout
-from ..system_config import current_target, current_system
+from ..system_config import current_system, current_target
 from ..tensor import Tensor, TensorLike
 from . import MoveAction
 from .base import AppliedImpl, Impl, make_applied_impl
@@ -158,7 +158,7 @@ class PadTranspack(_OperandWrapper):
             raise ValueError(f"Source must be in GL, but is in {source_spec.bank}")
         if self.destination.bank != "GL":
             raise ValueError(f"Dest. must be in GL, but is in {self.destination.bank}")
-        if source_spec.layout != layouts.ROW_MAJOR:
+        if not source_spec.layout.is_row_major:
             raise ValueError("Source must have a row-major layout")
         if self.destination.layout != layouts.HEXAGON_TRANSPACKED:
             raise ValueError("Destination must be HEXAGON_TRANSPACKED")
@@ -181,9 +181,9 @@ def _move_arguments(
 
     # If the tensor has only one element, row-major is the only available
     # layout. Otherwise, all layouts are available.
-    allowable_layouts = [layouts.ROW_MAJOR]
+    allowable_layouts = [layouts.row_major(len(operand.dim_sizes))]
     if any(d > 1 for d in operand.dim_sizes):
-        allowable_layouts = [l for l in target.all_layouts if l.applies_to_shape(operand.dim_sizes, operand.dtype)]
+        allowable_layouts = [l for l in target.all_layouts_for_shape(operand.dim_sizes) if l.applies_to_shape(operand.dim_sizes, operand.dtype)]
 
     # TODO: Moves into HEXAGON_TRANSPACKED are handled by pad_transpack, not
     #   move_{input, output} at the moment.

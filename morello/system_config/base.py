@@ -3,11 +3,12 @@ import dataclasses
 import functools
 import logging
 import typing
-from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence, Union
 
 if TYPE_CHECKING:
     from .. import dtypes
     from ..layouts import Layout
+    from ..specs import TensorSpec
     from ..tensor import TensorBase
 
 logger = logging.getLogger(__name__)
@@ -46,11 +47,10 @@ class Target(abc.ABC):
     def system(self) -> "SystemDescription":
         raise NotImplementedError()
 
-    @property
-    def all_layouts(self) -> Iterable["Layout"]:
-        from ..layouts import ROW_MAJOR, NCHWc4, NCHWc32, NCHWc64
+    def all_layouts_for_shape(self, shape: Sequence[int]) -> Iterable["Layout"]:
+        from ..layouts import NCHWc4, NCHWc32, NCHWc64, row_major
 
-        return [ROW_MAJOR, NCHWc4, NCHWc32, NCHWc64]
+        return [row_major(len(shape)), NCHWc4, NCHWc32, NCHWc64]
 
     async def run_impl(
         self,

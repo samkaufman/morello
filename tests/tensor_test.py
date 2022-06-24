@@ -44,12 +44,12 @@ def test_convolution_image_tile_boundary_size(
     # TODO: any_level should be something arbitrary from the system_config
     any_level = "GL"
     outer = tensor.Tensor(
-        specs.TensorSpec(outer_shp, dtypes.Uint8, True, any_level, layouts.ROW_MAJOR),
+        specs.TensorSpec(outer_shp, dtypes.Uint8, True, any_level, layouts.row_major(len(outer_shp))),
         name=None,
     )
     tile = tensor.ConvolutionImageTile(
         tensor.OperandIdx(0),
-        specs.TensorSpec(tile_shp, dtypes.Uint8, any_level, layouts.ROW_MAJOR),
+        specs.TensorSpec(tile_shp, dtypes.Uint8, any_level, layouts.row_major(len(tile_shp))),
         filter_shape=filt_shp,
         name=None,
     )

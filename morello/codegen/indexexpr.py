@@ -50,13 +50,13 @@ def buffer_indexing_expr(
         if concrete_shape is None:
             concrete_shape = tensor.dim_sizes
         assert len(concrete_shape) == len(tensor.dim_sizes)
-        if tensor.spec.layout == layouts.ROW_MAJOR:
+        if tensor.spec.layout.is_row_major:
             substitutions = {}
             for idx, dim in enumerate(concrete_shape):
                 substitutions[sympy.symbols(f"s{idx}")] = dim
                 if dim == 1:
                     substitutions[sympy.symbols(f"p{idx}")] = 0
-            if tensor.layout == layouts.ROW_MAJOR:
+            if tensor.layout.is_row_major:
                 index_expr = _tensor_row_major_indexing_expr(len(concrete_shape))
             else:
                 raise NotImplementedError(f"Unsupported layout: {tensor.layout}")

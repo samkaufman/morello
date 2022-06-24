@@ -1281,7 +1281,7 @@ def generate_c(
         for operand, c_buf, initial_value in zip(imp.spec.operands, c_tensors, values):
             c_buf.emit()
             if initial_value is not None:
-                if operand.layout != layouts.ROW_MAJOR:
+                if not operand.layout.is_row_major:
                     raise NotImplementedError(
                         "Initializing non-row-major tensors not yet implemented"
                     )
