@@ -157,7 +157,7 @@ def _compute_tile_out_loop_nest(
             if outer_operand == applied_operand:
                 new_index_exprs.append(deets.index_expr)
             else:
-                new_index_exprs.append(_update_index_expr_new(deets, applied_operand, all_subscript_details))
+                new_index_exprs.append(_update_index_expr(deets, applied_operand, all_subscript_details))
 
         concrete_shapes = [list(d.concrete_origin_shape) for d in op_details]
         for subscript_is_boundary, (sub, full_steps, _) in zip(
@@ -248,7 +248,7 @@ class _SubscriptDetails:
     it_term: Union[int, str]
 
 
-def _update_index_expr_new(
+def _update_index_expr(
     deets: OperandDetailsLoopExt,
     applied_operand: TensorLike,
     subscripts: Mapping[int, _SubscriptDetails]  # TODO: Just map to replacement
@@ -284,54 +284,3 @@ def _update_index_expr_new(
         expr_subs[f"p{dim}"] = vsub(new_logical, binding_subs)
         assert not any(_IRE.match(s.name) for s in expr_subs[f"p{dim}"].free_symbols)
     return vsub(deets.index_expr, expr_subs)
-
-
-def _update_index_exprs_old(
-    orig_index_exprs: Iterable[sympy.Expr],
-    it_subscript: int,
-    it_var: Optional[Union[str, int]],
-    applied_operands: Sequence[TensorLike],
-    op_details: Iterable[OperandDetailsLoopExt],
-) -> Sequence[sympy.Expr]:
-    """Update operand indexing expressions for an introduced C loop.
-
-    Specifically, this function returns indexing expressions---one for each given
-    OperandDetails---which have had dimensions corresponding to it_subscript replaced
-    by the operand's logical indexing expression and the given it_var.
-
-    :param it_var: Either the name of the iteration variable or an integer constant.
-    """
-    # Prefix with an underscore if this is a string (symbol name). This is the naming
-    # scheme codegen uses for symbols corresponding to names in the target language.
-    if isinstance(it_var, str):
-        it_var = "_" + it_var
-
-    new_index_exprs = []
-    for d, applied_operand, orig_idx_expr in zip(
-        op_details, applied_operands, orig_index_exprs
-    ):
-        # No logical indexing expressions defined for Tensors. Forward their
-        # (buffer) indexing expressions.
-        if isinstance(d.tiled_operand, Tensor):
-            new_index_exprs.append(orig_idx_expr)
-            continue
-        assert isinstance(d.tiled_operand, Tile)
-        # For each subscript-matching dimension in this operand, update
-        # the operand's corresponding indexing expression with the newly
-        # introduced loop iterator variable name and the Expr mapping points
-        # in the tile's coordinate space to that of its origin.
-        all_substitutions = {}
-        for dim, subscript in enumerate(d.inner_subscripts):
-            if subscript != it_subscript:
-                continue
-            assert isinstance(applied_operand, Tile)
-
-            new_expr = indexexpr.logical_indexing_expr(applied_operand, dim)
-            if it_var:
-                new_expr = vsub(new_expr, sympy.symbols(f"i{dim}"), it_var)
-            # else:
-            #     new_expr = vsub(new_expr, sympy.symbols(f"i{idx}"), 0)
-            all_substitutions[sympy.symbols(f"p{dim}")] = new_expr
-
-        new_index_exprs.append(vsub(orig_idx_expr, all_substitutions))
-    return new_index_exprs
