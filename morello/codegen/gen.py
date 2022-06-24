@@ -356,7 +356,6 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
             writer.writeline(
                 f"*({vtype} *)({op_details[-1].c_tensor.c_index_ptr(o)}) "
                 "+= "
-                # f"{l_ref(l)} * "
                 f"{op_details[0].c_tensor.c_index(l)} * "
                 f"(*({vtype} *)({op_details[1].c_tensor.c_index_ptr(r)}));"
                 " /* BroadcastVecMult */"
@@ -1292,6 +1291,11 @@ def generate_c(
                     writer.writeline(
                         f"{c_buf.c_index(idx)} = ({operand.dtype.c_type})({el});"
                     )
+            elif mode == "benchmark":
+                writer.writeline(f"for (unsigned long idx = 0; idx < {c_buf.size}; ++idx)")
+                writer.writeline(
+                    f"  {c_buf.c_index(sympy.symbols('_idx'))} = ({operand.dtype.c_type})rand();"
+                )
 
         def kernel():
             nonlocal c_tensors

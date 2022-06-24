@@ -120,6 +120,7 @@ class CpuTarget(Target):
                 "-o",
                 binary_path,
                 source_path,
+                "-lrt",
             ]
             clang_proc = await asyncio.create_subprocess_exec(*clang_cmd)
             await clang_proc.wait()

@@ -140,12 +140,14 @@ def _compute_tile_out_loop_nest(
             if not subscript_is_boundary
         ]
 
-        all_subscript_details = {
-            s: _SubscriptDetails(
-                it_term=(full_steps if in_boundary else it_var_names[s])
-            ) for (s, full_steps, _), in_boundary
-            in zip(emitting_subscripts, boundary_config)
-        }
+        all_subscript_details = {}
+        for (s, full_steps, _), in_boundary in zip(emitting_subscripts, boundary_config):
+            if in_boundary:
+                all_subscript_details[s] = _SubscriptDetails(full_steps)
+            elif full_steps == 1:
+                all_subscript_details[s] = _SubscriptDetails(0)
+            else:
+                all_subscript_details[s] = _SubscriptDetails(it_var_names[s])
 
         new_index_exprs = []
         for deets, outer_operand, applied_operand in zip(op_details, outer_operands, applied_operands):

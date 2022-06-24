@@ -642,10 +642,9 @@ class Pipeline(Impl):
     def peak_memory(self) -> dict[str, int]:
         # Pipeline currently adds an intermediate tensor between each stage, so
         # intermediates is just the output of everything but the last stage
-        intermediates = [o.output for o in self.stages[:-1]]
+        intermediates: list[specs.TensorSpec] = [o.spec.output for o in self.stages[:-1]]
         intermed_utils: list[dict[str, int]] = []
         for tensor in intermediates:
-            assert isinstance(tensor, Tensor)
             new_mem = {k: 0 for k in system_config.current_system().banks}
             new_mem[tensor.bank] += tensor.bytes_used
             intermed_utils.append(new_mem)

@@ -1,15 +1,16 @@
 name: morello
 channels:
-  - tlcpack
+  # - tlcpack
   - conda-forge
   - defaults
 dependencies:
   - python=3.9
   - pip
-  - clang==12.0.1
-  - llvm-openmp==12.0.1
-  - compiler-rt==12.0.1
-  - compiler-rt_linux-64==12.0.1
+  - clang==13.0.1
+  - llvm-openmp==13.0.1
+  - compiler-rt==13.0.1
+  - compiler-rt_linux-64==13.0.1
+  - llvmdev==13.0.1
   - tabulate
   - frozendict~=2.0
   - pyarrow
@@ -24,9 +25,10 @@ dependencies:
   - sympy
   - typeguard
   - gspread
-  - pytorch==1.11.0
+  - pytorch=1.11.0
   - jax==0.3.13
-  - tvm-py==0.7.0
+  - tvm-py=0.8.0=py39h9be6771_4_cpu
+  - libtvm=0.8.0=ha3b9936_4_cpu
   - gcc  # Required to build Cython
   - pip:
     - dataclass-abc
