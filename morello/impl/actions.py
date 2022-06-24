@@ -27,9 +27,7 @@ class MoveAction:
     kwargs: Optional[Mapping[Any, Any]] = None
 
     def __post_init__(self):
-        assert any(d > 1 for d in self.source.dim_sizes) or isinstance(
-            self.layout, layouts.RowMajor
-        ), f"Layout was {self.layout} for dims. {self.source.dim_sizes}"
+        assert any(d > 1 for d in self.source.dim_sizes) or self.layout == layouts.ROW_MAJOR, f"Layout was {self.layout} for dims. {self.source.dim_sizes}"
         assert (
             self.bank is None
             or self.bank

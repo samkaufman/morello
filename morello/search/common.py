@@ -19,10 +19,6 @@ if TYPE_CHECKING:
 from .. import cost, pruning, specs, system_config
 from ..impl import actions
 
-prune_column_major: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "prune_column_major", default=False
-)
-
 
 class ActionFailedException(Exception):
     def __init__(self, act) -> None:

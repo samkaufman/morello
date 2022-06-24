@@ -279,7 +279,7 @@ class HvxVmemTensor(HvxVmemTensorlike, tensor.TensorBase):
 
     def __str__(self):
         layout_epi = ""
-        if isinstance(self.layout, layouts.RowMajor):
+        if self.layout == layouts.ROW_MAJOR:
             layout_epi = f", {self.layout}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         vec_part = "×".join(str(s) for s in self.vector_shape)

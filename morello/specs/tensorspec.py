@@ -166,7 +166,7 @@ class TensorSpec:
         layout_epi = ""
         bank_epi = ""
         c_epi = ""
-        if not isinstance(self.layout, layouts.RowMajor):
+        if self.layout != layouts.ROW_MAJOR:
             layout_epi = f", {self.layout}"
         if self.bank != current_system().default_bank:
             bank_epi = f", {self.bank}"

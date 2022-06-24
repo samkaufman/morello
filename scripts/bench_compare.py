@@ -173,8 +173,8 @@ def sample_completion(
     if partial_impl.is_scheduled:
         return partial_impl, "random"
 
-    # TODO: Remove the following filter once codegen is implemented for column-major.
-    #   and sliding windows.
+    # TODO: Remove the following filter once codegen is implemented for other
+    #   layouts.
     actions = [
         a
         for a in partial_impl.actions()
@@ -182,7 +182,7 @@ def sample_completion(
             not isinstance(
                 a, (morello.impl.actions.MoveAction, morello.impl.actions.PeelAction)
             )
-            or isinstance(a.layout, layouts.RowMajor)
+            or a.layout == layouts.ROW_MAJOR
         )
         and not isinstance(a, morello.impl.actions.SlidingTileOutAction)
     ]

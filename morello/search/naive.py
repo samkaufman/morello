@@ -75,12 +75,6 @@ def naive_search(
     :param parallel_jobs: The maximum number of parallel processes to launch to
       enumerate subschedules available at the top level.
     """
-    if common.prune_column_major.get():
-        if any(isinstance(inp.layout, layouts.ColMajor) for inp in spec.inputs):
-            return None
-        if isinstance(spec.output.layout, layouts.ColMajor):
-            return None
-
     # The default available memory is the capacities of current_system().
     # These capacities are measured in cache lines, not words, so: multiply by
     # line size when initializing the limit.

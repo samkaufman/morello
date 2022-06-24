@@ -101,7 +101,7 @@ class Tensor(TensorBase):
 
     def __str__(self):
         layout_epi = ""
-        if not isinstance(self.layout, layouts.RowMajor):
+        if self.layout != layouts.ROW_MAJOR:
             layout_epi = f", {self.layout}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         return f"{type(self).__name__}({dims_part}{layout_epi}, {self.bank})"
@@ -279,7 +279,7 @@ class CommonTileBase(Tile):
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         layout_epi = ""
         bank_epi = ""
-        if not isinstance(self.spec.layout, layouts.RowMajor):
+        if self.spec.layout != layouts.ROW_MAJOR:
             layout_epi = f", {self.spec.layout}"
         if self.bank != system_config.current_system().default_bank:
             bank_epi = f", {self.bank}"

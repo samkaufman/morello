@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from typing import Iterable, NamedTuple, Optional, Union
 
 import cython
-
 import numpy as np
 
 from .. import cost, layouts, op_pprint, pruning, search_cache, specs
@@ -138,12 +137,6 @@ def beam_schedule_search(
     select_fn = _select_top_k_states
     if STOCHASTIC:
         select_fn = _select_new_states
-
-    if common.prune_column_major.get():
-        if any(isinstance(inp.layout, layouts.ColMajor) for inp in spec.inputs):
-            return None, ""
-        if isinstance(spec.output.layout, layouts.ColMajor):
-            return None, ""
 
     # Initialize the beam search with a single state: an Impl hole for the query Spec.
     best_found: tuple[Optional[Impl], Union[int, float]] = (

@@ -37,7 +37,6 @@ parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=str)
 parser.add_argument("--top", type=int, default=1)
 parser.add_argument("--no-save-cache", action="store_false", dest="save_cache")
-parser.add_argument("--row-major-only", action="store_true", dest="row_major_only")
 parser.add_argument(
     "--tile-sizes",
     choices=["all", "powers_of_two", "cache_line_multiples"],
@@ -187,12 +186,6 @@ def main() -> int:
     # Set a target
     system_config.set_current_target(parsed_args.target)
 
-    # Configure from args
-    if parsed_args.row_major_only:
-        col_major_token = search.prune_column_major.set(True)
-    else:
-        col_major_token = search.prune_column_major.set(False)
-
     # Apply the --tile-sizes setting
     if parsed_args.tile_sizes == "all":
         tile_size_mode = TileSizeMode.ALL
@@ -232,7 +225,6 @@ def main() -> int:
                 raise Exception("Unknown spec argument: " + parsed_args.spec)
             assert isinstance(scheds, list)
     finally:
-        search.prune_column_major.reset(col_major_token)
         impl.tile_size_mode.reset(tile_size_mode_token)
 
     # Let's apply some "concrete" tensors so we can pprint and generate code.

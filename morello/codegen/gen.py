@@ -733,8 +733,6 @@ def _emit_hvx_dcfetch(
             *[range(0, dim_max + 1) for dim_max in sizes_to_scan]
         ):
             enumerated = list(enumerate(dims))
-            if isinstance(source.layout, layouts.ColMajor) and len(enumerated) > 1:
-                enumerated = [enumerated[1], enumerated[0]] + enumerated[2:]
             subs = {f"p{i}": d for i, d in enumerated}
             for i in range(len(source.dim_sizes)):
                 subs.setdefault(f"p{i}", 0)
@@ -1283,7 +1281,7 @@ def generate_c(
         for operand, c_buf, initial_value in zip(imp.spec.operands, c_tensors, values):
             c_buf.emit()
             if initial_value is not None:
-                if not isinstance(operand.layout, layouts.RowMajor):
+                if operand.layout != layouts.ROW_MAJOR:
                     raise NotImplementedError(
                         "Initializing non-row-major tensors not yet implemented"
                     )

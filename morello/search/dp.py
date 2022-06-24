@@ -45,7 +45,6 @@ def schedule_search(
         memory_limits,
         cache,
         top_k=(top_k if top_k is not None else 1),
-        prune_col_major=common.prune_column_major.get(),
         parent_summary=parent_summary,
         stats=stats,
         callbacks=callbacks,
@@ -63,7 +62,6 @@ def _inner_schedule_search(
     memory_limits: pruning.MemoryLimits,
     cache: ScheduleCache,
     top_k: int,
-    prune_col_major: bool,
     parent_summary=None,
     stats: Optional[common.SearchStats] = None,
     callbacks=None,
@@ -73,12 +71,6 @@ def _inner_schedule_search(
     Returns a list of Impls which satisfy the given Spec and memory limits,
     sorted in order of increasing cost, up to `top_k` results.
     """
-
-    if prune_col_major:
-        if any(isinstance(inp.layout, layouts.ColMajor) for inp in spec.inputs):
-            return None
-        if isinstance(spec.output.layout, layouts.ColMajor):
-            return None
 
     if stats is not None:
         stats.expansions += 1
@@ -110,7 +102,6 @@ def _inner_schedule_search(
         memory_limits,
         cache,
         top_k,
-        prune_col_major,
         parent_summary=parent_summary,
         stats=stats,
         callbacks=callbacks,
@@ -141,7 +132,6 @@ def _best_options(
     memory_limits: pruning.MemoryLimits,
     cache: ScheduleCache,
     top_k: int,
-    prune_col_major: bool,
     parent_summary=None,
     stats=None,
     callbacks=None,
@@ -188,7 +178,6 @@ def _best_options(
                 child.spec,
                 cache=cache,
                 top_k=top_k,
-                prune_col_major=prune_col_major,
                 memory_limits=mem,
                 parent_summary=new_parent_summary,
                 stats=stats,

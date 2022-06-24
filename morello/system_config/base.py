@@ -48,9 +48,9 @@ class Target(abc.ABC):
 
     @property
     def all_layouts(self) -> Iterable["Layout"]:
-        from ..layouts import COL_MAJOR, ROW_MAJOR, NCHWc4, NCHWc32, NCHWc64
+        from ..layouts import ROW_MAJOR, NCHWc4, NCHWc32, NCHWc64
 
-        return [ROW_MAJOR, COL_MAJOR, NCHWc4, NCHWc32, NCHWc64]
+        return [ROW_MAJOR, NCHWc4, NCHWc32, NCHWc64]
 
     async def run_impl(
         self,

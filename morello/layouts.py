@@ -147,53 +147,34 @@ class StandardLayout(Layout):
             return functools.reduce(operator.mul, real_dims[:-1], 1) * math.ceil(
                 (real_dims[-1] * dtype.size) / line_size
             )
-
-    def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
-        """Returns tuple of operand's height and width; or vice versa if column-major."""
+        
+    def physical_order(self, rank: int) -> tuple[int, ...]:
         raise NotImplementedError()
-
-
-@dataclasses.dataclass(frozen=True)
-class RowMajor(StandardLayout):
+    
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, StandardLayout):
+            return NotImplemented
+        # TODO: Hacky! Fix with concrete-rank layouts!
+        return self.physical_order(12) == other.physical_order(12)
+    
     def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        r = _general_index_expr(list(range(len(concrete_shape))), concrete_shape)
+        r = _general_index_expr(self.physical_order(len(concrete_shape)), concrete_shape)
         if isinstance(r, int):
             return sympy.Integer(r)
         return r
 
     def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
-        if len(dim_sizes) == 1:
-            return (dim_sizes[0],)
-        return (dim_sizes[0], dim_sizes[1]) + tuple(dim_sizes[2:])
+        return tuple(dim_sizes[d] for d in self.physical_order(len(dim_sizes)))
+    
+
+@dataclasses.dataclass(frozen=True)
+class RowMajor(StandardLayout):
+
+    def physical_order(self, rank: int) -> tuple[int, ...]:
+        return tuple(range(rank))
 
     def __str__(self) -> str:
         return "RM"
-
-
-@dataclasses.dataclass(frozen=True)
-class ColMajor(StandardLayout):
-    def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        index_expr = _tensor_col_major_indexing_expr(len(concrete_shape))
-
-        # Substitute symbolic shapes with concrete shapes, and simplify size-1
-        # dimensions by setting their index symbols to 0 (since their domain is
-        # [0, 0]).
-        substitutions = {}
-        for idx, dim in enumerate(concrete_shape):
-            substitutions[sympy.symbols(f"s{idx}")] = dim
-            if dim == 1:
-                substitutions[sympy.symbols(f"p{idx}")] = 0
-
-        index_expr = index_expr.subs(substitutions, simultaneous=True)
-        return index_expr
-
-    def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
-        if len(dim_sizes) == 1:
-            return (dim_sizes[0],)
-        return (dim_sizes[1], dim_sizes[0]) + tuple(dim_sizes[2:])
-
-    def __str__(self) -> str:
-        return "CM"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -323,7 +304,6 @@ class HexagonTranspacked(Layout):
 
 
 ROW_MAJOR = RowMajor()  # singleton
-COL_MAJOR = ColMajor()  # singleton
 NCHWc4 = PackedLayout(4, 1, 4)
 NCHWc32 = PackedLayout(4, 1, 32)
 NCHWc64 = PackedLayout(4, 1, 64)
