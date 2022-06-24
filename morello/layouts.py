@@ -6,6 +6,7 @@ import operator
 from typing import TYPE_CHECKING, Sequence, Union
 
 import sympy
+from torch import normal
 
 from . import dtypes, system_config
 from .codegen.expr_utils import FloorDiv
@@ -35,6 +36,9 @@ class Layout:
     def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
         return True
     
+    def normalize(self) -> "Layout":
+        return self
+    
     @property
     def is_row_major(self) -> bool:
         return False
@@ -44,6 +48,9 @@ class Layout:
 class DimDropLayout(Layout):
     inner: Layout
     dropped_dims: frozenset[int]
+
+    def __post_init__(self):
+        assert len(self.dropped_dims)
 
     def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
         e = self.inner.buffer_indexing_expr(self._explode_shape(concrete_shape))
@@ -59,6 +66,37 @@ class DimDropLayout(Layout):
 
     def estimate_cache_lines(self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool) -> int:
         return self.inner.estimate_cache_lines(self._explode_shape(shape), dtype, contiguous)
+
+    def normalize(self) -> Layout:
+        normalized = self.inner.normalize()
+        if isinstance(normalized, StandardLayout):
+            removed = 0
+            new_dim_order = []
+            for orig_dim in normalized.dim_order:
+                if orig_dim in self.dropped_dims:
+                    removed += 1
+                else:
+                    new_dim_order.append(orig_dim - removed)
+            return StandardLayout(tuple(new_dim_order))
+
+        if isinstance(normalized, PackedLayout):
+            if normalized.strip_dim in self.dropped_dims:
+                return DimDropLayout(
+                    inner=row_major(normalized.dim_count),
+                    dropped_dims=self.dropped_dims,
+                ).normalize()
+            
+            after_strip_dim = frozenset(range(normalized.strip_dim + 1, normalized.dim_count))
+            if after_strip_dim:
+                if self.dropped_dims == after_strip_dim:
+                    return row_major(normalized.strip_dim + 1).normalize()
+                elif self.dropped_dims.issuperset(after_strip_dim):
+                    return DimDropLayout(
+                        inner=row_major(normalized.strip_dim + 1),
+                        dropped_dims=self.dropped_dims - after_strip_dim,
+                    ).normalize()
+
+        return normalized
 
     def _explode_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
         inner_shape = list(shape)
@@ -101,6 +139,24 @@ class TransposeLayout(Layout):
     def estimate_cache_lines(self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool) -> int:
         transposed_shape = self._transpose_shape(shape)
         return self.inner.estimate_cache_lines(transposed_shape, dtype, contiguous)
+    
+    def normalize(self) -> Layout:
+        normalized = self.inner.normalize()
+        if isinstance(normalized, StandardLayout):
+            new_dim_order = []
+            for orig_dim in normalized.dim_order:
+                if orig_dim == self.swap_dims[0]:
+                    new_dim_order.append(self.swap_dims[1])
+                elif orig_dim == self.swap_dims[1]:
+                    new_dim_order.append(self.swap_dims[0])
+                else:
+                    new_dim_order.append(orig_dim)
+            return StandardLayout(tuple(new_dim_order))
+        elif isinstance(normalized, PackedLayout):
+            raise NotImplementedError()
+        else:
+            return normalized
+
 
     def __str__(self):
         return str(self.inner) + ".T"
@@ -164,7 +220,9 @@ class StandardLayout(Layout):
         return False
 
     def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
-        assert len(dim_sizes) == len(self.dim_order)
+        assert len(dim_sizes) == len(self.dim_order), (
+            f"Expected {len(self.dim_order)} dimensions, but given: {dim_sizes}"
+        )
         return tuple(dim_sizes[d] for d in self.dim_order)
     
     def __str__(self) -> str:
@@ -181,7 +239,7 @@ class PackedLayout(Layout):
 
     def __post_init__(self):
         # TODO: Instead of asserting below, add a test that this is equivalent
-        assert self.strip_dim < self.dim_count
+        assert self.strip_dim + 1 < self.dim_count
 
     # def applies_to(self, shape: Sequence[int]) -> bool:
     #     if len(shape) != self.dim_count:
@@ -230,7 +288,7 @@ class PackedLayout(Layout):
         # TODO: Make this more precise. It's always False right now.
         new_contiguous = False
 
-        return row_major(self.dim_count).estimate_cache_lines(rm_like_shape, dtype, new_contiguous)
+        return row_major(len(rm_like_shape)).estimate_cache_lines(rm_like_shape, dtype, new_contiguous)
 
     def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
         if self.dim_count != len(shape):
