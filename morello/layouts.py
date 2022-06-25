@@ -228,6 +228,8 @@ class StandardLayout(Layout):
     def __str__(self) -> str:
         if self.is_row_major:
             return "RM"
+        if self.dim_order == (0, 2, 3, 1):
+            return "NHWC"
         return f"<{','.join(map(str, self.dim_order))}>"
     
 
@@ -359,6 +361,7 @@ class HexagonTranspacked(Layout):
         return "TP"
 
 
+NHWC = StandardLayout((0, 2, 3, 1))
 NCHWc4 = PackedLayout(4, 1, 4)
 NCHWc32 = PackedLayout(4, 1, 32)
 NCHWc64 = PackedLayout(4, 1, 64)
