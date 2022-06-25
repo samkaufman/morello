@@ -218,6 +218,13 @@ class StandardLayout(Layout):
         if self.dim_order == tuple(range(len(self.dim_order))):
             return True
         return False
+    
+    def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
+        if not super().applies_to_shape(shape, dtype):
+            return False
+        if len(shape) != len(self.dim_order):
+            return False
+        return True
 
     def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
         assert len(dim_sizes) == len(self.dim_order), (
