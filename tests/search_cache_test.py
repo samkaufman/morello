@@ -1,6 +1,6 @@
 import pytest
 
-from morello import dtypes, pruning, impl, search_cache, specs
+from morello import dtypes, impl, pruning, search_cache, specs
 from morello.system_config import current_system, current_target
 
 # TODO: Add assertion that tests below only put scheduled Impls into the cache.
@@ -14,13 +14,13 @@ def test_cache_common_scenario(dtype):
     rhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
     output = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
     fast_schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
-    fast_wrapped_schedule = search_cache.CachedScheduleSet(((fast_schedule, 10),))
+    fast_wrapped_schedule = search_cache.CachedScheduleSet(((fast_schedule, 10),), 1)
 
     lhs = target.tensor_spec((100, 100), dtype=dtype, bank="RF")
-    rhs=target.tensor_spec((100, 100), dtype=dtype, bank="RF")
-    output=target.tensor_spec((100, 100), dtype=dtype, bank="RF")
+    rhs = target.tensor_spec((100, 100), dtype=dtype, bank="RF")
+    output = target.tensor_spec((100, 100), dtype=dtype, bank="RF")
     slow_schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
-    slow_wrapped_schedule = search_cache.CachedScheduleSet(((slow_schedule, 50),))
+    slow_wrapped_schedule = search_cache.CachedScheduleSet(((slow_schedule, 50),), 1)
 
     lhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
     rhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
@@ -28,6 +28,7 @@ def test_cache_common_scenario(dtype):
     impossible_schedule = impl.MatmulHole(
         specs.Matmul(lhs, rhs, output, serial_only=False)
     )
+    impossible_wrapped_schedule = search_cache.CachedScheduleSet(tuple(), 1)
 
     cache = search_cache.ScheduleCache()
     cache.put(
@@ -60,7 +61,9 @@ def test_cache_common_scenario(dtype):
         ),
     }
     cache.put(
-        impossible_schedule.spec, None, pruning.StandardMemoryLimits({"RF": 1, "GL": 0})
+        impossible_schedule.spec,
+        impossible_wrapped_schedule,
+        pruning.StandardMemoryLimits({"RF": 1, "GL": 0}),
     )
     assert set(cache) == {
         (
@@ -75,7 +78,7 @@ def test_cache_common_scenario(dtype):
         ),
         (
             impossible_schedule.spec,
-            None,
+            impossible_wrapped_schedule,
             pruning.StandardMemoryLimits(({"RF": 1, "GL": 0})),
         ),
     }
@@ -86,20 +89,20 @@ def test_cache_common_scenario(dtype):
 def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype, contiguous):
     t = specs.TensorSpec((8, 8), dtype=dtype, contiguous=contiguous, bank="RF")
     spec = specs.Matmul(t, t, t, serial_only=False)
-    wrapped_schedule = None
+    wrapped_schedule = search_cache.CachedScheduleSet(tuple(), 1)
 
     cache = search_cache.ScheduleCache()
     cache.put(
         spec, wrapped_schedule, pruning.StandardMemoryLimits({"RF": 100, "GL": 0})
     )
     assert set(cache) == {
-        (spec, None, pruning.StandardMemoryLimits({"RF": 100, "GL": 0}))
+        (spec, wrapped_schedule, pruning.StandardMemoryLimits({"RF": 100, "GL": 0}))
     }
     cache.put(
         spec, wrapped_schedule, pruning.StandardMemoryLimits({"RF": 101, "GL": 0})
     )
     assert set(cache) == {
-        (spec, None, pruning.StandardMemoryLimits({"RF": 101, "GL": 0}))
+        (spec, wrapped_schedule, pruning.StandardMemoryLimits({"RF": 101, "GL": 0}))
     }
 
 
@@ -107,11 +110,11 @@ def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype, contig
 def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
     target = current_target()
     db = current_system().default_bank
-    lhs=target.tensor_spec((8, 8), dtype=dtype, bank=db)
-    rhs=target.tensor_spec((8, 8), dtype=dtype, bank=db)
-    output=target.tensor_spec((8, 8), dtype=dtype, bank=db)
+    lhs = target.tensor_spec((8, 8), dtype=dtype, bank=db)
+    rhs = target.tensor_spec((8, 8), dtype=dtype, bank=db)
+    output = target.tensor_spec((8, 8), dtype=dtype, bank=db)
     schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
-    wrapped_schedule = search_cache.CachedScheduleSet(((schedule, 10),))
+    wrapped_schedule = search_cache.CachedScheduleSet(((schedule, 10),), 1)
 
     cache = search_cache.ScheduleCache()
     cache.put(

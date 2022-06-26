@@ -1,6 +1,4 @@
-import functools
 import sys
-from operator import mul
 from typing import NewType, Union
 
 import cython

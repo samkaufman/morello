@@ -87,7 +87,7 @@ class MemoryLimits(abc.ABC):
 
 
 class StandardMemoryLimits(MemoryLimits):
-    _available: frozendict[str, int]
+    _available: frozendict
 
     def __init__(self, available_memory: Optional[Mapping[str, int]] = None) -> None:
         super().__init__()
@@ -107,7 +107,7 @@ class StandardMemoryLimits(MemoryLimits):
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, StandardMemoryLimits):
-            return False
+            return NotImplemented
         return self.available == other.available
 
     def __hash__(self) -> int:
@@ -119,7 +119,7 @@ class StandardMemoryLimits(MemoryLimits):
         return s + ")"
 
     @property
-    def available(self) -> frozendict[str, int]:
+    def available(self) -> Mapping[str, int]:
         return self._available
 
     def transition(self, schedule: impl.Impl) -> Optional[list["MemoryLimits"]]:

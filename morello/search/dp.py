@@ -1,12 +1,12 @@
-import functools
-import heapq
+import dataclasses
 import itertools
 from typing import Any, List, Optional, Tuple
 
 import cython
 
 try:
-    from cython.cimports.morello import layouts, specs
+    from cython.cimports.morello import specs
+
     from ..cython.cimports import common
 except ImportError:
     pass
@@ -25,6 +25,7 @@ def schedule_search(
     parent_summary=None,
     stats=None,
     callbacks=None,
+    return_extra: bool = False,
 ):
     """Returns the best Impl for a given Spec and memory limits.
 
@@ -49,11 +50,21 @@ def schedule_search(
         stats=stats,
         callbacks=callbacks,
     )
-    if top_k is not None:
+
+    if return_extra:
         return inner_result
-    if inner_result is not None:
-        return inner_result[0]
+    if top_k is not None:
+        return inner_result.impls
+    if len(inner_result.impls):
+        return inner_result.impls[0]
     return None
+
+
+@cython.dataclasses.dataclass(frozen=True)
+@cython.cclass
+class SearchResult:
+    impls: List[impl.Impl]
+    dependent_paths: int
 
 
 @cython.cfunc
@@ -65,11 +76,12 @@ def _inner_schedule_search(
     parent_summary=None,
     stats: Optional[common.SearchStats] = None,
     callbacks=None,
-):
+) -> SearchResult:
     """Implements most of the logic of schedule_search.
 
     Returns a list of Impls which satisfy the given Spec and memory limits,
-    sorted in order of increasing cost, up to `top_k` results.
+    sorted in order of increasing cost, up to `top_k` results. This is the empty
+    list if no Impls satisfy the given Spec and memory bounds.
     """
 
     if stats is not None:
@@ -84,9 +96,11 @@ def _inner_schedule_search(
     except KeyError:
         pass
     else:
-        if cache_result is None:
-            return None
-        return [im for im, _ in cache_result.contents]
+        assert cache_result is not None  # TODO: Remove
+        return SearchResult(
+            [im for im, _ in cache_result.contents],
+            cache_result.dependent_paths
+        )
 
     if callbacks is not None:
         callbacks.enter_unseen(spec, memory_limits)
@@ -96,7 +110,7 @@ def _inner_schedule_search(
     assert leaf.depth == 1, f"Expected hole to have depth 1; had {leaf.depth}"
 
     # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
-    best_results: list[tuple[Impl, tuple]] = _best_options(
+    best_results, specs_explored_by_options = _best_options(
         spec,
         leaf,
         memory_limits,
@@ -106,6 +120,7 @@ def _inner_schedule_search(
         stats=stats,
         callbacks=callbacks,
     )
+    specs_explored = specs_explored_by_options + 1
 
     if callbacks is not None:
         if best_results:
@@ -113,16 +128,14 @@ def _inner_schedule_search(
         else:
             callbacks.exit(spec, None)
 
-    if len(best_results):
-        cache.put(
-            spec,
-            CachedScheduleSet(tuple((im, c) for im, (c, _, _) in best_results)),
-            memory_limits,
-        )
-        return [im for im, _ in best_results]
-    else:
-        cache.put(spec, None, memory_limits)
-        return None
+    cache.put(
+        spec,
+        CachedScheduleSet(tuple((im, c) for im, (c, _, _) in best_results), specs_explored),
+        memory_limits,
+    )
+    return SearchResult(
+        [im for im, _ in best_results], specs_explored
+    )
 
 
 @cython.cfunc
@@ -135,8 +148,12 @@ def _best_options(
     parent_summary=None,
     stats=None,
     callbacks=None,
-) -> List[Tuple[Impl, tuple]]:
-    """Returns best Impls after taking any of leaf's actions (or no action)."""
+) -> Tuple[List[Tuple[Impl, tuple]], int]:
+    """Returns top-k best Impls after taking any of leaf's actions (if any).
+    
+    Also returns the number of unique Specs explored.
+    """
+    unique_specs_visited = 0
     best_results: list[tuple[Impl, Any]] = []
 
     # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
@@ -183,11 +200,12 @@ def _best_options(
                 stats=stats,
                 callbacks=callbacks,
             )
+            unique_specs_visited += child_result.dependent_paths
             # If any hole could not be filled--this can happen, for instance, if
             # every possible action uses too much memory--then exit the outer loop.
-            if child_result is None:
+            if not child_result.impls:
                 break
-            subsearch_results.append(child_result)
+            subsearch_results.append(child_result.impls)
         if len(subsearch_results) < len(new_tree.children):
             continue
 
@@ -200,7 +218,7 @@ def _best_options(
             ), f"{str(completed.spec)} != {str(new_tree.spec)}"
             _update_best_results(best_results, completed, spec, callbacks)
 
-    return _finalize_best_results(best_results, top_k)
+    return _finalize_best_results(best_results, top_k), unique_specs_visited
 
 
 @cython.cfunc
