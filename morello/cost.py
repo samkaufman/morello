@@ -17,6 +17,7 @@ from .system_config import current_system
 from .tensor import Tensor, Tile
 
 COST_ATTR = "_cost"
+INST_COST = 1000
 
 if not cython.compiled:
     _MAX_COST = sys.maxsize
@@ -153,8 +154,8 @@ def detailed_analytical_cost(
     elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
         # Tensor multiplication is free but its operands must be in memory.
         # (This cost model is only interested in the cost of moving data.)
-        assert compute_cost(op) == 1
-        return {op: (1, "    1")}
+        assert compute_cost(op) == INST_COST
+        return {op: (INST_COST, f"{INST_COST:5}")}
     elif isinstance(op, MoveLet):
         # This is the core of the cost model; the cost of a schedule is derived
         # entirely from its moves, which are done by MoveLet operations.
@@ -212,7 +213,7 @@ def compute_cost(op: Impl) -> MainCost:
         # Reminder: these types can be either holes or scheduled
         return _assign_cost(op, 4999)
     elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
-        return _assign_cost(op, 1)
+        return _assign_cost(op, INST_COST)
     elif isinstance(op, MoveLet):
         mcost: MainCost = move_cost(  # type: ignore
             op.spec.operands[op.source_idx], op.destination.spec, op.prefetching
