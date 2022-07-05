@@ -24,6 +24,11 @@ dependencies:
   - termcolor==1.1.0
   - sympy
   - typeguard
+  - google-api-python-client
+  - google-auth
+  - google-auth-httplib2
+  - google-auth-oauthlib
+  - pydrive2
   - gspread
   - pytorch=1.11.0
   - jax==0.3.13

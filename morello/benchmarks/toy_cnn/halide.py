@@ -5,6 +5,31 @@ import halide as hl
 ctypes.cdll.LoadLibrary("libautoschedule_adams2019.so")
 
 
+def halide_matmul(lhs, rhs, matrix_size: int, name="matmul") -> hl.Func:
+    matmul = hl.Func(name)
+
+    x, y = hl.Var("x"), hl.Var("y")
+    k = hl.RDom([(0, matrix_size)], name="k")
+
+    matmul[x, y] = 0.0
+    matmul[x, y] += lhs[x, k] * rhs[k, y]
+
+    if not isinstance(lhs, hl.Func):
+        assert lhs.dim(0).extent() == matrix_size
+        assert lhs.dim(1).extent() == matrix_size
+    if not isinstance(rhs, hl.Func):
+        assert rhs.dim(0).extent() == matrix_size
+        assert rhs.dim(1).extent() == matrix_size
+    matmul.set_estimates([(0, matrix_size), (0, matrix_size)])
+    return matmul
+
+
+def halide_gemm3(a, b, c, matrix_size: int, name="gemm3") -> hl.Func:
+    stage1 = halide_matmul(a, b, matrix_size, name="gemm3_stage1")
+    stage2 = halide_matmul(stage1, c, matrix_size, name="gemm3_stage2")
+    return stage2
+
+
 def halide_conv_layer(input, W: hl.Buffer, name="convolution") -> hl.Func:
     """Builds a 2D convolution over some image with a filters Buffer.
 

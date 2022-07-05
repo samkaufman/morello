@@ -154,14 +154,23 @@ class CpuTarget(Target):
 
             return RunResult(stdout, stderr)
 
-    async def time_impl(self, impl) -> float:
+    async def time_impl(self, impl, return_source=False) -> Union[float, tuple[float, str]]:
         """Executes and benchmarks an Impl on the local machine using Clang.
 
-        Returns the time in seconds. Measured by executing 10 times and
+        Returns the time in seconds. Measured by executing BENCH_ITERS times and
         returning the mean.
         """
-        r = await self.run_impl(impl)
-        return _parse_benchmark_output(r.stdout) / gen.BENCH_ITERS
+        source_code = None
+        def cb(s):
+            nonlocal source_code
+            if return_source:
+                source_code = s
+
+        r = await self.run_impl(impl, source_cb=cb)
+        result = _parse_benchmark_output(r.stdout) / gen.BENCH_ITERS
+        if return_source:
+            result = (result, source_code)
+        return result
 
 
 def _parse_benchmark_output(output: str) -> float:

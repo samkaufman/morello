@@ -76,7 +76,7 @@ FROM ubuntu:focal as cpu-only
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y git curl lib32z1 libncurses5 lib32ncurses-dev && \
+    apt-get install -y git curl lib32z1 libncurses5 lib32ncurses-dev numactl && \
     curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
     curl -LO http://mirrors.kernel.org/ubuntu/pool/main/libf/libffi/libffi6_3.2.1-8_amd64.deb && \
     dpkg -i libffi6_3.2.1-8_amd64.deb && \

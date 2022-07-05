@@ -156,6 +156,9 @@ class DirectConv(NonAllocatingLeaf):
         next_general_out = system.next_general_bank(out.bank)
         if next_general_out:
             return self.move_output(bank=next_general_out).complete()
+        
+        if any(d > 1 for d in self.spec.inputs[0].dim_sizes):
+            return self.spatial_split().complete()
 
         return self
 

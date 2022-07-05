@@ -48,9 +48,9 @@ class Target(abc.ABC):
         raise NotImplementedError()
 
     def all_layouts_for_shape(self, shape: Sequence[int]) -> Iterable["Layout"]:
-        from ..layouts import NCHWc4, NCHWc32, NCHWc64, row_major
+        from ..layouts import NHWC, NCHWc4, NCHWc32, NCHWc64, row_major
 
-        return [row_major(len(shape)), NCHWc4, NCHWc32, NCHWc64]
+        return [row_major(len(shape)), NHWC, NCHWc4, NCHWc32, NCHWc64]
 
     async def run_impl(
         self,
@@ -63,7 +63,7 @@ class Target(abc.ABC):
     ) -> RunResult:
         raise NotImplementedError()
 
-    async def time_impl(self, impl) -> float:
+    async def time_impl(self, impl, return_source: bool = False) -> Union[float, tuple[float, str]]:
         """Executes and benchmarks an Impl.
 
         Returns a measurement of time in arbitrary units.

@@ -3,39 +3,50 @@
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import datetime
 import functools
+from glob import glob
 import itertools
 import logging
+import mimetypes
 import multiprocessing
 import os
 import pathlib
 import random
 import re
-import sqlite3
+import runpy
 import tempfile
 import time
+import typing
+from typing import Any, Iterable, Optional, Sequence, Union
 
 import gspread
 import halide as hl
 import jax
 import jax.lib
-import jax.numpy as jnp
 import numpy as np
+import oauth2client.service_account
+import pydrive2
+import pydrive2.auth
+import pydrive2.drive
 import termcolor
 import torch
 import torch.nn.functional as F
 import tvm
+import tvm.te
+import tvm.auto_scheduler
 import tvm.contrib.graph_executor
+from google.oauth2 import service_account
 from jax import lax
 from jax.tools import jax_to_ir
-from torch import profiler
 from tvm import relay
 
 import morello.impl.actions
 import morello.impl.base
 from morello import (
     cost,
+    codegen,
     dtypes,
     layouts,
     op_pprint,
@@ -45,7 +56,6 @@ from morello import (
     system_config,
 )
 from morello.benchmarks.toy_cnn import halide as toyhl
-from morello.codegen import gen
 
 RUNS = 100
 SAMPLE_CNT = 100
@@ -61,16 +71,17 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=pathlib.Path, default=None)
 parser.add_argument("--no-save-cache", action="store_false", dest="save_cache")
-parser.add_argument("--n_cpus", type=int, default=1)
-parser.add_argument("--db_path", type=pathlib.Path, default="samples.db")
-parser.add_argument("--best", action="store_true")
-parser.add_argument("--baselines", action="store_true")
-parser.add_argument("--sample", action="store_true")
-parser.add_argument("--perturb", action="store_true")
-parser.add_argument("--print_graphs", action="store_true")
-parser.add_argument("--log_to_sheet", type=str, default=None)
-parser.add_argument("--gsheet_key", type=pathlib.Path, default=None)
+parser.add_argument("--backend", type=str, nargs="+", default=None)
+parser.add_argument("--log-to-sheet", type=str, default=None)
+parser.add_argument("--save-to-gdrive", type=str, default=None)
+parser.add_argument(
+    "--gsheet-key",
+    type=pathlib.Path,
+    default=None,
+    help="A path to a file containing a Google Sheets key",
+)
 parser.add_argument("--hostname", type=str, default=None)
+parser.add_argument("--configure-governor", nargs="?", type=pathlib.Path, const=True, default=None)
 parser.add_argument("-b", "--batch", type=int, action="append")
 
 subparsers = parser.add_subparsers(dest="spec")
@@ -93,11 +104,12 @@ parser_conv.add_argument(
     "sizes", metavar="N", type=int, nargs="+", help="image sizes to benchmark"
 )
 
-parser_cnn = subparsers.add_parser("cnn", help="Benchmark small CNN")
-parser_cnn.add_argument("--serial", action="store_true")
-parser_cnn.add_argument(
-    "sizes", metavar="N", type=int, nargs="+", help="image sizes to benchmark"
-)
+for cnn_short in ["cnn", "cnn-nchwc"]:
+    parser_cnn = subparsers.add_parser(cnn_short, help="Benchmark small CNN")
+    parser_cnn.add_argument("--serial", action="store_true")
+    parser_cnn.add_argument(
+        "sizes", metavar="N", type=int, nargs="+", help="image sizes to benchmark"
+    )
 
 
 def _to_torch(arr: np.ndarray) -> torch.Tensor:
@@ -108,333 +120,370 @@ def _to_torch(arr: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(arr)
 
 
-def make_matmul_spec(batch_size: int, d: int, serial: bool) -> specs.Matmul:
-    if batch_size != 1:
-        raise NotImplementedError("Batched matrix multiplication not yet supported")
-    target = system_config.current_target()
-    return specs.Matmul(
-        target.tensor_spec((d, d), dtype=DTYPE),
-        target.tensor_spec((d, d), dtype=DTYPE),
-        target.tensor_spec((d, d), dtype=DTYPE),
-        serial_only=serial,
-    )
+class Benchmark:
+    @property
+    def spec(self) -> specs.Spec:
+        raise NotImplementedError()
 
+    def make_backends(self, cache: Union[str, pathlib.Path, None], save_cache: bool, extras_dir: pathlib.Path) -> Iterable["BenchmarkBackend"]:
+        try:
+            yield self._numpy_backend()
+        except NotImplementedError as e:
+            print(f"Not yielding Numpy backend: {e}")
 
-def make_gemm3_spec(batch_size: int, d: int, serial: bool) -> specs.Spec:
-    if batch_size != 1:
-        raise NotImplementedError("Batched matrix multiplication not yet supported")
-    target = system_config.current_target()
-    return specs.Compose(
-        (specs.Matmul, specs.Matmul),
-        inputs=(
-            target.tensor_spec((d, d), dtype=DTYPE),
-            target.tensor_spec((d, d), dtype=DTYPE),
-            target.tensor_spec((d, d), dtype=DTYPE),
-        ),
-        output=target.tensor_spec((d, d), dtype=DTYPE),
-        intermediate_dtypes=(DTYPE,),
-        serial_only=serial,
-    )
+        try:
+            torch_backend = self._torch_backend()
+        except NotImplementedError as e:
+            print(f"Not yielding PyTorch backend: {e}")
+        else:
+            torchscript_backend = TorchScriptBackend(torch_backend)
+            relay_backend = RelayBackend(torchscript_backend, extras_dir)
+            # Drop the torch_backend itself. Nearly identicaly runtimes to
+            # TorchScript for x86.
+            yield from [torchscript_backend, relay_backend]
 
+        try:
+            yield self._jax_backend()
+        except NotImplementedError as e:
+            print(f"Not yielding JAX backend: {e}")
 
-def make_conv_spec(batch_size: int, d: int, serial: bool) -> specs.Convolution:
-    target = system_config.current_target()
-
-    fh, fw, fc = 5, 5, 32
-    out_h, out_w = 1 + d - fh, 1 + d - fw
-
-    return specs.Convolution(
-        target.tensor_spec((batch_size, 1, d, d), dtype=DTYPE),
-        target.tensor_spec((fc, 1, fh, fw), dtype=DTYPE),
-        output=target.tensor_spec((batch_size, fc, out_h, out_w), dtype=DTYPE),
-        serial_only=serial,
-    )
-
-
-def make_cnn_spec(batch_size: int, d: int, serial: bool) -> specs.Spec:
-    target = system_config.current_target()
-
-    img = target.tensor_spec((batch_size, 3, d, d), dtype=DTYPE)
-    filters_a = target.tensor_spec((32, 3, 3, 3), dtype=DTYPE)
-    filters_b = target.tensor_spec((32, 32, 3, 3), dtype=DTYPE)
-    output = target.tensor_spec((batch_size, 32, d - 4, d - 4), dtype=DTYPE)
-    return specs.Compose(
-        (specs.Convolution, specs.Convolution),
-        (filters_b, img, filters_a),
-        output,
-        intermediate_dtypes=(DTYPE,),
-        serial_only=serial,
-    )
-
-
-def sample_completion(
-    partial_impl: morello.impl.base.Impl,
-) -> tuple[morello.impl.base.Impl, str]:
-    if partial_impl.is_scheduled:
-        return partial_impl, "random"
-
-    # TODO: Remove the following filter once codegen is implemented for other
-    #   layouts.
-    actions = [
-        a
-        for a in partial_impl.actions()
-        if (
-            not isinstance(
-                a, (morello.impl.actions.MoveAction, morello.impl.actions.PeelAction)
-            )
-            or a.layout.is_row_major
-        )
-        and not isinstance(a, morello.impl.actions.SlidingTileOutAction)
-    ]
-    assert actions, f"actions was empty"
-
-    # TODO: Need to repeatedly draw.
-    expanded = random.choice(actions)()
-    return (
-        expanded.replace_children(sample_completion(c)[0] for c in expanded.children),
-        "random",
-    )
-
-
-def _sample_randint_on_boundary(upper, overweight_one=False) -> int:
-    """Returns a random number in [1, upper) divisible by four, or 1."""
-    if overweight_one:
-        if random.random() < 0.5:
+        try:
+            yield self._halide_backend()
+        except NotImplementedError as e:
+            print(f"Not yielding Halide backend: {e}")
+    
+        yield MorelloBackend(self, cache, save_cache, extras_dir)
+    
+    @property
+    def cpus_used(self) -> int:
+        if self.spec.serial_only:
             return 1
-    raw = random.randint(0, (upper - 1) // 4)
-    if raw == 0:
-        return 1
-    return raw * 4
+        return multiprocessing.cpu_count()
+
+    @property
+    def short_name(self) -> str:
+        raise NotImplementedError(f"Not implemented for {type(self).__name__}")
+
+    def _numpy_backend(self) -> "BenchmarkBackend":
+        raise NotImplementedError()
+
+    def _torch_backend(self) -> "BenchmarkBackend":
+        raise NotImplementedError()
+
+    def _jax_backend(self) -> "BenchmarkBackend":
+        raise NotImplementedError()
+
+    def _halide_backend(self) -> "BenchmarkBackend":
+        raise NotImplementedError()
 
 
-def sample_perturbed(
-    hole: morello.impl.base.Impl,
-) -> tuple[morello.impl.base.Impl, str]:
-    matmul_spec = hole.spec
-    assert isinstance(matmul_spec, specs.Matmul)
-    m, k, n = [
-        _sample_randint_on_boundary(bound)
-        for bound in matmul_spec.lhs.dim_sizes + (matmul_spec.rhs.dim_sizes[0],)
-    ]
-    impl = hole.tile_out((m, n))
-    impl = impl.split(k)
-    impl = impl.move_input(0, "RF", layouts.row_major(2))
-    m_ = _sample_randint_on_boundary(_get_innermost(impl).output.dim_sizes[0])
-    n_ = _sample_randint_on_boundary(_get_innermost(impl).output.dim_sizes[1])
-    impl = impl.tile_out((m_, n_))
-    impl = impl.move_input(1, "RF", layouts.row_major(2))
-    impl = impl.move_output("RF", layouts.row_major(2))
-    return impl.complete(), "perturbed3"
+class BenchmarkBackend:
+    @property
+    def short_name(self) -> str:
+        raise NotImplementedError(f"Not implemented for {type(self).__name__}")
+
+    def run(self) -> list[float]:
+        raise NotImplementedError()
 
 
-def _get_innermost(impl: morello.impl.base.Impl) -> morello.impl.base.Impl:
-    cur = impl
-    while len(cur.children):
-        assert hasattr(cur, "inner")
-        cur = cur.inner
-    return cur
+class MorelloBackend(BenchmarkBackend):
+    def __init__(self, benchmark: Benchmark, cache: Union[str, pathlib.Path, None], save_cache: bool, extras_dir: pathlib.Path):
+        if not extras_dir.is_dir():
+            raise ValueError("extras_dir should be an existing directory")
+        self.benchmark = benchmark
+        self.cache_path = cache
+        self.save_cache = save_cache
+        self.extras_dir = extras_dir
+
+    def run(self) -> list[float]:
+        spec = self.benchmark.spec
+        with search_cache.persistent_cache(self.cache_path, save=self.save_cache) as cache:
+            impl = search.schedule_search(spec, cache=cache)
+        assert impl is not None
+        runtime_samples, impl_str, source_code = _benchmark(impl)
+        assert runtime_samples
+        with (self.extras_dir / "impl.txt").open("w") as fo:
+            fo.write(impl_str)
+        with (self.extras_dir / "source.c").open("w") as fo:
+            fo.write(source_code)
+        return runtime_samples
+    
+    @property
+    def short_name(self) -> str:
+        if cost.INST_COST != 1000:
+            return f"morello-arith{cost.INST_COST}"
+        return "morello"
 
 
-def sample_and_benchmark(
-    sample_fn,
-    hole: morello.impl.base.Impl,
-    _: int,
-):
-    impl, procedure = sample_fn(hole)
-    r = _benchmark(impl)
-    return r, procedure
+class BaselineBackend(BenchmarkBackend):
+    @property
+    def codelet(self) -> str:
+        raise NotImplementedError()
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        raise NotImplementedError()
+
+    def run(self) -> list[float]:
+        benchmark_code = f"""
+global inner_benchmark
+
+def inner_benchmark(self, {', '.join([n for n, _ in self.data_deps])}):
+    {self.codelet}
+
+    start = time.time()
+    for _ in range(codegen.gen.BENCH_ITERS):
+        {self.codelet}
+    end = time.time()
+    return (end - start) / codegen.gen.BENCH_ITERS
+        """
+
+        exec(benchmark_code)
+        runs = []
+        for _ in range(RUNS):
+            runs.append(inner_benchmark(self, *[v for _, v in self.data_deps]))  # type: ignore
+        return runs
 
 
-def benchmark_baseline(
-    spec: specs.Spec, print_graphs: bool = False
-) -> dict[str, float]:
-    result = {}
 
-    if isinstance(spec, specs.Matmul):
-        # Make arbitrary args
-        (m, n), k = spec.output.dim_sizes, spec.lhs.dim_sizes[1]
-        lhs = np.arange(m * k, dtype=DTYPE.np_type).reshape((m, k))
-        rhs = np.arange(k * n, dtype=DTYPE.np_type).reshape((k, n))
-        lhs @ rhs
-
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            lhs @ rhs
-        end = time.time()
-        result["numpy"] = (end - start) / gen.BENCH_ITERS
-
-        lhs_t, rhs_t = _to_torch(lhs), _to_torch(rhs)
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            torch.matmul(lhs_t, rhs_t)
-        end = time.time()
-        result["pytorch"] = (end - start) / gen.BENCH_ITERS
-    elif isinstance(spec, specs.Compose) and all(
-        s == specs.Matmul for s in spec.subspec_classes
-    ):
-        m = spec.output.dim_sizes[0]
-        assert all(
-            d == m for operand in spec.operands for d in operand.dim_sizes
-        ), f"All matmul operands' dimensions expected to have the size: {m}."
-        a = np.arange(m * m, dtype=DTYPE.np_type).reshape((m, m))
-        b = np.arange(m * m, dtype=DTYPE.np_type).reshape((m, m))
-        c = np.arange(m * m, dtype=DTYPE.np_type).reshape((m, m))
-        (a @ b) @ c
-
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            (a @ b) @ c
-        end = time.time()
-        result["numpy"] = (end - start) / gen.BENCH_ITERS
-
-        a_t, b_t, c_t = [_to_torch(x) for x in (a, b, c)]
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            torch.matmul(torch.matmul(a_t, b_t), c_t)
-        end = time.time()
-        result["pytorch"] = (end - start) / gen.BENCH_ITERS
-
-        @torch.jit.script
-        def jit_gemm3(a, b, c):
-            return torch.matmul(torch.matmul(a, b), c)
-
-        torch.jit.wait(torch.jit.fork(jit_gemm3, a_t, b_t, c_t))
-
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            torch.jit.wait(torch.jit.fork(jit_gemm3, a_t, b_t, c_t))
-        end = time.time()
-        result["torchscript"] = (end - start) / gen.BENCH_ITERS
-    elif isinstance(spec, specs.Convolution):
-        batch, channels, h, w = spec.lhs.dim_sizes
-        filters_count, _, fh, fw = spec.rhs.dim_sizes
-
-        # Use signed int32 with PyTorch.
-        assert DTYPE == dtypes.Uint32
-
-        img = np.arange(batch * channels * h * w, dtype=TORCH_DTYPE_NP).reshape(
-            (batch, channels, h, w)
-        )
-        filters = np.arange(
-            filters_count * channels * fh * fw, dtype=TORCH_DTYPE_NP
-        ).reshape((filters_count, channels, fh, fw))
-        img_t, filters_t = torch.tensor(img), torch.tensor(filters)
-
-        # Which backend is PyTorch using?
-        # backend = torch._C._select_conv_backend(
-        #     img, filters, None, (1, 1), (0, 0), (1, 1), False, (0, 0), 1
-        # )
-        # print("Conv PyTorch backend:", backend)
-
-        # PyTorch execution on the CPU is synchronous. Useful for this benchmark
-        with profiler.profile(activities=[profiler.ProfilerActivity.CPU]) as prof:
-            with profiler.record_function("conv2d"):
-                F.conv2d(img_t, filters_t)
-        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
-
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            F.conv2d(img_t, filters_t)
-        end = time.time()
-        result["pytorch"] = (end - start) / gen.BENCH_ITERS
-
-        @torch.jit.script
-        def jit_conv(i, f):
-            return F.conv2d(i, f)
-
-        torch.jit.wait(torch.jit.fork(jit_conv, img_t, filters_t))
-
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            torch.jit.wait(torch.jit.fork(jit_conv, img_t, filters_t))
-        end = time.time()
-        result["torchscript"] = (end - start) / gen.BENCH_ITERS
-
-        if print_graphs:
-            print("")
-            termcolor.cprint("Torch:", attrs=["bold"])
-            print(torch.jit.last_executed_optimized_graph())
-
-        def jax_conv(i, f):
-            return lax.conv(i, f, (1, 1), "VALID")
-
-        jax_conv_fast = jax.jit(jax_conv)
-        jax_conv_fast(img, filters)
-
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            jax_conv_fast(img, filters)
-        end = time.time()
-        result["jax"] = (end - start) / gen.BENCH_ITERS
+class BaseJAXBackend(BaselineBackend):
+    def __init__(self, benchmark: Benchmark, print_graphs=True) -> None:
+        self.benchmark = benchmark
+        self.jitted_fn = jax.jit(self.make_jax_func())
+        self.set_inputs()
 
         if print_graphs:
             print(
                 jax_to_ir.jax_to_ir(
-                    jax_conv_fast,
+                    self.jitted_fn,
                     input_shapes=[
-                        ("i", jax.ShapedArray(img.shape, img.dtype)),
-                        ("f", jax.ShapedArray(filters.shape, filters.dtype)),
+                        (n, jax.ShapedArray(arr.shape, arr.dtype))
+                        for n, arr in self.data_deps
                     ],
                     format="HLO",
                 )[1]
             )
-    elif isinstance(spec, specs.Compose) and spec.subspec_classes == (
-        specs.Convolution,
-        specs.Convolution,
-    ):
-        batch_size, channels, h, w = spec.inputs[-2].dim_sizes
-        fc_a, _, fh_a, fw_a = spec.inputs[-1].dim_sizes
-        fc_b, _, fh_b, fw_b = spec.inputs[-3].dim_sizes
 
-        img = np.arange(batch_size * channels * h * w, dtype=TORCH_DTYPE_NP).reshape(
-            (batch_size, channels, h, w)
+    def make_jax_func(self):
+        raise NotImplementedError()
+
+    def set_inputs(self):
+        raise NotImplementedError()
+    
+    def run(self) -> list[float]:
+        if not self.benchmark.serial_only:
+            return super().run()
+        with _affinity_ctx(1):
+            return super().run()
+
+    @property
+    def short_name(self) -> str:
+        return "jax"
+
+    @property
+    def codelet(self) -> str:
+        return f"self.jitted_fn({', '.join(n for n, _ in self.data_deps)}).block_until_ready()"
+
+
+@dataclasses.dataclass
+class MatmulBenchmark(Benchmark):
+    batch_size: int
+    size: int
+    serial_only: bool
+
+    @classmethod
+    def from_args(cls, args) -> Iterable["MatmulBenchmark"]:
+        if args.spec != "matmul":
+            return
+        assert len(args.batch)
+        for b, n in itertools.product(args.batch, args.sizes):
+            yield MatmulBenchmark(b, n, args.serial)
+
+    @property
+    def spec(self) -> specs.Matmul:
+        if self.batch_size != 1:
+            raise NotImplementedError("Batched matrix multiplication not yet supported")
+        target = system_config.current_target()
+        return specs.Matmul(
+            target.tensor_spec((self.size, self.size), dtype=DTYPE),
+            target.tensor_spec((self.size, self.size), dtype=DTYPE),
+            target.tensor_spec((self.size, self.size), dtype=DTYPE),
+            serial_only=self.serial_only,
         )
-        filters_a = np.arange(
-            fh_a * fw_a * fc_a * channels, dtype=TORCH_DTYPE_NP
-        ).reshape((fc_a, channels, fh_a, fw_a))
-        filters_b = np.arange(fh_b * fw_b * fc_b * fc_a, dtype=TORCH_DTYPE_NP).reshape(
-            (fc_b, fc_a, fh_b, fw_b)
-        )
-        img_t, filters_a_t, filters_b_t = [
-            torch.tensor(x) for x in (img, filters_a, filters_b)
-        ]
+    
+    @property
+    def short_name(self) -> str:
+        return "matmul"
 
-        F.conv2d(F.conv2d(img_t, filters_a_t), filters_b_t)
+    def _numpy_backend(self) -> "BenchmarkBackend":
+        return MatmulNumpy(self)
 
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            F.conv2d(F.conv2d(img_t, filters_a_t), filters_b_t)
-        end = time.time()
-        result["pytorch"] = (end - start) / gen.BENCH_ITERS
+    def _torch_backend(self) -> "BenchmarkBackend":
+        return MatmulTorch(self)
+    
+    def _jax_backend(self) -> "BenchmarkBackend":
+        return MatmulJAX(self)
+    
+    def _halide_backend(self) -> "BenchmarkBackend":
+        return MatmulHalide(self)
 
-        assert (
-            torch.int32 == TORCH_DTYPE
-        ), "Expected torch.int32, which is inlined into jit_conv"
 
-        def jit_conv(i, fa, fb):
-            return F.conv2d(F.conv2d(i, fa), fb)
+class MatmulNumpy(BaselineBackend):
+    def __init__(self, benchmark: MatmulBenchmark) -> None:
+        self.benchmark = benchmark
 
-        jit_conv = torch.jit.trace(jit_conv, (img_t, filters_a_t, filters_b_t))
+        spec = self.benchmark.spec
+        (m, n), k = spec.output.dim_sizes, spec.lhs.dim_sizes[1]
+        self.lhs = np.arange(m * k, dtype=DTYPE.np_type).reshape((m, k))
+        self.rhs = np.arange(k * n, dtype=DTYPE.np_type).reshape((k, n))
 
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            torch.jit.wait(torch.jit.fork(jit_conv, img_t, filters_a_t, filters_b_t))
-        end = time.time()
-        result["torchscript"] = (end - start) / gen.BENCH_ITERS
+    @property
+    def short_name(self) -> str:
+        return "numpy"
 
-        if print_graphs:
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("lhs", self.lhs), ("rhs", self.rhs)]
+
+    @property
+    def codelet(self) -> str:
+        return """lhs @ rhs"""
+
+
+class MatmulJAX(BaseJAXBackend):
+    def make_jax_func(self):
+        def jax_mm(lhs, rhs):
+            return jax.numpy.matmul(lhs, rhs)
+
+        return jax_mm
+
+    def set_inputs(self):
+        numpy_backend = MatmulNumpy(self.benchmark)
+        self.lhs = jax.numpy.array(numpy_backend.lhs)
+        self.rhs = jax.numpy.array(numpy_backend.rhs)
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("lhs", self.lhs), ("rhs", self.rhs)]
+
+
+class BaseTorchBackend(BaselineBackend):
+    def run(self) -> list[float]:
+        # TODO: Save to file
+        termcolor.cprint("PyTorch Configuration:", attrs=["bold"])
+        print(torch.__config__.show())
+
+        orig_intraop_threads = torch.get_num_threads()
+        torch.set_num_threads(self.expected_threads())
+        try:
+            return super().run()
+        finally:
+            torch.set_num_threads(orig_intraop_threads)
+    
+    def expected_threads(self) -> int:
+        if self.benchmark.spec.serial_only:
+            return 1
+        return multiprocessing.cpu_count()
+
+
+class MatmulTorch(BaseTorchBackend):
+    def __init__(self, benchmark: MatmulBenchmark) -> None:
+        self.benchmark = benchmark
+        numpy_backend = MatmulNumpy(benchmark)
+        self.lhs = _to_torch(numpy_backend.lhs)
+        self.rhs = _to_torch(numpy_backend.rhs)
+
+    @property
+    def short_name(self) -> str:
+        return "pytorch"
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("lhs", self.lhs), ("rhs", self.rhs)]
+
+    @property
+    def codelet(self) -> str:
+        return """torch.matmul(lhs, rhs)"""
+
+
+class TorchScriptBackend(BaseTorchBackend):
+    def __init__(self, torch_backend: BenchmarkBackend, print_graphs=True, trace=True):
+        self.torch_backend = torch_backend
+        self.print_graphs = print_graphs
+        self._jitted_fn = None
+
+        if trace:
+            self.jitted_fn = self._jit_with_trace()
+        else:
+            self.jitted_fn = self._jit_with_script()
+    
+    def _jit_with_trace(self):
+        codelet = f"""
+import torch
+import torch.nn.functional as F
+
+global jittable
+
+def jittable({', '.join([n for n, _ in self.torch_backend.data_deps])}):
+    return {self.torch_backend.codelet}
+        """
+        exec(codelet)
+        return torch.jit.trace(jittable, tuple(v for _, v in self.data_deps))  # type: ignore
+
+    def _jit_with_script(self):
+        # We'll save the following to a file. TorchScript needs the actual .py
+        # to compile, th torch.jit.script, so we can't just exec it.
+        jitted_codelet = f"""
+import torch
+import torch.nn.functional as F
+
+@torch.jit.script
+def jitted({', '.join([n for n, _ in self.torch_backend.data_deps])}):
+    return {self.torch_backend.codelet}
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as fo:
+            fo.write(jitted_codelet)
+        ran = runpy.run_path(fo.name)
+        return ran["jitted"]
+    
+    @property
+    def benchmark(self):
+        return self.torch_backend.benchmark
+
+    @property
+    def short_name(self) -> str:
+        return "torchscript"
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return self.torch_backend.data_deps
+
+    @property
+    def codelet(self) -> str:
+        return f"torch.jit.wait(torch.jit.fork(self.jitted_fn, {', '.join([n for n, _ in self.data_deps])}))"
+
+    def run(self) -> list[float]:
+        result = super().run()
+        if self.print_graphs:
             print("")
             termcolor.cprint("Torch:", attrs=["bold"])
             print(torch.jit.last_executed_optimized_graph())
+        return result
+
+
+class RelayBackend(BaselineBackend):
+    def __init__(
+        self, torchscript_backend: TorchScriptBackend, extras_dir: pathlib.Path
+    ):
+        self.torchscript_backend = torchscript_backend
+        self.extras_dir = extras_dir
 
         # PyTorch graph on Relay/TVM
-        shape_list = [
-            ("input", img_t.shape),
-            ("filters_a", filters_a_t.shape),
-            ("filters_b", filters_b_t.shape),
-        ]
+        shape_list = [(n, v.shape) for n, v in torchscript_backend.data_deps]
         tvm_target = tvm.target.Target("llvm")
-        relay_mod, relay_params = relay.frontend.from_pytorch(jit_conv, shape_list)
+        relay_mod, relay_params = relay.frontend.from_pytorch(
+            torchscript_backend.jitted_fn, shape_list
+        )
 
         tvm_mod_text = None
 
@@ -449,62 +498,519 @@ def benchmark_baseline(
                 if not RELAY_VERSION_RE.match(new_text) and "@main" in new_text:
                     tvm_mod_text = new_text
 
-        instruments = []
-        if print_graphs:
-            instruments.append(PIR())
-
-        with tvm.transform.PassContext(opt_level=3, instruments=instruments):
+        with tvm.transform.PassContext(opt_level=3, instruments=[PIR()]):
             tvm_lib = relay.build(relay_mod, target=tvm_target, params=relay_params)
 
-        tvm_m = tvm.contrib.graph_executor.GraphModule(tvm_lib["default"](tvm.cpu(0)))
-        tvm_m.set_input("input", img_t)
-        tvm_m.set_input("filters_a", filters_a_t)
-        tvm_m.set_input("filters_b", filters_b_t)
+        self.tvm_m = tvm.contrib.graph_executor.GraphModule(
+            tvm_lib["default"](tvm.cpu(0))
+        )
+        for n, v in torchscript_backend.data_deps:
+            self.tvm_m.set_input(n, v)
+        
+        with (extras_dir / "tvm_mod.txt").open("w") as fo:
+            fo.write(tvm_mod_text)
+    
+    @property
+    def benchmark(self):
+        return self.torchscript_backend.benchmark
+    
+    def run(self, *args, **kwargs):
+        orig_val = os.getenv("TVM_NUM_THREADS")
+        os.environ["TVM_NUM_THREADS"] = str(self.expected_threads())
+        try:
+            return super().run(*args, **kwargs)
+        finally:
+            if orig_val is None:
+                del os.environ["TVM_NUM_THREADS"]
+            else:
+                os.environ["TVM_NUM_THREADS"] = orig_val
 
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            tvm_m.run()
-        end = time.time()
-        result["relay"] = (end - start) / gen.BENCH_ITERS
+    @property
+    def short_name(self) -> str:
+        return "relay"
 
-        if print_graphs:
-            print("")
-            termcolor.cprint("Relay:", attrs=["bold"])
-            print(tvm_mod_text)
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return []
 
-        def jax_cnn(i, fa, fb):
-            a = lax.conv(i, fa, (1, 1), "VALID")
+    @property
+    def codelet(self) -> str:
+        return "self.tvm_m.run()"
+
+    def expected_threads(self) -> int:
+        if self.benchmark.spec.serial_only:
+            return 1
+        return multiprocessing.cpu_count()
+
+
+@dataclasses.dataclass
+class GEMM3Benchmark(Benchmark):
+    batch_size: int
+    size: int
+    serial_only: bool
+
+    @classmethod
+    def from_args(cls, args) -> Iterable["GEMM3Benchmark"]:
+        if args.spec != "gemm3":
+            return
+        assert len(args.batch)
+        for b, n in itertools.product(args.batch, args.sizes):
+            yield GEMM3Benchmark(b, n, args.serial)
+
+    @property
+    def spec(self) -> specs.Spec:
+        if self.batch_size != 1:
+            raise NotImplementedError("Batched matrix multiplication not yet supported")
+        target = system_config.current_target()
+        return specs.Compose(
+            (specs.Matmul, specs.Matmul),
+            inputs=(
+                target.tensor_spec((self.size, self.size), dtype=DTYPE),
+                target.tensor_spec((self.size, self.size), dtype=DTYPE),
+                target.tensor_spec((self.size, self.size), dtype=DTYPE),
+            ),
+            output=target.tensor_spec((self.size, self.size), dtype=DTYPE),
+            intermediate_dtypes=(DTYPE,),
+            serial_only=self.serial_only,
+        )
+    
+    @property
+    def short_name(self) -> str:
+        return "gemm3"
+
+    def _numpy_backend(self) -> "BenchmarkBackend":
+        return GEMM3Numpy(self)
+    
+    def _jax_backend(self) -> "BenchmarkBackend":
+        return GEMM3JAX(self)
+
+    def _torch_backend(self) -> "BenchmarkBackend":
+        return GEMM3Torch(self)
+    
+    def _halide_backend(self) -> "BenchmarkBackend":
+        return GEMM3Halide(self)
+
+
+class GEMM3Numpy(BaselineBackend):
+    def __init__(self, benchmark: GEMM3Benchmark) -> None:
+        self.benchmark = benchmark
+
+        m = self.benchmark.size
+        self.a = np.arange(m * m, dtype=DTYPE.np_type).reshape((m, m))
+        self.b = np.arange(m * m, dtype=DTYPE.np_type).reshape((m, m))
+        self.c = np.arange(m * m, dtype=DTYPE.np_type).reshape((m, m))
+
+    @property
+    def short_name(self) -> str:
+        return "numpy"
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("a", self.a), ("b", self.b), ("c", self.c)]
+
+    @property
+    def codelet(self) -> str:
+        return """(a @ b) @ c"""
+
+class GEMM3JAX(BaseJAXBackend):
+    def make_jax_func(self):
+        def jax_gemm3(a, b, c):
+            return jax.numpy.matmul(jax.numpy.matmul(a, b), c)
+
+        return jax_gemm3
+
+    def set_inputs(self):
+        numpy_backend = GEMM3Numpy(self.benchmark)
+        self.a = jax.numpy.array(numpy_backend.a)
+        self.b = jax.numpy.array(numpy_backend.b)
+        self.c = jax.numpy.array(numpy_backend.c)
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("a", self.a), ("b", self.b), ("c", self.c)]
+
+
+
+class GEMM3Torch(BaseTorchBackend):
+    def __init__(self, benchmark: GEMM3Benchmark) -> None:
+        self.benchmark = benchmark
+        numpy_backend = GEMM3Numpy(benchmark)
+        self.a = _to_torch(numpy_backend.a)
+        self.b = _to_torch(numpy_backend.b)
+        self.c = _to_torch(numpy_backend.c)
+
+    @property
+    def short_name(self) -> str:
+        return "pytorch"
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("a", self.a), ("b", self.b), ("c", self.c)]
+
+    @property
+    def codelet(self) -> str:
+        return """torch.matmul(torch.matmul(a, b), c)"""
+
+
+@dataclasses.dataclass
+class ConvBenchmark(Benchmark):
+    batch_size: int
+    size: int
+    serial_only: bool
+
+    @classmethod
+    def from_args(cls, args) -> Iterable["ConvBenchmark"]:
+        if args.spec != "conv":
+            return
+        assert len(args.batch)
+        for b, n in itertools.product(args.batch, args.sizes):
+            yield ConvBenchmark(b, n, args.serial)
+
+    @property
+    def spec(self) -> specs.Convolution:
+        target = system_config.current_target()
+
+        img_channels = 4
+        fh, fw, fc = 5, 5, 32
+        out_h, out_w = 1 + self.size - fh, 1 + self.size - fw
+
+        return specs.Convolution(
+            target.tensor_spec((self.batch_size, img_channels, self.size, self.size), dtype=DTYPE),
+            target.tensor_spec((fc, img_channels, fh, fw), dtype=DTYPE),
+            output=target.tensor_spec((self.batch_size, fc, out_h, out_w), dtype=DTYPE),
+            serial_only=self.serial_only,
+        )
+    
+    @property
+    def short_name(self) -> str:
+        return "conv"
+
+    def _numpy_backend(self) -> "BenchmarkBackend":
+        return ConvNumpy(self)
+
+    def _torch_backend(self) -> "BenchmarkBackend":
+        return ConvTorch(self)
+    
+    def _jax_backend(self) -> "BenchmarkBackend":
+        return ConvJAX(self)
+
+
+class ConvNumpy(BaselineBackend):
+    def __init__(self, benchmark: ConvBenchmark) -> None:
+        self.benchmark = benchmark
+
+        spec = benchmark.spec
+        batch, channels, h, w = spec.lhs.dim_sizes
+        filters_count, _, fh, fw = spec.rhs.dim_sizes
+
+        # Use signed int32 with PyTorch.
+        assert DTYPE == dtypes.Uint32
+
+        self.img = np.arange(batch * channels * h * w, dtype=TORCH_DTYPE_NP).reshape(
+            (batch, channels, h, w)
+        )
+        self.filters = np.arange(
+            filters_count * channels * fh * fw, dtype=TORCH_DTYPE_NP
+        ).reshape((filters_count, channels, fh, fw))
+
+    @property
+    def short_name(self) -> str:
+        return "numpy"
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("img", self.img), ("filters", self.filters)]
+
+    @property
+    def codelet(self) -> str:
+        raise NotImplementedError()
+
+
+class ConvTorch(BaseTorchBackend):
+    def __init__(self, benchmark: ConvBenchmark) -> None:
+        self.benchmark = benchmark
+        numpy_backend = ConvNumpy(benchmark)
+        self.img = _to_torch(numpy_backend.img)
+        self.filters = _to_torch(numpy_backend.filters)
+
+    @property
+    def short_name(self) -> str:
+        return "pytorch"
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("img", self.img), ("filters", self.filters)]
+
+    @property
+    def codelet(self) -> str:
+        return """torch.conv2d(img, filters)"""
+
+
+class ConvJAX(BaseJAXBackend):
+    def make_jax_func(self):
+        def jax_conv(img, filters):
+            return lax.conv(img, filters, (1, 1), "VALID")
+
+        return jax_conv
+
+    def set_inputs(self):
+        numpy_backend = ConvNumpy(self.benchmark)
+        self.img = jax.numpy.array(numpy_backend.img)
+        self.filters = jax.numpy.array(numpy_backend.filters)
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("img", self.img), ("filters", self.filters)]
+
+
+@dataclasses.dataclass
+class CNNBenchmark(Benchmark):
+    batch_size: int
+    image_size: int
+    serial_only: bool
+
+    @property
+    def size(self):
+        return self.image_size
+
+    @classmethod
+    def from_args(cls, args) -> Iterable["CNNBenchmark"]:
+        if args.spec != "cnn":
+            return
+        assert len(args.batch)
+        for b, n in itertools.product(args.batch, args.sizes):
+            yield CNNBenchmark(b, n, args.serial)
+
+    @property
+    def spec(self) -> specs.Compose:
+        target = system_config.current_target()
+
+        img = target.tensor_spec(
+            (self.batch_size, 4, self.image_size, self.image_size),
+            dtype=DTYPE,
+            layout=layouts.row_major(4),
+        )
+        filters_a = target.tensor_spec(
+            (32, 4, 3, 3), dtype=DTYPE, layout=layouts.row_major(4)
+        )
+        filters_b = target.tensor_spec(
+            (32, 32, 3, 3), dtype=DTYPE, layout=layouts.row_major(4)
+        )
+        output = target.tensor_spec(
+            (self.batch_size, 32, self.image_size - 4, self.image_size - 4),
+            dtype=DTYPE,
+            layout=layouts.row_major(4),
+        )
+        return specs.Compose(
+            (specs.Convolution, specs.Convolution),
+            (filters_b, img, filters_a),
+            output,
+            intermediate_dtypes=(DTYPE,),
+            serial_only=self.serial_only,
+        )
+
+    @property
+    def short_name(self) -> str:
+        return "cnn"
+
+    def _torch_backend(self) -> "BenchmarkBackend":
+        return CNNTorch(self)
+
+    def _jax_backend(self) -> "BenchmarkBackend":
+        return CNNJAX(self)
+
+    def _halide_backend(self) -> "BencharkBackend":
+        return CNNHalide(self)
+
+
+@dataclasses.dataclass
+class CNNHCHWcBenchmark(CNNBenchmark):
+    batch_size: int
+    image_size: int
+    serial_only: bool
+
+    @property
+    def size(self):
+        return self.image_size
+
+    @classmethod
+    def from_args(cls, args) -> Iterable["CNNBenchmark"]:
+        if args.spec != "cnn-nchwc":
+            return
+        assert len(args.batch)
+        for b, n in itertools.product(args.batch, args.sizes):
+            yield CNNHCHWcBenchmark(b, n, args.serial)
+
+    @property
+    def spec(self) -> specs.Compose:
+        target = system_config.current_target()
+
+        img = target.tensor_spec(
+            (self.batch_size, 4, self.image_size, self.image_size),
+            dtype=DTYPE,
+            layout=layouts.NCHWc4,
+        )
+        filters_a = target.tensor_spec(
+            (32, 4, 3, 3), dtype=DTYPE, layout=layouts.NCHWc4,
+        )
+        filters_b = target.tensor_spec(
+            (32, 32, 3, 3), dtype=DTYPE, layout=layouts.NCHWc4,
+        )
+        output = target.tensor_spec(
+            (self.batch_size, 32, self.image_size - 4, self.image_size - 4),
+            dtype=DTYPE,
+            layout=layouts.NCHWc4,
+        )
+        return specs.Compose(
+            (specs.Convolution, specs.Convolution),
+            (filters_b, img, filters_a),
+            output,
+            intermediate_dtypes=(DTYPE,),
+            serial_only=self.serial_only,
+        )
+
+    @property
+    def short_name(self) -> str:
+        return "cnn-nchwc"
+    
+    def make_backends(self, cache: Union[str, pathlib.Path, None], save_cache: bool, extras_dir: pathlib.Path) -> Iterable["BenchmarkBackend"]:
+        # TODO: Yield the Relay backend
+        # yield RelayCNNNCHWcBackend(extras_dir)
+        yield MorelloBackend(self, cache, save_cache, extras_dir)
+
+
+class RelayCNNNCHWcBackend(BaselineBackend):
+    def __init__(self, extras_dir: pathlib.Path):
+        self.extras_dir = extras_dir
+
+        relay_mod = None
+        relay_params = None
+
+        layers.conv2d(
+            data=data,
+            channels=filter_list[0],
+            kernel_size=(3, 3),
+            strides=(1, 1),
+            padding=(1, 1),
+            name="conv0",
+            data_layout=data_layout,
+            kernel_layout=kernel_layout,
+        )
+
+        tvm_mod_text = None
+
+        class PIR(tvm.instrument.PassInstrument):
+            def run_after_pass(self, mod, info):
+                nonlocal tvm_mod_text
+                # Save the Relay module if the result of this pass has a useful
+                # text representation---in particular, it's not *just* something
+                # like '#[version = "0.0.5"]'---and seems to have not yet
+                # stripped the definition of the '@main' function.
+                new_text = mod.astext(show_meta_data=True)
+                if not RELAY_VERSION_RE.match(new_text) and "@main" in new_text:
+                    tvm_mod_text = new_text
+
+        with tvm.transform.PassContext(opt_level=3, instruments=[PIR()]):
+            tvm_lib = relay.build(relay_mod, target=tvm_target, params=relay_params)
+
+        self.tvm_m = tvm.contrib.graph_executor.GraphModule(
+            tvm_lib["default"](tvm.cpu(0))
+        )
+
+        # TODO: Set inputs as follows: 
+        # for n, v in torchscript_backend.data_deps:
+        #     self.tvm_m.set_input(n, v)
+        
+        with (extras_dir / "tvm_mod.txt").open("w") as fo:
+            fo.write(tvm_mod_text)
+    
+    @property
+    def benchmark(self):
+        return self.torchscript_backend.benchmark
+    
+    def run(self, *args, **kwargs):
+        orig_val = os.getenv("TVM_NUM_THREADS")
+        os.environ["TVM_NUM_THREADS"] = str(self.expected_threads())
+        try:
+            return super().run(*args, **kwargs)
+        finally:
+            if orig_val is None:
+                del os.environ["TVM_NUM_THREADS"]
+            else:
+                os.environ["TVM_NUM_THREADS"] = orig_val
+
+    @property
+    def short_name(self) -> str:
+        return "relay"
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return []
+
+    @property
+    def codelet(self) -> str:
+        return "self.tvm_m.run()"
+
+    def expected_threads(self) -> int:
+        if self.benchmark.spec.serial_only:
+            return 1
+        return multiprocessing.cpu_count()
+
+
+
+class CNNTorch(BaseTorchBackend):
+    def __init__(self, benchmark: CNNBenchmark) -> None:
+        self.benchmark = benchmark
+        self.img, self.filters_a, self.filters_b = map(
+            _to_torch, _make_np_cnn_inputs(self.benchmark.spec)
+        )
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("img", self.img), ("fa", self.filters_a), ("fb", self.filters_b)]
+    
+    @property
+    def short_name(self) -> str:
+        return "pytorch"
+
+    @property
+    def codelet(self) -> str:
+        return "F.conv2d(F.conv2d(img, fa), fb)"
+
+
+class CNNJAX(BaseJAXBackend):
+    def make_jax_func(self):
+        def jax_cnn(img, fa, fb):
+            a = lax.conv(img, fa, (1, 1), "VALID")
             b = lax.conv(a, fb, (1, 1), "VALID")
             return b
 
-        jax_cnn_fast = jax.jit(jax_cnn)
-        jax_cnn_fast(img, filters_a, filters_b).block_until_ready()
+        return jax_cnn
 
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            jax_cnn_fast(img, filters_a, filters_b).block_until_ready()
-        end = time.time()
-        result["jax"] = (end - start) / gen.BENCH_ITERS
-
-        # Print the *optimized* HLO. (This API is not stable.)
-        if print_graphs:
-            print("")
-            termcolor.cprint("JAX:", attrs=["bold"])
-            c = jax.xla_computation(jax_cnn_fast)(img, filters_a, filters_b)
-            print(
-                jax.lib.xla_bridge.get_backend().compile(c).hlo_modules()[0].to_string()
-            )
-
-        # Benchmark a Halide equivalent.
-        img_hl, filters_a_hl, filters_b_hl = (
-            hl.Buffer(img, name="img"),
-            hl.Buffer(filters_a, name="filters_a"),
-            hl.Buffer(filters_b, name="filters_b"),
+    def set_inputs(self):
+        self.img, self.filters_a, self.filters_b = _make_np_cnn_inputs(
+            self.benchmark.spec
         )
-        fn = toyhl.halide_small_cnn(img_hl, filters_a_hl, filters_b_hl)
-        fn = hl.Pipeline(fn)
-        fn.auto_schedule("Adams2019", hl.get_jit_target_from_environment())
+        self.img = jax.numpy.array(self.img)
+        self.filters_a = jax.numpy.array(self.filters_a)
+        self.filters_b = jax.numpy.array(self.filters_b)
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("img", self.img), ("fa", self.filters_a), ("fb", self.filters_b)]
+
+
+class BaseHalideBackend(BaselineBackend):
+    def __init__(self, benchmark: Benchmark, print_graphs=True):
+        self.benchmark = benchmark
+
+        fn = self._make_pipeline()
+        machine = hl.MachineParams((1 if benchmark.serial_only else multiprocessing.cpu_count()), 0, 0);
+        fn.auto_schedule("Adams2019", hl.get_jit_target_from_environment(), machine)
         fn.compile_jit()
+
+        self.fn = fn
+
         if print_graphs:
             print("")
             print("Halide: Basic Loop Nest")
@@ -517,100 +1023,186 @@ def benchmark_baseline(
                 print(t.name)
                 print(fo.read())
         print("")
-        print(f"output dims: {spec.output.dim_sizes}")
-        start = time.time()
-        for _ in range(gen.BENCH_ITERS):
-            fn.realize(spec.output.dim_sizes)
-        end = time.time()
-        result["halide (Adams2019)"] = (end - start) / gen.BENCH_ITERS
-    else:
-        raise ValueError(f"Unrecognized spec: {spec}")
+        print(f"output dims: {self.benchmark.spec.output.dim_sizes}")
 
-    return result
+    @property
+    def short_name(self) -> str:
+        return "halide"
+
+    @property
+    def codelet(self) -> str:
+        return f"self.fn.realize(out_size)"
+
+    @property
+    def data_deps(self) -> Sequence[tuple[str, Any]]:
+        return [("out_size", self.benchmark.spec.output.dim_sizes)] 
+
+    def _make_pipeline(self):
+        raise NotImplementedError()
+
+
+
+class MatmulHalide(BaseHalideBackend):
+    def _make_pipeline(self):
+        mmnp = MatmulNumpy(self.benchmark)
+        lhs_hl, rhs_hl = (
+            hl.Buffer(mmnp.lhs, name="lhs"),
+            hl.Buffer(mmnp.rhs, name="rhs"),
+        )
+        fn = toyhl.halide_matmul(lhs_hl, rhs_hl, mmnp.lhs.shape[0])
+        fn = hl.Pipeline(fn)
+        return fn
+
+
+
+
+class GEMM3Halide(BaseHalideBackend):
+    def _make_pipeline(self):
+        mmnp = GEMM3Numpy(self.benchmark)
+        a_hl, b_hl, c_hl = (
+            hl.Buffer(mmnp.a, name="a"),
+            hl.Buffer(mmnp.b, name="b"),
+            hl.Buffer(mmnp.c, name="c"),
+        )
+        fn = toyhl.halide_gemm3(a_hl, b_hl, c_hl, mmnp.a.shape[0])
+        fn = hl.Pipeline(fn)
+        return fn
+
+
+
+class CNNHalide(BaseHalideBackend):
+    def _make_pipeline(self):
+        img, filters_a, filters_b = _make_np_cnn_inputs(self.benchmark.spec)
+        img_hl, filters_a_hl, filters_b_hl = (
+            hl.Buffer(img, name="img"),
+            hl.Buffer(filters_a, name="filters_a"),
+            hl.Buffer(filters_b, name="filters_b"),
+        )
+        fn = toyhl.halide_small_cnn(img_hl, filters_a_hl, filters_b_hl)
+        fn = hl.Pipeline(fn)
+        return fn
+
+
+def _make_np_cnn_inputs(spec):
+    batch_size, channels, h, w = spec.inputs[-2].dim_sizes
+    fc_a, _, fh_a, fw_a = spec.inputs[-1].dim_sizes
+    fc_b, _, fh_b, fw_b = spec.inputs[-3].dim_sizes
+
+    img = np.arange(batch_size * channels * h * w, dtype=TORCH_DTYPE_NP).reshape(
+        (batch_size, channels, h, w)
+    )
+    filters_a = np.arange(fh_a * fw_a * fc_a * channels, dtype=TORCH_DTYPE_NP).reshape(
+        (fc_a, channels, fh_a, fw_a)
+    )
+    filters_b = np.arange(fh_b * fw_b * fc_b * fc_a, dtype=TORCH_DTYPE_NP).reshape(
+        (fc_b, fc_a, fh_b, fw_b)
+    )
+    return img, filters_a, filters_b
 
 
 def _benchmark(impl):
     loop = asyncio.get_event_loop()
     assert impl.is_scheduled
-    runtime_secs = None
+    runtime_samples = []
     for _ in range(RUNS):
-        secs = loop.run_until_complete(system_config.current_target().time_impl(impl))
+        secs, source = loop.run_until_complete(system_config.current_target().time_impl(impl, return_source=True))
         logger.info(f"Sample runtime result {secs}s:")
-        if runtime_secs is None or secs < runtime_secs:
-            runtime_secs = secs
-    impl_str = op_pprint.pformat(impl)
-    c = cost.compute_cost(impl)
-    peak = impl.peak_memory
-    return runtime_secs, impl_str, c, peak
+        runtime_samples.append(secs)
+    impl_str = op_pprint.pformat(impl, color=False)
+    return runtime_samples, impl_str, source
 
 
-# TODO: Remove check_same_thread?
+def _get_benchmark_classes():
+    return [MatmulBenchmark, GEMM3Benchmark, ConvBenchmark, CNNBenchmark,
+            CNNHCHWcBenchmark]
+
+
 @contextlib.contextmanager
-def _open_db(args, *, check_same_thread: bool):
-    args.db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(
-        str(args.db_path), check_same_thread=check_same_thread
-    ) as db_conn:
-        db_conn.execute(
-            "CREATE TABLE IF NOT EXISTS samples (procedure text, date datetime, "
-            "impl text, cost integer, peak_memory text, runtime_secs real)"
-        )
-        yield db_conn
+def _affinity_ctx(num_cpus: int):
+    orig_cpus = os.sched_getaffinity(0)
+    random_cpus = random.sample(sorted(orig_cpus), num_cpus)
+    os.sched_setaffinity(0, random_cpus)
+    try:
+        yield
+    finally:
+        os.sched_setaffinity(0, orig_cpus)
 
 
-def _run_baselines(args, spec: specs.Spec, print_graphs: bool = False) -> dict:
-    results = {}
-    for baseline_name, runtime_secs in benchmark_baseline(
-        spec, print_graphs=print_graphs
-    ).items():
-        print(f"{baseline_name} baseline took {runtime_secs:.7f}s")
-        assert baseline_name not in results
-        results[baseline_name] = runtime_secs
-        with _open_db(args, check_same_thread=False) as db_conn:
-            db_conn.execute(
-                "INSERT INTO samples VALUES (?, time('now'), NULL, NULL, NULL, ?)",
-                (baseline_name, runtime_secs),
-            )
-            db_conn.commit()
+@contextlib.contextmanager
+def _scale_governor(path: Optional[pathlib.Path]):
+    yield
+
+
+def _gdrive_upload_dir(drive: pydrive2.drive.GoogleDrive, local_dir: pathlib.Path, remote_root_name: str, parent_id: Optional[str] = None):
+    assert local_dir.is_dir()
+
+    # Get root folder in Drive based on provided name
+    if not parent_id:
+        remote_root_candidates = drive.ListFile({'q': f"title = '{remote_root_name}' and trashed = False"}).GetList()
+        if not remote_root_candidates:
+            raise ValueError(f"Found no folders with title '{remote_root_name}'")
+        if len(remote_root_candidates) > 1:
+            raise ValueError(f"Found multiple folders with title '{remote_root_name}'")
+        parent_id = remote_root_candidates[0]["id"]
+
+    # Create new remote subdirectory corresponding to the top of local_dir
+    root_meta: dict[str, Any] = {
+        "title": local_dir.name, "mimeType": 'application/vnd.google-apps.folder'
+    }
+    root_meta["parents"] = [{"id": parent_id}]
+    root_item = drive.CreateFile(root_meta)
+    root_item.Upload()
+
+    for entry in local_dir.iterdir():
+        if entry.is_file():
+            # TODO: Upload file
+            file_meta ={"title": entry.name,
+                "parents": [{"id": root_item["id"]}]}
+            guess = mimetypes.guess_type(entry)
+            if guess[0]:
+                file_meta["mimeType"] = guess[0]
+            f = drive.CreateFile(file_meta)
+            f.SetContentFile(str(entry.absolute()))
+            f.Upload()
+        else:
+            assert entry.is_dir()
+            _gdrive_upload_dir(drive, entry, remote_root_name, parent_id=root_item["id"])
+    
+    return root_item["alternateLink"]
+
+
+def _check_environment():
+    # TODO: Check irqbalance
+    # Check choice of governor
+    if any(g != "performance" for g in _get_governor_settings()):
+        raise Exception("Clock rate governor not set to 'performance'")
+    # # TODO: Check CPU frequency range
+    # if any(mi != ma for mi, ma in _get_clock_rates()):
+    #     raise Exception("CPU clock rates should be fixed (min == max)")
+    # TODO: Check that we're realtime
+
+
+def _get_governor_settings() -> list[str]:
+    govs = []
+    for path in glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
+        with open(path, "r") as fo:
+            govs.append(fo.read().strip())
+    assert govs
+    return govs
+
+
+def _get_clock_rates() -> list[tuple[float, float]]:
+    min_paths = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_min_freq")
+    max_paths = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq")
+    assert len(min_paths) == len(max_paths)
+    results = []
+    for min_path, max_path in zip(min_paths, max_paths):
+        with open(min_path, "r") as fo:
+            a = int(fo.read())
+        with open(max_path, "r") as fo:
+            b = int(fo.read())
+        results.append((a, b))
     return results
-
-
-def _run_best(args, spec) -> dict:
-    with search_cache.persistent_cache(args.cache, save=args.save_cache) as cache:
-        impl = search.schedule_search(spec, cache=cache)
-    assert impl is not None
-    runtime_secs, impl_str, c, peak = _benchmark(impl)
-    print(f"Best took {runtime_secs:.7f}s")
-    print("Impl:\n" + impl_str)
-    with _open_db(args, check_same_thread=False) as db_conn:
-        db_conn.execute(
-            "INSERT INTO samples VALUES (?, time('now'), ?, ?, ?, ?)",
-            ("best", impl_str, c, str(peak), runtime_secs),
-        )
-        db_conn.commit()
-
-    return {"morello": runtime_secs}
-
-
-def _run_sample(sample_fn, args, matmul_spec):
-    hole = morello.impl.base.spec_to_hole(matmul_spec)
-    with _open_db(args, check_same_thread=False) as db_conn:
-        with multiprocessing.Pool(processes=args.n_cpus) as pool:
-            for result in pool.imap_unordered(
-                functools.partial(
-                    sample_and_benchmark,
-                    sample_fn,
-                    hole,
-                ),
-                range(SAMPLE_CNT),
-            ):
-                (runtime_secs, impl_str, c, peak), procedure = result
-                print(f"{sample_fn.__name__} took {runtime_secs:.7f}s")
-                db_conn.execute(
-                    "INSERT INTO samples VALUES (?, time('now'), ?, ?, ?, ?)",
-                    (procedure, impl_str, c, str(peak), runtime_secs),
-                )
-                db_conn.commit()
 
 
 def main():
@@ -618,66 +1210,84 @@ def main():
 
     args = parser.parse_args()
 
+    _check_environment()
+
     batch_sizes = args.batch
     if not batch_sizes:
         batch_sizes = [1]
-
+    
+    sheet = None
     if args.log_to_sheet:
-        gc_kwargs = {}
-        if args.gsheet_key:
-            assert isinstance(args.gsheet_key, pathlib.Path)
-            gc_kwargs["filename"] = args.gsheet_key
-        gc = gspread.service_account(**gc_kwargs)
+        creds = service_account.Credentials.from_service_account_file(args.gsheet_key, scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ])
+        gc = gspread.Client(creds)
         sheet = gc.open(args.log_to_sheet).worksheet("Log")
+    
+    drive = None
+    if args.save_to_gdrive:
+        gauth = pydrive2.auth.GoogleAuth()
+        gauth.auth_method = 'service'
+        gauth.credentials = oauth2client.service_account.ServiceAccountCredentials.from_json_keyfile_name(args.gsheet_key, "https://www.googleapis.com/auth/drive")
+        drive = pydrive2.drive.GoogleDrive(gauth)
 
     system_config.set_current_target(args.target)
 
     # Disable sliding windows, since we can't use them with codegen yet.
     morello.impl.allow_sliding_windows.set(False)
 
-    termcolor.cprint("PyTorch Configuration:", attrs=["bold"])
-    print(torch.__config__.show())
-
     start_time = str(datetime.datetime.now())
     if args.hostname:
         hostname = args.hostname
     else:
         hostname = os.uname().nodename
-
-    print("")
-    print(f"Spec: {args.spec}")
-    for b, n in itertools.product(batch_sizes, args.sizes):
-        print("")
-        print(f"Size: {n} (Batch Size: {b})")
-        if args.spec == "matmul":
-            spec = make_matmul_spec(b, n, args.serial)
-        elif args.spec == "gemm3":
-            spec = make_gemm3_spec(b, n, args.serial)
-        elif args.spec == "conv":
-            spec = make_conv_spec(b, n, args.serial)
-        elif args.spec == "cnn":
-            spec = make_cnn_spec(b, n, args.serial)
-        else:
-            raise NotImplementedError(f"{args.spec} not implemented")
-
-        results = {}
-        if args.baselines:
-            results.update(_run_baselines(args, spec, print_graphs=args.print_graphs))
-        if args.best:
-            results.update(_run_best(args, spec))
-        if args.sample:
-            _run_sample(sample_completion, args, spec)
-        if args.perturb:
-            _run_sample(sample_perturbed, args, spec)
-
-        if args.log_to_sheet:
-            sheet.append_rows(
-                [
-                    [start_time, hostname, args.spec, n, b, name, secs]
-                    for name, secs in results.items()
-                ],
-                value_input_option="USER_ENTERED",
-            )
+    
+    governor_ctx = contextlib.nullcontext()
+    if args.configure_governor == True:
+        governor_ctx = _scale_governor(args.configure_governor)
+    
+    with tempfile.TemporaryDirectory() as tdir, governor_ctx:
+        for benchmark_cls in _get_benchmark_classes():
+            for benchmark in benchmark_cls.from_args(args):
+                print("Beginning", str(benchmark))
+                work_dir_backend = pathlib.Path(tdir) / f"{start_time}-{hostname}-{benchmark.short_name}-{random.randint(0, 9999)}"
+                work_dir_backend.mkdir(parents=True, exist_ok=False)
+                for backend in benchmark.make_backends(args.cache, args.save_cache, work_dir_backend):
+                    if args.backend and backend.short_name not in args.backend:
+                        print(f"Skipping backend named", backend.short_name)
+                        continue
+                    print(f"Running {backend.short_name}")
+                    try:
+                        runtime_samples = backend.run()
+                        assert isinstance(runtime_samples, list)
+                        runtime_secs = min(runtime_samples)
+                    except NotImplementedError:
+                        print(f"No implementation for {backend}. Skipping.")
+                        continue
+                    finally:
+                        uploaded_url = ""
+                        if args.save_to_gdrive:
+                            assert drive is not None
+                            uploaded_url = _gdrive_upload_dir(drive, work_dir_backend, args.save_to_gdrive)
+                    print(f"{backend.short_name} took {runtime_secs:.7f}s")
+                    if args.log_to_sheet:
+                        sheet.append_row(
+                            [
+                                start_time,
+                                hostname,
+                                benchmark.short_name,
+                                benchmark.size,
+                                benchmark.batch_size,
+                                backend.short_name,
+                                runtime_secs,
+                                benchmark.cpus_used,
+                                ", ".join(f"{s:.8f}" for s in runtime_samples),
+                                uploaded_url,
+                                "improved",
+                            ],
+                            value_input_option="USER_ENTERED",
+                        )
 
 
 if __name__ == "__main__":

@@ -203,12 +203,15 @@ class HvxSimulatorTarget(Target):
     async def time_impl(
         self,
         impl,
+        return_source: bool = False,
         profile_output: Optional[pathlib.Path] = None,
     ) -> float:
         """Executes and benchmarks an Impl on the Hexagon simulator.
 
         Returns the reported number of processor cycles.
         """
+        assert not return_source
+
         profile_output_ctx = contextlib.nullcontext(profile_output)
         if not profile_output:
             profile_output_ctx = tempfile.TemporaryDirectory()

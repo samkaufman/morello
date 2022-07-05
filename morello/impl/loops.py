@@ -52,7 +52,7 @@ class _TilingMixin:
     @assert_stable_spec
     def split(self, size: int) -> "Impl":
         return dataclasses.replace(self, inner=self.inner.split(size))
-
+    
     @assert_stable_spec
     def replace_children(self, replacements: Iterable[Impl]) -> Impl:
         replacements = tuple(replacements)
