@@ -70,13 +70,11 @@ class DimDropLayout(Layout):
     def normalize(self) -> Layout:
         normalized = self.inner.normalize()
         if isinstance(normalized, StandardLayout):
-            removed = 0
             new_dim_order = []
             for orig_dim in normalized.dim_order:
-                if orig_dim in self.dropped_dims:
-                    removed += 1
-                else:
-                    new_dim_order.append(orig_dim - removed)
+                if orig_dim not in self.dropped_dims:
+                    offset = len([d for d in self.dropped_dims if d < orig_dim])
+                    new_dim_order.append(orig_dim - offset)
             return StandardLayout(tuple(new_dim_order))
 
         if isinstance(normalized, PackedLayout):
@@ -175,6 +173,9 @@ class TransposeLayout(Layout):
 class StandardLayout(Layout):
 
     dim_order: tuple[int, ...]
+
+    def __post_init__(self):
+        assert all(d >= 0 for d in self.dim_order)
 
     def check_tile_contiguity(
         self, outer_shape: Sequence[int], tile_shape: Sequence[int]
@@ -383,13 +384,12 @@ def _general_index_expr(
     logical_dims: Sequence[int], shape: Sequence[int]
 ) -> Union[sympy.Expr, int]:
     assert logical_dims
-    assert len(shape) == len(logical_dims)
-    t, head = logical_dims[-1], logical_dims[:-1]
-    s, thead = shape[-1], shape[:-1]
+    t, remaining_dims = logical_dims[-1], logical_dims[:-1]
+    s = shape[t]
     p = sympy.symbols(f"p{t}") if s > 1 else 0
-    if not head:
+    if not remaining_dims:
         return p
-    return _general_index_expr(head, thead) * s + p
+    return _general_index_expr(remaining_dims, shape) * s + p
 
 
 def _tensor_col_major_indexing_expr(rank: int) -> sympy.Expr:
