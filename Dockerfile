@@ -47,19 +47,28 @@ FROM ubuntu:focal as halide
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y \
-    clang-tools-12 lld llvm-12-dev libclang-12-dev liblld-12-dev \
-    libpng-dev libjpeg-dev libgl-dev \
-    python3.9-dev python3-numpy python3-scipy python3-imageio python3-pybind11 \
-    python3-distutils \
-    libopenblas-dev libeigen3-dev libatlas-base-dev \
-    cmake wget git && \
+      apt-get install -y software-properties-common && \
+    add-apt-repository ppa:deadsnakes/ppa
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive \
+      apt-get install -y \
+      clang-12 clang++-12 clang-tools-12 lld \
+      llvm-12-dev libclang-12-dev liblld-12-dev \
+      libpng-dev libjpeg-dev libgl-dev \
+      python3.10 python3.10-dev python3.10-distutils \
+      libopenblas-dev libeigen3-dev libatlas-base-dev \
+      cmake wget git && \
     apt-get clean
+
 RUN wget -O /usr/src/halide.tar.gz https://github.com/halide/Halide/archive/refs/tags/v13.0.4.tar.gz && \
     tar -C /usr/src -xzvf /usr/src/halide.tar.gz && \
     rm /usr/src/halide.tar.gz
 RUN cd /usr/src/Halide-13.0.4 && \
     cmake -DCMAKE_BUILD_TYPE=Release -DWITH_PYTHON_BINDINGS=ON \
+    -DPython3_EXECUTABLE=/usr/bin/python3.10 \
+    -DCMAKE_C_COMPILER=/usr/bin/clang-12 \
+    -DCMAKE_CXX_COMPILER=/usr/bin/clang++-12 \
     -DLLVM_DIR=$LLVM_ROOT/lib/cmake/llvm -DTARGET_WEBASSEMBLY=OFF -S . -B build && \
     cmake --build build --parallel
 RUN cd /usr/src/Halide-13.0.4 && \

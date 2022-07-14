@@ -4,7 +4,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.9
+  - python=3.10
   - pip
   - clang==13.0.1
   - llvm-openmp==13.0.1
@@ -32,8 +32,8 @@ dependencies:
   - gspread
   - pytorch=1.11.0
   - jax==0.3.13
-  - tvm-py=0.8.0=py39h9be6771_4_cpu
-  - libtvm=0.8.0=ha3b9936_4_cpu
+  - tvm-py=0.8.0
+  - libtvm=0.8.0
   - gcc  # Required to build Cython
   - pip:
     - git+https://github.com/cython/cython.git@dc5f0de75638c7b39650c7542ad0779e5eddb38b
