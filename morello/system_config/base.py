@@ -1,4 +1,3 @@
-import abc
 import dataclasses
 import functools
 import logging
@@ -20,8 +19,7 @@ class RunResult:
     stderr: str
 
 
-class Target(abc.ABC):
-    @abc.abstractmethod
+class Target:
     def tensor(
         self,
         spec: "TensorSpec",
@@ -30,7 +28,6 @@ class Target(abc.ABC):
     ) -> "TensorBase":
         raise NotImplementedError()
 
-    @abc.abstractmethod
     def tensor_spec(
         self,
         dim_sizes: tuple[int, ...],
@@ -43,7 +40,6 @@ class Target(abc.ABC):
         raise NotImplementedError()
 
     @property
-    @abc.abstractmethod
     def system(self) -> "SystemDescription":
         raise NotImplementedError()
 

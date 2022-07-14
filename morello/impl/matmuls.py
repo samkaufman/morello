@@ -1,7 +1,6 @@
+import dataclasses
 import warnings
 from typing import Callable, Iterable, Optional, Sequence
-
-import dataclass_abc
 
 from .. import dtypes, layouts, specs, system_config
 from ..system_config import current_target
@@ -21,12 +20,12 @@ from .pruning import (
 from .utils import assert_stable_spec, dim_range, gen_tile_sizes
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class MatmulBase(NonAllocatingLeaf):
     spec: specs.Matmul
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class MatmulHole(MatmulBase):
     @property
     def is_scheduled(self) -> bool:
@@ -195,7 +194,7 @@ class MatmulHole(MatmulBase):
         return make_applied_impl(self, operands)
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class MatmulLeaf(MatmulBase):
     @property
     def is_scheduled(self) -> bool:
@@ -234,7 +233,7 @@ class MatmulLeaf(MatmulBase):
         return self
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class Mult(MatmulLeaf):
     # TODO: Replace whole class w/ target-specific implementations
 
@@ -253,7 +252,7 @@ class Mult(MatmulLeaf):
 _BROADCAST_VEC_MULT_WIDTH = 256 // 8  # bytes
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class BroadcastVecMult(MatmulLeaf):
     def __post_init__(self):
         check_result = BroadcastVecMult._check_operands(self.spec.operands)
@@ -297,7 +296,7 @@ class BroadcastVecMult(MatmulLeaf):
         return None
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class HvxGemvmpybbwAsm(MatmulLeaf):
     """Impl that invokes hexagon_nn's gemvmpybbw_asm function."""
 
@@ -353,7 +352,7 @@ class HvxGemvmpybbwAsm(MatmulLeaf):
         return None
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class HvxVrmpyaccVuwVubRub(MatmulLeaf):
     def __post_init__(self):
         super().__post_init__()

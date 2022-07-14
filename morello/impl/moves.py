@@ -2,8 +2,6 @@ import dataclasses
 import functools
 from typing import Any, Iterable, Optional, Sequence
 
-import dataclass_abc
-
 from .. import layouts, specs, system_config, utils
 from ..layouts import Layout
 from ..system_config import current_system, current_target
@@ -78,7 +76,7 @@ class _OperandWrapper(Impl):
         return self.inner.spec.replace_io(tuple(new_input_specs), new_output_spec)
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class MoveLet(_OperandWrapper):
     """A Move operation composed with some subsequent Impl."""
 
@@ -131,7 +129,7 @@ class MoveLet(_OperandWrapper):
         )  # type: ignore
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class PadTranspack(_OperandWrapper):
     """Impl that pads and transpacks an input tensor.
 

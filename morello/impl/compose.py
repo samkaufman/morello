@@ -4,8 +4,6 @@ import itertools
 import math
 from typing import Callable, Iterable, Optional, Sequence, Tuple, TypeVar, Union, cast
 
-import dataclass_abc
-
 from .. import layouts, specs, system_config, tiling, utils
 from ..layouts import Layout
 from ..system_config import current_system, current_target
@@ -34,7 +32,7 @@ class SplitNotSupportedByHeadError(NotImplementedError):
     pass
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class ComposeHole(Impl):
     spec: specs.Compose
 

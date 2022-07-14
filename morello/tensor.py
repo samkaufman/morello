@@ -1,4 +1,3 @@
-import abc
 import dataclasses
 import math
 import typing
@@ -16,7 +15,7 @@ class DisallowedTileShapeError(ValueError):
     pass
 
 
-class TensorLike(abc.ABC):
+class TensorLike:
     spec: "specs.TensorSpec"
 
     @property

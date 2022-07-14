@@ -3,8 +3,6 @@ import functools
 import math
 from typing import Callable, Iterable, Optional, Sequence, Tuple, Union
 
-import dataclass_abc
-
 from .. import specs, system_config
 from ..tensor import OperandIdx, Tensor, TensorLike, Tile
 from .base import AppliedImpl, Impl, make_applied_impl
@@ -68,7 +66,7 @@ class _TilingMixin:
 
 
 # TODO: Re-freeze.
-@dataclass_abc.dataclass_abc(frozen=False, unsafe_hash=True, eq=True)
+@dataclasses.dataclass(frozen=False, unsafe_hash=True, eq=True)
 class Loop(Impl):
     """Iterate over subscripts of the inner Impl's operand tiles."""
 
@@ -109,7 +107,7 @@ class Loop(Impl):
             self._operands_subscripts = tuple(self.spec.operands_dim_subscripts())
         else:
             self._operands_subscripts = operands_subscripts
-    
+        
     @property
     def operands_subscripts(self) -> Sequence[tuple[int, ...]]:
         return self._operands_subscripts
@@ -236,7 +234,7 @@ class Loop(Impl):
         return make_applied_impl(self.replace_children([applied_body]), operands)  # type: ignore
 
 
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class SlidingWindowLoop(_TilingMixin, Impl):
     """A sliding window iterator.
 

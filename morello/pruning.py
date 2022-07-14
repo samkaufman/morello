@@ -65,13 +65,11 @@ def _pipeline_transition(
         return None
 
 
-class MemoryLimits(abc.ABC):
+class MemoryLimits:
     @property
-    @abc.abstractmethod
     def available(self) -> frozendict[str, int]:
-        pass
+        raise NotImplementedError()
 
-    @abc.abstractmethod
     def transition(self, schedule: impl.Impl) -> Optional[list["MemoryLimits"]]:
         """Returns new limits for the children of the given schedule.
 

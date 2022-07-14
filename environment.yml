@@ -36,7 +36,6 @@ dependencies:
   - libtvm=0.8.0=ha3b9936_4_cpu
   - gcc  # Required to build Cython
   - pip:
-    - dataclass-abc
     - git+https://github.com/cython/cython.git@dc5f0de75638c7b39650c7542ad0779e5eddb38b
 variables:
   CLANG: ${CONDA_PREFIX}/bin/clang

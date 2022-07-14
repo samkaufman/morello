@@ -1,4 +1,3 @@
-import abc
 import dataclasses
 import functools
 import typing
@@ -12,14 +11,10 @@ from .pruning import ParentSummary
 from .utils import assert_stable_spec
 
 
-class Impl(abc.ABC):
-    @property
-    @abc.abstractmethod
-    def spec(self) -> specs.Spec:
-        raise NotImplementedError()
+class Impl:
+    spec: specs.Spec
 
     @property
-    @abc.abstractmethod
     def children(self) -> tuple["Impl", ...]:
         raise NotImplementedError()
 
@@ -62,7 +57,6 @@ class Impl(abc.ABC):
         replacements[child_idx] = new_child
         return self.replace_children(replacements)
 
-    @abc.abstractmethod
     def replace_children(self, replacements: Iterable["Impl"]) -> "Impl":
         raise NotImplementedError()
 
@@ -302,7 +296,6 @@ class Impl(abc.ABC):
             [next(iter(self.children)).place_hvx_gemvmpebbw(*args, **kwargs)]
         )
 
-    @abc.abstractmethod
     def move_input(
         self,
         input_idx: int,
@@ -313,7 +306,6 @@ class Impl(abc.ABC):
     ) -> "Impl":
         raise NotImplementedError()
 
-    @abc.abstractmethod
     def move_output(
         self,
         bank: Optional[str] = None,
@@ -337,15 +329,13 @@ class Impl(abc.ABC):
     def complete(self) -> "Impl":
         return dataclasses.replace(self, inner=self.inner.complete())
 
-    @abc.abstractmethod
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
-        pass
+        raise NotImplementedError()
 
     def to_applied(self) -> "AppliedImpl":
         return self.apply([current_target().tensor(o) for o in self.spec.operands])
 
     @property
-    @abc.abstractmethod
     def additional_memories(self) -> list[dict[str, int]]:
         """Memory costs of self when the corresponding child is executed.
 
@@ -356,7 +346,6 @@ class Impl(abc.ABC):
         raise NotImplementedError()
 
     @property
-    @abc.abstractmethod
     def peak_memory(self) -> dict[str, int]:
         raise NotImplementedError()
     
@@ -453,25 +442,6 @@ class AppliedImpl(Impl):
 
     def __setattr__(self, name, value):
         setattr(self.unapplied, name, value)
-
-
-def make_delegator(method_name):
-    if isinstance(getattr(AppliedImpl, method_name, None), property):
-
-        def prop_get(self, *args, **kwargs):
-            return getattr(self.unapplied, method_name)
-
-        return property(fget=prop_get)
-
-    def delegator(self, *args, **kwargs):
-        return getattr(self.unapplied, method_name)(*args, **kwargs)
-
-    return delegator
-
-
-for method_name in AppliedImpl.__abstractmethods__:
-    setattr(AppliedImpl, method_name, make_delegator(method_name))
-AppliedImpl.__abstractmethods__ = frozenset()
 
 
 @functools.lru_cache(maxsize=None)

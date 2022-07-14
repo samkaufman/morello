@@ -49,8 +49,7 @@ def _expr_to_c(expr: Union[sympy.Expr, int]) -> str:
     return _inner_expr_to_c(vsub(expr, substitutions))
 
 
-class CTensor(abc.ABC):
-    @abc.abstractmethod
+class CTensor:
     def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
         """Return a C expression referring to the value at a given expression.
 
@@ -67,11 +66,9 @@ class CTensor(abc.ABC):
             ptr_str = ptr_str[:-3]
         return ptr_str
 
-    @abc.abstractmethod
     def emit(self, zero_init=True) -> "CNameTensor":
         raise NotImplementedError()
 
-    @abc.abstractmethod
     def emit_free(self):
         raise NotImplementedError()
 

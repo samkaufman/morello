@@ -252,7 +252,6 @@ class HvxVmemTensorlike(tensor.TensorLike):
     def vector_count(self) -> int:
         return self.volume // functools.reduce(operator.mul, self.root.vector_shape, 1)
 
-    @abc.abstractmethod
     def vector_indices(self, tile_pt: Sequence[int]) -> Sequence[int]:
         """Returns identifiers of the included root HVX vectors."""
         raise NotImplementedError()

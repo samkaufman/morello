@@ -1,11 +1,9 @@
+import dataclasses
 import itertools
 from typing import Callable, Iterable, Optional
 
-import dataclass_abc
-
-from morello.impl.matmuls import MatmulHole
-
 from .. import specs, system_config
+from .matmuls import MatmulHole
 from ..layouts import Layout
 from ..tensor import OperandIdx, SqueezingTile, Tensor, Tile, TransposingTile
 from .actions import SlidingTileOutAction, TileOutAction
@@ -27,7 +25,7 @@ _directconv_sliding_tile_out_params_cache = {}
 
 
 # TODO: Convert this into ConvHole. (No longer needed with spatial splitting.)
-@dataclass_abc.dataclass_abc(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class DirectConv(NonAllocatingLeaf):
     """A native implementation of a convolution.
 
