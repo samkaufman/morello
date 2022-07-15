@@ -179,14 +179,18 @@ class TensorSpec:
         layout_epi = ""
         bank_epi = ""
         c_epi = ""
+        a_epi = ""
         if not self.layout.is_row_major:
             layout_epi = f", {self.layout}"
         if self.bank != current_system().default_bank:
             bank_epi = f", {self.bank}"
         if not self.contiguous:
             c_epi = ", nc"
+        if not self.aligned:
+            a_epi = ", ua"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
-        return f"({dims_part}, {self.dtype}{bank_epi}{layout_epi}{c_epi})"
+        dims_part = "×".join(str(s) for s in self.dim_sizes)
+        return f"({dims_part}, {self.dtype}{bank_epi}{layout_epi}{c_epi}{a_epi})"
 
 
 @cython.dataclasses.dataclass(unsafe_hash=True)
