@@ -71,12 +71,14 @@ class TensorSpec:
                 f" dtype {dtype}"
             )
 
-    # TODO: Call utils.contiguous_approx directly instead of taking an argument.
-    def shrink(self, new_dim_sizes: Sequence[int], contiguous: bool, aligned: bool) -> "TensorSpec":
-        """Returns a clone with new dimensions.
+    def shrink(self, new_dim_sizes: Sequence[int]) -> "TensorSpec":
+        """Returns a clone with new dimensions and updated contiguous- and aligned-ness.
 
         If new_dim_sizes is all ones, the layout may be changed to row-major.
         """
+        contiguous = utils.contiguous_approx(new_dim_sizes, self.layout, self)
+        aligned = utils.aligned_approx(new_dim_sizes, self.layout, self)
+
         new_layout = self.layout
         if all(d == 1 for d in new_dim_sizes):
             new_layout = layouts.row_major(len(new_dim_sizes))
@@ -168,11 +170,7 @@ class TensorSpec:
                 f"Tile {new_dims} would be larger than tensor {self.dim_sizes}"
             )
 
-        tile_spec = self.shrink(
-            new_dims,
-            contiguous=utils.contiguous_approx(new_dims, self.layout, self),
-            aligned=utils.aligned_approx(new_dims, self.layout, self)
-        )
+        tile_spec = self.shrink(new_dims)
         return tile_cls(source=operand_idx, spec=tile_spec, name=None, **kw)
 
     def __str__(self):
