@@ -152,6 +152,8 @@ class ComposeHole(Impl):
         # would make and seeing if we get a ValueError. This isn't a great solution:
         # catching all ValueErrors might become overbroad as the code evolves, and the
         # object construction is inefficient and unneeded. However, it'll work for now.
+        if bank not in current_system().addressed_banks:
+            return False
         peeling_shape = self.spec.subspec_outputs[1]
         intermediate_tensor_layout = layout
         if all(d == 1 for d in peeling_shape):
@@ -161,7 +163,6 @@ class ComposeHole(Impl):
                 current_target().tensor_spec(
                     dim_sizes=peeling_shape,
                     dtype=self.spec.intermediate_dtypes[0],
-                    contiguous=True,
                     bank=bank,
                     layout=intermediate_tensor_layout,
                     **kwargs,
@@ -182,6 +183,9 @@ class ComposeHole(Impl):
             # TODO: Just require them as arguments. Can relax the signature later.
             raise NotImplementedError("Auto-selecting bank or layout unimplemented")
 
+        if bank not in current_system().addressed_banks:
+            raise ValueError(f"Cannot peel into non-addressed bank {bank}")
+
         # TODO: Using ALPHABET_PRODUCT here will fail for long programs
         peeling_shape = self.spec.subspec_outputs[1]
         intermediate_tensor_layout = layout
@@ -191,7 +195,6 @@ class ComposeHole(Impl):
             current_target().tensor_spec(
                 dim_sizes=self.spec.subspec_outputs[1],
                 dtype=self.spec.intermediate_dtypes[0],
-                contiguous=(bank in current_system().addressed_banks),
                 bank=bank,
                 layout=intermediate_tensor_layout,
                 **kwargs,

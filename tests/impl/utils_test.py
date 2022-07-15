@@ -16,7 +16,7 @@ def test_nchwc_is_noncontiguous_when_breaking_by_nonmultiple():
     oi = tensor.OperandIdx(0)
 
     target = system_config.current_target()
-    outer_spec = target.tensor_spec(outer_shape, dtypes.Uint8, True, "GL", layout)
+    outer_spec = target.tensor_spec(outer_shape, dtypes.Uint8, bank="GL", layout=layout)
     assert not outer_spec.simple_tile(oi, bad_shape).spec.contiguous
 
 

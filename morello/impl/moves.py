@@ -256,14 +256,17 @@ def common_move(
     # Will the result be contiguous? If the move is into a cache, it might be.
     # If it's into memory bank with its own address space, then yes.
     contiguous = True
+    aligned = True
     if bank not in current_system().addressed_banks:
         contiguous = utils.contiguous_approx(operand.dim_sizes, layout, operand)
+        aligned = utils.aligned_approx(operand.dim_sizes, layout, operand)
 
     new_mat = current_target().tensor(
         spec=current_target().tensor_spec(
             dim_sizes=operand.dim_sizes,
             dtype=operand.dtype,
             contiguous=contiguous,
+            aligned=aligned,
             layout=layout,
             bank=bank,
             **kwargs,

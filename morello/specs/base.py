@@ -87,12 +87,17 @@ class Spec:
         new_inp_shapes = self.shrink_inputs_for_output_shape(input_shapes, output_shape)
 
         new_inputs = tuple(
-            inp.shrink(new_shape, utils.contiguous_approx(new_shape, inp.layout, inp))
+            inp.shrink(
+                new_shape,
+                utils.contiguous_approx(new_shape, inp.layout, inp),
+                utils.aligned_approx(new_shape, inp.layout, inp),
+            )
             for inp, new_shape in zip(self.inputs, new_inp_shapes)
         )
         new_output = self.output.shrink(
             output_shape,
             utils.contiguous_approx(output_shape, self.output.layout, self.output),
+            utils.aligned_approx(output_shape, self.output.layout, self.output)
         )
 
         return self.replace_io(new_inputs, new_output, serial_only=serial_only)

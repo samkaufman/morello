@@ -21,6 +21,9 @@ class TensorSpec:
     `contiguous' means that there is some way to iterate over the elements of
     the tensor without skipping bytes.
 
+    `aligned` means that the zero coordinate in the tensor is backed by an address
+    multiple of `current_system().line_size`.
+
     This class is distinct from impl.Tensor and impl.Tile, which describe
     operands in Impl.
     """
@@ -28,6 +31,7 @@ class TensorSpec:
     dim_sizes: tuple[int, ...]
     dtype: Dtype
     contiguous: bool
+    aligned: bool
     bank: str
     layout: layouts.Layout
 
@@ -36,6 +40,7 @@ class TensorSpec:
         dim_sizes: tuple[int, ...],
         dtype: Dtype,
         contiguous: bool,
+        aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[layouts.Layout] = None,
     ):
@@ -50,6 +55,7 @@ class TensorSpec:
         else:
             self.layout = layout
         self.contiguous = contiguous
+        self.aligned = aligned
 
         if not len(self.dim_sizes):
             raise ValueError("dim_sizes cannot be empty")
@@ -65,7 +71,8 @@ class TensorSpec:
                 f" dtype {dtype}"
             )
 
-    def shrink(self, new_dim_sizes: Sequence[int], contiguous: bool) -> "TensorSpec":
+    # TODO: Call utils.contiguous_approx directly instead of taking an argument.
+    def shrink(self, new_dim_sizes: Sequence[int], contiguous: bool, aligned: bool) -> "TensorSpec":
         """Returns a clone with new dimensions.
 
         If new_dim_sizes is all ones, the layout may be changed to row-major.
@@ -79,6 +86,7 @@ class TensorSpec:
             bank=self.bank,
             layout=new_layout,
             contiguous=contiguous,
+            aligned=aligned,
         )
 
     @property
@@ -161,7 +169,9 @@ class TensorSpec:
             )
 
         tile_spec = self.shrink(
-            new_dims, contiguous=utils.contiguous_approx(new_dims, self.layout, self)
+            new_dims,
+            contiguous=utils.contiguous_approx(new_dims, self.layout, self),
+            aligned=utils.aligned_approx(new_dims, self.layout, self)
         )
         return tile_cls(source=operand_idx, spec=tile_spec, name=None, **kw)
 

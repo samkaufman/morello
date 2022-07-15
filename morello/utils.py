@@ -1,11 +1,14 @@
 import functools
 import itertools
 import math
+import warnings
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Iterable, Sequence, TypeVar
 
+from . import layouts, system_config
+
 if TYPE_CHECKING:
-    from . import layouts, specs
+    from . import specs
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -69,6 +72,36 @@ def contiguous_approx(
     if not parent.contiguous:
         return False
     return tile_layout.check_tile_contiguity(parent.dim_sizes, tile_shape)
+
+
+def aligned_approx(
+    tile_shape: Sequence[int], tile_layout: "layouts.Layout", parent: "specs.TensorSpec"
+) -> bool:
+    """Test whether a tiling breaks alignment.
+
+    This is usually used to determine whether a TensorSpec is aligned. Like
+    `contiguous_approx`, it is compositional in Impl, but cannot "recover" alignment
+    in cases where a tiling would drop and then recover alignment
+    (e.g., 128 -> 127 -> 64).
+    """
+    if parent.layout != tile_layout:
+        raise ValueError(
+            f"Only supports same-layout TensorSpecs, but given"
+            f" {parent.layout} and {tile_layout}"
+        )
+    if not isinstance(tile_layout, layouts.StandardLayout):
+        warnings.warn(
+            f"No alignment heuristic support for {tile_layout.__class__.__name__}; "
+            "assuming unaligned"
+        )
+        return False
+
+    # Use a simple, under-approximating strategy. If any dimension would break alignment
+    # were that the physically innermost dimension, then this function returns `False`.
+    if not parent.aligned:
+        return False
+    line_size = system_config.current_system().line_size
+    return not any(d % line_size for d in tile_shape)
 
 
 def factors(n: int) -> Iterable[int]:

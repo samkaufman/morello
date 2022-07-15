@@ -66,17 +66,18 @@ class HvxSimulatorTarget(Target):
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
         contiguous: bool = True,
+        aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[layouts.Layout] = None,
         **kwargs,
-    ) -> "TensorSpec":
+    ) -> "specs.TensorSpec":
         if layout is None:
             layout = layouts.row_major(len(dim_sizes))
         if bank == "VMEM":
             return layouts.HvxVmemTensorSpec(
                 dim_sizes, dtype, contiguous, bank, layout, **kwargs
             )
-        return specs.TensorSpec(dim_sizes, dtype, contiguous, bank, layout)
+        return specs.TensorSpec(dim_sizes, dtype, contiguous, aligned, bank, layout)
 
     @functools.cached_property
     def system(self) -> "SystemDescription":

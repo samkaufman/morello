@@ -163,6 +163,7 @@ class SqueezingTile(Tile):
             dim_sizes=tuple(new_dim_sizes),
             dtype=ispec.dtype,
             contiguous=ispec.contiguous,
+            aligned=ispec.aligned,
             bank=ispec.bank,
             layout=new_layout.normalize(),
         )
@@ -228,6 +229,7 @@ class TransposingTile(Tile):
             dim_sizes=tuple(new_dim_sizes),
             dtype=ispec.dtype,
             contiguous=ispec.contiguous,
+            aligned=ispec.aligned,
             bank=ispec.bank,
             layout=layouts.TransposeLayout(ispec.layout, self.swap_dims).normalize(),
         ) 

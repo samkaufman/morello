@@ -42,13 +42,14 @@ class CpuTarget(Target):
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
         contiguous: bool = True,
+        aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         **kwargs,
     ) -> specs.TensorSpec:
         if layout is None:
             layout = layouts.row_major(len(dim_sizes))
-        return specs.TensorSpec(dim_sizes, dtype, contiguous, bank, layout)
+        return specs.TensorSpec(dim_sizes, dtype, contiguous, aligned, bank, layout)
 
     @functools.cached_property
     def system(self) -> "SystemDescription":
@@ -76,14 +77,14 @@ class CpuTarget(Target):
             return set()
         elif source == "GL":
             return {"RF"}
-        raise ValueError("Unknown source: " + source)
+        raise ValueError("Unknown source: " + str(source))
 
     def _next_general_bank(self, source: str) -> Optional[str]:
         if source == "RF":
             return None
         elif source == "GL":
             return "RF"
-        raise ValueError("Unknown source: " + source)
+        raise ValueError("Unknown source: " + str(source))
 
     async def run_impl(
         self,
