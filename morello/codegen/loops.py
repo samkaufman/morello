@@ -1,11 +1,11 @@
 import dataclasses
+import contextvars
 import itertools
 import re
 from collections import defaultdict
 from typing import Callable, Iterable, Mapping, Optional, Sequence, Union
 
 import sympy
-from attr import has
 
 from ..tensor import Tensor, TensorLike, Tile
 from . import common, indexexpr
@@ -13,6 +13,10 @@ from .common import OperandDetails
 from .indexexpr import set_subgroup, unset_subgroup, vsub
 
 _IRE = re.compile(r"i(\d+)")
+
+BOUNDARY_ANCESTORS: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "BOUNDARY_ANCESTORS", default=0
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -49,7 +53,12 @@ def emit_tile_out_loop_nest(
 
     # Emit loops.
     for loop_plan in _compute_tile_out_loop_nest(
-        all_subscripts, remaining_subscripts, it_var_names, outer_operands, inner_operands, op_details
+        all_subscripts,
+        remaining_subscripts,
+        it_var_names,
+        outer_operands,
+        inner_operands,
+        op_details,
     ):
         assert it_var_names is not None
 
@@ -68,14 +77,20 @@ def emit_tile_out_loop_nest(
                 )
             writer.indent()
 
-        inner_codegen(
-            [
-                OperandDetails(d.c_tensor, e, tuple(s), d.previously_transformed_tiles)
-                for d, e, s in zip(
-                    op_details, loop_plan.body_index_exprs, loop_plan.body_shapes
-                )
-            ]
-        )
+        BOUNDARY_ANCESTORS.set(BOUNDARY_ANCESTORS.get() + 1)
+        try:
+            inner_codegen(
+                [
+                    OperandDetails(
+                        d.c_tensor, e, tuple(s), d.previously_transformed_tiles
+                    )
+                    for d, e, s in zip(
+                        op_details, loop_plan.body_index_exprs, loop_plan.body_shapes
+                    )
+                ]
+            )
+        finally:
+            BOUNDARY_ANCESTORS.set(BOUNDARY_ANCESTORS.get() - 1)
         if len(loop_plan.subscripts_to_steps):
             writer.dedent()
             for _ in loop_plan.subscripts_to_steps:
@@ -91,7 +106,7 @@ def _compute_tile_out_loop_nest(
     op_details: Sequence[OperandDetailsLoopExt],
 ) -> Iterable[_LoopNestDescription]:
     """Yields loop nest plans, including main and boundary cases.
-    
+
     This function doesn't emit any code, but does decide which loop nests need
     to be produced, over which subscripts, and in what order. It also produces
     updated indexing expressions for boundary cases.
@@ -119,17 +134,21 @@ def _compute_tile_out_loop_nest(
             continue
         # if full_steps == 1 and not has_boundary:
         #     continue
-        assert full_steps > 0, f"full_steps cannot be {full_steps} in an emitting loop" 
+        assert full_steps > 0, f"full_steps cannot be {full_steps} in an emitting loop"
         emitting_subscripts.append((subscript, full_steps, has_boundary))
 
     # Range over the loop nests to emit. Each entry in boundary_config
     # corresponds to a unique subscript (group of zipped dimensions) and whether
     # or not we're considering a loop which implements that subscript's
     # boundary case.
-    for boundary_config in itertools.product([False, True], repeat=len(emitting_subscripts)):
-        # Ignore any combo. where the config. is set to emit a boundary case for 
+    for boundary_config in itertools.product(
+        [False, True], repeat=len(emitting_subscripts)
+    ):
+        # Ignore any combo. where the config. is set to emit a boundary case for
         # a subscript that doesn't have a boundary.
-        if any(b and not hb for b, (_, _, hb) in zip(boundary_config, emitting_subscripts)):
+        if any(
+            b and not hb for b, (_, _, hb) in zip(boundary_config, emitting_subscripts)
+        ):
             continue
 
         subscripts_to_loop_over = [
@@ -141,7 +160,9 @@ def _compute_tile_out_loop_nest(
         ]
 
         all_subscript_details = {}
-        for (s, full_steps, _), in_boundary in zip(emitting_subscripts, boundary_config):
+        for (s, full_steps, _), in_boundary in zip(
+            emitting_subscripts, boundary_config
+        ):
             if in_boundary:
                 all_subscript_details[s] = _SubscriptDetails(full_steps)
             elif full_steps == 1:
@@ -150,14 +171,18 @@ def _compute_tile_out_loop_nest(
                 all_subscript_details[s] = _SubscriptDetails(it_var_names[s])
 
         new_index_exprs = []
-        for deets, outer_operand, applied_operand in zip(op_details, outer_operands, applied_operands):
+        for deets, outer_operand, applied_operand in zip(
+            op_details, outer_operands, applied_operands
+        ):
             # The following check is important to avoid updating indexing
             # expressions twice for the same operand, such as when an operand is
             # passed through to a child unchanged.
             if outer_operand == applied_operand:
                 new_index_exprs.append(deets.index_expr)
             else:
-                new_index_exprs.append(_update_index_expr(deets, applied_operand, all_subscript_details))
+                new_index_exprs.append(
+                    _update_index_expr(deets, applied_operand, all_subscript_details)
+                )
 
         concrete_shapes = [list(d.concrete_origin_shape) for d in op_details]
         for subscript_is_boundary, (sub, full_steps, _) in zip(
@@ -180,9 +205,11 @@ def _compute_tile_out_loop_nest(
                                 if subscript_is_boundary
                                 else deets.tiled_operand.dim_sizes[sidx]
                             )
-                        concrete_shapes[op_idx][sidx] = min(concrete_shapes[op_idx][sidx], new_size)
+                        concrete_shapes[op_idx][sidx] = min(
+                            concrete_shapes[op_idx][sidx], new_size
+                        )
             unset_subgroup()
-        
+
         # TODO: Remove the following checks
         # if all(len(a) == 4 for a in concrete_shapes):
         #     assert concrete_shapes[0][0] == concrete_shapes[2][0]
@@ -198,8 +225,9 @@ def _compute_tile_out_loop_nest(
 
 
 def _calc_steps(
-    it_subscript: int, op_details: Sequence[OperandDetailsLoopExt],
-    pass_through_tensors: bool = False
+    it_subscript: int,
+    op_details: Sequence[OperandDetailsLoopExt],
+    pass_through_tensors: bool = False,
 ) -> tuple[int, bool]:
     # The following gathers the number of steps (both full and boundary) as well
     # as whether or not a boundary tile exists. While boundary tile sizes
@@ -224,7 +252,8 @@ def _calc_steps(
                 new_has_boundary = bool(
                     details.tiled_operand.boundary_size(
                         dim, details.concrete_origin_shape[dim]
-                    )                )
+                    )
+                )
             if partial_steps is None:
                 partial_steps = new_partial_steps
                 has_boundary = new_has_boundary
@@ -251,7 +280,7 @@ class _SubscriptDetails:
 def _update_index_expr(
     deets: OperandDetailsLoopExt,
     applied_operand: TensorLike,
-    subscripts: Mapping[int, _SubscriptDetails]  # TODO: Just map to replacement
+    subscripts: Mapping[int, _SubscriptDetails],  # TODO: Just map to replacement
 ) -> sympy.Expr:
     assert len(deets.inner_subscripts) == len(deets.concrete_origin_shape)
 

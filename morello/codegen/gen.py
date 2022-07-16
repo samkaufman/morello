@@ -1,6 +1,4 @@
-import abc
 import contextlib
-import contextvars
 import dataclasses
 import functools
 import itertools
@@ -33,7 +31,7 @@ from .ctensors import (
 
 # TODO: Remove
 from .indexexpr import set_subgroup, unset_subgroup, vsub
-from .loops import OperandDetailsLoopExt, emit_tile_out_loop_nest
+from .loops import OperandDetailsLoopExt, emit_tile_out_loop_nest, BOUNDARY_ANCESTORS
 
 _DCFETCH_EMIT_STRATEGY = "first-pt"
 _SIMD_MOVES = True
@@ -332,9 +330,10 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
         rhs_volume = functools.reduce(
             operator.mul, op_details[1].concrete_origin_shape, 1
         )
-        if rhs_volume < 8:  # TODO: <-- Get more general size
-            # In the boundary case, we can't apply the vectorized op., so we'll
-            # insert a naive multiplication loop.
+        if BOUNDARY_ANCESTORS.get() > 0:
+            # In the boundary case, we can't safely apply the vectorized op. Tensors
+            # might be misaligned or non-contiguous. So: insert a simple multiplication
+            # loop instead.
             with _emit_loop_nest_for_shape(out_shape) as it_names:
                 substitutions = {
                     f"p{dim}": (s if isinstance(s, int) else f"_{s}")
