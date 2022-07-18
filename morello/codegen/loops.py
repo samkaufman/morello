@@ -77,7 +77,8 @@ def emit_tile_out_loop_nest(
                 )
             writer.indent()
 
-        BOUNDARY_ANCESTORS.set(BOUNDARY_ANCESTORS.get() + 1)
+        if loop_plan.is_boundary:
+            BOUNDARY_ANCESTORS.set(BOUNDARY_ANCESTORS.get() + 1)
         try:
             inner_codegen(
                 [
@@ -90,7 +91,8 @@ def emit_tile_out_loop_nest(
                 ]
             )
         finally:
-            BOUNDARY_ANCESTORS.set(BOUNDARY_ANCESTORS.get() - 1)
+            if loop_plan.is_boundary:
+                BOUNDARY_ANCESTORS.set(BOUNDARY_ANCESTORS.get() - 1)
         if len(loop_plan.subscripts_to_steps):
             writer.dedent()
             for _ in loop_plan.subscripts_to_steps:

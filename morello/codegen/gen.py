@@ -341,7 +341,10 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                 }
                 l, r, o = [vsub(d.index_expr, substitutions) for d in op_details]
                 l_ref, r_ref, o_ref = (d.c_tensor.c_index for d in op_details)
-                writer.writeline(f"{o_ref(o)} += {l_ref(l)} * {r_ref(r)};  /* Mult */")
+                writer.writeline(
+                    f"{o_ref(o)} += {l_ref(l)} * {r_ref(r)};"
+                    "  /* Mult (vec boundary) */"
+                )
         else:
             assert rhs_volume == 8, f"Expected volume of 8, but given {rhs_volume}"
             try:
