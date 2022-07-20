@@ -118,8 +118,10 @@ class ReduceSum(base.Spec):
         return (output_shape + (input_shapes[0][-1],),)
 
     @classmethod
-    def operands_dim_subscripts(cls) -> Sequence[tuple[int, ...]]:
-        return ((0, 1, 2, 3), (0, 1, 2))
+    def operands_dim_subscripts_cls(cls, operand_ranks: Sequence[int]) -> Sequence[tuple[int, ...]]:
+        inp_rank, out_rank = operand_ranks
+        assert inp_rank == out_rank + 1
+        return tuple(range(inp_rank)), tuple(range(out_rank))
 
     def __str__(self):
         epi = ""

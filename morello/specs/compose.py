@@ -1,7 +1,5 @@
-from ast import Import
-import dataclasses
 import functools
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Callable, Iterable, Sequence
 
 import cython
 
@@ -83,7 +81,7 @@ class Compose(base.Spec):
         self,
         inputs: tuple[TensorSpec, ...],
         output: TensorSpec,
-        serial_only = None,
+        serial_only=None,
     ) -> base.Spec:
         if serial_only is None:
             serial_only = self.serial_only
@@ -137,7 +135,7 @@ class Compose(base.Spec):
         return 1 + sum(c.inputs_count() for c in subspec_classes) - len(subspec_classes)
 
     def shrink_for_tile_out(
-        self, output_shape: tuple[int, ...], serial_only = None
+        self, output_shape: tuple[int, ...], serial_only=None
     ) -> base.Spec:
         # Forward pass to compute the initial input and output shapes for every subspec.
         # The initial input shapes  are used to resolve ambiguities in determining input
@@ -268,11 +266,18 @@ class Compose(base.Spec):
         max_seen = 0
         accum: list[tuple[int, ...]] = []
         last_out_subs = None
-        for kls in reversed(self.subspec_classes):  # start from innermost/first
+
+        listed_subspecs = list(self._list_subspecs())
+        listed_subspecs.reverse()
+        for compose_subspec in listed_subspecs:  # start from innermost/first:
+            kls = compose_subspec.kls
             # Increment subscripts immediately so that we can replace without
             # worrying about conflicts
+            kls_ranks = [len(inp) for inp in compose_subspec.inputs] + [
+                len(compose_subspec.output)
+            ]
             kls_subscripts = Compose._increment_dims_subscripts(
-                kls.operands_dim_subscripts(), max_seen
+                kls.operands_dim_subscripts_cls(kls_ranks), max_seen
             )
             if not accum:
                 accum += kls_subscripts[:-1]  # Drop the output only

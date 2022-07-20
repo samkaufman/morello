@@ -112,14 +112,18 @@ class ComposeHole(Impl):
         #   inner split and for gathering the right split.
         if allow_reduce_splits.get():
             for k in self.split_sizes():
-                for parallel in [False] if self.spec.serial_only else [True, False]:
-                    yield functools.partial(self.split, k, parallel=parallel)
+                yield functools.partial(self.split, k, parallel=False)
+                if not self.spec.serial_only:
+                    yield functools.partial(self.split, k, parallel=True)
 
     def _get_output_dimensions_matching_first_input(self) -> Iterable[int]:
-        """Returns the dimensions matching subscripts of the first head input."""
-        first_head_idx = -self.spec.subspec_classes[-1].inputs_count()
-        first_head_subs = self.spec.operands_dim_subscripts()[first_head_idx - 1]
-        output_subs = self.spec.operands_dim_subscripts()[-1]
+        """Returns the output dimensions zipped with the first head input."""
+        # Get the index of the Compose input which matches the first input to
+        # the innermost (first executed) Impl.
+        compose_subscripts = self.spec.operands_dim_subscripts()
+        first_head_idx = -self.spec.subspec_classes[-1].inputs_count() - 1
+        first_head_subs = compose_subscripts[first_head_idx]
+        output_subs = compose_subscripts[-1]
         for sub in first_head_subs:
             try:
                 yield output_subs.index(sub)

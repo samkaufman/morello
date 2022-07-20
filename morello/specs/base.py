@@ -115,8 +115,12 @@ class Spec:
     ) -> tuple[tuple[int, ...], ...]:
         raise NotImplementedError()
 
+    def operands_dim_subscripts(self) -> Sequence[tuple[int, ...]]:
+        operand_ranks = [len(o.dim_sizes) for o in self.operands]
+        return self.operands_dim_subscripts_cls(operand_ranks)
+
     @classmethod
-    def operands_dim_subscripts(cls) -> Sequence[tuple[int, ...]]:
+    def operands_dim_subscripts_cls(cls, operand_ranks: Sequence[int]) -> Sequence[tuple[int, ...]]:
         """Returns which dimensions are the same size between operands.
 
         More specifically, this returns an iterable of the same length as the

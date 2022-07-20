@@ -12,7 +12,7 @@ from typing import Iterable, Optional, Union
 from .. import dtypes, layouts, specs
 from ..codegen import gen
 from ..layouts import Layout
-from ..tensor import Tensor, Tile
+from ..tensor import Tensor
 from .base import MemoryBankConfig, RunResult, SystemDescription, Target
 
 _OUTPUT_RE = re.compile(r"cpu:\s+(\d+)s\s*(\d+)ns")

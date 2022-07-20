@@ -89,7 +89,7 @@ class Matmul(base.Spec):
         return ((m, k), (k, n))
 
     @classmethod
-    def operands_dim_subscripts(cls) -> Sequence[tuple[int, ...]]:
+    def operands_dim_subscripts_cls(cls, operand_ranks: Sequence[int]) -> Sequence[tuple[int, ...]]:
         return ((0, 2), (2, 1), (0, 1))
 
     def __str__(self):

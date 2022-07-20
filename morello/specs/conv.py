@@ -111,7 +111,7 @@ class Convolution(base.Spec):
         return (smaller_lhs_dims, smaller_rhs_dims)
 
     @classmethod
-    def operands_dim_subscripts(cls) -> Sequence[tuple[int, ...]]:
+    def operands_dim_subscripts_cls(cls, operand_ranks: Sequence[int]) -> Sequence[tuple[int, ...]]:
         # Currently, this supports just 2 dimensions.
         # TODO: Extend this to arbitrary number of spatial dimensions.
         b, f, c, h, w, fh, fw = 0, 1, 2, 3, 4, 5, 6
