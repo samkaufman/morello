@@ -265,36 +265,15 @@ class Impl:
         return dataclasses.replace(self, inner=self.inner.split_filters(k))
 
     @assert_stable_spec
-    def place_mult(self, *args, **kwargs):
-        if len(self.children) != 1:
-            raise NotImplementedError()
-        return self.replace_children(
-            [next(iter(self.children)).place_mult(*args, **kwargs)]
-        )
-
-    @assert_stable_spec
-    def place_broadcastvecmult(self, *args, **kwargs):
-        if len(self.children) != 1:
-            raise NotImplementedError()
-        return self.replace_children(
-            [next(iter(self.children)).place_broadcastvecmult(*args, **kwargs)]
-        )
-
-    @assert_stable_spec
-    def place_hvx_vrmpyacc(self, *args, **kwargs):
-        if len(self.children) != 1:
-            raise NotImplementedError()
-        return self.replace_children(
-            [next(iter(self.children)).place_hvx_vrmpyacc(*args, **kwargs)]
-        )
-
-    @assert_stable_spec
-    def place_hvx_gemvmpebbw(self, *args, **kwargs):
-        if len(self.children) != 1:
-            raise NotImplementedError()
-        return self.replace_children(
-            [next(iter(self.children)).place_hvx_gemvmpebbw(*args, **kwargs)]
-        )
+    def place(self, leaf_cls, *args, **kwargs):
+        if len(self.children) == 0:
+            return leaf_cls(self.spec, *args, **kwargs)
+        elif len(self.children) == 1:
+            return self.replace_children(
+                [next(iter(self.children)).place(leaf_cls, *args, **kwargs)]
+            )
+        else:
+            raise ValueError("Multiple children. Leaf-to-replace is ambiguous.")
 
     def move_input(
         self,

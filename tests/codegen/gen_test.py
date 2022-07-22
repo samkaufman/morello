@@ -12,6 +12,7 @@ from hypothesis import strategies as st
 import morello.impl.actions
 import morello.impl.base
 import morello.impl.compose
+from morello.impl.matmuls import HvxGemvmpybbwAsm
 import morello.impl.moves
 from morello import dtypes, layouts, op_pprint, specs, system_config, tensor, utils
 from morello.codegen import indexexpr
@@ -525,7 +526,7 @@ def test_codegen_for_matmul_with_hvx_gemvmpebbw_with_aligned_k_without_split(
             .pad_transpack(1)
             .move_input(1, bank="L2")
             .move_output(bank="L2")
-            .place_hvx_gemvmpebbw()
+            .place(HvxGemvmpybbwAsm)
         )
 
         inp_values = [

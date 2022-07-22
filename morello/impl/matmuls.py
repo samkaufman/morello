@@ -1,4 +1,5 @@
 import dataclasses
+import functools
 import warnings
 from typing import Callable, Iterable, Optional, Sequence
 
@@ -59,14 +60,14 @@ class MatmulHole(MatmulBase):
         yield from common_operand_move_actions(self)
 
         if Mult.applies_to_operands(self.spec.operands):
-            yield self.place_mult
+            yield functools.partial(self.place, Mult)
 
         if BroadcastVecMult.applies_to_operands(self.spec.operands):
-            yield self.place_broadcastvecmult
+            yield functools.partial(self.place, BroadcastVecMult)
 
         if system_config.current_system().has_hvx:
             if HvxVrmpyaccVuwVubRub.applies_to_operands(self.spec.operands):
-                yield self.place_hvx_vrmpyacc
+                yield functools.partial(self.place, HvxVrmpyaccVuwVubRub)
 
     def move_input(
         self,
@@ -172,23 +173,7 @@ class MatmulHole(MatmulBase):
         next_general_out = system.next_general_bank(self.spec.output.bank)
         if next_general_out:
             return self.move_output(bank=next_general_out).complete()
-        return self.place_mult()
-
-    @assert_stable_spec
-    def place_mult(self) -> "Mult":
-        return Mult(self.spec)
-
-    @assert_stable_spec
-    def place_broadcastvecmult(self) -> "BroadcastVecMult":
-        return BroadcastVecMult(self.spec)
-
-    @assert_stable_spec
-    def place_hvx_gemvmpebbw(self) -> "HvxGemvmpybbwAsm":
-        return HvxGemvmpybbwAsm(self.spec)
-
-    @assert_stable_spec
-    def place_hvx_vrmpyacc(self) -> "HvxVrmpyaccVuwVubRub":
-        return HvxVrmpyaccVuwVubRub(self.spec)
+        return self.place(Mult)
 
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
         return make_applied_impl(self, operands)
