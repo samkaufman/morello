@@ -61,10 +61,12 @@ class TensorSpec:
             raise ValueError("dim_sizes cannot be empty")
         if all(d == 1 for d in self.dim_sizes):
             if not self.contiguous:
-                raise ValueError("If all dimensions are 1, TensorSpec must be contiguous")
+                raise ValueError(
+                    "If all dimensions are 1, TensorSpec must be contiguous"
+                )
             if not self.layout.is_row_major:
                 raise ValueError("If all dimensions are 1, layout must be row-major")
-        
+
         if not self.layout.applies_to_shape(dim_sizes, dtype):
             raise ValueError(
                 f"Layout {self.layout} does not apply to shape {dim_sizes} with"
@@ -76,7 +78,9 @@ class TensorSpec:
 
         If new_dim_sizes is all ones, the layout may be changed to row-major.
         """
-        contiguous = utils.contiguous_approx(new_dim_sizes, self.layout, self)
+        contiguous = self.layout.check_tile_contiguity(
+            new_dim_sizes, self.dim_sizes, self.contiguous
+        )
         aligned = utils.aligned_approx(new_dim_sizes, self.layout, self)
 
         new_layout = self.layout

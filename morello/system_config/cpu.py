@@ -112,17 +112,20 @@ class CpuTarget(Target):
 
             # TODO: Don't need to link OpenMP if the Impl has no parallel loops.
             extra_clang_args = extra_clang_args or []
-            clang_cmd = [
-                str(_clang_path())] + list(extra_clang_args) + [
-                "-mavx2",
-                "-std=gnu99",
-                "-fopenmp",
-                "-O3",
-                "-o",
-                binary_path,
-                source_path,
-                "-lrt",
-            ]
+            clang_cmd = (
+                [str(_clang_path())]
+                + list(extra_clang_args)
+                + [
+                    "-mavx2",
+                    "-std=gnu99",
+                    "-fopenmp",
+                    "-O3",
+                    "-o",
+                    binary_path,
+                    source_path,
+                    "-lrt",
+                ]
+            )
             clang_proc = await asyncio.create_subprocess_exec(*clang_cmd)
             await clang_proc.wait()
             if clang_proc.returncode != 0:
@@ -155,13 +158,16 @@ class CpuTarget(Target):
 
             return RunResult(stdout, stderr)
 
-    async def time_impl(self, impl, return_source=False) -> Union[float, tuple[float, str]]:
+    async def time_impl(
+        self, impl, return_source=False
+    ) -> Union[float, tuple[float, str]]:
         """Executes and benchmarks an Impl on the local machine using Clang.
 
         Returns the time in seconds. Measured by executing BENCH_ITERS times and
         returning the mean.
         """
         source_code = None
+
         def cb(s):
             nonlocal source_code
             if return_source:

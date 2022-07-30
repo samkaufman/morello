@@ -230,10 +230,13 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
         if o in d.previously_transformed_tiles:
             transformed_op_details.append(d)
             continue
-        transformed_op_details.append(dataclasses.replace(
-            d, concrete_origin_shape=o.transform_origin_shape(d.concrete_origin_shape),
-            previously_transformed_tiles=d.previously_transformed_tiles | {o},
-        ))
+        transformed_op_details.append(
+            dataclasses.replace(
+                d,
+                concrete_origin_shape=o.transform_origin_shape(d.concrete_origin_shape),
+                previously_transformed_tiles=d.previously_transformed_tiles | {o},
+            )
+        )
     op_details = transformed_op_details
 
     if isinstance(imp, impl.Loop):
@@ -250,7 +253,12 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
             imp.inner.operands,
             [
                 OperandDetailsLoopExt(
-                    o.c_tensor, o.index_expr, o.concrete_origin_shape, o.previously_transformed_tiles, op_subs, inner_op
+                    o.c_tensor,
+                    o.index_expr,
+                    o.concrete_origin_shape,
+                    o.previously_transformed_tiles,
+                    op_subs,
+                    inner_op,
                 )
                 for o, op_subs, inner_op in zip(
                     op_details,
@@ -286,7 +294,9 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
             assert isinstance(stage.output, Tensor)
 
             new_c_buf = _make_buffer(
-                stage.spec.output.volume, stage.spec.output.dtype, stage.spec.output.bank
+                stage.spec.output.volume,
+                stage.spec.output.dtype,
+                stage.spec.output.bank,
             ).emit()
             cur_out = _pipeline_emit_stage(
                 stage, inps_op_details[cur_slice], new_c_buf, cur_out, None
@@ -561,8 +571,10 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
 
         new_op_details = list(op_details)
         new_op_details[imp.input_idx] = OperandDetails(
-            result, result_index_expr, concrete_shape,
-            new_op_details[imp.input_idx].previously_transformed_tiles
+            result,
+            result_index_expr,
+            concrete_shape,
+            new_op_details[imp.input_idx].previously_transformed_tiles,
         )
 
         op_txt = op_details[imp.input_idx].c_tensor.c_index_ptr(
@@ -621,7 +633,9 @@ def _pipeline_emit_stage(
     cur_c_tensors = [d.c_tensor for d in input_operand_details] + [output_c_tensor]
     cur_index_exprs = [d.index_expr for d in input_operand_details]
     cur_concrete_shapes = [d.concrete_origin_shape for d in input_operand_details]
-    cur_prev_transformeds = [d.previously_transformed_tiles for d in input_operand_details]
+    cur_prev_transformeds = [
+        d.previously_transformed_tiles for d in input_operand_details
+    ]
     if previous_output:
         cur_c_tensors.insert(0, previous_output.c_tensor)
         cur_index_exprs.insert(0, previous_output.index_expr)
@@ -651,12 +665,19 @@ def _pipeline_emit_stage(
         stage,
         [
             OperandDetails(ct, ie, shp, p)
-            for ct, ie, shp, p in zip(cur_c_tensors, cur_index_exprs, cur_concrete_shapes, cur_prev_transformeds)
+            for ct, ie, shp, p in zip(
+                cur_c_tensors,
+                cur_index_exprs,
+                cur_concrete_shapes,
+                cur_prev_transformeds,
+            )
         ],
     )
     return OperandDetails(
-        cur_c_tensors[-1], cur_index_exprs[-1], cur_concrete_shapes[-1],
-        cur_prev_transformeds[-1]
+        cur_c_tensors[-1],
+        cur_index_exprs[-1],
+        cur_concrete_shapes[-1],
+        cur_prev_transformeds[-1],
     )
 
 
@@ -750,7 +771,7 @@ def _move_hvx_vmem(
     c_tensors: Sequence[CTensor],
     operand_index_exprs,
     concrete_shapes,
-    previously_transformeds
+    previously_transformeds,
 ):
     writer = common.writer.get()
 
@@ -792,7 +813,12 @@ def _move_hvx_vmem(
             imp.inner,
             [
                 OperandDetails(*t)
-                for t in zip(new_c_tensors, new_operand_index_exprs, concrete_shapes, previously_transformeds)
+                for t in zip(
+                    new_c_tensors,
+                    new_operand_index_exprs,
+                    concrete_shapes,
+                    previously_transformeds,
+                )
             ],
         )
         common.unroll.reset(unroll_token)
@@ -872,8 +898,9 @@ def _iter_vectors(
 
     # Approximate whether or not the tiles are contiguous in the backing address space.
     contiguous = destination.layout.check_tile_contiguity(
+        destination.vector_shape,
         destination.address_root.dim_sizes,
-        destination.vector_shape
+        destination.address_root.contiguous,
     )
 
     return exprs, contiguous
@@ -1292,7 +1319,9 @@ def generate_c(
                         f"{c_buf.c_index(idx)} = ({operand.dtype.c_type})({el});"
                     )
             elif mode == "benchmark":
-                writer.writeline(f"for (unsigned long idx = 0; idx < {c_buf.size}; ++idx)")
+                writer.writeline(
+                    f"for (unsigned long idx = 0; idx < {c_buf.size}; ++idx)"
+                )
                 writer.writeline(
                     f"  {c_buf.c_index(sympy.symbols('_idx'))} = ({operand.dtype.c_type})rand();"
                 )

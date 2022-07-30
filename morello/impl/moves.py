@@ -181,7 +181,11 @@ def _move_arguments(
     # layout. Otherwise, all layouts are available.
     allowable_layouts = [layouts.row_major(len(operand.dim_sizes))]
     if any(d > 1 for d in operand.dim_sizes):
-        allowable_layouts = [l for l in target.all_layouts_for_shape(operand.dim_sizes) if l.applies_to_shape(operand.dim_sizes, operand.dtype)]
+        allowable_layouts = [
+            l
+            for l in target.all_layouts_for_shape(operand.dim_sizes)
+            if l.applies_to_shape(operand.dim_sizes, operand.dtype)
+        ]
 
     # TODO: Moves into HEXAGON_TRANSPACKED are handled by pad_transpack, not
     #   move_{input, output} at the moment.
@@ -258,7 +262,9 @@ def common_move(
     contiguous = True
     aligned = True
     if bank not in current_system().addressed_banks:
-        contiguous = utils.contiguous_approx(operand.dim_sizes, layout, operand)
+        contiguous = layout.check_tile_contiguity(
+            operand.dim_sizes, operand.dim_sizes, operand.contiguous
+        )
         aligned = utils.aligned_approx(operand.dim_sizes, layout, operand)
 
     new_mat = current_target().tensor(

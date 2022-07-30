@@ -18,7 +18,7 @@ def dim_st(draw, max_size: Optional[int] = None) -> int:
 @st.composite
 def layout_st(
     draw,
-    dtype = None,
+    dtype=None,
     numels_ones: Optional[bool] = None,
     dim_sizes: Optional[tuple[int, ...]] = None,
 ) -> layouts.Layout:
@@ -51,6 +51,7 @@ def tensorspec_st(
     min_dims: int = 1,
     max_dims: Optional[int] = None,
     layout_fn: Optional[Callable[[int], layouts.Layout]] = None,
+    contiguous: Optional[bool] = None,
 ) -> specs.TensorSpec:
     target = system_config.current_target()
 
@@ -60,14 +61,19 @@ def tensorspec_st(
         ).map(tuple)
     )
     dtype = draw(st.from_type(dtypes.Dtype))
+
     if layout_fn is None:
         layout = draw(layout_st(dim_sizes=dim_sizes, dtype=dtype))
     else:
         layout = layout_fn(len(dim_sizes))
+
+    if contiguous is None:
+        contiguous = all(d == 1 for d in dim_sizes) or draw(st.booleans())
+
     return target.tensor_spec(
         dim_sizes,
         dtype=dtype,
-        contiguous=all(d == 1 for d in dim_sizes) or draw(st.booleans()),
+        contiguous=contiguous,
         layout=layout,
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )

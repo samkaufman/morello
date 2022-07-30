@@ -46,43 +46,13 @@ def flatten(src):
             yield el
 
 
-def contiguous_approx(
-    tile_shape: Sequence[int], tile_layout: "layouts.Layout", parent: "specs.TensorSpec"
-) -> bool:
-    """Test whether a tiling breaks contiguousness.
-
-    This is usually used in place of `contiguous`. It has the benefit of being
-    compositional in Impl, but cannot "recover" contiguousness in cases where
-    a tiling degenerates a dimension (e.g., [4, 4] -> [4, 2] -> [1, 2]), unless
-    the new tile has just one value.
-
-    :param tile_shape: The shape of the new tile to test.
-    :param tile_layout: The layout of the new tile to test.
-    :param parent: The spec of the tensorlike being tiled.
-    :returns: `True` if both the parent and its new tile can be determined to be
-      contiguous. `False` otherwise.
-    """
-    if parent.layout != tile_layout:
-        raise ValueError(
-            f"Only supports same-layout TensorSpecs, but given"
-            f" {parent.layout} and {tile_layout}"
-        )
-    if all(d == 1 for d in tile_shape):
-        return True
-    if not parent.contiguous:
-        return False
-    return tile_layout.check_tile_contiguity(parent.dim_sizes, tile_shape)
-
-
 def aligned_approx(
     tile_shape: Sequence[int], tile_layout: "layouts.Layout", parent: "specs.TensorSpec"
 ) -> bool:
     """Test whether a tiling breaks alignment.
 
-    This is usually used to determine whether a TensorSpec is aligned. Like
-    `contiguous_approx`, it is compositional in Impl, but cannot "recover" alignment
-    in cases where a tiling would drop and then recover alignment
-    (e.g., 128 -> 127 -> 64).
+    It may report some aligned tilings as unaligned, but may never report an unaligned
+    tiling as aligned.
     """
     if parent.layout != tile_layout:
         raise ValueError(
