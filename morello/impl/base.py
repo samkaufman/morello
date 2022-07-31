@@ -31,13 +31,10 @@ class Impl:
             for child in self.children:
                 yield from child.leaves
 
+    @typing.final
     @property
     def depth(self) -> int:
-        # TODO: Relying on reflection is pretty brittle
-        inners = []
-        if hasattr(self, "inner"):
-            inners.append(getattr(self, "inner"))
-        return 1 + sum(s.depth for s in inners)
+        return 1 + max((c.depth for c in self.children), default=0)
 
     @property
     def is_scheduled(self) -> bool:
@@ -50,12 +47,6 @@ class Impl:
             f"Not implemented for {type(self).__name__}. (This method should "
             "be implemented for holes.)"
         )
-
-    @typing.final
-    def replace_child(self, child_idx: int, new_child: "Impl") -> "Impl":
-        replacements = list(self.children)
-        replacements[child_idx] = new_child
-        return self.replace_children(replacements)
 
     def replace_children(self, replacements: Iterable["Impl"]) -> "Impl":
         raise NotImplementedError()
@@ -283,7 +274,7 @@ class Impl:
         prefetching: bool = False,
         **kwargs,
     ) -> "Impl":
-        raise NotImplementedError()
+        raise NotImplementedError(f"Not implemented for {type(self)}")
 
     def move_output(
         self,
@@ -292,7 +283,7 @@ class Impl:
         prefetching: bool = False,
         **kwargs,
     ) -> "Impl":
-        raise NotImplementedError()
+        raise NotImplementedError(f"Not implemented for {type(self)}")
 
     def pad_transpack(self, input_idx: int) -> "Impl":
         raise NotImplementedError(f"Unimplemented for {type(self).__name__}")
@@ -306,7 +297,7 @@ class Impl:
 
     @assert_stable_spec
     def complete(self) -> "Impl":
-        return dataclasses.replace(self, inner=self.inner.complete())
+        return self.replace_children(c.complete() for c in self.children)
 
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
         raise NotImplementedError()
@@ -327,7 +318,7 @@ class Impl:
     @property
     def peak_memory(self) -> dict[str, int]:
         raise NotImplementedError()
-    
+
     @property
     def operands_subscripts(self) -> Sequence[tuple[int, ...]]:
         return self.spec.operands_dim_subscripts()
@@ -446,6 +437,7 @@ def spec_to_hole(spec: specs.Spec) -> "Impl":
     from .directconv import DirectConv
     from .matmuls import MatmulHole
     from .reducesum import ReduceSum
+    from .moves import LoadHole, StoreHole
 
     if isinstance(spec, specs.Convolution):
         return DirectConv(spec)
@@ -455,5 +447,9 @@ def spec_to_hole(spec: specs.Spec) -> "Impl":
         return ReduceSum(spec)
     elif isinstance(spec, specs.Compose):
         return ComposeHole(spec)
+    elif isinstance(spec, specs.Load):
+        return LoadHole(spec)
+    elif isinstance(spec, specs.Store):
+        return StoreHole(spec)
     else:
         raise NotImplementedError()

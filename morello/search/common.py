@@ -110,7 +110,7 @@ def _double_result(action):
 
 @dataclasses.dataclass(frozen=True)
 class _WrappedRecurAction:
-    # This class could just be a partially applied, (nullary) function, but
+    # This class could just be a partially applied (nullary) function, but
     # debugging is a lot easier with a custom __str__ implementation.
     root: "Impl"
     include_inner_impl: bool
@@ -120,10 +120,14 @@ class _WrappedRecurAction:
     def __call__(self) -> Any:
         if self.include_inner_impl:
             new_impl, inner_impl = self.action()
-            r = self.root.replace_child(self.idx, new_impl)
+            children = list(self.root.children)
+            children[self.idx] = new_impl
+            r = self.root.replace_children(children)
             return r, inner_impl
         else:
-            return self.root.replace_child(self.idx, self.action())
+            children = list(self.root.children)
+            children[self.idx] = self.action()
+            return self.root.replace_children(children)
 
     def __str__(self) -> str:
         return f"R[{self.action}]"

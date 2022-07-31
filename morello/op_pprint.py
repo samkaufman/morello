@@ -23,7 +23,9 @@ def _build_table(
 ) -> None:
     system = current_system()
     ds = " " * (indent_depth * 2)
-    new_row = [f"{ds}{_env_str(op, tensor_name_fn, underscore_inner=True, color=color)}"]
+    new_row = [
+        f"{ds}{_env_str(op, tensor_name_fn, underscore_inner=True, color=color)}"
+    ]
     if show_spec:
         new_row.append(str(op.spec))
     if cost_dict:
@@ -51,7 +53,6 @@ def _build_table(
         for child in op.children:
             if not isinstance(child, impl.Impl):
                 continue
-            should_indent = not isinstance(op, impl.MoveLet)
             _build_table(
                 child,
                 show_spec,
@@ -60,16 +61,9 @@ def _build_table(
                 show_scheduled,
                 table,
                 tensor_name_fn,
-                indent_depth + 1 if should_indent else indent_depth,
+                indent_depth + 1,
                 color=color,
             )
-
-    # As the stack unwinds, insert a "store" line if this was a Move for an output
-    if isinstance(op, impl.MoveLet) and op.is_store:
-        store_row = [f"{ds}{_store_env_str(op, tensor_name_fn, color=color)}"]
-        while len(store_row) < len(table[-1]):
-            store_row.append("")
-        table.append(store_row)
 
 
 def _whitespace_preserving_tabulate(*args, **kwargs):
@@ -141,22 +135,6 @@ def _env_str(
         return f"{type(imp).__name__}({operands_str})"
     else:
         raise ValueError(f"Unsupported type: {type(imp)}")
-
-
-def _store_env_str(
-    op,
-    name_tensor_fn: Callable[[tensor.TensorLike], str],
-    color: bool = False,
-):
-    keyword = "store"
-    arrow = "<-"
-    if color:
-        keyword = termcolor.colored(keyword, attrs=["bold"])
-        arrow = termcolor.colored(arrow, attrs=["bold"])
-    return (
-        f"{keyword} {name_tensor_fn(op.operands[op.source_idx])}"
-        f" {arrow} {name_tensor_fn(op.destination)}"
-    )
 
 
 def _loop_operand_str(

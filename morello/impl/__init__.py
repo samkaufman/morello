@@ -16,7 +16,7 @@ from .matmuls import (
     MatmulHole,
     Mult,
 )
-from .moves import MoveLet, PadTranspack
+from .moves import MoveLet, PadTranspack, ValueAssign, CacheAccess
 from .pruning import ParentSummary
 from .reducesum import ReduceSum
 from .settings import (
@@ -38,6 +38,7 @@ __all__ = [
     "BREAK_MOVE_SYMMETRIES",
     "BREAK_SEQUENTIAL_TILES",
     "BroadcastVecMult",
+    "CacheAccess",
     "ComposeHole",
     "DirectConv",
     "HvxGemvmpybbwAsm",
@@ -61,4 +62,5 @@ __all__ = [
     "tile_size_mode",
     "TileOutAction",
     "TileSizeMode",
+    "ValueAssign",
 ]

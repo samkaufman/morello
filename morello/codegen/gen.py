@@ -217,7 +217,9 @@ def _emit_loop_nest_for_shape(shape: Sequence[int]):
 
 def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails]):
     assert imp.is_scheduled
-    assert len(op_details) == len(imp.inputs) + 1
+    assert len(op_details) == len(
+        imp.operands
+    ), f"Expected {len(imp.operands)} OperandDetails, got {len(op_details)}"
 
     namer, writer = common.namer.get(), common.writer.get()
 
@@ -261,9 +263,7 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                     inner_op,
                 )
                 for o, op_subs, inner_op in zip(
-                    op_details,
-                    imp.operands_subscripts,
-                    tiled_operands,
+                    op_details, imp.operands_subscripts, tiled_operands,
                 )
             ],
             imp.parallel,
@@ -322,18 +322,12 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
     elif isinstance(imp, impl.Mult):
         l_ref, r_ref, o_ref = (d.c_tensor.c_index for d in op_details)
         l, r, o = (d.index_expr for d in op_details)
-        # Zeroing the points below is safe because these Impls are applied only
-        # to contiguous TensorSpecs. Zeroing produces a reference to the
-        # beginning of those buffers.
         l = expr_utils.zero_points(l)
         r = expr_utils.zero_points(r)
         o = expr_utils.zero_points(o)
         writer.writeline(f"{o_ref(o)} += {l_ref(l)} * {r_ref(r)};  /* Mult */")
     elif isinstance(imp, impl.BroadcastVecMult):
         l, r, o = (d.index_expr for d in op_details)
-        # Zeroing the points below is safe because these Impls are applied only
-        # to contiguous TensorSpecs. Zeroing produces a reference to the
-        # beginning of those buffers.
         r = expr_utils.zero_points(r)
         o = expr_utils.zero_points(o)
         out_shape = op_details[2].concrete_origin_shape
@@ -439,8 +433,8 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
     elif isinstance(imp, impl.MoveLet):
         source_idx = imp.source_idx
         assert (
-            imp.inner.operands[source_idx] is imp.destination
-        ), "MoveLet's inner Impl does not use destination tensor"
+            imp.body.operands[source_idx] is imp.destination
+        ), "MoveLet's body Impl does not use destination tensor"
 
         # TODO: Remove the following "destructuring" of OperandDetails
         operand_index_exprs = [d.index_expr for d in op_details]
@@ -453,20 +447,20 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
             if not imp.is_store and imp.destination.bank == "L2":
                 assert imp.source.bank == "GL"
                 _emit_hvx_l2fetch(imp, imp.is_store, op_details[source_idx])
-                _inner_generate_c(imp.inner, op_details)
+                _inner_generate_c(imp.body, op_details)
             # HVX scalar L1/dc-to-register case
             elif not imp.is_store and imp.destination.bank == "L1":
                 assert imp.source.bank == "L2"
                 _emit_hvx_dcfetch(imp, imp.operands[source_idx], op_details[source_idx])
-                _inner_generate_c(imp.inner, op_details)
+                _inner_generate_c(imp.body, op_details)
             elif imp.is_store and imp.destination.bank == "L2":
                 # Generate no code for moves from L2 to global.
                 assert imp.source.bank == "GL"
-                _inner_generate_c(imp.inner, op_details)
+                _inner_generate_c(imp.body, op_details)
             elif imp.is_store and imp.destination.bank == "L1":
                 # Generate no code for writing from L1 back to L2
                 assert imp.source.bank == "L2"
-                _inner_generate_c(imp.inner, op_details)
+                _inner_generate_c(imp.body, op_details)
             elif imp.destination.bank == "VMEM":
                 assert imp.source.bank == "L2"
                 _move_hvx_vmem(
@@ -596,6 +590,15 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
         _inner_generate_c(imp.inner, new_op_details)
         writer.writeline(f"free({result.name});")
         writer.writeline(f"free({struct_name});")
+    elif isinstance(imp, impl.ValueAssign):
+        l_ref, o_ref = (d.c_tensor.c_index for d in op_details)
+        l, o = (d.index_expr for d in op_details)
+        l = expr_utils.zero_points(l)
+        o = expr_utils.zero_points(o)
+        if imp.is_store:
+            writer.writeline(f"{l_ref(l)} = {o_ref(o)};  /* ValueAssign */")
+        else:
+            writer.writeline(f"{o_ref(o)} = {l_ref(l)};  /* ValueAssign */")
     else:
         raise NotImplementedError(f"Not implemented for {type(imp).__name__}")
 
@@ -914,55 +917,49 @@ def _move_registers(
     concrete_shapes,
     previously_transformeds,
 ):
-    assert (source_idx < len(impl.operands) - 1) == (not impl.is_store)
-    assert (source_idx >= len(impl.operands) - 1) == impl.is_store
-
     dest_c_buf = _make_buffer(
         functools.reduce(operator.mul, concrete_shapes[source_idx], 1),
         impl.destination.dtype,
         impl.destination.bank,
     ).emit()
 
-    # TODO: All of the below could be one OperandDetails update
-
-    new_operand_index_exprs = list(operand_index_exprs)
-    # TODO: Do we need to call this both here and in _emit_assignment_copy?
-    new_operand_index_exprs[source_idx] = impl.destination.layout.buffer_indexing_expr(
-        concrete_shapes[source_idx]
-    )
-
-    new_concrete_shapes = list(concrete_shapes)
-    new_concrete_shapes[source_idx] = concrete_shapes[source_idx]
-
     destination_index_expr = impl.destination.layout.buffer_indexing_expr(
         concrete_shapes[source_idx]
     )
 
-    with _emit_assignment_copy(
-        impl.operands[impl.source_idx],
-        impl.destination,
-        operand_index_exprs[source_idx],
-        destination_index_expr,
-        concrete_shapes[source_idx],
-        c_tensors[source_idx],
-        dest_c_buf,
-        is_input=(not impl.is_store),
-        is_output=impl.is_store,
-    ):
-        new_c_tensors = list(c_tensors)
-        new_c_tensors[source_idx] = dest_c_buf
-        _inner_generate_c(
-            impl.inner,
-            [
-                OperandDetails(c_tensor, idx_expr, shape, p)
-                for c_tensor, idx_expr, shape, p in zip(
-                    new_c_tensors,
-                    new_operand_index_exprs,
-                    new_concrete_shapes,
-                    previously_transformeds,
-                )
-            ],
+    body_operand_details = []
+    for i in range(len(impl.body.operands)):
+        body_operand_details.append(
+            OperandDetails(
+                dest_c_buf if i == source_idx else c_tensors[i],
+                destination_index_expr if i == source_idx else operand_index_exprs[i],
+                concrete_shapes[i],
+                previously_transformeds[i],
+            )
         )
+
+    move_operand_details = [
+        OperandDetails(
+            c_tensors[source_idx],
+            operand_index_exprs[source_idx],
+            concrete_shapes[source_idx],
+            previously_transformeds[source_idx],
+        ),
+        OperandDetails(
+            dest_c_buf,
+            destination_index_expr,
+            concrete_shapes[source_idx],
+            previously_transformeds[source_idx],
+        ),
+    ]
+
+    if impl.prologue:
+        _inner_generate_c(impl.prologue, move_operand_details)
+    _inner_generate_c(impl.body, body_operand_details)
+    if impl.epilogue:
+        _inner_generate_c(impl.epilogue, move_operand_details)
+
+    dest_c_buf.emit_free()
 
 
 def generate_c(
@@ -1295,9 +1292,7 @@ def generate_c(
         operand_details = [
             OperandDetails(CPtr(c_buf.name, c_buf), index_expr, shape, frozenset())
             for c_buf, index_expr, shape in zip(
-                c_tensors,
-                index_exprs,
-                (op.dim_sizes for op in imp.spec.operands),
+                c_tensors, index_exprs, (op.dim_sizes for op in imp.spec.operands),
             )
         ]
         _inner_generate_c(imp, operand_details)

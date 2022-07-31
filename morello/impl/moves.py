@@ -1,14 +1,23 @@
 import dataclasses
 import functools
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Literal, Optional, Callable, Sequence, Union
 
 from .. import layouts, specs, system_config, utils
+from .pruning import (
+    ParentSummary,
+    break_matmul_split_symmetries,
+    break_moves_symmetries,
+    break_tile_out_symmetries,
+    prune_nested_parallel_loops,
+    prune_relayout_cycles,
+)
 from ..layouts import Layout
+from .actions import TileOutAction
 from ..system_config import current_system, current_target
-from ..tensor import Tensor, TensorLike
+from ..tensor import TensorBase, Tensor, TensorLike
 from . import MoveAction
-from .base import AppliedImpl, Impl, make_applied_impl
-from .utils import assert_stable_spec, gen_vector_shapes
+from .base import AppliedImpl, Impl, Leaf, NonAllocatingLeaf, make_applied_impl
+from .utils import assert_stable_spec, gen_vector_shapes, gen_tile_sizes
 
 
 class _OperandWrapper(Impl):
@@ -18,7 +27,7 @@ class _OperandWrapper(Impl):
 
     @property
     def is_scheduled(self) -> bool:
-        return self.inner.is_scheduled  # type: ignore
+        return all(c.is_scheduled for c in self.children)
 
     @assert_stable_spec
     def replace_children(self, replacements: Iterable[Impl]) -> Impl:
@@ -56,62 +65,91 @@ class _OperandWrapper(Impl):
     def complete(self) -> Impl:
         return self.replace_children((self.children[0].complete(),))
 
-    def _spec_with_replaced_operand(
-        self, to_replace: TensorLike, replacement: TensorLike
-    ) -> specs.Spec:
-        # The spec of a MoveLet can be calculated by taking the spec of the inner
-        # schedule and replacing the right inputs/output of the spec with the source
-        # tensor's spec.
-        new_input_specs = []
-        for inp in self.inner.inputs:
-            if inp is to_replace:
-                new_input_specs.append(replacement.spec)
-            else:
-                new_input_specs.append(inp.spec)
-
-        new_output_spec = self.inner.output.spec
-        if self.inner.output is to_replace:
-            new_output_spec = replacement.spec
-
-        return self.inner.spec.replace_io(tuple(new_input_specs), new_output_spec)
-
 
 @dataclasses.dataclass(frozen=True)
-class MoveLet(_OperandWrapper):
-    """A Move operation composed with some subsequent Impl."""
+class MoveLet(Impl):
+    """A Move operation composed with some subsequent Impl.
+    
+    This Impl corresponds to the following (pseudocode) fragment:
+
+    ```
+    (source, ...) => {
+        let n = prologue(source);
+        inner(n, ...);
+        epilogue(source, n);
+    })
+    ```
+
+    For loads, prologue is generally the load and the epilogue is a no-op
+    (`None` here). For stores, the prologue is a load or allocation and the
+    epilogue writes data back to the source.
+    """
 
     spec: specs.Spec
     source_idx: int
-    destination: Tensor
-    input_idx: Optional[int]
+    destination: TensorBase
     prefetching: bool
-    inner: Impl
+    prologue: Optional[Impl]
+    body: Impl
+    epilogue: Optional[Impl]
 
     def __post_init__(self):
         assert self.source_idx >= 0
-        assert (
-            self.inner.spec.operands[(-1 if self.input_idx is None else self.input_idx)]
-            == self.destination.spec
-        )
         assert self.destination.layout != layouts.HEXAGON_TRANSPACKED
-        # TODO: Assert that the inner Spec is expected..
 
     @property
     def is_store(self) -> bool:
-        return self.source_idx == len(self.spec.inputs)
+        # TODO: This is a heuristic. Shouldn't be needed.
+        return self.epilogue is not None
+
+    @property
+    def children(self) -> tuple[Impl, ...]:
+        return tuple(getattr(self, name) for name in self._filled_children_names())
+
+    @property
+    def is_scheduled(self) -> bool:
+        return all(c.is_scheduled for c in self.children)
+
+    @assert_stable_spec
+    def replace_children(self, replacements: Iterable[Impl]) -> Impl:
+        filled_children = list(self._filled_children_names())
+        replacements = list(replacements)
+        if len(replacements) != len(filled_children):
+            raise ValueError(
+                f"{len(filled_children)} children expected; got " f"{len(replacements)}"
+            )
+        return dataclasses.replace(self, **dict(zip(filled_children, replacements)))
+    
+    def move_input(self, *args, **kwargs):
+        return dataclasses.replace(self, body=self.body.move_input(*args, **kwargs))
+        
+    def move_output(self, *args, **kwargs):
+        return dataclasses.replace(self, body=self.body.move_output(*args, **kwargs))
+
+    @assert_stable_spec
+    def complete(self) -> Impl:
+        return self.replace_children((c.complete() for c in self.children))
 
     @property
     def additional_memories(self) -> list[dict[str, int]]:
-        mem = {k: 0 for k in system_config.current_system().banks}
         additional = self.destination.spec.bytes_used
         if self.prefetching:
             additional *= 2
+
+        zeros = {k: 0 for k in system_config.current_system().banks}
+        mem = dict(zeros)
         mem[self.destination.bank] = additional
-        return [mem]
+
+        to_return = [mem]
+        if self.prologue is not None:
+            to_return.insert(0, zeros)
+        if self.epilogue is not None:
+            to_return.append(zeros)
+        return to_return
 
     @property
     def peak_memory(self) -> dict[str, int]:
-        mem = self.inner.peak_memory
+        mem = self.body.peak_memory
         additional = self.destination.spec.bytes_used
         if self.prefetching:
             additional *= 2
@@ -119,14 +157,128 @@ class MoveLet(_OperandWrapper):
         return mem
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
-        inner_operands = list(operands)
-        if self.input_idx is None:
-            inner_operands[-1] = self.destination
-        else:
-            inner_operands[self.input_idx] = self.destination
+        move_op_operands = [operands[self.source_idx], self.destination]
+        body_operands = list(operands)
+        body_operands[self.source_idx] = self.destination
+        applied_children = [self.body.apply(body_operands)]
+        if self.prologue is not None:
+            applied_children.insert(0, self.prologue.apply(move_op_operands))
+        if self.epilogue is not None:
+            applied_children.append(self.epilogue.apply(move_op_operands))
         return make_applied_impl(
-            self.replace_children([self.inner.apply(inner_operands)]), operands
+            self.replace_children(applied_children), operands
         )  # type: ignore
+
+    def _filled_children_names(
+        self,
+    ) -> Iterable[Literal["prologue", "body", "epilogue"]]:
+        if self.prologue:
+            yield "prologue"
+        yield "body"
+        if self.epilogue:
+            yield "epilogue"
+
+
+class _BaseMoveHole(Leaf):
+    spec: Union[specs.Load, specs.Store]
+
+    @property
+    def is_scheduled(self) -> bool:
+        return False
+
+    def replace_spec(self, new_spec: specs.Spec) -> "Impl":
+        if not isinstance(new_spec, (specs.Load, specs.Store)):
+            raise TypeError(f"Spec had unexpected type: {type(new_spec).__name__}")
+        return type(self)(new_spec)  # type: ignore
+
+    @prune_nested_parallel_loops
+    @prune_relayout_cycles
+    @break_moves_symmetries
+    @break_tile_out_symmetries
+    @break_matmul_split_symmetries
+    def actions(
+        self, parent_summary: Optional[ParentSummary] = None
+    ) -> Iterable[Callable[[], Impl]]:
+        # Search only over full line sizes
+        source = self.spec.source
+        for tile_shape in gen_tile_sizes(source.dim_sizes, filter=self._can_tile_out):
+            yield TileOutAction(self, tile_shape, parallel=False)
+            if not self.spec.serial_only:
+                yield TileOutAction(self, tile_shape, parallel=True)
+
+        if ValueAssign.applies_to_operands(self.spec.operands):
+            yield functools.partial(self.place, ValueAssign)
+
+        if CacheAccess.applies_to_operands(self.spec.operands):
+            yield functools.partial(self.place, CacheAccess)
+
+    def complete(self) -> Impl:
+        if any(d > 1 for d in self.spec.source.dim_sizes):
+            ones = (1,) * len(self.spec.source.dim_sizes)
+            return self.tile_out(ones).complete()
+        return self.place(ValueAssign)
+
+    def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
+        return make_applied_impl(self, operands)
+
+
+@dataclasses.dataclass(frozen=True)
+class LoadHole(_BaseMoveHole):
+    spec: specs.Load
+
+
+@dataclasses.dataclass(frozen=True)
+class StoreHole(_BaseMoveHole):
+    spec: specs.Store
+
+
+@dataclasses.dataclass(frozen=True)
+class ValueAssign(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveLet.
+    spec: Union[specs.Load, specs.Store]
+
+    def __post_init__(self):
+        assert self.applies_to_operands(self.spec.operands)
+
+    @property
+    def is_store(self) -> bool:
+        return isinstance(self.spec, specs.Store)
+
+    @property
+    def is_scheduled(self) -> bool:
+        return True
+
+    def actions(
+        self, parent_summary: Optional[ParentSummary] = None
+    ) -> Iterable[Callable[[], Impl]]:
+        yield from []
+
+    def complete(self, *args, **kwargs):
+        return self
+
+    @staticmethod
+    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
+        source, destination = operands
+        if source.bank == destination.bank:
+            return False
+        if source.bank not in ("RF", "GL"):
+            return False
+        if destination.bank not in ("RF", "GL"):
+            return False
+        if any(d != 1 for o in operands for d in o.dim_sizes):
+            return False
+        return True
+
+
+@dataclasses.dataclass(frozen=True)
+class CacheAccess(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveLet.
+    spec: specs.Spec
+
+    def __post_init__(self):
+        raise NotImplementedError("Current CPU model doesn't model caches")
+
+    @staticmethod
+    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
+        return False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -280,21 +432,34 @@ def common_move(
         name=None,
     )
 
-    # Figure out the input index, if it's an input
-    input_idx = operand_idx if operand_idx < len(op.spec.inputs) else None
-    assert input_idx is not None or operand == op.spec.output
-
     new_operands = list(op.spec.operands)
     new_operands[operand_idx] = new_mat.spec
     new_inner_spec = op.spec.replace_io(
         tuple(new_operands[:-1]), new_operands[-1], op.spec.serial_only
     )
 
+    prologue = LoadHole(
+        specs.Load(
+            source=op.spec.operands[operand_idx],
+            destination=new_mat.spec,
+            serial_only=op.spec.serial_only,
+        )
+    )
+    epilogue = StoreHole(
+        specs.Store(
+            # TODO: Source and destination are confusing here. Reversed.
+            source=op.spec.operands[operand_idx],
+            destination=new_mat.spec,
+            serial_only=op.spec.serial_only,
+        )
+    )
+
     return MoveLet(
         spec=op.spec,
         source_idx=operand_idx,
         destination=new_mat,
-        input_idx=input_idx,
         prefetching=prefetching,
-        inner=op.replace_spec(new_inner_spec),
+        prologue=prologue,
+        body=op.replace_spec(new_inner_spec),
+        epilogue=epilogue,
     )

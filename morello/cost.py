@@ -9,7 +9,16 @@ else:
     import math
 
 from . import specs
-from .impl import ComposeHole, DirectConv, Impl, Loop, MatmulHole, MoveLet, ReduceSum
+from .impl import (
+    ComposeHole,
+    DirectConv,
+    Impl,
+    Loop,
+    MatmulHole,
+    MoveLet,
+    ReduceSum,
+    ValueAssign,
+)
 from .impl.compose import Pipeline
 from .impl.loops import SlidingWindowLoop
 from .impl.matmuls import BroadcastVecMult, HvxVrmpyaccVuwVubRub, Mult
@@ -151,7 +160,7 @@ def detailed_analytical_cost(
     elif isinstance(op, (DirectConv, ReduceSum)) and (op.is_scheduled or holes_ok):
         assert compute_cost(op) == 4999
         return {op: (4999, "    4999")}
-    elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
+    elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub, ValueAssign)):
         # Tensor multiplication is free but its operands must be in memory.
         # (This cost model is only interested in the cost of moving data.)
         assert compute_cost(op) == INST_COST
@@ -159,15 +168,30 @@ def detailed_analytical_cost(
     elif isinstance(op, MoveLet):
         # This is the core of the cost model; the cost of a schedule is derived
         # entirely from its moves, which are done by MoveLet operations.
-        mcost = move_cost(
+        mcost: int = move_cost(
             op.spec.operands[op.source_idx], op.destination.spec, op.prefetching
         )
+
         cost_dict = detailed_analytical_cost(
-            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok,
+            op.body, depth=depth + 1, env=env, holes_ok=holes_ok,
         )
-        assert isinstance(mcost, int)
-        assert isinstance(cost_dict[op.inner][0], int)
-        new_cost = mcost + cost_dict[op.inner][0]
+        new_cost = mcost + cost_dict[op.body][0]
+
+        if op.prologue:
+            cost_dict.update(
+                detailed_analytical_cost(
+                    op.prologue, depth=depth + 1, env=env, holes_ok=holes_ok,
+                )
+            )
+            new_cost += cost_dict[op.prologue][0]
+        if op.epilogue:
+            cost_dict.update(
+                detailed_analytical_cost(
+                    op.epilogue, depth=depth + 1, env=env, holes_ok=holes_ok,
+                )
+            )
+            new_cost += cost_dict[op.epilogue][0]
+
         cost_expl = f"{new_cost:5d} = {mcost} + _"
         assert compute_cost(op) == new_cost
         cost_dict[op] = (new_cost, cost_expl)
@@ -212,13 +236,18 @@ def compute_cost(op: Impl) -> MainCost:
     elif isinstance(op, (DirectConv, ReduceSum)):
         # Reminder: these types can be either holes or scheduled
         return _assign_cost(op, 4999)
-    elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
+    elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub, ValueAssign)):
         return _assign_cost(op, INST_COST)
     elif isinstance(op, MoveLet):
         mcost: MainCost = move_cost(  # type: ignore
             op.spec.operands[op.source_idx], op.destination.spec, op.prefetching
         )
-        return _assign_cost(op, _clip_add(mcost, compute_cost(op.inner)))
+        v = _clip_add(mcost, compute_cost(op.body))
+        if op.prologue:
+            v = _clip_add(v, compute_cost(op.prologue))
+        if op.epilogue:
+            v = _clip_add(v, compute_cost(op.epilogue))
+        return _assign_cost(op, v)
     elif isinstance(op, (ComposeHole, MatmulHole)):
         return _assign_cost(op, 0)
     else:

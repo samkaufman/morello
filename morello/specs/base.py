@@ -11,11 +11,10 @@ from .tensorspec import TensorSpec
 class Spec:
     """The abstract root class for program specifications."""
 
+    serial_only: bool
+
     def replace_io(
-        self,
-        inputs: tuple[TensorSpec, ...],
-        output: TensorSpec,
-        serial_only=None,
+        self, inputs: tuple[TensorSpec, ...], output: TensorSpec, serial_only=None,
     ) -> "Spec":
         # This method is similar to the static `from_io` except that it will
         # preserve properties other than the inputs and outputs. This is important for
@@ -65,14 +64,8 @@ class Spec:
     def operands(self) -> tuple[TensorSpec, ...]:
         return self.inputs + (self.output,)
 
-    @property
-    def serial_only(self) -> bool:
-        raise NotImplementedError(f"serial_only not implemented for {type(self)}")
-
     def shrink_for_tile_out(
-        self,
-        output_shape: tuple[int, ...],
-        serial_only: Optional[bool] = None,
+        self, output_shape: tuple[int, ...], serial_only: Optional[bool] = None,
     ) -> "Spec":
         """Reduces the Spec to dimensions needed to compute the given output tile.
 
@@ -87,8 +80,7 @@ class Spec:
         new_inp_shapes = self.shrink_inputs_for_output_shape(input_shapes, output_shape)
 
         new_inputs = tuple(
-            inp.shrink(new_shape)
-            for inp, new_shape in zip(self.inputs, new_inp_shapes)
+            inp.shrink(new_shape) for inp, new_shape in zip(self.inputs, new_inp_shapes)
         )
         new_output = self.output.shrink(output_shape)
 
@@ -120,7 +112,9 @@ class Spec:
         return self.operands_dim_subscripts_cls(operand_ranks)
 
     @classmethod
-    def operands_dim_subscripts_cls(cls, operand_ranks: Sequence[int]) -> Sequence[tuple[int, ...]]:
+    def operands_dim_subscripts_cls(
+        cls, operand_ranks: Sequence[int]
+    ) -> Sequence[tuple[int, ...]]:
         """Returns which dimensions are the same size between operands.
 
         More specifically, this returns an iterable of the same length as the

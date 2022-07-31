@@ -116,6 +116,10 @@ def tile_out(
         (_, k), _ = input_shapes
         m, n = spec_output.dim_sizes
         return PartialSimpleTile((m, k)), PartialSimpleTile((k, n))
+    elif (spec_type == specs.Load or spec_type == specs.Store) and isinstance(
+        spec_output, PartialSimpleTile
+    ):
+        return (PartialSimpleTile(spec_output.dim_sizes),)
     else:
         raise NotImplementedError(
             f"Unimplemented for {spec_type.__name__} and {type(spec_output).__name__}"

@@ -213,7 +213,7 @@ class MatmulLeaf(MatmulBase):
         **kwargs,
     ) -> "MoveLet":
         raise NotImplementedError()
-    
+
     def complete(self, *args, **kwargs):
         return self
 

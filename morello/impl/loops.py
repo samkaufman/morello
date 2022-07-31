@@ -50,7 +50,7 @@ class _TilingMixin:
     @assert_stable_spec
     def split(self, size: int) -> "Impl":
         return dataclasses.replace(self, inner=self.inner.split(size))
-    
+
     @assert_stable_spec
     def replace_children(self, replacements: Iterable[Impl]) -> Impl:
         replacements = tuple(replacements)
@@ -96,7 +96,9 @@ class Loop(Impl):
         self.parallel = parallel
         if self.parallel and not self.inner.spec.serial_only:
             raise ValueError("Parallel loop's child must be serial only")
-        self.inner_args = frozenset(inner_args) if inner_args is not None else self.tiles
+        self.inner_args = (
+            frozenset(inner_args) if inner_args is not None else self.tiles
+        )
 
         # Workaround for dataclasses.replace
         if "_operands_subscripts" in kwargs:
@@ -107,11 +109,11 @@ class Loop(Impl):
             self._operands_subscripts = tuple(self.spec.operands_dim_subscripts())
         else:
             self._operands_subscripts = operands_subscripts
-        
+
     @property
     def operands_subscripts(self) -> Sequence[tuple[int, ...]]:
         return self._operands_subscripts
-        
+
     @property
     def steps(self) -> int:
         val = 1

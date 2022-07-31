@@ -20,7 +20,7 @@ from morello.system_config import cpu, hexagon
 
 from .. import strategies
 
-CC_DEADLINE = 60 * 1000
+CC_DEADLINE = 5 * 60 * 1000
 CC_SANITIZE = True
 
 strategies.register_default_strategies()
@@ -128,6 +128,8 @@ def _arb_impls_from_actions(draw, partial_impl: morello.impl.base.Impl):
 
     # If we hit a dead end (no actions), and we haven't already returned, then
     # this isn't a viable example
+    if not len(actions):
+        print("No actions for: " + str(partial_impl.spec))
     hypothesis.assume(len(actions))
 
     action_idx = draw(st.integers(min_value=0, max_value=len(actions) - 1))
@@ -325,10 +327,7 @@ def _calculator_to_test(spec_st_fn):
         )
         @pytest.mark.parametrize(
             "parallel",
-            [
-                pytest.param(True, marks=pytest.mark.parallelspec),
-                False,
-            ],
+            [pytest.param(True, marks=pytest.mark.parallelspec), False,],
             ids=["parallel", "serial"],
         )
         @hypothesis.given(st.data())

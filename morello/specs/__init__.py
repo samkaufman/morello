@@ -8,6 +8,7 @@ from .base import Spec
 from .compose import Compose
 from .conv import Convolution
 from .matmul import Matmul
+from .moves import Load, Store
 from .original import *
 from .reducesum import ReduceSum
 from .tensorspec import HvxVmemTensorSpec, TensorSpec

@@ -57,7 +57,9 @@ class ComposeHole(Impl):
         # TODO: Remove this symmetry: lots of ways to iteratively split the pipeline
         # TODO: Reintroduce splitting on non-index 0
         peeling_shape = self.spec.subspec_outputs[1]
-        for bank, layout in itertools.product(system.addressed_banks, target.all_layouts_for_shape(peeling_shape)):
+        for bank, layout in itertools.product(
+            system.addressed_banks, target.all_layouts_for_shape(peeling_shape)
+        ):
             # TODO: Remove following check once cost.move_cost handles it correctly.
             if not system.has_hvx and layout == layouts.HEXAGON_TRANSPACKED:
                 continue
@@ -178,10 +180,7 @@ class ComposeHole(Impl):
 
     @assert_stable_spec
     def peel(
-        self,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        **kwargs,
+        self, bank: Optional[str] = None, layout: Optional[Layout] = None, **kwargs,
     ) -> Impl:
         if bank is None or layout is None:
             # TODO: Just require them as arguments. Can relax the signature later.
@@ -214,9 +213,7 @@ class ComposeHole(Impl):
             head_inps += self.spec.inputs[:hi]
         head_hole = spec_to_hole(
             self.spec.subspec_classes[0].from_io(
-                head_inps,
-                self.spec.output,
-                serial_only=self.spec.serial_only,
+                head_inps, self.spec.output, serial_only=self.spec.serial_only,
             )
         )
 
@@ -378,9 +375,7 @@ class ComposeHole(Impl):
                 yield idx, tiled_input
 
     def _calculate_partial_inputs_for_tile_out(
-        self,
-        output_tile: Union[SimpleTile, tiling.PartialTile],
-        skip_first: int = 0,
+        self, output_tile: Union[SimpleTile, tiling.PartialTile], skip_first: int = 0,
     ) -> list[tiling.PartialTile]:
         """Returns PartialTiles for this ComposeHole's inputs for an output tiling.
 
@@ -573,10 +568,6 @@ class Pipeline(Impl):
         new_stages[idx] = fn(new_stages[idx])
         return dataclasses.replace(self, stages=tuple(new_stages))
 
-    @property
-    def depth(self) -> int:
-        return 1 + max(stage.depth for stage in self.stages)
-
     def move_input(
         self,
         input_idx: int,
@@ -652,7 +643,9 @@ class Pipeline(Impl):
     def peak_memory(self) -> dict[str, int]:
         # Pipeline currently adds an intermediate tensor between each stage, so
         # intermediates is just the output of everything but the last stage
-        intermediates: list[specs.TensorSpec] = [o.spec.output for o in self.stages[:-1]]
+        intermediates: list[specs.TensorSpec] = [
+            o.spec.output for o in self.stages[:-1]
+        ]
         intermed_utils: list[dict[str, int]] = []
         for tensor in intermediates:
             new_mem = {k: 0 for k in system_config.current_system().banks}
