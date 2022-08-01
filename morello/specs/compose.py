@@ -134,45 +134,6 @@ class Compose(base.Spec):
     ) -> int:
         return 1 + sum(c.inputs_count() for c in subspec_classes) - len(subspec_classes)
 
-    def shrink_for_tile_out(
-        self, output_shape: tuple[int, ...], serial_only=None
-    ) -> base.Spec:
-        # Forward pass to compute the initial input and output shapes for every subspec.
-        # The initial input shapes  are used to resolve ambiguities in determining input
-        # shapes from the new output.
-        orig_input_shapes = self._expand_inputs()
-
-        new_outermost_inp_shps = self.subspec_classes[0].shrink_inputs_for_output_shape(
-            orig_input_shapes[0], output_shape
-        )
-
-        # The accumulator for the concatenated inputs
-        new_input_shapes: tuple[tuple[int, ...]] = new_outermost_inp_shps[1:]
-        last_input_shapes: tuple[tuple[int, ...]] = new_outermost_inp_shps
-
-        for kls_idx in range(1, len(self.subspec_classes)):
-            kls = self.subspec_classes[kls_idx]
-            last_input_shapes = kls.shrink_inputs_for_output_shape(
-                orig_input_shapes[kls_idx], last_input_shapes[0]
-            )
-            if kls_idx == len(self.subspec_classes) - 1:
-                new_input_shapes += last_input_shapes
-            else:
-                new_input_shapes += last_input_shapes[1:]
-
-        if serial_only is None:
-            serial_only = self.serial_only
-        return Compose(
-            self.subspec_classes,
-            tuple(
-                inp_spec.shrink(inp_spec)
-                for inp_spec, shp in zip(self.inputs, new_input_shapes)
-            ),
-            self.output.shrink(output_shape),
-            intermediate_dtypes=self.intermediate_dtypes,
-            serial_only=serial_only,
-        )
-
     # TODO: Rename & document _list_subspecs
     def _list_subspecs(self) -> list[_ComposeSubspec]:
         # Initialize with the first/innermost function's inputs. We'll lift

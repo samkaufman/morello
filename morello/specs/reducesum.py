@@ -76,26 +76,6 @@ class ReduceSum(base.Spec):
     def output_shape(source_shape: tuple[int, ...]) -> tuple[int, ...]:
         return source_shape[:-1]
 
-    def shrink_for_tile_out(
-        self,
-        output_shape: tuple[int, ...],
-        serial_only=None,
-    ) -> "ReduceSum":
-        if len(output_shape) != len(self.output.dim_sizes):
-            raise ValueError(
-                f"Expected {len(self.output.dim_sizes)} dimensions; got {len(output_shape)}"
-            )
-        for dim, dim_size in enumerate(output_shape):
-            if dim_size <= 0:
-                raise ValueError("All dimensions must be size 1 or greater")
-            elif dim_size > self.output.dim_sizes[dim]:
-                raise ValueError(
-                    f"Dimensions {dim} was larger than "
-                    f"{self.output.dim_sizes[dim]} ({dim_size} > "
-                    f"{self.output.dim_sizes[dim]})"
-                )
-        return cast(ReduceSum, super().shrink_for_tile_out(output_shape, serial_only))
-
     @classmethod
     def calculate_output_shape_cls(
         cls, input_shapes: Iterable[tuple[int, ...]]

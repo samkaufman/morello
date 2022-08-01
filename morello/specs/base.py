@@ -1,9 +1,8 @@
 import warnings
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Sequence
 
 import cython
 
-from .. import utils
 from .tensorspec import TensorSpec
 
 
@@ -12,10 +11,7 @@ class Spec:
     """The abstract root class for program specifications."""
 
     def replace_io(
-        self,
-        inputs: tuple[TensorSpec, ...],
-        output: TensorSpec,
-        serial_only=None,
+        self, inputs: tuple[TensorSpec, ...], output: TensorSpec, serial_only=None,
     ) -> "Spec":
         # This method is similar to the static `from_io` except that it will
         # preserve properties other than the inputs and outputs. This is important for
@@ -69,31 +65,6 @@ class Spec:
     def serial_only(self) -> bool:
         raise NotImplementedError(f"serial_only not implemented for {type(self)}")
 
-    def shrink_for_tile_out(
-        self,
-        output_shape: tuple[int, ...],
-        serial_only: Optional[bool] = None,
-    ) -> "Spec":
-        """Reduces the Spec to dimensions needed to compute the given output tile.
-
-        The default implementation relies on `shrink_inputs_for_output_shape`.
-
-        :returns: A copy of the callee with modified input and output dimensions.
-        """
-        if serial_only is None:
-            serial_only = self.serial_only
-
-        input_shapes = tuple(inp.dim_sizes for inp in self.inputs)
-        new_inp_shapes = self.shrink_inputs_for_output_shape(input_shapes, output_shape)
-
-        new_inputs = tuple(
-            inp.shrink(new_shape)
-            for inp, new_shape in zip(self.inputs, new_inp_shapes)
-        )
-        new_output = self.output.shrink(output_shape)
-
-        return self.replace_io(new_inputs, new_output, serial_only=serial_only)
-
     def calculate_output_shape(
         self, input_shapes: Iterable[tuple[int, ...]]
     ) -> tuple[int, ...]:
@@ -120,7 +91,9 @@ class Spec:
         return self.operands_dim_subscripts_cls(operand_ranks)
 
     @classmethod
-    def operands_dim_subscripts_cls(cls, operand_ranks: Sequence[int]) -> Sequence[tuple[int, ...]]:
+    def operands_dim_subscripts_cls(
+        cls, operand_ranks: Sequence[int]
+    ) -> Sequence[tuple[int, ...]]:
         """Returns which dimensions are the same size between operands.
 
         More specifically, this returns an iterable of the same length as the
