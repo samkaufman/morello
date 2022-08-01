@@ -70,6 +70,20 @@ class Impl:
                 [self.children[0].tile_out(output_shape, parallel=parallel)]
             )
 
+        if len(output_shape) != len(self.spec.output.dim_sizes):
+            raise ValueError(
+                f"Expected {len(self.spec.output.dim_sizes)} dimensions; got {len(output_shape)}"
+            )
+        for dim, dim_size in enumerate(output_shape):
+            if dim_size <= 0:
+                raise ValueError("All dimensions must be size 1 or greater")
+            elif dim_size > self.spec.output.dim_sizes[dim]:
+                raise ValueError(
+                    f"Dimensions {dim} was larger than "
+                    f"{self.spec.output.dim_sizes[dim]} ({dim_size} > "
+                    f"{self.spec.output.dim_sizes[dim]})"
+                )
+
         # A no-op if the given shape is already the output shape.
         if self.spec.output.dim_sizes == output_shape:
             return self
@@ -95,7 +109,11 @@ class Impl:
         if parallel:
             inner_serial = True
         inner = spec_to_hole(
-            self.spec.shrink_for_tile_out(output_shape, serial_only=inner_serial)
+            self.spec.replace_io(
+                tuple(x.spec for x in smaller_inputs),
+                smaller_output.spec,
+                serial_only=inner_serial,
+            )
         )
 
         # Construct the list of tiles, which is every tile_out result that just

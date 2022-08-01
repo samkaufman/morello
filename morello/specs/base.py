@@ -1,3 +1,4 @@
+import typing
 import warnings
 from typing import Iterable, Optional, Sequence
 
@@ -63,28 +64,6 @@ class Spec:
     @property
     def operands(self) -> tuple[TensorSpec, ...]:
         return self.inputs + (self.output,)
-
-    def shrink_for_tile_out(
-        self, output_shape: tuple[int, ...], serial_only: Optional[bool] = None,
-    ) -> "Spec":
-        """Reduces the Spec to dimensions needed to compute the given output tile.
-
-        The default implementation relies on `shrink_inputs_for_output_shape`.
-
-        :returns: A copy of the callee with modified input and output dimensions.
-        """
-        if serial_only is None:
-            serial_only = self.serial_only
-
-        input_shapes = tuple(inp.dim_sizes for inp in self.inputs)
-        new_inp_shapes = self.shrink_inputs_for_output_shape(input_shapes, output_shape)
-
-        new_inputs = tuple(
-            inp.shrink(new_shape) for inp, new_shape in zip(self.inputs, new_inp_shapes)
-        )
-        new_output = self.output.shrink(output_shape)
-
-        return self.replace_io(new_inputs, new_output, serial_only=serial_only)
 
     def calculate_output_shape(
         self, input_shapes: Iterable[tuple[int, ...]]
