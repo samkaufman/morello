@@ -28,10 +28,7 @@ class CpuTarget(Target):
         return it
 
     def tensor(
-        self,
-        spec: specs.TensorSpec,
-        name: Optional[str] = None,
-        **kwargs,
+        self, spec: specs.TensorSpec, name: Optional[str] = None, **kwargs,
     ) -> Tensor:
         if kwargs:
             raise TypeError(f"Unexpected keyword argument(s): {', '.join(kwargs)}")
@@ -54,7 +51,7 @@ class CpuTarget(Target):
     @functools.cached_property
     def system(self) -> "SystemDescription":
         return SystemDescription(
-            line_size=64,
+            line_size=32,
             banks={
                 # Selecting 4096 because that's a power of two. We normally
                 # overapproximate the peak memory usage of an Impl to the next
