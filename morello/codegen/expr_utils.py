@@ -8,6 +8,12 @@ _POINT_SYMBOL_RE = re.compile(r"^p(\d+)$")
 class FloorDiv(sympy.Function):
     nargs = 2
 
+    @classmethod
+    def eval(cls, n, d):
+        if n.is_Number and d.is_Number:
+            return sympy.Integer(n // d)
+        return None
+
 
 def zero_points(expr: sympy.Expr) -> sympy.Expr:
     substitutions = {}
