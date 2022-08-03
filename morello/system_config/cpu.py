@@ -120,9 +120,10 @@ class CpuTarget(Target):
                     "-o",
                     binary_path,
                     source_path,
-                    "-lrt",
                 ]
             )
+            if os.getenv("MORELLO_CLANG_LINK_RT"):
+                clang_cmd.append("-lrt")
             clang_proc = await asyncio.create_subprocess_exec(*clang_cmd)
             await clang_proc.wait()
             if clang_proc.returncode != 0:

@@ -97,6 +97,7 @@ ENV PATH=/env/bin:$PATH
 ENV CLANG=/env/bin/clang
 ENV LD_LIBRARY_PATH=/env/lib:$LD_LIBRARY_PATH
 ENV LIBRARY_PATH=/env/lib:$LIBRARY_PATH
+ENV MORELLO_CLANG_LINK_RT=1
 
 COPY --from=halide /usr/src/Halide-13.0.4/python_bindings/requirements.txt /halide-reqs.txt
 RUN python3 -m pip install -r /halide-reqs.txt && \
