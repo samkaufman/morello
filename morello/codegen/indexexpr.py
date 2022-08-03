@@ -2,7 +2,6 @@ from typing import Optional
 
 import sympy
 
-from .. import specs
 from ..tensor import (
     ConvolutionImageTile,
     SimpleTile,
@@ -17,26 +16,28 @@ from .expr_utils import FloorDiv
 # TODO: Remove all these
 subgroup_stack = []
 
+
 def set_subgroup(name):
     global subgroup_stack
     subgroup_stack.append(name)
+
 
 def unset_subgroup():
     global subgroup_stack
     subgroup_stack.pop()
 
+
 def vsub(expr, *args, **kwargs):
     kwargs = dict(kwargs)
-    if 'simultaneous' not in kwargs:
-        kwargs['simultaneous'] = True
-    
+    if "simultaneous" not in kwargs:
+        kwargs["simultaneous"] = True
+
     orig = expr
     result = expr.subs(*args, **kwargs)
     if orig != result:
         part = f"{orig} -> {result}"
         # print(f" .    {', '.join(subgroup_stack)}  substituting {part}")
     return result
-
 
 
 def buffer_indexing_expr(
@@ -144,7 +145,9 @@ def logical_indexing_expr(source: TensorLike, dim: int) -> sympy.Expr:
             # elif dim == j:
             #     new_dim = i
             source_expr = logical_indexing_expr(source.inner, new_dim)
-            return vsub(source_expr, [(f"p{i}", f"p{j}"), (f"p{j}", f"p{i}")], simultaneous=True)
+            return vsub(
+                source_expr, [(f"p{i}", f"p{j}"), (f"p{j}", f"p{i}")], simultaneous=True
+            )
             # return source_expr
         elif isinstance(source, Tensor):
             w = source.dim_sizes[dim]

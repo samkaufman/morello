@@ -1284,7 +1284,7 @@ def main():
                                 benchmark.cpus_used,
                                 ", ".join(f"{s:.8f}" for s in runtime_samples),
                                 uploaded_url,
-                                "improved",
+                                "vectormoves",
                             ],
                             value_input_option="USER_ENTERED",
                         )

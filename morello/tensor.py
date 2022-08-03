@@ -318,10 +318,15 @@ class ConvolutionImageTile(CommonTileBase):
     filter_shape: tuple[int, ...]
 
     def __post_init__(self):
-        assert len(self.dim_sizes) >= 3
-        assert len(self.filter_shape) + 1 == len(
-            self.dim_sizes
-        ), f"Incompatible ranks; filters was {self.filter_shape} and image was {self.dim_sizes}"
+        assert len(self.dim_sizes) >= self.minimum_image_rank()
+        assert len(self.filter_shape) + 1 == len(self.dim_sizes), (
+            f"Incompatible ranks; filters was {self.filter_shape} and image "
+            f"was {self.dim_sizes}"
+        )
+    
+    @staticmethod
+    def minimum_image_rank() -> int:
+        return 3
 
     def steps_dim(self, dim: int, origin_size: int) -> int:
         # Batch should be a normal tiling.

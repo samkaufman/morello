@@ -351,14 +351,7 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                 )
         else:
             assert rhs_volume == 8, f"Expected volume of 8, but given {rhs_volume}"
-            try:
-                vtype = GCC_VEC_TYPES[(imp.spec.operands[2].dtype, rhs_volume)][1]
-            except Exception as e:
-                print(
-                    f"Got a {type(e)} for output operand: {op_details[-1].c_tensor}\n"
-                    f"and spec {imp.spec}"
-                )
-                raise
+            vtype = GCC_VEC_TYPES[(imp.spec.operands[2].dtype, rhs_volume)][1]
             writer.writeline(
                 f"*({vtype} *)({op_details[-1].c_tensor.c_index_ptr(o)}) "
                 "+= "
@@ -596,9 +589,36 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
         l = expr_utils.zero_points(l)
         o = expr_utils.zero_points(o)
         if imp.is_store:
-            writer.writeline(f"{l_ref(l)} = {o_ref(o)};  /* ValueAssign */")
+            writer.writeline(f"{l_ref(l)} = {o_ref(o)};  // ValueAssign (store)")
         else:
-            writer.writeline(f"{o_ref(o)} = {l_ref(l)};  /* ValueAssign */")
+            writer.writeline(f"{o_ref(o)} = {l_ref(l)};  // ValueAssign")
+    elif isinstance(imp, impl.VectorAssign):
+        shape = op_details[0].concrete_origin_shape
+        assert shape == op_details[1].concrete_origin_shape
+        if BOUNDARY_ANCESTORS.get() > 0:
+            with _emit_loop_nest_for_shape(shape) as it_names:
+                substitutions = {
+                    f"p{dim}": (s if isinstance(s, int) else f"_{s}")
+                    for dim, s in enumerate(it_names)
+                }
+                l, r = [vsub(d.index_expr, substitutions) for d in op_details]
+                lhs_txt = op_details[0].c_tensor.c_index(l)
+                rhs_txt = op_details[1].c_tensor.c_index(r)
+                if not imp.is_store:
+                    lhs_txt, rhs_txt = rhs_txt, lhs_txt
+                writer.writeline(f"{lhs_txt} = {rhs_txt};  // VectorAssign boundary")
+        else:
+            vol = functools.reduce(operator.mul, shape, 1)
+            vtype = GCC_VEC_TYPES[(imp.spec.operands[0].dtype, vol)][1]
+            l, r = (expr_utils.zero_points(d.index_expr) for d in op_details)
+            lhs_txt = op_details[0].c_tensor.c_index_ptr(l)
+            rhs_txt = op_details[1].c_tensor.c_index_ptr(r)
+            if not imp.is_store:
+                lhs_txt, rhs_txt = rhs_txt, lhs_txt
+            writer.writeline(
+                f"*({vtype} *)({lhs_txt}) = "
+                f"(*({vtype} *)({rhs_txt}));  // VectorAssign"
+            )
     else:
         raise NotImplementedError(f"Not implemented for {type(imp).__name__}")
 
@@ -998,9 +1018,12 @@ def generate_c(
     writer.writeline("  (((uintptr_t)(const void *)(POINTER)) % (BYTE_COUNT) == 0)")
 
     if _SIMD_MOVES:
-        for (dt, bytes), (cnt, name) in GCC_VEC_TYPES.items():
+        for (dt, bytes), (vec_bytes, name) in GCC_VEC_TYPES.items():
+            # Declare a vector of {vec_bytes} bytes, divided into {dt.c_type}
+            # values. (vec_bytes must be a multiple of the c_type size.)
             writer.writeline(
-                f"typedef {dt.c_type} {name} __attribute__ ((vector_size ({cnt})));"
+                f"typedef {dt.c_type} {name} __attribute__ "
+                f"((vector_size ({vec_bytes})));"
             )
 
     # TODO: The following prelude is a mess. Include decls/defs on demand, and

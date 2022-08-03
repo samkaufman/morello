@@ -16,7 +16,7 @@ from .matmuls import (
     MatmulHole,
     Mult,
 )
-from .moves import MoveLet, PadTranspack, ValueAssign, CacheAccess
+from .moves import MoveLet, PadTranspack, ValueAssign, CacheAccess, VectorAssign
 from .pruning import ParentSummary
 from .reducesum import ReduceSum
 from .settings import (
@@ -63,4 +63,5 @@ __all__ = [
     "TileOutAction",
     "TileSizeMode",
     "ValueAssign",
+    "VectorAssign",
 ]

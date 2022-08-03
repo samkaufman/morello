@@ -18,6 +18,7 @@ from .impl import (
     MoveLet,
     ReduceSum,
     ValueAssign,
+    VectorAssign,
 )
 from .impl.compose import Pipeline
 from .impl.loops import SlidingWindowLoop
@@ -160,7 +161,9 @@ def detailed_analytical_cost(
     elif isinstance(op, (DirectConv, ReduceSum)) and (op.is_scheduled or holes_ok):
         assert compute_cost(op) == 4999
         return {op: (4999, "    4999")}
-    elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub, ValueAssign)):
+    elif isinstance(
+        op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub, ValueAssign, VectorAssign)
+    ):
         # Tensor multiplication is free but its operands must be in memory.
         # (This cost model is only interested in the cost of moving data.)
         assert compute_cost(op) == INST_COST
@@ -236,7 +239,9 @@ def compute_cost(op: Impl) -> MainCost:
     elif isinstance(op, (DirectConv, ReduceSum)):
         # Reminder: these types can be either holes or scheduled
         return _assign_cost(op, 4999)
-    elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub, ValueAssign)):
+    elif isinstance(
+        op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub, ValueAssign, VectorAssign)
+    ):
         return _assign_cost(op, INST_COST)
     elif isinstance(op, MoveLet):
         mcost: MainCost = move_cost(  # type: ignore

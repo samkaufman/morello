@@ -256,7 +256,6 @@ class BroadcastVecMult(MatmulLeaf):
         if lhs.bank != "RF" or rhs.bank != "RF" or out.bank != "RF":
             return "BroadcastVecMult only supports RF operands"
 
-        # lhs is contiguous because it's 1 vlaue.
         if not rhs.contiguous:
             return "rhs must be contiguous, but was: " + str(rhs)
         if not out.contiguous:

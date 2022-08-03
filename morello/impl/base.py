@@ -335,7 +335,7 @@ class Impl:
 
     @property
     def peak_memory(self) -> dict[str, int]:
-        raise NotImplementedError()
+        raise NotImplementedError(f"Not implemented for {type(self)}")
 
     @property
     def operands_subscripts(self) -> Sequence[tuple[int, ...]]:

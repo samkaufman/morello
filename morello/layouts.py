@@ -48,6 +48,11 @@ class Layout:
         parent_shape: Sequence[int],
         parent_contiguous: bool,
     ):
+        if any(t > p for t, p in zip(tile_shape, parent_shape)):
+            raise ValueError(
+                f"Tile shape {tile_shape} is larger than parent "
+                f"shape {parent_shape}"
+            )
         if all(d == 1 for d in tile_shape):
             return True
         if not parent_contiguous:

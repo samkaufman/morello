@@ -1,6 +1,7 @@
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from hypothesis import strategies as st
+import hypothesis
 
 from morello import dtypes, impl, layouts, specs, system_config, tensor
 from morello.system_config import cpu, hexagon
@@ -39,9 +40,9 @@ def layout_st(
 
 
 @st.composite
-def tensor_st(draw):
+def tensor_st(draw, *args, **kwargs):
     target = system_config.current_target()
-    return target.tensor(spec=draw(tensorspec_st()), name=draw(st.text()))
+    return target.tensor(spec=draw(tensorspec_st(*args, **kwargs)), name=draw(st.text()))
 
 
 @st.composite
@@ -218,6 +219,37 @@ def composehole_op_st(draw) -> impl.ComposeHole:
 @st.composite
 def pipeline_op_st(draw) -> impl.Pipeline:
     raise NotImplementedError()
+
+
+@st.composite
+def tiling_chain_st(draw, *args, chain_len: Optional[int] = None, allow_conv = True, **kwargs):
+    base_tensor = draw(tensor_st(*args, **kwargs))
+
+    if len(base_tensor.spec.dim_sizes) < tensor.ConvolutionImageTile.minimum_image_rank():
+        allow_conv = False
+
+    if chain_len is None:
+        chain_len = draw(st.integers(min_value=1, max_value=3))
+    assert chain_len is not None
+
+    chain = [base_tensor]
+    for _ in range(chain_len):
+        use_conv = draw(st.booleans()) if allow_conv else False
+        tile_shape = _smaller_shape(draw, chain[-1].dim_sizes)
+        hypothesis.assume(chain[-1].spec.layout.applies_to_shape(tile_shape, chain[-1].spec.dtype))
+        if use_conv:
+            filter_shape = _smaller_shape(draw, tile_shape[1:])
+            chain.append(chain[-1].spec.conv_image_tile(0, tile_shape, filter_shape))
+        else:
+            chain.append(chain[-1].spec.simple_tile(0, tile_shape))
+    return chain
+
+
+def _smaller_shape(draw, outer: Sequence[int]) -> tuple[int, ...]:
+    tile_shape = []
+    for dim in outer:
+        tile_shape.append(draw(st.integers(min_value=1, max_value=dim)))
+    return tuple(tile_shape)
 
 
 def register_default_strategies():

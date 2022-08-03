@@ -1,8 +1,9 @@
 import dataclasses
+import operator
 import functools
-from typing import Any, Iterable, Literal, Optional, Callable, Sequence, Union
+from typing import Any, Iterable, Literal, Optional, Callable, Sequence, Union, cast
 
-from .. import layouts, specs, system_config, utils
+from .. import layouts, specs, system_config
 from .pruning import (
     ParentSummary,
     break_matmul_split_symmetries,
@@ -119,10 +120,10 @@ class MoveLet(Impl):
                 f"{len(filled_children)} children expected; got " f"{len(replacements)}"
             )
         return dataclasses.replace(self, **dict(zip(filled_children, replacements)))
-    
+
     def move_input(self, *args, **kwargs):
         return dataclasses.replace(self, body=self.body.move_input(*args, **kwargs))
-        
+
     def move_output(self, *args, **kwargs):
         return dataclasses.replace(self, body=self.body.move_output(*args, **kwargs))
 
@@ -209,6 +210,9 @@ class _BaseMoveHole(Leaf):
         if ValueAssign.applies_to_operands(self.spec.operands):
             yield functools.partial(self.place, ValueAssign)
 
+        if VectorAssign.applies_to_operands(self.spec.operands):
+            yield functools.partial(self.place, VectorAssign)
+
         if CacheAccess.applies_to_operands(self.spec.operands):
             yield functools.partial(self.place, CacheAccess)
 
@@ -220,6 +224,14 @@ class _BaseMoveHole(Leaf):
 
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
         return make_applied_impl(self, operands)
+
+    @property
+    def additional_memories(self) -> list[dict[str, int]]:
+        return [{b: 0 for b in system_config.current_system().banks}]
+
+    @property
+    def peak_memory(self) -> dict[str, int]:
+        return {b: 0 for b in system_config.current_system().banks}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -267,6 +279,55 @@ class ValueAssign(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveL
         if any(d != 1 for o in operands for d in o.dim_sizes):
             return False
         return True
+
+
+@dataclasses.dataclass(frozen=True)
+class VectorAssign(NonAllocatingLeaf):
+    spec: Union[specs.Load, specs.Store]
+
+    def __post_init__(self):
+        check_result = VectorAssign._check_operands(self.spec.operands)
+        if check_result:
+            raise ValueError(check_result)
+
+    @property
+    def is_store(self) -> bool:
+        return isinstance(self.spec, specs.Store)
+
+    @property
+    def is_scheduled(self) -> bool:
+        return True
+
+    def actions(
+        self, parent_summary: Optional[ParentSummary] = None
+    ) -> Iterable[Callable[[], Impl]]:
+        yield from []
+
+    def complete(self, *args, **kwargs):
+        return self
+
+    @staticmethod
+    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
+        return VectorAssign._check_operands(operands) is None
+
+    @staticmethod
+    def _check_operands(operands: Sequence[specs.TensorSpec]) -> Optional[str]:
+        lhs, rhs = operands
+        if not (lhs.contiguous and rhs.contiguous):
+            return "Operands must be contiguous, but were: " + str((lhs, rhs))
+        if not (lhs.aligned and rhs.aligned):
+            return "Operands must be aligned, but were: " + str((lhs, rhs))
+        if lhs.dtype != rhs.dtype:
+            return "Operand value types must match, but were: " + str((lhs, rhs))
+        if lhs.dim_sizes != rhs.dim_sizes:
+            return "Operand shapes must match, but were: " + str((lhs, rhs))
+
+        # Check that we're moving an AVX2 vector-sized tensor.
+        vol_bytes = functools.reduce(operator.mul, lhs.dim_sizes, 1) * lhs.dtype.size
+        if vol_bytes != 32:
+            return f"Expected operands to be 32 bytes, but were {vol_bytes} bytes"
+
+        return None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -409,15 +470,19 @@ def common_move(
     if bank == operand.bank and layout == operand.layout:
         raise ValueError("Either bank or layout must differ from current")
 
-    # Will the result be contiguous? If the move is into a cache, it might be.
-    # If it's into memory bank with its own address space, then yes.
-    contiguous = True
-    aligned = True
+    # If the move is not into an addressed bank, contiguousness doesn't change.
     if bank not in current_system().addressed_banks:
-        contiguous = layout.check_tile_contiguity(
+        contiguous = operand.contiguous
+    else:
+        contiguous = cast(Layout, layout).check_tile_contiguity(
             operand.dim_sizes, operand.dim_sizes, operand.contiguous
         )
-        aligned = utils.aligned_approx(operand.dim_sizes, layout, operand)
+
+    # When moving into an addressed bank, we'll generate an aligned destination.
+    # If it's into a cache level, alignment won't change.
+    aligned = True
+    if bank not in current_system().addressed_banks:
+        aligned = operand.aligned
 
     new_mat = current_target().tensor(
         spec=current_target().tensor_spec(

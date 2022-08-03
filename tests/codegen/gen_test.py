@@ -14,11 +14,11 @@ import morello.impl.base
 import morello.impl.compose
 from morello.impl.matmuls import HvxGemvmpybbwAsm
 import morello.impl.moves
-from morello import dtypes, layouts, op_pprint, specs, system_config, tensor, utils
-from morello.codegen import indexexpr
+from morello import dtypes, layouts, op_pprint, specs, system_config, tensor
 from morello.system_config import cpu, hexagon
 
 from .. import strategies
+from .. import utils as test_utils
 
 CC_DEADLINE = 5 * 60 * 1000
 CC_SANITIZE = True
@@ -385,7 +385,7 @@ def _test_impl(imp: morello.impl.base.Impl, inp_values, calc_fn):
 
 
 @st.composite
-def _st_test_index_exprs_consistent_with_contiguous_props(draw):
+def _st_test_tile_contiguousness_matches_walking_index_exprs(draw):
     target = system_config.current_target()
 
     # TODO: Test column-major as well.
@@ -430,9 +430,14 @@ def _st_test_index_exprs_consistent_with_contiguous_props(draw):
     return stack, concrete_tile_idxs
 
 
+@pytest.mark.parametrize(
+    "exact",
+    [pytest.param(True, marks=pytest.mark.skip), pytest.param(False),],
+    ids=["exact", "underapproximate"],
+)
 @hypothesis.settings(max_examples=1000, deadline=4000)
-@hypothesis.given(_st_test_index_exprs_consistent_with_contiguous_props())
-def test_index_exprs_consistent_with_contiguous_props(inp):
+@hypothesis.given(inp=_st_test_tile_contiguousness_matches_walking_index_exprs())
+def test_tile_contiguousness_matches_walking_index_exprs(exact, inp):
     """Test that Tiles' `contiguous` property matches walking elements.
 
     More specifically: test that walking all elements with the highest-numbered
@@ -442,49 +447,41 @@ def test_index_exprs_consistent_with_contiguous_props(inp):
     stack, concrete_tile_idxs = cast(
         tuple[list[tensor.TensorLike], list[list[int]]], inp
     )
-    first_spec = stack[0].spec
+    final_operand = stack[-1]
 
-    # Compose indexing expressions so that we have a mapping from the final
-    # tile's coordinates all the way back to its root tensor.
-    operand: Optional[tensor.TensorLike] = None
-    last_spec = stack[0].spec
-    expr = stack.pop(0).spec.layout.buffer_indexing_expr(last_spec.dim_sizes)
-    while stack:
-        operand = stack[0]
-        assert isinstance(operand, tensor.Tile)
-        del stack[0]
-        all_substitutions = {}
-        tile_it_vars = concrete_tile_idxs[-1]
-        del concrete_tile_idxs[-1]
-        for dim_idx, it_var in zip(range(len(operand.dim_sizes)), tile_it_vars):
-            e = indexexpr.logical_indexing_expr(operand, dim_idx)
-            e = e.subs(f"i{dim_idx}", it_var)
-            all_substitutions[f"p{dim_idx}"] = e
-        expr = expr.subs(all_substitutions)
-        last_spec = operand.spec
-    assert operand is not None
+    expr = test_utils.compose_indexing_exprs(stack, concrete_tile_idxs)
+
+    hypothesis.note("Stack:")
+    for i, x in enumerate(stack):
+        hypothesis.note(f" {i}. {x}")
 
     # Walk the elements.
     is_contiguous = True
     last_offset: Optional[int] = None
-    for pts in itertools.product(*map(range, operand.spec.dim_sizes)):
+    for pts in itertools.product(*map(range, final_operand.spec.dim_sizes)):
         offset = int(expr.evalf(subs={f"p{idx}": pt for idx, pt in enumerate(pts)}))
         assert isinstance(offset, int), f"offset was type {type(offset)}"
-        if last_offset is None:
-            last_offset = offset
-            continue
-        if offset != last_offset + 1:
+        if last_offset is not None and offset != last_offset + 1:
+            print(f"contiguous no because {offset} != {last_offset} + 1")
             is_contiguous = False
             break
         last_offset = offset
 
-    assert operand.spec.layout == first_spec.layout
-    assert (
-        operand.layout.check_tile_contiguity(
-            operand.spec.dim_sizes, first_spec.dim_sizes, first_spec.contiguous
+    if exact:
+        assert (
+            final_operand.layout.check_tile_contiguity(
+                final_operand.spec.dim_sizes,
+                stack[-2].dim_sizes,
+                final_operand.spec.contiguous,
+            )
+            == is_contiguous
         )
-        == is_contiguous
-    )
+    else:
+        assert is_contiguous or not final_operand.layout.check_tile_contiguity(
+            final_operand.spec.dim_sizes,
+            stack[-2].dim_sizes,
+            final_operand.spec.contiguous,
+        )
 
 
 @_calculator_to_test(_arb_matmul_spec)

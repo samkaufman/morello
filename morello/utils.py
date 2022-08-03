@@ -5,7 +5,7 @@ import warnings
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Iterable, Sequence, TypeVar
 
-from . import layouts, system_config
+from . import tensor, layouts, system_config
 
 if TYPE_CHECKING:
     from . import specs
@@ -45,33 +45,53 @@ def flatten(src):
         else:
             yield el
 
-
 def aligned_approx(
-    tile_shape: Sequence[int], tile_layout: "layouts.Layout", parent: "specs.TensorSpec"
+    tile_cls: type,
+    tile_shape: Sequence[int],
+    parent: "specs.TensorSpec",
 ) -> bool:
     """Test whether a tiling breaks alignment.
 
-    It may report some aligned tilings as unaligned, but may never report an unaligned
-    tiling as aligned.
+    Returns `True` if every concrete tile in a tiling of a given-layout tensor
+    has its first address on an aligned address. An aligned address is a
+    multiple of `current_system().line_size`.
+
+    Tiles must have the same layout as `parent` (the usual case). 
+
+    It may report some aligned tilings as unaligned, but will never report an
+    unaligned tiling as aligned.
     """
-    if parent.layout != tile_layout:
-        raise ValueError(
-            f"Only supports same-layout TensorSpecs, but given"
-            f" {parent.layout} and {tile_layout}"
-        )
-    if not isinstance(tile_layout, layouts.StandardLayout):
-        warnings.warn(
-            f"No alignment heuristic support for {tile_layout.__class__.__name__}; "
-            "assuming unaligned"
-        )
+    # If the parent isn't contiguous or aligned, then we have no idea if
+    # anything is aligned or not.
+    if not parent.contiguous or not parent.aligned:
         return False
 
-    # Use a simple, under-approximating strategy. If any dimension would break alignment
-    # were that the physically innermost dimension, then this function returns `False`.
-    if not parent.aligned:
-        return False
     line_size = system_config.current_system().line_size
-    return not any(d % line_size for d in tile_shape)
+
+    if isinstance(parent.layout, layouts.StandardLayout) and issubclass(
+        tile_cls, tensor.SimpleTile
+    ):
+        # We want to know if a step in any tiling direction results in a delta
+        # that is not a multiple of the line size. In the case of a regular
+        # layout and tiling, this is the same as checking that the cumulative
+        # tile dimensions (times bytes) are multiples of the line, ignoring
+        # dimensions which will never be advanced (tile dim = parent dim).
+        cum_inner_volume = 1
+        for physical_dim_idx in reversed(parent.layout.dim_order):
+            step_values = cum_inner_volume * tile_shape[physical_dim_idx]
+            cum_inner_volume *= parent.dim_sizes[physical_dim_idx]
+            # Skip dimensions over which we don't iterate.
+            if parent.dim_sizes[physical_dim_idx] == tile_shape[physical_dim_idx]:
+                continue 
+            if step_values * parent.dtype.size % line_size != 0:
+                return False
+        return True
+    else:
+        warnings.warn(
+            f"No alignment heuristic support for {tile_cls.__name__} and "
+            f"{parent.layout.__class__.__name__}; assuming unaligned"
+        )
+        return False
 
 
 def factors(n: int) -> Iterable[int]:
