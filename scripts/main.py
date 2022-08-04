@@ -186,6 +186,9 @@ def main() -> int:
     # Set a target
     system_config.set_current_target(parsed_args.target)
 
+    # Disable sliding windows, since we can't use them with codegen yet.
+    impl.allow_sliding_windows.set(False)
+
     # Apply the --tile-sizes setting
     if parsed_args.tile_sizes == "all":
         tile_size_mode = TileSizeMode.ALL
