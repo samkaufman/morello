@@ -10,7 +10,7 @@ import sympy
 from ..tensor import Tensor, TensorLike, Tile
 from . import common, indexexpr
 from .common import OperandDetails
-from .indexexpr import set_subgroup, unset_subgroup, vsub
+from .indexexpr import vsub
 
 _IRE = re.compile(r"i(\d+)")
 
@@ -190,8 +190,6 @@ def _compute_tile_out_loop_nest(
         for subscript_is_boundary, (sub, full_steps, _) in zip(
             boundary_config, emitting_subscripts
         ):
-            set_subgroup("   sub: " + str(sub))
-
             # Edit `concrete_shape` to reflect whichever subscripts are currently
             # boundaries.
             for op_idx, deets in enumerate(op_details):
@@ -210,7 +208,6 @@ def _compute_tile_out_loop_nest(
                         concrete_shapes[op_idx][sidx] = min(
                             concrete_shapes[op_idx][sidx], new_size
                         )
-            unset_subgroup()
 
         # TODO: Remove the following checks
         # if all(len(a) == 4 for a in concrete_shapes):

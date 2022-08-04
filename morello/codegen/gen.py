@@ -30,7 +30,7 @@ from .ctensors import (
 )
 
 # TODO: Remove
-from .indexexpr import set_subgroup, unset_subgroup, vsub
+from .indexexpr import vsub
 from .loops import OperandDetailsLoopExt, emit_tile_out_loop_nest, BOUNDARY_ANCESTORS
 
 _DCFETCH_EMIT_STRATEGY = "first-pt"

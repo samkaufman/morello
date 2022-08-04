@@ -6,7 +6,7 @@ import sympy
 
 from ..dtypes import Dtype, Uint32, Uint8
 from . import common, expr_utils
-from .indexexpr import set_subgroup, unset_subgroup, vsub
+from .indexexpr import vsub
 
 GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str]] = {
     # TODO: Fix _BROADCAST_VEC_MULT_WIDTH
