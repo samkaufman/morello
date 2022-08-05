@@ -609,16 +609,27 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                 writer.writeline(f"{lhs_txt} = {rhs_txt};  // VectorAssign boundary")
         else:
             vol = functools.reduce(operator.mul, shape, 1)
-            vtype = GCC_VEC_TYPES[(imp.spec.operands[0].dtype, vol)][1]
             l, r = (expr_utils.zero_points(d.index_expr) for d in op_details)
             lhs_txt = op_details[0].c_tensor.c_index_ptr(l)
             rhs_txt = op_details[1].c_tensor.c_index_ptr(r)
-            if not imp.is_store:
-                lhs_txt, rhs_txt = rhs_txt, lhs_txt
-            writer.writeline(
-                f"*({vtype} *)({lhs_txt}) = "
-                f"(*({vtype} *)({rhs_txt}));  // VectorAssign"
-            )
+            if all(t.aligned for t in imp.spec.operands):
+                vtype = GCC_VEC_TYPES[(imp.spec.operands[0].dtype, vol)][1]
+                if not imp.is_store:
+                    lhs_txt, rhs_txt = rhs_txt, lhs_txt
+                writer.writeline(
+                    f"*({vtype} *)({lhs_txt}) = "
+                    f"(*({vtype} *)({rhs_txt}));  // VectorAssign"
+                )
+            else:
+                itype = GCC_VEC_TYPES[(imp.spec.operands[0].dtype, vol)][2]
+                if imp.is_store:
+                    writer.writeline(
+                        f"_mm_storeu_si128(({itype} *)({lhs_txt}), *({itype} *)({rhs_txt}));  // VectorAssign"
+                    )
+                else:
+                    writer.writeline(
+                        f"*({itype} *)({rhs_txt}) = _mm_loadu_si128(({itype} *)({lhs_txt}));  // VectorAssign"
+                    )
     else:
         raise NotImplementedError(f"Not implemented for {type(imp).__name__}")
 
@@ -1018,7 +1029,7 @@ def generate_c(
     writer.writeline("  (((uintptr_t)(const void *)(POINTER)) % (BYTE_COUNT) == 0)")
 
     if _SIMD_MOVES:
-        for (dt, bytes), (vec_bytes, name) in GCC_VEC_TYPES.items():
+        for (dt, _), (vec_bytes, name, _) in GCC_VEC_TYPES.items():
             # Declare a vector of {vec_bytes} bytes, divided into {dt.c_type}
             # values. (vec_bytes must be a multiple of the c_type size.)
             writer.writeline(

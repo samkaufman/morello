@@ -8,10 +8,10 @@ from ..dtypes import Dtype, Uint32, Uint8
 from . import common, expr_utils
 from .indexexpr import vsub
 
-GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str]] = {
+GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str, str]] = {
     # TODO: Fix _BROADCAST_VEC_MULT_WIDTH
-    (Uint32, 8): (32, "vui8"),  # TODO: Add
-    (Uint8, 32): (32, "vub32"),
+    (Uint32, 8): (32, "vui8", "__m128i"),
+    (Uint8, 32): (32, "vub32", "__m128i"),
 }
 
 
