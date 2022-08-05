@@ -624,11 +624,11 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                 itype = GCC_VEC_TYPES[(imp.spec.operands[0].dtype, vol)][2]
                 if imp.is_store:
                     writer.writeline(
-                        f"_mm_storeu_si128(({itype} *)({lhs_txt}), *({itype} *)({rhs_txt}));  // VectorAssign"
+                        f"_mm256_storeu_si256(({itype} *)({lhs_txt}), *({itype} *)({rhs_txt}));  // VectorAssign"
                     )
                 else:
                     writer.writeline(
-                        f"*({itype} *)({rhs_txt}) = _mm_loadu_si128(({itype} *)({lhs_txt}));  // VectorAssign"
+                        f"*({itype} *)({rhs_txt}) = _mm256_loadu_si256(({itype} *)({lhs_txt}));  // VectorAssign"
                     )
     else:
         raise NotImplementedError(f"Not implemented for {type(imp).__name__}")
