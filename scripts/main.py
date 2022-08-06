@@ -54,6 +54,7 @@ parser_matmul.add_argument("k", type=int)
 parser_matmul.add_argument("n", type=int)
 
 parser_conv = subparsers.add_parser("conv", help="Impl a convolution")
+parser_conv.add_argument("batch_size", type=int)
 parser_conv.add_argument("image_width", type=int)
 parser_conv.add_argument("image_height", type=int)
 parser_conv.add_argument("filter_width", type=int)
@@ -83,6 +84,7 @@ def _matmul_main(m, k, n, top_k: int, cache: search_cache.ScheduleCache):
 
 
 def _conv_main(
+    batch_size,
     image_width,
     image_height,
     filter_width,
@@ -94,16 +96,17 @@ def _conv_main(
     target = system_config.current_target()
     assert filter_width <= image_width and filter_height <= image_height
     left = target.tensor(
-        target.tensor_spec((1, 3, image_width, image_height), dtype=DTYPE), name="image"
+        target.tensor_spec((batch_size, 4, image_width, image_height), dtype=DTYPE),
+        name="image",
     )
     right = target.tensor(
-        target.tensor_spec((filter_count, 3, filter_width, filter_height), dtype=DTYPE),
+        target.tensor_spec((filter_count, 4, filter_width, filter_height), dtype=DTYPE),
         name="filters",
     )
     output = target.tensor(
         target.tensor_spec(
             (
-                1,
+                batch_size,
                 filter_count,
                 image_width - filter_width + 1,
                 image_height - filter_height + 1,
@@ -210,6 +213,7 @@ def main() -> int:
                 )
             elif parsed_args.spec == "conv":
                 scheds, runtime = _conv_main(
+                    parsed_args.batch_size,
                     parsed_args.image_width,
                     parsed_args.image_height,
                     parsed_args.filter_width,
