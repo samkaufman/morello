@@ -59,7 +59,7 @@ class TensorLike:
         for i, origin_dim_size in enumerate(origin_shape):
             s *= self.steps_dim(i, origin_dim_size)
         return s
-    
+
     def steps_dim(self, dim: int, origin_size: int) -> int:
         raise NotImplementedError()
 
@@ -70,7 +70,7 @@ class TensorLike:
     def frontiers(self) -> tuple[int, ...]:
         """The sizes of non-overlapping regions between consecutive tiles in each dimension."""
         raise NotImplementedError()
-    
+
     def transform_origin_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
         return tuple(shape)
 
@@ -104,7 +104,7 @@ class Tensor(TensorBase):
             layout_epi = f", {self.layout}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         return f"{type(self).__name__}({dims_part}{layout_epi}, {self.bank})"
-    
+
     def steps_dim(self, dim: int, origin_size: int) -> int:
         return 1
 
@@ -157,7 +157,7 @@ class SqueezingTile(Tile):
         if all(d == 1 for d in new_dim_sizes):
             new_layout = layouts.row_major(len(new_dim_sizes))
         else:
-            new_layout = layouts.DimDropLayout(ispec.layout, self.dropped_dims)
+            new_layout = layouts.DimDropView(ispec.layout, self.dropped_dims)
 
         return specs.TensorSpec(
             dim_sizes=tuple(new_dim_sizes),
@@ -184,8 +184,10 @@ class SqueezingTile(Tile):
     def frontiers(self) -> tuple[int, ...]:
         mapping = self._squeezed_to_exploded_dims()
         inner_frontier = self.inner.frontiers
-        return tuple(inner_frontier[mapping[idx]] for idx in range(len(self.spec.dim_sizes)))
-            
+        return tuple(
+            inner_frontier[mapping[idx]] for idx in range(len(self.spec.dim_sizes))
+        )
+
     def _squeezed_to_exploded_dims(self) -> Mapping[int, int]:
         to_return = {}
         skipped = 0
@@ -193,13 +195,13 @@ class SqueezingTile(Tile):
             if dim_idx in self.dropped_dims:
                 skipped += 1
             else:
-                to_return[dim_idx - skipped] = dim_idx    
+                to_return[dim_idx - skipped] = dim_idx
         return to_return
 
     def transform_origin_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
         shape = self.inner.transform_origin_shape(shape)
         return tuple(d for i, d in enumerate(shape) if i not in self.dropped_dims)
-    
+
     def __str__(self):
         return f"{self.inner}.squeeze"
 
@@ -231,19 +233,19 @@ class TransposingTile(Tile):
             contiguous=ispec.contiguous,
             aligned=ispec.aligned,
             bank=ispec.bank,
-            layout=layouts.TransposeLayout(ispec.layout, self.swap_dims).normalize(),
-        ) 
-    
+            layout=layouts.TransposeView(ispec.layout, self.swap_dims).normalize(),
+        )
+
     @property
     def name(self) -> str:
         return self.inner.name
-    
+
     def steps_dim(self, dim: int, origin_size: int) -> int:
         return self.inner.steps_dim(self._flip_dim(dim), origin_size)
-    
+
     def boundary_size(self, dim: int, origin_size: int) -> int:
         return self.inner.boundary_size(self._flip_dim(dim), origin_size)
-    
+
     @property
     def frontiers(self) -> tuple[int, ...]:
         f = list(self.inner.frontiers)
@@ -260,7 +262,7 @@ class TransposingTile(Tile):
 
     def __str__(self):
         return f"{self.inner}.T"
-    
+
     def _flip_dim(self, dim: int) -> int:
         d = dim
         if d == self.swap_dims[0]:
@@ -318,10 +320,15 @@ class ConvolutionImageTile(CommonTileBase):
     filter_shape: tuple[int, ...]
 
     def __post_init__(self):
-        assert len(self.dim_sizes) >= 3
-        assert len(self.filter_shape) + 1 == len(
-            self.dim_sizes
-        ), f"Incompatible ranks; filters was {self.filter_shape} and image was {self.dim_sizes}"
+        assert len(self.dim_sizes) >= self.minimum_image_rank()
+        assert len(self.filter_shape) + 1 == len(self.dim_sizes), (
+            f"Incompatible ranks; filters was {self.filter_shape} and image "
+            f"was {self.dim_sizes}"
+        )
+
+    @staticmethod
+    def minimum_image_rank() -> int:
+        return 3
 
     def steps_dim(self, dim: int, origin_size: int) -> int:
         # Batch should be a normal tiling.

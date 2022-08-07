@@ -75,7 +75,7 @@ class Layout:
 
 
 @dataclasses.dataclass(frozen=True)
-class DimDropLayout(Layout):
+class DimDropView(Layout):
     inner: Layout
     dropped_dims: frozenset[int]
 
@@ -118,7 +118,7 @@ class DimDropLayout(Layout):
 
         if isinstance(normalized, PackedLayout):
             if normalized.strip_dim in self.dropped_dims:
-                return DimDropLayout(
+                return DimDropView(
                     inner=row_major(normalized.dim_count),
                     dropped_dims=self.dropped_dims,
                 ).normalize()
@@ -130,7 +130,7 @@ class DimDropLayout(Layout):
                 if self.dropped_dims == after_strip_dim:
                     return row_major(normalized.strip_dim + 1).normalize()
                 elif self.dropped_dims.issuperset(after_strip_dim):
-                    return DimDropLayout(
+                    return DimDropView(
                         inner=row_major(normalized.strip_dim + 1),
                         dropped_dims=self.dropped_dims - after_strip_dim,
                     ).normalize()
@@ -148,7 +148,7 @@ class DimDropLayout(Layout):
 
 
 @dataclasses.dataclass(frozen=True)
-class TransposeLayout(Layout):
+class TransposeView(Layout):
     inner: Layout
     swap_dims: tuple[int, int]
 
