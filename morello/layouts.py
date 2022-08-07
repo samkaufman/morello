@@ -3,7 +3,7 @@ import functools
 import itertools
 import math
 import operator
-from typing import TYPE_CHECKING, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Sequence, Union
 import typing
 
 import sympy
@@ -73,145 +73,11 @@ class Layout:
     def is_row_major(self) -> bool:
         return False
 
+    def dim_drop(self, dropped_dims: frozenset[int]) -> "Layout":
+        raise NotImplementedError()
 
-@dataclasses.dataclass(frozen=True)
-class DimDropView(Layout):
-    inner: Layout
-    dropped_dims: frozenset[int]
-
-    def __post_init__(self):
-        assert len(self.dropped_dims)
-
-    def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        e = self.inner.buffer_indexing_expr(self._explode_shape(concrete_shape))
-        # TODO: Assert that dropped dims aren't present in returned expression
-        return e
-
-    def check_tile_contiguity(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ) -> bool:
-        return self.inner.check_tile_contiguity(
-            self._explode_shape(tile_shape),
-            self._explode_shape(parent_shape),
-            parent_contiguous,
-        )
-
-    def estimate_cache_lines(
-        self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool
-    ) -> int:
-        return self.inner.estimate_cache_lines(
-            self._explode_shape(shape), dtype, contiguous
-        )
-
-    def normalize(self) -> Layout:
-        normalized = self.inner.normalize()
-        if isinstance(normalized, StandardLayout):
-            new_dim_order = []
-            for orig_dim in normalized.dim_order:
-                if orig_dim not in self.dropped_dims:
-                    offset = len([d for d in self.dropped_dims if d < orig_dim])
-                    new_dim_order.append(orig_dim - offset)
-            return StandardLayout(tuple(new_dim_order))
-
-        if isinstance(normalized, PackedLayout):
-            if normalized.strip_dim in self.dropped_dims:
-                return DimDropView(
-                    inner=row_major(normalized.dim_count),
-                    dropped_dims=self.dropped_dims,
-                ).normalize()
-
-            after_strip_dim = frozenset(
-                range(normalized.strip_dim + 1, normalized.dim_count)
-            )
-            if after_strip_dim:
-                if self.dropped_dims == after_strip_dim:
-                    return row_major(normalized.strip_dim + 1).normalize()
-                elif self.dropped_dims.issuperset(after_strip_dim):
-                    return DimDropView(
-                        inner=row_major(normalized.strip_dim + 1),
-                        dropped_dims=self.dropped_dims - after_strip_dim,
-                    ).normalize()
-
-        return normalized
-
-    def _explode_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
-        inner_shape = list(shape)
-        for d in sorted(self.dropped_dims, reverse=True):
-            inner_shape.insert(d, 1)
-        return tuple(inner_shape)
-
-    def __str__(self):
-        return str(self.inner) + ".drop"
-
-
-@dataclasses.dataclass(frozen=True)
-class TransposeView(Layout):
-    inner: Layout
-    swap_dims: tuple[int, int]
-
-    def __post_init__(self):
-        assert self.swap_dims[0] < self.swap_dims[1]
-
-    def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        e = self.inner.buffer_indexing_expr(self._transpose_shape(concrete_shape))
-        e = e.subs(
-            [
-                (f"p{self.swap_dims[0]}", f"p{self.swap_dims[1]}"),
-                (f"p{self.swap_dims[1]}", f"p{self.swap_dims[0]}"),
-            ],
-            simultaneous=True,
-        )
-        return e
-
-    def check_tile_contiguity(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ) -> bool:
-        transposed_parent_shape = self._transpose_shape(parent_shape)
-        transposed_tile_shape = self._transpose_shape(tile_shape)
-        return self.inner.check_tile_contiguity(
-            transposed_tile_shape, transposed_parent_shape, parent_contiguous
-        )
-
-    def estimate_cache_lines(
-        self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool
-    ) -> int:
-        transposed_shape = self._transpose_shape(shape)
-        return self.inner.estimate_cache_lines(transposed_shape, dtype, contiguous)
-
-    def normalize(self) -> Layout:
-        normalized = self.inner.normalize()
-        if isinstance(normalized, StandardLayout):
-            new_dim_order = []
-            for orig_dim in normalized.dim_order:
-                if orig_dim == self.swap_dims[0]:
-                    new_dim_order.append(self.swap_dims[1])
-                elif orig_dim == self.swap_dims[1]:
-                    new_dim_order.append(self.swap_dims[0])
-                else:
-                    new_dim_order.append(orig_dim)
-            return StandardLayout(tuple(new_dim_order))
-        elif isinstance(normalized, PackedLayout):
-            raise NotImplementedError()
-        else:
-            return normalized
-
-    def __str__(self):
-        return str(self.inner) + ".T"
-
-    def _transpose_shape(self, shape):
-        transposed_shape = list(shape)
-        i, j = self.swap_dims
-        transposed_shape[i], transposed_shape[j] = (
-            transposed_shape[j],
-            transposed_shape[i],
-        )
-        return tuple(transposed_shape)
+    def transpose(self, swap_dims: tuple[int, int]) -> "Layout":
+        raise NotImplementedError()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -282,6 +148,27 @@ class StandardLayout(Layout):
         if len(shape) != len(self.dim_order):
             return False
         return True
+
+    def dim_drop(self, dropped_dims: frozenset[int]) -> "Layout":
+        assert len(dropped_dims)
+        new_dim_order = []
+        for orig_dim in self.dim_order:
+            if orig_dim not in dropped_dims:
+                offset = len([d for d in dropped_dims if d < orig_dim])
+                new_dim_order.append(orig_dim - offset)
+        return StandardLayout(tuple(new_dim_order))
+
+    def transpose(self, swap_dims: tuple[int, int]) -> "Layout":
+        assert swap_dims[0] < swap_dims[1]
+        new_dim_order = []
+        for orig_dim in self.dim_order:
+            if orig_dim == swap_dims[0]:
+                new_dim_order.append(swap_dims[1])
+            elif orig_dim == swap_dims[1]:
+                new_dim_order.append(swap_dims[0])
+            else:
+                new_dim_order.append(orig_dim)
+        return StandardLayout(tuple(new_dim_order))
 
     def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
         assert len(dim_sizes) == len(
@@ -377,6 +264,23 @@ class PackedLayout(Layout):
         if shape[self.strip_dim] % self.strip_size != 0:
             return False
         return True
+
+    def dim_drop(self, dropped_dims: frozenset[int]) -> "Layout":
+        if self.strip_dim in dropped_dims:
+            return row_major(self.dim_count).dim_drop(dropped_dims).normalize()
+
+        after_strip_dim = frozenset(range(self.strip_dim + 1, self.dim_count))
+        if after_strip_dim:
+            if dropped_dims == after_strip_dim:
+                return row_major(self.strip_dim + 1).normalize()
+            elif dropped_dims.issuperset(after_strip_dim):
+                return (
+                    row_major(self.strip_dim + 1)
+                    .dim_drop(dropped_dims - after_strip_dim)
+                    .normalize()
+                )
+
+        return self
 
     def _expand_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
         new_shape = list(shape)
