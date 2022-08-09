@@ -56,12 +56,36 @@ jobs:
           name: ${{ env.DOCKER_IMAGE_NAME }}
           path: ${{ env.DOCKER_IMAGE_PATH }}
           retention-days: 1
+  upload-to-docker-hub:
+    # TODO: Depend on tests passing as well.
+    needs: build-img
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to DockerHub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+      - name: Download the Docker image artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: ${{ env.DOCKER_IMAGE_NAME }}
+      - name: Load the image
+        run: |
+          docker load -i "$DOCKER_IMAGE_PATH"
+      - name: Tag and push the image to DockerHub
+        if: github.event_name != 'pull_request'
+        run: |
+          docker tag "$DOCKER_IMAGE_TAG" "samkaufman/morello:${{ github.ref_name }}"
+          docker rmi "$DOCKER_IMAGE_TAG"
+          docker push "samkaufman/morello:${{ github.ref_name }}"
   test:
     needs: build-img
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: Download the Docker image
+      - name: Download the Docker image artifact
         uses: actions/download-artifact@v2
         with:
           name: ${{ env.DOCKER_IMAGE_NAME }}
@@ -80,7 +104,7 @@ jobs:
       matrix:
         spec: ["matmul", "gemm3", "conv", "cnn"]
     steps:
-      - name: Download the Docker image
+      - name: Download the Docker image artifact
         uses: actions/download-artifact@v2
         with:
           name: ${{ env.DOCKER_IMAGE_NAME }}
