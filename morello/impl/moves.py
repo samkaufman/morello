@@ -254,12 +254,13 @@ def common_move(
         bank = operand.bank
     if layout is None:
         layout = operand.layout
+    assert layout is not None
     if bank == operand.bank and layout == operand.layout:
         raise ValueError("Either bank or layout must differ from current")
 
     # Will the result be contiguous? If the move is into a cache, it might be.
     # If it's into memory bank with its own address space, then yes.
-    contiguous = True
+    contiguous = layout.contiguous_top()
     aligned = True
     if bank not in current_system().addressed_banks:
         contiguous = layout.check_tile_contiguity(

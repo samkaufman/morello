@@ -1,7 +1,7 @@
 import functools
 import operator
 import typing
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import cython
 
@@ -39,7 +39,7 @@ class TensorSpec:
         self,
         dim_sizes: tuple[int, ...],
         dtype: Dtype,
-        contiguous: bool,
+        contiguous: Any,
         aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[layouts.Layout] = None,
@@ -60,10 +60,6 @@ class TensorSpec:
         if not len(self.dim_sizes):
             raise ValueError("dim_sizes cannot be empty")
         if all(d == 1 for d in self.dim_sizes):
-            if not self.contiguous:
-                raise ValueError(
-                    "If all dimensions are 1, TensorSpec must be contiguous"
-                )
             if not self.layout.is_row_major:
                 raise ValueError("If all dimensions are 1, layout must be row-major")
 
@@ -186,8 +182,8 @@ class TensorSpec:
             layout_epi = f", {self.layout}"
         if self.bank != current_system().default_bank:
             bank_epi = f", {self.bank}"
-        if not self.contiguous:
-            c_epi = ", nc"
+        if self.contiguous != self.layout.contiguous_top():
+            c_epi = f", c{self.contiguous}"
         if not self.aligned:
             a_epi = ", ua"
         dims_part = "×".join(str(s) for s in self.dim_sizes)

@@ -68,10 +68,7 @@ def test_gen_vector_shapes_2():
 def test_gen_vector_shapes_3():
     assert list(
         morello.impl.utils.gen_vector_shapes([16, 2], dtypes.Uint8, elements=16)
-    ) == [
-        (8, 2),
-        (16, 1),
-    ]
+    ) == [(8, 2), (16, 1),]
 
 
 def test_gen_vector_shapes_4():
@@ -135,7 +132,7 @@ def test_pipeline_peak_and_additional_memory(
     assert len(intermed_shapes) + 1 == len(op_mems)
 
     intermediates: list[Optional[tensor.Tensor]] = [
-        tensor.Tensor(spec=specs.TensorSpec(shp, dtype, True, bank="RF"), name=None)
+        tensor.Tensor(spec=specs.TensorSpec(shp, dtype, len(shp), bank="RF"), name=None)
         for shp in intermed_shapes
     ]
     intermediates.append(None)
@@ -174,16 +171,12 @@ def test_convolution_steps(
 ):
     print(f"Testing square {tile_size}")
     filter_cnt = 4
-    img = specs.TensorSpec((outer_batch, channels, img_size, img_size), dtype, True)
+    img = specs.TensorSpec((outer_batch, channels, img_size, img_size), dtype, 4)
     filters = specs.TensorSpec(
-        (filter_cnt, channels, filter_size, filter_size), dtype, True
+        (filter_cnt, channels, filter_size, filter_size), dtype, 4
     )
-    out=specs.TensorSpec(
-        (outer_batch, filter_cnt, out_size, out_size), dtype, True
-    )
-    conv = impl.DirectConv(
-      specs.Convolution(img, filters, out, serial_only=False)
-    )
+    out = specs.TensorSpec((outer_batch, filter_cnt, out_size, out_size), dtype, 4)
+    conv = impl.DirectConv(specs.Convolution(img, filters, out, serial_only=False))
     print("On a conv: " + str(conv))
     print(f"Calling conv.tile_out({(inner_batch, filter_cnt, tile_size, tile_size)})")
     loop = conv.tile_out((inner_batch, filter_cnt, tile_size, tile_size))
@@ -195,12 +188,12 @@ def test_convolution_steps(
 
 
 def test_evenly_divisible_matmul_tiling():
-    lhs = specs.TensorSpec((4, 4), dtypes.Uint32, True)
-    rhs = specs.TensorSpec((4, 4), dtypes.Uint32, True)
-    out = specs.TensorSpec((4, 4), dtypes.Uint32, True)
-    schedule = impl.MatmulHole(specs.Matmul(
-        lhs, rhs, out, serial_only=False
-    )).tile_out((2, 2))
+    lhs = specs.TensorSpec((4, 4), dtypes.Uint32, 4)
+    rhs = specs.TensorSpec((4, 4), dtypes.Uint32, 4)
+    out = specs.TensorSpec((4, 4), dtypes.Uint32, 4)
+    schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, out, serial_only=False)).tile_out(
+        (2, 2)
+    )
     assert schedule.spec.output.dim_sizes == (4, 4)
     assert isinstance(schedule.inner, morello.impl.matmuls.MatmulBase)
     assert schedule.inner.spec.output.dim_sizes == (2, 2)
@@ -227,22 +220,20 @@ def test_nested_convs_outputs_constant(
 ):
     # TODO: Update to try different batches counts
     image = tensor.Tensor(
-        specs.TensorSpec((1, 1, h + a + fa, w + b + fb), dtype, True), name=None
+        specs.TensorSpec((1, 1, h + a + fa, w + b + fb), dtype, 4), name=None
     )
     # TODO: Update to try different channels counts
-    filters = tensor.Tensor(specs.TensorSpec((fi, 1, h, w), dtype, True), name=None)
+    filters = tensor.Tensor(specs.TensorSpec((fi, 1, h, w), dtype, 4), name=None)
     expected_output_height = 1 + a + fa
     expected_output_width = 1 + b + fb
     output = tensor.Tensor(
         specs.TensorSpec(
-            (1, fi, expected_output_height, expected_output_width), dtype, True
+            (1, fi, expected_output_height, expected_output_width), dtype, 4
         ),
         name=None,
     )
     schedule = morello.impl.directconv.DirectConv(
-        specs.Convolution(
-            image.spec, filters.spec, output.spec, serial_only=False
-        )
+        specs.Convolution(image.spec, filters.spec, output.spec, serial_only=False)
     )
     assert schedule.spec.output.dim_sizes[:2] == (1, fi)
     assert schedule.spec.output.dim_sizes[2] == expected_output_height
@@ -265,14 +256,10 @@ def test_nested_convs_outputs_constant(
 
 @pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 def test_tile_compose_hole_out(dtype):
-    img = tensor.Tensor(specs.TensorSpec((1, 1, 8, 8), dtype, True), name="image")
-    filters_a = tensor.Tensor(
-        specs.TensorSpec((4, 1, 3, 3), dtype, True), name="filtersA"
-    )
-    filters_b = tensor.Tensor(
-        specs.TensorSpec((4, 4, 3, 3), dtype, True), name="filtersB"
-    )
-    output = tensor.Tensor(specs.TensorSpec((1, 4, 4, 4), dtype, True), name="output")
+    img = tensor.Tensor(specs.TensorSpec((1, 1, 8, 8), dtype, 4), name="image")
+    filters_a = tensor.Tensor(specs.TensorSpec((4, 1, 3, 3), dtype, 4), name="filtersA")
+    filters_b = tensor.Tensor(specs.TensorSpec((4, 4, 3, 3), dtype, 4), name="filtersB")
+    output = tensor.Tensor(specs.TensorSpec((1, 4, 4, 4), dtype, 4), name="output")
 
     compose_spec = specs.Compose(
         (specs.Convolution, specs.Convolution),
@@ -316,14 +303,14 @@ def test_composehole_actions_change_spec(dtype):
     # This doesn't test for cycles introduced by sequences of more than one
     # action, but it makes sure that at least every individual step changes the
     # spec.
-    img = tensor.Tensor(specs.TensorSpec((1, 1, 8, 8), dtype, True), name="image")
+    img = tensor.Tensor(specs.TensorSpec((1, 1, 8, 8), dtype, 4), name="image")
     filters_a = tensor.Tensor(
-        specs.TensorSpec((10, 1, 3, 3), dtype, True), name="filtersA"
+        specs.TensorSpec((10, 1, 3, 3), dtype, 4), name="filtersA"
     )
     filters_b = tensor.Tensor(
-        specs.TensorSpec((7, 10, 3, 3), dtype, True), name="filtersB"
+        specs.TensorSpec((7, 10, 3, 3), dtype, 4), name="filtersB"
     )
-    output = tensor.Tensor(specs.TensorSpec((1, 7, 4, 4), dtype, True), name="output")
+    output = tensor.Tensor(specs.TensorSpec((1, 7, 4, 4), dtype, 4), name="output")
     initial_spec = specs.Compose(
         (specs.Convolution, specs.Convolution),
         (filters_b.spec, img.spec, filters_a.spec),
@@ -331,9 +318,7 @@ def test_composehole_actions_change_spec(dtype):
         intermediate_dtypes=(dtype,),
         serial_only=False,
     )
-    initial_op = morello.impl.compose.ComposeHole(
-        initial_spec
-    )
+    initial_op = morello.impl.compose.ComposeHole(initial_spec)
 
     for child in _walk_actions(initial_op, depth=3):
         assert child.spec != initial_spec, f"{child.spec} == {str(initial_spec)}"

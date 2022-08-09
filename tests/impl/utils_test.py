@@ -8,16 +8,18 @@ from .. import strategies
 
 strategies.register_default_strategies()
 
-def test_nchwc_is_noncontiguous_when_breaking_by_nonmultiple():
+
+def test_nchwc_contiguousness_when_breaking_by_nonmultiple():
     layout = layouts.PackedLayout(4, 1, 32)  # NCHWc with 4-split
     outer_shape = (8, 64, 8, 8)
-    bad_shape = (8, 32, 8, 8)
+    tile_shape = (8, 32, 8, 8)
 
     oi = tensor.OperandIdx(0)
 
     target = system_config.current_target()
     outer_spec = target.tensor_spec(outer_shape, dtypes.Uint8, bank="GL", layout=layout)
-    assert not outer_spec.simple_tile(oi, bad_shape).spec.contiguous
+    tile = outer_spec.simple_tile(oi, tile_shape)
+    assert tile.spec.contiguous == 4
 
 
 @hypothesis.example([1, 1], True)

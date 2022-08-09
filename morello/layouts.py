@@ -3,7 +3,7 @@ import functools
 import itertools
 import math
 import operator
-from typing import TYPE_CHECKING, Sequence, Union
+from typing import TYPE_CHECKING, Any, Sequence, Union
 import typing
 
 import sympy
@@ -21,12 +21,15 @@ class Layout:
     def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
         raise NotImplementedError()
 
+    def contiguous_top(self) -> Any:
+        raise NotImplementedError()
+
+    def tile_is_contiguous(self, contiguous) -> bool:
+        raise NotImplementedError()
+
     def check_tile_contiguity(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ) -> bool:
+        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous,
+    ) -> Any:
         """Test whether a tile of a particular shape and layout is contiguous.
 
         This returns `True` if a tile of a given shape and `self` layout, when
@@ -40,19 +43,6 @@ class Layout:
         the tile is not contiguous.
         """
         raise NotImplementedError()
-
-    @typing.final
-    def _check_shared_contiguousness_conditions(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ):
-        if all(d == 1 for d in tile_shape):
-            return True
-        if not parent_contiguous:
-            return False
-        return None
 
     def estimate_cache_lines(
         self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool
@@ -88,29 +78,32 @@ class StandardLayout(Layout):
     def __post_init__(self):
         assert all(d >= 0 for d in self.dim_order)
 
+    def contiguous_top(self) -> Any:
+        return len(self.dim_order)
+
+    def tile_is_contiguous(self, contiguous) -> bool:
+        return contiguous == len(self.dim_order)
+
     def check_tile_contiguity(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ) -> bool:
-        c = self._check_shared_contiguousness_conditions(
-            tile_shape, parent_shape, parent_contiguous
-        )
-        if c is not None:
-            return c
+        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous,
+    ) -> Any:
+        if all(d == 1 for d in tile_shape):
+            return self.contiguous_top()
 
-        self_ordered_dims = self._layout_ordered_dims(tile_shape)
-        address_root_ordered_dims = self._layout_ordered_dims(parent_shape)
+        cnt = 1  # Skip first.
 
-        pairs = zip(self_ordered_dims, address_root_ordered_dims)
-        pairs = itertools.dropwhile(lambda x: x[0] == 1, pairs)
-        pairs = itertools.islice(pairs, 1, None)
-        for tile_dim_size, root_dim_size in pairs:
-            # The following includes the case where an underlying dimension is 1.
-            if tile_dim_size != root_dim_size:
-                return False
-        return True
+        def inner_loop(offset: int, comp):
+            nonlocal cnt
+            while cnt < len(tile_shape):
+                phys_idx = self.dim_order[-cnt + offset]
+                if tile_shape[phys_idx] != comp(phys_idx):
+                    break
+                cnt += 1
+
+        inner_loop(0, lambda x: parent_shape[x])
+        cnt = min(cnt, parent_contiguous)
+        inner_loop(-1, lambda _: 1)
+        return cnt
 
     def estimate_cache_lines(
         self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool
@@ -201,19 +194,16 @@ class PackedLayout(Layout):
     #         return False
     #     return True
 
+    def contiguous_top(self) -> Any:
+        return self.dim_count + 1
+
+    def tile_is_contiguous(self, contiguous) -> bool:
+        return contiguous == self.dim_count + 1
+
     # TODO: Prefix calls with layout-checking assertions
     def check_tile_contiguity(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ) -> bool:
-        c = self._check_shared_contiguousness_conditions(
-            tile_shape, parent_shape, parent_contiguous
-        )
-        if c is not None:
-            return c
-
+        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous,
+    ) -> Any:
         if len(parent_shape) != self.dim_count:
             raise ValueError(f"Expected rank-{self.dim_count} outer shape")
         if len(tile_shape) != self.dim_count:
