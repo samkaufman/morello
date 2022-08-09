@@ -14,9 +14,9 @@ import sys
 import tempfile
 import typing
 import warnings
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Callable, Optional, Union, cast
+from typing import Callable, Optional, cast
 
 from .. import dtypes, layouts, specs, tensor
 from ..codegen import gen
@@ -51,10 +51,7 @@ class HvxSimulatorTarget(Target):
         return it
 
     def tensor(
-        self,
-        spec: specs.TensorSpec,
-        name: Optional[str] = None,
-        **kwargs,
+        self, spec: specs.TensorSpec, name: Optional[str] = None, **kwargs,
     ) -> tensor.TensorBase:
         if spec.bank == "VMEM":
             assert isinstance(spec, specs.HvxVmemTensorSpec)
@@ -65,7 +62,7 @@ class HvxSimulatorTarget(Target):
         self,
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
-        contiguous: bool = True,
+        contiguous=None,
         aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[layouts.Layout] = None,
@@ -73,6 +70,8 @@ class HvxSimulatorTarget(Target):
     ) -> "specs.TensorSpec":
         if layout is None:
             layout = layouts.row_major(len(dim_sizes))
+        if contiguous is None:
+            contiguous = layout.contiguous_top()
         if bank == "VMEM":
             return layouts.HvxVmemTensorSpec(
                 dim_sizes, dtype, contiguous, bank, layout, **kwargs
@@ -97,13 +96,15 @@ class HvxSimulatorTarget(Target):
             faster_destination_banks=self._faster_destination_banks,
             next_general_bank=self._next_general_bank,
             ordered_banks=["HexagonRF", "VMEM", "L1", "L2", "GL"],
-            addressed_banks=frozenset(["HexagonRF", "VMEM", "GL"])
+            addressed_banks=frozenset(["HexagonRF", "VMEM", "GL"]),
         )
 
     def all_layouts_for_shape(self, shape: Sequence[int]) -> Iterable[layouts.Layout]:
-        from .. import layouts        
+        from .. import layouts
 
-        return list(super().all_layouts_for_shape(shape)) + [layouts.HEXAGON_TRANSPACKED]
+        return list(super().all_layouts_for_shape(shape)) + [
+            layouts.HEXAGON_TRANSPACKED
+        ]
 
     def _faster_destination_banks(self, source: str) -> set[str]:
         if source in ("HexagonRF", "VMEM"):
@@ -339,11 +340,7 @@ class HvxVmemSimpleTile(HvxVmemTensorlike, tensor.SimpleTile):
 
 @contextlib.contextmanager
 def _build_for_hexagon(
-    impl: Impl,
-    *,
-    source_cb: Callable[[str], None],
-    print_output: bool,
-    values,
+    impl: Impl, *, source_cb: Callable[[str], None], print_output: bool, values,
 ):
     clang_path = _hexagon_sdk_tools_root() / "Tools" / "bin" / "hexagon-clang"
     if not clang_path.is_file():

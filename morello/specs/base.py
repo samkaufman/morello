@@ -1,10 +1,9 @@
 import typing
 import warnings
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Sequence
 
 import cython
 
-from .. import utils
 from .tensorspec import TensorSpec
 
 

@@ -3,7 +3,7 @@ import functools
 import itertools
 import math
 import operator
-from typing import TYPE_CHECKING, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Sequence, Union
 import typing
 
 import sympy
@@ -21,12 +21,15 @@ class Layout:
     def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
         raise NotImplementedError()
 
+    def contiguous_top(self) -> Any:
+        raise NotImplementedError()
+
+    def tile_is_contiguous(self, contiguous) -> bool:
+        raise NotImplementedError()
+
     def check_tile_contiguity(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ) -> bool:
+        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous,
+    ) -> Any:
         """Test whether a tile of a particular shape and layout is contiguous.
 
         This returns `True` if a tile of a given shape and `self` layout, when
@@ -40,24 +43,6 @@ class Layout:
         the tile is not contiguous.
         """
         raise NotImplementedError()
-
-    @typing.final
-    def _check_shared_contiguousness_conditions(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ):
-        if any(t > p for t, p in zip(tile_shape, parent_shape)):
-            raise ValueError(
-                f"Tile shape {tile_shape} is larger than parent "
-                f"shape {parent_shape}"
-            )
-        if all(d == 1 for d in tile_shape):
-            return True
-        if not parent_contiguous:
-            return False
-        return None
 
     def estimate_cache_lines(
         self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool
@@ -78,145 +63,11 @@ class Layout:
     def is_row_major(self) -> bool:
         return False
 
+    def dim_drop(self, dropped_dims: frozenset[int]) -> "Layout":
+        raise NotImplementedError()
 
-@dataclasses.dataclass(frozen=True)
-class DimDropLayout(Layout):
-    inner: Layout
-    dropped_dims: frozenset[int]
-
-    def __post_init__(self):
-        assert len(self.dropped_dims)
-
-    def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        e = self.inner.buffer_indexing_expr(self._explode_shape(concrete_shape))
-        # TODO: Assert that dropped dims aren't present in returned expression
-        return e
-
-    def check_tile_contiguity(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ) -> bool:
-        return self.inner.check_tile_contiguity(
-            self._explode_shape(tile_shape),
-            self._explode_shape(parent_shape),
-            parent_contiguous,
-        )
-
-    def estimate_cache_lines(
-        self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool
-    ) -> int:
-        return self.inner.estimate_cache_lines(
-            self._explode_shape(shape), dtype, contiguous
-        )
-
-    def normalize(self) -> Layout:
-        normalized = self.inner.normalize()
-        if isinstance(normalized, StandardLayout):
-            new_dim_order = []
-            for orig_dim in normalized.dim_order:
-                if orig_dim not in self.dropped_dims:
-                    offset = len([d for d in self.dropped_dims if d < orig_dim])
-                    new_dim_order.append(orig_dim - offset)
-            return StandardLayout(tuple(new_dim_order))
-
-        if isinstance(normalized, PackedLayout):
-            if normalized.strip_dim in self.dropped_dims:
-                return DimDropLayout(
-                    inner=row_major(normalized.dim_count),
-                    dropped_dims=self.dropped_dims,
-                ).normalize()
-
-            after_strip_dim = frozenset(
-                range(normalized.strip_dim + 1, normalized.dim_count)
-            )
-            if after_strip_dim:
-                if self.dropped_dims == after_strip_dim:
-                    return row_major(normalized.strip_dim + 1).normalize()
-                elif self.dropped_dims.issuperset(after_strip_dim):
-                    return DimDropLayout(
-                        inner=row_major(normalized.strip_dim + 1),
-                        dropped_dims=self.dropped_dims - after_strip_dim,
-                    ).normalize()
-
-        return normalized
-
-    def _explode_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
-        inner_shape = list(shape)
-        for d in sorted(self.dropped_dims, reverse=True):
-            inner_shape.insert(d, 1)
-        return tuple(inner_shape)
-
-    def __str__(self):
-        return str(self.inner) + ".drop"
-
-
-@dataclasses.dataclass(frozen=True)
-class TransposeLayout(Layout):
-    inner: Layout
-    swap_dims: tuple[int, int]
-
-    def __post_init__(self):
-        assert self.swap_dims[0] < self.swap_dims[1]
-
-    def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        e = self.inner.buffer_indexing_expr(self._transpose_shape(concrete_shape))
-        e = e.subs(
-            [
-                (f"p{self.swap_dims[0]}", f"p{self.swap_dims[1]}"),
-                (f"p{self.swap_dims[1]}", f"p{self.swap_dims[0]}"),
-            ],
-            simultaneous=True,
-        )
-        return e
-
-    def check_tile_contiguity(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ) -> bool:
-        transposed_parent_shape = self._transpose_shape(parent_shape)
-        transposed_tile_shape = self._transpose_shape(tile_shape)
-        return self.inner.check_tile_contiguity(
-            transposed_tile_shape, transposed_parent_shape, parent_contiguous
-        )
-
-    def estimate_cache_lines(
-        self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool
-    ) -> int:
-        transposed_shape = self._transpose_shape(shape)
-        return self.inner.estimate_cache_lines(transposed_shape, dtype, contiguous)
-
-    def normalize(self) -> Layout:
-        normalized = self.inner.normalize()
-        if isinstance(normalized, StandardLayout):
-            new_dim_order = []
-            for orig_dim in normalized.dim_order:
-                if orig_dim == self.swap_dims[0]:
-                    new_dim_order.append(self.swap_dims[1])
-                elif orig_dim == self.swap_dims[1]:
-                    new_dim_order.append(self.swap_dims[0])
-                else:
-                    new_dim_order.append(orig_dim)
-            return StandardLayout(tuple(new_dim_order))
-        elif isinstance(normalized, PackedLayout):
-            raise NotImplementedError()
-        else:
-            return normalized
-
-    def __str__(self):
-        return str(self.inner) + ".T"
-
-    def _transpose_shape(self, shape):
-        transposed_shape = list(shape)
-        i, j = self.swap_dims
-        transposed_shape[i], transposed_shape[j] = (
-            transposed_shape[j],
-            transposed_shape[i],
-        )
-        return tuple(transposed_shape)
+    def transpose(self, swap_dims: tuple[int, int]) -> "Layout":
+        raise NotImplementedError()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -227,29 +78,32 @@ class StandardLayout(Layout):
     def __post_init__(self):
         assert all(d >= 0 for d in self.dim_order)
 
+    def contiguous_top(self) -> Any:
+        return len(self.dim_order)
+
+    def tile_is_contiguous(self, contiguous) -> bool:
+        return contiguous == len(self.dim_order)
+
     def check_tile_contiguity(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ) -> bool:
-        c = self._check_shared_contiguousness_conditions(
-            tile_shape, parent_shape, parent_contiguous
-        )
-        if c is not None:
-            return c
+        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous,
+    ) -> Any:
+        if all(d == 1 for d in tile_shape):
+            return self.contiguous_top()
 
-        self_ordered_dims = self._layout_ordered_dims(tile_shape)
-        address_root_ordered_dims = self._layout_ordered_dims(parent_shape)
+        cnt = 1  # Skip first.
 
-        pairs = zip(self_ordered_dims, address_root_ordered_dims)
-        pairs = itertools.dropwhile(lambda x: x[0] == 1, pairs)
-        pairs = itertools.islice(pairs, 1, None)
-        for tile_dim_size, root_dim_size in pairs:
-            # The following includes the case where an underlying dimension is 1.
-            if tile_dim_size != root_dim_size:
-                return False
-        return True
+        def inner_loop(offset: int, comp):
+            nonlocal cnt
+            while cnt < len(tile_shape):
+                phys_idx = self.dim_order[-cnt + offset]
+                if tile_shape[phys_idx] != comp(phys_idx):
+                    break
+                cnt += 1
+
+        inner_loop(0, lambda x: parent_shape[x])
+        cnt = min(cnt, parent_contiguous)
+        inner_loop(-1, lambda _: 1)
+        return cnt
 
     def estimate_cache_lines(
         self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool
@@ -288,6 +142,27 @@ class StandardLayout(Layout):
             return False
         return True
 
+    def dim_drop(self, dropped_dims: frozenset[int]) -> "Layout":
+        assert len(dropped_dims)
+        new_dim_order = []
+        for orig_dim in self.dim_order:
+            if orig_dim not in dropped_dims:
+                offset = len([d for d in dropped_dims if d < orig_dim])
+                new_dim_order.append(orig_dim - offset)
+        return StandardLayout(tuple(new_dim_order))
+
+    def transpose(self, swap_dims: tuple[int, int]) -> "Layout":
+        assert swap_dims[0] < swap_dims[1]
+        new_dim_order = []
+        for orig_dim in self.dim_order:
+            if orig_dim == swap_dims[0]:
+                new_dim_order.append(swap_dims[1])
+            elif orig_dim == swap_dims[1]:
+                new_dim_order.append(swap_dims[0])
+            else:
+                new_dim_order.append(orig_dim)
+        return StandardLayout(tuple(new_dim_order))
+
     def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
         assert len(dim_sizes) == len(
             self.dim_order
@@ -319,19 +194,16 @@ class PackedLayout(Layout):
     #         return False
     #     return True
 
+    def contiguous_top(self) -> Any:
+        return self.dim_count + 1
+
+    def tile_is_contiguous(self, contiguous) -> bool:
+        return contiguous == self.dim_count + 1
+
     # TODO: Prefix calls with layout-checking assertions
     def check_tile_contiguity(
-        self,
-        tile_shape: Sequence[int],
-        parent_shape: Sequence[int],
-        parent_contiguous: bool,
-    ) -> bool:
-        c = self._check_shared_contiguousness_conditions(
-            tile_shape, parent_shape, parent_contiguous
-        )
-        if c is not None:
-            return c
-
+        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous,
+    ) -> Any:
         if len(parent_shape) != self.dim_count:
             raise ValueError(f"Expected rank-{self.dim_count} outer shape")
         if len(tile_shape) != self.dim_count:
@@ -382,6 +254,23 @@ class PackedLayout(Layout):
         if shape[self.strip_dim] % self.strip_size != 0:
             return False
         return True
+
+    def dim_drop(self, dropped_dims: frozenset[int]) -> "Layout":
+        if self.strip_dim in dropped_dims:
+            return row_major(self.dim_count).dim_drop(dropped_dims).normalize()
+
+        after_strip_dim = frozenset(range(self.strip_dim + 1, self.dim_count))
+        if after_strip_dim:
+            if dropped_dims == after_strip_dim:
+                return row_major(self.strip_dim + 1).normalize()
+            elif dropped_dims.issuperset(after_strip_dim):
+                return (
+                    row_major(self.strip_dim + 1)
+                    .dim_drop(dropped_dims - after_strip_dim)
+                    .normalize()
+                )
+
+        return self
 
     def _expand_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
         new_shape = list(shape)

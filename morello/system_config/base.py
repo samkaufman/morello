@@ -2,7 +2,7 @@ import dataclasses
 import functools
 import logging
 import typing
-from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence, Union
 
 if TYPE_CHECKING:
     from .. import dtypes
@@ -21,10 +21,7 @@ class RunResult:
 
 class Target:
     def tensor(
-        self,
-        spec: "TensorSpec",
-        name: Optional[str] = None,
-        **kwargs,
+        self, spec: "TensorSpec", name: Optional[str] = None, **kwargs,
     ) -> "TensorBase":
         raise NotImplementedError()
 
@@ -32,7 +29,7 @@ class Target:
         self,
         dim_sizes: tuple[int, ...],
         dtype: "dtypes.Dtype",
-        contiguous: bool = True,
+        contiguous = None,
         bank: Optional[str] = None,
         layout: Optional["Layout"] = None,
         **kwargs,
@@ -59,7 +56,9 @@ class Target:
     ) -> RunResult:
         raise NotImplementedError()
 
-    async def time_impl(self, impl, return_source: bool = False) -> Union[float, tuple[float, str]]:
+    async def time_impl(
+        self, impl, return_source: bool = False
+    ) -> Union[float, tuple[float, str]]:
         """Executes and benchmarks an Impl.
 
         Returns a measurement of time in arbitrary units.

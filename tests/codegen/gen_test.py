@@ -327,7 +327,7 @@ def _calculator_to_test(spec_st_fn):
         )
         @pytest.mark.parametrize(
             "parallel",
-            [pytest.param(True, marks=pytest.mark.parallelspec), False,],
+            [pytest.param(True, marks=pytest.mark.parallelspec), False],
             ids=["parallel", "serial"],
         )
         @hypothesis.given(st.data())
@@ -385,7 +385,7 @@ def _test_impl(imp: morello.impl.base.Impl, inp_values, calc_fn):
 
 
 @st.composite
-def _st_test_tile_contiguousness_matches_walking_index_exprs(draw):
+def _st_test_index_exprs_full_contiguousness_matches_contiguous_props(draw):
     target = system_config.current_target()
 
     # TODO: Test column-major as well.
@@ -395,7 +395,7 @@ def _st_test_tile_contiguousness_matches_walking_index_exprs(draw):
             min_dims=1,
             max_dims=4,
             layout_fn=layouts.row_major,
-            contiguous=True,
+            fully_contiguous=True,
         )
     )
     root_tensor = target.tensor(spec=tensor_spec, name=None)
@@ -436,8 +436,8 @@ def _st_test_tile_contiguousness_matches_walking_index_exprs(draw):
     ids=["exact", "underapproximate"],
 )
 @hypothesis.settings(max_examples=1000, deadline=4000)
-@hypothesis.given(inp=_st_test_tile_contiguousness_matches_walking_index_exprs())
-def test_tile_contiguousness_matches_walking_index_exprs(exact, inp):
+@hypothesis.given(_st_test_index_exprs_full_contiguousness_matches_contiguous_props())
+def test_index_exprs_full_contiguousness_matches_contiguous_props(exact, inp):
     """Test that Tiles' `contiguous` property matches walking elements.
 
     More specifically: test that walking all elements with the highest-numbered
@@ -447,13 +447,10 @@ def test_tile_contiguousness_matches_walking_index_exprs(exact, inp):
     stack, concrete_tile_idxs = cast(
         tuple[list[tensor.TensorLike], list[list[int]]], inp
     )
+    first_spec = stack[0].spec
     final_operand = stack[-1]
 
     expr = test_utils.compose_indexing_exprs(stack, concrete_tile_idxs)
-
-    hypothesis.note("Stack:")
-    for i, x in enumerate(stack):
-        hypothesis.note(f" {i}. {x}")
 
     # Walk the elements.
     is_contiguous = True
@@ -467,20 +464,16 @@ def test_tile_contiguousness_matches_walking_index_exprs(exact, inp):
             break
         last_offset = offset
 
+    assert final_operand.spec.layout == first_spec.layout
+
     if exact:
         assert (
-            final_operand.layout.check_tile_contiguity(
-                final_operand.spec.dim_sizes,
-                stack[-2].dim_sizes,
-                final_operand.spec.contiguous,
-            )
+            final_operand.layout.tile_is_contiguous(final_operand.spec.contiguous)
             == is_contiguous
         )
     else:
-        assert is_contiguous or not final_operand.layout.check_tile_contiguity(
-            final_operand.spec.dim_sizes,
-            stack[-2].dim_sizes,
-            final_operand.spec.contiguous,
+        assert is_contiguous or not final_operand.layout.tile_is_contiguous(
+            final_operand.spec.contiguous
         )
 
 
