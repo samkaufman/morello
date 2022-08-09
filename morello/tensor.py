@@ -165,7 +165,7 @@ class SqueezingTile(Tile):
             contiguous=ispec.contiguous,
             aligned=ispec.aligned,
             bank=ispec.bank,
-            layout=new_layout.normalize(),
+            layout=new_layout,
         )
 
     @property
@@ -233,7 +233,7 @@ class TransposingTile(Tile):
             contiguous=ispec.contiguous,
             aligned=ispec.aligned,
             bank=ispec.bank,
-            layout=ispec.layout.transpose(self.swap_dims).normalize(),
+            layout=ispec.layout.transpose(self.swap_dims),
         )
 
     @property

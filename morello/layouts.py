@@ -56,9 +56,6 @@ class Layout:
     def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
         return True
 
-    def normalize(self) -> "Layout":
-        return self
-
     @property
     def is_row_major(self) -> bool:
         return False
@@ -257,17 +254,16 @@ class PackedLayout(Layout):
 
     def dim_drop(self, dropped_dims: frozenset[int]) -> "Layout":
         if self.strip_dim in dropped_dims:
-            return row_major(self.dim_count).dim_drop(dropped_dims).normalize()
+            return row_major(self.dim_count).dim_drop(dropped_dims)
 
         after_strip_dim = frozenset(range(self.strip_dim + 1, self.dim_count))
         if after_strip_dim:
             if dropped_dims == after_strip_dim:
-                return row_major(self.strip_dim + 1).normalize()
+                return row_major(self.strip_dim + 1)
             elif dropped_dims.issuperset(after_strip_dim):
                 return (
                     row_major(self.strip_dim + 1)
                     .dim_drop(dropped_dims - after_strip_dim)
-                    .normalize()
                 )
 
         return self
