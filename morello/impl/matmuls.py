@@ -213,7 +213,7 @@ class MatmulLeaf(MatmulBase):
         **kwargs,
     ) -> "MoveLet":
         raise NotImplementedError()
-    
+
     def complete(self, *args, **kwargs):
         return self
 
@@ -239,6 +239,8 @@ _BROADCAST_VEC_MULT_WIDTH = 256 // 8  # bytes
 
 @dataclasses.dataclass(frozen=True)
 class BroadcastVecMult(MatmulLeaf):
+    """A leaf for a scalar-vector multiplication (Clang vector extensions)."""
+
     def __post_init__(self):
         check_result = BroadcastVecMult._check_operands(self.spec.operands)
         if check_result:
@@ -255,6 +257,11 @@ class BroadcastVecMult(MatmulLeaf):
         # TODO: Maybe model the AVX registers explicitly instead of using RF.
         if lhs.bank != "RF" or rhs.bank != "RF" or out.bank != "RF":
             return "BroadcastVecMult only supports RF operands"
+
+        # Perhaps surprisingly, the Clang vector extensions require the rhs
+        # to be aligned.
+        if not rhs.aligned:
+            return "rhs must be aligned, but was: " + str(rhs)
 
         # lhs is contiguous because it's 1 vlaue.
         if not rhs.contiguous:
