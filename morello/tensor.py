@@ -156,16 +156,19 @@ class SqueezingTile(Tile):
 
         if all(d == 1 for d in new_dim_sizes):
             new_layout = layouts.row_major(len(new_dim_sizes))
+            new_contig = True
         else:
-            new_layout = ispec.layout.dim_drop(self.dropped_dims)
+            new_layout, new_contig = ispec.layout.dim_drop(
+                self.dropped_dims, ispec.contiguous
+            )
 
         return specs.TensorSpec(
             dim_sizes=tuple(new_dim_sizes),
             dtype=ispec.dtype,
-            contiguous=ispec.contiguous,
+            contiguous=new_contig,
             aligned=ispec.aligned,
             bank=ispec.bank,
-            layout=new_layout.normalize(),
+            layout=new_layout,
         )
 
     @property
@@ -227,13 +230,16 @@ class TransposingTile(Tile):
         new_dim_sizes = list(ispec.dim_sizes)
         i, j = self.swap_dims
         new_dim_sizes[i], new_dim_sizes[j] = new_dim_sizes[j], new_dim_sizes[i]
+        new_layout, new_contig = ispec.layout.transpose(
+            self.swap_dims, ispec.contiguous
+        )
         return specs.TensorSpec(
             dim_sizes=tuple(new_dim_sizes),
             dtype=ispec.dtype,
-            contiguous=ispec.contiguous,
+            contiguous=new_contig,
             aligned=ispec.aligned,
             bank=ispec.bank,
-            layout=ispec.layout.transpose(self.swap_dims).normalize(),
+            layout=new_layout,
         )
 
     @property

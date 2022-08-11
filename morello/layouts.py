@@ -3,7 +3,7 @@ import functools
 import itertools
 import math
 import operator
-from typing import TYPE_CHECKING, Any, Sequence, Union
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Sequence, Union
 import typing
 
 import sympy
@@ -56,17 +56,14 @@ class Layout:
     def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
         return True
 
-    def normalize(self) -> "Layout":
-        return self
-
     @property
     def is_row_major(self) -> bool:
         return False
 
-    def dim_drop(self, dropped_dims: frozenset[int]) -> "Layout":
+    def dim_drop(self, dropped_dims: Iterable[int], contiguous) -> tuple["Layout", Any]:
         raise NotImplementedError()
 
-    def transpose(self, swap_dims: tuple[int, int]) -> "Layout":
+    def transpose(self, swap_dims: tuple[int, int], contiguous) -> tuple["Layout", Any]:
         raise NotImplementedError()
 
 
@@ -142,17 +139,28 @@ class StandardLayout(Layout):
             return False
         return True
 
-    def dim_drop(self, dropped_dims: frozenset[int]) -> "Layout":
-        assert len(dropped_dims)
-        new_dim_order = []
-        for orig_dim in self.dim_order:
-            if orig_dim not in dropped_dims:
-                offset = len([d for d in dropped_dims if d < orig_dim])
-                new_dim_order.append(orig_dim - offset)
-        return StandardLayout(tuple(new_dim_order))
+    def dim_drop(self, dropped_dims: Iterable[int], contiguous) -> tuple["Layout", Any]:
+        dropped_dims = set(dropped_dims)
+        if not dropped_dims:
+            return self, contiguous
 
-    def transpose(self, swap_dims: tuple[int, int]) -> "Layout":
-        assert swap_dims[0] < swap_dims[1]
+        new_dim_order = []
+        for logical_dim in self.dim_order:  # Iterate toward physically inner
+            if logical_dim not in dropped_dims:
+                offset = sum(1 for d in dropped_dims if d < logical_dim)
+                new_dim_order.append(logical_dim - offset)
+
+        new_contiguous = contiguous
+        if contiguous != 0:
+            for logical_dim_inside_contig in self.dim_order[-contiguous:]:
+                if logical_dim_inside_contig in dropped_dims:
+                    new_contiguous -= 1
+
+        return StandardLayout(tuple(new_dim_order)), new_contiguous
+
+    def transpose(self, swap_dims: tuple[int, int], contiguous) -> tuple["Layout", Any]:
+        if swap_dims[0] >= swap_dims[1]:
+            raise ValueError("Dims. must be ordered, but given: {swap_dims}")
         new_dim_order = []
         for orig_dim in self.dim_order:
             if orig_dim == swap_dims[0]:
@@ -161,7 +169,7 @@ class StandardLayout(Layout):
                 new_dim_order.append(swap_dims[0])
             else:
                 new_dim_order.append(orig_dim)
-        return StandardLayout(tuple(new_dim_order))
+        return StandardLayout(tuple(new_dim_order)), contiguous
 
     def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
         assert len(dim_sizes) == len(
@@ -184,15 +192,16 @@ class PackedLayout(Layout):
     strip_size: int
 
     def __post_init__(self):
-        # TODO: Instead of asserting below, add a test that this is equivalent
-        assert self.strip_dim + 1 < self.dim_count
-
-    # def applies_to(self, shape: Sequence[int]) -> bool:
-    #     if len(shape) != self.dim_count:
-    #         return False
-    #     if shape[self.strip_dim] % self.strip_size != 0:
-    #         return False
-    #     return True
+        if self.strip_dim >= self.dim_count:
+            raise ValueError(
+                f"PackedLayout has {self.dim_count} dimensions, but strip_dim "
+                f"is {self.strip_dim}"
+            )
+        if self.strip_dim == self.dim_count - 1:
+            raise ValueError(
+                f"Strip dim. {self.strip_dim} cannot be the innermost logical "
+                "dimension; that is equivalent to a StandardLayout"
+            )
 
     def contiguous_top(self) -> Any:
         return self.dim_count + 1
@@ -255,22 +264,39 @@ class PackedLayout(Layout):
             return False
         return True
 
-    def dim_drop(self, dropped_dims: frozenset[int]) -> "Layout":
+    def dim_drop(self, dropped_dims: Iterable[int], contiguous) -> tuple[Layout, Any]:
+        dropped_dims = set(dropped_dims)
+        if not dropped_dims:
+            return self, contiguous
+
         if self.strip_dim in dropped_dims:
-            return row_major(self.dim_count).dim_drop(dropped_dims).normalize()
+            rm_contig = max(0, contiguous - 1)
+            return row_major(self.dim_count).dim_drop(dropped_dims, rm_contig)
 
-        after_strip_dim = frozenset(range(self.strip_dim + 1, self.dim_count))
-        if after_strip_dim:
-            if dropped_dims == after_strip_dim:
-                return row_major(self.strip_dim + 1).normalize()
-            elif dropped_dims.issuperset(after_strip_dim):
-                return (
-                    row_major(self.strip_dim + 1)
-                    .dim_drop(dropped_dims - after_strip_dim)
-                    .normalize()
-                )
+        after_strip_dims = set(range(self.strip_dim + 1, self.dim_count))
+        assert after_strip_dims, (
+            "There must be dimensions after the strip dim., otherwise this is "
+            "really a StandardLayout"
+        )
+        if dropped_dims.issuperset(after_strip_dims):
+            return row_major(self.strip_dim + 1).dim_drop(
+                dropped_dims - after_strip_dims,
+                max(0, contiguous - len(after_strip_dims) - 1),
+            )
 
-        return self
+        fifth_dim_contig = min(1, contiguous)  # 1 or 0
+        standard_contig = max(0, contiguous - 1)
+        contig_dropped = sum(
+            1 for d in dropped_dims if self.dim_count - d <= standard_contig
+        )
+        return (
+            PackedLayout(
+                dim_count=self.dim_count - len(dropped_dims),
+                strip_dim=self.strip_dim,
+                strip_size=self.strip_size,
+            ),
+            fifth_dim_contig + standard_contig - contig_dropped,
+        )
 
     def _expand_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
         new_shape = list(shape)
@@ -354,14 +380,3 @@ def _general_index_expr(
     if not remaining_dims:
         return p
     return _general_index_expr(remaining_dims, shape) * s + p
-
-
-def _tensor_col_major_indexing_expr(rank: int) -> sympy.Expr:
-    if rank == 2:
-        p0, p1, s0 = sympy.symbols("p0 p1 s0")
-        return (p1 * s0) + p0
-    elif rank > 2:
-        s, p = sympy.symbols(f"s{rank - 1}, p{rank - 1}")
-        return _tensor_col_major_indexing_expr(rank - 1) * s + p
-    else:
-        raise ValueError("rank must be at least 2, but was " + str(rank))

@@ -1,6 +1,13 @@
 # syntax=docker/dockerfile:1
 
-FROM ubuntu:focal as hexagon
+FROM ubuntu:focal AS base
+ARG HALIDE_CMAKE_PARALLEL
+
+# Set apt to use a local mirror
+RUN sed -i -e 's/http:\/\/archive\.ubuntu\.com\/ubuntu\//mirror:\/\/mirrors\.ubuntu\.com\/mirrors\.txt/' /etc/apt/sources.list
+
+
+FROM base as hexagon
 
 # To build this container, you'll need to download manually
 # hexagon_sdk_lnx_3_5_installer_00006_1.zip to the root of this
@@ -43,7 +50,7 @@ RUN /bin/bash -c "cd /Hexagon_SDK/3.5.4 && \
     make tree VERBOSE=1 V=hexagon_Release_dynamic_toolv83_v66 V66=1"
 
 
-FROM ubuntu:focal as halide
+FROM base as halide
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
@@ -70,7 +77,7 @@ RUN cd /usr/src/Halide-13.0.4 && \
     -DCMAKE_C_COMPILER=/usr/bin/clang-12 \
     -DCMAKE_CXX_COMPILER=/usr/bin/clang++-12 \
     -DLLVM_DIR=$LLVM_ROOT/lib/cmake/llvm -DTARGET_WEBASSEMBLY=OFF -S . -B build && \
-    cmake --build build --parallel
+    cmake --build build --parallel ${HALIDE_CMAKE_PARALLEL}
 RUN cd /usr/src/Halide-13.0.4 && \
     cmake --install ./build --prefix /halide
 
@@ -81,7 +88,7 @@ COPY environment.yml .
 RUN --mount=type=cache,target=/opt/conda/pkgs mamba env create -p /env -f environment.yml 
 
 
-FROM ubuntu:focal as cpu-only
+FROM base as cpu-only
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
