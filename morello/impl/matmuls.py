@@ -258,10 +258,11 @@ class BroadcastVecMult(MatmulLeaf):
         if lhs.bank != "RF" or rhs.bank != "RF" or out.bank != "RF":
             return "BroadcastVecMult only supports RF operands"
 
-        # Perhaps surprisingly, the Clang vector extensions require the rhs
-        # to be aligned.
+        # The Clang vector extensions require the rhs and output to be aligned.
         if not rhs.aligned:
             return "rhs must be aligned, but was: " + str(rhs)
+        if not out.aligned:
+            return "out must be aligned, but was: " + str(out)
 
         # lhs is contiguous because it's 1 vlaue.
         if not rhs.contiguous:
