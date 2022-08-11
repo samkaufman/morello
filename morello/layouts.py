@@ -350,14 +350,3 @@ def _general_index_expr(
     if not remaining_dims:
         return p
     return _general_index_expr(remaining_dims, shape) * s + p
-
-
-def _tensor_col_major_indexing_expr(rank: int) -> sympy.Expr:
-    if rank == 2:
-        p0, p1, s0 = sympy.symbols("p0 p1 s0")
-        return (p1 * s0) + p0
-    elif rank > 2:
-        s, p = sympy.symbols(f"s{rank - 1}, p{rank - 1}")
-        return _tensor_col_major_indexing_expr(rank - 1) * s + p
-    else:
-        raise ValueError("rank must be at least 2, but was " + str(rank))
