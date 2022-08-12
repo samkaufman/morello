@@ -518,14 +518,18 @@ def common_move(
             serial_only=op.spec.serial_only,
         )
     )
-    epilogue = StoreHole(
-        specs.Store(
-            # TODO: Source and destination are confusing here. Reversed.
-            source=op.spec.operands[operand_idx],
-            destination=new_mat.spec,
-            serial_only=op.spec.serial_only,
+
+    # Add an epilogue if this is an output
+    epilogue = None
+    if operand_idx == len(op.spec.operands) - 1:
+        epilogue = StoreHole(
+            specs.Store(
+                # TODO: Source and destination are confusing here. Reversed.
+                source=op.spec.operands[operand_idx],
+                destination=new_mat.spec,
+                serial_only=op.spec.serial_only,
+            )
         )
-    )
 
     return MoveLet(
         spec=op.spec,

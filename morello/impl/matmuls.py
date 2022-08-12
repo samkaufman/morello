@@ -264,7 +264,7 @@ class BroadcastVecMult(MatmulLeaf):
         if not out.aligned:
             return "out must be aligned, but was: " + str(out)
 
-        # lhs is contiguous because it's 1 vlaue.
+        # lhs is contiguous because it's 1 value.
         if not rhs.contiguous:
             return "rhs must be contiguous, but was: " + str(rhs)
         if not out.contiguous:
