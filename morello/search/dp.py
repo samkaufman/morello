@@ -1,6 +1,6 @@
 import dataclasses
 import itertools
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 import cython
 
@@ -25,19 +25,13 @@ def schedule_search(
     parent_summary=None,
     stats=None,
     callbacks=None,
-    return_extra: bool = False,
-):
+) -> Union[list[Impl], Impl, None]:
     """Returns the best Impl for a given Spec and memory limits.
 
     May return `None` if no Impl satisfies the given Spec and memory limits.
     """
-    # If no cache is provided, initialize a new cache
     if cache is None:
         cache = ScheduleCache()
-
-    # The default available memory is the capacities of current_system().
-    # These capacities are measured in cache lines, not words, so: multiply by
-    # line size when initializing the limit.
     if memory_limits is None:
         memory_limits = pruning.StandardMemoryLimits()
 
@@ -51,8 +45,6 @@ def schedule_search(
         callbacks=callbacks,
     )
 
-    if return_extra:
-        return inner_result
     if top_k is not None:
         return inner_result.impls
     if len(inner_result.impls):
