@@ -250,7 +250,7 @@ def dp_task(
     print(f"Running DP search for {spec_name}")
     sys.stdout.flush()
 
-    start = time.time()
+    start = time.monotonic()
 
     cbs = ComposeCountingSearchCallbacks()
 
@@ -273,7 +273,7 @@ def dp_task(
     else:
         print("No schedule found by DP search")
 
-    runtime = time.time() - start
+    runtime = time.monotonic() - start
     print(f"DP search for {spec_name} took {runtime:.2} seconds")
     sys.stdout.flush()
 
@@ -343,7 +343,7 @@ def _beam_task_job(
     else:
         raise ValueError(f"Unexpected heuristic name: {heuristic_name}")
 
-    start = time.time()
+    start = time.monotonic()
 
     remaining_budget = budget
     overall_best_result = None
@@ -385,7 +385,7 @@ def _beam_task_job(
             f.write("==============================\n")
             f.write(trial_log)
 
-    runtime = time.time() - start
+    runtime = time.monotonic() - start
     print(f"Beam search for {spec_name} w/ {beam_width} took {runtime:.2} seconds")
     sys.stdout.flush()
 
@@ -421,7 +421,7 @@ def random_search(
     if parallel is None:
         parallel = os.cpu_count() or 1
 
-    start = time.time()
+    start = time.monotonic()
     original_budget = budget
 
     inputs = tuple(target.tensor(inp_spec, name=None) for inp_spec in spec.inputs)
@@ -481,7 +481,7 @@ def random_search(
             assert steps_taken == budget
         budget -= steps_taken
 
-    runtime = time.time() - start
+    runtime = time.monotonic() - start
     print(f"Random search took {runtime:.2}s")
     sys.stdout.flush()
     return ExperimentResult(

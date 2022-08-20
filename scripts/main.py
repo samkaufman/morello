@@ -93,13 +93,13 @@ def _matmul_main(m, k, n, serial: bool, top_k: int, cache: search_cache.Schedule
     left = target.tensor(target.tensor_spec((m, k), dtype=DTYPE), name="left")
     right = target.tensor(target.tensor_spec((k, n), dtype=DTYPE), name="right")
     output = target.tensor(target.tensor_spec((m, n), dtype=DTYPE), name="output")
-    start = time.time()
+    start = time.monotonic()
     s = schedule_search(
         specs.Matmul(left.spec, right.spec, output.spec, serial_only=serial),
         top_k=top_k,
         cache=cache,
     )
-    return s, (time.time() - start)
+    return s, (time.monotonic() - start)
 
 
 def _conv_main(
@@ -135,13 +135,13 @@ def _conv_main(
         ),
         name="output",
     )
-    start = time.time()
+    start = time.monotonic()
     s = schedule_search(
         specs.Convolution(left.spec, right.spec, output.spec, serial_only=serial),
         top_k=top_k,
         cache=cache,
     )
-    return s, (time.time() - start)
+    return s, (time.monotonic() - start)
 
 
 def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCache):
@@ -160,7 +160,7 @@ def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCache):
         target.tensor_spec((32, 32, d - 4, d - 4), dtype=DTYPE), name="output"
     )
 
-    start = time.time()
+    start = time.monotonic()
     s = schedule_search(
         specs.Compose(
             (specs.Convolution, specs.Convolution),
@@ -172,7 +172,7 @@ def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCache):
         top_k=top_k,
         cache=cache,
     )
-    return s, (time.time() - start)
+    return s, (time.monotonic() - start)
 
 
 def _gemm3_main(
@@ -190,9 +190,9 @@ def _gemm3_main(
         intermediate_dtypes=(DTYPE,),
         serial_only=True,
     )
-    start = time.time()
+    start = time.monotonic()
     search_result = schedule_search(spec, top_k=top_k, cache=cache)
-    return search_result, (time.time() - start)
+    return search_result, (time.monotonic() - start)
 
 
 def main() -> int:

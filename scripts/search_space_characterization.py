@@ -32,11 +32,11 @@ def main():
 
     _setup_target()
 
-    start = time.time()
+    start = time.monotonic()
     results = {}
     with multiprocessing.Pool() as pool:
         results.update(*pool.starmap(job, experiment_specs(), chunksize=1))
-    print(f"Took {time.time() - start:.2f} seconds")
+    print(f"Took {time.monotonic() - start:.2f} seconds")
 
     with output_path.open("w") as fo:
         json.dump(results, fo)

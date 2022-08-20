@@ -247,10 +247,10 @@ global inner_benchmark
 def inner_benchmark(self, {', '.join([n for n, _ in self.data_deps])}):
     {self.codelet}
 
-    start = time.time()
+    start = time.monotonic()
     for _ in range(codegen.gen.BENCH_ITERS):
         {self.codelet}
-    end = time.time()
+    end = time.monotonic()
     return (end - start) / codegen.gen.BENCH_ITERS
         """
 
