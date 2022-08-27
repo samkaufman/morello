@@ -30,7 +30,7 @@ class TensorSpec:
 
     dim_sizes: tuple[int, ...]
     dtype: Dtype
-    contiguous: bool
+    contiguous: Any
     aligned: bool
     bank: str
     layout: layouts.Layout

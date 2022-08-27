@@ -262,8 +262,6 @@ def dp_task(
     with cache_context as cache:
         search_result = search.dp.schedule_search(
             spec,
-            tuple(target.tensor(s) for s in spec.inputs),
-            target.tensor(spec.output),
             callbacks=cbs,
             cache=cache,
         )

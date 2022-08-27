@@ -171,6 +171,28 @@ def _arb_conv_spec(draw, parallel: Optional[bool] = None):
 
 
 @st.composite
+def _arb_reducesum_spec(draw, parallel: Optional[bool] = None):
+    """A strategy that yields arbitrary ReduceSum specs."""
+    target = system_config.current_target()
+
+    if parallel is None:
+        parallel = draw(st.booleans())
+
+    dtype = draw(st.from_type(dtypes.Dtype))
+    input_shape = tuple(draw(st.lists(st.integers(min_value=1, max_value=512), min_size=2, max_size=3)))
+    output_shape = input_shape[:-1]
+
+    print(f"Input: {input_shape}")
+    print(f"Output: {output_shape}")
+
+    return specs.ReduceSum(
+        source=target.tensor_spec(input_shape, dtype=dtype),
+        output=target.tensor_spec(output_shape, dtype=dtype),
+        serial_only=(not parallel),
+    )
+
+
+@st.composite
 def _arb_reduce_conv_spec(draw, parallel: Optional[bool] = None):
     """A strategy that yields Conv-then-Reduce specs.
 
@@ -537,6 +559,12 @@ def test_codegen_for_matmul_matmul(spec, inp_values):
 def test_codegen_for_conv(spec, inp_values):
     out_type = spec.output.dtype.np_type
     return _conv2d(*inp_values, out_type)
+
+
+@_calculator_to_test(_arb_reducesum_spec)
+def test_codegen_for_reducesum(spec, inp_values):
+    out_type = spec.output.dtype.np_type
+    return np.sum(inp_values[0], axis=-1, dtype=out_type)
 
 
 @_calculator_to_test(_arb_reduce_conv_spec)
