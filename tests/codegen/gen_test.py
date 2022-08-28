@@ -179,11 +179,10 @@ def _arb_reducesum_spec(draw, parallel: Optional[bool] = None):
         parallel = draw(st.booleans())
 
     dtype = draw(st.from_type(dtypes.Dtype))
-    input_shape = tuple(draw(st.lists(st.integers(min_value=1, max_value=512), min_size=2, max_size=3)))
+    input_shape = tuple(
+        draw(st.lists(st.integers(min_value=1, max_value=512), min_size=2, max_size=3))
+    )
     output_shape = input_shape[:-1]
-
-    print(f"Input: {input_shape}")
-    print(f"Output: {output_shape}")
 
     return specs.ReduceSum(
         source=target.tensor_spec(input_shape, dtype=dtype),
@@ -320,20 +319,32 @@ def _arb_matmul_matmul_spec(draw, parallel: Optional[bool] = None):
 
 @st.composite
 def _arb_zip_values_for_impl(draw, imp: morello.impl.base.Impl):
-    def _value(shape, dtype: dtypes.Dtype):
-        num_elements: int = functools.reduce(operator.mul, shape, 1)
-        return np.asarray(
-            draw(
-                st.lists(
-                    st.integers(min_value=0, max_value=7),
-                    max_size=num_elements,
-                    min_size=num_elements,
-                )
-            ),
-            dtype=dtype.np_type,
-        ).reshape(shape)
+    test_inputs = []
+    for op in imp.spec.inputs:
+        num_elements = functools.reduce(operator.mul, op.dim_sizes, 1)
 
-    return imp, [_value(op.dim_sizes, op.dtype) for op in imp.spec.inputs]
+        dtype_info = np.iinfo(op.dtype.np_type)
+        values_to_test = [0, 1]  # NOTE: The order will affect shrinking.
+        if -1 >= dtype_info.min:
+            values_to_test.append(-1)
+        if dtype_info.min not in values_to_test:
+            values_to_test.append(dtype_info.min)
+        if dtype_info.max not in values_to_test:
+            values_to_test.append(dtype_info.max)
+
+        test_inputs.append(
+            np.asarray(
+                draw(
+                    st.lists(
+                        elements=st.sampled_from(values_to_test),
+                        max_size=num_elements,
+                        min_size=num_elements,
+                    )
+                ),
+                dtype=op.dtype.np_type,
+            ).reshape(op.dim_sizes)
+        )
+    return imp, test_inputs
 
 
 def _calculator_to_test(spec_st_fn):
