@@ -227,8 +227,8 @@ class PackedLayout(Layout):
             raise ValueError(f"Expected rank-{self.dim_count} outer shape")
         if len(tile_shape) != self.dim_count:
             raise ValueError(f"Expected rank-{self.dim_count} tile")
-        expanded_parent_shape = self._expand_shape(parent_shape)
-        expanded_tile_shape = self._expand_shape(tile_shape)
+        expanded_parent_shape = self.expand_shape(parent_shape)
+        expanded_tile_shape = self.expand_shape(tile_shape)
         return row_major(len(expanded_parent_shape)).check_tile_contiguity(
             expanded_tile_shape, expanded_parent_shape, parent_contiguous
         )
@@ -241,7 +241,7 @@ class PackedLayout(Layout):
             return row_major(self.dim_count).buffer_indexing_expr(concrete_shape)
 
         packing_p, last_p = sympy.symbols(f"p{self.strip_dim} p{len(concrete_shape)}")
-        expanded = self._expand_shape(concrete_shape)
+        expanded = self.expand_shape(concrete_shape)
         idx_expr = row_major(len(expanded)).buffer_indexing_expr(expanded)
         idx_expr = idx_expr.subs(
             [
@@ -256,7 +256,7 @@ class PackedLayout(Layout):
         self, shape: Sequence[int], dtype: dtypes.Dtype, contiguous: bool
     ) -> int:
         # Estimate as if the tensor_spec were in row-major but had an extra dim.
-        rm_like_shape = self._expand_shape(shape)
+        rm_like_shape = self.expand_shape(shape)
 
         # TODO: Make this more precise. It's always False right now.
         new_contiguous = False
@@ -310,7 +310,17 @@ class PackedLayout(Layout):
             fifth_dim_contig + standard_contig - contig_dropped,
         )
 
-    def _expand_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
+    def expand_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
+        """Factor a shape's strip dimension into a new innermost dimension.
+        
+        For example:
+        >>> l = PackedLayout(dim_count=3, strip_dim=1, strip_size=4)
+        >>> l.expand_shape((2, 8, 2))
+        (2, 2, 2, 4)
+        """
+        # TODO: The above doctest should be under pytest, but pytest has
+        # difficulty resolving paths with Cython-built extension modules.
+
         new_shape = list(shape)
         new_shape[self.strip_dim] = math.ceil(
             new_shape[self.strip_dim] / self.strip_size

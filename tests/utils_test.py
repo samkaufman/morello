@@ -55,7 +55,7 @@ def test_simpletile_alignment(tile_shape, parent_shape, expected):
 # TODO: Check intermediate tilings too.
 
 
-@hypothesis.settings(deadline=500, max_examples=5000)
+@hypothesis.settings(deadline=1000, max_examples=20000)
 @hypothesis.given(data=st.data())
 @pytest.mark.parametrize(
     "test_conv",
