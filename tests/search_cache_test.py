@@ -88,7 +88,7 @@ def test_cache_common_scenario(dtype):
 @pytest.mark.parametrize("contiguous", [True, False], ids=["contig", "noncontig"])
 def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype, contiguous):
     t = specs.TensorSpec(
-        (8, 8), dtype=dtype, contiguous=(4 if contiguous else 0), bank="RF"
+        (8, 8), dtype=dtype, contiguous_abs=(4 if contiguous else 0), bank="RF"
     )
     spec = specs.Matmul(t, t, t, serial_only=False)
     wrapped_schedule = search_cache.CachedScheduleSet(tuple(), 1)

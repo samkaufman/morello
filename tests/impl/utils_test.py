@@ -19,7 +19,7 @@ def test_nchwc_contiguousness_when_breaking_by_nonmultiple():
     target = system_config.current_target()
     outer_spec = target.tensor_spec(outer_shape, dtypes.Uint8, bank="GL", layout=layout)
     tile = outer_spec.simple_tile(oi, tile_shape)
-    assert tile.spec.contiguous == 4
+    assert tile.spec.contiguous_abs == 4
 
 
 @hypothesis.example([1, 1], True)

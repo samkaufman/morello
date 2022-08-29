@@ -29,7 +29,7 @@ class Target:
         self,
         dim_sizes: tuple[int, ...],
         dtype: "dtypes.Dtype",
-        contiguous = None,
+        contiguous_abs = None,
         bank: Optional[str] = None,
         layout: Optional["Layout"] = None,
         **kwargs,

@@ -38,7 +38,7 @@ class CpuTarget(Target):
         self,
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
-        contiguous = None,
+        contiguous_abs = None,
         aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
@@ -46,9 +46,9 @@ class CpuTarget(Target):
     ) -> specs.TensorSpec:
         if layout is None:
             layout = layouts.row_major(len(dim_sizes))
-        if contiguous is None:
-            contiguous = layout.contiguous_top()
-        return specs.TensorSpec(dim_sizes, dtype, contiguous, aligned, bank, layout)
+        if contiguous_abs is None:
+            contiguous_abs = layout.contiguous_top()
+        return specs.TensorSpec(dim_sizes, dtype, contiguous_abs, aligned, bank, layout)
 
     @functools.cached_property
     def system(self) -> "SystemDescription":

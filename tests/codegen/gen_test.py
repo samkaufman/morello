@@ -501,12 +501,12 @@ def test_index_exprs_full_contiguousness_matches_contiguous_props(exact, inp):
 
     if exact:
         assert (
-            final_operand.layout.tile_is_contiguous(final_operand.spec.contiguous)
+            final_operand.layout.tile_is_contiguous(final_operand.spec.contiguous_abs)
             == is_contiguous
         )
     else:
         assert is_contiguous or not final_operand.layout.tile_is_contiguous(
-            final_operand.spec.contiguous
+            final_operand.spec.contiguous_abs
         )
 
 

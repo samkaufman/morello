@@ -15,4 +15,4 @@ def test_tile_contiguous(tensor_shape, tile_shape, expected):
         tensor_shape, dtype, len(tensor_shape), bank, layout
     )
     tile = tensor_spec.simple_tile(tensor.OperandIdx(0), tile_shape)
-    assert tile.spec.contiguous == expected
+    assert tile.spec.contiguous_abs == expected

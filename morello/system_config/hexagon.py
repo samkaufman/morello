@@ -62,7 +62,7 @@ class HvxSimulatorTarget(Target):
         self,
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
-        contiguous=None,
+        contiguous_abs = None,
         aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[layouts.Layout] = None,
@@ -70,13 +70,13 @@ class HvxSimulatorTarget(Target):
     ) -> "specs.TensorSpec":
         if layout is None:
             layout = layouts.row_major(len(dim_sizes))
-        if contiguous is None:
-            contiguous = layout.contiguous_top()
+        if contiguous_abs is None:
+            contiguous_abs = layout.contiguous_top()
         if bank == "VMEM":
             return layouts.HvxVmemTensorSpec(
-                dim_sizes, dtype, contiguous, bank, layout, **kwargs
+                dim_sizes, dtype, contiguous_abs, bank, layout, **kwargs
             )
-        return specs.TensorSpec(dim_sizes, dtype, contiguous, aligned, bank, layout)
+        return specs.TensorSpec(dim_sizes, dtype, contiguous_abs, aligned, bank, layout)
 
     @functools.cached_property
     def system(self) -> "SystemDescription":

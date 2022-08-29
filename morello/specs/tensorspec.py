@@ -30,7 +30,7 @@ class TensorSpec:
 
     dim_sizes: tuple[int, ...]
     dtype: Dtype
-    contiguous: Any
+    contiguous_abs: Any
     aligned: bool
     bank: str
     layout: layouts.Layout
@@ -39,7 +39,7 @@ class TensorSpec:
         self,
         dim_sizes: tuple[int, ...],
         dtype: Dtype,
-        contiguous: Any,
+        contiguous_abs: Any,
         aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[layouts.Layout] = None,
@@ -54,7 +54,7 @@ class TensorSpec:
             self.layout = layouts.row_major(len(self.dim_sizes))
         else:
             self.layout = layout
-        self.contiguous = contiguous
+        self.contiguous_abs = contiguous_abs
         self.aligned = aligned
 
         if not len(self.dim_sizes):
@@ -74,8 +74,8 @@ class TensorSpec:
 
         If new_dim_sizes is all ones, the layout may be changed to row-major.
         """
-        contiguous = self.layout.check_tile_contiguity(
-            new_dim_sizes, self.dim_sizes, self.contiguous
+        contiguous_abs = self.layout.check_tile_contiguity(
+            new_dim_sizes, self.dim_sizes, self.contiguous_abs
         )
 
         new_layout = self.layout
@@ -86,9 +86,13 @@ class TensorSpec:
             dtype=self.dtype,
             bank=self.bank,
             layout=new_layout,
-            contiguous=contiguous,
+            contiguous_abs=contiguous_abs,
             aligned=aligned,
         )
+
+    @property
+    def contiguous(self) -> bool:
+        return self.contiguous_abs == len(self.dim_sizes)
 
     @property
     @typing.final
@@ -168,7 +172,7 @@ class TensorSpec:
             raise ValueError(
                 f"Tile {new_dims} would be larger than tensor {self.dim_sizes}"
             )
-        
+
         aligned = utils.aligned_approx(tile_cls, new_dims, self)
         tile_spec = self.shrink(new_dims, aligned=aligned)
         return tile_cls(source=operand_idx, spec=tile_spec, name=None, **kw)
@@ -182,8 +186,8 @@ class TensorSpec:
             layout_epi = f", {self.layout}"
         if self.bank != current_system().default_bank:
             bank_epi = f", {self.bank}"
-        if self.contiguous != self.layout.contiguous_top():
-            c_epi = f", c{self.contiguous}"
+        if self.contiguous_abs != self.layout.contiguous_top():
+            c_epi = f", c{self.contiguous_abs}"
         if not self.aligned:
             a_epi = ", ua"
         dims_part = "×".join(str(s) for s in self.dim_sizes)

@@ -24,7 +24,7 @@ class Layout:
     def contiguous_top(self) -> Any:
         raise NotImplementedError()
 
-    def tile_is_contiguous(self, contiguous) -> bool:
+    def tile_is_contiguous(self, contiguous_abs) -> bool:
         raise NotImplementedError()
 
     def check_tile_contiguity(
@@ -60,10 +60,14 @@ class Layout:
     def is_row_major(self) -> bool:
         return False
 
-    def dim_drop(self, dropped_dims: Iterable[int], contiguous) -> tuple["Layout", Any]:
+    def dim_drop(
+        self, dropped_dims: Iterable[int], contiguous_abs
+    ) -> tuple["Layout", Any]:
         raise NotImplementedError()
 
-    def transpose(self, swap_dims: tuple[int, int], contiguous) -> tuple["Layout", Any]:
+    def transpose(
+        self, swap_dims: tuple[int, int], contiguous_abs
+    ) -> tuple["Layout", Any]:
         raise NotImplementedError()
 
 
@@ -78,8 +82,9 @@ class StandardLayout(Layout):
     def contiguous_top(self) -> Any:
         return len(self.dim_order)
 
-    def tile_is_contiguous(self, contiguous) -> bool:
-        return contiguous == len(self.dim_order)
+    def tile_is_contiguous(self, contiguous_abs) -> bool:
+        assert contiguous_abs >= 0 and contiguous_abs <= len(self.dim_order)
+        return contiguous_abs == len(self.dim_order)
 
     def check_tile_contiguity(
         self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous,
@@ -139,10 +144,12 @@ class StandardLayout(Layout):
             return False
         return True
 
-    def dim_drop(self, dropped_dims: Iterable[int], contiguous) -> tuple["Layout", Any]:
+    def dim_drop(
+        self, dropped_dims: Iterable[int], contiguous_abs
+    ) -> tuple["Layout", Any]:
         dropped_dims = set(dropped_dims)
         if not dropped_dims:
-            return self, contiguous
+            return self, contiguous_abs
 
         new_dim_order = []
         for logical_dim in self.dim_order:  # Iterate toward physically inner
@@ -150,15 +157,17 @@ class StandardLayout(Layout):
                 offset = sum(1 for d in dropped_dims if d < logical_dim)
                 new_dim_order.append(logical_dim - offset)
 
-        new_contiguous = contiguous
-        if contiguous != 0:
-            for logical_dim_inside_contig in self.dim_order[-contiguous:]:
+        new_contiguous = contiguous_abs
+        if contiguous_abs != 0:
+            for logical_dim_inside_contig in self.dim_order[-contiguous_abs:]:
                 if logical_dim_inside_contig in dropped_dims:
                     new_contiguous -= 1
 
         return StandardLayout(tuple(new_dim_order)), new_contiguous
 
-    def transpose(self, swap_dims: tuple[int, int], contiguous) -> tuple["Layout", Any]:
+    def transpose(
+        self, swap_dims: tuple[int, int], contiguous_abs
+    ) -> tuple["Layout", Any]:
         if swap_dims[0] >= swap_dims[1]:
             raise ValueError("Dims. must be ordered, but given: {swap_dims}")
         new_dim_order = []
@@ -169,7 +178,7 @@ class StandardLayout(Layout):
                 new_dim_order.append(swap_dims[0])
             else:
                 new_dim_order.append(orig_dim)
-        return StandardLayout(tuple(new_dim_order)), contiguous
+        return StandardLayout(tuple(new_dim_order)), contiguous_abs
 
     def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
         assert len(dim_sizes) == len(
@@ -206,8 +215,9 @@ class PackedLayout(Layout):
     def contiguous_top(self) -> Any:
         return self.dim_count + 1
 
-    def tile_is_contiguous(self, contiguous) -> bool:
-        return contiguous == self.dim_count + 1
+    def tile_is_contiguous(self, contiguous_abs) -> bool:
+        assert contiguous_abs >= 0 and contiguous_abs <= self.dim_count + 1
+        return contiguous_abs == self.dim_count + 1
 
     # TODO: Prefix calls with layout-checking assertions
     def check_tile_contiguity(
@@ -264,13 +274,15 @@ class PackedLayout(Layout):
             return False
         return True
 
-    def dim_drop(self, dropped_dims: Iterable[int], contiguous) -> tuple[Layout, Any]:
+    def dim_drop(
+        self, dropped_dims: Iterable[int], contiguous_abs
+    ) -> tuple[Layout, Any]:
         dropped_dims = set(dropped_dims)
         if not dropped_dims:
-            return self, contiguous
+            return self, contiguous_abs
 
         if self.strip_dim in dropped_dims:
-            rm_contig = max(0, contiguous - 1)
+            rm_contig = max(0, contiguous_abs - 1)
             return row_major(self.dim_count).dim_drop(dropped_dims, rm_contig)
 
         after_strip_dims = set(range(self.strip_dim + 1, self.dim_count))
@@ -281,11 +293,11 @@ class PackedLayout(Layout):
         if dropped_dims.issuperset(after_strip_dims):
             return row_major(self.strip_dim + 1).dim_drop(
                 dropped_dims - after_strip_dims,
-                max(0, contiguous - len(after_strip_dims) - 1),
+                max(0, contiguous_abs - len(after_strip_dims) - 1),
             )
 
-        fifth_dim_contig = min(1, contiguous)  # 1 or 0
-        standard_contig = max(0, contiguous - 1)
+        fifth_dim_contig = min(1, contiguous_abs)  # 1 or 0
+        standard_contig = max(0, contiguous_abs - 1)
         contig_dropped = sum(
             1 for d in dropped_dims if self.dim_count - d <= standard_contig
         )

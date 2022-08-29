@@ -477,13 +477,13 @@ def common_move(
 
     # Will the result be contiguous? If the move is into a cache, it might be.
     # If it's into memory bank with its own address space, then yes.
-    contiguous = layout.contiguous_top()
+    contiguous_abs = layout.contiguous_top()
     aligned = True
     if bank not in current_system().addressed_banks:
-        contiguous = operand.contiguous
+        contiguous_abs = operand.contiguous_abs
     else:
-        contiguous = cast(Layout, layout).check_tile_contiguity(
-            operand.dim_sizes, operand.dim_sizes, operand.contiguous
+        contiguous_abs = cast(Layout, layout).check_tile_contiguity(
+            operand.dim_sizes, operand.dim_sizes, operand.contiguous_abs
         )
 
     # When moving into an addressed bank, we'll generate an aligned destination.
@@ -496,7 +496,7 @@ def common_move(
         spec=current_target().tensor_spec(
             dim_sizes=operand.dim_sizes,
             dtype=operand.dtype,
-            contiguous=contiguous,
+            contiguous_abs=contiguous_abs,
             aligned=aligned,
             layout=layout,
             bank=bank,

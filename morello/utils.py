@@ -45,10 +45,9 @@ def flatten(src):
         else:
             yield el
 
+
 def aligned_approx(
-    tile_cls: type,
-    tile_shape: Sequence[int],
-    parent: "specs.TensorSpec",
+    tile_cls: type, tile_shape: Sequence[int], parent: "specs.TensorSpec",
 ) -> bool:
     """Test whether a tiling breaks alignment.
 

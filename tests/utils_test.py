@@ -42,14 +42,12 @@ def _shape_ids(arg):
     ids=_shape_ids,
 )
 def test_simpletile_alignment(tile_shape, parent_shape, expected):
+    parent = specs.TensorSpec(
+        parent_shape, dtypes.Uint8, contiguous_abs=len(parent_shape)
+    )
     assert system_config.current_system().line_size == 32
     assert (
-        utils.aligned_approx(
-            tiling.SimpleTile,
-            tile_shape,
-            parent=specs.TensorSpec(parent_shape, dtypes.Uint8, contiguous=True),
-        )
-        == expected
+        utils.aligned_approx(tiling.SimpleTile, tile_shape, parent=parent) == expected
     )
 
 

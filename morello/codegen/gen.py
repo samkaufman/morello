@@ -934,7 +934,7 @@ def _iter_vectors(
     contiguous = destination.layout.check_tile_contiguity(
         destination.vector_shape,
         destination.address_root.dim_sizes,
-        destination.address_root.contiguous,
+        destination.address_root.contiguous_abs,
     )
 
     return exprs, contiguous

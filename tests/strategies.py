@@ -52,7 +52,7 @@ def tensorspec_st(
     min_dims: int = 1,
     max_dims: Optional[int] = None,
     layout_fn: Optional[Callable[[int], layouts.Layout]] = None,
-    contiguous: Optional[Any] = None,
+    contiguous_abs: Optional[Any] = None,
     fully_contiguous: bool = False,
 ) -> specs.TensorSpec:
     target = system_config.current_target()
@@ -69,17 +69,17 @@ def tensorspec_st(
     else:
         layout = layout_fn(len(dim_sizes))
 
-    if contiguous is None:
+    if contiguous_abs is None:
         if isinstance(layout, layouts.StandardLayout):
             if fully_contiguous:
-                contiguous = len(dim_sizes)
+                contiguous_abs = len(dim_sizes)
             else:
-                contiguous = draw(st.integers(min_value=0, max_value=len(dim_sizes)))
+                contiguous_abs = draw(st.integers(min_value=0, max_value=len(dim_sizes)))
         elif isinstance(layout, layouts.PackedLayout):
             if fully_contiguous:
-                contiguous = len(dim_sizes) + 1
+                contiguous_abs = len(dim_sizes) + 1
             else:
-                contiguous = draw(
+                contiguous_abs = draw(
                     st.integers(min_value=0, max_value=len(dim_sizes) + 1)
                 )
         else:
@@ -88,7 +88,7 @@ def tensorspec_st(
     return target.tensor_spec(
         dim_sizes,
         dtype=dtype,
-        contiguous=contiguous,
+        contiguous_abs=contiguous_abs,
         layout=layout,
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
@@ -104,7 +104,7 @@ def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
     rhs = target.tensor_spec(
         dim_sizes=rhs_dim_sizes,
         dtype=lhs_dtype,
-        contiguous=draw(st.integers(min_value=0, max_value=len(rhs_dim_sizes))),
+        contiguous_abs=draw(st.integers(min_value=0, max_value=len(rhs_dim_sizes))),
         layout=draw(layout_st(dim_sizes=rhs_dim_sizes, dtype=lhs_dtype)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
@@ -112,7 +112,7 @@ def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
     out = target.tensor_spec(
         dim_sizes=out_dim_sizes,
         dtype=rhs_dtype,
-        contiguous=draw(st.integers(min_value=0, max_value=len(out_dim_sizes))),
+        contiguous_abs=draw(st.integers(min_value=0, max_value=len(out_dim_sizes))),
         layout=draw(layout_st(dim_sizes=out_dim_sizes, dtype=rhs_dtype)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
@@ -134,7 +134,7 @@ def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
     filters = target.tensor_spec(
         dim_sizes=filters_dim_sizes,
         dtype=filters_dtype,
-        contiguous=draw(st.integers(min_value=0, max_value=len(filters_dim_sizes))),
+        contiguous_abs=draw(st.integers(min_value=0, max_value=len(filters_dim_sizes))),
         layout=draw(layout_st(dim_sizes=filters_dim_sizes, dtype=filters_dtype)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
@@ -142,7 +142,7 @@ def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
     out = target.tensor_spec(
         dim_sizes=out_dim_sizes,
         dtype=out_dtype,
-        contiguous=draw(st.integers(min_value=0, max_value=len(out_dim_sizes))),
+        contiguous_abs=draw(st.integers(min_value=0, max_value=len(out_dim_sizes))),
         layout=draw(layout_st(dim_sizes=out_dim_sizes, dtype=out_dtype)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
@@ -158,7 +158,7 @@ def reduce_spec_st(draw, max_dim_size: Optional[int] = 32):
     output = target.tensor_spec(
         dim_sizes=output_dim_sizes,
         dtype=out_dtype,
-        contiguous=draw(st.integers(min_value=0, max_value=len(output_dim_sizes))),
+        contiguous_abs=draw(st.integers(min_value=0, max_value=len(output_dim_sizes))),
         layout=draw(layout_st(dim_sizes=output_dim_sizes, dtype=out_dtype)),
         bank=draw(st.sampled_from(sorted(target.system.banks))),
     )
@@ -199,7 +199,7 @@ def compose_spec_st(draw) -> specs.Compose:
     output_spec = target.tensor_spec(
         dim_sizes=output_dim_sizes,
         dtype=out_dtype,
-        contiguous=draw(st.integers(min_value=0, max_value=len(output_dim_sizes))),
+        contiguous_abs=draw(st.integers(min_value=0, max_value=len(output_dim_sizes))),
         bank=draw(st.sampled_from(sorted(system_config.current_system().banks))),
         layout=draw(layout_st(dim_sizes=output_dim_sizes, dtype=out_dtype)),
     )
