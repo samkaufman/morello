@@ -82,9 +82,17 @@ def aligned_approx(
             parent_expanded,
             parent.dtype,
         )
+    elif issubclass(tile_cls, tensor.ConvolutionImageTile):
+        # A ConvolutionImageTile defines the first dimension to be a batch dimension;
+        # equivalent to a SimpleTile over that dimension. If that's the only dimension
+        # that's changed, we can treat it as a SimpleTile.
+        if all(a == b for a, b in zip(tile_shape[1:], parent.dim_sizes[1:])):
+            return aligned_approx(tensor.SimpleTile, tile_shape, parent)
+        else:
+            warnings.warn("No alignment analysis for non-batch convolution")
     else:
         warnings.warn(
-            f"No alignment heuristic support for {tile_cls.__name__} and "
+            f"No alignment analysis for {tile_cls.__name__} and "
             f"{parent.layout.__class__.__name__}; assuming unaligned"
         )
         return False

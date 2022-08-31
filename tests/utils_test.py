@@ -6,7 +6,7 @@ import hypothesis
 import pytest
 from hypothesis import strategies as st
 
-from morello import dtypes, tiling, specs, system_config, tensor, utils
+from morello import dtypes, layouts, tiling, specs, system_config, tensor, utils
 
 from . import strategies
 from . import utils as test_utils
@@ -41,13 +41,31 @@ def _shape_ids(arg):
     ],
     ids=_shape_ids,
 )
-def test_simpletile_alignment(tile_shape, parent_shape, expected):
+def test_simpletile_regularlayout_alignment(tile_shape, parent_shape, expected):
     parent = specs.TensorSpec(
         parent_shape, dtypes.Uint8, contiguous_abs=len(parent_shape)
     )
     assert system_config.current_system().line_size == 32
     assert (
         utils.aligned_approx(tiling.SimpleTile, tile_shape, parent=parent) == expected
+    )
+
+
+def test_convtile_nhwc_alignment():
+    tile_shape = (1, 4, 512, 512)
+    parent_shape = (4, 4, 512, 512)
+    expected = True
+
+    parent = specs.TensorSpec(
+        parent_shape,
+        dtypes.Uint8,
+        contiguous_abs=len(parent_shape),
+        layout=layouts.NHWC,
+    )
+    assert system_config.current_system().line_size == 32
+    assert (
+        utils.aligned_approx(tiling.ConvolutionImageTile, tile_shape, parent=parent)
+        == expected
     )
 
 
