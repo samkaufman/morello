@@ -255,7 +255,9 @@ class ValueAssign(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveL
     spec: Union[specs.Load, specs.Store]
 
     def __post_init__(self):
-        assert self.applies_to_operands(self.spec.operands)
+        check_result = self._check_operands(self.spec.operands)
+        if check_result:
+            raise ValueError(check_result)
 
     @property
     def is_store(self) -> bool:
@@ -275,16 +277,20 @@ class ValueAssign(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveL
 
     @staticmethod
     def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
+        return ValueAssign._check_operands(operands) is None
+
+    @staticmethod
+    def _check_operands(operands: Sequence[specs.TensorSpec]) -> Optional[str]:
         source, destination = operands
         if source.bank == destination.bank:
-            return False
+            return "Source and destination are in the same bank"
         if source.bank not in ("RF", "GL"):
-            return False
+            return f"Source is in {source.bank} bank"
         if destination.bank not in ("RF", "GL"):
-            return False
+            return f"Destination is in {destination.bank} bank"
         if any(d != 1 for o in operands for d in o.dim_sizes):
-            return False
-        return True
+            return "Non-value operand; had operands: " + ", ".join(map(str, operands))
+        return None
 
 
 @dataclasses.dataclass(frozen=True)
