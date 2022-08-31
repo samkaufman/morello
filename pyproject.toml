@@ -2,6 +2,9 @@
 profile = "black"
 skip = ["setup.py"]
 
+[tool.black]
+line-length = 88
+
 [tool.pytest.ini_options]
 minversion = 6.0
 addopts = "--strict-markers --doctest-modules"

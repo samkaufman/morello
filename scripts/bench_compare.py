@@ -81,7 +81,9 @@ parser.add_argument(
     help="A path to a file containing a Google Sheets key",
 )
 parser.add_argument("--hostname", type=str, default=None)
-parser.add_argument("--configure-governor", nargs="?", type=pathlib.Path, const=True, default=None)
+parser.add_argument(
+    "--configure-governor", nargs="?", type=pathlib.Path, const=True, default=None
+)
 parser.add_argument("-b", "--batch", type=int, action="append")
 
 subparsers = parser.add_subparsers(dest="spec")
@@ -125,7 +127,12 @@ class Benchmark:
     def spec(self) -> specs.Spec:
         raise NotImplementedError()
 
-    def make_backends(self, cache: Union[str, pathlib.Path, None], save_cache: bool, extras_dir: pathlib.Path) -> Iterable["BenchmarkBackend"]:
+    def make_backends(
+        self,
+        cache: Union[str, pathlib.Path, None],
+        save_cache: bool,
+        extras_dir: pathlib.Path,
+    ) -> Iterable["BenchmarkBackend"]:
         try:
             yield self._numpy_backend()
         except NotImplementedError as e:
@@ -151,9 +158,9 @@ class Benchmark:
             yield self._halide_backend()
         except NotImplementedError as e:
             print(f"Not yielding Halide backend: {e}")
-    
+
         yield MorelloBackend(self, cache, save_cache, extras_dir)
-    
+
     @property
     def cpus_used(self) -> int:
         if self.spec.serial_only:
@@ -187,7 +194,13 @@ class BenchmarkBackend:
 
 
 class MorelloBackend(BenchmarkBackend):
-    def __init__(self, benchmark: Benchmark, cache: Union[str, pathlib.Path, None], save_cache: bool, extras_dir: pathlib.Path):
+    def __init__(
+        self,
+        benchmark: Benchmark,
+        cache: Union[str, pathlib.Path, None],
+        save_cache: bool,
+        extras_dir: pathlib.Path,
+    ):
         if not extras_dir.is_dir():
             raise ValueError("extras_dir should be an existing directory")
         self.benchmark = benchmark
@@ -197,8 +210,10 @@ class MorelloBackend(BenchmarkBackend):
 
     def run(self) -> list[float]:
         spec = self.benchmark.spec
-        with search_cache.persistent_cache(self.cache_path, save=self.save_cache) as cache:
-            impl = search.schedule_search(spec, cache=cache)
+        with search_cache.persistent_cache(
+            self.cache_path, save=self.save_cache
+        ) as cache:
+            impl = search.schedule_search(spec, cache=cache)[0]
         assert impl is not None
         runtime_samples, impl_str, source_code = _benchmark(impl)
         assert runtime_samples
@@ -207,7 +222,7 @@ class MorelloBackend(BenchmarkBackend):
         with (self.extras_dir / "source.c").open("w") as fo:
             fo.write(source_code)
         return runtime_samples
-    
+
     @property
     def short_name(self) -> str:
         if cost.INST_COST != 1000:
@@ -245,7 +260,6 @@ def inner_benchmark(self, {', '.join([n for n, _ in self.data_deps])}):
         return runs
 
 
-
 class BaseJAXBackend(BaselineBackend):
     def __init__(self, benchmark: Benchmark, print_graphs=True) -> None:
         self.benchmark = benchmark
@@ -269,7 +283,7 @@ class BaseJAXBackend(BaselineBackend):
 
     def set_inputs(self):
         raise NotImplementedError()
-    
+
     def run(self) -> list[float]:
         if not self.benchmark.serial_only:
             return super().run()
@@ -310,7 +324,7 @@ class MatmulBenchmark(Benchmark):
             target.tensor_spec((self.size, self.size), dtype=DTYPE),
             serial_only=self.serial_only,
         )
-    
+
     @property
     def short_name(self) -> str:
         return "matmul"
@@ -320,10 +334,10 @@ class MatmulBenchmark(Benchmark):
 
     def _torch_backend(self) -> "BenchmarkBackend":
         return MatmulTorch(self)
-    
+
     def _jax_backend(self) -> "BenchmarkBackend":
         return MatmulJAX(self)
-    
+
     def _halide_backend(self) -> "BenchmarkBackend":
         return MatmulHalide(self)
 
@@ -379,7 +393,7 @@ class BaseTorchBackend(BaselineBackend):
             return super().run()
         finally:
             torch.set_num_threads(orig_intraop_threads)
-    
+
     def expected_threads(self) -> int:
         if self.benchmark.spec.serial_only:
             return 1
@@ -416,7 +430,7 @@ class TorchScriptBackend(BaseTorchBackend):
             self.jitted_fn = self._jit_with_trace()
         else:
             self.jitted_fn = self._jit_with_script()
-    
+
     def _jit_with_trace(self):
         codelet = f"""
 import torch
@@ -445,7 +459,7 @@ def jitted({', '.join([n for n, _ in self.torch_backend.data_deps])}):
             fo.write(jitted_codelet)
         ran = runpy.run_path(fo.name)
         return ran["jitted"]
-    
+
     @property
     def benchmark(self):
         return self.torch_backend.benchmark
@@ -506,14 +520,14 @@ class RelayBackend(BaselineBackend):
         )
         for n, v in torchscript_backend.data_deps:
             self.tvm_m.set_input(n, v)
-        
+
         with (extras_dir / "tvm_mod.txt").open("w") as fo:
             fo.write(tvm_mod_text)
-    
+
     @property
     def benchmark(self):
         return self.torchscript_backend.benchmark
-    
+
     def run(self, *args, **kwargs):
         orig_val = os.getenv("TVM_NUM_THREADS")
         os.environ["TVM_NUM_THREADS"] = str(self.expected_threads())
@@ -573,20 +587,20 @@ class GEMM3Benchmark(Benchmark):
             intermediate_dtypes=(DTYPE,),
             serial_only=self.serial_only,
         )
-    
+
     @property
     def short_name(self) -> str:
         return "gemm3"
 
     def _numpy_backend(self) -> "BenchmarkBackend":
         return GEMM3Numpy(self)
-    
+
     def _jax_backend(self) -> "BenchmarkBackend":
         return GEMM3JAX(self)
 
     def _torch_backend(self) -> "BenchmarkBackend":
         return GEMM3Torch(self)
-    
+
     def _halide_backend(self) -> "BenchmarkBackend":
         return GEMM3Halide(self)
 
@@ -612,6 +626,7 @@ class GEMM3Numpy(BaselineBackend):
     def codelet(self) -> str:
         return """(a @ b) @ c"""
 
+
 class GEMM3JAX(BaseJAXBackend):
     def make_jax_func(self):
         def jax_gemm3(a, b, c):
@@ -628,7 +643,6 @@ class GEMM3JAX(BaseJAXBackend):
     @property
     def data_deps(self) -> Sequence[tuple[str, Any]]:
         return [("a", self.a), ("b", self.b), ("c", self.c)]
-
 
 
 class GEMM3Torch(BaseTorchBackend):
@@ -675,12 +689,14 @@ class ConvBenchmark(Benchmark):
         out_h, out_w = 1 + self.size - fh, 1 + self.size - fw
 
         return specs.Convolution(
-            target.tensor_spec((self.batch_size, img_channels, self.size, self.size), dtype=DTYPE),
+            target.tensor_spec(
+                (self.batch_size, img_channels, self.size, self.size), dtype=DTYPE
+            ),
             target.tensor_spec((fc, img_channels, fh, fw), dtype=DTYPE),
             output=target.tensor_spec((self.batch_size, fc, out_h, out_w), dtype=DTYPE),
             serial_only=self.serial_only,
         )
-    
+
     @property
     def short_name(self) -> str:
         return "conv"
@@ -690,7 +706,7 @@ class ConvBenchmark(Benchmark):
 
     def _torch_backend(self) -> "BenchmarkBackend":
         return ConvTorch(self)
-    
+
     def _jax_backend(self) -> "BenchmarkBackend":
         return ConvJAX(self)
 
@@ -872,8 +888,13 @@ class CNNHCHWcBenchmark(CNNBenchmark):
     @property
     def short_name(self) -> str:
         return "cnn-nchwc"
-    
-    def make_backends(self, cache: Union[str, pathlib.Path, None], save_cache: bool, extras_dir: pathlib.Path) -> Iterable["BenchmarkBackend"]:
+
+    def make_backends(
+        self,
+        cache: Union[str, pathlib.Path, None],
+        save_cache: bool,
+        extras_dir: pathlib.Path,
+    ) -> Iterable["BenchmarkBackend"]:
         # TODO: Yield the Relay backend
         # yield RelayCNNNCHWcBackend(extras_dir)
         yield MorelloBackend(self, cache, save_cache, extras_dir)
@@ -917,17 +938,17 @@ class RelayCNNNCHWcBackend(BaselineBackend):
             tvm_lib["default"](tvm.cpu(0))
         )
 
-        # TODO: Set inputs as follows: 
+        # TODO: Set inputs as follows:
         # for n, v in torchscript_backend.data_deps:
         #     self.tvm_m.set_input(n, v)
-        
+
         with (extras_dir / "tvm_mod.txt").open("w") as fo:
             fo.write(tvm_mod_text)
-    
+
     @property
     def benchmark(self):
         return self.torchscript_backend.benchmark
-    
+
     def run(self, *args, **kwargs):
         orig_val = os.getenv("TVM_NUM_THREADS")
         os.environ["TVM_NUM_THREADS"] = str(self.expected_threads())
@@ -957,7 +978,6 @@ class RelayCNNNCHWcBackend(BaselineBackend):
         return multiprocessing.cpu_count()
 
 
-
 class CNNTorch(BaseTorchBackend):
     def __init__(self, benchmark: CNNBenchmark) -> None:
         self.benchmark = benchmark
@@ -968,7 +988,7 @@ class CNNTorch(BaseTorchBackend):
     @property
     def data_deps(self) -> Sequence[tuple[str, Any]]:
         return [("img", self.img), ("fa", self.filters_a), ("fb", self.filters_b)]
-    
+
     @property
     def short_name(self) -> str:
         return "pytorch"
@@ -1005,7 +1025,9 @@ class BaseHalideBackend(BaselineBackend):
         self.benchmark = benchmark
 
         fn = self._make_pipeline()
-        machine = hl.MachineParams((1 if benchmark.serial_only else multiprocessing.cpu_count()), 0, 0);
+        machine = hl.MachineParams(
+            (1 if benchmark.serial_only else multiprocessing.cpu_count()), 0, 0
+        )
         fn.auto_schedule("Adams2019", hl.get_jit_target_from_environment(), machine)
         fn.compile_jit()
 
@@ -1035,11 +1057,10 @@ class BaseHalideBackend(BaselineBackend):
 
     @property
     def data_deps(self) -> Sequence[tuple[str, Any]]:
-        return [("out_size", self.benchmark.spec.output.dim_sizes)] 
+        return [("out_size", self.benchmark.spec.output.dim_sizes)]
 
     def _make_pipeline(self):
         raise NotImplementedError()
-
 
 
 class MatmulHalide(BaseHalideBackend):
@@ -1054,8 +1075,6 @@ class MatmulHalide(BaseHalideBackend):
         return fn
 
 
-
-
 class GEMM3Halide(BaseHalideBackend):
     def _make_pipeline(self):
         mmnp = GEMM3Numpy(self.benchmark)
@@ -1067,7 +1086,6 @@ class GEMM3Halide(BaseHalideBackend):
         fn = toyhl.halide_gemm3(a_hl, b_hl, c_hl, mmnp.a.shape[0])
         fn = hl.Pipeline(fn)
         return fn
-
 
 
 class CNNHalide(BaseHalideBackend):
@@ -1105,7 +1123,9 @@ def _benchmark(impl):
     assert impl.is_scheduled
     runtime_samples = []
     for _ in range(RUNS):
-        secs, source = loop.run_until_complete(system_config.current_target().time_impl(impl, return_source=True))
+        secs, source = loop.run_until_complete(
+            system_config.current_target().time_impl(impl, return_source=True)
+        )
         logger.info(f"Sample runtime result {secs}s:")
         runtime_samples.append(secs)
     impl_str = op_pprint.pformat(impl, color=False)
@@ -1113,8 +1133,13 @@ def _benchmark(impl):
 
 
 def _get_benchmark_classes():
-    return [MatmulBenchmark, GEMM3Benchmark, ConvBenchmark, CNNBenchmark,
-            CNNHCHWcBenchmark]
+    return [
+        MatmulBenchmark,
+        GEMM3Benchmark,
+        ConvBenchmark,
+        CNNBenchmark,
+        CNNHCHWcBenchmark,
+    ]
 
 
 @contextlib.contextmanager
@@ -1133,12 +1158,19 @@ def _scale_governor(path: Optional[pathlib.Path]):
     yield
 
 
-def _gdrive_upload_dir(drive: pydrive2.drive.GoogleDrive, local_dir: pathlib.Path, remote_root_name: str, parent_id: Optional[str] = None):
+def _gdrive_upload_dir(
+    drive: pydrive2.drive.GoogleDrive,
+    local_dir: pathlib.Path,
+    remote_root_name: str,
+    parent_id: Optional[str] = None,
+):
     assert local_dir.is_dir()
 
     # Get root folder in Drive based on provided name
     if not parent_id:
-        remote_root_candidates = drive.ListFile({'q': f"title = '{remote_root_name}' and trashed = False"}).GetList()
+        remote_root_candidates = drive.ListFile(
+            {"q": f"title = '{remote_root_name}' and trashed = False"}
+        ).GetList()
         if not remote_root_candidates:
             raise ValueError(f"Found no folders with title '{remote_root_name}'")
         if len(remote_root_candidates) > 1:
@@ -1147,7 +1179,8 @@ def _gdrive_upload_dir(drive: pydrive2.drive.GoogleDrive, local_dir: pathlib.Pat
 
     # Create new remote subdirectory corresponding to the top of local_dir
     root_meta: dict[str, Any] = {
-        "title": local_dir.name, "mimeType": 'application/vnd.google-apps.folder'
+        "title": local_dir.name,
+        "mimeType": "application/vnd.google-apps.folder",
     }
     root_meta["parents"] = [{"id": parent_id}]
     root_item = drive.CreateFile(root_meta)
@@ -1156,8 +1189,7 @@ def _gdrive_upload_dir(drive: pydrive2.drive.GoogleDrive, local_dir: pathlib.Pat
     for entry in local_dir.iterdir():
         if entry.is_file():
             # TODO: Upload file
-            file_meta ={"title": entry.name,
-                "parents": [{"id": root_item["id"]}]}
+            file_meta = {"title": entry.name, "parents": [{"id": root_item["id"]}]}
             guess = mimetypes.guess_type(entry)
             if guess[0]:
                 file_meta["mimeType"] = guess[0]
@@ -1166,8 +1198,10 @@ def _gdrive_upload_dir(drive: pydrive2.drive.GoogleDrive, local_dir: pathlib.Pat
             f.Upload()
         else:
             assert entry.is_dir()
-            _gdrive_upload_dir(drive, entry, remote_root_name, parent_id=root_item["id"])
-    
+            _gdrive_upload_dir(
+                drive, entry, remote_root_name, parent_id=root_item["id"]
+            )
+
     return root_item["alternateLink"]
 
 
@@ -1215,21 +1249,26 @@ def main():
     batch_sizes = args.batch
     if not batch_sizes:
         batch_sizes = [1]
-    
+
     sheet = None
     if args.log_to_sheet:
-        creds = service_account.Credentials.from_service_account_file(args.gsheet_key, scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ])
+        creds = service_account.Credentials.from_service_account_file(
+            args.gsheet_key,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ],
+        )
         gc = gspread.Client(creds)
         sheet = gc.open(args.log_to_sheet).worksheet("Log")
-    
+
     drive = None
     if args.save_to_gdrive:
         gauth = pydrive2.auth.GoogleAuth()
-        gauth.auth_method = 'service'
-        gauth.credentials = oauth2client.service_account.ServiceAccountCredentials.from_json_keyfile_name(args.gsheet_key, "https://www.googleapis.com/auth/drive")
+        gauth.auth_method = "service"
+        gauth.credentials = oauth2client.service_account.ServiceAccountCredentials.from_json_keyfile_name(
+            args.gsheet_key, "https://www.googleapis.com/auth/drive"
+        )
         drive = pydrive2.drive.GoogleDrive(gauth)
 
     system_config.set_current_target(args.target)
@@ -1242,18 +1281,23 @@ def main():
         hostname = args.hostname
     else:
         hostname = os.uname().nodename
-    
+
     governor_ctx = contextlib.nullcontext()
     if args.configure_governor == True:
         governor_ctx = _scale_governor(args.configure_governor)
-    
+
     with tempfile.TemporaryDirectory() as tdir, governor_ctx:
         for benchmark_cls in _get_benchmark_classes():
             for benchmark in benchmark_cls.from_args(args):
                 print("Beginning", str(benchmark))
-                work_dir_backend = pathlib.Path(tdir) / f"{start_time}-{hostname}-{benchmark.short_name}-{random.randint(0, 9999)}"
+                work_dir_backend = (
+                    pathlib.Path(tdir)
+                    / f"{start_time}-{hostname}-{benchmark.short_name}-{random.randint(0, 9999)}"
+                )
                 work_dir_backend.mkdir(parents=True, exist_ok=False)
-                for backend in benchmark.make_backends(args.cache, args.save_cache, work_dir_backend):
+                for backend in benchmark.make_backends(
+                    args.cache, args.save_cache, work_dir_backend
+                ):
                     if args.backend and backend.short_name not in args.backend:
                         print(f"Skipping backend named", backend.short_name)
                         continue
@@ -1269,7 +1313,9 @@ def main():
                         uploaded_url = ""
                         if args.save_to_gdrive:
                             assert drive is not None
-                            uploaded_url = _gdrive_upload_dir(drive, work_dir_backend, args.save_to_gdrive)
+                            uploaded_url = _gdrive_upload_dir(
+                                drive, work_dir_backend, args.save_to_gdrive
+                            )
                     print(f"{backend.short_name} took {runtime_secs:.7f}s")
                     if args.log_to_sheet:
                         sheet.append_row(
