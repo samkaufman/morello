@@ -45,6 +45,16 @@ class _MoveBase(base.Spec):
         return self.destination
 
     @classmethod
+    def calculate_output_shape_cls(
+        cls, input_shapes: Iterable[tuple[int, ...]]
+    ) -> tuple[int, ...]:
+        return next(iter(input_shapes))
+
+    @classmethod
+    def inputs_count(cls) -> int:
+        return 1
+
+    @classmethod
     def shrink_inputs_for_output_shape(
         cls, input_shapes: Iterable[tuple[int, ...]], output_shape: tuple[int, ...]
     ) -> tuple[tuple[int, ...], ...]:
