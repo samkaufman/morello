@@ -327,12 +327,12 @@ class VectorAssign(NonAllocatingLeaf):
         lhs, rhs = operands
         if not (lhs.contiguous and rhs.contiguous):
             return "Operands must be contiguous, but were: " + str((lhs, rhs))
-        if not (lhs.aligned and rhs.aligned):
-            return "Operands must be aligned, but were: " + str((lhs, rhs))
         if lhs.dtype != rhs.dtype:
             return "Operand value types must match, but were: " + str((lhs, rhs))
         if lhs.dim_sizes != rhs.dim_sizes:
             return "Operand shapes must match, but were: " + str((lhs, rhs))
+        if lhs.layout != rhs.layout:
+            return "Layouts must match, but were: " + str((lhs, rhs))
 
         # Check that we're moving an AVX2 vector-sized tensor.
         vol_bytes = functools.reduce(operator.mul, lhs.dim_sizes, 1) * lhs.dtype.size

@@ -18,8 +18,8 @@ if typing.TYPE_CHECKING:
 class TensorSpec:
     """A TensorSpec describes an operand to a Spec.
 
-    `contiguous' means that there is some way to iterate over the elements of
-    the tensor without skipping bytes.
+    `contiguous' means that there is a way to iterate over all elements of
+    the tensor without skipping addresses.
 
     `aligned` means that the zero coordinate in the tensor is backed by an address
     multiple of `current_system().line_size`.
