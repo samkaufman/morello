@@ -23,10 +23,6 @@ class _MoveBase(base.Spec):
         # TODO: Check that destination bank is the same or "deeper"
 
     @property
-    def operands(self) -> tuple[TensorSpec, ...]:
-        return self.source, self.destination
-
-    @property
     def _is_store(self) -> bool:
         if self.source.bank == "RF":
             assert self.destination.bank == "GL"

@@ -73,7 +73,7 @@ def test_convtile_nhwc_alignment():
 # TODO: Check intermediate tilings too.
 
 
-@hypothesis.settings(deadline=1000, max_examples=20000)
+@hypothesis.settings(deadline=2000, max_examples=20000)
 @hypothesis.given(data=st.data())
 @pytest.mark.parametrize(
     "test_conv",

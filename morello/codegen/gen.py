@@ -319,6 +319,18 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
         assert (
             cur_out.concrete_origin_shape == output_op_details.concrete_origin_shape
         ), "Final stage output shape didn't match Pipeline output shape"
+    elif isinstance(imp, impl.MemsetZero):
+        expr = expr_utils.zero_points(op_details[0].index_expr)
+        if isinstance(op_details[0].c_tensor, CVecVar):
+            ref = op_details[0].c_tensor.c_index
+            writer.writeline(f"{ref} = {{0}};  /* MemsetZero */")
+        else:
+            ref = op_details[0].c_tensor.c_index_ptr
+            vol = functools.reduce(operator.mul, op_details[0].concrete_origin_shape, 1)
+            vol *= imp.spec.destination.dtype.size
+            writer.writeline(
+                f"memset((void *)({ref(expr)}), 0, {vol});  /* MemsetZero */"
+            )
     elif isinstance(imp, impl.Mult):
         l_ref, r_ref, o_ref = (d.c_tensor.c_index for d in op_details)
         l, r, o = (d.index_expr for d in op_details)
@@ -985,7 +997,11 @@ def _move_registers(
     ]
 
     if impl.prologue:
-        _inner_generate_c(impl.prologue, move_operand_details)
+        # Prologue may or may not take an input (e.g., no inputs for Zero).
+        if impl.prologue.spec.inputs:
+            _inner_generate_c(impl.prologue, move_operand_details)
+        else:
+            _inner_generate_c(impl.prologue, move_operand_details[-1:])
     _inner_generate_c(impl.body, body_operand_details)
     if impl.epilogue:
         _inner_generate_c(impl.epilogue, move_operand_details)

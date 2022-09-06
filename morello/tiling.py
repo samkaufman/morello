@@ -120,6 +120,9 @@ def tile_out(
         spec_output, PartialSimpleTile
     ):
         return (PartialSimpleTile(spec_output.dim_sizes),)
+    elif spec_type == specs.Zero:
+        # No inputs for Zero.
+        return tuple()
     else:
         raise NotImplementedError(
             f"Unimplemented for {spec_type.__name__} and {type(spec_output).__name__}"

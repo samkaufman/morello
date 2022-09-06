@@ -3,6 +3,8 @@ from typing import NewType, Union
 
 import cython
 
+from morello.impl.zero import MemsetZero
+
 if cython.compiled:
     from cython.cimports.libc import math
 else:
@@ -167,7 +169,7 @@ def detailed_analytical_cost(
         # (This cost model is only interested in the cost of moving data.)
         assert compute_cost(op) == INST_COST
         return {op: (INST_COST, f"{INST_COST:5}")}
-    elif isinstance(op, (ValueAssign, VectorAssign)):
+    elif isinstance(op, (ValueAssign, VectorAssign, MemsetZero)):
         assert compute_cost(op) == ASSIGN_INST_COST
         return {op: (ASSIGN_INST_COST, f"{ASSIGN_INST_COST:5}")}
     elif isinstance(op, MoveLet):
@@ -243,7 +245,7 @@ def compute_cost(op: Impl) -> MainCost:
         return _assign_cost(op, 4999)
     elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
         return _assign_cost(op, INST_COST)
-    elif isinstance(op, (ValueAssign, VectorAssign)):
+    elif isinstance(op, (ValueAssign, VectorAssign, MemsetZero)):
         return _assign_cost(op, ASSIGN_INST_COST)
     elif isinstance(op, MoveLet):
         mcost: MainCost = move_cost(  # type: ignore

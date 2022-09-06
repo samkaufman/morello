@@ -389,7 +389,10 @@ class AppliedImpl(Impl):
         assert not hasattr(self.unapplied, "operands")
         assert not hasattr(self.unapplied, "inputs")
         assert not hasattr(self.unapplied, "output")
-        assert len(self.operands) == self.unapplied.operand_count
+        assert len(self.operands) == self.unapplied.operand_count, (
+            f"Expected {self.unapplied.operand_count} operands, but was given: "
+            f"{self.operands}"
+        )
         assert all(
             a.spec == b for a, b in zip(self.operands, self.unapplied.spec.inputs)
         ), (
@@ -456,6 +459,7 @@ def spec_to_hole(spec: specs.Spec) -> "Impl":
     from .matmuls import MatmulHole
     from .reducesum import ReduceSum
     from .moves import LoadHole, StoreHole
+    from .zero import ZeroHole
 
     if isinstance(spec, specs.Convolution):
         return DirectConv(spec)
@@ -469,5 +473,7 @@ def spec_to_hole(spec: specs.Spec) -> "Impl":
         return LoadHole(spec)
     elif isinstance(spec, specs.Store):
         return StoreHole(spec)
+    elif isinstance(spec, specs.Zero):
+        return ZeroHole(spec)
     else:
         raise NotImplementedError()

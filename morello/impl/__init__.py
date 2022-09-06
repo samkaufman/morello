@@ -29,6 +29,7 @@ from .settings import (
     tile_size_mode,
 )
 from .utils import ActionOutOfDomain
+from .zero import ZeroHole, MemsetZero
 
 __all__ = [
     "ActionOutOfDomain",
@@ -47,6 +48,7 @@ __all__ = [
     "Loop",
     "MatmulHole",
     "MatmulSplitAction",
+    "MemsetZero",
     "MoveAction",
     "MoveLet",
     "Mult",
@@ -64,4 +66,5 @@ __all__ = [
     "TileSizeMode",
     "ValueAssign",
     "VectorAssign",
+    "ZeroHole",
 ]

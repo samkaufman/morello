@@ -71,15 +71,18 @@ class _OperandWrapper(Impl):
 class MoveLet(Impl):
     """A Move operation composed with some subsequent Impl.
     
-    This Impl corresponds to the following (pseudocode) fragment:
+    This Impl corresponds roughly to the following pseudocode:
 
     ```
-    (source, ...) => {
+    (..., source, ...) => {
         let n = prologue(source);
-        inner(n, ...);
+        inner(..., n, ...);
         epilogue(source, n);
     })
     ```
+
+    Non-`source` operands are passed through to inner, and `n` is passed to
+    `inner` at `source_idx`.
 
     For loads, prologue is generally the load and the epilogue is a no-op
     (`None` here). For stores, the prologue is a load or allocation and the
