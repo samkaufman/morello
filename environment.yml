@@ -34,9 +34,8 @@ dependencies:
   - jax==0.3.13
   - tvm-py=0.8.0
   - libtvm=0.8.0
-  - gcc  # Required to build Cython
   - pip:
-    - git+https://github.com/cython/cython.git@dc5f0de75638c7b39650c7542ad0779e5eddb38b
+    - cython==3.0.0a11
 variables:
   CLANG: ${CONDA_PREFIX}/bin/clang
   LIBRARY_PATH: ${CONDA_PREFIX}/lib
