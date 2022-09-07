@@ -9,7 +9,7 @@ from ..tensor import OperandIdx, TensorLike
 from .actions import MatmulSplitAction, TileOutAction
 from .base import AppliedImpl, Impl, NonAllocatingLeaf, make_applied_impl
 from .loops import Loop
-from .moves import MoveLet, PadTranspack, common_move, common_operand_move_actions
+from .moves import MoveLet, Moveable, PadTranspack, common_operand_move_actions
 from .pruning import (
     ParentSummary,
     break_matmul_split_symmetries,
@@ -27,7 +27,7 @@ class MatmulBase(NonAllocatingLeaf):
 
 
 @dataclasses.dataclass(frozen=True)
-class MatmulHole(MatmulBase):
+class MatmulHole(MatmulBase, Moveable):
     @property
     def is_scheduled(self) -> bool:
         return False
@@ -68,27 +68,6 @@ class MatmulHole(MatmulBase):
         if system_config.current_system().has_hvx:
             if HvxVrmpyaccVuwVubRub.applies_to_operands(self.spec.operands):
                 yield functools.partial(self.place, HvxVrmpyaccVuwVubRub)
-
-    def move_input(
-        self,
-        input_idx: int,
-        bank: Optional[str] = None,
-        layout: Optional[layouts.Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "MoveLet":
-        if input_idx not in (0, 1):
-            raise ValueError("input_idx must be 0 or 1")
-        return common_move(self, input_idx, bank, layout, prefetching, **kwargs)
-
-    def move_output(
-        self,
-        bank: Optional[str] = None,
-        layout: Optional[layouts.Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "MoveLet":
-        return common_move(self, -1, bank, layout, prefetching, **kwargs)
 
     @assert_stable_spec
     def pad_transpack(self, input_idx: int) -> "Impl":
@@ -194,25 +173,6 @@ class MatmulLeaf(MatmulBase):
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Impl]]:
         yield from []
-
-    def move_input(
-        self,
-        input_idx: int,
-        bank: Optional[str] = None,
-        layout: Optional[layouts.Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "MoveLet":
-        raise NotImplementedError()
-
-    def move_output(
-        self,
-        bank: Optional[str] = None,
-        layout: Optional[layouts.Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "MoveLet":
-        raise NotImplementedError()
 
     def complete(self, *args, **kwargs):
         return self

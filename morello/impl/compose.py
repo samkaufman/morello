@@ -545,18 +545,6 @@ class Pipeline(Impl):
         # serial_only flag
         return self.stages[0].spec.serial_only
 
-    # @property
-    # def inputs(self) -> tuple[Union[Tensor, Tile], ...]:
-    #     flattened_inputs = list(self.stages[0].inputs)
-    #     for stage in self.stages[1:]:
-    #         flattened_inputs = list(stage.inputs[1:]) + flattened_inputs
-    #     assert len(flattened_inputs) == len(self.spec.inputs)
-    #     return tuple(flattened_inputs)
-
-    # @property
-    # def output(self) -> Union[Tensor, Tile]:
-    #     return self.stages[-1].output
-
     @property
     def children(self) -> Tuple[Impl, ...]:
         return self.stages
@@ -567,34 +555,6 @@ class Pipeline(Impl):
         new_stages = list(self.stages)
         new_stages[idx] = fn(new_stages[idx])
         return dataclasses.replace(self, stages=tuple(new_stages))
-
-    def move_input(
-        self,
-        input_idx: int,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "Impl":
-        raise NotImplementedError(
-            "move_input should usually be called on ComposeHole, not Pipeline"
-        )
-
-    def move_output(
-        self,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "Impl":
-        raise NotImplementedError(
-            "move_output should usually be called on ComposeHole, not Pipeline"
-        )
-
-    def actions(
-        self, parent_summary: Optional[ParentSummary] = None
-    ) -> Iterable[Callable[[], Impl]]:
-        raise NotImplementedError("Pipeline has no actions because it is never a leaf")
 
     @assert_stable_spec
     def complete(self) -> Impl:

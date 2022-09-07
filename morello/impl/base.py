@@ -280,28 +280,6 @@ class Impl:
         else:
             raise ValueError("Multiple children. Leaf-to-replace is ambiguous.")
 
-    def move_input(
-        self,
-        input_idx: int,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "Impl":
-        raise NotImplementedError(f"Not implemented for {type(self)}")
-
-    def move_output(
-        self,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "Impl":
-        raise NotImplementedError(f"Not implemented for {type(self)}")
-
-    def pad_transpack(self, input_idx: int) -> "Impl":
-        raise NotImplementedError(f"Unimplemented for {type(self).__name__}")
-
     @assert_stable_spec
     def subschedule(self, *args, **kwargs) -> "Impl":
         if len(self.children) == 1:

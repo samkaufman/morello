@@ -7,7 +7,7 @@ from ..tensor import OperandIdx
 from .actions import TileOutAction
 from .base import Impl, NonAllocatingLeaf
 from .loops import Loop
-from .moves import common_move, common_operand_move_actions
+from .moves import Moveable, common_operand_move_actions
 from .pruning import (
     ParentSummary,
     break_moves_symmetries,
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from .moves import MoveLet
 
 
-class ReduceSum(NonAllocatingLeaf):
+class ReduceSum(NonAllocatingLeaf, Moveable):
     def __init__(self, spec: specs.ReduceSum):
         super().__init__()
         self._spec = spec
@@ -83,27 +83,6 @@ class ReduceSum(NonAllocatingLeaf):
         if not self.spec.inputs[0].is_valid_tile_shape(orig_shape[:-1] + (k,)):
             return False
         return True
-
-    def move_input(
-        self,
-        input_idx: int,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "MoveLet":
-        if input_idx != 0:
-            raise ValueError("input_idx must be 0 ")
-        return common_move(self, 0, bank, layout, prefetching, **kwargs)
-
-    def move_output(
-        self,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> Impl:
-        return common_move(self, -1, bank, layout, prefetching, **kwargs)
 
     @assert_stable_spec
     def split(self, k: int) -> Union["ReduceSum", "Loop"]:

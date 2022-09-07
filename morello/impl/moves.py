@@ -400,6 +400,33 @@ class PadTranspack(_OperandWrapper):
         return self.inner.peak_memory
 
 
+class Moveable:
+    """A mixin providing the most common `move_input` and `move_output` actions."""
+
+    def move_input(
+        self,
+        input_idx: int,
+        bank: Optional[str] = None,
+        layout: Optional[Layout] = None,
+        prefetching: bool = False,
+        **kwargs,
+    ) -> "MoveLet":
+        assert isinstance(self, Impl)
+        if input_idx >= self.spec.inputs_count():
+            raise ValueError(f"Input index {input_idx} out of range")
+        return common_move(self, input_idx, bank, layout, prefetching, **kwargs)
+
+    def move_output(
+        self,
+        bank: Optional[str] = None,
+        layout: Optional[Layout] = None,
+        prefetching: bool = False,
+        **kwargs,
+    ) -> "MoveLet":
+        assert isinstance(self, Impl)
+        return common_move(self, -1, bank, layout, prefetching, **kwargs)
+
+
 def _move_arguments(
     operand: specs.TensorSpec,
 ) -> Iterable[tuple[str, Layout, dict[str, Any]]]:

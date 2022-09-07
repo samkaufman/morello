@@ -5,11 +5,11 @@ from typing import Callable, Iterable, Optional
 from .. import specs, system_config
 from .matmuls import MatmulHole
 from ..layouts import Layout
-from ..tensor import OperandIdx, SqueezingTile, Tensor, Tile, TransposingTile
+from ..tensor import OperandIdx, SqueezingTile, TransposingTile
 from .actions import SlidingTileOutAction, TileOutAction
 from .base import Impl, NonAllocatingLeaf
 from .loops import Loop
-from .moves import MoveLet, _move_arguments, common_move, common_operand_move_actions
+from .moves import Moveable, _move_arguments, common_operand_move_actions
 from .pruning import (
     ParentSummary,
     break_moves_symmetries,
@@ -26,7 +26,7 @@ _directconv_sliding_tile_out_params_cache = {}
 
 # TODO: Convert this into ConvHole. (No longer needed with spatial splitting.)
 @dataclasses.dataclass(frozen=True)
-class DirectConv(NonAllocatingLeaf):
+class DirectConv(NonAllocatingLeaf, Moveable):
     """A native implementation of a convolution.
 
     Stride is 1. No padding.
@@ -50,27 +50,6 @@ class DirectConv(NonAllocatingLeaf):
             return False
         return True
 
-    def move_input(
-        self,
-        input_idx: int,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "MoveLet":
-        if input_idx not in (0, 1):
-            raise ValueError("input_idx must be 0 or 1")
-        return common_move(self, input_idx, bank, layout, prefetching, **kwargs)
-
-    def move_output(
-        self,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "MoveLet":
-        return common_move(self, -1, bank, layout, prefetching, **kwargs)
-
     @assert_stable_spec
     def split(self, size: int) -> "Impl":
         raise NotImplementedError("Split not implemented for DirectConv")
@@ -83,7 +62,7 @@ class DirectConv(NonAllocatingLeaf):
                 f"{self.spec.inputs[0].dim_sizes} and "
                 f"{self.spec.inputs[1].dim_sizes}"
             )
-        
+
         # TODO: This doesn't range over the filters' spatial dims.!
         spatial_subscripts = self.spec.operands_dim_subscripts()[0][2:]
 
@@ -98,15 +77,21 @@ class DirectConv(NonAllocatingLeaf):
             OperandIdx(1),
             self.spec.inputs[1].dim_sizes[:2] + tuple(1 for _ in range(spatial_rank)),
         )
-        reinterpreted_filters_view = SqueezingTile(OperandIdx(1), filters_view, dropped_dims)
+        reinterpreted_filters_view = SqueezingTile(
+            OperandIdx(1), filters_view, dropped_dims
+        )
         if any(d > 1 for d in reinterpreted_filters_view.dim_sizes):
-            reinterpreted_filters_view = TransposingTile(OperandIdx(1), reinterpreted_filters_view, (0, 1))
+            reinterpreted_filters_view = TransposingTile(
+                OperandIdx(1), reinterpreted_filters_view, (0, 1)
+            )
 
         # Building a pass-through tile here is inelegant. Can we improve?
-        output_view = self.spec.output.simple_tile(    
+        output_view = self.spec.output.simple_tile(
             OperandIdx(2), self.spec.output.dim_sizes
         )
-        reinterpreted_output_view = SqueezingTile(OperandIdx(2), output_view, dropped_dims)
+        reinterpreted_output_view = SqueezingTile(
+            OperandIdx(2), output_view, dropped_dims
+        )
 
         # Inner spec applied to produce a simple pixel (cross-batch and channel)
         matmul_spec = specs.Matmul(
@@ -124,10 +109,14 @@ class DirectConv(NonAllocatingLeaf):
 
         return Loop(
             spec=self.spec,
-            subscripts=range(100, 100+ spatial_rank),
+            subscripts=range(100, 100 + spatial_rank),
             operands_subscripts=tuple(map(tuple, new_operands_subscripts)),
             tiles=frozenset([img_view, filters_view]),
-            inner_args=(reinterpreted_img_view, reinterpreted_filters_view, reinterpreted_output_view),
+            inner_args=(
+                reinterpreted_img_view,
+                reinterpreted_filters_view,
+                reinterpreted_output_view,
+            ),
             inner=MatmulHole(matmul_spec),
             parallel=False,
         )
@@ -149,7 +138,7 @@ class DirectConv(NonAllocatingLeaf):
         next_general_out = system.next_general_bank(out.bank)
         if next_general_out:
             return self.move_output(bank=next_general_out).complete()
-        
+
         if any(d > 1 for d in self.spec.inputs[0].dim_sizes):
             return self.spatial_split().complete()
 
