@@ -50,11 +50,6 @@ class DirectConv(NonAllocatingLeaf):
             return False
         return True
 
-    # TODO: Remove split_filters
-    @assert_stable_spec
-    def split_filters(self, k: int) -> "Impl":
-        return self.tile_out(self.spec.output.dim_sizes[:-1] + (k,))
-
     def move_input(
         self,
         input_idx: int,
@@ -219,12 +214,6 @@ class DirectConv(NonAllocatingLeaf):
                 SlidingTileOutAction(self.sliding_tile_out, *a)
                 for a in sliding_tile_out_results
             )
-
-        # Search over all possible filters splits
-        # TODO: We don't need a sep. split_filters. Should be just a dim for tile_out!
-        # if self.rhs.dim_sizes[-1] > 1:
-        #     for k in range(1, self.rhs.dim_sizes[-1]):
-        #         yield functools.partial(self.split_filters, k)
 
         yield from common_operand_move_actions(self)
 

@@ -197,12 +197,6 @@ class Loop(Impl):
         return self.subschedule(lambda i: i.split(size))
 
     @assert_stable_spec
-    def split_filters(self, size: int) -> "Loop":
-        # Pass split_filters through to the inner schedule.
-        assert hasattr(self.inner, "split")
-        return self.subschedule(lambda i: i.split_filters(size))
-
-    @assert_stable_spec
     def peel(self, *args, **kwargs) -> "Loop":
         # Pass split through to the inner schedule. This method is
         # sugar for calling subschedule.

@@ -270,10 +270,6 @@ class Impl:
         )
 
     @assert_stable_spec
-    def split_filters(self, k: int) -> "Impl":
-        return dataclasses.replace(self, inner=self.inner.split_filters(k))
-
-    @assert_stable_spec
     def place(self, leaf_cls, *args, **kwargs):
         if len(self.children) == 0:
             return leaf_cls(self.spec, *args, **kwargs)
