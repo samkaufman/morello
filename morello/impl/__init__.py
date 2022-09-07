@@ -7,7 +7,7 @@ from .actions import (
 )
 from .base import AppliedImpl, Impl, spec_to_hole
 from .compose import ComposeHole, Pipeline
-from .directconv import DirectConv
+from .convhole import ConvHole
 from .loops import Loop, SlidingWindowLoop
 from .matmuls import (
     BroadcastVecMult,
@@ -41,7 +41,7 @@ __all__ = [
     "BroadcastVecMult",
     "CacheAccess",
     "ComposeHole",
-    "DirectConv",
+    "ConvHole",
     "HvxGemvmpybbwAsm",
     "HvxVrmpyaccVuwVubRub",
     "Impl",

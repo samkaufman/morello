@@ -176,13 +176,13 @@ def test_convolution_steps(
         (filter_cnt, channels, filter_size, filter_size), dtype, 4
     )
     out = specs.TensorSpec((outer_batch, filter_cnt, out_size, out_size), dtype, 4)
-    conv = impl.DirectConv(specs.Convolution(img, filters, out, serial_only=False))
+    conv = impl.ConvHole(specs.Convolution(img, filters, out, serial_only=False))
     print("On a conv: " + str(conv))
     print(f"Calling conv.tile_out({(inner_batch, filter_cnt, tile_size, tile_size)})")
     loop = conv.tile_out((inner_batch, filter_cnt, tile_size, tile_size))
     print(f"Loop:\n{op_pprint.pformat(loop, show_utilization=False, show_cost=False)}")
     if steps == 1:
-        assert isinstance(loop, impl.DirectConv)
+        assert isinstance(loop, impl.ConvHole)
     else:
         assert loop.steps == steps
 
@@ -232,7 +232,7 @@ def test_nested_convs_outputs_constant(
         ),
         name=None,
     )
-    schedule = morello.impl.directconv.DirectConv(
+    schedule = morello.impl.convhole.ConvHole(
         specs.Convolution(image.spec, filters.spec, output.spec, serial_only=False)
     )
     assert schedule.spec.output.dim_sizes[:2] == (1, fi)

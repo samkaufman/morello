@@ -429,14 +429,14 @@ def spec_to_hole(spec: specs.Spec) -> "Impl":
     # Import some Impls here to avoid import cycle
     # TODO: Can we move this to its own file instead?
     from .compose import ComposeHole
-    from .directconv import DirectConv
+    from .convhole import ConvHole
     from .matmuls import MatmulHole
     from .reducesum import ReduceSum
     from .moves import LoadHole, StoreHole
     from .zero import ZeroHole
 
     if isinstance(spec, specs.Convolution):
-        return DirectConv(spec)
+        return ConvHole(spec)
     elif isinstance(spec, specs.Matmul):
         return MatmulHole(spec)
     elif isinstance(spec, specs.ReduceSum):

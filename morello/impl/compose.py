@@ -91,9 +91,9 @@ class ComposeHole(Impl):
 
         # TODO: Don't just use the first input. This isn't general to arbitrary
         # slideable ops in a Pipeline, or even, for instance, if we swapped the
-        # operand order of Convolution/DirectConv. Besides, the dimensions
+        # operand order of Convolution/ConvHole. Besides, the dimensions
         # passed to sliding_tile_out are over the *output* Tile, not either
-        # input; this only works because they're one-to-one for DirectConv.
+        # input; this only works because they're one-to-one for ConvHole.
         if allow_sliding_windows.get():
             for slide_dim in self._get_output_dimensions_matching_first_input():
                 for slide_size in dim_range(
@@ -180,7 +180,10 @@ class ComposeHole(Impl):
 
     @assert_stable_spec
     def peel(
-        self, bank: Optional[str] = None, layout: Optional[Layout] = None, **kwargs,
+        self,
+        bank: Optional[str] = None,
+        layout: Optional[Layout] = None,
+        **kwargs,
     ) -> Impl:
         if bank is None or layout is None:
             # TODO: Just require them as arguments. Can relax the signature later.
@@ -213,7 +216,9 @@ class ComposeHole(Impl):
             head_inps += self.spec.inputs[:hi]
         head_hole = spec_to_hole(
             self.spec.subspec_classes[0].from_io(
-                head_inps, self.spec.output, serial_only=self.spec.serial_only,
+                head_inps,
+                self.spec.output,
+                serial_only=self.spec.serial_only,
             )
         )
 
@@ -375,7 +380,9 @@ class ComposeHole(Impl):
                 yield idx, tiled_input
 
     def _calculate_partial_inputs_for_tile_out(
-        self, output_tile: Union[SimpleTile, tiling.PartialTile], skip_first: int = 0,
+        self,
+        output_tile: Union[SimpleTile, tiling.PartialTile],
+        skip_first: int = 0,
     ) -> list[tiling.PartialTile]:
         """Returns PartialTiles for this ComposeHole's inputs for an output tiling.
 

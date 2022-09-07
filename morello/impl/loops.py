@@ -74,7 +74,7 @@ class Loop(Impl):
     subscripts: tuple[int, ...]
     _operands_subscripts: tuple[tuple[int, ...], ...]
     tiles: frozenset[Tile]
-    inner_args: tuple[Tile]
+    inner_args: frozenset[Tile]
     inner: Impl
     parallel: bool
 

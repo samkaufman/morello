@@ -42,7 +42,9 @@ def layout_st(
 @st.composite
 def tensor_st(draw, *args, **kwargs):
     target = system_config.current_target()
-    return target.tensor(spec=draw(tensorspec_st(*args, **kwargs)), name=draw(st.text()))
+    return target.tensor(
+        spec=draw(tensorspec_st(*args, **kwargs)), name=draw(st.text())
+    )
 
 
 @st.composite
@@ -74,7 +76,9 @@ def tensorspec_st(
             if fully_contiguous:
                 contiguous_abs = len(dim_sizes)
             else:
-                contiguous_abs = draw(st.integers(min_value=0, max_value=len(dim_sizes)))
+                contiguous_abs = draw(
+                    st.integers(min_value=0, max_value=len(dim_sizes))
+                )
         elif isinstance(layout, layouts.PackedLayout):
             if fully_contiguous:
                 contiguous_abs = len(dim_sizes) + 1
@@ -236,10 +240,15 @@ def pipeline_op_st(draw) -> impl.Pipeline:
 
 
 @st.composite
-def tiling_chain_st(draw, *args, chain_len: Optional[int] = None, allow_conv = True, **kwargs):
+def tiling_chain_st(
+    draw, *args, chain_len: Optional[int] = None, allow_conv=True, **kwargs
+):
     base_tensor = draw(tensor_st(*args, **kwargs))
 
-    if len(base_tensor.spec.dim_sizes) < tensor.ConvolutionImageTile.minimum_image_rank():
+    if (
+        len(base_tensor.spec.dim_sizes)
+        < tensor.ConvolutionImageTile.minimum_image_rank()
+    ):
         allow_conv = False
 
     if chain_len is None:
@@ -250,7 +259,9 @@ def tiling_chain_st(draw, *args, chain_len: Optional[int] = None, allow_conv = T
     for _ in range(chain_len):
         use_conv = draw(st.booleans()) if allow_conv else False
         tile_shape = _smaller_shape(draw, chain[-1].dim_sizes)
-        hypothesis.assume(chain[-1].spec.layout.applies_to_shape(tile_shape, chain[-1].spec.dtype))
+        hypothesis.assume(
+            chain[-1].spec.layout.applies_to_shape(tile_shape, chain[-1].spec.dtype)
+        )
         if use_conv:
             filter_shape = _smaller_shape(draw, tile_shape[1:])
             chain.append(chain[-1].spec.conv_image_tile(0, tile_shape, filter_shape))
@@ -294,7 +305,7 @@ def register_default_strategies():
         st.one_of(
             st.from_type(impl.ComposeHole),
             st.from_type(impl.Pipeline),
-            st.from_type(impl.DirectConv),
+            st.from_type(impl.ConvHole),
             st.from_type(impl.ReduceSum),
             st.from_type(impl.Loop),
             st.from_type(impl.MoveLet),

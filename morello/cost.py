@@ -13,7 +13,6 @@ else:
 from . import specs
 from .impl import (
     ComposeHole,
-    DirectConv,
     Impl,
     Loop,
     MatmulHole,
@@ -161,7 +160,7 @@ def detailed_analytical_cost(
         cost_dict[op] = (new_cost, cost_expl)
         assert compute_cost(op) == new_cost
         return cost_dict
-    elif isinstance(op, (DirectConv, ReduceSum)) and (op.is_scheduled or holes_ok):
+    elif isinstance(op, ReduceSum) and (op.is_scheduled or holes_ok):
         assert compute_cost(op) == 4999
         return {op: (4999, "    4999")}
     elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
@@ -240,7 +239,7 @@ def compute_cost(op: Impl) -> MainCost:
         return _assign_cost(op, _clip_mul(factor, compute_cost(op.inner)))
     elif isinstance(op, SlidingWindowLoop):
         raise NotImplementedError()
-    elif isinstance(op, (DirectConv, ReduceSum)):
+    elif isinstance(op, ReduceSum):
         # Reminder: these types can be either holes or scheduled
         return _assign_cost(op, 4999)
     elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):

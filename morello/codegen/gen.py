@@ -392,40 +392,6 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
         writer.writeline(f"  *(HVX_Vector *)({lhs_ref_fn(lhs_index_expr)}),")
         writer.writeline(f"  *(uint32_t *)({rhs_ref_fn(rhs_index_expr)})")
         writer.writeline(f");")
-    elif isinstance(imp, impl.DirectConv):
-        if not all(d == 1 for d in imp.output.dim_sizes):
-            raise Exception("Only 1x1x1 output shape DirectConvs supported")
-        # TODO: Remove the following OperandDetails "destructuring"
-        operand_index_exprs = [d.index_expr for d in op_details]
-        tensor_ref_fns = [d.c_tensor.c_index for d in op_details]
-
-        img, _, _ = imp.operands
-        if common.unroll.get():
-            raise NotImplementedError("unrolling not implemented for DirectConv")
-
-        with _emit_loop_nest_for_shape(img.dim_sizes[1:]) as it_names:
-            # Add 1 to dim because we're slicing off the first (batch) dim.
-            substitutions = {
-                f"p{dim + 1}": (s if isinstance(s, int) else f"_{s}")
-                for dim, s in enumerate(it_names)
-            }
-            new_op_idx_exprs = [vsub(ie, substitutions) for ie in operand_index_exprs]
-            with writer.indent_block():
-                in_i, in_f, o = new_op_idx_exprs
-
-                # TODO: Remove following debug comment.
-                writer.writeline(f"//  dest: {tensor_ref_fns[2]}")
-                writer.writeline(f"//  left: {tensor_ref_fns[0]}")
-                writer.writeline(f"// right: {tensor_ref_fns[1]}")
-                writer.writeline(f"// in_i")
-                writer.writeline(f"// in_i: {in_i}")
-                writer.writeline(f"// in_f: {in_f}")
-                writer.writeline(f"//    o: {o}")
-
-                writer.writeline(
-                    f"{tensor_ref_fns[2](o)} += {tensor_ref_fns[0](in_i)} * "
-                    f"{tensor_ref_fns[1](in_f)};  /* DirectConv */"
-                )
     elif isinstance(imp, impl.ReduceSum):
         if not all(d == 1 for d in imp.output.dim_sizes):
             raise Exception("Only 1x1x1 ReduceSums supported")

@@ -80,11 +80,11 @@ Implementations are scheduled using a tree of operators deriving from `Impl`, an
   * `MatmulTilesLoop` represents a loop over the operand tiles required to calculate a tiled output.
   * `MatmulSplitLoop` represents a loop over the **k** dimension.
   * `Matmul`.
-  * `DirectConv`.
+  * `ConvHole`.
 
-Tree leaves are either `Matmul` or `DirectConv`.
+Tree leaves are either `Matmul` or `ConvHole`.
 
-Every `Impl` has two operands: `lhs` and `rhs`. All except `Matmul` and `DirectConv` have an inner `Impl`.
+Every `Impl` has two operands: `lhs` and `rhs`. All except `Matmul` and `ConvHole` have an inner `Impl`.
 
 Operands are either tensors or views into tensors (tiles). These are defined in [tensor.py](tensor.py).
 
@@ -92,7 +92,7 @@ Schedules should be interpreted as having loop orders zipped with the logical di
 
 ### Scheduling Operators
 
-Schedules are just Python [dataclasses](https://docs.python.org/3/library/dataclasses.html) and can be constructed manually, but it's much easier to chain applications of scheduling operators, starting with a `Matmul` or `DirectConv` instance. For example:
+Schedules are just Python [dataclasses](https://docs.python.org/3/library/dataclasses.html) and can be constructed manually, but it's much easier to chain applications of scheduling operators, starting with a `Matmul` or `ConvHole` instance. For example:
 
 ```python
 spec = Matmul(Tensor(m, k, name="lhs"), Tensor(k, n, name="rhs"))
@@ -103,7 +103,7 @@ op_pprint.pprint(sched)
 Or: 
 
 ```python
-spec = DirectConv(Tensor(m, k, name="lhs"), Tensor(k, n, name="rhs"))
+spec = ConvHole(Tensor(m, k, name="lhs"), Tensor(k, n, name="rhs"))
 sched = spec.simple_tile(2, 2).complete()
 op_pprint.pprint(sched)
 ```

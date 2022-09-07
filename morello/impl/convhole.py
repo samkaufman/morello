@@ -20,39 +20,25 @@ from .pruning import (
 from .settings import allow_sliding_windows
 from .utils import assert_stable_spec, dim_range, gen_tile_sizes
 
-_directconv_tile_out_params_cache = {}
-_directconv_sliding_tile_out_params_cache = {}
+_convhole_tile_out_params_cache = {}
+_convhole_sliding_tile_out_params_cache = {}
 
 
 # TODO: Convert this into ConvHole. (No longer needed with spatial splitting.)
 @dataclasses.dataclass(frozen=True)
-class DirectConv(NonAllocatingLeaf, Moveable):
-    """A native implementation of a convolution.
-
-    Stride is 1. No padding.
-    """
-
+class ConvHole(NonAllocatingLeaf, Moveable):
     spec: specs.Spec
 
     def replace_spec(self, new_spec: specs.Spec) -> "Impl":
-        assert type(self) is DirectConv
-        return DirectConv(new_spec)
+        return ConvHole(new_spec)
 
     @property
     def is_scheduled(self) -> bool:
-        # TODO: Remove this disabling of DirectConv? Or not?
         return False
-
-        # TODO: Drop these RF constants. Instead, use target-specific impls.
-        if not all(op.bank in ("RF", "HexagonRF") for op in self.spec.operands):
-            return False
-        if any(d > 1 for d in self.spec.output.dim_sizes):
-            return False
-        return True
 
     @assert_stable_spec
     def split(self, size: int) -> "Impl":
-        raise NotImplementedError("Split not implemented for DirectConv")
+        raise NotImplementedError("Split not implemented for ConvHole")
 
     def spatial_split(self) -> "Impl":
         if self.spec.inputs[0].dim_sizes[2:] != self.spec.inputs[1].dim_sizes[2:]:
@@ -155,13 +141,13 @@ class DirectConv(NonAllocatingLeaf, Moveable):
         #
         # Because this was a performance problem during beam search trails with the
         # random search heuristic, we can cache the possible tile sizes according to
-        # DirectConv's spec. With some refactoring, we would be able to make
+        # ConvHole's spec. With some refactoring, we would be able to make
         # _can_tile_out a function of the Spec alone, then cache tile size results on
         # Specs and hash-cons the Specs. This isn't super important right now, though,
         # so we just do it here, where the problem is, and because we know it's safe
-        # to do with a non-composed Spec and for DirectConv, which has no subclasses.
+        # to do with a non-composed Spec and for ConvHole, which has no subclasses.
         try:
-            gen_tile_sizes_results = _directconv_tile_out_params_cache[
+            gen_tile_sizes_results = _convhole_tile_out_params_cache[
                 (self.spec.output.dim_sizes, self.spec)
             ]
         except KeyError:
@@ -171,7 +157,7 @@ class DirectConv(NonAllocatingLeaf, Moveable):
             ):
                 for parallel in [False] if self.spec.serial_only else [True, False]:
                     gen_tile_sizes_results.append((shape, parallel))
-            _directconv_tile_out_params_cache[
+            _convhole_tile_out_params_cache[
                 (self.spec.output.dim_sizes, self.spec)
             ] = gen_tile_sizes_results
         yield from (TileOutAction(self, *a) for a in gen_tile_sizes_results)
@@ -181,7 +167,7 @@ class DirectConv(NonAllocatingLeaf, Moveable):
         # is the only operand over which one can slide.
         if allow_sliding_windows.get():
             try:
-                sliding_tile_out_results = _directconv_sliding_tile_out_params_cache[
+                sliding_tile_out_results = _convhole_sliding_tile_out_params_cache[
                     (self.spec.output.dim_sizes, self.spec)
                 ]
             except KeyError:
@@ -196,7 +182,7 @@ class DirectConv(NonAllocatingLeaf, Moveable):
                             sliding_tile_out_results.append(
                                 (sliding_dim, slide_size, bank)
                             )
-                _directconv_sliding_tile_out_params_cache[
+                _convhole_sliding_tile_out_params_cache[
                     (self.spec.output.dim_sizes, self.spec)
                 ] = sliding_tile_out_results
             yield from (
