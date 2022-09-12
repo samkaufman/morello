@@ -1,4 +1,4 @@
-import abc
+import contextvars
 import dataclasses
 from typing import Optional, Union
 
@@ -13,6 +13,10 @@ GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str, str]] = {
     (Uint32, 8): (32, "vui8", "__m256i"),
     (Uint8, 32): (32, "vub32", "__m256i"),
 }
+
+ONES_FOR_NON_ZERO_INIT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "ONES_FOR_NON_ZERO_INIT", default=False
+)
 
 
 def _expr_to_c(expr: Union[sympy.Expr, int]) -> str:
@@ -121,8 +125,7 @@ class CPtr(CNameTensor):
     def emit_free(self):
         raise NotImplementedError()
 
-    def emit(self):
-        # return self
+    def emit(self, zero_init=True):
         raise NotImplementedError()
 
 
@@ -166,6 +169,10 @@ class CHeapArray(CNameTensor):
             writer.writeline(
                 f"memset({self.name}, 0, {self.size}*sizeof({self.dtype.c_type}));"
             )
+        elif ONES_FOR_NON_ZERO_INIT.get():
+            writer.writeline(
+                f"memset({self.name}, 1, {self.size}*sizeof({self.dtype.c_type}));"
+            )
         return self
 
     def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
@@ -205,10 +212,17 @@ class CStackArray(CNameTensor):
     def emit_free(self):
         pass
 
-    def emit(self) -> "CStackArray":
+    def emit(self, zero_init=True) -> "CStackArray":
+        epi = ""
+        if zero_init:
+            epi = " = {{0}}"
         common.writer.get().writeline(
-            f"{self.dtype.c_type} {self.name}[{self.size}] __attribute__((aligned (128))) = {{0}};"
+            f"{self.dtype.c_type} {self.name}[{self.size}] __attribute__((aligned (128))){epi};"
         )
+        if not zero_init and ONES_FOR_NON_ZERO_INIT.get():
+            common.writer.get().writeline(f"for (uint32_t i = 0; i < {self.size}; ++i)")
+            with common.writer.get().indent_block():
+                common.writer.get().writeline(f"{self.name}[i] = 1;")
         return self
 
 
@@ -234,13 +248,18 @@ class CVecVar(CNameTensor):
     def emit_free(self):
         pass
 
-    def emit(self) -> "CVecVar":
+    def emit(self, zero_init=True) -> "CVecVar":
         # Allocate and zero the register.
-        common.writer.get().writeline(f"{self.declared_type} {self.name} = {{0}};")
+        epi = ""
+        if zero_init:
+            epi = " = {{0}}"
+        elif ONES_FOR_NON_ZERO_INIT.get():
+            epi = f" = 1 - ({self.declared_type}){{}}"
+        common.writer.get().writeline(f"{self.declared_type} {self.name}{epi};")
         return self
 
     def vec(self) -> str:
-        return self.c_index(0, reinterpret=self.declared_type)
+        return self.name
 
     @property
     def declared_type(self) -> str:
@@ -266,7 +285,11 @@ class CValueVar(CNameTensor):
     def emit_free(self):
         pass
 
-    def emit(self) -> "CValueVar":
-        common.writer.get().writeline(f"{self.dtype.c_type} {self.name} = 0;")
+    def emit(self, zero_init=True) -> "CValueVar":
+        epi = ""
+        if zero_init:
+            epi = " = 0"
+        elif ONES_FOR_NON_ZERO_INIT.get():
+            epi = " = 1"
+        common.writer.get().writeline(f"{self.dtype.c_type} {self.name}{epi};")
         return self
-

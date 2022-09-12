@@ -30,9 +30,9 @@ def compose_indexing_exprs(
         del concrete_tile_idxs[-1]
         for dim_idx, it_var in zip(range(len(operand.dim_sizes)), tile_it_vars):
             e = indexexpr.logical_indexing_expr(operand, dim_idx)
-            e = e.subs(f"i{dim_idx}", it_var)
+            e = e.xreplace({sympy.symbols(f"i{dim_idx}"): it_var})
             all_substitutions[f"p{dim_idx}"] = e
-        expr = expr.subs(all_substitutions)
+        expr = expr.subs(all_substitutions, simultaneous=True)
         last_spec = operand.spec
     assert operand is not None
     return expr

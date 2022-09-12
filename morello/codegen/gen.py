@@ -269,6 +269,10 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
             imp.parallel,
             inner_codegen=lambda details: _inner_generate_c(imp.inner, details),
         )
+    elif isinstance(imp, impl.Block):
+        for step, op_idxs in zip(imp.steps, imp.op_idxs):
+            assert isinstance(step, impl.AppliedImpl)
+            _inner_generate_c(step, [op_details[i] for i in op_idxs])
     elif isinstance(imp, impl.Pipeline):
         inps_op_details = op_details[:-1]
         output_op_details = op_details[-1]
@@ -280,7 +284,7 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
             imp.stages[0].spec.output.volume,
             imp.stages[0].spec.output.dtype,
             imp.stages[0].spec.output.bank,
-        ).emit()
+        ).emit(zero_init=False)
         cur_slice = slice(-len(imp.stages[0].inputs), len(inps_op_details))
         cur_out = _pipeline_emit_stage(
             imp.stages[0], inps_op_details[cur_slice], last_c_buf, None, None
@@ -297,7 +301,7 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                 stage.spec.output.volume,
                 stage.spec.output.dtype,
                 stage.spec.output.bank,
-            ).emit()
+            ).emit(zero_init=False)
             cur_out = _pipeline_emit_stage(
                 stage, inps_op_details[cur_slice], new_c_buf, cur_out, None
             )
@@ -320,17 +324,28 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
             cur_out.concrete_origin_shape == output_op_details.concrete_origin_shape
         ), "Final stage output shape didn't match Pipeline output shape"
     elif isinstance(imp, impl.MemsetZero):
-        expr = expr_utils.zero_points(op_details[0].index_expr)
-        if isinstance(op_details[0].c_tensor, CVecVar):
-            ref = op_details[0].c_tensor.c_index
-            writer.writeline(f"{ref} = {{0}};  /* MemsetZero */")
+        if BOUNDARY_ANCESTORS.get() > 0:
+            _naive_memset(op_details, writer)
         else:
-            ref = op_details[0].c_tensor.c_index_ptr
-            vol = functools.reduce(operator.mul, op_details[0].concrete_origin_shape, 1)
-            vol *= imp.spec.destination.dtype.size
-            writer.writeline(
-                f"memset((void *)({ref(expr)}), 0, {vol});  /* MemsetZero */"
-            )
+            expr = expr_utils.zero_points(op_details[0].index_expr)
+            ten = op_details[0].c_tensor
+            if isinstance(ten, CVecVar):
+                out_shape = op_details[0].concrete_origin_shape
+                if functools.reduce(operator.mul, out_shape, 1) == ten.size:
+                    # No assignment syntax for Clang vector extensions yet, so we'll
+                    # multiply by zero, which should produce a setzero or be optimized away.
+                    writer.writeline(f"{ten.vec()} *= 0;  /* MemsetZero */")
+                else:
+                    _naive_memset(op_details, writer)
+            else:
+                ref = ten.c_index_ptr
+                vol = functools.reduce(
+                    operator.mul, op_details[0].concrete_origin_shape, 1
+                )
+                vol *= imp.spec.destination.dtype.size
+                writer.writeline(
+                    f"memset((void *)({ref(expr)}), 0, {vol});  /* MemsetZero */"
+                )
     elif isinstance(imp, impl.Mult):
         l_ref, r_ref, o_ref = (d.c_tensor.c_index for d in op_details)
         l, r, o = (d.index_expr for d in op_details)
@@ -392,15 +407,11 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
         writer.writeline(f"  *(HVX_Vector *)({lhs_ref_fn(lhs_index_expr)}),")
         writer.writeline(f"  *(uint32_t *)({rhs_ref_fn(rhs_index_expr)})")
         writer.writeline(f");")
-    elif isinstance(imp, impl.ReduceSum):
-        if not all(d == 1 for d in imp.output.dim_sizes):
-            raise Exception("Only 1x1x1 ReduceSums supported")
-        # TODO: Remove the following OperandDetails "destructuring"
-        operand_index_exprs = [d.index_expr for d in op_details]
-        tensor_ref_fns = [d.c_tensor.c_index for d in op_details]
-        assert imp.is_scheduled
-        i, o = operand_index_exprs
-        writer.writeline(f"{tensor_ref_fns[1](o)} += {tensor_ref_fns[0](i)};")
+    elif isinstance(imp, impl.Add):
+        assert all(d == 1 for d in imp.output.dim_sizes)
+        i_ref, o_ref = [d.c_tensor.c_index for d in op_details]
+        i, o = [d.index_expr for d in op_details]
+        writer.writeline(f"{o_ref(o)} += {i_ref(i)};")
     elif isinstance(imp, impl.MoveLet):
         source_idx = imp.source_idx
         assert (
@@ -930,7 +941,7 @@ def _move_registers(
         functools.reduce(operator.mul, concrete_shapes[source_idx], 1),
         impl.destination.dtype,
         impl.destination.bank,
-    ).emit()
+    ).emit(zero_init=False)
 
     destination_index_expr = impl.destination.layout.buffer_indexing_expr(
         concrete_shapes[source_idx]
@@ -973,6 +984,18 @@ def _move_registers(
         _inner_generate_c(impl.epilogue, move_operand_details)
 
     dest_c_buf.emit_free()
+
+
+def _naive_memset(op_details, writer):
+    out_shape = op_details[0].concrete_origin_shape
+    with _emit_loop_nest_for_shape(out_shape) as it_names:
+        substitutions = {
+            f"p{dim}": (s if isinstance(s, int) else f"_{s}")
+            for dim, s in enumerate(it_names)
+        }
+        o = vsub(op_details[0].index_expr, substitutions)
+        o_ref = op_details[0].c_tensor.c_index
+        writer.writeline(f"{o_ref(o)} = 0;  /* MemsetZero (vec boundary) */")
 
 
 def generate_c(
@@ -1319,7 +1342,7 @@ def generate_c(
     writer.writeline("int main() {")
     with writer.indent_block():
         for operand, c_buf, initial_value in zip(imp.spec.operands, c_tensors, values):
-            c_buf.emit()
+            c_buf.emit(zero_init=False)
             if initial_value is not None:
                 if not operand.layout.is_row_major:
                     raise NotImplementedError(

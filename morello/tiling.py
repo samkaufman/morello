@@ -67,10 +67,12 @@ def tile_out(
     # We don't handle the case where spec_output is a Tensor on the
     # assumption that the caller will construct a Tile. (Otherwise why
     # bother calling this function?)
-    if spec_type == specs.ReduceSum and isinstance(spec_output, PartialSimpleTile):
+    if spec_type in (specs.ReduceSum, specs.ReduceSumAccum) and isinstance(
+        spec_output, PartialSimpleTile
+    ):
         assert len(input_shapes) == 1
         return (PartialSimpleTile(spec_output.dim_sizes + (input_shapes[0][-1],)),)
-    elif spec_type == specs.ReduceSum and isinstance(
+    elif spec_type in (specs.ReduceSum, specs.ReduceSumAccum) and isinstance(
         spec_output, PartialConvolutionImageTile
     ):
         assert len(input_shapes) == 1
@@ -79,7 +81,7 @@ def tile_out(
                 spec_output.dim_sizes + (input_shapes[0][-1],), spec_output.filter_shape
             ),
         )
-    elif spec_type == specs.Convolution and isinstance(
+    elif spec_type in (specs.Convolution, specs.ConvolutionAccum) and isinstance(
         spec_output, (PartialSimpleTile, PartialConvolutionImageTile)
     ):
         new_batch_size, new_filter_cnt = spec_output.dim_sizes[:2]
@@ -112,7 +114,9 @@ def tile_out(
             ),
             PartialSimpleTile((new_filter_cnt, channels) + orig_filter_spatials),
         )
-    elif spec_type == specs.Matmul and isinstance(spec_output, PartialSimpleTile):
+    elif spec_type in (specs.Matmul, specs.MatmulAccum) and isinstance(
+        spec_output, PartialSimpleTile
+    ):
         (_, k), _ = input_shapes
         m, n = spec_output.dim_sizes
         return PartialSimpleTile((m, k)), PartialSimpleTile((k, n))

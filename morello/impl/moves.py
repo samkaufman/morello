@@ -70,7 +70,7 @@ class _OperandWrapper(Impl):
 @dataclasses.dataclass(frozen=True)
 class MoveLet(Impl):
     """A Move operation composed with some subsequent Impl.
-    
+
     This Impl corresponds roughly to the following pseudocode:
 
     ```
@@ -513,17 +513,6 @@ def common_move(
     if bank == operand.bank and layout == operand.layout:
         raise ValueError("Either bank or layout must differ from current")
 
-    # Will the result be contiguous? If the move is into a cache, it might be.
-    # If it's into memory bank with its own address space, then yes.
-    contiguous_abs = layout.contiguous_top()
-    aligned = True
-    if bank not in current_system().addressed_banks:
-        contiguous_abs = operand.contiguous_abs
-    else:
-        contiguous_abs = cast(Layout, layout).check_tile_contiguity(
-            operand.dim_sizes, operand.dim_sizes, operand.contiguous_abs
-        )
-
     # When moving into an addressed bank, we'll generate an aligned destination.
     # If it's into a cache level, alignment won't change.
     aligned = True
@@ -534,7 +523,7 @@ def common_move(
         spec=current_target().tensor_spec(
             dim_sizes=operand.dim_sizes,
             dtype=operand.dtype,
-            contiguous_abs=contiguous_abs,
+            contiguous_abs=transition_contiguous(bank, layout, operand),
             aligned=aligned,
             layout=layout,
             bank=bank,
@@ -577,4 +566,14 @@ def common_move(
         prologue=prologue,
         body=op.replace_spec(new_inner_spec),
         epilogue=epilogue,
+    )
+
+
+def transition_contiguous(bank, layout, operand):
+    # Will the result be contiguous? If the move is into a cache, it might be.
+    # If it's into memory bank with its own address space, then yes.
+    if bank not in current_system().addressed_banks:
+        return operand.contiguous_abs
+    return cast(Layout, layout).check_tile_contiguity(
+        operand.dim_sizes, operand.dim_sizes, operand.contiguous_abs
     )

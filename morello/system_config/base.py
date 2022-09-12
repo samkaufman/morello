@@ -1,8 +1,9 @@
+import abc
 import dataclasses
 import functools
 import logging
 import typing
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence, Union
 
 if TYPE_CHECKING:
     from .. import dtypes
@@ -29,7 +30,7 @@ class Target:
         self,
         dim_sizes: tuple[int, ...],
         dtype: "dtypes.Dtype",
-        contiguous_abs = None,
+        contiguous_abs=None,
         bank: Optional[str] = None,
         layout: Optional["Layout"] = None,
         **kwargs,
@@ -44,6 +45,16 @@ class Target:
         from ..layouts import NHWC, NCHWc4, NCHWc32, NCHWc64, row_major
 
         return [row_major(len(shape)), NHWC, NCHWc4, NCHWc32, NCHWc64]
+
+    async def build_impl(
+        self,
+        impl,
+        print_output=False,
+        source_cb=None,
+        values=None,
+        extra_clang_args: Optional[Iterable[str]] = None,
+    ) -> "BuiltArtifact":
+        raise NotImplementedError()
 
     async def run_impl(
         self,
@@ -67,10 +78,22 @@ class Target:
 
     @typing.final
     async def time_impl_robustly(self, impl, repeat=10) -> float:
+        artifact = await self.build_impl(impl)
         means = []
         for _ in range(repeat):
-            means.append(await self.time_impl(impl))
+            means.append(await artifact.measure_time())
         return min(means)
+
+
+class BuiltArtifact(abc.ABC):
+    async def run(self, check_flakiness: int = 1) -> RunResult:
+        raise NotImplementedError()
+
+    async def measure_time(self) -> float:
+        raise NotImplementedError()
+
+    def delete(self):
+        raise NotImplementedError()
 
 
 # TODO: Re-freeze. (Need a way to cache properties.)

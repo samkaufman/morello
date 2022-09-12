@@ -1,10 +1,8 @@
-import dataclasses
 import functools
 import typing
 from typing import Callable, Iterable, Optional, Sequence, Tuple, cast
 
 from .. import specs, tiling
-from ..layouts import Layout
 from ..system_config import current_system, current_target
 from ..tensor import OperandIdx, TensorLike, Tile
 from .pruning import ParentSummary
@@ -199,7 +197,7 @@ class Impl:
         )
 
     def split(self, k: int) -> "Impl":
-        raise NotImplementedError()
+        raise NotImplementedError(f"Not implemented for {type(self).__name__}")
 
     @assert_stable_spec
     def sliding_tile_out(self, sliding_dim: int, output_size: int, bank: str) -> "Impl":
@@ -429,18 +427,24 @@ def spec_to_hole(spec: specs.Spec) -> "Impl":
     # Import some Impls here to avoid import cycle
     # TODO: Can we move this to its own file instead?
     from .compose import ComposeHole
-    from .convhole import ConvHole
-    from .matmuls import MatmulHole
-    from .reducesum import ReduceSum
+    from .convhole import ConvHole, ConvAccumHole
+    from .matmuls import MatmulHole, MatmulAccumHole
+    from .reducesum import ReduceSumHole, ReduceSumAccumHole
     from .moves import LoadHole, StoreHole
     from .zero import ZeroHole
 
     if isinstance(spec, specs.Convolution):
         return ConvHole(spec)
+    elif isinstance(spec, specs.ConvolutionAccum):
+        return ConvAccumHole(spec)
     elif isinstance(spec, specs.Matmul):
         return MatmulHole(spec)
+    elif isinstance(spec, specs.MatmulAccum):
+        return MatmulAccumHole(spec)
     elif isinstance(spec, specs.ReduceSum):
-        return ReduceSum(spec)
+        return ReduceSumHole(spec)
+    elif isinstance(spec, specs.ReduceSumAccum):
+        return ReduceSumAccumHole(spec)
     elif isinstance(spec, specs.Compose):
         return ComposeHole(spec)
     elif isinstance(spec, specs.Load):

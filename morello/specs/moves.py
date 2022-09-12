@@ -51,6 +51,12 @@ class _MoveBase(base.Spec):
         return 1
 
     @classmethod
+    def from_io(
+        cls, inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
+    ) -> "_MoveBase":
+        return cls(inputs[0], output, serial_only=serial_only)
+
+    @classmethod
     def shrink_inputs_for_output_shape(
         cls, input_shapes: Iterable[tuple[int, ...]], output_shape: tuple[int, ...]
     ) -> tuple[tuple[int, ...], ...]:
@@ -73,16 +79,8 @@ class _MoveBase(base.Spec):
 
 
 class Load(_MoveBase):
-    @staticmethod
-    def from_io(
-        inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
-    ) -> "_MoveBase":
-        return Load(inputs[0], output, serial_only=serial_only)
+    pass
 
 
 class Store(_MoveBase):
-    @staticmethod
-    def from_io(
-        inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
-    ) -> "_MoveBase":
-        return Store(inputs[0], output, serial_only=serial_only)
+    pass

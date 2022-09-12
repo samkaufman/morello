@@ -8,7 +8,9 @@ import hypothesis
 import numpy as np
 import pytest
 from hypothesis import strategies as st
+from morello.codegen.ctensors import ONES_FOR_NON_ZERO_INIT
 
+from morello.impl import SplitNotSupportedByHeadError
 import morello.impl.actions
 import morello.impl.base
 import morello.impl.compose
@@ -20,7 +22,7 @@ from morello.system_config import cpu, hexagon
 from .. import strategies
 from .. import utils as test_utils
 
-CC_DEADLINE = 5 * 60 * 1000
+CC_DEADLINE = 10 * 60 * 1000  # 10 minutes
 CC_SANITIZE = True
 
 strategies.register_default_strategies()
@@ -133,10 +135,14 @@ def _arb_impls_from_actions(draw, partial_impl: morello.impl.base.Impl):
     hypothesis.assume(len(actions))
 
     action_idx = draw(st.integers(min_value=0, max_value=len(actions) - 1))
-    expanded = actions[action_idx]()
-    return expanded.replace_children(
-        draw(_arb_impls_from_actions(c)) for c in expanded.children
-    )
+    try:
+        expanded = actions[action_idx]()
+    except SplitNotSupportedByHeadError:
+        hypothesis.assume(False)
+    else:
+        return expanded.replace_children(
+            draw(_arb_impls_from_actions(c)) for c in expanded.children
+        )
 
 
 @st.composite
@@ -180,7 +186,7 @@ def _arb_reducesum_spec(draw, parallel: Optional[bool] = None):
 
     dtype = draw(st.from_type(dtypes.Dtype))
     input_shape = tuple(
-        draw(st.lists(st.integers(min_value=1, max_value=512), min_size=2, max_size=3))
+        draw(st.lists(st.integers(min_value=1, max_value=129), min_size=2, max_size=3))
     )
     output_shape = input_shape[:-1]
 
@@ -210,7 +216,7 @@ def _arb_reduce_conv_spec(draw, parallel: Optional[bool] = None):
     fh = draw(st.integers(min_value=1, max_value=inp_h))
     fw = draw(st.integers(min_value=1, max_value=inp_w))
     fc = draw(st.integers(min_value=1, max_value=9))
-    out_h, out_w = 1 + inp_h - fh, 1 + inp_w - fw
+    out_h = 1 + inp_h - fh
 
     return specs.Compose(
         (specs.ReduceSum, specs.Convolution),
@@ -267,6 +273,15 @@ def _arb_conv_reduce_conv_spec(draw, parallel: Optional[bool] = None):
 
 
 @st.composite
+def _arb_zero_spec(draw, parallel: Optional[bool] = None):
+    target = system_config.current_target()
+    shape = draw(st.lists(st.integers(1, 129), min_size=1, max_size=3))
+    dtype = draw(st.from_type(dtypes.Dtype))
+    t = target.tensor_spec(shape, dtype=dtype)
+    return specs.Zero(t, serial_only=(not parallel))
+
+
+@st.composite
 def _arb_matmul_spec(draw, parallel: Optional[bool] = None):
     """A strategy that yields Matmul specs.
 
@@ -279,9 +294,9 @@ def _arb_matmul_spec(draw, parallel: Optional[bool] = None):
         parallel = draw(st.booleans())
 
     dtype = draw(st.from_type(dtypes.Dtype))
-    m = draw(st.integers(min_value=1, max_value=32))
-    k = draw(st.integers(min_value=1, max_value=32))
-    n = draw(st.integers(min_value=1, max_value=32))
+    m = draw(st.integers(min_value=1, max_value=129))
+    k = draw(st.integers(min_value=1, max_value=129))
+    n = draw(st.integers(min_value=1, max_value=129))
     return specs.Matmul(
         target.tensor_spec((m, k), dtype=dtype),
         target.tensor_spec((k, n), dtype=dtype),
@@ -367,14 +382,18 @@ def _calculator_to_test(spec_st_fn):
         @hypothesis.settings(deadline=CC_DEADLINE)
         @functools.wraps(calc_fn)
         def wrapper(target, parallel, data):
-            with system_config.with_target(target):
-                impl, inp_values = data.draw(
-                    spec_st_fn(parallel=parallel)
-                    .map(morello.impl.base.spec_to_hole)
-                    .flatmap(_arb_impls_from_actions)
-                    .flatmap(_arb_zip_values_for_impl)
-                )
-                _test_impl(impl, inp_values, calc_fn)
+            token = ONES_FOR_NON_ZERO_INIT.set(True)
+            try:
+                with system_config.with_target(target):
+                    impl, inp_values = data.draw(
+                        spec_st_fn(parallel=parallel)
+                        .map(morello.impl.base.spec_to_hole)
+                        .flatmap(_arb_impls_from_actions)
+                        .flatmap(_arb_zip_values_for_impl)
+                    )
+                    _test_impl(impl, inp_values, calc_fn)
+            finally:
+                ONES_FOR_NON_ZERO_INIT.reset(token)
 
         return wrapper
 
@@ -508,6 +527,11 @@ def test_index_exprs_full_contiguousness_matches_contiguous_props(exact, inp):
         assert is_contiguous or not final_operand.layout.tile_is_contiguous(
             final_operand.spec.contiguous_abs
         )
+
+
+@_calculator_to_test(_arb_zero_spec)
+def test_codegen_for_zero(spec, _):
+    return np.zeros(spec.output.dim_sizes, spec.output.dtype.np_type)
 
 
 @_calculator_to_test(_arb_matmul_spec)

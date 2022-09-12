@@ -4,12 +4,12 @@ import warnings
 from typing import Callable, Iterable, Optional, Sequence
 
 from .. import dtypes, layouts, specs, system_config
-from ..system_config import current_target
 from ..tensor import OperandIdx, TensorLike
 from .actions import MatmulSplitAction, TileOutAction
 from .base import AppliedImpl, Impl, NonAllocatingLeaf, make_applied_impl
+from .block import Block
 from .loops import Loop
-from .moves import MoveLet, Moveable, PadTranspack, common_operand_move_actions
+from .moves import Moveable, common_operand_move_actions
 from .pruning import (
     ParentSummary,
     break_matmul_split_symmetries,
@@ -19,22 +19,83 @@ from .pruning import (
     prune_relayout_cycles,
 )
 from .utils import assert_stable_spec, dim_range, gen_tile_sizes
+from .zero import ZeroHole
+
+_BROADCAST_VEC_MULT_WIDTH = 256 // 8  # bytes
 
 
 @dataclasses.dataclass(frozen=True)
-class MatmulBase(NonAllocatingLeaf):
-    spec: specs.Matmul
+class MatmulHoleBase(NonAllocatingLeaf, Moveable):
+    spec: specs.Spec
 
-
-@dataclasses.dataclass(frozen=True)
-class MatmulHole(MatmulBase, Moveable):
     @property
     def is_scheduled(self) -> bool:
         return False
 
     def replace_spec(self, new_spec: specs.Spec) -> "Impl":
-        assert type(self) is MatmulHole
-        return MatmulHole(new_spec)
+        return type(self)(new_spec)
+
+    def actions(
+        self, parent_summary: Optional[ParentSummary] = None
+    ) -> Iterable[Callable[[], Impl]]:
+        out = self.spec.output
+
+        # Search only over full line sizes
+        for h, w in gen_tile_sizes(out.dim_sizes, filter=self._can_tile_out):
+            yield TileOutAction(self, (h, w), parallel=False)
+            if not self.spec.serial_only:
+                yield TileOutAction(self, (h, w), parallel=True)
+
+        yield from common_operand_move_actions(self)
+
+    def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
+        return make_applied_impl(self, operands)
+
+
+class MatmulHole(MatmulHoleBase):
+    @prune_nested_parallel_loops
+    @prune_relayout_cycles
+    @break_moves_symmetries
+    @break_tile_out_symmetries
+    @break_matmul_split_symmetries
+    def actions(
+        self, parent_summary: Optional[ParentSummary] = None
+    ) -> Iterable[Callable[[], Impl]]:
+        yield from super().actions(parent_summary)
+        # NOTE: Don't yield `split` here.
+        yield self.to_accum
+
+    @assert_stable_spec
+    def split(self, *args, **kwargs) -> "Impl":
+        block = self.to_accum()
+        matmul_accum = block.children[1]
+        assert isinstance(
+            matmul_accum, MatmulAccumHole
+        ), f"Expected MatmulAccum, but is {type(matmul_accum).__name__}"
+        new_children = list(block.children)
+        new_children[1] = matmul_accum.split(*args, **kwargs)
+        return block.replace_children(new_children)
+
+    @assert_stable_spec
+    def complete(self) -> Impl:
+        return self.to_accum().complete()
+
+    def to_accum(self) -> Impl:
+        s = self.spec
+        assert isinstance(s, specs.Matmul)
+        zero_hole = ZeroHole(specs.Zero(s.output, serial_only=s.serial_only))
+        accum_spec = specs.MatmulAccum(s.lhs, s.rhs, s.output, s.serial_only)
+        accum_hole = MatmulAccumHole(accum_spec)
+
+        out_idx = len(s.inputs)
+        return Block(
+            s, (zero_hole, accum_hole), ((out_idx,), tuple(range(len(s.operands))))
+        )
+
+
+class MatmulAccumHole(MatmulHoleBase):
+    def __post_init__(self):
+        assert isinstance(self.spec, specs.MatmulAccum)
 
     @prune_nested_parallel_loops
     @prune_relayout_cycles
@@ -44,20 +105,13 @@ class MatmulHole(MatmulBase, Moveable):
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Impl]]:
-        lhs, _, out = self.spec.operands
+        yield from super().actions(parent_summary)
 
-        # Search only over full line sizes
-        for h, w in gen_tile_sizes(out.dim_sizes, filter=self._can_tile_out):
-            yield TileOutAction(self, (h, w), parallel=False)
-            if not self.spec.serial_only:
-                yield TileOutAction(self, (h, w), parallel=True)
-
+        lhs, _ = self.spec.inputs
         if lhs.dim_sizes[1] > 1:
             for k in dim_range(lhs.dim_sizes[1], include_end=False):
                 if self._split_valid(k):
                     yield MatmulSplitAction(self.split, size=k)
-
-        yield from common_operand_move_actions(self)
 
         if Mult.applies_to_operands(self.spec.operands):
             yield functools.partial(self.place, Mult)
@@ -65,39 +119,12 @@ class MatmulHole(MatmulBase, Moveable):
         if BroadcastVecMult.applies_to_operands(self.spec.operands):
             yield functools.partial(self.place, BroadcastVecMult)
 
-        if system_config.current_system().has_hvx:
-            if HvxVrmpyaccVuwVubRub.applies_to_operands(self.spec.operands):
-                yield functools.partial(self.place, HvxVrmpyaccVuwVubRub)
-
-    @assert_stable_spec
-    def pad_transpack(self, input_idx: int) -> "Impl":
-        source = self.inputs[input_idx]
-        new_mat = current_target().tensor(
-            spec=current_target().tensor_spec(
-                dim_sizes=source.dim_sizes,
-                dtype=source.dtype,
-                bank="GL",
-                layout=layouts.HEXAGON_TRANSPACKED,
-            ),
-            origin=source,
-        )
-
-        new_inputs = self.inputs[:input_idx] + (new_mat,) + self.inputs[input_idx + 1 :]
-        return PadTranspack(
-            source=source,
-            destination=new_mat,
-            input_idx=input_idx,
-            inner=self.replace_io(new_inputs, self.output),
-        )
-
     @assert_stable_spec
     def split(self, size: int) -> "Impl":
         assert size > 0
         lhs, rhs = self.spec.inputs
         if size > lhs.dim_sizes[1]:
-            raise ValueError(
-                f"Cannot split {size} with inner dim. {self.lhs.dim_sizes[1]}"
-            )
+            raise ValueError(f"Cannot split {size} with inner dim. {lhs.dim_sizes[1]}")
         if size == lhs.dim_sizes[1]:
             return self
         left_view = lhs.simple_tile(OperandIdx(0), (lhs.dim_sizes[0], size))
@@ -110,12 +137,9 @@ class MatmulHole(MatmulBase, Moveable):
             spec=self.spec,
             subscripts=(split_subscript,),
             tiles=frozenset([left_view, right_view]),
-            inner=MatmulHole(
-                specs.Matmul(
-                    left_view.spec,
-                    right_view.spec,
-                    self.spec.output,
-                    self.spec.serial_only,
+            inner=MatmulAccumHole(
+                specs.MatmulAccum(
+                    left_view.spec, right_view.spec, self.spec.output, serial_only=True,
                 )
             ),
             parallel=False,  # TODO: Is this parallel correct?
@@ -154,21 +178,15 @@ class MatmulHole(MatmulBase, Moveable):
             return self.move_output(bank=next_general_out).complete()
         return self.place(Mult)
 
-    def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
-        return make_applied_impl(self, operands)
-
 
 @dataclasses.dataclass(frozen=True)
-class MatmulLeaf(MatmulBase):
+class MatmulLeaf(NonAllocatingLeaf):
+    spec: specs.Matmul
+
     @property
     def is_scheduled(self) -> bool:
         return True
 
-    @prune_nested_parallel_loops
-    @prune_relayout_cycles
-    @break_moves_symmetries
-    @break_tile_out_symmetries
-    @break_matmul_split_symmetries
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Impl]]:
@@ -180,8 +198,6 @@ class MatmulLeaf(MatmulBase):
 
 @dataclasses.dataclass(frozen=True)
 class Mult(MatmulLeaf):
-    # TODO: Replace whole class w/ target-specific implementations
-
     def __post_init__(self):
         assert all(o.bank in ("RF", "HexagonRF") for o in self.spec.operands)
         assert all(d == 1 for o in self.spec.operands for d in o.dim_sizes)
@@ -194,14 +210,13 @@ class Mult(MatmulLeaf):
         )
 
 
-_BROADCAST_VEC_MULT_WIDTH = 256 // 8  # bytes
-
-
 @dataclasses.dataclass(frozen=True)
 class BroadcastVecMult(MatmulLeaf):
     """A leaf for a scalar-vector multiplication (Clang vector extensions)."""
 
     def __post_init__(self):
+        # TODO: Remove following.
+        assert isinstance(self.spec, specs.MatmulAccum)
         check_result = BroadcastVecMult._check_operands(self.spec.operands)
         if check_result:
             raise ValueError(check_result)

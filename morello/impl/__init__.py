@@ -6,7 +6,8 @@ from .actions import (
     TileOutAction,
 )
 from .base import AppliedImpl, Impl, spec_to_hole
-from .compose import ComposeHole, Pipeline
+from .block import Block
+from .compose import ComposeHole, Pipeline, SplitNotSupportedByHeadError
 from .convhole import ConvHole
 from .loops import Loop, SlidingWindowLoop
 from .matmuls import (
@@ -14,11 +15,12 @@ from .matmuls import (
     HvxGemvmpybbwAsm,
     HvxVrmpyaccVuwVubRub,
     MatmulHole,
+    MatmulAccumHole,
     Mult,
 )
 from .moves import MoveLet, PadTranspack, ValueAssign, CacheAccess, VectorAssign
 from .pruning import ParentSummary
-from .reducesum import ReduceSum
+from .reducesum import Add, ReduceSumHole, ReduceSumAccumHole
 from .settings import (
     BREAK_MOVE_SYMMETRIES,
     BREAK_SEQUENTIAL_TILES,
@@ -33,9 +35,11 @@ from .zero import ZeroHole, MemsetZero
 
 __all__ = [
     "ActionOutOfDomain",
+    "Add",
     "allow_reduce_splits",
     "allow_sliding_windows",
     "AppliedImpl",
+    "Block",
     "BREAK_MOVE_SYMMETRIES",
     "BREAK_SEQUENTIAL_TILES",
     "BroadcastVecMult",
@@ -46,6 +50,7 @@ __all__ = [
     "HvxVrmpyaccVuwVubRub",
     "Impl",
     "Loop",
+    "MatmulAccumHole",
     "MatmulHole",
     "MatmulSplitAction",
     "MemsetZero",
@@ -57,10 +62,12 @@ __all__ = [
     "PeelAction",
     "Pipeline",
     "PRUNE_RELAYOUT_CYCLES",
-    "ReduceSum",
+    "ReduceSumAccumHole",
+    "ReduceSumHole",
     "SlidingTileOutAction",
     "SlidingWindowLoop",
     "spec_to_hole",
+    "SplitNotSupportedByHeadError",
     "tile_size_mode",
     "TileOutAction",
     "TileSizeMode",

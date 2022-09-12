@@ -7,7 +7,7 @@ from typing import Callable, Iterable, Optional, Sequence, Tuple, TypeVar, Union
 from .. import layouts, specs, system_config, tiling, utils
 from ..layouts import Layout
 from ..system_config import current_system, current_target
-from ..tensor import OperandIdx, SimpleTile, Tensor, TensorBase, TensorLike, Tile
+from ..tensor import OperandIdx, SimpleTile, TensorBase, TensorLike, Tile
 from .actions import PeelAction, SlidingTileOutAction, TileOutAction
 from .base import AppliedImpl, Impl, make_applied_impl, spec_to_hole
 from .loops import Loop
@@ -26,6 +26,7 @@ from .utils import assert_stable_spec, dim_range, gen_tile_sizes, gen_vector_sha
 T = TypeVar("T")
 U = TypeVar("U")
 V = TypeVar("V")
+Tt = TypeVar("Tt", bound=TensorLike)
 
 
 class SplitNotSupportedByHeadError(NotImplementedError):
@@ -180,10 +181,7 @@ class ComposeHole(Impl):
 
     @assert_stable_spec
     def peel(
-        self,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        **kwargs,
+        self, bank: Optional[str] = None, layout: Optional[Layout] = None, **kwargs,
     ) -> Impl:
         if bank is None or layout is None:
             # TODO: Just require them as arguments. Can relax the signature later.
@@ -216,9 +214,7 @@ class ComposeHole(Impl):
             head_inps += self.spec.inputs[:hi]
         head_hole = spec_to_hole(
             self.spec.subspec_classes[0].from_io(
-                head_inps,
-                self.spec.output,
-                serial_only=self.spec.serial_only,
+                head_inps, self.spec.output, serial_only=self.spec.serial_only,
             )
         )
 
@@ -291,23 +287,20 @@ class ComposeHole(Impl):
 
     @assert_stable_spec
     def split(self, k: int, parallel=False) -> Impl:
-        # TODO: Can we abstract over both Matmul and Reduce' splits
-        if self.spec.subspec_classes[0] == specs.ReduceSum:
+        # TODO: Can we abstract over both Matmul and Reduce' splits?
+        if self.spec.subspec_classes[0] == specs.ReduceSumAccum:
             return self._split_reduce_head(k, parallel=parallel)
-        else:
-            raise SplitNotSupportedByHeadError()
+        raise SplitNotSupportedByHeadError()
 
     def split_sizes(self) -> Iterable[int]:
-        if self.spec.subspec_classes[0] == specs.ReduceSum:
+        if self.spec.subspec_classes[0] in (specs.ReduceSum, specs.ReduceSumAccum):
             # TODO: This should defer to the inner op
             for k in dim_range(self.spec.subspec_outputs[1][-1], include_end=False):
                 if k != self.spec.subspec_outputs[1][-1]:
                     yield k
-        else:
-            return
 
     def _split_reduce_head(self, k: int, parallel: bool) -> Impl:
-        assert self.spec.subspec_classes[0] == specs.ReduceSum
+        assert self.spec.subspec_classes[0] in (specs.ReduceSum, specs.ReduceSumAccum)
 
         if parallel and self.spec.serial_only:
             raise ValueError("Serial-only Spec prevents parallel tiling")
@@ -324,7 +317,7 @@ class ComposeHole(Impl):
             dim_sizes=orig_reduce_input_shape[:-1] + (k,)
         )
         reified_inputs = tuple(
-            partial_inp.tile(OperandIdx(op_idx), inp)
+            cast(Tile, partial_inp.tile(OperandIdx(op_idx), inp))
             for op_idx, (inp, partial_inp) in enumerate(
                 zip(
                     self.spec.inputs,
@@ -372,17 +365,15 @@ class ComposeHole(Impl):
         )
 
     def _filter_unchanged_inputs(
-        self, source: Iterable[TensorLike]
-    ) -> Iterable[tuple[int, TensorLike]]:
+        self, source: Iterable[Tt]
+    ) -> Iterable[tuple[int, Tt]]:
         """Return given tensors different from self's corresponding inputs."""
         for idx, (orig_spec, tiled_input) in enumerate(zip(self.spec.inputs, source)):
             if orig_spec != tiled_input.spec:
                 yield idx, tiled_input
 
     def _calculate_partial_inputs_for_tile_out(
-        self,
-        output_tile: Union[SimpleTile, tiling.PartialTile],
-        skip_first: int = 0,
+        self, output_tile: Union[SimpleTile, tiling.PartialTile], skip_first: int = 0,
     ) -> list[tiling.PartialTile]:
         """Returns PartialTiles for this ComposeHole's inputs for an output tiling.
 

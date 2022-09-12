@@ -1,11 +1,13 @@
+import dataclasses
 import functools
-from typing import TYPE_CHECKING, Callable, Iterable, Optional, Union
+from typing import Callable, Iterable, Optional, Sequence, Union
 
 from .. import specs, system_config
 from ..layouts import Layout
 from ..tensor import OperandIdx
 from .actions import TileOutAction
 from .base import Impl, NonAllocatingLeaf
+from .block import Block
 from .loops import Loop
 from .moves import Moveable, common_operand_move_actions
 from .pruning import (
@@ -17,40 +19,19 @@ from .pruning import (
 )
 from .settings import allow_reduce_splits
 from .utils import assert_stable_spec, dim_range, gen_tile_sizes
-
-if TYPE_CHECKING:
-    from .moves import MoveLet
+from .zero import ZeroHole
 
 
-class ReduceSum(NonAllocatingLeaf, Moveable):
-    def __init__(self, spec: specs.ReduceSum):
-        super().__init__()
-        self._spec = spec
-
-    @property
-    def spec(self) -> specs.Spec:
-        return self._spec
-
-    def __eq__(self, other):
-        if type(other) == ReduceSum:
-            return NotImplemented
-        return self.spec == other.spec
-
-    def __hash__(self) -> int:
-        return hash(self.spec)
+@dataclasses.dataclass(frozen=True)
+class ReduceSumHoleBase(NonAllocatingLeaf, Moveable):
+    spec: specs.Spec
 
     @property
     def is_scheduled(self) -> bool:
-        # TODO: Drop these hard-coded bank literals. Instead, use target-specific Impls.
-        return all(o.bank in ("RF", "HexagonRF") for o in self.spec.operands) and all(
-            d == 1 for d in self.spec.inputs[0].dim_sizes
-        )
+        return False
 
     def replace_spec(self, new_spec: specs.Spec) -> "Impl":
-        assert type(self) is ReduceSum
-        if not isinstance(new_spec, specs.ReduceSum):
-            raise ValueError(f"Expected Spec to be ReduceSum; was: {type(new_spec)}")
-        return ReduceSum(new_spec)
+        return type(self)(new_spec)
 
     @prune_nested_parallel_loops
     @prune_relayout_cycles
@@ -67,6 +48,52 @@ class ReduceSum(NonAllocatingLeaf, Moveable):
             for parallel in [False] if self.spec.serial_only else [True, False]:
                 yield TileOutAction(self, ds, parallel)
 
+        yield from common_operand_move_actions(self)
+
+
+class ReduceSumHole(ReduceSumHoleBase):
+    def __post_init__(self):
+        assert type(self.spec) == specs.ReduceSum  # TODO: Remove
+
+    @prune_nested_parallel_loops
+    @prune_relayout_cycles
+    @break_moves_symmetries
+    @break_tile_out_symmetries
+    def actions(
+        self, parent_summary: Optional[ParentSummary] = None
+    ) -> Iterable[Callable[[], Impl]]:
+        yield from super().actions(parent_summary)
+        yield self.to_accum
+
+    def to_accum(self) -> Impl:
+        s = self.spec
+        assert isinstance(
+            s, specs.ReduceSum
+        ), f"Spec was expected to be ReduceSum, but was {type(s).__name__}"
+        zero_hole = ZeroHole(specs.Zero(s.output, serial_only=s.serial_only))
+        accum_spec = specs.ReduceSumAccum(s.source, s.output, s.serial_only)
+        accum_hole = ReduceSumAccumHole(accum_spec)
+
+        out_idx = len(s.inputs)
+        return Block(
+            s, (zero_hole, accum_hole), ((out_idx,), tuple(range(len(s.operands))))
+        )
+
+    @assert_stable_spec
+    def complete(self) -> Impl:
+        return self.to_accum().complete()
+
+
+class ReduceSumAccumHole(ReduceSumHoleBase):
+    @prune_nested_parallel_loops
+    @prune_relayout_cycles
+    @break_moves_symmetries
+    @break_tile_out_symmetries
+    def actions(
+        self, parent_summary: Optional[ParentSummary] = None
+    ) -> Iterable[Callable[[], Impl]]:
+        yield from super().actions(parent_summary)
+
         # Split over the reduction dimension
         if allow_reduce_splits.get():
             for k in dim_range(self.spec.inputs[0].dim_sizes[-1], include_end=False):
@@ -74,18 +101,11 @@ class ReduceSum(NonAllocatingLeaf, Moveable):
                     if self._split_valid(k):
                         yield functools.partial(self.split, k)
 
-        yield from common_operand_move_actions(self)
-
-    def _split_valid(self, k: int) -> bool:
-        orig_shape = self.spec.inputs[0].dim_sizes
-        if k > orig_shape[-1]:
-            return False
-        if not self.spec.inputs[0].is_valid_tile_shape(orig_shape[:-1] + (k,)):
-            return False
-        return True
+        if Add.applies_to_operands(self.spec.operands):
+            yield functools.partial(self.place, Add)
 
     @assert_stable_spec
-    def split(self, k: int) -> Union["ReduceSum", "Loop"]:
+    def split(self, k: int) -> Union["ReduceSumAccumHole", "Loop"]:
         if k == self.spec.inputs[0].dim_sizes[-1]:
             return self
         source_tile = self.spec.inputs[0].simple_tile(
@@ -96,8 +116,8 @@ class ReduceSum(NonAllocatingLeaf, Moveable):
             spec=self.spec,
             subscripts=(driving_subscript,),
             tiles=frozenset([source_tile]),
-            inner=ReduceSum(
-                specs.ReduceSum(
+            inner=ReduceSumAccumHole(
+                specs.ReduceSumAccum(
                     source=source_tile.spec,
                     output=self.spec.output,
                     serial_only=self.spec.serial_only,
@@ -106,10 +126,20 @@ class ReduceSum(NonAllocatingLeaf, Moveable):
             parallel=False,
         )
 
+    def _split_valid(self, k: int) -> bool:
+        orig_shape = self.spec.inputs[0].dim_sizes
+        if k > orig_shape[-1]:
+            return False
+        if not self.spec.inputs[0].is_valid_tile_shape(orig_shape[:-1] + (k,)):
+            return False
+        return True
+
     @assert_stable_spec
     def complete(self) -> Impl:
-        if any(d > 1 for d in self.output.dim_sizes):
-            return self.tile_out(tuple(1 for _ in self.output.dim_sizes)).complete()
+        if any(d > 1 for d in self.spec.output.dim_sizes):
+            return self.tile_out(
+                tuple(1 for _ in self.spec.output.dim_sizes)
+            ).complete()
         if self.spec.inputs[0].dim_sizes[-1] > 1:
             return self.split(1).complete()
 
@@ -117,8 +147,37 @@ class ReduceSum(NonAllocatingLeaf, Moveable):
         next_general_source = system.next_general_bank(self.spec.inputs[0].bank)
         if next_general_source:
             return self.move_input(0, bank=next_general_source).complete()
-        next_general_out = system.next_general_bank(self.output.bank)
+        next_general_out = system.next_general_bank(self.spec.output.bank)
         if next_general_out:
             return self.move_output(bank=next_general_out).complete()
 
+        return self
+
+
+@dataclasses.dataclass(frozen=True)
+class Add(NonAllocatingLeaf, Moveable):
+    """Implements `output += source;` in the target language."""
+
+    spec: specs.Spec
+
+    def __post_init__(self):
+        assert self.applies_to_operands(self.spec.operands)
+
+    @property
+    def is_scheduled(self) -> bool:
+        return True
+
+    @staticmethod
+    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
+        return all(
+            o.bank in ("RF", "HexagonRF") and all(d == 1 for d in o.dim_sizes)
+            for o in operands
+        )
+
+    def actions(
+        self, parent_summary: Optional[ParentSummary] = None
+    ) -> Iterable[Callable[[], Impl]]:
+        yield from []
+
+    def complete(self, *args, **kwargs):
         return self

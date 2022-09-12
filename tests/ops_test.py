@@ -195,7 +195,6 @@ def test_evenly_divisible_matmul_tiling():
         (2, 2)
     )
     assert schedule.spec.output.dim_sizes == (4, 4)
-    assert isinstance(schedule.inner, morello.impl.matmuls.MatmulBase)
     assert schedule.inner.spec.output.dim_sizes == (2, 2)
     assert schedule.inner.spec.inputs[0].dim_sizes[1] == 4
 

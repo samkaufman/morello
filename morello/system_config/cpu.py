@@ -2,8 +2,9 @@ import asyncio
 import functools
 import io
 import os
+import pathlib
 import re
-import subprocess
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -11,9 +12,8 @@ from typing import Iterable, Optional, Union
 
 from .. import dtypes, layouts, specs
 from ..codegen import gen
-from ..layouts import Layout
 from ..tensor import Tensor
-from .base import MemoryBankConfig, RunResult, SystemDescription, Target
+from .base import MemoryBankConfig, RunResult, SystemDescription, BuiltArtifact, Target
 
 _OUTPUT_RE = re.compile(r"cpu:\s+(\d+)s\s*(\d+)ns")
 
@@ -38,10 +38,10 @@ class CpuTarget(Target):
         self,
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
-        contiguous_abs = None,
+        contiguous_abs=None,
         aligned: bool = True,
         bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
+        layout: Optional[layouts.Layout] = None,
         **kwargs,
     ) -> specs.TensorSpec:
         if layout is None:
@@ -85,6 +85,53 @@ class CpuTarget(Target):
             return "RF"
         raise ValueError("Unknown source: " + str(source))
 
+    async def build_impl(
+        self,
+        impl,
+        print_output=False,
+        source_cb=None,
+        values=None,
+        extra_clang_args: Optional[Iterable[str]] = None,
+    ) -> "BuiltArtifact":
+        dirname = pathlib.Path(tempfile.mkdtemp())
+        source_path = dirname / "main.c"
+        binary_path = dirname / "a.out"
+
+        with io.StringIO() as source_io:
+            if print_output:
+                gen.generate_c("print_output", impl, source_io, values=values)
+            else:
+                gen.generate_c("benchmark", impl, source_io, values=values)
+            source_code = source_io.getvalue()
+        if source_cb:
+            source_cb(source_code)
+        with source_path.open(mode="w") as fo:
+            fo.write(source_code)
+
+        # TODO: Don't need to link OpenMP if the Impl has no parallel loops.
+        extra_clang_args = extra_clang_args or []
+        clang_cmd = (
+            [str(_clang_path())]
+            + list(extra_clang_args)
+            + [
+                "-mavx2",
+                "-std=gnu99",
+                "-fopenmp",
+                "-O3",
+                "-o",
+                str(binary_path),
+                str(source_path),
+            ]
+        )
+        if os.getenv("MORELLO_CLANG_LINK_RT"):
+            clang_cmd.append("-lrt")
+        clang_proc = await asyncio.create_subprocess_exec(*clang_cmd)
+        await clang_proc.wait()
+        if clang_proc.returncode != 0:
+            raise Exception(f"Clang exited with code {clang_proc.returncode}")
+
+        return CPUBuiltArtifact(binary_path, source_path, dirname)
+
     async def run_impl(
         self,
         impl,
@@ -94,69 +141,14 @@ class CpuTarget(Target):
         check_flakiness: int = 1,
         extra_clang_args: Optional[Iterable[str]] = None,
     ) -> RunResult:
-        with tempfile.TemporaryDirectory() as dirname:
-            source_path = os.path.join(dirname, "main.c")
-            binary_path = os.path.join(dirname, "a.out")
-
-            with io.StringIO() as source_io:
-                if print_output:
-                    gen.generate_c("print_output", impl, source_io, values=values)
-                else:
-                    gen.generate_c("benchmark", impl, source_io, values=values)
-                source_code = source_io.getvalue()
-            if source_cb:
-                source_cb(source_code)
-            with open(source_path, mode="w") as fo:
-                fo.write(source_code)
-
-            # TODO: Don't need to link OpenMP if the Impl has no parallel loops.
-            extra_clang_args = extra_clang_args or []
-            clang_cmd = (
-                [str(_clang_path())]
-                + list(extra_clang_args)
-                + [
-                    "-mavx2",
-                    "-std=gnu99",
-                    "-fopenmp",
-                    "-O3",
-                    "-o",
-                    binary_path,
-                    source_path,
-                ]
-            )
-            if os.getenv("MORELLO_CLANG_LINK_RT"):
-                clang_cmd.append("-lrt")
-            clang_proc = await asyncio.create_subprocess_exec(*clang_cmd)
-            await clang_proc.wait()
-            if clang_proc.returncode != 0:
-                raise Exception(f"Clang exited with code {clang_proc.returncode}")
-
-            # Run the compiled binary
-            last_stdout = None
-            for it in range(check_flakiness):
-                binary_proc = subprocess.run(
-                    binary_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = binary_proc.stdout, binary_proc.stderr
-
-                if binary_proc.returncode != 0:
-                    raise Exception(
-                        f"Binary exited with code {binary_proc.returncode}. "
-                        f"Standard error: {stderr}"
-                    )
-                stdout = stdout.decode("utf8")
-                stderr = stderr.decode("utf8")
-
-                if last_stdout is not None:
-                    assert stdout == last_stdout, (
-                        f"On iteration {it}, received inconsistent stdouts:"
-                        f"\n\n{stdout}\n\n{last_stdout}"
-                    )
-                last_stdout = stdout
-
-            return RunResult(stdout, stderr)
+        artifact = await self.build_impl(
+            impl,
+            print_output=print_output,
+            source_cb=source_cb,
+            values=values,
+            extra_clang_args=extra_clang_args,
+        )
+        return await artifact.run(check_flakiness=check_flakiness)
 
     async def time_impl(
         self, impl, return_source=False
@@ -173,11 +165,65 @@ class CpuTarget(Target):
             if return_source:
                 source_code = s
 
-        r = await self.run_impl(impl, source_cb=cb)
-        result = _parse_benchmark_output(r.stdout) / gen.BENCH_ITERS
+        artifact = await self.build_impl(impl, source_cb=cb)
+        assert isinstance(source_code, str)
+        t = await artifact.measure_time()
         if return_source:
-            result = (result, source_code)
-        return result
+            return (t, source_code)
+        return t
+
+
+class CPUBuiltArtifact(BuiltArtifact):
+    def __init__(
+        self,
+        binary_path: pathlib.Path,
+        source_path: pathlib.Path,
+        whole_dir: pathlib.Path,
+    ):
+        self.binary_path = binary_path
+        self.whole_dir = whole_dir
+        with source_path.open(mode="r") as fo:
+            self.source_code = fo.read()
+
+    async def run(self, check_flakiness: int = 1) -> RunResult:
+        # Run the compiled binary
+        last_stdout = None
+        for it in range(check_flakiness):
+            binary_proc = await asyncio.create_subprocess_exec(
+                self.binary_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await binary_proc.communicate()
+
+            if binary_proc.returncode != 0:
+                raise Exception(
+                    f"Binary exited with code {binary_proc.returncode}. "
+                    f"Standard error: {stderr}"
+                )
+            stdout = stdout.decode("utf8")
+            stderr = stderr.decode("utf8")
+
+            if last_stdout is not None:
+                assert stdout == last_stdout, (
+                    f"On iteration {it}, received inconsistent stdouts:"
+                    f"\n\n{stdout}\n\n{last_stdout}"
+                )
+            last_stdout = stdout
+
+        return RunResult(stdout, stderr)  # type: ignore
+
+    async def measure_time(self) -> float:
+        """Executes and benchmarks an Impl on the local machine using Clang.
+
+        Returns the time in seconds. Measured by executing BENCH_ITERS times and
+        returning the mean.
+        """
+        r = await self.run()
+        return _parse_benchmark_output(r.stdout) / gen.BENCH_ITERS
+
+    def delete(self):
+        shutil.rmtree(self.whole_dir)
 
 
 def _parse_benchmark_output(output: str) -> float:

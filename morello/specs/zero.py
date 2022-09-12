@@ -22,10 +22,10 @@ class Zero(base.Spec):
     def inputs_count(cls) -> int:
         return 0
 
-    @staticmethod
+    @classmethod
     def from_io(
-        inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
-    ) -> "Spec":
+        cls, inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
+    ) -> base.Spec:
         return Zero(output, serial_only=serial_only)
 
     @classmethod

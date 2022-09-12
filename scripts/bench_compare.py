@@ -1119,13 +1119,17 @@ def _make_np_cnn_inputs(spec):
 
 
 def _benchmark(impl):
-    loop = asyncio.get_event_loop()
     assert impl.is_scheduled
+
+    loop = asyncio.get_event_loop()
+    artifact = loop.run_until_complete(system_config.current_target().build_impl(impl))
+
+    assert hasattr(artifact, "source_code")
+    source = artifact.source_code  # type: ignore
+
     runtime_samples = []
     for _ in range(RUNS):
-        secs, source = loop.run_until_complete(
-            system_config.current_target().time_impl(impl, return_source=True)
-        )
+        secs = loop.run_until_complete(artifact.measure_time())
         logger.info(f"Sample runtime result {secs}s:")
         runtime_samples.append(secs)
     impl_str = op_pprint.pformat(impl, color=False)

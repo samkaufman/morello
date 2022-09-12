@@ -1,3 +1,4 @@
+import itertools
 from typing import Any, Callable, Optional, Sequence
 
 from hypothesis import strategies as st
@@ -50,21 +51,28 @@ def tensor_st(draw, *args, **kwargs):
 @st.composite
 def tensorspec_st(
     draw,
+    dim_sizes: Optional[tuple[int, ...]] = None,
     max_dim_size: Optional[int] = 128,
     min_dims: int = 1,
     max_dims: Optional[int] = None,
+    dtype: Optional[dtypes.Dtype] = None,
     layout_fn: Optional[Callable[[int], layouts.Layout]] = None,
     contiguous_abs: Optional[Any] = None,
+    bank: Optional[str] = None,
     fully_contiguous: bool = False,
 ) -> specs.TensorSpec:
     target = system_config.current_target()
 
-    dim_sizes = draw(
-        st.lists(
-            dim_st(max_size=max_dim_size), min_size=min_dims, max_size=max_dims
-        ).map(tuple)
-    )
-    dtype = draw(st.from_type(dtypes.Dtype))
+    if not dim_sizes:
+        dim_sizes = draw(
+            st.lists(
+                dim_st(max_size=max_dim_size), min_size=min_dims, max_size=max_dims
+            ).map(tuple)
+        )
+    assert dim_sizes
+
+    if not dtype:
+        dtype = draw(st.from_type(dtypes.Dtype))
 
     if layout_fn is None:
         layout = draw(layout_st(dim_sizes=dim_sizes, dtype=dtype))
@@ -76,11 +84,17 @@ def tensorspec_st(
             if fully_contiguous:
                 contiguous_abs = len(dim_sizes)
             else:
+                trailing_ones = sum(
+                    itertools.takewhile(
+                        lambda s: s == 1,
+                        (dim_sizes[i] for i in reversed(layout.dim_order)),
+                    )
+                )
                 contiguous_abs = draw(
-                    st.integers(min_value=0, max_value=len(dim_sizes))
+                    st.integers(min_value=trailing_ones, max_value=len(dim_sizes))
                 )
         elif isinstance(layout, layouts.PackedLayout):
-            if fully_contiguous:
+            if fully_contiguous or all(s == 1 for s in dim_sizes):
                 contiguous_abs = len(dim_sizes) + 1
             else:
                 contiguous_abs = draw(
@@ -89,36 +103,38 @@ def tensorspec_st(
         else:
             raise NotImplementedError()
 
+    if not bank:
+        bank = draw(st.sampled_from(sorted(target.system.banks)))
+
     return target.tensor_spec(
-        dim_sizes,
-        dtype=dtype,
-        contiguous_abs=contiguous_abs,
-        layout=layout,
-        bank=draw(st.sampled_from(sorted(target.system.banks))),
+        dim_sizes, dtype=dtype, contiguous_abs=contiguous_abs, layout=layout, bank=bank,
     )
 
 
 @st.composite
 def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
-    target = system_config.current_target()
     lhs_dtype = draw(st.from_type(dtypes.Dtype))
     rhs_dtype = draw(st.from_type(dtypes.Dtype))
     lhs = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=2))
     rhs_dim_sizes = (lhs.dim_sizes[1], draw(dim_st(max_size=max_dim_size)))
-    rhs = target.tensor_spec(
-        dim_sizes=rhs_dim_sizes,
-        dtype=lhs_dtype,
-        contiguous_abs=draw(st.integers(min_value=0, max_value=len(rhs_dim_sizes))),
-        layout=draw(layout_st(dim_sizes=rhs_dim_sizes, dtype=lhs_dtype)),
-        bank=draw(st.sampled_from(sorted(target.system.banks))),
+    rhs = draw(
+        tensorspec_st(
+            dim_sizes=rhs_dim_sizes,
+            dtype=lhs_dtype,
+            layout_fn=lambda _: draw(
+                layout_st(dim_sizes=rhs_dim_sizes, dtype=lhs_dtype)
+            ),
+        )
     )
     out_dim_sizes = (lhs.dim_sizes[0], rhs.dim_sizes[1])
-    out = target.tensor_spec(
-        dim_sizes=out_dim_sizes,
-        dtype=rhs_dtype,
-        contiguous_abs=draw(st.integers(min_value=0, max_value=len(out_dim_sizes))),
-        layout=draw(layout_st(dim_sizes=out_dim_sizes, dtype=rhs_dtype)),
-        bank=draw(st.sampled_from(sorted(target.system.banks))),
+    out = draw(
+        tensorspec_st(
+            dim_sizes=out_dim_sizes,
+            dtype=rhs_dtype,
+            layout_fn=lambda _: draw(
+                layout_st(dim_sizes=out_dim_sizes, dtype=rhs_dtype)
+            ),
+        )
     )
     return specs.Matmul(lhs, rhs, out, serial_only=draw(st.booleans()))
 
@@ -284,6 +300,7 @@ def register_default_strategies():
 
     st.register_type_strategy(tensor.Tensor, tensor_st())
 
+    # Register default strategies for generating Specs.
     st.register_type_strategy(specs.Compose, compose_spec_st())
     st.register_type_strategy(specs.Matmul, matmul_spec_st())
     st.register_type_strategy(specs.Convolution, convolution_spec_st())
@@ -298,6 +315,8 @@ def register_default_strategies():
         ),
     )
 
+    # Register default strategies for generating Impls, including Holes, Movelets,
+    # and Loops.
     st.register_type_strategy(impl.ComposeHole, composehole_op_st())
     st.register_type_strategy(impl.Pipeline, pipeline_op_st())
     st.register_type_strategy(
@@ -306,7 +325,7 @@ def register_default_strategies():
             st.from_type(impl.ComposeHole),
             st.from_type(impl.Pipeline),
             st.from_type(impl.ConvHole),
-            st.from_type(impl.ReduceSum),
+            st.from_type(impl.ReduceSumHole),
             st.from_type(impl.Loop),
             st.from_type(impl.MoveLet),
         ),

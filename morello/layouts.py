@@ -1,10 +1,8 @@
 import dataclasses
 import functools
-import itertools
 import math
 import operator
-from typing import TYPE_CHECKING, Any, Iterable, Literal, Sequence, Union
-import typing
+from typing import TYPE_CHECKING, Any, Iterable, Sequence, Union
 
 import sympy
 
@@ -12,7 +10,7 @@ from . import dtypes, system_config
 from .codegen.expr_utils import FloorDiv
 
 if TYPE_CHECKING:
-    from . import dtypes, layouts, specs
+    from . import dtypes
 
 
 class Layout:
@@ -78,6 +76,7 @@ class StandardLayout(Layout):
 
     def __post_init__(self):
         assert all(d >= 0 for d in self.dim_order)
+        assert len(set(self.dim_order)) == len(self.dim_order)
 
     def contiguous_top(self) -> Any:
         return len(self.dim_order)

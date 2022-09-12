@@ -11,8 +11,9 @@ from . import base
 from .tensorspec import TensorSpec
 
 
+@cython.dataclasses.dataclass(unsafe_hash=True)
 @cython.cclass
-class ReduceSum(base.Spec):
+class ReduceSumBase(base.Spec):
     """Sums along the the innermost dimension of a tensor.
 
     Not defined for rank-1 tensors. The actual reduction function (sum, max, etc.) is
@@ -23,42 +24,27 @@ class ReduceSum(base.Spec):
     _output: TensorSpec
     _serial_only: bool
 
-    def __init__(self, source: TensorSpec, output: TensorSpec, serial_only: bool):
+    def __init__(self, source, output, serial_only) -> None:
+        super().__init__()
         self.source = source
         self._output = output
         self._serial_only = serial_only
 
-        assert len(source.dim_sizes) >= 2
-        assert len(output.dim_sizes) == len(source.dim_sizes) - 1, (
+        assert len(self.source.dim_sizes) >= 2
+        assert len(self.output.dim_sizes) == len(self.source.dim_sizes) - 1, (
             "Expected output shape to have one fewer dimensions than source; "
-            f"source and output shapes were: {source.dim_sizes} and "
-            f"{output.dim_sizes}"
+            f"source and output shapes were: {self.source.dim_sizes} and "
+            f"{self.output.dim_sizes}"
         )
-        assert output.dim_sizes == self.output_shape(source.dim_sizes), (
-            f"Given output shape was {output.dim_sizes} but the computed "
+        assert self.output.dim_sizes == self.output_shape(self.source.dim_sizes), (
+            f"Given output shape was {self.output.dim_sizes} but the computed "
             f"output shape is {self.output_shape(self.source.dim_sizes)} "
-            f"(input shape: {source.dim_sizes})"
+            f"(input shape: {self.source.dim_sizes})"
         )
 
-    def __eq__(self, other):
-        if type(other) != ReduceSum:
-            return NotImplemented
-        return (
-            self.source == other.source
-            and self.output == other.output
-            and self.serial_only == other.serial_only
-        )
-
-    def __hash__(self) -> int:
-        return hash((self.source, self.output, self.serial_only))
-
-    @staticmethod
-    def from_io(
-        inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
-    ) -> "ReduceSum":
-        if len(inputs) != 1:
-            raise ValueError("Expected 1 input; got {len(inputs)}")
-        return ReduceSum(inputs[0], output, serial_only=serial_only)
+    @property
+    def inputs(self) -> tuple[TensorSpec, ...]:
+        return (self.source,)
 
     @property
     def output(self) -> TensorSpec:
@@ -68,9 +54,13 @@ class ReduceSum(base.Spec):
     def serial_only(self) -> bool:
         return self._serial_only
 
-    @property
-    def inputs(self) -> tuple[TensorSpec, ...]:
-        return (self.source,)
+    @classmethod
+    def from_io(
+        cls, inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
+    ) -> "ReduceSumBase":
+        if len(inputs) != 1:
+            raise ValueError("Expected 1 input; got {len(inputs)}")
+        return cls(inputs[0], output, serial_only=serial_only)  # type: ignore
 
     @staticmethod
     def output_shape(source_shape: tuple[int, ...]) -> tuple[int, ...]:
@@ -98,7 +88,9 @@ class ReduceSum(base.Spec):
         return (output_shape + (input_shapes[0][-1],),)
 
     @classmethod
-    def operands_dim_subscripts_cls(cls, operand_ranks: Sequence[int]) -> Sequence[tuple[int, ...]]:
+    def operands_dim_subscripts_cls(
+        cls, operand_ranks: Sequence[int]
+    ) -> Sequence[tuple[int, ...]]:
         inp_rank, out_rank = operand_ranks
         assert inp_rank == out_rank + 1
         return tuple(range(inp_rank)), tuple(range(out_rank))
@@ -107,4 +99,14 @@ class ReduceSum(base.Spec):
         epi = ""
         if self.serial_only:
             epi = ", serial"
-        return f"ReduceSum({self.source}, {self.output}{epi})"
+        return f"{type(self).__name__}({self.source}, {self.output}{epi})"
+
+
+@cython.cclass
+class ReduceSum(ReduceSumBase):
+    pass
+
+
+@cython.cclass
+class ReduceSumAccum(ReduceSumBase):
+    pass

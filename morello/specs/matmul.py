@@ -13,7 +13,7 @@ from .tensorspec import TensorSpec
 
 @cython.dataclasses.dataclass(unsafe_hash=True)
 @cython.cclass
-class Matmul(base.Spec):
+class MatmulBase(base.Spec):
     """A matrix multiplication.
 
     Both lhs and rhs operands must be rank-2 TensorSpecs (matrices).
@@ -26,14 +26,6 @@ class Matmul(base.Spec):
 
     def __init__(self, lhs, rhs, output, serial_only) -> None:
         super().__init__()
-
-        # TODO: Remove below type checks
-        assert isinstance(lhs, TensorSpec), f"lhs must be a TensorSpec, got {lhs}"
-        assert isinstance(rhs, TensorSpec), f"rhs must be a TensorSpec, got {rhs}"
-        assert isinstance(
-            output, TensorSpec
-        ), f"output must be a TensorSpec, got {output}"
-
         self.lhs = lhs
         self.rhs = rhs
         self._output = output
@@ -54,12 +46,12 @@ class Matmul(base.Spec):
     def serial_only(self) -> bool:
         return self._serial_only
 
-    @staticmethod
+    @classmethod
     def from_io(
-        inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
-    ) -> "Matmul":
+        cls, inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
+    ):
         lhs, rhs = inputs
-        return Matmul(lhs, rhs, output, serial_only=serial_only)
+        return cls(lhs, rhs, output, serial_only=serial_only)
 
     @property
     def inputs(self) -> tuple[TensorSpec, ...]:
@@ -89,11 +81,23 @@ class Matmul(base.Spec):
         return ((m, k), (k, n))
 
     @classmethod
-    def operands_dim_subscripts_cls(cls, operand_ranks: Sequence[int]) -> Sequence[tuple[int, ...]]:
+    def operands_dim_subscripts_cls(
+        cls, operand_ranks: Sequence[int]
+    ) -> Sequence[tuple[int, ...]]:
         return ((0, 2), (2, 1), (0, 1))
 
     def __str__(self):
         epi = ""
         if self.serial_only:
             epi = ", serial"
-        return f"Matmul({self.lhs}, {self.rhs}, {self.output}{epi})"
+        return f"{type(self).__name__}({self.lhs}, {self.rhs}, {self.output}{epi})"
+
+
+@cython.cclass
+class Matmul(MatmulBase):
+    pass
+
+
+@cython.cclass
+class MatmulAccum(MatmulBase):
+    pass

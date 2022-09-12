@@ -13,7 +13,7 @@ from .tensorspec import TensorSpec
 
 @cython.dataclasses.dataclass(unsafe_hash=True)
 @cython.cclass
-class Convolution(base.Spec):
+class ConvolutionBase(base.Spec):
     """A batched, any-dimensional convolution.
 
     The lhs operand is an image of shape (batch, channels, spatial dims...).
@@ -54,12 +54,12 @@ class Convolution(base.Spec):
     def serial_only(self) -> bool:
         return self._serial_only
 
-    @staticmethod
+    @classmethod
     def from_io(
-        inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
-    ) -> "Convolution":
+        cls, inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
+    ) -> "ConvolutionBase":
         lhs, rhs = inputs
-        return Convolution(lhs, rhs, output, serial_only=serial_only)
+        return cls(lhs, rhs, output, serial_only=serial_only)
 
     @property
     def inputs(self) -> tuple[TensorSpec, ...]:
@@ -87,7 +87,7 @@ class Convolution(base.Spec):
     def calculate_output_shape_cls(
         cls, input_shapes: Iterable[tuple[int, ...]]
     ) -> tuple[int, ...]:
-        return Convolution.output_shape(*input_shapes)
+        return cls.output_shape(*input_shapes)
 
     @classmethod
     def inputs_count(cls) -> int:
@@ -111,7 +111,9 @@ class Convolution(base.Spec):
         return (smaller_lhs_dims, smaller_rhs_dims)
 
     @classmethod
-    def operands_dim_subscripts_cls(cls, operand_ranks: Sequence[int]) -> Sequence[tuple[int, ...]]:
+    def operands_dim_subscripts_cls(
+        cls, operand_ranks: Sequence[int]
+    ) -> Sequence[tuple[int, ...]]:
         # Currently, this supports just 2 dimensions.
         # TODO: Extend this to arbitrary number of spatial dimensions.
         b, f, c, h, w, fh, fw = 0, 1, 2, 3, 4, 5, 6
@@ -120,12 +122,22 @@ class Convolution(base.Spec):
         out = (b, f, h, w)
         return (img, filt, out)
 
-    @classmethod
-    def short_name(cls):
-        return "Conv"
-
     def __str__(self):
         epi = ""
         if self.serial_only:
             epi = ", serial"
         return f"Conv({self.lhs}, {self.rhs}, {self.output}{epi})"
+
+
+@cython.cclass
+class Convolution(ConvolutionBase):
+    @classmethod
+    def short_name(cls):
+        return "Conv"
+
+
+@cython.cclass
+class ConvolutionAccum(ConvolutionBase):
+    @classmethod
+    def short_name(cls):
+        return "ConvAccum"

@@ -1,4 +1,3 @@
-import typing
 import warnings
 from typing import Iterable, Sequence
 
@@ -23,9 +22,9 @@ class Spec:
             serial_only = self.serial_only
         return self.from_io(inputs, output, serial_only=serial_only)
 
-    @staticmethod
+    @classmethod
     def from_io(
-        inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
+        cls, inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool
     ) -> "Spec":
         raise NotImplementedError()
 

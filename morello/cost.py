@@ -1,5 +1,5 @@
 import sys
-from typing import NewType, Union
+from typing import NewType, Optional, Union
 
 import cython
 
@@ -12,18 +12,22 @@ else:
 
 from . import specs
 from .impl import (
+    Add,
+    Block,
+    BroadcastVecMult,
     ComposeHole,
+    HvxVrmpyaccVuwVubRub,
     Impl,
     Loop,
+    MatmulAccumHole,
     MatmulHole,
     MoveLet,
-    ReduceSum,
+    Mult,
+    Pipeline,
+    SlidingWindowLoop,
     ValueAssign,
     VectorAssign,
 )
-from .impl.compose import Pipeline
-from .impl.loops import SlidingWindowLoop
-from .impl.matmuls import BroadcastVecMult, HvxVrmpyaccVuwVubRub, Mult
 from .system_config import current_system
 from .tensor import Tensor, Tile
 
@@ -87,7 +91,7 @@ def move_cost(
 def detailed_analytical_cost(
     op: Impl,
     depth: int = 0,
-    env: dict[Union[Tensor, Tile], str] = None,
+    env: Optional[dict[Union[Tensor, Tile], str]] = None,
     holes_ok=False,
 ) -> dict[Impl, tuple[int, str]]:
     """Compute costs for a given Impl and its children.
@@ -103,17 +107,17 @@ def detailed_analytical_cost(
     if env is None:
         env = {}
 
-    if isinstance(op, Pipeline):
+    if isinstance(op, (Block, Pipeline)):
         cost_dict: dict[Impl, tuple[int, str]] = {}
         sum_cost = 0
-        for stage in op.stages:
+        for child in op.children:
             sub_cd = detailed_analytical_cost(
-                stage, depth=depth + 1, env=env, holes_ok=holes_ok,
+                child, depth=depth + 1, env=env, holes_ok=holes_ok,
             )
             cost_dict.update(sub_cd)
-            sum_cost += sub_cd[stage][0]
+            sum_cost += sub_cd[child][0]
         assert compute_cost(op) == sum_cost
-        cost_dict[op] = (sum_cost, f"{sum_cost} (sum of {len(op.stages)})")
+        cost_dict[op] = (sum_cost, f"{sum_cost} (sum of {len(op.children)})")
         return cost_dict
     elif isinstance(op, Loop):
         # Non-sliding loops are just the inner cost times the number of iterations.
@@ -160,10 +164,7 @@ def detailed_analytical_cost(
         cost_dict[op] = (new_cost, cost_expl)
         assert compute_cost(op) == new_cost
         return cost_dict
-    elif isinstance(op, ReduceSum) and (op.is_scheduled or holes_ok):
-        assert compute_cost(op) == 4999
-        return {op: (4999, "    4999")}
-    elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
+    elif isinstance(op, (Add, Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
         # Tensor multiplication is free but its operands must be in memory.
         # (This cost model is only interested in the cost of moving data.)
         assert compute_cost(op) == INST_COST
@@ -202,7 +203,7 @@ def detailed_analytical_cost(
         assert compute_cost(op) == new_cost
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
-    elif holes_ok and isinstance(op, (ComposeHole, MatmulHole)):
+    elif holes_ok and isinstance(op, (ComposeHole, MatmulHole, MatmulAccumHole)):
         assert compute_cost(op) == 0
         return {op: (0, "")}
     else:
@@ -219,10 +220,10 @@ def compute_cost(op: Impl) -> MainCost:
     except AttributeError:
         pass
 
-    if isinstance(op, Pipeline):
+    if isinstance(op, (Block, Pipeline)):
         sum_cost: MainCost = 0
-        for s in op.stages:
-            sum_cost = _clip_add(sum_cost, compute_cost(s))
+        for c in op.children:
+            sum_cost = _clip_add(sum_cost, compute_cost(c))
         return _assign_cost(op, sum_cost)
     elif isinstance(op, Loop):
         if not op.parallel:
@@ -239,10 +240,7 @@ def compute_cost(op: Impl) -> MainCost:
         return _assign_cost(op, _clip_mul(factor, compute_cost(op.inner)))
     elif isinstance(op, SlidingWindowLoop):
         raise NotImplementedError()
-    elif isinstance(op, ReduceSum):
-        # Reminder: these types can be either holes or scheduled
-        return _assign_cost(op, 4999)
-    elif isinstance(op, (Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
+    elif isinstance(op, (Add, Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
         return _assign_cost(op, INST_COST)
     elif isinstance(op, (ValueAssign, VectorAssign, MemsetZero)):
         return _assign_cost(op, ASSIGN_INST_COST)
@@ -256,7 +254,7 @@ def compute_cost(op: Impl) -> MainCost:
         if op.epilogue:
             v = _clip_add(v, compute_cost(op.epilogue))
         return _assign_cost(op, v)
-    elif isinstance(op, (ComposeHole, MatmulHole)):
+    elif isinstance(op, (ComposeHole, MatmulHole, MatmulAccumHole)):
         return _assign_cost(op, 0)
     else:
         raise TypeError(f"Unsupported op. {type(op)}")
