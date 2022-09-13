@@ -59,14 +59,15 @@ class CpuTarget(Target):
                 # overapproximate the peak memory usage of an Impl to the next
                 # power of two.
                 "RF": MemoryBankConfig(cache_hit_cost=0, capacity=4096),
-                "GL": MemoryBankConfig(cache_hit_cost=10, capacity=sys.maxsize),
+                "L1": MemoryBankConfig(cache_hit_cost=10, capacity=512 * 1024),
+                "GL": MemoryBankConfig(cache_hit_cost=100, capacity=sys.maxsize),
             },
             default_bank="GL",
             processors=32,
             has_hvx=False,
             faster_destination_banks=self._faster_destination_banks,
             next_general_bank=self._next_general_bank,
-            ordered_banks=["RF", "GL"],
+            ordered_banks=["RF", "L1", "GL"],
             addressed_banks=frozenset(["RF", "GL"]),
         )
 
@@ -75,6 +76,8 @@ class CpuTarget(Target):
         if source == "RF":
             return set()
         elif source == "GL":
+            return {"L1"}
+        elif source == "L1":
             return {"RF"}
         raise ValueError("Unknown source: " + str(source))
 
@@ -82,6 +85,8 @@ class CpuTarget(Target):
         if source == "RF":
             return None
         elif source == "GL":
+            return "L1"
+        elif source == "L1":
             return "RF"
         raise ValueError("Unknown source: " + str(source))
 

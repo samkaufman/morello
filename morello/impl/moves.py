@@ -538,25 +538,26 @@ def common_move(
         tuple(new_operands[:-1]), new_operands[-1], op.spec.serial_only
     )
 
-    prologue = LoadHole(
-        specs.Load(
-            source=op.spec.operands[operand_idx],
-            destination=new_mat.spec,
-            serial_only=op.spec.serial_only,
-        )
-    )
-
-    # Add an epilogue if this is an output
-    epilogue = None
-    if operand_idx == len(op.spec.operands) - 1:
-        epilogue = StoreHole(
-            specs.Store(
-                # TODO: Source and destination are confusing here. Reversed.
+    prologue, epilogue = None, None
+    if bank in current_system().addressed_banks:
+        prologue = LoadHole(
+            specs.Load(
                 source=op.spec.operands[operand_idx],
                 destination=new_mat.spec,
                 serial_only=op.spec.serial_only,
             )
         )
+
+        # Add an epilogue if this is an output
+        if operand_idx == len(op.spec.operands) - 1:
+            epilogue = StoreHole(
+                specs.Store(
+                    # TODO: Source and destination are confusing here. Reversed.
+                    source=op.spec.operands[operand_idx],
+                    destination=new_mat.spec,
+                    serial_only=op.spec.serial_only,
+                )
+            )
 
     return MoveLet(
         spec=op.spec,
