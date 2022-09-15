@@ -3,6 +3,7 @@ import typing
 from typing import Callable, Iterable, Optional, Sequence, Tuple, cast
 
 from .. import specs, tiling
+from ..utils import TinyMap
 from ..system_config import current_system, current_target
 from ..tensor import OperandIdx, TensorLike, Tile
 from .pruning import ParentSummary
@@ -296,7 +297,7 @@ class Impl:
         return self.apply([current_target().tensor(o) for o in self.spec.operands])
 
     @property
-    def additional_memories(self) -> list[dict[str, int]]:
+    def additional_memories(self) -> list[TinyMap[str, int]]:
         """Memory costs of self when the corresponding child is executed.
 
         :returns: A list of amounts of memory to remove from that available. The
@@ -306,7 +307,7 @@ class Impl:
         raise NotImplementedError()
 
     @property
-    def peak_memory(self) -> dict[str, int]:
+    def peak_memory(self) -> TinyMap[str, int]:
         raise NotImplementedError(f"Not implemented for {type(self)}")
 
     @property
@@ -340,12 +341,13 @@ class NonAllocatingLeaf(Leaf):
     """A helper base class for leaf Impls that do not allocate memory."""
 
     @property
-    def additional_memories(self) -> list[dict[str, int]]:
+    def additional_memories(self) -> list[TinyMap[str, int]]:
         return []
 
     @property
-    def peak_memory(self) -> dict[str, int]:
-        return {k: 0 for k in current_system().banks}
+    def peak_memory(self) -> TinyMap[str, int]:
+        banks = current_system().ordered_banks
+        return TinyMap(banks, (0,) * len(banks))
 
 
 class AppliedImpl(Impl):

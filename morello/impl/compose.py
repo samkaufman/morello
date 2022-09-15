@@ -2,7 +2,7 @@ import dataclasses
 import functools
 import itertools
 import math
-from typing import Callable, Iterable, Optional, Sequence, Tuple, TypeVar, Union, cast
+from typing import Callable, Iterable, Mapping, Optional, Sequence, Tuple, TypeVar, Union, cast
 
 from .. import layouts, specs, system_config, tiling, utils
 from ..layouts import Layout
@@ -460,12 +460,14 @@ class ComposeHole(Impl):
         return self
 
     @property
-    def additional_memories(self) -> list[dict[str, int]]:
-        return [{b: 0 for b in system_config.current_system().banks}]
+    def additional_memories(self) -> list[utils.TinyMap[str, int]]:
+        banks = system_config.current_system().ordered_banks
+        return [utils.TinyMap(banks, (0,) * len(banks))]
 
     @property
-    def peak_memory(self) -> dict[str, int]:
-        return {b: 0 for b in system_config.current_system().banks}
+    def peak_memory(self) -> utils.TinyMap[str, int]:
+        banks = system_config.current_system().ordered_banks
+        return utils.TinyMap(banks, (0,) * len(banks))
 
     @property
     def is_scheduled(self) -> bool:
@@ -482,7 +484,7 @@ class Pipeline(Impl):
     The output of the pipeline is the output of the final stage.
     """
 
-    stages: tuple[Impl]
+    stages: tuple[Impl, ...]
     intermediates: tuple[TensorBase, ...]
 
     def __init__(self, stages: tuple[Impl, ...], intermediates: tuple[TensorBase, ...]):
@@ -577,28 +579,36 @@ class Pipeline(Impl):
         return dataclasses.replace(self, stages=replacements)
 
     @property
-    def additional_memories(self) -> list[dict[str, int]]:
+    def additional_memories(self) -> list[utils.TinyMap[str, int]]:
+        stages = self.stages
+        banks = system_config.current_system().ordered_banks
+
         # Initialize peaks to dependencies of the first stage, which is just its
         # output
-        first_peak = {k: 0 for k in system_config.current_system().banks}
-        first_peak[self.stages[0].output.bank] = self.stages[0].output.bytes_used
+        first_peak: list[int] = [0] * len(banks)
+        first_peak[banks.index(stages[0].spec.output.bank)] = stages[
+            0
+        ].spec.output.bytes_used
 
-        middle_peaks: list[dict[str, int]] = []
+        middle_peaks: list[list[int]] = []
         for stage_idx in range(1, len(self.stages) - 1):
-            before = self.stages[stage_idx - 1].output
-            after = self.stages[stage_idx].output
-            stage_mem = {b: 0 for b in system_config.current_system().banks}
-            stage_mem[before.bank] += before.bytes_used
-            stage_mem[after.bank] += after.bytes_used
+            before = self.stages[stage_idx - 1].spec.output
+            after = self.stages[stage_idx].spec.output
+            stage_mem: list[int] = [0] * len(banks)
+            stage_mem[banks.index(before.bank)] += before.bytes_used
+            stage_mem[banks.index(after.bank)] += after.bytes_used
             middle_peaks.append(stage_mem)
 
-        last_peak = {k: 0 for k in system_config.current_system().banks}
-        last_peak[self.stages[-2].output.bank] = self.stages[-2].output.bytes_used
+        last_peak: list[int] = [0] * len(banks)
+        last_peak[banks.index(self.stages[-2].spec.output.bank)] = self.stages[
+            -2
+        ].spec.output.bytes_used
 
-        return [first_peak] + middle_peaks + [last_peak]
+        peaks = [first_peak] + middle_peaks + [last_peak]
+        return [utils.TinyMap(banks, tuple(p)) for p in peaks]
 
     @property
-    def peak_memory(self) -> dict[str, int]:
+    def peak_memory(self) -> utils.TinyMap[str, int]:
         # Pipeline currently adds an intermediate tensor between each stage, so
         # intermediates is just the output of everything but the last stage
         intermediates: list[specs.TensorSpec] = [
@@ -627,7 +637,8 @@ class Pipeline(Impl):
         mem = _zipply(
             max, mem, _zipply(sum, self.stages[-1].peak_memory, intermed_utils[-1])
         )
-        return mem
+        # TODO: Construct TinyMap directly without all the intermediate dicts
+        return utils.TinyMap(mem)
 
     @property
     def is_scheduled(self) -> bool:
@@ -661,9 +672,9 @@ class Pipeline(Impl):
         )
 
 
-def _zipply(fn: Callable[[tuple[U]], V], *args: dict[T, U]) -> dict[T, V]:
+def _zipply(fn: Callable[[tuple[U]], V], *args: Mapping[T, U]) -> dict[T, V]:
     if not args:
         return {}
     return {
-        k: fn(v) for k, v in utils.zip_dict(args[0], *args[1:], same_keys=True).items()
+        k: fn(v) for k, v in utils.zip_dict(args[0], *args[1:], same_keys=True)
     }

@@ -108,7 +108,7 @@ class SystemDescription:
     has_hvx: bool
     faster_destination_banks: Callable[[str], set[str]]
     next_general_bank: Callable[[str], Optional[str]]
-    ordered_banks: list[str]
+    ordered_banks: tuple[str, ...]
     addressed_banks: frozenset[str]  # TODO: Replace w/ lack of Alloc Specs
 
     def __post_init__(self):

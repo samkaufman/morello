@@ -67,7 +67,7 @@ class CpuTarget(Target):
             has_hvx=False,
             faster_destination_banks=self._faster_destination_banks,
             next_general_bank=self._next_general_bank,
-            ordered_banks=["RF", "L1", "GL"],
+            ordered_banks=("RF", "L1", "GL"),
             addressed_banks=frozenset(["RF", "GL"]),
         )
 

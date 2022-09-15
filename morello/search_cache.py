@@ -5,12 +5,11 @@ import warnings
 from typing import Iterable, Iterator, Mapping, NamedTuple, Optional, Tuple, Union
 
 import atomicwrites
-from frozendict import frozendict
 
-from . import pruning
+from . import pruning, system_config
 from .impl import Impl
 from .specs import Spec
-from .utils import zip_dict
+from .utils import TinyMap, zip_dict
 
 
 class CachedScheduleSet:
@@ -20,6 +19,7 @@ class CachedScheduleSet:
     """
 
     contents: tuple[tuple[Impl, int], ...]
+    peak_memory: Optional[TinyMap[str, int]]
     dependent_paths: int
 
     def __init__(self, contents: tuple[tuple[Impl, int]], specs_visited: int):
@@ -27,11 +27,14 @@ class CachedScheduleSet:
         self.dependent_paths = specs_visited
         self.peak_memory = None
         if contents:
-            self.peak_memory = frozendict(
-                (bank, max(all_bytes))
-                for bank, all_bytes in zip_dict(
-                    *(imp.peak_memory for imp, _ in self.contents), same_keys=True
-                ).items()
+            self.peak_memory = TinyMap(
+                self.contents[0][0].peak_memory.raw_keys,
+                tuple(
+                    max(zvals)
+                    for zvals in zip(
+                        *(c[0].peak_memory.raw_values for c in self.contents)
+                    )
+                ),
             )
 
     def __eq__(self, other: object) -> bool:
@@ -64,7 +67,7 @@ class _TableEntry(NamedTuple):
 
     spec: Spec
     schedules: CachedScheduleSet
-    caps: Mapping[str, int]
+    caps: TinyMap[str, int]
 
     @property
     def peak_memory(self) -> Optional[Mapping[str, int]]:
@@ -77,9 +80,7 @@ class ScheduleCache:
     def __init__(self):
         self._rects = {}
 
-    def get(
-        self, spec: Spec, memory_limits: pruning.MemoryLimits
-    ) -> CachedScheduleSet:
+    def get(self, spec: Spec, memory_limits: pruning.MemoryLimits) -> CachedScheduleSet:
         """Returns cached Impls. May contain nothing if query has no Impls.
 
         Raises KeyError if no Impl meeting the given limits exists and it is unknown
@@ -119,19 +120,22 @@ class ScheduleCache:
         assert all(
             m <= c
             for im, _ in schedules_to_put.contents
-            for m, c in zip_dict(im.peak_memory, memory_caps_to_put, same_keys=True).values()
+            for _, (m, c) in zip_dict(
+                im.peak_memory, memory_caps_to_put, same_keys=True
+            )
         )
         rects = self._rects.setdefault(spec, [])
 
         # First, check for a TableEntry to update.
         for rect_idx in range(len(rects)):
-            raised_caps = frozendict(
-                {
-                    k: max(a, b)
-                    for k, (a, b) in zip_dict(
-                        memory_caps_to_put, rects[rect_idx].caps, same_keys=True
-                    ).items()
-                }
+            raised_caps = TinyMap(
+                memory_caps_to_put.raw_keys,
+                tuple(
+                    max(a, b)
+                    for a, b in zip(
+                        memory_caps_to_put.raw_values, rects[rect_idx].caps.raw_values
+                    )
+                ),
             )
 
             # If we're putting no Impls and there exists an entry already for
@@ -143,7 +147,11 @@ class ScheduleCache:
             else:
                 if not rects[rect_idx].schedules.contents:
                     continue
-                if _mem_dicts_ordered(rects[rect_idx].peak_memory, schedules_to_put.peak_memory, rects[rect_idx].caps):
+                if _mem_dicts_ordered(
+                    rects[rect_idx].peak_memory,
+                    schedules_to_put.peak_memory,
+                    rects[rect_idx].caps,
+                ):
                     rects[rect_idx] = _TableEntry(spec, schedules_to_put, raised_caps)
                     return
             # TODO: Assert that there is at most one intersection
@@ -204,7 +212,7 @@ def _mem_dicts_ordered(*dicts: Optional[Mapping[str, int]]) -> bool:
     filtered_dicts = [d for d in dicts if d is not None]
     while len(filtered_dicts) >= 2:
         head = filtered_dicts.pop(0)
-        for a, b in zip_dict(head, filtered_dicts[0], same_keys=True).values():
+        for _, (a, b) in zip_dict(head, filtered_dicts[0], same_keys=True):
             if a > b:
                 return False
     return True

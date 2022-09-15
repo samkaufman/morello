@@ -3,7 +3,7 @@ import itertools
 import math
 import warnings
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Iterable, Sequence, TypeVar
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Sequence, TypeVar
 
 from . import tensor, layouts, system_config
 
@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 U = TypeVar("U")
+V = TypeVar("V")
 
 _ALPHABET = list(map(chr, range(97, 123)))
 ALPHABET_PRODUCT = _ALPHABET + [
@@ -19,20 +20,84 @@ ALPHABET_PRODUCT = _ALPHABET + [
 ]
 
 
+class TinyMap(Mapping[T, U]):
+    __slots__ = ("raw_keys", "raw_values")
+
+    raw_keys: tuple[T, ...]
+    raw_values: tuple[U, ...]
+
+    def __init__(self, *args) -> None:
+        super().__init__()
+        if len(args) == 1 and isinstance(args[0], TinyMap):
+            self.raw_keys = args[0].raw_keys
+            self.raw_values = args[0].raw_values
+        elif len(args) == 1:
+            self.raw_keys = tuple(args[0].keys())
+            self.raw_values = tuple(args[0][k] for k in self.raw_keys)
+        else:
+            keys, values = args
+            self.raw_keys = keys
+            self.raw_values = values
+        assert len(self.raw_keys) == len(self.raw_values)
+
+    def __hash__(self) -> int:
+        # Just use the values. In most cases, the keys will be the same.
+        return hash(self.raw_values)
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, TinyMap):
+            return NotImplemented
+        return self.raw_keys == other.raw_keys and self.raw_values == other.raw_values
+
+    def __len__(self) -> int:
+        return len(self.raw_keys)
+
+    def __iter__(self) -> Iterator[T]:
+        return iter(self.raw_keys)
+
+    def __getitem__(self, key: T) -> U:
+        try:
+            idx = self.raw_keys.index(key)
+        except ValueError:
+            raise KeyError(key)
+        return self.raw_values[idx]
+
+    def map_values(self, f: Callable[[U], V]) -> "TinyMap[T, V]":
+        return TinyMap(self.raw_keys, tuple(f(v) for v in self.raw_values))
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({repr(self.raw_keys)}, {repr(self.raw_values)})"
+
+    def __str__(self) -> str:
+        return repr(self)
+
+
+# TODO: Convert into a generator to avoid intermediate dict allocation.
 def zip_dict(
     first: Mapping[T, U], *others: Mapping[T, U], same_keys: bool = False
-) -> dict[T, tuple[U, ...]]:
+) -> Iterable[tuple[T, tuple[U, ...]]]:
+    # TODO: Just remove the kwargs
+    assert same_keys
+
+    # The case where everything is a TinyMap with the same keys can be quick.
+    # This should be common: TinyMaps often use a reference to the target's
+    # ordered_banks as their keys.
+    if (
+        isinstance(first, TinyMap)
+        and all(isinstance(o, TinyMap) for o in others)
+        and all(first.raw_keys == o.raw_keys for o in others)  # type: ignore
+    ):
+        yield from zip(
+            first.raw_keys, zip(first.raw_values, *(o.raw_values for o in others))  # type: ignore
+        )
+        return
+
     keys = set(first)
-    if same_keys:
-        for d in others:
-            if set(d) != keys:
-                raise ValueError(f"Keys did not match: {set(d)} and {keys}")
-    else:
-        keys.intersection_update(*others)
-    result = {}
+    for d in others:
+        if set(d) != keys:
+            raise ValueError(f"Keys did not match: {set(d)} and {keys}")
     for key in keys:
-        result[key] = (first[key],) + tuple(d[key] for d in others)
-    return result
+        yield key, (first[key],) + tuple(d[key] for d in others)
 
 
 def flatten(src):

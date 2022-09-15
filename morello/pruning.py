@@ -1,11 +1,12 @@
-import abc
 import warnings
 from collections.abc import Mapping
-from typing import NamedTuple, Optional
+from typing import Optional
 
 from frozendict import frozendict
 
 from . import impl, specs, system_config, utils
+from .utils import TinyMap
+
 
 # If True, schedules will be saved as if they had memory limits, for all banks,
 # that are the next highest power of 2. This discretizes the cache a bit, even
@@ -67,7 +68,7 @@ def _pipeline_transition(
 
 class MemoryLimits:
     @property
-    def available(self) -> frozendict[str, int]:
+    def available(self) -> Mapping[str, int]:
         raise NotImplementedError()
 
     def transition(self, schedule: impl.Impl) -> Optional[list["MemoryLimits"]]:
@@ -85,22 +86,25 @@ class MemoryLimits:
 
 
 class StandardMemoryLimits(MemoryLimits):
-    _available: frozendict
+    _available: TinyMap[str, int]
 
     def __init__(self, available_memory: Optional[Mapping[str, int]] = None) -> None:
         super().__init__()
         if available_memory is None:
             system = system_config.current_system()
-            available = {}
-            for bank, bank_config in system.banks.items():
-                available[bank] = bank_config.capacity
-            self._available = frozendict(available)
+            self._available = TinyMap(
+                system.ordered_banks,
+                tuple(system.banks[b].capacity for b in system.ordered_banks),
+            )
         else:
             if any(m < 0 for m in available_memory.values()):
                 raise AvailableIsNegativeError(
                     f"Given negative available memory: {available_memory}"
                 )
-            self._available = frozendict(available_memory)
+            if isinstance(available_memory, TinyMap):
+                self._available = available_memory
+            else:
+                self._available = TinyMap(available_memory)
         self._available = _snap_availables(self._available)
 
     def __eq__(self, other) -> bool:
@@ -117,7 +121,7 @@ class StandardMemoryLimits(MemoryLimits):
         return s + ")"
 
     @property
-    def available(self) -> Mapping[str, int]:
+    def available(self) -> TinyMap[str, int]:
         return self._available
 
     def transition(self, schedule: impl.Impl) -> Optional[list["MemoryLimits"]]:
@@ -130,8 +134,16 @@ class StandardMemoryLimits(MemoryLimits):
         # base->base
         child_limits = []
         for adds in schedule.additional_memories:
-            zd = utils.zip_dict(self._available, adds, same_keys=True).items()
-            child_limits.append({k: m - d for k, (m, d) in zd})
+            assert self._available.raw_keys == adds.raw_keys
+            child_limits.append(
+                TinyMap(
+                    self._available.raw_keys,
+                    tuple(
+                        m - d
+                        for m, d in zip(self._available.raw_values, adds.raw_values)
+                    ),
+                )
+            )
         assert len(child_limits) == len(schedule.children), (
             f"{len(child_limits)} child limits != {len(schedule.children)} "
             f"children for {type(schedule).__name__}"
@@ -166,39 +178,37 @@ class PipelineChildMemoryLimits(MemoryLimits):
         super().__init__()
         if any(
             v > b
-            for v, b in utils.zip_dict(input_consumption, base, same_keys=True).values()
+            for _, (v, b) in utils.zip_dict(input_consumption, base, same_keys=True)
         ):
             raise IntermediatesTooBigError("input tensor doesn't fit in available")
         if any(
             v > b
-            for v, b in utils.zip_dict(
-                output_consumption, base, same_keys=True
-            ).values()
+            for _, (v, b) in utils.zip_dict(output_consumption, base, same_keys=True)
         ):
             raise IntermediatesTooBigError("output tensor doesn't fit in available")
 
         self.base_available = base
 
         # Update input and output consumptions using the adjustments
-        snapped_base_available = _snap_availables(self.base_available)
+        snapped_base_available = _snap_availables(TinyMap(self.base_available))
         adjustments: Mapping[str, int] = {
             k: orig - v
             for k, (orig, v) in utils.zip_dict(
                 self.base_available, snapped_base_available, same_keys=True
-            ).items()
+            )
         }
 
         self.input_consumption = {
             k: max(0, orig - adjustment)
             for k, (orig, adjustment) in utils.zip_dict(
                 input_consumption, adjustments, same_keys=True
-            ).items()
+            )
         }
         self.output_consumption = {
             k: max(0, orig - adjustment)
             for k, (orig, adjustment) in utils.zip_dict(
                 output_consumption, adjustments, same_keys=True
-            ).items()
+            )
         }
 
         # Assert that the important, observable numbers are snapped. (The actual
@@ -211,12 +221,12 @@ class PipelineChildMemoryLimits(MemoryLimits):
         # )
         # assert not SNAP_CAP_TO_POWER_OF_TWO or all(
         #     _is_snapped(a - b) and _is_snapped(a - c)
-        #     for (a, b, c) in utils.zip_dict(
+        #     for _, (a, b, c) in utils.zip_dict(
         #         self.base_available,
         #         self.input_consumption,
         #         self.output_consumption,
         #         same_keys=True,
-        #     ).values()
+        #     )
         # )
         warnings.warn(
             "PipelineChildMemoryLimits snapping behavior isn't very "
@@ -246,7 +256,7 @@ class PipelineChildMemoryLimits(MemoryLimits):
         )
 
     @property
-    def available(self) -> frozendict[str, int]:
+    def available(self) -> Mapping[str, int]:
         # This property is the interface for any caller expecting a base
         # StandardMemoryLimits (i.e. one that can't use extra information about
         # its context in a Pipeline).
@@ -258,7 +268,7 @@ class PipelineChildMemoryLimits(MemoryLimits):
                     self.input_consumption,
                     self.output_consumption,
                     same_keys=True,
-                ).items()
+                )
             }
         )
 
@@ -286,12 +296,12 @@ class PipelineChildMemoryLimits(MemoryLimits):
         )
 
 
-def _snap_availables(available: Mapping[str, int]) -> frozendict[str, int]:
+def _snap_availables(available: TinyMap[str, int]) -> TinyMap[str, int]:
     """Returns limits that are snapped down according to the snapping strategy."""
     # If SNAP_CAP_TO_POWER_OF_TWO isn't set, don't rebuild the data structure.
     if not SNAP_CAP_TO_POWER_OF_TWO:
         return available
-    return frozendict((k, _snap_down(v)) for k, v in available.items())
+    return available.map_values(_snap_down)
 
 
 def _snap_down(n: int) -> int:
@@ -305,23 +315,6 @@ def _snap_down(n: int) -> int:
         return 0
     # Return the greatest power of two equal to or less than n
     return 2 ** (n.bit_length() - 1)
-
-
-def _is_snapped(n: int) -> bool:
-    assert SNAP_CAP_TO_POWER_OF_TWO
-    return n == _snap_down(n)
-
-
-class _SubSnapResult(NamedTuple):
-    difference: int
-    snapped_subtrahend: int
-
-
-def _sub_snap(n: int, subtrahend: int) -> _SubSnapResult:
-    assert _is_snapped(n)
-    raw_result = n - subtrahend
-    snapped_result = _snap_down(raw_result)
-    return _SubSnapResult(snapped_result, n - snapped_result)
 
 
 def _zero_banks() -> dict[str, int]:

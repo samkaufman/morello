@@ -5,6 +5,7 @@ from typing import Callable, Iterable, Optional, Sequence, Tuple, Union
 
 from .. import specs, system_config
 from ..tensor import OperandIdx, Tensor, TensorLike, Tile
+from ..utils import TinyMap
 from .base import AppliedImpl, Impl, make_applied_impl
 from .utils import assert_stable_spec
 
@@ -21,11 +22,12 @@ class _TilingMixin:
         return None
 
     @property
-    def additional_memories(self) -> list[dict[str, int]]:
-        return [{b: 0 for b in system_config.current_system().banks}]
+    def additional_memories(self) -> list[TinyMap[str, int]]:
+        banks = system_config.current_system().ordered_banks
+        return [TinyMap(banks, (0,) * len(banks))]
 
     @property
-    def peak_memory(self) -> dict[str, int]:
+    def peak_memory(self) -> TinyMap[str, int]:
         return self.inner.peak_memory
 
     @property
@@ -159,7 +161,8 @@ class Loop(Impl):
 
     @property
     def additional_memories(self) -> list[dict[str, int]]:
-        return [{k: 0 for k in system_config.current_system().banks}]
+        banks = system_config.current_system().ordered_banks
+        return [TinyMap(banks, (0,) * len(banks))]
 
     @property
     def peak_memory(self) -> dict[str, int]:
@@ -320,16 +323,31 @@ class SlidingWindowLoop(_TilingMixin, Impl):
         )
 
     @property
-    def peak_memory(self) -> dict[str, int]:
-        inner_peak_memory = dict(self.inner.peak_memory)
-        inner_peak_memory[self.live_tensor.bank] += self.live_tensor.spec.bytes_used
-        return inner_peak_memory
+    def peak_memory(self) -> TinyMap[str, int]:
+        m = self.inner.peak_memory
+        live_bank_idx = m.raw_keys.index(self.live_tensor.bank)
+        live_bytes = self.live_tensor.spec.bytes_used
+        return TinyMap(
+            m.raw_keys,
+            tuple(
+                v + live_bytes if i == live_bank_idx else v
+                for i, v in enumerate(m.raw_values)
+            ),
+        )
 
     @property
-    def additional_memories(self) -> list[dict[str, int]]:
-        mem = {k: 0 for k in system_config.current_system().banks}
-        mem[self.live_tensor.bank] = self.live_tensor.spec.bytes_used
-        return [mem]
+    def additional_memories(self) -> list[TinyMap[str, int]]:
+        banks = system_config.current_system().ordered_banks
+        live_bank_idx = banks.index(self.live_tensor.bank)
+        live_bytes = self.live_tensor.spec.bytes_used
+        adds = TinyMap(
+            banks,
+            tuple(
+                live_bytes if i == live_bank_idx else 0
+                for i in range(len(banks))
+            ),
+        )
+        return [adds]
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
         inner_operands = list(operands)
