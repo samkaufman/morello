@@ -145,12 +145,12 @@ class ScheduleCache:
                     rects[rect_idx] = _TableEntry(spec, schedules_to_put, raised_caps)
                     return
             else:
-                if not rects[rect_idx].schedules.contents:
+                r = rects[rect_idx]
+                if not r.schedules.contents:
                     continue
+                assert r.peak_memory is None or isinstance(r.peak_memory, TinyMap)
                 if _mem_dicts_ordered(
-                    rects[rect_idx].peak_memory,
-                    schedules_to_put.peak_memory,
-                    rects[rect_idx].caps,
+                    r.peak_memory, schedules_to_put.peak_memory, r.caps
                 ):
                     rects[rect_idx] = _TableEntry(spec, schedules_to_put, raised_caps)
                     return
@@ -208,11 +208,33 @@ def persistent_cache(path: Optional[Union[str, pathlib.Path]], save: bool = True
                 pickle.dump(cache, fo)
 
 
-def _mem_dicts_ordered(*dicts: Optional[Mapping[str, int]]) -> bool:
-    filtered_dicts = [d for d in dicts if d is not None]
-    while len(filtered_dicts) >= 2:
-        head = filtered_dicts.pop(0)
-        for _, (a, b) in zip_dict(head, filtered_dicts[0], same_keys=True):
-            if a > b:
+def _mem_dicts_ordered(*dicts: Optional[TinyMap[str, int]]) -> bool:
+    # This function is pretty verbose. It avoids `range`, `any`, and other
+    # generators for speed.
+    if len(dicts) == 0:
+        return True
+
+    idx: int = 0
+    while dicts[idx] is None:
+        idx += 1
+        if idx == len(dicts):
+            return True
+    head: TinyMap[str, int] = cast(TinyMap[str, int], dicts[idx])
+    val_len = len(head.raw_values)
+
+    # for i in range(idx + 1, len(dicts)):
+    idx += 1
+    while idx < len(dicts):
+        cur = dicts[idx]
+        if cur is None:
+            idx += 1
+            continue
+        assert cur.raw_keys is head.raw_keys
+        j = 0
+        while j < val_len:
+            if head.raw_values[j] > cur.raw_values[j]:
                 return False
+            j += 1
+        head = cur
+        idx += 1
     return True
