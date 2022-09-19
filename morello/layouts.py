@@ -22,6 +22,9 @@ class Layout:
     def contiguous_top(self) -> Any:
         raise NotImplementedError()
 
+    def all_contiguous_abs_for_shape(self) -> Iterable[Any]:
+        raise NotImplementedError()
+
     def tile_is_contiguous(self, contiguous_abs) -> bool:
         raise NotImplementedError()
 
@@ -51,7 +54,9 @@ class Layout:
         """
         raise NotImplementedError()
 
-    def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
+    def applies_to_shape(self, shape: Sequence[int]) -> bool:
+        if all(d == 1 for d in shape) and not self.is_row_major:
+            return False
         return True
 
     @property
@@ -80,6 +85,9 @@ class StandardLayout(Layout):
 
     def contiguous_top(self) -> Any:
         return len(self.dim_order)
+
+    def all_contiguous_abs_for_shape(self) -> Iterable[Any]:
+        yield from range(len(self.dim_order) + 1)
 
     def tile_is_contiguous(self, contiguous_abs) -> bool:
         assert contiguous_abs >= 0 and contiguous_abs <= len(self.dim_order)
@@ -136,8 +144,8 @@ class StandardLayout(Layout):
             return True
         return False
 
-    def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
-        if not super().applies_to_shape(shape, dtype):
+    def applies_to_shape(self, shape: Sequence[int]) -> bool:
+        if not super().applies_to_shape(shape):
             return False
         if len(shape) != len(self.dim_order):
             return False
@@ -214,6 +222,9 @@ class PackedLayout(Layout):
     def contiguous_top(self) -> Any:
         return self.dim_count + 1
 
+    def all_contiguous_abs_for_shape(self) -> Iterable[Any]:
+        yield from range(self.dim_count + 2)
+
     def tile_is_contiguous(self, contiguous_abs) -> bool:
         assert contiguous_abs >= 0 and contiguous_abs <= self.dim_count + 1
         return contiguous_abs == self.dim_count + 1
@@ -264,7 +275,9 @@ class PackedLayout(Layout):
             rm_like_shape, dtype, new_contiguous
         )
 
-    def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
+    def applies_to_shape(self, shape: Sequence[int]) -> bool:
+        if not super().applies_to_shape(shape):
+            return False
         if self.dim_count != len(shape):
             return False
         # Only applies when the strip dimension is a multiple of the strip size.
@@ -311,7 +324,7 @@ class PackedLayout(Layout):
 
     def expand_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
         """Factor a shape's strip dimension into a new innermost dimension.
-        
+
         For example:
         >>> l = PackedLayout(dim_count=3, strip_dim=1, strip_size=4)
         >>> l.expand_shape((2, 8, 2))
@@ -344,14 +357,14 @@ class PackedLayout(Layout):
 
 
 class HexagonTranspacked(Layout):
-    def applies_to_shape(self, shape: Sequence[int], dtype: "dtypes.Dtype") -> bool:
+    def applies_to_shape(self, shape: Sequence[int]) -> bool:
         from .dtypes import Uint8
 
-        if not super().applies_to_shape(shape, dtype):
+        if not super().applies_to_shape(shape):
             return False
 
-        if dtype != Uint8:
-            return False
+        raise NotImplementedError("Should check that this only applies to uint8 tensor")
+
         if len(shape) != 2:
             return False
         if shape[0] % 4 != 0 or shape[1] % 32 != 0:

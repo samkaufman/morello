@@ -203,11 +203,33 @@ def factors(n: int) -> Iterable[int]:
     )
 
 
+def powers_of_two(maximum: int) -> Iterable[int]:
+    """Yields positive powers of two up to maximum, exclusive."""
+    return itertools.takewhile(
+        lambda v: v < maximum, (2 ** i for i in itertools.count())
+    )
+
+
 def next_power_of_two(x: int) -> int:
-    """Return next highest power of 2, or self if a power of two or zero."""
+    """Return next highest power of 2, or `x` if a power of two or zero."""
     if x == 0:
         return 0
     assert x >= 1, f"x must be 1 or greater; was: {x}"
     result = int(2 ** math.ceil(math.log2(x)))
     assert result >= x
     return result
+
+
+def sum_seqs(maxes: Sequence[int], total: int) -> Iterable[tuple[int, ...]]:
+    """Return non-negative sequences which sum to `total`, bounded by `maxes`."""
+    if len(maxes) == 0:
+        return
+    elif len(maxes) == 1:
+        if maxes[0] >= total:
+            yield (total,)
+    else:
+        # The most it'll be able to do is `start`, so we'll begin with that min.
+        obligation = max(total - sum(maxes[1:]), 0)
+        for v in range(obligation, min(maxes[0], total) + 1):
+            for suffix in sum_seqs(maxes[1:], total - v):
+                yield (v,) + suffix

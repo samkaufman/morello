@@ -139,7 +139,7 @@ class MatmulAccumHole(MatmulHoleBase):
             tiles=frozenset([left_view, right_view]),
             inner=MatmulAccumHole(
                 specs.MatmulAccum(
-                    left_view.spec, right_view.spec, self.spec.output, serial_only=True,
+                    left_view.spec, right_view.spec, self.spec.output, serial_only=True
                 )
             ),
             parallel=False,  # TODO: Is this parallel correct?

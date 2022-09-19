@@ -31,7 +31,7 @@ def test_search_passes_on_any_spec(spec: specs.Spec):
     search.schedule_search(spec, inputs, output)
 
 
-class CountingCache(search_cache.ScheduleCache):
+class CountingCache(search_cache.InMemoryScheduleCache):
     def __init__(self):
         super().__init__()
         self.get_counts = collections.defaultdict(lambda: 0)

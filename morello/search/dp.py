@@ -13,7 +13,7 @@ except ImportError:
 
 from .. import impl, layouts, pruning, specs
 from ..impl import Impl
-from ..search_cache import CachedScheduleSet, ScheduleCache
+from ..search_cache import CachedScheduleSet, InMemoryScheduleCache
 from . import common
 
 
@@ -49,7 +49,7 @@ class Search:
         self.callbacks = callbacks
         self.cache = cache
         if self.cache is None:
-            self.cache = ScheduleCache()
+            self.cache = InMemoryScheduleCache()
 
     @typing.final
     def __call__(
@@ -113,7 +113,6 @@ class Search:
         except KeyError:
             pass
         else:
-            assert cache_result is not None  # TODO: Remove
             return SearchResult(
                 [im for im, _ in cache_result.contents], cache_result.dependent_paths
             )
@@ -127,11 +126,7 @@ class Search:
 
         # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
         best_results, specs_explored_by_options = self._choose(
-            spec,
-            leaf,
-            memory_limits,
-            parent_summary=parent_summary,
-            stats=stats,
+            spec, leaf, memory_limits, parent_summary=parent_summary, stats=stats,
         )
         assert len(best_results) <= self.top_k
         specs_explored = specs_explored_by_options + 1
@@ -217,8 +212,10 @@ class Search:
                 _update_best_results(best_results, completed, spec, self.callbacks)
 
         return _finalize_best_results(best_results, self.top_k), unique_specs_visited
-    
-    def _gen_actions(self, current_spec, leaf, parent_summary) -> Iterable[tuple[Any, Impl]]:
+
+    def _gen_actions(
+        self, current_spec, leaf, parent_summary
+    ) -> Iterable[tuple[Any, Impl]]:
         for act in leaf.actions(parent_summary=parent_summary):
             try:
                 new_tree = act()
@@ -227,7 +224,9 @@ class Search:
             except Exception as e:
                 # Re-raise the exception with a little more detail about act.
                 raise common.ActionFailedException(act) from e
-            assert new_tree.spec == current_spec, f"{str(new_tree.spec)} != {str(current_spec)}"
+            assert (
+                new_tree.spec == current_spec
+            ), f"{str(new_tree.spec)} != {str(current_spec)}"
             assert new_tree != leaf, (
                 f"Action returned self: {new_tree}; spec = {str(new_tree.spec)}; "
                 f"action = {act}"

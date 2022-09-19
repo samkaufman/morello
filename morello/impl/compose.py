@@ -2,7 +2,17 @@ import dataclasses
 import functools
 import itertools
 import math
-from typing import Callable, Iterable, Mapping, Optional, Sequence, Tuple, TypeVar, Union, cast
+from typing import (
+    Callable,
+    Iterable,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+)
 
 from .. import layouts, specs, system_config, tiling, utils
 from ..layouts import Layout

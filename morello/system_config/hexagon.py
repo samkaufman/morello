@@ -102,9 +102,9 @@ class HvxSimulatorTarget(Target):
     def all_layouts_for_shape(self, shape: Sequence[int]) -> Iterable[layouts.Layout]:
         from .. import layouts
 
-        return list(super().all_layouts_for_shape(shape)) + [
-            layouts.HEXAGON_TRANSPACKED
-        ]
+        yield from super().all_layouts_for_shape(shape)
+        if layouts.HEXAGON_TRANSPACKED.applies_to_shape(shape):
+            yield layouts.HEXAGON_TRANSPACKED
 
     def _faster_destination_banks(self, source: str) -> set[str]:
         if source in ("HexagonRF", "VMEM"):

@@ -60,7 +60,7 @@ class CpuTarget(Target):
                 # power of two.
                 "RF": MemoryBankConfig(cache_hit_cost=0, capacity=4096),
                 "L1": MemoryBankConfig(cache_hit_cost=10, capacity=512 * 1024),
-                "GL": MemoryBankConfig(cache_hit_cost=100, capacity=sys.maxsize),
+                "GL": MemoryBankConfig(cache_hit_cost=100, capacity=1024 ** 3),
             },
             default_bank="GL",
             processors=32,

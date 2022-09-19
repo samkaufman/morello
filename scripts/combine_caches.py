@@ -24,7 +24,7 @@ def main() -> int:
     with tqdm.tqdm(
         total=sum_bytes_to_read, unit="B", unit_scale=True, unit_divisor=1024
     ) as progress_bar:
-        accumulated_cache = search_cache.ScheduleCache()
+        accumulated_cache = search_cache.InMemoryScheduleCache()
         for inp_fo, inp_size in zip(parsed_args.inputs, input_file_sizes):
             progress_bar.write(f"Processing: {inp_fo.name}")
             loaded_cache = pickle.load(inp_fo)

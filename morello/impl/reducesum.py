@@ -3,7 +3,6 @@ import functools
 from typing import Callable, Iterable, Optional, Sequence, Union
 
 from .. import specs, system_config
-from ..layouts import Layout
 from ..tensor import OperandIdx
 from .actions import TileOutAction
 from .base import Impl, NonAllocatingLeaf

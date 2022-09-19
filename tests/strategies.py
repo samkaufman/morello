@@ -32,12 +32,7 @@ def layout_st(
     target = system_config.current_target()
     if numels_ones:
         return layouts.row_major(len(dim_sizes))
-    available_layouts = [
-        l
-        for l in target.all_layouts_for_shape(dim_sizes)
-        if dim_sizes is None or dtype is None or l.applies_to_shape(dim_sizes, dtype)
-    ]
-    return draw(st.sampled_from(available_layouts))
+    return draw(st.sampled_from(list(target.all_layouts_for_shape(dim_sizes))))
 
 
 @st.composite
@@ -275,9 +270,7 @@ def tiling_chain_st(
     for _ in range(chain_len):
         use_conv = draw(st.booleans()) if allow_conv else False
         tile_shape = _smaller_shape(draw, chain[-1].dim_sizes)
-        hypothesis.assume(
-            chain[-1].spec.layout.applies_to_shape(tile_shape, chain[-1].spec.dtype)
-        )
+        hypothesis.assume(chain[-1].spec.layout.applies_to_shape(tile_shape))
         if use_conv:
             filter_shape = _smaller_shape(draw, tile_shape[1:])
             chain.append(chain[-1].spec.conv_image_tile(0, tile_shape, filter_shape))

@@ -295,10 +295,6 @@ class ValueAssign(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveL
         source, destination = operands
         if source.bank == destination.bank:
             return "Source and destination are in the same bank"
-        if source.bank not in ("RF", "GL"):
-            return f"Source is in {source.bank} bank"
-        if destination.bank not in ("RF", "GL"):
-            return f"Destination is in {destination.bank} bank"
         if any(d != 1 for o in operands for d in o.dim_sizes):
             return "Non-value operand; had operands: " + ", ".join(map(str, operands))
         return None
@@ -441,15 +437,7 @@ def _move_arguments(
 ) -> Iterable[tuple[str, Layout, dict[str, Any]]]:
     target = system_config.current_target()
 
-    # If the tensor has only one element, row-major is the only available
-    # layout. Otherwise, all layouts are available.
-    allowable_layouts = [layouts.row_major(len(operand.dim_sizes))]
-    if any(d > 1 for d in operand.dim_sizes):
-        allowable_layouts = [
-            l
-            for l in target.all_layouts_for_shape(operand.dim_sizes)
-            if l.applies_to_shape(operand.dim_sizes, operand.dtype)
-        ]
+    allowable_layouts = list(target.all_layouts_for_shape(operand.dim_sizes))
 
     # TODO: Moves into HEXAGON_TRANSPACKED are handled by pad_transpack, not
     #   move_{input, output} at the moment.

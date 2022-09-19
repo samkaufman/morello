@@ -63,7 +63,7 @@ class TensorSpec:
             if not self.layout.is_row_major:
                 raise ValueError("If all dimensions are 1, layout must be row-major")
 
-        if not self.layout.applies_to_shape(dim_sizes, dtype):
+        if not self.layout.applies_to_shape(dim_sizes):
             raise ValueError(
                 f"Layout {self.layout} does not apply to shape {dim_sizes} with"
                 f" dtype {dtype}"
@@ -133,7 +133,7 @@ class TensorSpec:
             return False
         if not all(i <= o for (i, o) in zip(shape, self.dim_sizes)):
             return False
-        if not self.layout.applies_to_shape(shape, self.dtype):
+        if not self.layout.applies_to_shape(shape):
             return False
         return True
 

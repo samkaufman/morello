@@ -44,7 +44,10 @@ class Target:
     def all_layouts_for_shape(self, shape: Sequence[int]) -> Iterable["Layout"]:
         from ..layouts import NHWC, NCHWc4, NCHWc32, NCHWc64, row_major
 
-        return [row_major(len(shape)), NHWC, NCHWc4, NCHWc32, NCHWc64]
+        possible_layouts = [row_major(len(shape)), NHWC, NCHWc4, NCHWc32, NCHWc64]
+        for layout in possible_layouts:
+            if layout.applies_to_shape(shape):
+                yield layout
 
     async def build_impl(
         self,
@@ -86,14 +89,17 @@ class Target:
 
 
 class BuiltArtifact(abc.ABC):
+    @abc.abstractmethod
     async def run(self, check_flakiness: int = 1) -> RunResult:
-        raise NotImplementedError()
+        pass
 
+    @abc.abstractmethod
     async def measure_time(self) -> float:
-        raise NotImplementedError()
+        pass
 
+    @abc.abstractmethod
     def delete(self):
-        raise NotImplementedError()
+        pass
 
 
 # TODO: Re-freeze. (Need a way to cache properties.)

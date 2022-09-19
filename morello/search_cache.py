@@ -1,22 +1,30 @@
+import abc
 import contextlib
+import itertools
 import pathlib
 import pickle
 import warnings
-from typing import Iterable, Iterator, Mapping, NamedTuple, Optional, Tuple, Union
+from typing import (
+    Iterable,
+    Iterator,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import atomicwrites
 
-from . import pruning, system_config
+from . import pruning
 from .impl import Impl
 from .specs import Spec
 from .utils import TinyMap, zip_dict
 
 
 class CachedScheduleSet:
-    """A container for schedules stored in the cache.
-
-    Stores, along with schedules themselves, costs of the schedules.
-    """
+    """Wraps Impls with their cost and other metadata."""
 
     contents: tuple[tuple[Impl, int], ...]
     peak_memory: Optional[TinyMap[str, int]]
@@ -57,12 +65,11 @@ class CachedScheduleSet:
 
 
 class _TableEntry(NamedTuple):
-    """Stores the best schedule for a region from its used memory to `caps`.
+    """Stores the best Impl for a region from its used memory to `caps`.
 
-    A _TableEntry is a record of the best schedule that exists up to `caps`.
-    That schedule is no longer the best as soon as any memory capacity is above
-    its corresponding level in `caps` or below the memory used at that level by
-    the schedule.
+    A _TableEntry is a record of the best Impls that exist up to `caps`.  That schedule
+    is no longer the best as soon as any memory capacity is above its corresponding
+    level in `caps` or below the memory used at that level by the schedule.
     """
 
     spec: Spec
@@ -70,11 +77,36 @@ class _TableEntry(NamedTuple):
     caps: TinyMap[str, int]
 
     @property
-    def peak_memory(self) -> Optional[Mapping[str, int]]:
+    def peak_memory(self) -> Optional[TinyMap[str, int]]:
         return self.schedules.peak_memory
 
 
-class ScheduleCache:
+class ScheduleCache(abc.ABC):
+    @abc.abstractmethod
+    def get(self, spec: Spec, memory_limits: pruning.MemoryLimits) -> CachedScheduleSet:
+        pass
+
+    @abc.abstractmethod
+    def put(
+        self,
+        spec: Spec,
+        schedules_to_put: CachedScheduleSet,
+        memory_limits: pruning.MemoryLimits,
+    ) -> None:
+        pass
+
+    @abc.abstractmethod
+    def specs(self) -> Iterable[Spec]:
+        pass
+
+    @abc.abstractmethod
+    def __iter__(
+        self,
+    ) -> Iterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
+        pass
+
+
+class InMemoryScheduleCache(ScheduleCache):
     _rects: dict[Spec, list[_TableEntry]]
 
     def __init__(self):
@@ -180,10 +212,47 @@ class ScheduleCache:
                 yield spec, rect.schedules, pruning.StandardMemoryLimits(rect.caps)
 
 
+class CacheChain(ScheduleCache):
+    def __init__(self, caches: Sequence[ScheduleCache]):
+        if len(caches) == 0:
+            raise ValueError("`caches` must be non-empty")
+        self.caches = caches
+
+    def get(self, spec: Spec, memory_limits: pruning.MemoryLimits) -> CachedScheduleSet:
+        for cache in self.caches:
+            try:
+                return cache.get(spec, memory_limits)
+            except KeyError:
+                pass
+        raise KeyError()
+
+    def put(
+        self,
+        spec: Spec,
+        schedules_to_put: CachedScheduleSet,
+        memory_limits: pruning.MemoryLimits,
+    ) -> None:
+        self.caches[0].put(spec, schedules_to_put, memory_limits)
+
+    @property
+    def specs(self) -> Iterable[Spec]:
+        seen = set()
+        for cache in self.caches:
+            for spec in cache.specs():
+                if spec not in seen:
+                    yield spec
+                    seen.add(spec)
+
+    def __iter__(
+        self,
+    ) -> Iterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
+        yield from itertools.chain(*self.caches)
+
+
 @contextlib.contextmanager
 def persistent_cache(path: Optional[Union[str, pathlib.Path]], save: bool = True):
     if path is None:
-        yield ScheduleCache()
+        yield InMemoryScheduleCache()
         return
 
     if isinstance(path, str):
@@ -198,7 +267,7 @@ def persistent_cache(path: Optional[Union[str, pathlib.Path]], save: bool = True
         # If we're going to save the cache, make any parent directories
         if save:
             path.parent.mkdir(parents=True, exist_ok=True)
-        cache = ScheduleCache()
+        cache = InMemoryScheduleCache()
 
     try:
         yield cache
@@ -222,14 +291,13 @@ def _mem_dicts_ordered(*dicts: Optional[TinyMap[str, int]]) -> bool:
     head: TinyMap[str, int] = cast(TinyMap[str, int], dicts[idx])
     val_len = len(head.raw_values)
 
-    # for i in range(idx + 1, len(dicts)):
     idx += 1
     while idx < len(dicts):
         cur = dicts[idx]
         if cur is None:
             idx += 1
             continue
-        assert cur.raw_keys is head.raw_keys
+        assert cur.raw_keys == head.raw_keys
         j = 0
         while j < val_len:
             if head.raw_values[j] > cur.raw_values[j]:
