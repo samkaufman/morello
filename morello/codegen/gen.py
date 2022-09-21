@@ -479,7 +479,9 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                 [d.previously_transformed_tiles for d in op_details],
             )
         else:
-            _inner_generate_c(imp.body, op_details)
+            _inner_generate_c(
+                cast(impl.AppliedImpl, cast(impl.MoveLet, imp).body), op_details
+            )
     elif isinstance(imp, impl.HvxGemvmpybbwAsm):
         lhs, rhs, out = op_details
         lhs_ref_fn, rhs_ref_fn, out_ref_fn = (
