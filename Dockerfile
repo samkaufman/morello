@@ -6,6 +6,18 @@ ARG HALIDE_CMAKE_PARALLEL
 # Set apt to use a local mirror
 RUN sed -i -e 's/http:\/\/archive\.ubuntu\.com\/ubuntu\//mirror:\/\/mirrors\.ubuntu\.com\/mirrors\.txt/' /etc/apt/sources.list
 
+# Python 3.10 will be useful for all of the following image layers.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive \
+      apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3.10 python3.10-venv python3.10-dev python3.10-distutils \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 
 FROM base as hexagon
 
@@ -15,7 +27,7 @@ FROM base as hexagon
 COPY ./hexagon_sdk_lnx_3_5_installer_00006_1.zip /hexagon.zip
 
 RUN apt-get update &&\
-    apt-get install -y unzip default-jre-headless && \
+    apt-get install -y --no-install-recommends unzip default-jre-headless && \
     apt-get clean
 RUN unzip /hexagon.zip && \
     rm /hexagon.zip && \
@@ -36,7 +48,8 @@ RUN unzip /hexagon.zip && \
 
 # Install libffi6, which is needed by qaic in hexagon_nn, but not in
 # Ubuntu 20 (focal).
-RUN apt-get install -y curl make bash lib32z1 libncurses5 lib32ncurses-dev lsb-release && \
+RUN apt-get install -y --no-install-recommends \
+      curl make bash lib32z1 libncurses5 lib32ncurses-dev lsb-release && \
     curl -LO http://mirrors.kernel.org/ubuntu/pool/main/libf/libffi/libffi6_3.2.1-8_amd64.deb && \
     dpkg -i libffi6_3.2.1-8_amd64.deb && \
     rm libffi6_3.2.1-8_amd64.deb && \
@@ -54,21 +67,16 @@ FROM base as halide
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
-      apt-get install -y software-properties-common && \
-    add-apt-repository ppa:deadsnakes/ppa
-
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive \
-      apt-get install -y \
+      apt-get install -y --no-install-recommends \
       clang-12 clang++-12 clang-tools-12 lld \
       llvm-12-dev libclang-12-dev liblld-12-dev \
       libpng-dev libjpeg-dev libgl-dev \
-      python3.10 python3.10-dev python3.10-distutils \
       libopenblas-dev libeigen3-dev libatlas-base-dev \
-      cmake wget git && \
-    apt-get clean
+      cmake make wget git && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN wget -O /usr/src/halide.tar.gz https://github.com/halide/Halide/archive/refs/tags/v13.0.4.tar.gz && \
+RUN wget -q -O /usr/src/halide.tar.gz https://github.com/halide/Halide/archive/refs/tags/v13.0.4.tar.gz && \
     tar -C /usr/src -xzvf /usr/src/halide.tar.gz && \
     rm /usr/src/halide.tar.gz
 RUN cd /usr/src/Halide-13.0.4 && \
@@ -76,52 +84,75 @@ RUN cd /usr/src/Halide-13.0.4 && \
     -DPython3_EXECUTABLE=/usr/bin/python3.10 \
     -DCMAKE_C_COMPILER=/usr/bin/clang-12 \
     -DCMAKE_CXX_COMPILER=/usr/bin/clang++-12 \
-    -DLLVM_DIR=$LLVM_ROOT/lib/cmake/llvm -DTARGET_WEBASSEMBLY=OFF -S . -B build && \
+    -DLLVM_DIR="$LLVM_ROOT/lib/cmake/llvm" -DTARGET_WEBASSEMBLY=OFF -S . -B build && \
     cmake --build build --parallel ${HALIDE_CMAKE_PARALLEL}
 RUN cd /usr/src/Halide-13.0.4 && \
     cmake --install ./build --prefix /halide
 
 
-FROM condaforge/mambaforge:4.11.0-2 as conda
+FROM base as poetry
 
-COPY environment.yml .
-RUN --mount=type=cache,target=/opt/conda/pkgs mamba env create -p /env -f environment.yml 
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    POETRY_VERSION=1.2.1 \
+    POETRY_VENV=/opt/poetry-venv
+
+# Install poetry in its own venv
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3 python3-venv \
+    && python3 -m venv $POETRY_VENV \
+    && $POETRY_VENV/bin/pip install -U pip setuptools \
+    && $POETRY_VENV/bin/pip install "poetry==${POETRY_VERSION}" \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="${PATH}:${POETRY_VENV}/bin"
+
+# Have Poetry pipe specific pkg. versions in pip to install.
+COPY pyproject.toml poetry.lock ./
+RUN poetry config virtualenvs.in-project true \
+    && python -m venv /env \
+    && poetry install -n --no-ansi --no-root --with=dev,evaluation
 
 
-FROM base as cpu-only
+FROM base AS cpu-only
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
-    apt-get install -y git curl lib32z1 libncurses5 lib32ncurses-dev numactl && \
+    apt-get install -y --no-install-recommends \
+      git curl lib32z1 libncurses5 lib32ncurses-dev numactl \
+      clang-12 lld libomp5-12 libomp-12-dev && \
     curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
     curl -LO http://mirrors.kernel.org/ubuntu/pool/main/libf/libffi/libffi6_3.2.1-8_amd64.deb && \
     dpkg -i libffi6_3.2.1-8_amd64.deb && \
     rm libffi6_3.2.1-8_amd64.deb && \
-    apt-get clean
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-COPY --from=conda /env /env
-ENV PATH=/env/bin:$PATH
-ENV CLANG=/env/bin/clang
-ENV LD_LIBRARY_PATH=/env/lib:$LD_LIBRARY_PATH
-ENV LIBRARY_PATH=/env/lib:$LIBRARY_PATH
-ENV MORELLO_CLANG_LINK_RT=1
+COPY --from=poetry /.venv /.venv
+ENV PATH="/.venv/bin:$PATH" \
+    CLANG=/usr/bin/clang-12 \
+    LD_LIBRARY_PATH="/.venv/lib:$LD_LIBRARY_PATH" \
+    LIBRARY_PATH="/.venv/lib:$LIBRARY_PATH"
 
 COPY --from=halide /usr/src/Halide-13.0.4/python_bindings/requirements.txt /halide-reqs.txt
-RUN python3 -m pip install -r /halide-reqs.txt && \
-    rm /halide-reqs.txt
+RUN python -m pip install -r /halide-reqs.txt \
+    && rm /halide-reqs.txt
 COPY --from=halide /halide /halide
-ENV PYTHONPATH "/halide/lib/python3/site-packages:${PYTHONPATH}"
-ENV LD_LIBRARY_PATH "/halide/lib:${LD_LIBRARY_PATH}"
+ENV PYTHONPATH="/halide/lib/python3/site-packages:${PYTHONPATH}" \
+    LD_LIBRARY_PATH="/halide/lib:${LD_LIBRARY_PATH}"
 
 WORKDIR /app
 
-ENV PYTHONPATH ".:${PYTHONPATH}"
+ENV PYTHONFAULTHANDLER=1 \
+    PYTHONPATH=".:${PYTHONPATH}" \
+    MORELLO_CLANG_LINK_RT=1
 
 COPY pyproject.toml ./
 COPY tests ./tests
 COPY setup.py .
 COPY morello ./morello
-RUN python3 setup.py build_ext -j $(nproc) --inplace
+RUN CC=clang-12 LDSHARED="clang-12 -shared" python3 setup.py build_ext -j "$(nproc)" --inplace
 
 COPY scripts ./scripts
 

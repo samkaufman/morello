@@ -484,7 +484,7 @@ def _st_test_index_exprs_full_contiguousness_matches_contiguous_props(draw):
 
 @pytest.mark.parametrize(
     "exact",
-    [pytest.param(True, marks=pytest.mark.skip), pytest.param(False),],
+    [pytest.param(True, marks=pytest.mark.skip), pytest.param(False)],
     ids=["exact", "underapproximate"],
 )
 @hypothesis.settings(max_examples=1000, deadline=4000)
