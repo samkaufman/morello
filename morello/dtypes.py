@@ -11,6 +11,19 @@ class Dtype:
     np_type: np.dtype
     short_name: str
 
+    @staticmethod
+    def from_short_name(short_name: str) -> "Dtype":
+        for dtype in ALL_DTYPES:
+            if dtype.short_name == short_name:
+                return dtype
+        raise ValueError(f"Unknown short name: {short_name}")
+
+    def __hash__(self) -> int:
+        return hash(self.short_name)
+
+    def __reduce__(self):
+        return Dtype.from_short_name, (self.short_name,)
+
     def __str__(self):
         return self.short_name
 
