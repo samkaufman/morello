@@ -34,6 +34,18 @@ class _AssertingSearch(dp.Search):
         memory_limits: pruning.MemoryLimits,
         **kwargs,
     ) -> tuple[list[tuple["impl.Impl", tuple]], int]:
+        assert self.block_coordinate is None or len(
+            _spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec)).dim_coords
+        ) == len(self.block_coordinate.dim_coords), (
+            f"Expected the same number of dim_coords in the Spec: {spec} and "
+            f"{_spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec))}"
+        )
+        assert self.block_coordinate is None or len(
+            _spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec)).other_coords
+        ) == len(self.block_coordinate.other_coords), (
+            f"Expected the same number of other_coords in the Spec: {spec} and "
+            f"{_spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec))}"
+        )
         assert (
             self.block_coordinate is None
             or _spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec))
@@ -58,17 +70,35 @@ class Coord:
 
     @staticmethod
     def structure(flattened: tuple[int, ...], reference_spec: specs.Spec) -> "Coord":
+        other_coords_cnt = Coord.other_coords_count(type(reference_spec))
         return Coord(
-            dim_coords=flattened[: len(reference_spec.operands)],
-            other_coords=flattened[len(reference_spec.operands) :],
+            dim_coords=flattened[:-other_coords_cnt],
+            other_coords=flattened[-other_coords_cnt:],
         )
+
+    @staticmethod
+    def other_coords_count(spec_type: type):
+        if spec_type in (specs.Matmul, specs.MatmulAccum):
+            return 4
+        elif spec_type in (specs.Convolution, specs.ConvolutionAccum):
+            return 4
+        elif spec_type in (specs.ReduceSum, specs.ReduceSumAccum):
+            return 3
+        elif spec_type in (specs.Load, specs.Store):
+            return 3
+        elif spec_type == specs.Zero:
+            return 2
+        elif spec_type == specs.Compose:
+            raise ValueError("Compose Specs not supported")
+        else:
+            raise ValueError("Unexpected type: " + str(spec_type))
 
 
 def _spec_coordinates_in_block(block: Coord) -> Iterable[Coord]:
     for log_pts in itertools.product(
         *[range(b * FACTOR, (b + 1) * FACTOR) for b in block.dim_coords]
     ):
-        yield Coord(tuple(2 ** p for p in log_pts), block.other_coords)
+        yield Coord(tuple(2**p for p in log_pts), block.other_coords)
 
 
 def _spec_coordinate_to_block_coord(spec_coord: Coord) -> Coord:
@@ -81,7 +111,7 @@ def _spec_coordinate_to_block_coord(spec_coord: Coord) -> Coord:
 def _spec_to_spec_coordinate(spec: specs.Spec) -> Coord:
     system = system_config.current_system()
 
-    sb = spec.serial_only == 0
+    sb = 0 if spec.serial_only else 1
     banks = tuple(system.ordered_banks.index(o.bank) for o in spec.operands)
     if isinstance(spec, (specs.Matmul, specs.MatmulAccum)):
         m, k = spec.lhs.dim_sizes
@@ -147,10 +177,10 @@ def _compute_all(
     top_block = _spec_coordinate_to_block_coord(top_spec_pt)
     slice_idx = 0
     while True:
-        block_diagonal = list(
-            utils.sum_seqs(maxes=top_block.flatten(), total=slice_idx)
-        )
-        block_diagonal = [Coord.structure(d, top_query_spec) for d in block_diagonal]
+        block_diagonal = [
+            Coord.structure(d, top_query_spec)
+            for d in utils.sum_seqs(maxes=top_block.flatten(), total=slice_idx)
+        ]
         if not block_diagonal:
             break
         block_results = dask_client.map(
@@ -160,10 +190,6 @@ def _compute_all(
             [top_query_spec] * len(block_diagonal),
             [top_limits] * len(block_diagonal),
             [cache] * len(block_diagonal),
-            # key=[
-            #     f"{type(top_query_spec).__name__}-{'x'.join(map(str, b.flatten()))}"
-            #     for b in block_diagonal
-            # ],
             key=f"block-{type(top_query_spec).__name__}",
         )
         cache = dask_client.submit(_merge_block_results, cache, block_results, target)
