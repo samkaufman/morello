@@ -148,12 +148,10 @@ ENV PYTHONFAULTHANDLER=1 \
     PYTHONPATH=".:${PYTHONPATH}" \
     MORELLO_CLANG_LINK_RT=1
 
-COPY pyproject.toml ./
+COPY pyproject.toml setup.py ./
 COPY tests ./tests
-COPY setup.py .
 COPY morello ./morello
-RUN CC=clang-12 LDSHARED="clang-12 -shared" python3 setup.py build_ext -j "$(nproc)" --inplace
-
+# RUN CC=clang-12 LDSHARED="clang-12 -shared" python3 setup.py build_ext -j "$(nproc)" --inplace
 COPY scripts ./scripts
 
 
