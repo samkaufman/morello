@@ -1,22 +1,34 @@
-from collections.abc import Sequence
+import argparse
 import copy
 import dataclasses
 import itertools
+import logging
 import math
+import pathlib
+import pickle
+import secrets
+import subprocess
 import time
-from typing import Iterable, Optional, TYPE_CHECKING, Union
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Iterable, Optional, Union
 
+import atomicwrites
 import dask.distributed
 
+from .. import dtypes, pruning, search_cache, specs, system_config, utils
 from . import dp
-from .. import pruning, search_cache, specs, system_config, utils
 
 if TYPE_CHECKING:
     from .. import impl
 
-
 FACTOR = 4
 USE_TINYMAPS = True
+
+logger = logging.getLogger(__name__)
+
+arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument("--deploy-k8s", action="store_true")
+arg_parser.add_argument("--image-tag", "-t", type=str, default="samkaufman/morello")
 
 
 # TODO: Make sure we're staying in the expected or dependent Tables.
@@ -98,7 +110,7 @@ def _spec_coordinates_in_block(block: Coord) -> Iterable[Coord]:
     for log_pts in itertools.product(
         *[range(b * FACTOR, (b + 1) * FACTOR) for b in block.dim_coords]
     ):
-        yield Coord(tuple(2 ** p for p in log_pts), block.other_coords)
+        yield Coord(tuple(2**p for p in log_pts), block.other_coords)
 
 
 def _spec_coordinate_to_block_coord(spec_coord: Coord) -> Coord:
@@ -292,16 +304,59 @@ def _compute_block(
         return cache.caches[0]
 
 
-# TODO: Remove main
 def main():
-    from .. import dtypes
+    logging.basicConfig(level=logging.INFO)
+
+    args = arg_parser.parse_args()
 
     start = time.time()
 
     system_config.set_current_target("cpu")
     target = system_config.current_target()
 
-    with dask.distributed.Client(threads_per_worker=1) as dask_client:
+    if args.deploy_k8s:
+        from dask_kubernetes import KubeCluster, make_pod_spec
+
+        current_dir = pathlib.Path(__file__).parent.resolve().parent.parent
+        assert (
+            current_dir / "Dockerfile"
+        ).is_file(), f"{current_dir} does not contain a Dockerfile"
+
+        assert args.image_tag
+        tag = f"{args.image_tag}:dep{secrets.token_hex(14)}"
+        logger.info("Building Docker image with tag %s", tag)
+        build_process = subprocess.run(
+            f"docker build --target cpu-only -t {tag} -q .",
+            stdout=subprocess.PIPE,
+            shell=True,
+            cwd=current_dir,
+        )
+        build_process.check_returncode()
+        image_id = build_process.stdout.strip()
+        logger.info("Built image with ID %s", image_id.decode("utf8"))
+
+        logger.info("Pushing Docker image with tag %s", tag)
+        subprocess.run(f"docker push -q {tag}", shell=True, check=True)
+        logger.info("Pushed Docker image with tag %s", tag)
+
+        logger.info("Starting the Kubernetes cluster")
+        cluster = KubeCluster(
+            make_pod_spec(
+                image=tag,
+                memory_limit="6G",
+                memory_request="3G",
+                cpu_limit=1,
+                cpu_request=1,
+                extra_container_config={"imagePullPolicy": "Always"},
+            )
+        )
+        cluster.adapt(minimum=1, maximum=256)
+        logger.info("Started the Kubernetes cluster")
+        logger.info("Kubernetes scheduler address: %s", cluster.scheduler_address)
+    else:
+        cluster = dask.distributed.LocalCluster(threads_per_worker=1)
+
+    with cluster, dask.distributed.Client(cluster) as dask_client:
         limits = pruning.StandardMemoryLimits()
 
         per_dt_caches = []
@@ -309,10 +364,11 @@ def main():
         for dt in dtypes.ALL_DTYPES:
             dt_cache = search_cache.InMemoryScheduleCache()
 
+            # TODO: Checkpoint each of the following stages
             futures = []
             spec0 = specs.Load(
-                source=target.tensor_spec((1024, 1024), dtype=dt),
-                destination=target.tensor_spec((1024, 1024), dtype=dt),
+                source=target.tensor_spec((512, 512), dtype=dt),
+                destination=target.tensor_spec((512, 512), dtype=dt),
                 serial_only=False,
             )
             futures.append(
@@ -320,8 +376,8 @@ def main():
             )
 
             spec1 = specs.Store(
-                source=target.tensor_spec((1024, 1024), dtype=dt),
-                destination=target.tensor_spec((1024, 1024), dtype=dt),
+                source=target.tensor_spec((512, 512), dtype=dt),
+                destination=target.tensor_spec((512, 512), dtype=dt),
                 serial_only=False,
             )
             futures.append(
@@ -334,22 +390,32 @@ def main():
             )
 
             spec2 = specs.Zero(
-                destination=target.tensor_spec((1024, 1024), dtype=dt),
-                serial_only=True,
+                destination=target.tensor_spec((512, 512), dtype=dt),
+                serial_only=False,
             )
             dt_cache = _compute_all(
                 dask_client, spec2, top_limits=limits, cache=dt_cache
             )
 
-            # spec3 = specs.MatmulAccum(
-            #     lhs=target.tensor_spec((32, 32), dtype=dt),
-            #     rhs=target.tensor_spec((32, 32), dtype=dt),
-            #     output=target.tensor_spec((32, 32), dtype=dt),
-            #     serial_only=True,
-            # )
-            # dt_cache = _compute_all(
-            #     dask_client, spec3, top_limits=limits, cache=dt_cache
-            # )
+            spec3 = specs.MatmulAccum(
+                lhs=target.tensor_spec((512, 512), dtype=dt),
+                rhs=target.tensor_spec((512, 512), dtype=dt),
+                output=target.tensor_spec((512, 512), dtype=dt),
+                serial_only=False,
+            )
+            dt_cache = _compute_all(
+                dask_client, spec3, top_limits=limits, cache=dt_cache
+            )
+
+            spec4 = specs.Matmul(
+                lhs=target.tensor_spec((512, 512), dtype=dt),
+                rhs=target.tensor_spec((512, 512), dtype=dt),
+                output=target.tensor_spec((512, 512), dtype=dt),
+                serial_only=False,
+            )
+            dt_cache = _compute_all(
+                dask_client, spec4, top_limits=limits, cache=dt_cache
+            )
 
             per_dt_caches.append(dt_cache)
 
@@ -360,8 +426,12 @@ def main():
             search_cache.InMemoryScheduleCache(),
             per_dt_caches,
             target,
-        )
-        print("Got cache:", combined_cache.result())
+        ).result()
+
+        out_path = pathlib.Path("./cache.pkl")
+        with atomicwrites.atomic_write(out_path, mode="wb", overwrite=True) as fo:
+            pickle.dump(combined_cache, fo)
+        logger.info("Saving cache to: %s", str(out_path))
 
     print(f"Total time: {time.time() - start:.1f}s")
 
