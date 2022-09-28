@@ -65,6 +65,15 @@ class TinyMap(Mapping[T, U]):
     def map_values(self, f: Callable[[U], V]) -> "TinyMap[T, V]":
         return TinyMap(self.raw_keys, tuple(f(v) for v in self.raw_values))
 
+    def replace_value(self, key: T, new_value: U) -> "TinyMap[T, U]":
+        index = self.raw_keys.index(key)
+        return TinyMap(
+            self.raw_keys,
+            tuple(
+                new_value if i == index else v for i, v in enumerate(self.raw_values)
+            ),
+        )
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}({repr(self.raw_keys)}, {repr(self.raw_values)})"
 
@@ -72,7 +81,6 @@ class TinyMap(Mapping[T, U]):
         return repr(self)
 
 
-# TODO: Convert into a generator to avoid intermediate dict allocation.
 def zip_dict(
     first: Mapping[T, U], *others: Mapping[T, U], same_keys: bool = False
 ) -> Iterable[tuple[T, tuple[U, ...]]]:
@@ -112,7 +120,9 @@ def flatten(src):
 
 
 def aligned_approx(
-    tile_cls: type, tile_shape: Sequence[int], parent: "specs.TensorSpec",
+    tile_cls: type,
+    tile_shape: Sequence[int],
+    parent: "specs.TensorSpec",
 ) -> bool:
     """Test whether a tiling breaks alignment.
 
@@ -120,7 +130,7 @@ def aligned_approx(
     has its first address on an aligned address. An aligned address is a
     multiple of `current_system().line_size`.
 
-    Tiles must have the same layout as `parent` (the usual case). 
+    Tiles must have the same layout as `parent` (the usual case).
 
     It may report some aligned tilings as unaligned, but will never report an
     unaligned tiling as aligned.
@@ -155,6 +165,7 @@ def aligned_approx(
             return aligned_approx(tensor.SimpleTile, tile_shape, parent)
         else:
             warnings.warn("No alignment analysis for non-batch convolution")
+            return False
     else:
         warnings.warn(
             f"No alignment analysis for {tile_cls.__name__} and "
@@ -197,7 +208,7 @@ def factors(n: int) -> Iterable[int]:
         set(
             functools.reduce(
                 list.__add__,
-                ([i, n // i] for i in range(1, int(n ** 0.5) + 1) if n % i == 0),
+                ([i, n // i] for i in range(1, int(n**0.5) + 1) if n % i == 0),
             )
         )
     )
@@ -206,7 +217,7 @@ def factors(n: int) -> Iterable[int]:
 def powers_of_two(maximum: int) -> Iterable[int]:
     """Yields positive powers of two up to maximum, exclusive."""
     return itertools.takewhile(
-        lambda v: v < maximum, (2 ** i for i in itertools.count())
+        lambda v: v < maximum, (2**i for i in itertools.count())
     )
 
 

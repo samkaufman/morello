@@ -2,8 +2,6 @@ import warnings
 from collections.abc import Mapping
 from typing import Optional
 
-from frozendict import frozendict
-
 from . import impl, specs, system_config, utils
 from .utils import TinyMap
 
@@ -23,15 +21,13 @@ class IntermediatesTooBigError(ValueError):
 
 
 def _pipeline_transition(
-    base_available: dict[str, int],
+    base_available: TinyMap[str, int],
     pipeline: impl.Pipeline,
-    carried_input_consumption: dict[str, int],
-    carried_output_consumption: dict[str, int],
+    carried_input_consumption: TinyMap[str, int],
+    carried_output_consumption: TinyMap[str, int],
 ) -> Optional[list["MemoryLimits"]]:
-    def _tensor_mem(tensor: specs.TensorSpec) -> dict[str, int]:
-        mem = _zero_banks()
-        mem[tensor.bank] = tensor.bytes_used
-        return mem
+    def _tensor_mem(tensor: specs.TensorSpec) -> TinyMap[str, int]:
+        return _zero_banks().replace_value(tensor.bank, tensor.bytes_used)
 
     child_limits: list["MemoryLimits"] = []
     try:
@@ -128,13 +124,16 @@ class StandardMemoryLimits(MemoryLimits):
         # base->pipeline
         if isinstance(schedule, impl.Pipeline):
             return _pipeline_transition(
-                dict(self.available), schedule, _zero_banks(), _zero_banks()
+                self.available, schedule, _zero_banks(), _zero_banks()
             )
 
         # base->base
         child_limits = []
         for adds in schedule.additional_memories:
-            assert self._available.raw_keys == adds.raw_keys
+            assert self._available.raw_keys == adds.raw_keys, (
+                f"Memory levels do not match; {self._available.raw_keys} != "
+                f"{adds.raw_keys}"
+            )
             child_limits.append(
                 TinyMap(
                     self._available.raw_keys,
@@ -165,17 +164,22 @@ class PipelineChildMemoryLimits(MemoryLimits):
     This should not be mutated.
     """
 
-    base_available: dict[str, int]
-    input_consumption: dict[str, int]
-    output_consumption: dict[str, int]
+    base_available: TinyMap[str, int]
+    input_consumption: TinyMap[str, int]
+    output_consumption: TinyMap[str, int]
 
     def __init__(
         self,
-        base: dict[str, int],
-        input_consumption: dict[str, int],
-        output_consumption: dict[str, int],
+        base: TinyMap[str, int],
+        input_consumption: TinyMap[str, int],
+        output_consumption: TinyMap[str, int],
     ) -> None:
         super().__init__()
+        if base.raw_keys != input_consumption.raw_keys:
+            raise ValueError("base and input_consumption TinyMaps' keys must match")
+        if base.raw_keys != output_consumption.raw_keys:
+            raise ValueError("base and output_consumption TinyMaps' keys must match")
+
         if any(
             v > b
             for _, (v, b) in utils.zip_dict(input_consumption, base, same_keys=True)
@@ -187,47 +191,28 @@ class PipelineChildMemoryLimits(MemoryLimits):
         ):
             raise IntermediatesTooBigError("output tensor doesn't fit in available")
 
-        self.base_available = base
-
         # Update input and output consumptions using the adjustments
-        snapped_base_available = _snap_availables(TinyMap(self.base_available))
-        adjustments: Mapping[str, int] = {
-            k: orig - v
-            for k, (orig, v) in utils.zip_dict(
-                self.base_available, snapped_base_available, same_keys=True
-            )
-        }
+        adjustments = tuple(
+            orig - v
+            for orig, v in zip(base.raw_values, _snap_availables(base).raw_values)
+        )
 
-        self.input_consumption = {
-            k: max(0, orig - adjustment)
-            for k, (orig, adjustment) in utils.zip_dict(
-                input_consumption, adjustments, same_keys=True
-            )
-        }
-        self.output_consumption = {
-            k: max(0, orig - adjustment)
-            for k, (orig, adjustment) in utils.zip_dict(
-                output_consumption, adjustments, same_keys=True
-            )
-        }
+        self.base_available = base
+        self.input_consumption = TinyMap(
+            base.raw_keys,
+            tuple(
+                max(0, orig - adjustment)
+                for orig, adjustment in zip(input_consumption.raw_values, adjustments)
+            ),
+        )
+        self.output_consumption = TinyMap(
+            base.raw_keys,
+            tuple(
+                max(0, orig - adjustment)
+                for orig, adjustment in zip(output_consumption.raw_values, adjustments)
+            ),
+        )
 
-        # Assert that the important, observable numbers are snapped. (The actual
-        # snapping should happen in the transition function.)
-        # assert not SNAP_CAP_TO_POWER_OF_TWO or all(
-        #     _is_snapped(v) for v in self.base_available.values()
-        # )
-        # assert not SNAP_CAP_TO_POWER_OF_TWO or all(
-        #     _is_snapped(v) for v in self.available.values()
-        # )
-        # assert not SNAP_CAP_TO_POWER_OF_TWO or all(
-        #     _is_snapped(a - b) and _is_snapped(a - c)
-        #     for _, (a, b, c) in utils.zip_dict(
-        #         self.base_available,
-        #         self.input_consumption,
-        #         self.output_consumption,
-        #         same_keys=True,
-        #     )
-        # )
         warnings.warn(
             "PipelineChildMemoryLimits snapping behavior isn't very "
             "well-defined yet. Base available memory is snapped, but input- and "
@@ -260,16 +245,20 @@ class PipelineChildMemoryLimits(MemoryLimits):
         # This property is the interface for any caller expecting a base
         # StandardMemoryLimits (i.e. one that can't use extra information about
         # its context in a Pipeline).
-        return frozendict(
-            {
-                bank: a - (b + c)
-                for bank, (a, b, c) in utils.zip_dict(
-                    self.base_available,
-                    self.input_consumption,
-                    self.output_consumption,
-                    same_keys=True,
+        banks = system_config.current_system().ordered_banks
+        assert self.base_available.raw_keys == banks
+        assert self.input_consumption.raw_keys == banks
+        assert self.output_consumption.raw_keys == banks
+        return TinyMap(
+            banks,
+            tuple(
+                a - (b + c)
+                for a, b, c in zip(
+                    self.base_available.raw_values,
+                    self.input_consumption.raw_values,
+                    self.output_consumption.raw_values,
                 )
-            }
+            ),
         )
 
     def transition(self, schedule: impl.Impl) -> Optional[list["MemoryLimits"]]:
@@ -317,5 +306,6 @@ def _snap_down(n: int) -> int:
     return 2 ** (n.bit_length() - 1)
 
 
-def _zero_banks() -> dict[str, int]:
-    return {bank: 0 for bank in system_config.current_system().banks}
+def _zero_banks() -> TinyMap[str, int]:
+    banks = system_config.current_system().ordered_banks
+    return TinyMap(banks, (0,) * len(banks))
