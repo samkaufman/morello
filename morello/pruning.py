@@ -290,20 +290,7 @@ def _snap_availables(available: TinyMap[str, int]) -> TinyMap[str, int]:
     # If SNAP_CAP_TO_POWER_OF_TWO isn't set, don't rebuild the data structure.
     if not SNAP_CAP_TO_POWER_OF_TWO:
         return available
-    return available.map_values(_snap_down)
-
-
-def _snap_down(n: int) -> int:
-    """Snaps an integer down according to the snapping strategy.
-
-    No-op for already-snapped integers.
-    """
-    assert SNAP_CAP_TO_POWER_OF_TWO
-    assert n >= 0
-    if n == 0:
-        return 0
-    # Return the greatest power of two equal to or less than n
-    return 2 ** (n.bit_length() - 1)
+    return available.map_values(lambda n: 0 if n == 0 else 2 ** (n.bit_length() - 1))
 
 
 def _zero_banks() -> TinyMap[str, int]:

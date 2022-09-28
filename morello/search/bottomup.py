@@ -1,15 +1,15 @@
 from collections.abc import Sequence
-import dataclasses
-import math
 import copy
+import dataclasses
 import itertools
+import math
 import time
-from typing import TYPE_CHECKING, Iterable, Optional, Union
+from typing import Iterable, Optional, TYPE_CHECKING, Union
 
 import dask.distributed
 
 from . import dp
-from .. import pruning, specs, system_config, search_cache, utils
+from .. import pruning, search_cache, specs, system_config, utils
 
 if TYPE_CHECKING:
     from .. import impl
@@ -98,7 +98,7 @@ def _spec_coordinates_in_block(block: Coord) -> Iterable[Coord]:
     for log_pts in itertools.product(
         *[range(b * FACTOR, (b + 1) * FACTOR) for b in block.dim_coords]
     ):
-        yield Coord(tuple(2**p for p in log_pts), block.other_coords)
+        yield Coord(tuple(2 ** p for p in log_pts), block.other_coords)
 
 
 def _spec_coordinate_to_block_coord(spec_coord: Coord) -> Coord:
