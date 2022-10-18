@@ -215,8 +215,9 @@ def _emit_loop_nest_for_shape(shape: Sequence[int]):
             writer.writeline("}")
 
 
-def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails]):
-    assert imp.is_scheduled
+def _inner_generate_c(
+    imp: impl.AppliedImpl, op_details: Sequence[OperandDetails], allow_holes: bool
+):
     assert len(op_details) == len(
         imp.operands
     ), f"Expected {len(imp.operands)} OperandDetails, got {len(op_details)}"
@@ -263,16 +264,20 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                     inner_op,
                 )
                 for o, op_subs, inner_op in zip(
-                    op_details, imp.operands_subscripts, tiled_operands,
+                    op_details,
+                    imp.operands_subscripts,
+                    tiled_operands,
                 )
             ],
             imp.parallel,
-            inner_codegen=lambda details: _inner_generate_c(imp.inner, details),
+            inner_codegen=lambda details: _inner_generate_c(
+                imp.inner, details, allow_holes
+            ),
         )
     elif isinstance(imp, impl.Block):
         for step, op_idxs in zip(imp.steps, imp.op_idxs):
             assert isinstance(step, impl.AppliedImpl)
-            _inner_generate_c(step, [op_details[i] for i in op_idxs])
+            _inner_generate_c(step, [op_details[i] for i in op_idxs], allow_holes)
     elif isinstance(imp, impl.Pipeline):
         inps_op_details = op_details[:-1]
         output_op_details = op_details[-1]
@@ -287,7 +292,12 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
         ).emit(zero_init=False)
         cur_slice = slice(-len(imp.stages[0].inputs), len(inps_op_details))
         cur_out = _pipeline_emit_stage(
-            imp.stages[0], inps_op_details[cur_slice], last_c_buf, None, None
+            imp.stages[0],
+            inps_op_details[cur_slice],
+            last_c_buf,
+            None,
+            None,
+            allow_holes,
         )
         cur_slice = slice(
             1 + cur_slice.start - len(imp.stages[1].inputs), cur_slice.start
@@ -303,7 +313,7 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                 stage.spec.output.bank,
             ).emit(zero_init=False)
             cur_out = _pipeline_emit_stage(
-                stage, inps_op_details[cur_slice], new_c_buf, cur_out, None
+                stage, inps_op_details[cur_slice], new_c_buf, cur_out, None, allow_holes
             )
             last_c_buf.emit_free()
             last_c_buf = new_c_buf
@@ -318,6 +328,7 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
             output_op_details.c_tensor,
             cur_out,
             output_op_details,
+            allow_holes,
         )
         last_c_buf.emit_free()
         assert (
@@ -429,20 +440,20 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
             if not imp.is_store and imp.destination.bank == "L2":
                 assert imp.source.bank == "GL"
                 _emit_hvx_l2fetch(imp, imp.is_store, op_details[source_idx])
-                _inner_generate_c(imp.body, op_details)
+                _inner_generate_c(imp.body, op_details, allow_holes)
             # HVX scalar L1/dc-to-register case
             elif not imp.is_store and imp.destination.bank == "L1":
                 assert imp.source.bank == "L2"
                 _emit_hvx_dcfetch(imp, imp.operands[source_idx], op_details[source_idx])
-                _inner_generate_c(imp.body, op_details)
+                _inner_generate_c(imp.body, op_details, allow_holes)
             elif imp.is_store and imp.destination.bank == "L2":
                 # Generate no code for moves from L2 to global.
                 assert imp.source.bank == "GL"
-                _inner_generate_c(imp.body, op_details)
+                _inner_generate_c(imp.body, op_details, allow_holes)
             elif imp.is_store and imp.destination.bank == "L1":
                 # Generate no code for writing from L1 back to L2
                 assert imp.source.bank == "L2"
-                _inner_generate_c(imp.body, op_details)
+                _inner_generate_c(imp.body, op_details, allow_holes)
             elif imp.destination.bank == "VMEM":
                 assert imp.source.bank == "L2"
                 _move_hvx_vmem(
@@ -452,6 +463,7 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                     operand_index_exprs,
                     concrete_shapes,
                     [d.previously_transformed_tiles for d in op_details],
+                    allow_holes,
                 )
             elif imp.destination.bank == "HexagonRF":
                 _move_registers(
@@ -461,6 +473,7 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                     operand_index_exprs,
                     concrete_shapes,
                     [d.previously_transformed_tiles for d in op_details],
+                    allow_holes,
                 )
             else:
                 word = "store" if imp.is_store else "load"
@@ -477,10 +490,13 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                 operand_index_exprs,
                 concrete_shapes,
                 [d.previously_transformed_tiles for d in op_details],
+                allow_holes,
             )
         else:
             _inner_generate_c(
-                cast(impl.AppliedImpl, cast(impl.MoveLet, imp).body), op_details
+                cast(impl.AppliedImpl, cast(impl.MoveLet, imp).body),
+                op_details,
+                allow_holes,
             )
     elif isinstance(imp, impl.HvxGemvmpybbwAsm):
         lhs, rhs, out = op_details
@@ -571,7 +587,7 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
         writer.writeline(
             f"uint8_t *{result.name} = pad2d_and_transpack({struct_name});"
         )
-        _inner_generate_c(imp.inner, new_op_details)
+        _inner_generate_c(imp.inner, new_op_details, allow_holes)
         writer.writeline(f"free({result.name});")
         writer.writeline(f"free({struct_name});")
     elif isinstance(imp, impl.ValueAssign):
@@ -621,6 +637,8 @@ def _inner_generate_c(imp: impl.AppliedImpl, op_details: Sequence[OperandDetails
                     writer.writeline(
                         f"_mm256_storeu_si256(({itype} *)({rhs_txt}), _mm256_loadu_si256(({itype} *)({lhs_txt})));  // VectorAssign"
                     )
+    elif not imp.is_scheduled and allow_holes:
+        writer.writeline(f"/* HOLE */")
     else:
         raise NotImplementedError(f"Not implemented for {type(imp).__name__}")
 
@@ -631,6 +649,7 @@ def _pipeline_emit_stage(
     output_c_tensor: CTensor,
     previous_output: Optional[OperandDetails],  # None only on first stage.
     final_output: Optional[OperandDetails],  # Non-None on last stage.
+    allow_holes: bool,
 ) -> OperandDetails:
     """Emits code for one stage in a Pipeline.
 
@@ -697,6 +716,7 @@ def _pipeline_emit_stage(
                 cur_prev_transformeds,
             )
         ],
+        allow_holes,
     )
     return OperandDetails(
         cur_c_tensors[-1],
@@ -797,6 +817,7 @@ def _move_hvx_vmem(
     operand_index_exprs,
     concrete_shapes,
     previously_transformeds,
+    allow_holes: bool
 ):
     writer = common.writer.get()
 
@@ -845,6 +866,7 @@ def _move_hvx_vmem(
                     previously_transformeds,
                 )
             ],
+            allow_holes,
         )
         common.unroll.reset(unroll_token)
         if imp.is_store:
@@ -938,6 +960,7 @@ def _move_registers(
     operand_index_exprs,
     concrete_shapes,
     previously_transformeds,
+    allow_holes: bool,
 ):
     dest_c_buf = _make_buffer(
         functools.reduce(operator.mul, concrete_shapes[source_idx], 1),
@@ -978,12 +1001,12 @@ def _move_registers(
     if impl.prologue:
         # Prologue may or may not take an input (e.g., no inputs for Zero).
         if impl.prologue.spec.inputs:
-            _inner_generate_c(impl.prologue, move_operand_details)
+            _inner_generate_c(impl.prologue, move_operand_details, allow_holes)
         else:
-            _inner_generate_c(impl.prologue, move_operand_details[-1:])
-    _inner_generate_c(impl.body, body_operand_details)
+            _inner_generate_c(impl.prologue, move_operand_details[-1:], allow_holes)
+    _inner_generate_c(impl.body, body_operand_details, allow_holes)
     if impl.epilogue:
-        _inner_generate_c(impl.epilogue, move_operand_details)
+        _inner_generate_c(impl.epilogue, move_operand_details, allow_holes)
 
     dest_c_buf.emit_free()
 
@@ -1005,6 +1028,7 @@ def generate_c(
     imp: impl.Impl,
     out_fo,
     values=None,
+    allow_holes: bool = False,
 ) -> None:
     imp = imp.to_applied()
 
@@ -1333,10 +1357,12 @@ def generate_c(
         operand_details = [
             OperandDetails(CPtr(c_buf.name, c_buf), index_expr, shape, frozenset())
             for c_buf, index_expr, shape in zip(
-                c_tensors, index_exprs, (op.dim_sizes for op in imp.spec.operands),
+                c_tensors,
+                index_exprs,
+                (op.dim_sizes for op in imp.spec.operands),
             )
         ]
-        _inner_generate_c(imp, operand_details)
+        _inner_generate_c(imp, operand_details, allow_holes)
     writer.writeline("}")
     writer.writeline("")
 
