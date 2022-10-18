@@ -484,7 +484,7 @@ class ComposeHole(Impl):
         return False
 
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
-        raise NotImplementedError("apply not implemented for holes")
+        return make_applied_impl(self, operands)
 
 
 @dataclasses.dataclass(frozen=True, init=False)
