@@ -22,7 +22,7 @@ class RunResult:
 
 class Target:
     def tensor(
-        self, spec: "TensorSpec", name: Optional[str] = None, **kwargs,
+        self, spec: "TensorSpec", name: Optional[str] = None, **kwargs
     ) -> "TensorBase":
         raise NotImplementedError()
 

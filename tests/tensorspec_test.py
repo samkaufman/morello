@@ -12,7 +12,7 @@ def test_tile_contiguous(tensor_shape, tile_shape, expected):
     target = system_config.current_target()
     dtype, bank, layout = dtypes.Uint8, "RF", layouts.row_major(len(tensor_shape))
     tensor_spec = target.tensor_spec(
-        tensor_shape, dtype, len(tensor_shape), bank, layout
+        tensor_shape, dtype, contiguous_abs=len(tensor_shape), bank=bank, layout=layout
     )
     tile = tensor_spec.simple_tile(tensor.OperandIdx(0), tile_shape)
     assert tile.spec.contiguous_abs == expected

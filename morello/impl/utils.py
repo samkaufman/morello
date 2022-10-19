@@ -56,9 +56,9 @@ def dim_range(dim: int, include_end: bool = True) -> Iterable[int]:
             return
         power = 0
         while True:
-            if 2 ** power >= dim:
+            if 2**power >= dim:
                 break
-            yield 2 ** power
+            yield 2**power
             power += 1
         if include_end:
             yield dim

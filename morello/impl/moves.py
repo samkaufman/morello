@@ -146,12 +146,15 @@ class MoveLet(Impl):
         additional = self.destination.spec.bytes_used
         if self.prefetching:
             additional *= 2
-        
+
         banks = system_config.current_system().ordered_banks
 
-        zeros = TinyMap(banks, (0,)* len(banks))
+        zeros = TinyMap(banks, (0,) * len(banks))
         dest_bank_idx = banks.index(self.destination.bank)
-        mem = TinyMap(banks, tuple(additional if i == dest_bank_idx else 0 for i in range(len(banks))))
+        mem = TinyMap(
+            banks,
+            tuple(additional if i == dest_bank_idx else 0 for i in range(len(banks))),
+        )
 
         to_return = [mem]
         if self.prologue is not None:
@@ -169,7 +172,10 @@ class MoveLet(Impl):
         dest_idx = mem.raw_keys.index(self.destination.bank)
         return TinyMap(
             mem.raw_keys,
-            tuple(v + additional if dest_idx == i else v for i, v in enumerate(mem.raw_values))
+            tuple(
+                v + additional if dest_idx == i else v
+                for i, v in enumerate(mem.raw_values)
+            ),
         )
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:

@@ -191,7 +191,10 @@ class ComposeHole(Impl):
 
     @assert_stable_spec
     def peel(
-        self, bank: Optional[str] = None, layout: Optional[Layout] = None, **kwargs,
+        self,
+        bank: Optional[str] = None,
+        layout: Optional[Layout] = None,
+        **kwargs,
     ) -> Impl:
         if bank is None or layout is None:
             # TODO: Just require them as arguments. Can relax the signature later.
@@ -383,7 +386,7 @@ class ComposeHole(Impl):
                 yield idx, tiled_input
 
     def _calculate_partial_inputs_for_tile_out(
-        self, output_tile: Union[SimpleTile, tiling.PartialTile], skip_first: int = 0,
+        self, output_tile: Union[SimpleTile, tiling.PartialTile], skip_first: int = 0
     ) -> list[tiling.PartialTile]:
         """Returns PartialTiles for this ComposeHole's inputs for an output tiling.
 
@@ -685,6 +688,4 @@ class Pipeline(Impl):
 def _zipply(fn: Callable[[tuple[U]], V], *args: Mapping[T, U]) -> dict[T, V]:
     if not args:
         return {}
-    return {
-        k: fn(v) for k, v in utils.zip_dict(args[0], *args[1:], same_keys=True)
-    }
+    return {k: fn(v) for k, v in utils.zip_dict(args[0], *args[1:], same_keys=True)}

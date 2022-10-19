@@ -867,10 +867,10 @@ class CNNHCHWcBenchmark(CNNBenchmark):
             layout=layouts.NCHWc4,
         )
         filters_a = target.tensor_spec(
-            (32, 4, 3, 3), dtype=DTYPE, layout=layouts.NCHWc4,
+            (32, 4, 3, 3), dtype=DTYPE, layout=layouts.NCHWc4
         )
         filters_b = target.tensor_spec(
-            (32, 32, 3, 3), dtype=DTYPE, layout=layouts.NCHWc4,
+            (32, 32, 3, 3), dtype=DTYPE, layout=layouts.NCHWc4
         )
         output = target.tensor_spec(
             (self.batch_size, 32, self.image_size - 4, self.image_size - 4),
