@@ -1121,8 +1121,8 @@ def _make_np_cnn_inputs(spec):
 def _benchmark(impl):
     assert impl.is_scheduled
 
-    loop = asyncio.get_event_loop()
-    artifact = loop.run_until_complete(system_config.current_target().build_impl(impl))
+    loop = asyncio.new_event_loop()
+    artifact = asyncio.run(system_config.current_target().build_impl(impl))
 
     assert hasattr(artifact, "source_code")
     source = artifact.source_code  # type: ignore

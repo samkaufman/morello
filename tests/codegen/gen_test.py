@@ -58,7 +58,7 @@ def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
             np.arange(4 * 16, dtype=np.uint32).reshape((4, 16)),
         ]
 
-        run_result = asyncio.get_event_loop().run_until_complete(
+        run_result = asyncio.run(
             target.run_impl(
                 imp.to_applied(),
                 print_output=True,
@@ -418,8 +418,7 @@ def _test_impl(imp: morello.impl.base.Impl, inp_values, calc_fn):
             "-fsanitize=address",
         ]
 
-    loop = asyncio.get_event_loop()
-    run_result = loop.run_until_complete(
+    run_result = asyncio.run(
         target.run_impl(
             imp,
             print_output=True,
