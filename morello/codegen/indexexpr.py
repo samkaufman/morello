@@ -14,16 +14,12 @@ from ..tensor import (
 from .expr_utils import FloorDiv
 
 
-def vsub(expr, *args, **kwargs):
+def vsub(expr, *args, **kwargs) -> sympy.Expr:
     kwargs = dict(kwargs)
     if "simultaneous" not in kwargs:
         kwargs["simultaneous"] = True
-
-    orig = expr
     result = expr.subs(*args, **kwargs)
-    if orig != result:
-        part = f"{orig} -> {result}"
-        # print(f" .    {', '.join(subgroup_stack)}  substituting {part}")
+    assert isinstance(result, sympy.Expr)
     return result
 
 
