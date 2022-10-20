@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("--deploy-k8s", action="store_true")
+arg_parser.add_argument("--moves-only", action="store_true")
+arg_parser.add_argument("--size", type=int, default=512)
 arg_parser.add_argument("--image-tag", "-t", type=str, default="samkaufman/morello")
 
 
@@ -304,6 +306,53 @@ def _compute_block(
         return cache.caches[0]
 
 
+def _make_docker_image(image_tag: str) -> str:
+    current_dir = pathlib.Path(__file__).parent.resolve().parent.parent
+    assert (
+        current_dir / "Dockerfile"
+    ).is_file(), f"{current_dir} does not contain a Dockerfile"
+
+    tag = f"{image_tag}:dep{secrets.token_hex(14)}"
+    logger.info("Building Docker image with tag %s", tag)
+    build_process = subprocess.run(
+        f"docker build --target cpu-only -t {tag} -q .",
+        stdout=subprocess.PIPE,
+        shell=True,
+        cwd=current_dir,
+    )
+    build_process.check_returncode()
+    image_id = build_process.stdout.strip()
+    logger.info("Built image with ID %s", image_id.decode("utf8"))
+
+    logger.info("Pushing Docker image with tag %s", tag)
+    subprocess.run(f"docker push -q {tag}", shell=True, check=True)
+    logger.info("Pushed Docker image with tag %s", tag)
+
+    return tag
+
+
+def _deploy_k8s_cluster(image_tag: str):
+    from dask_kubernetes import KubeCluster, make_pod_spec
+
+    tag = _make_docker_image(image_tag)
+
+    logger.info("Starting the Kubernetes cluster")
+    cluster = KubeCluster(
+        make_pod_spec(
+            image=tag,
+            memory_limit="6G",
+            memory_request="3G",
+            cpu_limit=1,
+            cpu_request=1,
+            extra_container_config={"imagePullPolicy": "Always"},
+        )
+    )
+    cluster.adapt(minimum=1, maximum=256)
+    logger.info("Started the Kubernetes cluster")
+    logger.info("Kubernetes scheduler address: %s", cluster.scheduler_address)
+    return cluster
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
 
@@ -315,44 +364,8 @@ def main():
     target = system_config.current_target()
 
     if args.deploy_k8s:
-        from dask_kubernetes import KubeCluster, make_pod_spec
-
-        current_dir = pathlib.Path(__file__).parent.resolve().parent.parent
-        assert (
-            current_dir / "Dockerfile"
-        ).is_file(), f"{current_dir} does not contain a Dockerfile"
-
         assert args.image_tag
-        tag = f"{args.image_tag}:dep{secrets.token_hex(14)}"
-        logger.info("Building Docker image with tag %s", tag)
-        build_process = subprocess.run(
-            f"docker build --target cpu-only -t {tag} -q .",
-            stdout=subprocess.PIPE,
-            shell=True,
-            cwd=current_dir,
-        )
-        build_process.check_returncode()
-        image_id = build_process.stdout.strip()
-        logger.info("Built image with ID %s", image_id.decode("utf8"))
-
-        logger.info("Pushing Docker image with tag %s", tag)
-        subprocess.run(f"docker push -q {tag}", shell=True, check=True)
-        logger.info("Pushed Docker image with tag %s", tag)
-
-        logger.info("Starting the Kubernetes cluster")
-        cluster = KubeCluster(
-            make_pod_spec(
-                image=tag,
-                memory_limit="6G",
-                memory_request="3G",
-                cpu_limit=1,
-                cpu_request=1,
-                extra_container_config={"imagePullPolicy": "Always"},
-            )
-        )
-        cluster.adapt(minimum=1, maximum=256)
-        logger.info("Started the Kubernetes cluster")
-        logger.info("Kubernetes scheduler address: %s", cluster.scheduler_address)
+        cluster = _deploy_k8s_cluster(args.image_tag)
     else:
         cluster = dask.distributed.LocalCluster(threads_per_worker=1)
 
@@ -367,8 +380,8 @@ def main():
             # TODO: Checkpoint each of the following stages
             futures = []
             spec0 = specs.Load(
-                source=target.tensor_spec((512, 512), dtype=dt),
-                destination=target.tensor_spec((512, 512), dtype=dt),
+                source=target.tensor_spec((args.size, args.size), dtype=dt),
+                destination=target.tensor_spec((args.size, args.size), dtype=dt),
                 serial_only=False,
             )
             futures.append(
@@ -376,8 +389,8 @@ def main():
             )
 
             spec1 = specs.Store(
-                source=target.tensor_spec((512, 512), dtype=dt),
-                destination=target.tensor_spec((512, 512), dtype=dt),
+                source=target.tensor_spec((args.size, args.size), dtype=dt),
+                destination=target.tensor_spec((args.size, args.size), dtype=dt),
                 serial_only=False,
             )
             futures.append(
@@ -390,32 +403,33 @@ def main():
             )
 
             spec2 = specs.Zero(
-                destination=target.tensor_spec((512, 512), dtype=dt),
+                destination=target.tensor_spec((args.size, args.size), dtype=dt),
                 serial_only=False,
             )
             dt_cache = _compute_all(
                 dask_client, spec2, top_limits=limits, cache=dt_cache
             )
 
-            spec3 = specs.MatmulAccum(
-                lhs=target.tensor_spec((512, 512), dtype=dt),
-                rhs=target.tensor_spec((512, 512), dtype=dt),
-                output=target.tensor_spec((512, 512), dtype=dt),
-                serial_only=False,
-            )
-            dt_cache = _compute_all(
-                dask_client, spec3, top_limits=limits, cache=dt_cache
-            )
+            if not args.moves_only:
+                spec3 = specs.MatmulAccum(
+                    lhs=target.tensor_spec((args.size, args.size), dtype=dt),
+                    rhs=target.tensor_spec((args.size, args.size), dtype=dt),
+                    output=target.tensor_spec((args.size, args.size), dtype=dt),
+                    serial_only=False,
+                )
+                dt_cache = _compute_all(
+                    dask_client, spec3, top_limits=limits, cache=dt_cache
+                )
 
-            spec4 = specs.Matmul(
-                lhs=target.tensor_spec((512, 512), dtype=dt),
-                rhs=target.tensor_spec((512, 512), dtype=dt),
-                output=target.tensor_spec((512, 512), dtype=dt),
-                serial_only=False,
-            )
-            dt_cache = _compute_all(
-                dask_client, spec4, top_limits=limits, cache=dt_cache
-            )
+                spec4 = specs.Matmul(
+                    lhs=target.tensor_spec((args.size, args.size), dtype=dt),
+                    rhs=target.tensor_spec((args.size, args.size), dtype=dt),
+                    output=target.tensor_spec((args.size, args.size), dtype=dt),
+                    serial_only=False,
+                )
+                dt_cache = _compute_all(
+                    dask_client, spec4, top_limits=limits, cache=dt_cache
+                )
 
             per_dt_caches.append(dt_cache)
 
