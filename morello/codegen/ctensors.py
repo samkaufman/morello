@@ -8,10 +8,11 @@ from ..dtypes import Dtype, Uint32, Uint8
 from . import common, expr_utils
 from .indexexpr import vsub
 
-GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str, str]] = {
-    # TODO: Fix _BROADCAST_VEC_MULT_WIDTH
-    (Uint32, 8): (32, "vui8", "__m256i"),
-    (Uint8, 32): (32, "vub32", "__m256i"),
+GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str, str, str]] = {
+    (Uint32, 8): (32, "vui8", "__m256i", "si256"),
+    (Uint32, 4): (16, "vui4", "__m128i", "si128"),
+    (Uint8, 32): (32, "vub32", "__m256i", "si256"),
+    (Uint8, 16): (16, "vub16", "__m128i", "si128"),
 }
 
 ONES_FOR_NON_ZERO_INIT: contextvars.ContextVar[bool] = contextvars.ContextVar(
