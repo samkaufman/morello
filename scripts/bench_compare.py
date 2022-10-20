@@ -3,20 +3,27 @@
 import argparse
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import datetime
-import functools
 import itertools
 import logging
 import mimetypes
 import multiprocessing
+import multiprocessing.pool
 import os
 import pathlib
+import queue
 import random
 import re
 import runpy
+import shutil
+import signal
+import subprocess
 import tempfile
+import threading
 import time
+import warnings
 from glob import glob
 from typing import Any, Callable, Iterable, Optional, Sequence, Union
 
@@ -56,11 +63,11 @@ from morello import (
 )
 from morello.benchmarks.toy_cnn import halide as toyhl
 
-RUNS = 100
 SAMPLE_CNT = 100
 DTYPE = dtypes.Uint32
 TORCH_DTYPE_NP = np.int32  # Signed version of DTYPE
 TORCH_DTYPE = torch.int32
+PERF_TERMINATE_TIMEOUT = 60.0  # 1 min.
 
 RELAY_VERSION_RE = re.compile(r'^\s*#\[version = "[\d\.]+"\]\s*$')
 
@@ -70,6 +77,15 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--ignore-environment", action="store_true")
 parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=pathlib.Path, default=None)
+parser.add_argument(
+    "--trials",
+    type=int,
+    default=10,
+    help=(
+        "The number of times to measure each benchmark. (Each measurement is "
+        "a loop of individual executions which will be averaged.)"
+    ),
+)
 parser.add_argument("--no-save-cache", action="store_false", dest="save_cache")
 parser.add_argument("--backend", type=str, nargs="+", default=None)
 parser.add_argument("--log-to-sheet", type=str, default=None)
@@ -122,6 +138,76 @@ def _to_torch(arr: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(arr)
 
 
+@contextlib.contextmanager
+def _perf_events(output_dir: pathlib.Path, pid=None, tid=None):
+    assert not (pid and tid)
+    assert pid or tid
+
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    bin_path = shutil.which("perf")
+    if not bin_path:
+        warnings.warn("perf not found in PATH; will not profile")
+        yield
+        return
+
+    data_path = output_dir / "perf.data"
+    text_path = output_dir / "perf.txt"
+
+    if pid:
+        pid_tid_part = ["-p", str(pid)]
+    else:
+        pid_tid_part = ["-t", str(tid)]
+
+    perf_record_cmd = [
+        str(bin_path),
+        "record",
+        # "--call-graph", "dwarf",
+        "--freq=1000",
+        "-e",
+        "cpu-cycles,cache-misses,l2_fill_pending.l2_fill_busy",
+        "--inherit",
+        "-g",
+        "-o",
+        str(data_path),
+    ] + pid_tid_part
+    print("perf record cmd:")
+    print(" ".join(perf_record_cmd))
+    with subprocess.Popen(
+        perf_record_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as p:
+        yield
+        p.send_signal(signal.SIGINT)
+        try:
+            _, stderr = p.communicate(timeout=PERF_TERMINATE_TIMEOUT)
+            print("perf stderr:")
+            print(stderr.decode("utf-8"))
+        except TimeoutError:
+            pass
+        else:
+            if stderr:
+                logger.warning("perf stderr: %s", stderr.decode("utf8"))
+    if p.returncode not in (0, -signal.SIGINT):
+        logger.error("perf exited with error code %d", p.returncode)
+        return
+
+    with text_path.open("w") as f:
+        try:
+            subprocess.run(
+                [bin_path, "script", "-i", data_path],
+                check=True,
+                stderr=subprocess.PIPE,
+                stdout=f,
+            )
+        except subprocess.CalledProcessError as e:
+            logger.error("perf script failed; continuing anyway")
+            if e.stderr:
+                logger.error("stderr from perf script: %s", e.stderr.decode("utf8"))
+
+
 class Benchmark:
     @property
     def spec(self) -> specs.Spec:
@@ -133,17 +219,22 @@ class Benchmark:
         save_cache: bool,
         extras_dir: pathlib.Path,
     ) -> Iterable[tuple[str, Callable[[], "BenchmarkBackend"]]]:
-        yield "numpy", self._numpy_backend
-        yield "torch", self._torch_backend
-        yield "torchscript", lambda: TorchScriptBackend(self._torch_backend())
-        yield "relay", lambda: RelayBackend(
-            TorchScriptBackend(self._torch_backend()), extras_dir / "relay"
+
+        np_backend = lambda: self._numpy_backend(extras_dir / "numpy")
+        torch_backend = lambda: self._torch_backend(extras_dir / "torch")
+        torchscript_backend = lambda: TorchScriptBackend(
+            torch_backend(), extras_dir / "torchscript"
         )
+
+        yield "numpy", np_backend
+        yield "torch", torch_backend
+        yield "torchscript", torchscript_backend
+        yield "relay", lambda: RelayBackend(torchscript_backend(), extras_dir / "relay")
         yield "tvmautoscheduler", lambda: TVMAutoschedulerBackend(
-            TorchScriptBackend(self._torch_backend()), extras_dir / "tvmautoscheduler"
+            torchscript_backend(), extras_dir / "tvmautoscheduler"
         )
-        yield "jax", self._jax_backend
-        yield "halide", self._halide_backend
+        yield "jax", lambda: self._jax_backend(extras_dir / "jax")
+        yield "halide", lambda: self._halide_backend(extras_dir / "halide")
         yield "morello", lambda: MorelloBackend(
             self, cache, save_cache, extras_dir / "morello"
         )
@@ -158,21 +249,27 @@ class Benchmark:
     def short_name(self) -> str:
         raise NotImplementedError(f"Not implemented for {type(self).__name__}")
 
-    def _numpy_backend(self) -> "BenchmarkBackend":
+    def _numpy_backend(self, extras_dir) -> "BenchmarkBackend":
         raise NotImplementedError()
 
-    def _torch_backend(self) -> "BenchmarkBackend":
+    def _torch_backend(self, extras_dir) -> "BenchmarkBackend":
         raise NotImplementedError()
 
-    def _jax_backend(self) -> "BenchmarkBackend":
+    def _jax_backend(self, extras_dir) -> "BenchmarkBackend":
         raise NotImplementedError()
 
-    def _halide_backend(self) -> "BenchmarkBackend":
+    def _halide_backend(self, extras_dir) -> "BenchmarkBackend":
         raise NotImplementedError()
 
 
 class BenchmarkBackend:
-    def run(self) -> list[float]:
+    extras_dir: pathlib.Path
+
+    def __init__(self, extras_dir: pathlib.Path) -> None:
+        self.extras_dir = extras_dir
+        extras_dir.mkdir(parents=True, exist_ok=True)
+
+    def run(self, trials: int) -> list[float]:
         raise NotImplementedError()
 
 
@@ -184,20 +281,21 @@ class MorelloBackend(BenchmarkBackend):
         save_cache: bool,
         extras_dir: pathlib.Path,
     ):
+        super().__init__(extras_dir)
         self.benchmark = benchmark
         self.cache_path = cache
         self.save_cache = save_cache
-        self.extras_dir = extras_dir
-        extras_dir.mkdir(parents=True, exist_ok=True)
 
-    def run(self) -> list[float]:
+    def run(self, trials: int) -> list[float]:
         spec = self.benchmark.spec
         with search_cache.persistent_cache(
             self.cache_path, save=self.save_cache
         ) as cache:
             impl = search.schedule_search(spec, cache=cache)[0]
-        assert impl is not None
-        runtime_samples, impl_str, source_code = _benchmark(impl)
+        assert impl
+
+        runtime_samples, impl_str, source_code = _benchmark(impl, trials)
+
         assert runtime_samples
         with (self.extras_dir / "impl.txt").open("w") as fo:
             fo.write(impl_str)
@@ -213,6 +311,16 @@ class MorelloBackend(BenchmarkBackend):
 
 
 class LoopingBaseline(BenchmarkBackend):
+    """A base class for benchmarks which execute a Python codelet in a loop."""
+
+    @property
+    def _should_run_rt(self) -> bool:
+        return True
+
+    @property
+    def _use_subprocess(self) -> bool:
+        return False
+
     @property
     def codelet(self) -> str:
         raise NotImplementedError()
@@ -221,7 +329,79 @@ class LoopingBaseline(BenchmarkBackend):
     def data_deps(self) -> Sequence[tuple[str, Any]]:
         raise NotImplementedError()
 
-    def run(self) -> list[float]:
+    def run(self, trials: int) -> list[float]:
+        # TODO: Pull building out of the profiled loop
+        self._run_with_profiler(
+            1, lambda **k: _perf_events(self.extras_dir / "perf", **k)
+        )
+        return self._run_with_profiler(trials, lambda **_: contextlib.nullcontext())
+
+    def _run_with_profiler(self, *args, **kwargs) -> list[float]:
+        if self._use_subprocess:
+            return self._run_with_profiler_process(*args, **kwargs)
+        return self._run_with_profiler_thread(*args, **kwargs)
+
+    def _run_with_profiler_process(self, trials: int, perf_ctx) -> list[float]:
+        mp_ctx = multiprocessing.get_context("fork")
+        go_q, r_q = mp_ctx.Queue(), mp_ctx.Queue()
+        child_process = mp_ctx.Process(
+            target=self._subproc_wrapper, args=(go_q, r_q, None, trials), daemon=True
+        )
+        child_process.start()
+        r_q.get()  # Drop the returned thread ID.
+        with perf_ctx(pid=child_process.pid):
+            go_q.put("go")
+            success, result = r_q.get()
+            child_process.join()
+            if not success:
+                raise result
+        assert result is not None
+        return result
+
+    def _run_with_profiler_thread(self, trials: int, perf_ctx) -> list[float]:
+        go_q, r_q = queue.Queue(), queue.Queue()
+
+        c = contextvars.copy_context()
+        child_thread = threading.Thread(
+            target=c.run,
+            args=(self._subproc_wrapper, go_q, r_q, trials),
+            daemon=True,
+            name=f"ProfTh{type(self).__name__}",
+        )
+        child_thread.start()
+        tid = r_q.get()
+        with perf_ctx(tid=tid):
+            go_q.put("go")
+            success, result = r_q.get()
+            child_thread.join()
+            if not success:
+                raise result
+        assert result is not None
+        return result
+
+    def _subproc_wrapper(self, go_q, result_queue, *args, **kwargs):
+        """Calls `_subproc_run`, controlled by and reporting to given queues.
+
+        If `self._should_run_rt`, this will set current process to real-time
+        priority immediately.
+
+        Meant to be called either in a subprocess or thread.
+        """
+        try:
+            result_queue.put(threading.get_native_id())
+            if self._should_run_rt:
+                # Set own priority to realtime (99)
+                max_param = os.sched_param(os.sched_get_priority_max(os.SCHED_FIFO))
+                os.sched_setscheduler(0, os.SCHED_FIFO, max_param)  # type: ignore
+            msg = go_q.get()
+            assert msg == "go"
+            result = self._subproc_run(*args, **kwargs)
+        except Exception as e:
+            result_queue.put((False, e))
+        else:
+            result_queue.put((True, result))
+
+    def _subproc_run(self, trials) -> list[float]:
         benchmark_code = f"""
 global inner_benchmark
 
@@ -234,16 +414,18 @@ def inner_benchmark(self, {', '.join([n for n, _ in self.data_deps])}):
     end = time.monotonic()
     return (end - start) / codegen.gen.BENCH_ITERS
         """
-
         exec(benchmark_code)
+
         runs = []
-        for _ in range(RUNS):
+        for _ in range(trials):
             runs.append(inner_benchmark(self, *[v for _, v in self.data_deps]))  # type: ignore
         return runs
 
 
 class BaseJAXBackend(LoopingBaseline):
-    def __init__(self, benchmark: Benchmark, print_graphs=True) -> None:
+    def __init__(self, benchmark: Benchmark, extras_dir, print_graphs=True) -> None:
+        super().__init__(extras_dir)
+
         self.benchmark = benchmark
         self.jitted_fn = jax.jit(self.make_jax_func())
         self.set_inputs()
@@ -260,21 +442,26 @@ class BaseJAXBackend(LoopingBaseline):
                 )[1]
             )
 
+    @property
+    def _should_run_rt(self) -> bool:
+        return False
+
     def make_jax_func(self):
         raise NotImplementedError()
 
     def set_inputs(self):
         raise NotImplementedError()
 
-    def run(self) -> list[float]:
+    def run(self, trials: int) -> list[float]:
         if not self.benchmark.serial_only:
-            return super().run()
+            return super().run(trials)
         with _affinity_ctx(1):
-            return super().run()
+            return super().run(trials)
 
     @property
     def codelet(self) -> str:
-        return f"self.jitted_fn({', '.join(n for n, _ in self.data_deps)}).block_until_ready()"
+        dep_part = ", ".join(n for n, _ in self.data_deps)
+        return f"self.jitted_fn({dep_part}).block_until_ready()"
 
 
 @dataclasses.dataclass
@@ -307,23 +494,23 @@ class MatmulBenchmark(Benchmark):
     def short_name(self) -> str:
         return "matmul"
 
-    def _numpy_backend(self) -> "BenchmarkBackend":
-        return MatmulNumpy(self)
+    def _numpy_backend(self, extras_dir) -> "BenchmarkBackend":
+        return MatmulNumpy(self, extras_dir)
 
-    def _torch_backend(self) -> "BenchmarkBackend":
-        return MatmulTorch(self)
+    def _torch_backend(self, extras_dir) -> "BenchmarkBackend":
+        return MatmulTorch(self, extras_dir)
 
-    def _jax_backend(self) -> "BenchmarkBackend":
-        return MatmulJAX(self)
+    def _jax_backend(self, extras_dir) -> "BenchmarkBackend":
+        return MatmulJAX(self, extras_dir)
 
-    def _halide_backend(self) -> "BenchmarkBackend":
-        return MatmulHalide(self)
+    def _halide_backend(self, extras_dir) -> "BenchmarkBackend":
+        return MatmulHalide(self, extras_dir)
 
 
 class MatmulNumpy(LoopingBaseline):
-    def __init__(self, benchmark: MatmulBenchmark) -> None:
+    def __init__(self, benchmark: MatmulBenchmark, extras_dir) -> None:
+        super().__init__(extras_dir)
         self.benchmark = benchmark
-
         spec = self.benchmark.spec
         (m, n), k = spec.output.dim_sizes, spec.lhs.dim_sizes[1]
         self.lhs = np.arange(m * k, dtype=DTYPE.np_type).reshape((m, k))
@@ -360,7 +547,7 @@ class MatmulJAX(BaseJAXBackend):
 
 
 class BaseTorchBackend(LoopingBaseline):
-    def run(self) -> list[float]:
+    def run(self, trials: int) -> list[float]:
         # TODO: Save to file
         termcolor.cprint("PyTorch Configuration:", attrs=["bold"])
         print(torch.__config__.show())
@@ -368,7 +555,7 @@ class BaseTorchBackend(LoopingBaseline):
         orig_intraop_threads = torch.get_num_threads()
         torch.set_num_threads(self.expected_threads())
         try:
-            return super().run()
+            return super().run(trials)
         finally:
             torch.set_num_threads(orig_intraop_threads)
 
@@ -379,7 +566,8 @@ class BaseTorchBackend(LoopingBaseline):
 
 
 class MatmulTorch(BaseTorchBackend):
-    def __init__(self, benchmark: MatmulBenchmark) -> None:
+    def __init__(self, benchmark: MatmulBenchmark, extras_dir) -> None:
+        super().__init__(extras_dir)
         self.benchmark = benchmark
         numpy_backend = MatmulNumpy(benchmark)
         self.lhs = _to_torch(numpy_backend.lhs)
@@ -395,7 +583,10 @@ class MatmulTorch(BaseTorchBackend):
 
 
 class TorchScriptBackend(BaseTorchBackend):
-    def __init__(self, torch_backend: BenchmarkBackend, print_graphs=True, trace=True):
+    def __init__(
+        self, torch_backend: BenchmarkBackend, extras_dir, print_graphs=True, trace=True
+    ):
+        super().__init__(extras_dir)
         self.torch_backend = torch_backend
         self.print_graphs = print_graphs
         self._jitted_fn = None
@@ -446,8 +637,8 @@ def jitted({', '.join([n for n, _ in self.torch_backend.data_deps])}):
     def codelet(self) -> str:
         return f"torch.jit.wait(torch.jit.fork(self.jitted_fn, {', '.join([n for n, _ in self.data_deps])}))"
 
-    def run(self) -> list[float]:
-        result = super().run()
+    def run(self, trials: int) -> list[float]:
+        result = super().run(trials)
         if self.print_graphs:
             print("")
             termcolor.cprint("Torch:", attrs=["bold"])
@@ -540,6 +731,8 @@ class RelayBackend(_RelayBase):
             fo.write(tvm_mod_text)
         with (extras_dir / "tvm_source.txt").open("w") as fo:
             fo.write(tvm_lib.get_lib().get_source())
+        cc = os.getenv("CXX")
+        tvm_lib.export_library(str(extras_dir / "network.so"), cc=cc)
 
         return tvm_lib, relay_mod, relay_params
 
@@ -627,23 +820,23 @@ class GEMM3Benchmark(Benchmark):
     def short_name(self) -> str:
         return "gemm3"
 
-    def _numpy_backend(self) -> "BenchmarkBackend":
-        return GEMM3Numpy(self)
+    def _numpy_backend(self, extras_dir) -> "BenchmarkBackend":
+        return GEMM3Numpy(self, extras_dir)
 
-    def _jax_backend(self) -> "BenchmarkBackend":
-        return GEMM3JAX(self)
+    def _jax_backend(self, extras_dir) -> "BenchmarkBackend":
+        return GEMM3JAX(self, extras_dir)
 
-    def _torch_backend(self) -> "BenchmarkBackend":
-        return GEMM3Torch(self)
+    def _torch_backend(self, extras_dir) -> "BenchmarkBackend":
+        return GEMM3Torch(self, extras_dir)
 
-    def _halide_backend(self) -> "BenchmarkBackend":
-        return GEMM3Halide(self)
+    def _halide_backend(self, extras_dir) -> "BenchmarkBackend":
+        return GEMM3Halide(self, extras_dir)
 
 
 class GEMM3Numpy(LoopingBaseline):
-    def __init__(self, benchmark: GEMM3Benchmark) -> None:
+    def __init__(self, benchmark: GEMM3Benchmark, extras_dir) -> None:
+        super().__init__(extras_dir)
         self.benchmark = benchmark
-
         m = self.benchmark.size
         self.a = np.arange(m * m, dtype=DTYPE.np_type).reshape((m, m))
         self.b = np.arange(m * m, dtype=DTYPE.np_type).reshape((m, m))
@@ -681,7 +874,8 @@ class GEMM3JAX(BaseJAXBackend):
 
 
 class GEMM3Torch(BaseTorchBackend):
-    def __init__(self, benchmark: GEMM3Benchmark) -> None:
+    def __init__(self, benchmark: GEMM3Benchmark, extras_dir) -> None:
+        super().__init__(extras_dir)
         self.benchmark = benchmark
         numpy_backend = GEMM3Numpy(benchmark)
         self.a = _to_torch(numpy_backend.a)
@@ -732,18 +926,20 @@ class ConvBenchmark(Benchmark):
     def short_name(self) -> str:
         return "conv"
 
-    def _numpy_backend(self) -> "BenchmarkBackend":
-        return ConvNumpy(self)
+    def _numpy_backend(self, extras_dir) -> "BenchmarkBackend":
+        return ConvNumpy(self, extras_dir)
 
-    def _torch_backend(self) -> "BenchmarkBackend":
-        return ConvTorch(self)
+    def _torch_backend(self, extras_dir) -> "BenchmarkBackend":
+        return ConvTorch(self, extras_dir)
 
-    def _jax_backend(self) -> "BenchmarkBackend":
-        return ConvJAX(self)
+    def _jax_backend(self, extras_dir) -> "BenchmarkBackend":
+        return ConvJAX(self, extras_dir)
 
 
 class ConvNumpy(LoopingBaseline):
-    def __init__(self, benchmark: ConvBenchmark) -> None:
+    def __init__(self, benchmark: ConvBenchmark, extras_dir) -> None:
+        super().__init__(extras_dir)
+
         self.benchmark = benchmark
 
         spec = benchmark.spec
@@ -774,9 +970,9 @@ class ConvNumpy(LoopingBaseline):
 
 
 class ConvTorch(BaseTorchBackend):
-    def __init__(self, benchmark: ConvBenchmark) -> None:
+    def __init__(self, benchmark: ConvBenchmark, extras_dir) -> None:
         self.benchmark = benchmark
-        numpy_backend = ConvNumpy(benchmark)
+        numpy_backend = ConvNumpy(benchmark, extras_dir / "torch")
         self.img = _to_torch(numpy_backend.img)
         self.filters = _to_torch(numpy_backend.filters)
 
@@ -856,14 +1052,14 @@ class CNNBenchmark(Benchmark):
     def short_name(self) -> str:
         return "cnn"
 
-    def _torch_backend(self) -> "BenchmarkBackend":
-        return CNNTorch(self)
+    def _torch_backend(self, extras_dir) -> "BenchmarkBackend":
+        return CNNTorch(self, extras_dir)
 
-    def _jax_backend(self) -> "BenchmarkBackend":
-        return CNNJAX(self)
+    def _jax_backend(self, extras_dir) -> "BenchmarkBackend":
+        return CNNJAX(self, extras_dir)
 
-    def _halide_backend(self) -> "BencharkBackend":
-        return CNNHalide(self)
+    def _halide_backend(self, extras_dir) -> "BenchmarkBackend":
+        return CNNHalide(self, extras_dir)
 
 
 @dataclasses.dataclass
@@ -1003,7 +1199,8 @@ class RelayCNNNCHWcBackend(LoopingBaseline):
 
 
 class CNNTorch(BaseTorchBackend):
-    def __init__(self, benchmark: CNNBenchmark) -> None:
+    def __init__(self, benchmark: CNNBenchmark, extras_dir) -> None:
+        super().__init__(extras_dir)
         self.benchmark = benchmark
         self.img, self.filters_a, self.filters_b = map(
             _to_torch, _make_np_cnn_inputs(self.benchmark.spec)
@@ -1041,7 +1238,9 @@ class CNNJAX(BaseJAXBackend):
 
 
 class BaseHalideBackend(LoopingBaseline):
-    def __init__(self, benchmark: Benchmark, print_graphs=True):
+    def __init__(self, benchmark: Benchmark, extras_dir, print_graphs=True):
+        super().__init__(extras_dir)
+
         self.benchmark = benchmark
 
         fn = self._make_pipeline()
@@ -1134,17 +1333,17 @@ def _make_np_cnn_inputs(spec):
     return img, filters_a, filters_b
 
 
-def _benchmark(impl):
+def _benchmark(impl, trials: int):
     assert impl.is_scheduled
 
     loop = asyncio.new_event_loop()
-    artifact = asyncio.run(system_config.current_target().build_impl(impl))
+    artifact = loop.run_until_complete(system_config.current_target().build_impl(impl))
 
     assert hasattr(artifact, "source_code")
     source = artifact.source_code  # type: ignore
 
     runtime_samples = []
-    for _ in range(RUNS):
+    for _ in range(trials):
         secs = loop.run_until_complete(artifact.measure_time())
         logger.info(f"Sample runtime result {secs}s:")
         runtime_samples.append(secs)
@@ -1297,7 +1496,7 @@ def main():
     # Disable sliding windows, since we can't use them with codegen yet.
     morello.impl.allow_sliding_windows.set(False)
 
-    start_time = str(datetime.datetime.now())
+    start_time = datetime.datetime.now()
     if args.hostname:
         hostname = args.hostname
     else:
@@ -1313,7 +1512,8 @@ def main():
                 print("Beginning", str(benchmark))
                 work_dir_backend = (
                     pathlib.Path(tdir)
-                    / f"{start_time}-{hostname}-{benchmark.short_name}-{random.randint(0, 9999)}"
+                    / start_time.strftime("%Y-%m-%d_%H:%M:%S")
+                    / f"{hostname}-{benchmark.short_name}-{random.randint(0, 9999)}"
                 )
                 work_dir_backend.mkdir(parents=True, exist_ok=False)
                 for short_name, backend_constructor in benchmark.backends(
@@ -1325,7 +1525,7 @@ def main():
                     print(f"Running {short_name}")
                     try:
                         backend = backend_constructor()
-                        runtime_samples = backend.run()
+                        runtime_samples = backend.run(args.trials)
                         assert isinstance(runtime_samples, list)
                         runtime_secs = min(runtime_samples)
                     except NotImplementedError:
@@ -1342,7 +1542,7 @@ def main():
                     if args.log_to_sheet:
                         sheet.append_row(
                             [
-                                start_time,
+                                str(start_time),
                                 hostname,
                                 benchmark.short_name,
                                 benchmark.size,
