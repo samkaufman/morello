@@ -46,14 +46,19 @@ parser.add_argument(
 )
 parser.add_argument("--print-code", action="store_true")
 parser.add_argument("--save-code", type=pathlib.Path)
+parser.add_argument("--serial", action="store_true", help="Don't emit parallel loops")
 subparsers = parser.add_subparsers(dest="spec")
 
-parser_matmul = subparsers.add_parser("matmul", help="Impl a matrix multiplication")
+parser_matmul = subparsers.add_parser("matmul", help="Schedule a matrix multiplication")
 parser_matmul.add_argument("m", type=int)
 parser_matmul.add_argument("k", type=int)
 parser_matmul.add_argument("n", type=int)
 
-parser_conv = subparsers.add_parser("conv", help="Impl a convolution")
+parser_zero = subparsers.add_parser("zero", help="Schedule a memory zeroing op.")
+parser_zero.add_argument("m", type=int)
+parser_zero.add_argument("n", type=int)
+
+parser_conv = subparsers.add_parser("conv", help="Schedule a convolution")
 parser_conv.add_argument("batch_size", type=int)
 parser_conv.add_argument("image_width", type=int)
 parser_conv.add_argument("image_height", type=int)
@@ -62,21 +67,35 @@ parser_conv.add_argument("filter_height", type=int)
 parser_conv.add_argument("filter_count", type=int)
 
 parser_convnet = subparsers.add_parser(
-    "convnet", help="Impl a Conv-Reduce-Conv pipeline"
+    "convnet", help="Schedule a Conv-Reduce-Conv pipeline"
 )
 
-parser_gemm3 = subparsers.add_parser("gemm3", help="Impl a GEMM3")
+parser_gemm3 = subparsers.add_parser("gemm3", help="Schedule a GEMM3")
 parser_gemm3.add_argument("matrix_size", type=int)
 
 
-def _matmul_main(m, k, n, top_k: int, cache: search_cache.ScheduleCache):
+def _zero_main(
+    m: int, n: int, serial: bool, top_k: int, cache: search_cache.ScheduleCache
+):
+    target = system_config.current_target()
+    single = target.tensor(target.tensor_spec((m, n), dtype=DTYPE), name="single")
+    start = time.time()
+    s = schedule_search(
+        specs.Zero(single.spec, serial_only=serial),
+        top_k=top_k,
+        cache=cache,
+    )
+    return s, (time.time() - start)
+
+
+def _matmul_main(m, k, n, serial: bool, top_k: int, cache: search_cache.ScheduleCache):
     target = system_config.current_target()
     left = target.tensor(target.tensor_spec((m, k), dtype=DTYPE), name="left")
     right = target.tensor(target.tensor_spec((k, n), dtype=DTYPE), name="right")
     output = target.tensor(target.tensor_spec((m, n), dtype=DTYPE), name="output")
     start = time.time()
     s = schedule_search(
-        specs.Matmul(left.spec, right.spec, output.spec, serial_only=False),
+        specs.Matmul(left.spec, right.spec, output.spec, serial_only=serial),
         top_k=top_k,
         cache=cache,
     )
@@ -90,6 +109,7 @@ def _conv_main(
     filter_width,
     filter_height,
     filter_count,
+    serial: bool,
     top_k: int,
     cache: search_cache.ScheduleCache,
 ) -> tuple[Optional[impl.Impl], float]:
@@ -117,27 +137,27 @@ def _conv_main(
     )
     start = time.time()
     s = schedule_search(
-        specs.Convolution(left.spec, right.spec, output.spec, serial_only=False),
+        specs.Convolution(left.spec, right.spec, output.spec, serial_only=serial),
         top_k=top_k,
         cache=cache,
     )
     return s, (time.time() - start)
 
 
-def _convnet_main(top_k: int, cache: search_cache.ScheduleCache):
+def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCache):
     target = system_config.current_target()
 
-    d = 32
+    d = 128
 
-    img = target.tensor(target.tensor_spec((2, 3, d, d), dtype=DTYPE), name="img")
+    img = target.tensor(target.tensor_spec((32, 4, d, d), dtype=DTYPE), name="img")
     filters_a = target.tensor(
-        target.tensor_spec((16, 3, 5, 5), dtype=DTYPE), name="filters_a"
+        target.tensor_spec((32, 4, 3, 3), dtype=DTYPE), name="filters_a"
     )
     filters_b = target.tensor(
-        target.tensor_spec((16, 16, 5, 5), dtype=DTYPE), name="filters_b"
+        target.tensor_spec((32, 32, 3, 3), dtype=DTYPE), name="filters_b"
     )
     output = target.tensor(
-        target.tensor_spec((2, 16, d - 8, d - 8), dtype=DTYPE), name="output"
+        target.tensor_spec((32, 32, d - 4, d - 4), dtype=DTYPE), name="output"
     )
 
     start = time.time()
@@ -147,7 +167,7 @@ def _convnet_main(top_k: int, cache: search_cache.ScheduleCache):
             (filters_b.spec, img.spec, filters_a.spec),
             output.spec,
             intermediate_dtypes=(DTYPE,),
-            serial_only=False,
+            serial_only=serial,
         ),
         top_k=top_k,
         cache=cache,
@@ -155,7 +175,9 @@ def _convnet_main(top_k: int, cache: search_cache.ScheduleCache):
     return s, (time.time() - start)
 
 
-def _gemm3_main(matrix_size: int, top_k: int, cache: search_cache.ScheduleCache):
+def _gemm3_main(
+    matrix_size: int, serial: bool, top_k: int, cache: search_cache.ScheduleCache
+):
     target = system_config.current_target()
     spec = specs.Compose(
         (specs.Matmul, specs.Matmul),
@@ -207,9 +229,22 @@ def main() -> int:
         with search_cache.persistent_cache(
             parsed_args.cache, save=parsed_args.save_cache
         ) as cache:
-            if parsed_args.spec == "matmul":
+            if parsed_args.spec == "zero":
+                scheds, runtime = _zero_main(
+                    parsed_args.m,
+                    parsed_args.n,
+                    parsed_args.serial,
+                    parsed_args.top,
+                    cache,
+                )
+            elif parsed_args.spec == "matmul":
                 scheds, runtime = _matmul_main(
-                    parsed_args.m, parsed_args.k, parsed_args.n, parsed_args.top, cache
+                    parsed_args.m,
+                    parsed_args.k,
+                    parsed_args.n,
+                    parsed_args.serial,
+                    parsed_args.top,
+                    cache,
                 )
             elif parsed_args.spec == "conv":
                 scheds, runtime = _conv_main(
@@ -219,14 +254,17 @@ def main() -> int:
                     parsed_args.filter_width,
                     parsed_args.filter_height,
                     parsed_args.filter_count,
+                    parsed_args.serial,
                     parsed_args.top,
                     cache,
                 )
             elif parsed_args.spec == "convnet":
-                scheds, runtime = _convnet_main(parsed_args.top, cache)
+                scheds, runtime = _convnet_main(
+                    parsed_args.serial, parsed_args.top, cache
+                )
             elif parsed_args.spec == "gemm3":
                 scheds, runtime = _gemm3_main(
-                    parsed_args.matrix_size, parsed_args.top, cache
+                    parsed_args.matrix_size, parsed_args.serial, parsed_args.top, cache
                 )
             else:
                 raise Exception("Unknown spec argument: " + parsed_args.spec)
