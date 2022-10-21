@@ -6,7 +6,6 @@ import contextlib
 import dataclasses
 import datetime
 import functools
-from glob import glob
 import itertools
 import logging
 import mimetypes
@@ -19,6 +18,7 @@ import runpy
 import tempfile
 import time
 import typing
+from glob import glob
 from typing import Any, Iterable, Optional, Sequence, Union
 
 import gspread
@@ -34,9 +34,9 @@ import termcolor
 import torch
 import torch.nn.functional as F
 import tvm
-import tvm.te
 import tvm.auto_scheduler
 import tvm.contrib.graph_executor
+import tvm.te
 from google.oauth2 import service_account
 from jax import lax
 from jax.tools import jax_to_ir
@@ -45,8 +45,8 @@ from tvm import relay
 import morello.impl.actions
 import morello.impl.base
 from morello import (
-    cost,
     codegen,
+    cost,
     dtypes,
     layouts,
     op_pprint,
@@ -68,6 +68,7 @@ RELAY_VERSION_RE = re.compile(r'^\s*#\[version = "[\d\.]+"\]\s*$')
 logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--ignore-environment", action="store_true")
 parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=pathlib.Path, default=None)
 parser.add_argument("--no-save-cache", action="store_false", dest="save_cache")
@@ -1248,7 +1249,8 @@ def main():
 
     args = parser.parse_args()
 
-    _check_environment()
+    if not args.ignore_environment:
+        _check_environment()
 
     batch_sizes = args.batch
     if not batch_sizes:
