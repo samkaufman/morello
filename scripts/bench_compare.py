@@ -310,7 +310,7 @@ class MorelloBackend(BenchmarkBackend):
         return "morello"
 
 
-class LoopingBaseline(BenchmarkBackend):
+class LoopingBackend(BenchmarkBackend):
     """A base class for benchmarks which execute a Python codelet in a loop."""
 
     @property
@@ -422,7 +422,7 @@ def inner_benchmark(self, {', '.join([n for n, _ in self.data_deps])}):
         return runs
 
 
-class BaseJAXBackend(LoopingBaseline):
+class BaseJAXBackend(LoopingBackend):
     def __init__(self, benchmark: Benchmark, extras_dir, print_graphs=True) -> None:
         super().__init__(extras_dir)
 
@@ -507,7 +507,7 @@ class MatmulBenchmark(Benchmark):
         return MatmulHalide(self, extras_dir)
 
 
-class MatmulNumpy(LoopingBaseline):
+class MatmulNumpy(LoopingBackend):
     def __init__(self, benchmark: MatmulBenchmark, extras_dir) -> None:
         super().__init__(extras_dir)
         self.benchmark = benchmark
@@ -546,7 +546,7 @@ class MatmulJAX(BaseJAXBackend):
         return [("lhs", self.lhs), ("rhs", self.rhs)]
 
 
-class BaseTorchBackend(LoopingBaseline):
+class BaseTorchBackend(LoopingBackend):
     def run(self, trials: int) -> list[float]:
         # TODO: Save to file
         termcolor.cprint("PyTorch Configuration:", attrs=["bold"])
@@ -646,7 +646,7 @@ def jitted({', '.join([n for n, _ in self.torch_backend.data_deps])}):
         return result
 
 
-class _RelayBase(LoopingBaseline):
+class _RelayBase(LoopingBackend):
     tvm_m: tvm.contrib.graph_executor.GraphModule
     relay_mod: tvm.ir.module.IRModule
     relay_params: dict[str, tvm.nd.NDArray]
@@ -833,7 +833,7 @@ class GEMM3Benchmark(Benchmark):
         return GEMM3Halide(self, extras_dir)
 
 
-class GEMM3Numpy(LoopingBaseline):
+class GEMM3Numpy(LoopingBackend):
     def __init__(self, benchmark: GEMM3Benchmark, extras_dir) -> None:
         super().__init__(extras_dir)
         self.benchmark = benchmark
@@ -936,7 +936,7 @@ class ConvBenchmark(Benchmark):
         return ConvJAX(self, extras_dir)
 
 
-class ConvNumpy(LoopingBaseline):
+class ConvNumpy(LoopingBackend):
     def __init__(self, benchmark: ConvBenchmark, extras_dir) -> None:
         super().__init__(extras_dir)
 
@@ -1123,7 +1123,7 @@ class CNNHCHWcBenchmark(CNNBenchmark):
         yield MorelloBackend(self, cache, save_cache, extras_dir)
 
 
-class RelayCNNNCHWcBackend(LoopingBaseline):
+class RelayCNNNCHWcBackend(LoopingBackend):
     def __init__(self, extras_dir: pathlib.Path):
         self.extras_dir = extras_dir
         self.extras_dir.mkdir(parents=True, exist_ok=True)
@@ -1237,7 +1237,7 @@ class CNNJAX(BaseJAXBackend):
         return [("img", self.img), ("fa", self.filters_a), ("fb", self.filters_b)]
 
 
-class BaseHalideBackend(LoopingBaseline):
+class BaseHalideBackend(LoopingBackend):
     def __init__(self, benchmark: Benchmark, extras_dir, print_graphs=True):
         super().__init__(extras_dir)
 
