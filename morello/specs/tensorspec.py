@@ -34,6 +34,7 @@ class TensorSpec:
     aligned: bool
     bank: str
     layout: layouts.Layout
+    vector_shape: Optional[tuple[int, ...]]
 
     def __init__(
         self,
@@ -43,7 +44,10 @@ class TensorSpec:
         aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[layouts.Layout] = None,
+        vector_shape: Optional[tuple[int, ...]] = None,
     ):
+        system = current_system()
+
         self.dim_sizes = dim_sizes
         self.dtype = dtype
         if bank is None:
@@ -56,12 +60,27 @@ class TensorSpec:
             self.layout = layout
         self.contiguous_abs = contiguous_abs
         self.aligned = aligned
+        self.vector_shape = vector_shape
 
         if not len(self.dim_sizes):
             raise ValueError("dim_sizes cannot be empty")
         if all(d == 1 for d in self.dim_sizes):
             if not self.layout.is_row_major:
                 raise ValueError("If all dimensions are 1, layout must be row-major")
+
+        if (self.vector_shape is not None) != system.banks[self.bank].vector_rf:
+            raise ValueError(
+                f"vector_shape must be specified if and only if the bank ({self.bank})"
+                " is a vector register file"
+            )
+        if vector_shape is not None:
+            if len(vector_shape) != len(dim_sizes):
+                raise ValueError("vector_shape must have same rank as dim_sizes")
+            if any(i > o for i, o in zip(vector_shape, dim_sizes)):
+                raise ValueError(
+                    f"vector_shape must be smaller than dim_sizes, but "
+                    f"were {vector_shape} and {dim_sizes}"
+                )
 
         if not self.layout.applies_to_shape(dim_sizes):
             raise ValueError(
@@ -88,6 +107,7 @@ class TensorSpec:
             layout=new_layout,
             contiguous_abs=contiguous_abs,
             aligned=aligned,
+            vector_shape=self.vector_shape,
         )
 
     @property
@@ -109,6 +129,7 @@ class TensorSpec:
     ) -> bool:
         if bank is None:
             bank = self.bank
+
         if isinstance(layout, layouts.HexagonTranspacked):
             if self.dtype != Uint8:
                 return False
@@ -135,6 +156,9 @@ class TensorSpec:
             return False
         if not self.layout.applies_to_shape(shape):
             return False
+        if self.vector_shape:
+            if any(i < v for i, v in zip(shape, self.vector_shape)):
+                return False
         return True
 
     def simple_tile(
@@ -182,6 +206,7 @@ class TensorSpec:
         bank_epi = ""
         c_epi = ""
         a_epi = ""
+        v_epi = ""
         if not self.layout.is_row_major:
             layout_epi = f", {self.layout}"
         if self.bank != current_system().default_bank:
@@ -190,9 +215,10 @@ class TensorSpec:
             c_epi = f", c{self.contiguous_abs}"
         if not self.aligned:
             a_epi = ", ua"
+        if self.vector_shape is not None:
+            v_epi = f", {'×'.join(str(s) for s in self.vector_shape)}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
-        dims_part = "×".join(str(s) for s in self.dim_sizes)
-        return f"({dims_part}, {self.dtype}{bank_epi}{layout_epi}{c_epi}{a_epi})"
+        return f"({dims_part}, {self.dtype}{bank_epi}{layout_epi}{c_epi}{a_epi}{v_epi})"
 
 
 @cython.dataclasses.dataclass(unsafe_hash=True)

@@ -1,3 +1,6 @@
+import functools
+import itertools
+import operator
 from typing import Iterable, Optional, cast
 
 import hypothesis
@@ -53,28 +56,68 @@ def test_dim_range():
         impl.tile_size_mode.reset(token)
 
 
-def test_gen_vector_shapes_1():
+def test_gen_vector_shapes_u8_1():
     assert list(
-        morello.impl.utils.gen_vector_shapes([4, 4], dtypes.Uint8, elements=4 * 4)
+        morello.impl.utils.gen_vector_shapes([4, 4], dtypes.Uint8, vector_bytes=4 * 4)
     ) == [(4, 4)]
 
 
-def test_gen_vector_shapes_2():
+def test_gen_vector_shapes_u8_2():
     assert (
-        list(morello.impl.utils.gen_vector_shapes([8], dtypes.Uint8, elements=16)) == []
+        list(morello.impl.utils.gen_vector_shapes([8], dtypes.Uint8, vector_bytes=16))
+        == []
     )
 
 
-def test_gen_vector_shapes_3():
+def test_gen_vector_shapes_u8_3():
     assert list(
-        morello.impl.utils.gen_vector_shapes([16, 2], dtypes.Uint8, elements=16)
-    ) == [(8, 2), (16, 1),]
+        morello.impl.utils.gen_vector_shapes([16, 2], dtypes.Uint8, vector_bytes=16)
+    ) == [
+        (8, 2),
+        (16, 1),
+    ]
 
 
-def test_gen_vector_shapes_4():
+def test_gen_vector_shapes_u8_4():
     assert list(
-        morello.impl.utils.gen_vector_shapes([16], dtypes.Uint8, elements=16)
+        morello.impl.utils.gen_vector_shapes([16], dtypes.Uint8, vector_bytes=16)
     ) == [(16,)]
+
+
+def test_gen_vector_shapes_u32_1():
+    assert list(
+        morello.impl.utils.gen_vector_shapes([8], dtypes.Uint32, vector_bytes=32)
+    ) == [(8,)]
+
+
+@pytest.mark.parametrize("dt", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
+@hypothesis.given(
+    st.lists(st.integers(min_value=1, max_value=10), min_size=1, max_size=5),
+    st.integers(min_value=1, max_value=1024),
+)
+def test_gen_vector_shapes_yields_strictly_positive_dims(
+    dt: dtypes.Dtype, maxes: list[int], total: int
+):
+    total *= dt.size
+    generated = list(morello.impl.utils.gen_vector_shapes(maxes, dt, total))
+    for idx, v in enumerate(generated):
+        hypothesis.note(f"Vector {idx} of {len(generated)}: {v}")
+        assert all(d > 0 for d in v)
+
+
+@pytest.mark.parametrize("dt", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
+@hypothesis.given(
+    st.lists(st.integers(min_value=1, max_value=10), min_size=1, max_size=5),
+    st.integers(min_value=1, max_value=1024),
+)
+def test_gen_vector_shapes_is_correct(dt: dtypes.Dtype, maxes: list[int], volume: int):
+    # TODO: What about factors of two?
+    vector_bytes = volume * dt.size
+    assert list(morello.impl.utils.gen_vector_shapes(maxes, dt, vector_bytes)) == [
+        shape
+        for shape in itertools.product(*[range(0, m + 1) for m in maxes])
+        if functools.reduce(operator.mul, shape, 1) == volume
+    ]
 
 
 @pytest.mark.skip

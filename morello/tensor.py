@@ -20,6 +20,11 @@ class TensorLike:
 
     @property
     @typing.final
+    def vector_shape(self) -> Optional[tuple[int, ...]]:
+        return self.spec.vector_shape
+
+    @property
+    @typing.final
     def dim_sizes(self) -> tuple[int, ...]:
         return self.spec.dim_sizes
 
@@ -153,6 +158,17 @@ class SqueezingTile(Tile):
         for dim in sorted(self.dropped_dims, reverse=True):
             assert new_dim_sizes[dim] == 1
             del new_dim_sizes[dim]
+        new_dim_sizes = tuple(new_dim_sizes)
+
+        new_vector_shape = None
+        if ispec.vector_shape:
+            new_vector_shape = list(ispec.vector_shape)
+            for dim in sorted(self.dropped_dims, reverse=True):
+                assert (
+                    new_vector_shape[dim] == 1
+                ), f"Cannot drop dimension {dim} of vector shape {ispec.vector_shape}"
+                del new_vector_shape[dim]
+            new_vector_shape = tuple(new_vector_shape)
 
         if all(d == 1 for d in new_dim_sizes):
             new_layout = layouts.row_major(len(new_dim_sizes))
@@ -163,12 +179,13 @@ class SqueezingTile(Tile):
             )
 
         return specs.TensorSpec(
-            dim_sizes=tuple(new_dim_sizes),
+            dim_sizes=new_dim_sizes,
             dtype=ispec.dtype,
             contiguous_abs=new_contig,
             aligned=ispec.aligned,
             bank=ispec.bank,
             layout=new_layout,
+            vector_shape=new_vector_shape,
         )
 
     @property

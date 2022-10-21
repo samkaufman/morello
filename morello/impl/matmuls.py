@@ -21,8 +21,6 @@ from .pruning import (
 from .utils import assert_stable_spec, dim_range, gen_tile_sizes
 from .zero import ZeroHole
 
-_BROADCAST_VEC_MULT_WIDTH = 256 // 8  # bytes
-
 
 @dataclasses.dataclass(frozen=True)
 class MatmulHoleBase(NonAllocatingLeaf, Moveable):
@@ -229,9 +227,13 @@ class BroadcastVecMult(MatmulLeaf):
     def _check_operands(operands: Sequence[specs.TensorSpec]) -> Optional[str]:
         lhs, rhs, out = operands
 
-        # TODO: Maybe model the AVX registers explicitly instead of using RF.
-        if lhs.bank != "RF" or rhs.bank != "RF" or out.bank != "RF":
-            return "BroadcastVecMult only supports RF operands"
+        if lhs.bank != "RF":
+            return "BroadcastVecMult only applies to RF scalar operands"
+        if rhs.bank != "VRF" or out.bank != "VRF":
+            return "BroadcastVecMult only applies to VRF vector operands"
+
+        if rhs.dim_sizes != rhs.vector_shape or out.dim_sizes != out.vector_shape:
+            return "BroadcastVecMult only applies to single vector tiles."
 
         # The Clang vector extensions require the rhs and output to be aligned.
         if not rhs.aligned:
@@ -256,10 +258,6 @@ class BroadcastVecMult(MatmulLeaf):
             return f"rhs should have shape 1xn, but had shape: {rhs.dim_sizes}"
         if out.dim_sizes != (1, rhs.dim_sizes[1]):
             return f"out should have shape 1x{rhs.dim_sizes[1]}, but had shape: {out.dim_sizes}"
-
-        assert _BROADCAST_VEC_MULT_WIDTH % out.dtype.size == 0
-        if out.dim_sizes[1] != _BROADCAST_VEC_MULT_WIDTH // (out.dtype.size):
-            return f"Expects {_BROADCAST_VEC_MULT_WIDTH}-byte operands"
 
         return None
 

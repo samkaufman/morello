@@ -5,7 +5,6 @@ import os
 import pathlib
 import re
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 from typing import Iterable, Optional, Union
@@ -13,7 +12,7 @@ from typing import Iterable, Optional, Union
 from .. import dtypes, layouts, specs
 from ..codegen import gen
 from ..tensor import Tensor
-from .base import MemoryBankConfig, RunResult, SystemDescription, BuiltArtifact, Target
+from .base import BuiltArtifact, MemoryBankConfig, RunResult, SystemDescription, Target
 
 _OUTPUT_RE = re.compile(r"cpu:\s+(\d+)s\s*(\d+)ns")
 
@@ -28,7 +27,7 @@ class CpuTarget(Target):
         return it
 
     def tensor(
-        self, spec: specs.TensorSpec, name: Optional[str] = None, **kwargs,
+        self, spec: specs.TensorSpec, name: Optional[str] = None, **kwargs
     ) -> Tensor:
         if kwargs:
             raise TypeError(f"Unexpected keyword argument(s): {', '.join(kwargs)}")
@@ -42,43 +41,53 @@ class CpuTarget(Target):
         aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[layouts.Layout] = None,
+        vector_shape: Optional[tuple[int, ...]] = None,
         **kwargs,
     ) -> specs.TensorSpec:
         if layout is None:
             layout = layouts.row_major(len(dim_sizes))
         if contiguous_abs is None:
             contiguous_abs = layout.contiguous_top()
-        return specs.TensorSpec(dim_sizes, dtype, contiguous_abs, aligned, bank, layout)
+        return specs.TensorSpec(
+            dim_sizes,
+            dtype,
+            contiguous_abs,
+            aligned,
+            bank,
+            layout,
+            vector_shape,
+            **kwargs,
+        )
 
     @functools.cached_property
     def system(self) -> "SystemDescription":
         return SystemDescription(
             line_size=32,
             banks={
-                # Selecting 4096 because that's a power of two. We normally
-                # overapproximate the peak memory usage of an Impl to the next
-                # power of two.
-                "RF": MemoryBankConfig(cache_hit_cost=0, capacity=4096),
+                "RF": MemoryBankConfig(cache_hit_cost=0, capacity=1024),
+                "VRF": MemoryBankConfig(
+                    cache_hit_cost=0, capacity=1024, vector_bytes=32  # 256-bit YMMs
+                ),
                 "L1": MemoryBankConfig(cache_hit_cost=10, capacity=512 * 1024),
-                "GL": MemoryBankConfig(cache_hit_cost=100, capacity=1024 ** 3),
+                "GL": MemoryBankConfig(cache_hit_cost=100, capacity=1024**3),
             },
             default_bank="GL",
             processors=32,
             has_hvx=False,
             faster_destination_banks=self._faster_destination_banks,
             next_general_bank=self._next_general_bank,
-            ordered_banks=("RF", "L1", "GL"),
-            addressed_banks=frozenset(["RF", "GL"]),
+            ordered_banks=("RF", "VRF", "L1", "GL"),
+            addressed_banks=frozenset(["RF", "VRF", "GL"]),
         )
 
     def _faster_destination_banks(self, source: str) -> set[str]:
         assert isinstance(source, str)
-        if source == "RF":
+        if source in ("RF", "VRF"):
             return set()
         elif source == "GL":
             return {"L1"}
         elif source == "L1":
-            return {"RF"}
+            return {"RF", "VRF"}
         raise ValueError("Unknown source: " + str(source))
 
     def _next_general_bank(self, source: str) -> Optional[str]:

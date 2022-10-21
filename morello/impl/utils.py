@@ -104,31 +104,51 @@ def gen_tile_sizes(
 
 
 def gen_vector_shapes(
-    outer_shape: Sequence[int], dtype: dtypes.Dtype, elements: int = 128
+    outer_shape: Sequence[int], dtype: dtypes.Dtype, vector_bytes: int
 ) -> Iterable[tuple[int, ...]]:
-    for result in _gen_vector_shapes_inner(outer_shape, dtype, elements):
-        velems = functools.reduce(operator.mul, result, 1)
-        assert velems % elements == 0
+    if not outer_shape:
+        raise ValueError("outer_shape must be a non-empty list")
+    if any(d <= 0 for d in outer_shape):
+        raise ValueError("Each outer_shape entry must be 1 or greater")
+    if vector_bytes <= 0:
+        raise ValueError("vector_bytes must be greater than 0")
+    if vector_bytes % dtype.size != 0:
+        raise ValueError(f"vector_bytes must be a multiple of dtype size: {dtype.size}")
+
+    adjusted_vector_bytes = vector_bytes
+    if dtype.size != 1:
+        adjusted_vector_bytes //= dtype.size
+
+    for result in _gen_vector_shapes_inner(outer_shape, adjusted_vector_bytes):
+        assert (
+            functools.reduce(operator.mul, result, 1) * dtype.size == vector_bytes
+        ), f"{result} was not {vector_bytes} vector bytes"
         yield result
 
 
 def _gen_vector_shapes_inner(
-    outer_shape: Sequence[int], dtype: dtypes.Dtype, elements: int
+    outer_shape: Sequence[int], total_elements: int
 ) -> Iterable[tuple[int, ...]]:
-    if dtype.size != 1:
-        return _gen_vector_shapes_inner(
-            outer_shape, dtypes.Uint8, elements=elements // dtype.size
-        )
+    # The following checks overlap a bit with the checks done by gen_vector_shapes,
+    # but are asserts so that -O can elide them.
+    assert outer_shape
+    assert all(d > 0 for d in outer_shape)
 
     if len(outer_shape) == 0:
         raise ValueError("Given shape cannot be empty")
-    elif len(outer_shape) == 1:
-        if outer_shape[0] < elements:
-            return
-        yield (elements,)
+    if total_elements == 0:
+        yield from []
+        return
+
+    if len(outer_shape) == 1:
+        if outer_shape[0] >= total_elements:
+            yield (total_elements,)
     else:
-        for factor in utils.factors(min(outer_shape[0], elements)):
+        for factor in utils.factors(total_elements):
+            if factor > outer_shape[0]:
+                break
+            assert total_elements % factor == 0
             for tail in _gen_vector_shapes_inner(
-                outer_shape[1:], dtype, elements // factor
+                outer_shape[1:], total_elements // factor
             ):
                 yield (factor,) + tail

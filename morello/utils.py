@@ -5,7 +5,7 @@ import warnings
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Sequence, TypeVar
 
-from . import tensor, layouts, system_config
+from . import layouts, system_config, tensor
 
 if TYPE_CHECKING:
     from . import specs
@@ -199,11 +199,13 @@ def _aligned_approx_standard_simple(
     return True
 
 
-def factors(n: int) -> Iterable[int]:
+def factors(n: int) -> list[int]:
     """Returns the factors of an integer, in ascending order.
 
     Implementation taken from https://stackoverflow.com/a/6800214.
     """
+    if n == 0:
+        return []
     return sorted(
         set(
             functools.reduce(
@@ -232,7 +234,13 @@ def next_power_of_two(x: int) -> int:
 
 
 def sum_seqs(maxes: Sequence[int], total: int) -> Iterable[tuple[int, ...]]:
-    """Return non-negative sequences which sum to `total`, bounded by `maxes`."""
+    """Return strictly positive integer tuples which sum to `total`, bounded by `maxes`.
+
+    All returned tuples are the same length as `maxes`.
+
+    This is an enumeration of the compositions of the integer `total` with bounded
+    parts.
+    """
     if len(maxes) == 0:
         return
     elif len(maxes) == 1:

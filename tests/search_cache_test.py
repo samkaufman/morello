@@ -34,52 +34,52 @@ def test_cache_common_scenario(dtype):
     cache.put(
         fast_schedule.spec,
         fast_wrapped_schedule,
-        pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0}),
+        pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
     )
     assert set(cache) == {
         (
             fast_schedule.spec,
             fast_wrapped_schedule,
-            pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0}),
+            pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
         )
     }
     cache.put(
         slow_schedule.spec,
         slow_wrapped_schedule,
-        pruning.StandardMemoryLimits({"RF": 50, "L1": 50, "GL": 0}),
+        pruning.StandardMemoryLimits({"RF": 50, "VRF": 50, "L1": 50, "GL": 0}),
     )
     assert set(cache) == {
         (
             fast_schedule.spec,
             fast_wrapped_schedule,
-            pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0}),
+            pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
         ),
         (
             slow_schedule.spec,
             slow_wrapped_schedule,
-            pruning.StandardMemoryLimits({"RF": 50, "L1": 50, "GL": 0}),
+            pruning.StandardMemoryLimits({"RF": 50, "VRF": 50, "L1": 50, "GL": 0}),
         ),
     }
     cache.put(
         impossible_schedule.spec,
         impossible_wrapped_schedule,
-        pruning.StandardMemoryLimits({"RF": 1, "L1": 1, "GL": 0}),
+        pruning.StandardMemoryLimits({"RF": 1, "VRF": 1, "L1": 1, "GL": 0}),
     )
     assert set(cache) == {
         (
             fast_schedule.spec,
             fast_wrapped_schedule,
-            pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0}),
+            pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
         ),
         (
             slow_schedule.spec,
             slow_wrapped_schedule,
-            pruning.StandardMemoryLimits({"RF": 50, "L1": 50, "GL": 0}),
+            pruning.StandardMemoryLimits({"RF": 50, "VRF": 50, "L1": 50, "GL": 0}),
         ),
         (
             impossible_schedule.spec,
             impossible_wrapped_schedule,
-            pruning.StandardMemoryLimits(({"RF": 1, "L1": 1, "GL": 0})),
+            pruning.StandardMemoryLimits(({"RF": 1, "VRF": 1, "L1": 1, "GL": 0})),
         ),
     }
 
@@ -134,24 +134,24 @@ def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
     cache.put(
         schedule.spec,
         wrapped_schedule,
-        pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0}),
+        pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
     )
     assert set(cache) == {
         (
             schedule.spec,
             wrapped_schedule,
-            pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0}),
+            pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
         )
     }
     cache.put(
         schedule.spec,
         wrapped_schedule,
-        pruning.StandardMemoryLimits({"RF": 101, "L1": 101, "GL": 0}),
+        pruning.StandardMemoryLimits({"RF": 101, "VRF": 101, "L1": 101, "GL": 0}),
     )
     assert set(cache) == {
         (
             schedule.spec,
             wrapped_schedule,
-            pruning.StandardMemoryLimits({"RF": 101, "L1": 101, "GL": 0}),
+            pruning.StandardMemoryLimits({"RF": 101, "VRF": 101, "L1": 101, "GL": 0}),
         )
     }

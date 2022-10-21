@@ -147,3 +147,8 @@ class SystemDescription:
 class MemoryBankConfig:
     cache_hit_cost: int
     capacity: int  # in bytes
+    vector_bytes: Optional[int] = None
+
+    @property
+    def vector_rf(self) -> bool:
+        return self.vector_bytes is not None

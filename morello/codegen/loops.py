@@ -47,9 +47,7 @@ def emit_tile_out_loop_nest(
     namer, writer = common.namer.get(), common.writer.get()
 
     # Generate new names for loop iterators.
-    it_var_names: Optional[defaultdict[int, str]] = None
-    if not common.unroll.get():
-        it_var_names = defaultdict(lambda: namer.fresh_name("t"))
+    it_var_names = defaultdict(lambda: namer.fresh_name("t"))
 
     # Emit loops.
     for loop_plan in _compute_tile_out_loop_nest(
@@ -113,10 +111,31 @@ def _compute_tile_out_loop_nest(
     to be produced, over which subscripts, and in what order. It also produces
     updated indexing expressions for boundary cases.
     """
+    inner_iterable = _compute_rolled_tile_out_loop_nest(
+        all_subscripts,
+        remaining_subscripts,
+        it_var_names,
+        outer_operands,
+        applied_operands,
+        op_details,
+    )
+    # TODO: Only need to unroll loops over vector variables, not all of them.
+    if common.unroll.get():
+        assert it_var_names is not None
+        inner_iterable = _unroll_loop_nest_plans(inner_iterable, it_var_names)
+    yield from inner_iterable
+
+
+def _compute_rolled_tile_out_loop_nest(
+    all_subscripts: set[int],
+    remaining_subscripts: list[int],
+    it_var_names: Optional[Mapping[int, str]],
+    outer_operands: Sequence[TensorLike],
+    applied_operands: Sequence[TensorLike],
+    op_details: Sequence[OperandDetailsLoopExt],
+) -> Iterable[_LoopNestDescription]:
     # The following would be much faster if we sharing prefixes and didn't
     # enumerate combos where boundaries are impossible.
-    if common.unroll.get():
-        raise NotImplementedError()
     assert it_var_names is not None
 
     # Compute steps and drop subscripts that have no full steps.
@@ -209,18 +228,38 @@ def _compute_tile_out_loop_nest(
                             concrete_shapes[op_idx][sidx], new_size
                         )
 
-        # TODO: Remove the following checks
-        # if all(len(a) == 4 for a in concrete_shapes):
-        #     assert concrete_shapes[0][0] == concrete_shapes[2][0]
-        #     assert concrete_shapes[1][0] == concrete_shapes[2][1]
-        #     assert concrete_shapes[0][1] == concrete_shapes[1][1]
-
         yield _LoopNestDescription(
             subscripts_to_loop_over,
             new_index_exprs,
             list(map(tuple, concrete_shapes)),
             is_boundary=any(boundary_config),
         )
+
+
+def _unroll_loop_nest_plans(
+    loop_nests: Iterable[_LoopNestDescription],
+    it_var_names: Mapping[int, str],
+) -> Iterable[_LoopNestDescription]:
+    for original_plan in loop_nests:
+        for tile_idxs in itertools.product(
+            *[range(steps) for _, steps in original_plan.subscripts_to_steps]
+        ):
+            new_body_index_exprs = []
+            for original_body_index_expr in original_plan.body_index_exprs:
+                new_idx_expr = original_body_index_expr
+                for (sub, _), tile_idx in zip(
+                    original_plan.subscripts_to_steps, tile_idxs
+                ):
+                    iterator_var_name = "_" + it_var_names[sub]
+                    new_idx_expr = new_idx_expr.subs(iterator_var_name, tile_idx)
+                new_body_index_exprs.append(new_idx_expr)
+            assert len(new_body_index_exprs) == len(original_plan.body_index_exprs)
+            yield _LoopNestDescription(
+                [],
+                new_body_index_exprs,
+                original_plan.body_shapes,
+                original_plan.is_boundary,
+            )
 
 
 def _calc_steps(

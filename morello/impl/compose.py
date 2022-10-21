@@ -227,7 +227,7 @@ class ComposeHole(Impl):
             head_inps += self.spec.inputs[:hi]
         head_hole = spec_to_hole(
             self.spec.subspec_classes[0].from_io(
-                head_inps, self.spec.output, serial_only=self.spec.serial_only,
+                head_inps, self.spec.output, serial_only=self.spec.serial_only
             )
         )
 

@@ -130,8 +130,6 @@ def _arb_impls_from_actions(draw, partial_impl: morello.impl.base.Impl):
 
     # If we hit a dead end (no actions), and we haven't already returned, then
     # this isn't a viable example
-    if not len(actions):
-        print("No actions for: " + str(partial_impl.spec))
     hypothesis.assume(len(actions))
 
     action_idx = draw(st.integers(min_value=0, max_value=len(actions) - 1))
@@ -458,7 +456,14 @@ def _st_test_index_exprs_full_contiguousness_matches_contiguous_props(draw):
     for _ in range(depth):
         # TODO: Use a more generic strategy for producing any tile callable
         # TODO: Test convolution tiles
-        new_tile_size = tuple(draw(st.integers(1, d)) for d in stack[-1].dim_sizes)
+        lower_bounds = (
+            stack[-1].vector_shape
+            if stack[-1].vector_shape
+            else ((1,) * len(stack[-1].spec.dim_sizes))
+        )
+        new_tile_size = tuple(
+            draw(st.integers(l, d)) for l, d in zip(lower_bounds, stack[-1].dim_sizes)
+        )
 
         hypothesis.assume(stack[-1].dim_sizes != new_tile_size)
         # Avoids the case where simple_tile returns `t` itself.

@@ -11,10 +11,8 @@ dtype_st = st.sampled_from([dtypes.Uint8, dtypes.Uint32])
 
 
 @st.composite
-def dim_st(draw, max_size: Optional[int] = None) -> int:
-    if max_size is None:
-        return draw(st.integers(min_value=1))
-    return draw(st.integers(min_value=1, max_value=max_size))
+def dim_st(draw, min_size: int = 1, max_size: Optional[int] = None) -> int:
+    return draw(st.integers(min_value=min_size, max_value=max_size))
 
 
 @st.composite
@@ -49,7 +47,7 @@ def tensorspec_st(
     dim_sizes: Optional[tuple[int, ...]] = None,
     max_dim_size: Optional[int] = 128,
     min_dims: int = 1,
-    max_dims: Optional[int] = None,
+    max_dims: int = 20,
     dtype: Optional[dtypes.Dtype] = None,
     layout_fn: Optional[Callable[[int], layouts.Layout]] = None,
     contiguous_abs: Optional[Any] = None,
@@ -58,16 +56,45 @@ def tensorspec_st(
 ) -> specs.TensorSpec:
     target = system_config.current_target()
 
-    if not dim_sizes:
-        dim_sizes = draw(
-            st.lists(
-                dim_st(max_size=max_dim_size), min_size=min_dims, max_size=max_dims
-            ).map(tuple)
-        )
-    assert dim_sizes
-
     if not dtype:
         dtype = draw(st.from_type(dtypes.Dtype))
+    if not bank:
+        bank = draw(st.sampled_from(sorted(target.system.banks)))
+    assert dtype is not None and bank is not None
+
+    if dim_sizes:
+        rank = len(dim_sizes)
+    else:
+        rank = draw(st.integers(min_value=min_dims, max_value=max_dims))
+
+    # TODO: Instead of rejecting when vector_shapes is empty, enum. vector shapes
+    vector_shape = None
+    if target.system.banks[bank].vector_rf:
+        vector_value_cnt: int = target.system.banks[bank].vector_bytes // dtype.size
+        outer_shape = dim_sizes if dim_sizes else (max_dim_size,) * rank
+        all_shapes = list(
+            impl.utils.gen_vector_shapes(
+                outer_shape=outer_shape,
+                dtype=dtype,
+                vector_bytes=vector_value_cnt,
+            )
+        )
+        hypothesis.assume(len(all_shapes))
+        vector_shape = draw(st.sampled_from(all_shapes))
+
+    if not dim_sizes:
+        if vector_shape:
+            dim_sizes = tuple(
+                draw(dim_st(min_size=v, max_size=max_dim_size)) for v in vector_shape
+            )
+        else:
+            dim_sizes = draw(
+                st.lists(
+                    dim_st(max_size=max_dim_size), min_size=rank, max_size=rank
+                ).map(tuple)
+            )
+    assert dim_sizes
+    assert all(d > 0 for d in dim_sizes)
 
     if layout_fn is None:
         layout = draw(layout_st(dim_sizes=dim_sizes, dtype=dtype))
@@ -98,11 +125,13 @@ def tensorspec_st(
         else:
             raise NotImplementedError()
 
-    if not bank:
-        bank = draw(st.sampled_from(sorted(target.system.banks)))
-
     return target.tensor_spec(
-        dim_sizes, dtype=dtype, contiguous_abs=contiguous_abs, layout=layout, bank=bank,
+        dim_sizes,
+        dtype=dtype,
+        contiguous_abs=contiguous_abs,
+        layout=layout,
+        bank=bank,
+        vector_shape=vector_shape,
     )
 
 
@@ -269,7 +298,7 @@ def tiling_chain_st(
     chain = [base_tensor]
     for _ in range(chain_len):
         use_conv = draw(st.booleans()) if allow_conv else False
-        tile_shape = _smaller_shape(draw, chain[-1].dim_sizes)
+        tile_shape = _smaller_shape(draw, chain[-1].dim_sizes, chain[-1].vector_shape)
         hypothesis.assume(chain[-1].spec.layout.applies_to_shape(tile_shape))
         if use_conv:
             filter_shape = _smaller_shape(draw, tile_shape[1:])
@@ -279,10 +308,16 @@ def tiling_chain_st(
     return chain
 
 
-def _smaller_shape(draw, outer: Sequence[int]) -> tuple[int, ...]:
+def _smaller_shape(
+    draw, outer: Sequence[int], vector_shape: Optional[Sequence[int]] = None
+) -> tuple[int, ...]:
     tile_shape = []
-    for dim in outer:
-        tile_shape.append(draw(st.integers(min_value=1, max_value=dim)))
+    if vector_shape:
+        for dim, v in zip(outer, vector_shape):
+            tile_shape.append(draw(st.integers(min_value=v, max_value=dim)))
+    else:
+        for dim in outer:
+            tile_shape.append(draw(st.integers(min_value=1, max_value=dim)))
     return tuple(tile_shape)
 
 

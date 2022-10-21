@@ -154,7 +154,12 @@ class ConvAccumHole(ConvHoleBase):
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Impl]]:
         yield from super().actions(parent_summary)
-        if all(d == 1 for d in self.spec.output.dim_sizes[2:]):
+
+        if all(d == 1 for d in self.spec.output.dim_sizes[2:]) and all(
+            all(v == 1 for v in inp.vector_shape)
+            for inp in self.spec.inputs
+            if inp.vector_shape
+        ):
             yield self.spatial_split
 
     def spatial_split(self) -> "Impl":

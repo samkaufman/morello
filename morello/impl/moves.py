@@ -347,10 +347,15 @@ class VectorAssign(NonAllocatingLeaf):
         if lhs.layout != rhs.layout:
             return "Layouts must match, but were: " + str((lhs, rhs))
 
-        # Check that we're moving an AVX2 vector-sized tensor.
-        vol_bytes = functools.reduce(operator.mul, lhs.dim_sizes, 1) * lhs.dtype.size
-        if vol_bytes != 32:
-            return f"Expected operands to be 32 bytes, but were {vol_bytes} bytes"
+        system = current_system()
+        has_vrf = False
+        for o in operands:
+            if system.banks[o.bank].vector_rf:
+                has_vrf = True
+                if o.dim_sizes != o.vector_shape:
+                    return "VectorAssign's vector operand was not a single register"
+        if not has_vrf:
+            return "Neither operand is in a vector register file"
 
         return None
 
@@ -455,9 +460,11 @@ def _move_arguments(
     # includes relayouts in registers and movements from level 1 to RF.
     for layout in allowable_layouts:
         for bank in target.system.faster_destination_banks(operand.bank):
-            # TODO: Hacky check for VMEM.
-            if bank == "VMEM":
-                for vector_shape in gen_vector_shapes(operand.dim_sizes, operand.dtype):
+            vector_bytes: Optional[int] = target.system.banks[bank].vector_bytes
+            if vector_bytes:
+                for vector_shape in gen_vector_shapes(
+                    operand.dim_sizes, operand.dtype, vector_bytes
+                ):
                     yield bank, layout, {"vector_shape": vector_shape}
             else:
                 yield bank, layout, {}

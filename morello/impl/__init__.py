@@ -18,7 +18,13 @@ from .matmuls import (
     MatmulAccumHole,
     Mult,
 )
-from .moves import MoveLet, PadTranspack, ValueAssign, CacheAccess, VectorAssign
+from .moves import (
+    MoveLet,
+    PadTranspack,
+    ValueAssign,
+    CacheAccess,
+    VectorAssign,
+)
 from .pruning import ParentSummary
 from .reducesum import Add, ReduceSumHole, ReduceSumAccumHole
 from .settings import (
@@ -31,7 +37,7 @@ from .settings import (
     tile_size_mode,
 )
 from .utils import ActionOutOfDomain
-from .zero import ZeroHole, MemsetZero
+from .zero import ZeroHole, MemsetZero, VectorZero
 
 __all__ = [
     "ActionOutOfDomain",
@@ -73,5 +79,6 @@ __all__ = [
     "TileSizeMode",
     "ValueAssign",
     "VectorAssign",
+    "VectorZero",
     "ZeroHole",
 ]

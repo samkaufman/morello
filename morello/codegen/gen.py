@@ -14,29 +14,24 @@ from .. import impl, layouts, utils
 from ..dtypes import Dtype, Uint8, Uint32
 from ..system_config import hexagon
 from ..system_config.state import current_system
-from ..tensor import Tensor, TensorBase, TensorLike
+from ..tensor import Tensor, TensorLike
 from . import common, expr_utils, indexexpr
 from .common import OperandDetails
 from .ctensors import (
     GCC_VEC_TYPES,
     CHeapArray,
-    CNameTensor,
     CPtr,
     CStackArray,
     CTensor,
     CUnsizedHeapArray,
     CValueVar,
-    CVecVar,
+    CVecVars,
 )
-
-# TODO: Remove
 from .indexexpr import vsub
-from .loops import OperandDetailsLoopExt, emit_tile_out_loop_nest, BOUNDARY_ANCESTORS
+from .loops import BOUNDARY_ANCESTORS, OperandDetailsLoopExt, emit_tile_out_loop_nest
 
 _DCFETCH_EMIT_STRATEGY = "first-pt"
-_SIMD_MOVES = True
 
-# TODO: Choose a more principled STACK_CUTOFF.
 STACK_CUTOFF = 256
 BENCH_ITERS = 10
 
@@ -86,15 +81,22 @@ def _emit_tensor_print(
     writer.writeline("}")
 
 
-def _make_buffer(size: int, dtype: Dtype, bank: str) -> CNameTensor:
+def _make_buffer(
+    shape: tuple[int, ...],
+    vector_shape: Optional[tuple[int, ...]],
+    dtype: Dtype,
+    bank: str,
+) -> CTensor:
+    if bank == "VRF" and not BOUNDARY_ANCESTORS.get():
+        assert vector_shape
+        return CVecVars(common.namer.get(), shape, vector_shape, dtype)
+
     name = common.namer.get().fresh_name("buf")
+    size = functools.reduce(operator.mul, shape, 1)
     if (size * dtype.size) > STACK_CUTOFF:
         return CHeapArray(name, size, dtype)
     elif size > 1:
-        if _SIMD_MOVES and bank == "RF" and CVecVar.accepts(dtype, size):
-            return CVecVar(name, size, dtype)
-        else:
-            return CStackArray(name, size, dtype)
+        return CStackArray(name, size, dtype)
     else:
         return CValueVar(name, dtype)
 
@@ -132,64 +134,6 @@ class _CHvxVectors(CTensor):
 
     def emit_free(self):
         pass
-
-
-@contextlib.contextmanager
-def _emit_assignment_copy(
-    source: TensorLike,
-    destination: TensorBase,
-    source_index_expr: sympy.Expr,
-    destination_index_expr: sympy.Expr,
-    concrete_shape: tuple[int, ...],
-    source_c_buf: CTensor,
-    dest_c_buf: CNameTensor,
-    is_input: bool,
-    is_output: bool,
-):
-    assert is_input or is_output
-    assert len(source.dim_sizes) == len(destination.dim_sizes)
-
-    writer = common.writer.get()
-
-    def inner_emit_standard(for_output: bool):
-        nonlocal source_index_expr, destination_index_expr, source_c_buf, dest_c_buf
-        with _emit_loop_nest_for_shape(concrete_shape) as loop_subs:
-            # Substitute the loop iterator names into the source and destination
-            # index expressions.
-            substitutions = {
-                f"p{dim}": (s if isinstance(s, int) else f"_{s}")
-                for dim, s in enumerate(loop_subs)
-            }
-            subbed_source_index_expr = vsub(source_index_expr, substitutions)
-            subbed_destination_index_expr = vsub(destination_index_expr, substitutions)
-
-            left = dest_c_buf.c_index(subbed_destination_index_expr)
-            right = source_c_buf.c_index(subbed_source_index_expr)
-            if for_output:
-                left, right = right, left
-            writer.writeline(f"{left} = {right};")
-
-    def inner_emit_vec(for_output: bool):
-        nonlocal source_index_expr, source_c_buf, dest_c_buf
-        assert isinstance(dest_c_buf, CVecVar)
-        left = dest_c_buf.vec()
-        right = source_c_buf.c_index(
-            expr_utils.zero_points(source_index_expr),
-            reinterpret=dest_c_buf.declared_type,
-        )
-        if for_output:
-            left, right = right, left
-        writer.writeline(f"{left} = {right};")
-
-    inner_emit = inner_emit_standard
-    # if isinstance(dest_c_buf, _CVecVar):
-    #     inner_emit = inner_emit_vec
-
-    inner_emit(False)
-    yield
-    if is_output:
-        inner_emit(True)
-    dest_c_buf.emit_free()
 
 
 @contextlib.contextmanager
@@ -283,14 +227,13 @@ def _inner_generate_c(
         output_op_details = op_details[-1]
 
         # First stage
-        assert isinstance(imp.stages[0].output, Tensor)
-
         last_c_buf = _make_buffer(
-            imp.stages[0].spec.output.volume,
+            imp.stages[0].spec.output.dim_sizes,
+            imp.stages[0].spec.output.vector_shape,
             imp.stages[0].spec.output.dtype,
             imp.stages[0].spec.output.bank,
         ).emit(zero_init=False)
-        cur_slice = slice(-len(imp.stages[0].inputs), len(inps_op_details))
+        cur_slice = slice(-len(imp.stages[0].spec.inputs), len(inps_op_details))
         cur_out = _pipeline_emit_stage(
             imp.stages[0],
             inps_op_details[cur_slice],
@@ -300,15 +243,14 @@ def _inner_generate_c(
             allow_holes,
         )
         cur_slice = slice(
-            1 + cur_slice.start - len(imp.stages[1].inputs), cur_slice.start
+            1 + cur_slice.start - len(imp.stages[1].spec.inputs), cur_slice.start
         )
 
         # Intermediate stages
         for stage, next_stage in zip(imp.stages[1:], imp.stages[2:]):
-            assert isinstance(stage.output, Tensor)
-
             new_c_buf = _make_buffer(
-                stage.spec.output.volume,
+                stage.spec.output.dim_sizes,
+                stage.spec.output.vector_shape,
                 stage.spec.output.dtype,
                 stage.spec.output.bank,
             ).emit(zero_init=False)
@@ -318,7 +260,7 @@ def _inner_generate_c(
             last_c_buf.emit_free()
             last_c_buf = new_c_buf
             cur_slice = slice(
-                1 + cur_slice.start - len(next_stage.inputs), cur_slice.start
+                1 + cur_slice.start - len(next_stage.spec.inputs), cur_slice.start
             )
 
         # Last stage
@@ -334,29 +276,29 @@ def _inner_generate_c(
         assert (
             cur_out.concrete_origin_shape == output_op_details.concrete_origin_shape
         ), "Final stage output shape didn't match Pipeline output shape"
-    elif isinstance(imp, impl.MemsetZero):
+    elif isinstance(imp, impl.VectorZero):
         if BOUNDARY_ANCESTORS.get() > 0:
-            _naive_memset(op_details, writer)
+            _naive_memset(op_details[0], "VectorZero", writer)
         else:
             expr = expr_utils.zero_points(op_details[0].index_expr)
             ten = op_details[0].c_tensor
-            if isinstance(ten, CVecVar):
-                out_shape = op_details[0].concrete_origin_shape
-                if functools.reduce(operator.mul, out_shape, 1) == ten.size:
-                    # No assignment syntax for Clang vector extensions yet, so we'll
-                    # multiply by zero, which should produce a setzero or be optimized away.
-                    writer.writeline(f"{ten.vec()} *= 0;  /* MemsetZero */")
-                else:
-                    _naive_memset(op_details, writer)
-            else:
-                ref = ten.c_index_ptr
-                vol = functools.reduce(
-                    operator.mul, op_details[0].concrete_origin_shape, 1
-                )
-                vol *= imp.spec.destination.dtype.size
-                writer.writeline(
-                    f"memset((void *)({ref(expr)}), 0, {vol});  /* MemsetZero */"
-                )
+            assert isinstance(ten, CVecVars), f"ten was not a CVecVars; was: {ten}"
+            out_shape = op_details[0].concrete_origin_shape
+            # No assignment syntax for Clang vector extensions yet, so we'll
+            # multiply by zero, which should produce a setzero or be optimized away.
+            writer.writeline(f"{ten.c_index_vec(expr)} *= 0;  /* VectorZero */")
+    elif isinstance(imp, impl.MemsetZero):
+        if BOUNDARY_ANCESTORS.get() > 0:
+            _naive_memset(op_details[0], "MemsetZero", writer)
+        else:
+            expr = expr_utils.zero_points(op_details[0].index_expr)
+            ten = op_details[0].c_tensor
+            ref = ten.c_index_ptr
+            vol = functools.reduce(operator.mul, op_details[0].concrete_origin_shape, 1)
+            vol *= imp.spec.destination.dtype.size
+            writer.writeline(
+                f"memset((void *)({ref(expr)}), 0, {vol});  /* MemsetZero */"
+            )
     elif isinstance(imp, impl.Mult):
         l_ref, r_ref, o_ref = (d.c_tensor.c_index for d in op_details)
         l, r, o = (d.index_expr for d in op_details)
@@ -482,7 +424,7 @@ def _inner_generate_c(
         # previous cases) for MoveLet if there is a layout or contiguity change.
         # Otherwise, we just recurse.
         #
-        elif imp.destination.bank == "RF":
+        elif imp.destination.bank in ("RF", "VRF"):
             _move_registers(
                 imp,
                 source_idx,
@@ -628,15 +570,13 @@ def _inner_generate_c(
                     f"(*({vtype} *)({rhs_txt}));  // VectorAssign"
                 )
             else:
-                itype = GCC_VEC_TYPES[(imp.spec.operands[0].dtype, vol)][2]
+                itype, suffix = GCC_VEC_TYPES[(imp.spec.operands[0].dtype, vol)][2:]
+                a, b = rhs_txt, lhs_txt
                 if imp.is_store:
-                    writer.writeline(
-                        f"_mm256_storeu_si256(({itype} *)({lhs_txt}), _mm256_loadu_si256(({itype} *)({rhs_txt})));  // VectorAssign"
-                    )
-                else:
-                    writer.writeline(
-                        f"_mm256_storeu_si256(({itype} *)({rhs_txt}), _mm256_loadu_si256(({itype} *)({lhs_txt})));  // VectorAssign"
-                    )
+                    a, b = lhs_txt, rhs_txt
+                writer.writeline(
+                    f"_mm256_storeu_{suffix}(({itype} *)({a}), _mm256_loadu_{suffix}(({itype} *)({b})));  // VectorAssign"
+                )
     elif not imp.is_scheduled and allow_holes:
         writer.writeline(f"/* HOLE */")
     else:
@@ -817,7 +757,7 @@ def _move_hvx_vmem(
     operand_index_exprs,
     concrete_shapes,
     previously_transformeds,
-    allow_holes: bool
+    allow_holes: bool,
 ):
     writer = common.writer.get()
 
@@ -841,7 +781,6 @@ def _move_hvx_vmem(
     new_c_tensors[source_idx] = vectors
 
     new_operand_index_exprs = list(operand_index_exprs)
-    # TODO: Do we need to call this both here and in _emit_assignment_copy?
     new_operand_index_exprs[source_idx] = imp.destination.layout.buffer_indexing_expr(
         concrete_shapes[source_idx]
     )
@@ -881,33 +820,6 @@ def _move_hvx_vmem(
         raise NotImplementedError(
             "The below needs to copy for *all* vectors in this tensor."
         )
-        for destination_name, slice_index_expr in zip(vectors.names, slice_idx_exprs):
-            # TODO: Can we use vgather here?
-            # We don't assign with Q6_V_vzero() because this is a load, so it'll be
-            # immediately filled.
-            destination_index_expr = imp.destination.layout.buffer_indexing_expr(
-                concrete_shape
-            )
-
-            with _emit_assignment_copy(
-                imp.source,
-                imp.destination,
-                slice_index_expr,
-                destination_index_expr,
-                concrete_shapes[source_idx],
-                source_ref_fn,
-                vectors,
-                is_input=(not imp.is_store),
-                is_output=imp.is_store,
-            ):
-                unroll_token = common.unroll.set(True)
-                _inner_generate_c(
-                    imp.inner,
-                    new_tensor_ref_fns,
-                    new_operand_index_exprs,
-                    new_concrete_shapes,
-                )
-                common.unroll.reset(unroll_token)
 
 
 def _iter_vectors(
@@ -954,26 +866,32 @@ def _iter_vectors(
 
 
 def _move_registers(
-    impl,
-    source_idx,
+    imp: impl.MoveLet,
+    source_idx: int,
     c_tensors: Sequence[CTensor],
     operand_index_exprs,
     concrete_shapes,
     previously_transformeds,
     allow_holes: bool,
 ):
+    system = current_system()
+    unroll_token = None
+    if system.banks[imp.destination.bank].vector_rf:
+        unroll_token = common.unroll.set(True)
+
     dest_c_buf = _make_buffer(
-        functools.reduce(operator.mul, concrete_shapes[source_idx], 1),
-        impl.destination.dtype,
-        impl.destination.bank,
+        concrete_shapes[source_idx],
+        imp.destination.vector_shape,
+        imp.destination.dtype,
+        imp.destination.bank,
     ).emit(zero_init=False)
 
-    destination_index_expr = impl.destination.layout.buffer_indexing_expr(
+    destination_index_expr = imp.destination.layout.buffer_indexing_expr(
         concrete_shapes[source_idx]
     )
 
     body_operand_details = []
-    for i in range(len(impl.body.operands)):
+    for i in range(len(imp.body.operands)):
         body_operand_details.append(
             OperandDetails(
                 dest_c_buf if i == source_idx else c_tensors[i],
@@ -998,29 +916,32 @@ def _move_registers(
         ),
     ]
 
-    if impl.prologue:
+    if imp.prologue:
         # Prologue may or may not take an input (e.g., no inputs for Zero).
-        if impl.prologue.spec.inputs:
-            _inner_generate_c(impl.prologue, move_operand_details, allow_holes)
+        if imp.prologue.spec.inputs:
+            _inner_generate_c(imp.prologue, move_operand_details, allow_holes)
         else:
-            _inner_generate_c(impl.prologue, move_operand_details[-1:], allow_holes)
-    _inner_generate_c(impl.body, body_operand_details, allow_holes)
-    if impl.epilogue:
-        _inner_generate_c(impl.epilogue, move_operand_details, allow_holes)
+            _inner_generate_c(imp.prologue, move_operand_details[-1:], allow_holes)
+    _inner_generate_c(imp.body, body_operand_details, allow_holes)
+    if imp.epilogue:
+        _inner_generate_c(imp.epilogue, move_operand_details, allow_holes)
 
     dest_c_buf.emit_free()
 
+    if unroll_token is not None:
+        common.unroll.reset(unroll_token)
 
-def _naive_memset(op_details, writer):
-    out_shape = op_details[0].concrete_origin_shape
+
+def _naive_memset(op, outer_name, writer):
+    out_shape = op.concrete_origin_shape
+    o_ref = op.c_tensor.c_index
     with _emit_loop_nest_for_shape(out_shape) as it_names:
         substitutions = {
             f"p{dim}": (s if isinstance(s, int) else f"_{s}")
             for dim, s in enumerate(it_names)
         }
-        o = vsub(op_details[0].index_expr, substitutions)
-        o_ref = op_details[0].c_tensor.c_index
-        writer.writeline(f"{o_ref(o)} = 0;  /* MemsetZero (vec boundary) */")
+        o = vsub(op.index_expr, substitutions)
+        writer.writeline(f"{o_ref(o)} = 0;  /* {outer_name} (vec boundary) */")
 
 
 def generate_c(
@@ -1048,8 +969,7 @@ def generate_c(
     writer.writeline("#include <stdio.h>")
     writer.writeline("#include <string.h>")
     writer.writeline("#include <time.h>")
-    if _SIMD_MOVES:
-        writer.writeline("#include <immintrin.h>")
+    writer.writeline("#include <immintrin.h>")
     if current_system().has_hvx:
         writer.writeline("#include <hexagon_types.h>")
         writer.writeline("#include <hexagon_protos.h>")
@@ -1059,14 +979,13 @@ def generate_c(
     writer.writeline("#define is_aligned(POINTER, BYTE_COUNT) \\")
     writer.writeline("  (((uintptr_t)(const void *)(POINTER)) % (BYTE_COUNT) == 0)")
 
-    if _SIMD_MOVES:
-        for (dt, _), (vec_bytes, name, _) in GCC_VEC_TYPES.items():
-            # Declare a vector of {vec_bytes} bytes, divided into {dt.c_type}
-            # values. (vec_bytes must be a multiple of the c_type size.)
-            writer.writeline(
-                f"typedef {dt.c_type} {name} __attribute__ "
-                f"((vector_size ({vec_bytes})));"
-            )
+    for (dt, _), (vec_bytes, name, _, _) in GCC_VEC_TYPES.items():
+        # Declare a vector of {vec_bytes} bytes, divided into {dt.c_type}
+        # values. (vec_bytes must be a multiple of the c_type size.)
+        writer.writeline(
+            f"typedef {dt.c_type} {name} __attribute__ "
+            f"((vector_size ({vec_bytes})));"
+        )
 
     # TODO: The following prelude is a mess. Include decls/defs on demand, and
     #  don't embed them here, in Python.
@@ -1340,9 +1259,11 @@ def generate_c(
     c_tensors = []
     index_exprs = []
     for operand, initial_value in zip(imp.spec.operands, values):
-        c_buf = _make_buffer(operand.volume, operand.dtype, operand.bank)
+        c_buf = _make_buffer(
+            operand.dim_sizes, operand.vector_shape, operand.dtype, operand.bank
+        )
         index_exprs.append(operand.layout.buffer_indexing_expr(operand.dim_sizes))
-        tensor_names.append(c_buf.name)
+        tensor_names.append(c_buf.name)  # type: ignore
         c_tensors.append(c_buf)
 
     # Emit the kernel function

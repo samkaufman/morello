@@ -3,8 +3,6 @@ from typing import NewType, Optional, Union
 
 import cython
 
-from morello.impl.zero import MemsetZero
-
 if cython.compiled:
     from cython.cimports.libc import math
 else:
@@ -21,11 +19,13 @@ from .impl import (
     Loop,
     MatmulAccumHole,
     MatmulHole,
+    MemsetZero,
     MoveLet,
     Mult,
     Pipeline,
     SlidingWindowLoop,
     ValueAssign,
+    VectorZero,
     VectorAssign,
 )
 from .system_config import current_system
@@ -112,7 +112,7 @@ def detailed_analytical_cost(
         sum_cost = 0
         for child in op.children:
             sub_cd = detailed_analytical_cost(
-                child, depth=depth + 1, env=env, holes_ok=holes_ok,
+                child, depth=depth + 1, env=env, holes_ok=holes_ok
             )
             cost_dict.update(sub_cd)
             sum_cost += sub_cd[child][0]
@@ -141,7 +141,7 @@ def detailed_analytical_cost(
         return cost_dict
     elif isinstance(op, SlidingWindowLoop):
         cost_dict = detailed_analytical_cost(
-            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok,
+            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
         )
         # The moves are implicit in SlidingWindowLoop, so we'll construct
         # Tiles to serve as operands to `move_cost`.
@@ -169,7 +169,7 @@ def detailed_analytical_cost(
         # (This cost model is only interested in the cost of moving data.)
         assert compute_cost(op) == INST_COST
         return {op: (INST_COST, f"{INST_COST:5}")}
-    elif isinstance(op, (ValueAssign, VectorAssign, MemsetZero)):
+    elif isinstance(op, (ValueAssign, VectorAssign, MemsetZero, VectorZero)):
         assert compute_cost(op) == ASSIGN_INST_COST
         return {op: (ASSIGN_INST_COST, f"{ASSIGN_INST_COST:5}")}
     elif isinstance(op, MoveLet):
@@ -180,21 +180,21 @@ def detailed_analytical_cost(
         )
 
         cost_dict = detailed_analytical_cost(
-            op.body, depth=depth + 1, env=env, holes_ok=holes_ok,
+            op.body, depth=depth + 1, env=env, holes_ok=holes_ok
         )
         new_cost = mcost + cost_dict[op.body][0]
 
         if op.prologue:
             cost_dict.update(
                 detailed_analytical_cost(
-                    op.prologue, depth=depth + 1, env=env, holes_ok=holes_ok,
+                    op.prologue, depth=depth + 1, env=env, holes_ok=holes_ok
                 )
             )
             new_cost += cost_dict[op.prologue][0]
         if op.epilogue:
             cost_dict.update(
                 detailed_analytical_cost(
-                    op.epilogue, depth=depth + 1, env=env, holes_ok=holes_ok,
+                    op.epilogue, depth=depth + 1, env=env, holes_ok=holes_ok
                 )
             )
             new_cost += cost_dict[op.epilogue][0]
@@ -242,7 +242,7 @@ def compute_cost(op: Impl) -> MainCost:
         raise NotImplementedError()
     elif isinstance(op, (Add, Mult, BroadcastVecMult, HvxVrmpyaccVuwVubRub)):
         return _assign_cost(op, INST_COST)
-    elif isinstance(op, (ValueAssign, VectorAssign, MemsetZero)):
+    elif isinstance(op, (ValueAssign, VectorAssign, MemsetZero, VectorZero)):
         return _assign_cost(op, ASSIGN_INST_COST)
     elif isinstance(op, MoveLet):
         mcost: MainCost = move_cost(  # type: ignore

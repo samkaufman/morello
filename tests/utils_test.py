@@ -1,12 +1,12 @@
-from typing import Iterable
-
 import itertools
 import re
+from typing import Iterable
+
 import hypothesis
 import pytest
 from hypothesis import strategies as st
 
-from morello import dtypes, layouts, tiling, specs, system_config, tensor, utils
+from morello import dtypes, layouts, specs, system_config, tensor, tiling, utils
 
 from . import strategies
 from . import utils as test_utils
@@ -22,6 +22,12 @@ def _shape_ids(arg):
     return str(arg)
 
 
+@hypothesis.given(st.integers(min_value=0, max_value=100))
+def test_factors_are_ordered(n: int):
+    result = list(utils.factors(n))
+    assert sorted(result) == result
+
+
 @pytest.mark.parametrize(
     "tile_shape, parent_shape, expected",
     [
@@ -34,10 +40,10 @@ def _shape_ids(arg):
         ((64,), (96,), True),
         ((64,), (128,), True),
         ((128,), (256,), True),
-        ((2, 16), (2, 64,), False,),
-        ((2, 32), (2, 64,), True,),
+        ((2, 16), (2, 64), False),
+        ((2, 32), (2, 64), True),
         ((64, 1), (64, 64), False),
-        ((1, 64), (2, 96,), True,),
+        ((1, 64), (2, 96), True),
     ],
     ids=_shape_ids,
 )
@@ -73,7 +79,7 @@ def test_convtile_nhwc_alignment():
 # TODO: Check intermediate tilings too.
 
 
-@hypothesis.settings(deadline=3000)
+@hypothesis.settings(deadline=4000)
 @hypothesis.given(data=st.data())
 @pytest.mark.parametrize(
     "test_conv",
@@ -120,6 +126,19 @@ def test_alignment_approximation_is_correct(test_conv: bool, data):
         assert final_tile.spec.aligned == _compute_alignment(
             tile_chain, val_size, tile_coords
         )
+
+
+@hypothesis.given(
+    st.lists(st.integers(min_value=0, max_value=10), min_size=1, max_size=5),
+    st.integers(min_value=0),
+)
+def test_sum_seqs_is_correct(maxes: list[int], total: int):
+    expected_shapes = [
+        shape
+        for shape in itertools.product(*[range(0, m + 1) for m in maxes])
+        if sum(shape) == total
+    ]
+    assert list(utils.sum_seqs(maxes, total)) == expected_shapes
 
 
 def _compute_alignment(tile_chain, val_size, tile_coords):

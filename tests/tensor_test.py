@@ -18,7 +18,13 @@ def test_tensors_and_tiles_can_be_pickled_and_unpickled_losslessly(
 ):
     t = system_config.current_target().tensor(spec=spec, name=name)
     if should_tile:
-        t = t.spec.simple_tile(tensor.OperandIdx(0), tuple(1 for _ in t.dim_sizes))
+        new_shape = tuple(1 for _ in t.dim_sizes)
+        if t.spec.vector_shape:
+            new_shape = t.spec.vector_shape
+        try:
+            t = t.spec.simple_tile(tensor.OperandIdx(0), new_shape)
+        except ValueError:
+            hypothesis.assume(False)
 
     buf = io.BytesIO()
     pickle.dump(t, buf)

@@ -108,6 +108,9 @@ class ZeroHole(base.NonAllocatingLeaf):
         if MemsetZero.applies_to_operands(self.spec.operands):
             yield functools.partial(self.place, MemsetZero)
 
+        if VectorZero.applies_to_operands(self.spec.operands):
+            yield functools.partial(self.place, VectorZero)
+
     def complete(self) -> "impl.Impl":
         system = system_config.current_system()
         one = tuple(1 for _ in self.spec.output.dim_sizes)
@@ -150,4 +153,40 @@ class MemsetZero(base.NonAllocatingLeaf):
             return f"TensorSpec {operands[0]} must be contiguous"
         if operands[0].bank != "RF":
             return f"TensorSpec {operands[0]} must be in RF"
+        return None
+
+
+@dataclasses.dataclass(frozen=True)
+class VectorZero(base.NonAllocatingLeaf):
+    spec: specs.Zero
+
+    def __post_init__(self):
+        check_result = VectorZero._check_operands(self.spec.operands)
+        if check_result:
+            raise ValueError(check_result)
+
+    @property
+    def is_scheduled(self) -> bool:
+        return True
+
+    def actions(
+        self, parent_summary: Optional[ParentSummary] = None
+    ) -> Iterable[Callable[[], "impl.Impl"]]:
+        yield from []
+
+    def complete(self, *args, **kwargs):
+        return self
+
+    @staticmethod
+    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
+        return VectorZero._check_operands(operands) is None
+
+    @staticmethod
+    def _check_operands(operands: Sequence[specs.TensorSpec]) -> Optional[str]:
+        if not operands[0].contiguous:
+            return f"TensorSpec {operands[0]} must be contiguous"
+        if operands[0].bank != "VRF":
+            return f"TensorSpec {operands[0]} must be in VRF"
+        if operands[0].dim_sizes != operands[0].vector_shape:
+            return "VectorZero applies only to individual vector registers"
         return None
