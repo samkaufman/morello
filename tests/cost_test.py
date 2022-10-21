@@ -71,7 +71,7 @@ def _make_tiled_matmul(
 ) -> Impl:
     target = system_config.current_target()
 
-    m_dim = 2 ** c
+    m_dim = 2**c
     tile_width = target.system.line_size * m
     hypothesis.assume(tile_width <= m_dim)
     hypothesis.note(f"Non-contig. {m_dim}x{m_dim} Matmul w/ {tile_width}-wide tile")
@@ -110,20 +110,6 @@ def test_contiguous_copy_lowers_matmul_cost(c: int, m: int, dtype: dtypes.Dtype)
     hypothesis.note(f"Slow, non-contiguous model is {str(noncontiguous_matmul)}")
     hypothesis.note(f"Fast, contig. model is {str(contiguous_matmul)}")
     assert fast_cost < slow_cost
-
-
-@hypothesis.settings(deadline=10 * 1000)
-@given(matmul_spec=strategies.matmul_spec_st())
-def test_trivial_tilings_are_same_cost_as_untiled_matmul(matmul_spec):
-    ((_, k), (m, n)) = matmul_spec.inputs[0].dim_sizes, matmul_spec.output.dim_sizes
-
-    trivial_tiled_schedule = (
-        morello.impl.MatmulHole(matmul_spec).tile_out((m, n)).split(k).complete()
-    )
-    trivial_untiled_schedule = morello.impl.MatmulHole(matmul_spec).complete()
-    assert cost.compute_cost(trivial_tiled_schedule) == cost.compute_cost(
-        trivial_untiled_schedule
-    )
 
 
 if __name__ == "__main__":
