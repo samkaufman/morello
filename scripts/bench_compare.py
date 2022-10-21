@@ -1134,7 +1134,7 @@ def _benchmark(impl):
         logger.info(f"Sample runtime result {secs}s:")
         runtime_samples.append(secs)
     impl_str = op_pprint.pformat(impl, color=False)
-    return runtime_samples, impl_str, source
+    return runtime_samples, impl_str, source  # type: ignore
 
 
 def _get_benchmark_classes():
