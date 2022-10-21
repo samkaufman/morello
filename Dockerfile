@@ -1,17 +1,12 @@
 # syntax=docker/dockerfile:1
 
-FROM ubuntu:focal AS base
+FROM ubuntu:jammy AS base
 ARG HALIDE_CMAKE_PARALLEL
 
 # Set apt to use a local mirror
-RUN sed -i -e 's/http:\/\/archive\.ubuntu\.com\/ubuntu\//mirror:\/\/mirrors\.ubuntu\.com\/mirrors\.txt/' /etc/apt/sources.list
+# RUN sed -i -e 's/http:\/\/archive\.ubuntu\.com\/ubuntu\//mirror:\/\/mirrors\.ubuntu\.com\/mirrors\.txt/' /etc/apt/sources.list
 
 # Python 3.10 will be useful for all of the following image layers.
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive \
-      apt-get install -y --no-install-recommends software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && rm -rf /var/lib/apt/lists/*
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       python3.10 python3.10-venv python3.10-dev python3.10-distutils \
@@ -121,7 +116,7 @@ RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
     apt-get install -y --no-install-recommends \
       git curl lib32z1 libncurses5 lib32ncurses-dev numactl \
-      clang-12 lld libomp5-12 libomp-12-dev && \
+      clang-14 lld libomp5-14 libomp-14-dev && \
     curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
     curl -LO http://mirrors.kernel.org/ubuntu/pool/main/libf/libffi/libffi6_3.2.1-8_amd64.deb && \
     dpkg -i libffi6_3.2.1-8_amd64.deb && \
@@ -131,7 +126,7 @@ RUN apt-get update && \
 
 COPY --from=poetry /.venv /.venv
 ENV PATH="/.venv/bin:$PATH" \
-    CLANG=/usr/bin/clang-12 \
+    CLANG=/usr/bin/clang-14 \
     LD_LIBRARY_PATH="/.venv/lib:$LD_LIBRARY_PATH" \
     LIBRARY_PATH="/.venv/lib:$LIBRARY_PATH"
 
@@ -151,7 +146,7 @@ ENV PYTHONFAULTHANDLER=1 \
 COPY pyproject.toml setup.py ./
 COPY tests ./tests
 COPY morello ./morello
-# RUN CC=clang-12 LDSHARED="clang-12 -shared" python3 setup.py build_ext -j "$(nproc)" --inplace
+# RUN CC=clang-14 LDSHARED="clang-14 -shared" python3 setup.py build_ext -j "$(nproc)" --inplace
 COPY scripts ./scripts
 
 
