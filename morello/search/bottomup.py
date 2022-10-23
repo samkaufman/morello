@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import copy
 import dataclasses
 import itertools
@@ -21,12 +22,12 @@ from . import dp
 if TYPE_CHECKING:
     from .. import impl
 
-FACTOR = 4
-USE_TINYMAPS = True
+FACTOR = 2
 
 logger = logging.getLogger(__name__)
 
 arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument("--scheduler", type=str)
 arg_parser.add_argument("--deploy-k8s", action="store_true")
 arg_parser.add_argument("--moves-only", action="store_true")
 arg_parser.add_argument("--size", type=int, default=512)
@@ -287,12 +288,9 @@ def _compute_block(
                                 for bank in all_banks
                             ]
                         ):
-                            if USE_TINYMAPS:
-                                limits_map = utils.TinyMap(all_banks, limits)
-                            else:
-                                limits_map = dict(zip(all_banks, limits))
-
-                            limits_map = pruning.StandardMemoryLimits(limits_map)
+                            limits_map = pruning.StandardMemoryLimits(
+                                utils.TinyMap(all_banks, limits)
+                            )
 
                             spec = top_query_spec.replace_io(
                                 inputs=new_inputs,
@@ -363,13 +361,18 @@ def main():
     system_config.set_current_target("cpu")
     target = system_config.current_target()
 
-    if args.deploy_k8s:
+    if args.scheduler:
+        cluster = contextlib.nullcontext()
+        cluster_address = args.scheduler
+    elif args.deploy_k8s:
         assert args.image_tag
         cluster = _deploy_k8s_cluster(args.image_tag)
+        cluster_address = cluster
     else:
         cluster = dask.distributed.LocalCluster(threads_per_worker=1)
+        cluster_address = cluster
 
-    with cluster, dask.distributed.Client(cluster) as dask_client:
+    with cluster, dask.distributed.Client(cluster_address) as dask_client:
         limits = pruning.StandardMemoryLimits()
 
         per_dt_caches = []
@@ -377,37 +380,40 @@ def main():
         for dt in dtypes.ALL_DTYPES:
             dt_cache = search_cache.InMemoryScheduleCache()
 
-            # TODO: Checkpoint each of the following stages
-            futures = []
-            spec0 = specs.Load(
+            load_spec = specs.Load(
                 source=target.tensor_spec((args.size, args.size), dtype=dt),
                 destination=target.tensor_spec((args.size, args.size), dtype=dt),
                 serial_only=False,
             )
-            futures.append(
-                _compute_all(dask_client, spec0, top_limits=limits, cache=dt_cache)
-            )
-
-            spec1 = specs.Store(
+            store_spec = specs.Store(
                 source=target.tensor_spec((args.size, args.size), dtype=dt),
                 destination=target.tensor_spec((args.size, args.size), dtype=dt),
                 serial_only=False,
             )
-            futures.append(
-                _compute_all(dask_client, spec1, top_limits=limits, cache=dt_cache)
+            zero_spec = specs.Zero(
+                destination=target.tensor_spec((args.size, args.size), dtype=dt),
+                serial_only=True,
             )
 
-            # Merge the Load and Store tables.
+            # Zero depends on Store, not Load, so chain those.
+            store_zero_cache = _compute_all(
+                dask_client, store_spec, top_limits=limits, cache=dt_cache
+            )
+            store_zero_cache = _compute_all(
+                dask_client, zero_spec, top_limits=limits, cache=store_zero_cache
+            )
+
+            # Merge the Load table with the Store/Zero table.
             dt_cache = dask_client.submit(
-                _merge_block_results, dt_cache, futures, target
-            )
-
-            spec2 = specs.Zero(
-                destination=target.tensor_spec((args.size, args.size), dtype=dt),
-                serial_only=False,
-            )
-            dt_cache = _compute_all(
-                dask_client, spec2, top_limits=limits, cache=dt_cache
+                _merge_block_results,
+                dt_cache,
+                [
+                    store_zero_cache,
+                    _compute_all(
+                        dask_client, load_spec, top_limits=limits, cache=dt_cache
+                    ),
+                ],
+                target,
             )
 
             if not args.moves_only:
