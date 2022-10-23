@@ -127,6 +127,8 @@ RUN apt-get update && \
 COPY --from=poetry /.venv /.venv
 ENV PATH="/.venv/bin:$PATH" \
     CLANG=/usr/bin/clang-14 \
+    CC=/usr/bin/clang-14 \
+    CXX=/usr/bin/clang++-14 \
     LD_LIBRARY_PATH="/.venv/lib:$LD_LIBRARY_PATH" \
     LIBRARY_PATH="/.venv/lib:$LIBRARY_PATH"
 

@@ -17,9 +17,8 @@ import re
 import runpy
 import tempfile
 import time
-import typing
 from glob import glob
-from typing import Any, Iterable, Optional, Sequence, Union
+from typing import Any, Callable, Iterable, Optional, Sequence, Union
 
 import gspread
 import halide as hl
@@ -40,7 +39,7 @@ import tvm.te
 from google.oauth2 import service_account
 from jax import lax
 from jax.tools import jax_to_ir
-from tvm import relay
+from tvm import auto_scheduler, relay
 
 import morello.impl.actions
 import morello.impl.base
@@ -128,39 +127,26 @@ class Benchmark:
     def spec(self) -> specs.Spec:
         raise NotImplementedError()
 
-    def make_backends(
+    def backends(
         self,
         cache: Union[str, pathlib.Path, None],
         save_cache: bool,
         extras_dir: pathlib.Path,
-    ) -> Iterable["BenchmarkBackend"]:
-        try:
-            yield self._numpy_backend()
-        except NotImplementedError as e:
-            print(f"Not yielding Numpy backend: {e}")
-
-        try:
-            torch_backend = self._torch_backend()
-        except NotImplementedError as e:
-            print(f"Not yielding PyTorch backend: {e}")
-        else:
-            torchscript_backend = TorchScriptBackend(torch_backend)
-            relay_backend = RelayBackend(torchscript_backend, extras_dir)
-            # Drop the torch_backend itself. Nearly identicaly runtimes to
-            # TorchScript for x86.
-            yield from [torchscript_backend, relay_backend]
-
-        try:
-            yield self._jax_backend()
-        except NotImplementedError as e:
-            print(f"Not yielding JAX backend: {e}")
-
-        try:
-            yield self._halide_backend()
-        except NotImplementedError as e:
-            print(f"Not yielding Halide backend: {e}")
-
-        yield MorelloBackend(self, cache, save_cache, extras_dir)
+    ) -> Iterable[tuple[str, Callable[[], "BenchmarkBackend"]]]:
+        yield "numpy", self._numpy_backend
+        yield "torch", self._torch_backend
+        yield "torchscript", lambda: TorchScriptBackend(self._torch_backend())
+        yield "relay", lambda: RelayBackend(
+            TorchScriptBackend(self._torch_backend()), extras_dir / "relay"
+        )
+        yield "tvmautoscheduler", lambda: TVMAutoschedulerBackend(
+            TorchScriptBackend(self._torch_backend()), extras_dir / "tvmautoscheduler"
+        )
+        yield "jax", self._jax_backend
+        yield "halide", self._halide_backend
+        yield "morello", lambda: MorelloBackend(
+            self, cache, save_cache, extras_dir / "morello"
+        )
 
     @property
     def cpus_used(self) -> int:
@@ -186,10 +172,6 @@ class Benchmark:
 
 
 class BenchmarkBackend:
-    @property
-    def short_name(self) -> str:
-        raise NotImplementedError(f"Not implemented for {type(self).__name__}")
-
     def run(self) -> list[float]:
         raise NotImplementedError()
 
@@ -202,12 +184,11 @@ class MorelloBackend(BenchmarkBackend):
         save_cache: bool,
         extras_dir: pathlib.Path,
     ):
-        if not extras_dir.is_dir():
-            raise ValueError("extras_dir should be an existing directory")
         self.benchmark = benchmark
         self.cache_path = cache
         self.save_cache = save_cache
         self.extras_dir = extras_dir
+        extras_dir.mkdir(parents=True, exist_ok=True)
 
     def run(self) -> list[float]:
         spec = self.benchmark.spec
@@ -231,7 +212,7 @@ class MorelloBackend(BenchmarkBackend):
         return "morello"
 
 
-class BaselineBackend(BenchmarkBackend):
+class LoopingBaseline(BenchmarkBackend):
     @property
     def codelet(self) -> str:
         raise NotImplementedError()
@@ -261,7 +242,7 @@ def inner_benchmark(self, {', '.join([n for n, _ in self.data_deps])}):
         return runs
 
 
-class BaseJAXBackend(BaselineBackend):
+class BaseJAXBackend(LoopingBaseline):
     def __init__(self, benchmark: Benchmark, print_graphs=True) -> None:
         self.benchmark = benchmark
         self.jitted_fn = jax.jit(self.make_jax_func())
@@ -290,10 +271,6 @@ class BaseJAXBackend(BaselineBackend):
             return super().run()
         with _affinity_ctx(1):
             return super().run()
-
-    @property
-    def short_name(self) -> str:
-        return "jax"
 
     @property
     def codelet(self) -> str:
@@ -343,7 +320,7 @@ class MatmulBenchmark(Benchmark):
         return MatmulHalide(self)
 
 
-class MatmulNumpy(BaselineBackend):
+class MatmulNumpy(LoopingBaseline):
     def __init__(self, benchmark: MatmulBenchmark) -> None:
         self.benchmark = benchmark
 
@@ -382,7 +359,7 @@ class MatmulJAX(BaseJAXBackend):
         return [("lhs", self.lhs), ("rhs", self.rhs)]
 
 
-class BaseTorchBackend(BaselineBackend):
+class BaseTorchBackend(LoopingBaseline):
     def run(self) -> list[float]:
         # TODO: Save to file
         termcolor.cprint("PyTorch Configuration:", attrs=["bold"])
@@ -407,10 +384,6 @@ class MatmulTorch(BaseTorchBackend):
         numpy_backend = MatmulNumpy(benchmark)
         self.lhs = _to_torch(numpy_backend.lhs)
         self.rhs = _to_torch(numpy_backend.rhs)
-
-    @property
-    def short_name(self) -> str:
-        return "pytorch"
 
     @property
     def data_deps(self) -> Sequence[tuple[str, Any]]:
@@ -466,10 +439,6 @@ def jitted({', '.join([n for n, _ in self.torch_backend.data_deps])}):
         return self.torch_backend.benchmark
 
     @property
-    def short_name(self) -> str:
-        return "torchscript"
-
-    @property
     def data_deps(self) -> Sequence[tuple[str, Any]]:
         return self.torch_backend.data_deps
 
@@ -486,44 +455,27 @@ def jitted({', '.join([n for n, _ in self.torch_backend.data_deps])}):
         return result
 
 
-class RelayBackend(BaselineBackend):
+class _RelayBase(LoopingBaseline):
+    tvm_m: tvm.contrib.graph_executor.GraphModule
+    relay_mod: tvm.ir.module.IRModule
+    relay_params: dict[str, tvm.nd.NDArray]
+
     def __init__(
         self, torchscript_backend: TorchScriptBackend, extras_dir: pathlib.Path
     ):
         self.torchscript_backend = torchscript_backend
         self.extras_dir = extras_dir
+        extras_dir.mkdir(parents=True, exist_ok=True)
 
         # PyTorch graph on Relay/TVM
-        shape_list = [(n, v.shape) for n, v in torchscript_backend.data_deps]
-        tvm_target = tvm.target.Target("llvm")
-        relay_mod, relay_params = relay.frontend.from_pytorch(
-            torchscript_backend.jitted_fn, shape_list
-        )
-
-        tvm_mod_text = None
-
-        class PIR(tvm.instrument.PassInstrument):
-            def run_after_pass(self, mod, info):
-                nonlocal tvm_mod_text
-                # Save the Relay module if the result of this pass has a useful
-                # text representation---in particular, it's not *just* something
-                # like '#[version = "0.0.5"]'---and seems to have not yet
-                # stripped the definition of the '@main' function.
-                new_text = mod.astext(show_meta_data=True)
-                if not RELAY_VERSION_RE.match(new_text) and "@main" in new_text:
-                    tvm_mod_text = new_text
-
-        with tvm.transform.PassContext(opt_level=3, instruments=[PIR()]):
-            tvm_lib = relay.build(relay_mod, target=tvm_target, params=relay_params)
+        self._tvm_target = self._make_tvm_target()
+        tvm_lib, relay_mod, relay_params = self._make_relay(extras_dir)
 
         self.tvm_m = tvm.contrib.graph_executor.GraphModule(
             tvm_lib["default"](tvm.cpu(0))
         )
         for n, v in torchscript_backend.data_deps:
             self.tvm_m.set_input(n, v)
-
-        with (extras_dir / "tvm_mod.txt").open("w") as fo:
-            fo.write(tvm_mod_text)
 
     @property
     def benchmark(self):
@@ -541,10 +493,6 @@ class RelayBackend(BaselineBackend):
                 os.environ["TVM_NUM_THREADS"] = orig_val
 
     @property
-    def short_name(self) -> str:
-        return "relay"
-
-    @property
     def data_deps(self) -> Sequence[tuple[str, Any]]:
         return []
 
@@ -556,6 +504,92 @@ class RelayBackend(BaselineBackend):
         if self.benchmark.spec.serial_only:
             return 1
         return multiprocessing.cpu_count()
+
+    def _make_tvm_target(self):
+        # TODO: Produce target from target backend
+        return tvm.target.Target("llvm -mcpu=core-avx2")
+
+
+class RelayBackend(_RelayBase):
+    def _make_relay(self, extras_dir: pathlib.Path):
+        backend = self.torchscript_backend
+        shape_list = [(n, v.shape) for n, v in backend.data_deps]
+        relay_mod, relay_params = relay.frontend.from_pytorch(
+            backend.jitted_fn, shape_list
+        )
+
+        tvm_mod_text = None
+
+        class PIR(tvm.instrument.PassInstrument):
+            def run_after_pass(self, mod, info):
+                nonlocal tvm_mod_text
+                # Save the Relay module if the result of this pass has a useful
+                # text representation---in particular, it's not *just* something
+                # like '#[version = "0.0.5"]'---and seems to have not yet
+                # stripped the definition of the '@main' function.
+                new_text = mod.astext(show_meta_data=True)
+                if not RELAY_VERSION_RE.match(new_text) and "@main" in new_text:
+                    tvm_mod_text = new_text
+
+        with tvm.transform.PassContext(opt_level=3, instruments=[PIR()]):
+            tvm_lib = relay.build(
+                relay_mod, target=self._tvm_target, params=relay_params
+            )
+
+        with (extras_dir / "tvm_mod.txt").open("w") as fo:
+            fo.write(tvm_mod_text)
+        with (extras_dir / "tvm_source.txt").open("w") as fo:
+            fo.write(tvm_lib.get_lib().get_source())
+
+        return tvm_lib, relay_mod, relay_params
+
+
+class TVMAutoschedulerBackend(_RelayBase):
+    def _make_relay(self, extras_dir: pathlib.Path):
+        extras_dir.mkdir(parents=True, exist_ok=True)
+
+        backend = self.torchscript_backend
+        shape_list = [(n, v.shape) for n, v in backend.data_deps]
+        relay_mod, relay_params = relay.frontend.from_pytorch(
+            backend.jitted_fn, shape_list
+        )
+
+        target = self._make_tvm_target()
+        tasks, task_weights = auto_scheduler.extract_tasks(
+            relay_mod["main"], relay_params, target
+        )
+
+        with (extras_dir / "tasks.txt").open("w") as f:
+            for idx, task in enumerate(tasks):
+                print(
+                    "========== Task %d  (workload key: %s) =========="
+                    % (idx, task.workload_key),
+                    file=f,
+                )
+                print(task.compute_dag, file=f)
+
+        # Begin tuning
+        tuner = auto_scheduler.TaskScheduler(tasks, task_weights)
+        log_file_path = str(extras_dir / "tuning.log")
+        tuning_options = auto_scheduler.TuningOptions(
+            num_measure_trials=2000,  # change this to 20000 to achieve the best performance
+            runner=auto_scheduler.LocalRunner(repeat=10, enable_cpu_cache_flush=True),
+            measure_callbacks=[auto_scheduler.RecordToFile(log_file_path)],
+        )
+        tune_start = time.monotonic()
+        tuner.tune(tuning_options)
+        tune_end = time.monotonic()
+        with (extras_dir / "runtime.txt").open("w") as f:
+            print(f"Tuning took {tune_end - tune_start:.3f}s", file=f)
+
+        # Compile with the history best
+        with auto_scheduler.ApplyHistoryBest(log_file_path):
+            with tvm.transform.PassContext(
+                opt_level=3, config={"relay.backend.use_auto_scheduler": True}
+            ):
+                lib = relay.build(relay_mod, target=target, params=relay_params)
+
+        return lib, relay_mod, relay_params
 
 
 @dataclasses.dataclass
@@ -606,7 +640,7 @@ class GEMM3Benchmark(Benchmark):
         return GEMM3Halide(self)
 
 
-class GEMM3Numpy(BaselineBackend):
+class GEMM3Numpy(LoopingBaseline):
     def __init__(self, benchmark: GEMM3Benchmark) -> None:
         self.benchmark = benchmark
 
@@ -653,10 +687,6 @@ class GEMM3Torch(BaseTorchBackend):
         self.a = _to_torch(numpy_backend.a)
         self.b = _to_torch(numpy_backend.b)
         self.c = _to_torch(numpy_backend.c)
-
-    @property
-    def short_name(self) -> str:
-        return "pytorch"
 
     @property
     def data_deps(self) -> Sequence[tuple[str, Any]]:
@@ -712,7 +742,7 @@ class ConvBenchmark(Benchmark):
         return ConvJAX(self)
 
 
-class ConvNumpy(BaselineBackend):
+class ConvNumpy(LoopingBaseline):
     def __init__(self, benchmark: ConvBenchmark) -> None:
         self.benchmark = benchmark
 
@@ -749,10 +779,6 @@ class ConvTorch(BaseTorchBackend):
         numpy_backend = ConvNumpy(benchmark)
         self.img = _to_torch(numpy_backend.img)
         self.filters = _to_torch(numpy_backend.filters)
-
-    @property
-    def short_name(self) -> str:
-        return "pytorch"
 
     @property
     def data_deps(self) -> Sequence[tuple[str, Any]]:
@@ -901,9 +927,10 @@ class CNNHCHWcBenchmark(CNNBenchmark):
         yield MorelloBackend(self, cache, save_cache, extras_dir)
 
 
-class RelayCNNNCHWcBackend(BaselineBackend):
+class RelayCNNNCHWcBackend(LoopingBaseline):
     def __init__(self, extras_dir: pathlib.Path):
         self.extras_dir = extras_dir
+        self.extras_dir.mkdir(parents=True, exist_ok=True)
 
         relay_mod = None
         relay_params = None
@@ -962,10 +989,6 @@ class RelayCNNNCHWcBackend(BaselineBackend):
                 os.environ["TVM_NUM_THREADS"] = orig_val
 
     @property
-    def short_name(self) -> str:
-        return "relay"
-
-    @property
     def data_deps(self) -> Sequence[tuple[str, Any]]:
         return []
 
@@ -989,10 +1012,6 @@ class CNNTorch(BaseTorchBackend):
     @property
     def data_deps(self) -> Sequence[tuple[str, Any]]:
         return [("img", self.img), ("fa", self.filters_a), ("fb", self.filters_b)]
-
-    @property
-    def short_name(self) -> str:
-        return "pytorch"
 
     @property
     def codelet(self) -> str:
@@ -1021,7 +1040,7 @@ class CNNJAX(BaseJAXBackend):
         return [("img", self.img), ("fa", self.filters_a), ("fb", self.filters_b)]
 
 
-class BaseHalideBackend(BaselineBackend):
+class BaseHalideBackend(LoopingBaseline):
     def __init__(self, benchmark: Benchmark, print_graphs=True):
         self.benchmark = benchmark
 
@@ -1047,10 +1066,6 @@ class BaseHalideBackend(BaselineBackend):
                 print(fo.read())
         print("")
         print(f"output dims: {self.benchmark.spec.output.dim_sizes}")
-
-    @property
-    def short_name(self) -> str:
-        return "halide"
 
     @property
     def codelet(self) -> str:
@@ -1193,7 +1208,7 @@ def _gdrive_upload_dir(
 
     for entry in local_dir.iterdir():
         if entry.is_file():
-            # TODO: Upload file
+            # Upload file
             file_meta = {"title": entry.name, "parents": [{"id": root_item["id"]}]}
             guess = mimetypes.guess_type(entry)
             if guess[0]:
@@ -1301,19 +1316,20 @@ def main():
                     / f"{start_time}-{hostname}-{benchmark.short_name}-{random.randint(0, 9999)}"
                 )
                 work_dir_backend.mkdir(parents=True, exist_ok=False)
-                for backend in benchmark.make_backends(
+                for short_name, backend_constructor in benchmark.backends(
                     args.cache, args.save_cache, work_dir_backend
                 ):
-                    if args.backend and backend.short_name not in args.backend:
-                        print(f"Skipping backend named", backend.short_name)
+                    if args.backend and short_name not in args.backend:
+                        print(f"Skipping backend named", short_name)
                         continue
-                    print(f"Running {backend.short_name}")
+                    print(f"Running {short_name}")
                     try:
+                        backend = backend_constructor()
                         runtime_samples = backend.run()
                         assert isinstance(runtime_samples, list)
                         runtime_secs = min(runtime_samples)
                     except NotImplementedError:
-                        print(f"No implementation for {backend}. Skipping.")
+                        print(f"No implementation for {short_name}. Skipping.")
                         continue
                     finally:
                         uploaded_url = ""
@@ -1322,7 +1338,7 @@ def main():
                             uploaded_url = _gdrive_upload_dir(
                                 drive, work_dir_backend, args.save_to_gdrive
                             )
-                    print(f"{backend.short_name} took {runtime_secs:.7f}s")
+                    print(f"{short_name} took {runtime_secs:.7f}s")
                     if args.log_to_sheet:
                         sheet.append_row(
                             [
@@ -1331,7 +1347,7 @@ def main():
                                 benchmark.short_name,
                                 benchmark.size,
                                 benchmark.batch_size,
-                                backend.short_name,
+                                short_name,
                                 runtime_secs,
                                 benchmark.cpus_used,
                                 ", ".join(f"{s:.8f}" for s in runtime_samples),
