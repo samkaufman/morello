@@ -7,6 +7,7 @@ import logging
 import math
 import pathlib
 import pickle
+import random
 import secrets
 import subprocess
 import time
@@ -22,25 +23,29 @@ from . import dp
 if TYPE_CHECKING:
     from .. import impl
 
-FACTOR = 2
-
 logger = logging.getLogger(__name__)
 
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("--scheduler", type=str)
+arg_parser.add_argument("--downscale", type=int, default=1)
 arg_parser.add_argument("--deploy-k8s", action="store_true")
 arg_parser.add_argument("--moves-only", action="store_true")
 arg_parser.add_argument("--size", type=int, default=512)
 arg_parser.add_argument("--image-tag", "-t", type=str, default="samkaufman/morello")
+arg_parser.add_argument("--moves-cache", metavar="CACHE", type=pathlib.Path)
+arg_parser.add_argument("out_path", metavar="OUTCACHE", type=pathlib.Path)
 
 
 # TODO: Make sure we're staying in the expected or dependent Tables.
 class _AssertingSearch(dp.Search):
-    """This extends dp.Search to assert that cache misses occur in a single block."""
+    """Wraps dp.Search to assert that no cache misses occur across block boundaries."""
 
-    def __init__(self, block_coordinate: Optional["Coord"], *args, **kwargs) -> None:
+    def __init__(
+        self, downscale: int, block_coordinate: Optional["Coord"], *args, **kwargs
+    ) -> None:
         self.block_coordinate = block_coordinate
         super().__init__(*args, **kwargs)
+        self.downscale = downscale
 
     def _choose(
         self,
@@ -50,24 +55,30 @@ class _AssertingSearch(dp.Search):
         **kwargs,
     ) -> tuple[list[tuple["impl.Impl", tuple]], int]:
         assert self.block_coordinate is None or len(
-            _spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec)).dim_coords
+            _spec_coordinate_to_block_coord(
+                self.downscale, _spec_to_spec_coordinate(spec)
+            ).dim_coords
         ) == len(self.block_coordinate.dim_coords), (
             f"Expected the same number of dim_coords in the Spec: {spec} and "
-            f"{_spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec))}"
+            f"{_spec_coordinate_to_block_coord(self.downscale, _spec_to_spec_coordinate(spec))}"
         )
         assert self.block_coordinate is None or len(
-            _spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec)).other_coords
+            _spec_coordinate_to_block_coord(
+                self.downscale, _spec_to_spec_coordinate(spec)
+            ).other_coords
         ) == len(self.block_coordinate.other_coords), (
             f"Expected the same number of other_coords in the Spec: {spec} and "
-            f"{_spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec))}"
+            f"{_spec_coordinate_to_block_coord(self.downscale, _spec_to_spec_coordinate(spec))}"
         )
         assert (
             self.block_coordinate is None
-            or _spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec))
+            or _spec_coordinate_to_block_coord(
+                self.downscale, _spec_to_spec_coordinate(spec)
+            )
             == self.block_coordinate
         ), (
             "Unexpected miss at block coordinate "
-            f"{_spec_coordinate_to_block_coord(_spec_to_spec_coordinate(spec))} from "
+            f"{_spec_coordinate_to_block_coord(self.downscale, _spec_to_spec_coordinate(spec))} from "
             f"Spec coordinate {_spec_to_spec_coordinate(spec)}; "
             f"search expected block coord. {self.block_coordinate}; "
             f"Spec = {spec}"
@@ -109,17 +120,17 @@ class Coord:
             raise ValueError("Unexpected type: " + str(spec_type))
 
 
-def _spec_coordinates_in_block(block: Coord) -> Iterable[Coord]:
+def _spec_coordinates_in_block(downscale: int, block_coord: Coord) -> Iterable[Coord]:
     for log_pts in itertools.product(
-        *[range(b * FACTOR, (b + 1) * FACTOR) for b in block.dim_coords]
+        *[range(b * downscale, (b + 1) * downscale) for b in block_coord.dim_coords]
     ):
-        yield Coord(tuple(2**p for p in log_pts), block.other_coords)
+        yield Coord(tuple(2**p for p in log_pts), block_coord.other_coords)
 
 
-def _spec_coordinate_to_block_coord(spec_coord: Coord) -> Coord:
+def _spec_coordinate_to_block_coord(downscale: int, spec_coord: Coord) -> Coord:
     # Scale the tensor dimensions down.
     # TODO: Avoid conversion to floats. (Maybe: switch to bit-flipping.)
-    dim_coords = tuple(int(math.log2(v)) // FACTOR for v in spec_coord.dim_coords)
+    dim_coords = tuple(int(math.log2(v)) // downscale for v in spec_coord.dim_coords)
     return Coord(dim_coords, spec_coord.other_coords)
 
 
@@ -178,50 +189,97 @@ def _destructure_spec_coordinate(
         raise NotImplementedError("Unsupported Spec: " + str(base_spec))
 
 
-def _compute_all(
-    dask_client: dask.distributed.Client,
-    top_query_spec: specs.Spec,
-    top_limits: pruning.MemoryLimits,
-    cache: Union[search_cache.InMemoryScheduleCache, dask.distributed.Future],
-) -> dask.distributed.Future:
-    # Walk frontiers, with synchronization after each.
+class DPTableGraph:
+    final_cache: dask.distributed.Future
+    _block_caches: dict[Coord, dask.distributed.Future]
 
-    target = system_config.current_target()
+    def __init__(
+        self,
+        dask_client: dask.distributed.Client,
+        downscale: int,
+        top_query_spec: specs.Spec,
+        top_limits: pruning.MemoryLimits,
+        base_cache: Optional[
+            Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]
+        ],
+    ):
+        self._block_caches = {}
 
-    top_spec_pt = _spec_to_spec_coordinate(top_query_spec)
-    top_block = _spec_coordinate_to_block_coord(top_spec_pt)
-    slice_idx = 0
-    while True:
-        block_diagonal = [
-            Coord.structure(d, top_query_spec)
-            for d in utils.sum_seqs(maxes=top_block.flatten(), total=slice_idx)
-        ]
-        if not block_diagonal:
-            break
-        block_results = dask_client.map(
-            _compute_block,
-            block_diagonal,
-            [target] * len(block_diagonal),
-            [top_query_spec] * len(block_diagonal),
-            [top_limits] * len(block_diagonal),
-            [cache] * len(block_diagonal),
-            key=f"block-{type(top_query_spec).__name__}",
-        )
-        cache = dask_client.submit(_merge_block_results, cache, block_results, target)
-        slice_idx += 1
+        target = system_config.current_target()
+        rid = f"{random.randint(0, 99999)}"
 
-    assert not isinstance(cache, search_cache.InMemoryScheduleCache)
-    return cache
+        top_spec_pt = _spec_to_spec_coordinate(top_query_spec)
+        top_block = _spec_coordinate_to_block_coord(downscale, top_spec_pt)
+        diagonal_idx = 0
+        last_diagonal: list[tuple[Coord, dask.distributed.Future]] = []
+        while True:
+            new_diagonal: list[tuple[Coord, dask.distributed.Future]] = []
+            block_diagonal = [
+                Coord.structure(d, top_query_spec)
+                for d in utils.sum_seqs(maxes=top_block.flatten(), total=diagonal_idx)
+            ]
+            if not block_diagonal:
+                break
+            for bidx, block in enumerate(block_diagonal):
+                # Each block depends on the blocks in the prior diagonal with no greater
+                # dimension, as well as *their* dependencies (transitive deps.).
+                # (The following loop is slow, but fast enough in practice.)
+                last_diag_deps: list[
+                    Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]
+                ] = [
+                    f
+                    for c, f in last_diagonal
+                    if all(a <= b for a, b in zip(c.flatten(), block.flatten()))
+                ]
+                if diagonal_idx == 0:
+                    assert not last_diag_deps
+                    if base_cache:
+                        last_diag_deps.append(base_cache)
+
+                # Create the task for the block.
+                suffix = f"{type(top_query_spec).__name__}-{diagonal_idx}-{bidx}-{rid}"
+                new_task = dask_client.submit(
+                    _compute_block,
+                    block,
+                    target,
+                    top_query_spec,
+                    top_limits,
+                    last_diag_deps,
+                    downscale,
+                    key=f"block-{suffix}",
+                )
+                merged_resulting_cache = dask_client.submit(
+                    _merge_caches,
+                    last_diag_deps + [new_task],
+                    target,
+                    key=f"resultmerge-{suffix}",
+                )
+                new_diagonal.append((block, merged_resulting_cache))
+                self._block_caches[block] = merged_resulting_cache
+            diagonal_idx += 1
+            last_diagonal = new_diagonal
+
+        # The final result is the transitive deps. of the final, single-element diagnonal.
+        assert len(last_diagonal) == 1
+        self.final_cache = last_diagonal[0][1]
 
 
-def _merge_block_results(
-    base_cache: search_cache.InMemoryScheduleCache,
-    block_results: Sequence[search_cache.InMemoryScheduleCache],
+def _merge_caches(
+    caches: Sequence[search_cache.ScheduleCache],
     target: system_config.Target,
 ) -> search_cache.InMemoryScheduleCache:
+    if not caches:
+        raise ValueError("No caches to merge")
+
+    if len(caches) == 1 and isinstance(caches[0], search_cache.InMemoryScheduleCache):
+        return caches[0]
     with system_config.with_target(target):
-        cache = copy.deepcopy(base_cache)
-        for block_result in block_results:
+        if isinstance(caches[0], search_cache.InMemoryScheduleCache):
+            cache = copy.deepcopy(caches[0])
+            caches = caches[1:]
+        else:
+            cache = search_cache.InMemoryScheduleCache()
+        for block_result in caches:
             cache.update(block_result)
         return cache
 
@@ -233,24 +291,34 @@ def _compute_block(
     target: system_config.Target,
     top_query_spec: specs.Spec,
     top_limits: pruning.MemoryLimits,
-    cache: search_cache.ScheduleCache,
+    caches: Sequence[search_cache.InMemoryScheduleCache],
+    downscale: int,
 ) -> search_cache.ScheduleCache:
-    """Compute a block given an input cache and return an overlay cache."""
+    """Compute a block given an input cache and return an overlay cache.
+
+    The returned cache does not contain Specs in the provided `cache`; just the
+    additional Specs computed for this block.
+    """
     assert isinstance(top_limits, pruning.StandardMemoryLimits)
 
-    with system_config.with_target(target):
-        all_banks = target.system.ordered_banks
-        op_count = len(top_query_spec.operands)
+    assert caches
+    cache = caches[0]
+    if len(caches) > 1:
+        cache = _merge_caches(caches, target)
 
+    with system_config.with_target(target):
         # Wrap the cache so that updates end up in a separate, "overlay" cache.
         cache = search_cache.CacheChain([search_cache.InMemoryScheduleCache(), cache])
 
-        search_obj = _AssertingSearch(block_coord, cache=cache)
+        all_banks = target.system.ordered_banks
+        op_count = len(top_query_spec.operands)
+
+        search_obj = _AssertingSearch(downscale, block_coord, cache=cache)
 
         assert set(top_limits.available.keys()) == set(all_banks)
 
         top_query_shape = _spec_to_spec_coordinate(top_query_spec)
-        for spec_coord in _spec_coordinates_in_block(block_coord):
+        for spec_coord in _spec_coordinates_in_block(downscale, block_coord):
             # The larget block might contain Specs which are larger than the bounding
             # query shape (`top_query_shape`). Skip those.
             if any(
@@ -361,6 +429,11 @@ def main():
     system_config.set_current_target("cpu")
     target = system_config.current_target()
 
+    loaded_moves_cache = None
+    if args.moves_cache:
+        with args.moves_cache.open(mode="rb") as fo:
+            loaded_moves_cache = pickle.load(fo)
+
     if args.scheduler:
         cluster = contextlib.nullcontext()
         cluster_address = args.scheduler
@@ -378,80 +451,98 @@ def main():
         per_dt_caches = []
 
         for dt in dtypes.ALL_DTYPES:
-            dt_cache = search_cache.InMemoryScheduleCache()
+            if loaded_moves_cache:
+                dt_cache = loaded_moves_cache
+            else:
+                dt_cache = search_cache.InMemoryScheduleCache()
+                load_spec = specs.Load(
+                    source=target.tensor_spec((args.size, args.size), dtype=dt),
+                    destination=target.tensor_spec((args.size, args.size), dtype=dt),
+                    serial_only=False,
+                )
+                store_spec = specs.Store(
+                    source=target.tensor_spec((args.size, args.size), dtype=dt),
+                    destination=target.tensor_spec((args.size, args.size), dtype=dt),
+                    serial_only=False,
+                )
+                zero_spec = specs.Zero(
+                    destination=target.tensor_spec((args.size, args.size), dtype=dt),
+                    serial_only=True,
+                )
 
-            load_spec = specs.Load(
-                source=target.tensor_spec((args.size, args.size), dtype=dt),
-                destination=target.tensor_spec((args.size, args.size), dtype=dt),
-                serial_only=False,
-            )
-            store_spec = specs.Store(
-                source=target.tensor_spec((args.size, args.size), dtype=dt),
-                destination=target.tensor_spec((args.size, args.size), dtype=dt),
-                serial_only=False,
-            )
-            zero_spec = specs.Zero(
-                destination=target.tensor_spec((args.size, args.size), dtype=dt),
-                serial_only=True,
-            )
+                # Zero depends on Store, not Load, so chain those.
+                store_zero_cache = DPTableGraph(
+                    dask_client,
+                    args.downscale,
+                    store_spec,
+                    top_limits=limits,
+                    base_cache=dt_cache,
+                ).final_cache
+                store_zero_cache = DPTableGraph(
+                    dask_client,
+                    args.downscale,
+                    zero_spec,
+                    top_limits=limits,
+                    base_cache=store_zero_cache,
+                ).final_cache
 
-            # Zero depends on Store, not Load, so chain those.
-            store_zero_cache = _compute_all(
-                dask_client, store_spec, top_limits=limits, cache=dt_cache
-            )
-            store_zero_cache = _compute_all(
-                dask_client, zero_spec, top_limits=limits, cache=store_zero_cache
-            )
-
-            # Merge the Load table with the Store/Zero table.
-            dt_cache = dask_client.submit(
-                _merge_block_results,
-                dt_cache,
-                [
-                    store_zero_cache,
-                    _compute_all(
-                        dask_client, load_spec, top_limits=limits, cache=dt_cache
-                    ),
-                ],
-                target,
-            )
+                # Merge the Load table with the Store/Zero table.
+                dt_cache = dask_client.submit(
+                    _merge_caches,
+                    [
+                        dt_cache,
+                        store_zero_cache,
+                        DPTableGraph(
+                            dask_client,
+                            args.downscale,
+                            load_spec,
+                            top_limits=limits,
+                            base_cache=dt_cache,
+                        ).final_cache,
+                    ],
+                    target,
+                )
 
             if not args.moves_only:
-                spec3 = specs.MatmulAccum(
+                matmul_accum_spec = specs.MatmulAccum(
                     lhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     rhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     output=target.tensor_spec((args.size, args.size), dtype=dt),
                     serial_only=False,
                 )
-                dt_cache = _compute_all(
-                    dask_client, spec3, top_limits=limits, cache=dt_cache
-                )
+                dt_cache = DPTableGraph(
+                    dask_client,
+                    args.downscale,
+                    matmul_accum_spec,
+                    top_limits=limits,
+                    base_cache=dt_cache,
+                ).final_cache
 
-                spec4 = specs.Matmul(
+                matmul_spec = specs.Matmul(
                     lhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     rhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     output=target.tensor_spec((args.size, args.size), dtype=dt),
                     serial_only=False,
                 )
-                dt_cache = _compute_all(
-                    dask_client, spec4, top_limits=limits, cache=dt_cache
-                )
+                dt_cache = DPTableGraph(
+                    dask_client,
+                    args.downscale,
+                    matmul_spec,
+                    top_limits=limits,
+                    base_cache=dt_cache,
+                ).final_cache
 
             per_dt_caches.append(dt_cache)
 
         assert len(per_dt_caches) == 2
 
         combined_cache = dask_client.submit(
-            _merge_block_results,
-            search_cache.InMemoryScheduleCache(),
-            per_dt_caches,
-            target,
+            _merge_caches, per_dt_caches, target
         ).result()
 
-        out_path = pathlib.Path("./cache.pkl")
-        with atomicwrites.atomic_write(out_path, mode="wb", overwrite=True) as fo:
+        with atomicwrites.atomic_write(args.out_path, mode="wb", overwrite=True) as fo:
             pickle.dump(combined_cache, fo)
-        logger.info("Saving cache to: %s", str(out_path))
+        logger.info("Saving cache to: %s", str(args.out_path))
 
     print(f"Total time: {time.time() - start:.1f}s")
 
