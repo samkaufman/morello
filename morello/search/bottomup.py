@@ -10,6 +10,7 @@ import pickle
 import random
 import secrets
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Iterable, Optional, Union
@@ -29,9 +30,10 @@ arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("--scheduler", type=str)
 arg_parser.add_argument("--downscale", type=int, default=1)
 arg_parser.add_argument("--deploy-k8s", action="store_true")
+arg_parser.add_argument("--deploy-k8s-with-custom-image", type=str)
 arg_parser.add_argument("--moves-only", action="store_true")
 arg_parser.add_argument("--size", type=int, default=512)
-arg_parser.add_argument("--image-tag", "-t", type=str, default="samkaufman/morello")
+arg_parser.add_argument("--image-name", "-t", type=str, default="samkaufman/morello")
 arg_parser.add_argument("--moves-cache", metavar="CACHE", type=pathlib.Path)
 arg_parser.add_argument("out_path", metavar="OUTCACHE", type=pathlib.Path)
 
@@ -372,13 +374,13 @@ def _compute_block(
         return cache.caches[0]
 
 
-def _make_docker_image(image_tag: str) -> str:
+def _make_docker_image(image_name: str) -> str:
     current_dir = pathlib.Path(__file__).parent.resolve().parent.parent
     assert (
         current_dir / "Dockerfile"
     ).is_file(), f"{current_dir} does not contain a Dockerfile"
 
-    tag = f"{image_tag}:dep{secrets.token_hex(14)}"
+    tag = f"{image_name}:dep{secrets.token_hex(14)}"
     logger.info("Building Docker image with tag %s", tag)
     build_process = subprocess.run(
         f"docker build --target cpu-only -t {tag} -q .",
@@ -400,12 +402,10 @@ def _make_docker_image(image_tag: str) -> str:
 def _deploy_k8s_cluster(image_tag: str):
     from dask_kubernetes import KubeCluster, make_pod_spec
 
-    tag = _make_docker_image(image_tag)
-
     logger.info("Starting the Kubernetes cluster")
     cluster = KubeCluster(
         make_pod_spec(
-            image=tag,
+            image=image_tag,
             memory_limit="6G",
             memory_request="3G",
             cpu_limit=1,
@@ -437,9 +437,15 @@ def main():
     if args.scheduler:
         cluster = contextlib.nullcontext()
         cluster_address = args.scheduler
-    elif args.deploy_k8s:
-        assert args.image_tag
-        cluster = _deploy_k8s_cluster(args.image_tag)
+    elif args.deploy_k8s or args.deploy_k8s_with_custom_image:
+        if args.deploy_k8s_with_custom_image:
+            if args.image_name:
+                print("--image_name ignored when using a custom image", file=sys.stderr)
+            tag = args.deploy_k8s_with_custom_image
+        else:
+            assert args.image_name
+            tag = _make_docker_image(args.image_name)
+        cluster = _deploy_k8s_cluster(tag)
         cluster_address = cluster
     else:
         cluster = dask.distributed.LocalCluster(threads_per_worker=1)
