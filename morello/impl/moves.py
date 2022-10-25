@@ -1,9 +1,16 @@
 import dataclasses
-import operator
 import functools
-from typing import Any, Iterable, Literal, Optional, Callable, Sequence, Union, cast
+import operator
+from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union, cast
 
 from .. import layouts, specs, system_config
+from ..layouts import Layout
+from ..system_config import current_system, current_target
+from ..tensor import Tensor, TensorBase, TensorLike
+from ..utils import TinyMap
+from . import MoveAction, settings
+from .actions import TileOutAction
+from .base import AppliedImpl, Impl, Leaf, NonAllocatingLeaf, make_applied_impl
 from .pruning import (
     ParentSummary,
     break_matmul_split_symmetries,
@@ -12,14 +19,7 @@ from .pruning import (
     prune_nested_parallel_loops,
     prune_relayout_cycles,
 )
-from ..layouts import Layout
-from .actions import TileOutAction
-from ..system_config import current_system, current_target
-from ..tensor import TensorBase, Tensor, TensorLike
-from ..utils import TinyMap
-from . import MoveAction
-from .base import AppliedImpl, Impl, Leaf, NonAllocatingLeaf, make_applied_impl
-from .utils import assert_stable_spec, gen_vector_shapes, gen_tile_sizes
+from .utils import assert_stable_spec, gen_tile_sizes, gen_vector_shapes
 
 
 class _OperandWrapper(Impl):
@@ -101,6 +101,7 @@ class MoveLet(Impl):
     def __post_init__(self):
         assert self.source_idx >= 0
         assert self.destination.layout != layouts.HEXAGON_TRANSPACKED
+        assert not self.prefetching or settings.enable_prefetching_moves.get()
 
     @property
     def is_store(self) -> bool:
@@ -466,6 +467,11 @@ def _move_arguments(
 def common_operand_move_actions(impl: "Impl") -> Iterable[MoveAction]:
     spec = impl.spec
 
+    if settings.enable_prefetching_moves.get():
+        prf_options = [True, False]
+    else:
+        prf_options = [False]
+
     def inner(inp_idx, operand: specs.TensorSpec) -> Iterable[MoveAction]:
         assert isinstance(operand, specs.TensorSpec)  # TODO: Remove
         move_fn, can_move_fn = impl.move_output, operand.can_move_to
@@ -474,7 +480,7 @@ def common_operand_move_actions(impl: "Impl") -> Iterable[MoveAction]:
             can_move_fn = operand.can_move_to
 
         for bank, layout, kws in _move_arguments(operand):
-            for prf in [True, False]:
+            for prf in prf_options:
                 if can_move_fn(bank, layout):
                     yield MoveAction(move_fn, operand, inp_idx, prf, bank, layout, kws)
 
