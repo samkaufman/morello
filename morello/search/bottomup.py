@@ -35,6 +35,7 @@ arg_parser.add_argument("--moves-only", action="store_true")
 arg_parser.add_argument("--size", type=int, default=512)
 arg_parser.add_argument("--image-name", "-t", type=str, default="samkaufman/morello")
 arg_parser.add_argument("--moves-cache", metavar="CACHE", type=pathlib.Path)
+arg_parser.add_argument("--serial-only", action="store_true")
 arg_parser.add_argument("out_path", metavar="OUTCACHE", type=pathlib.Path)
 
 
@@ -464,16 +465,16 @@ def main():
                 load_spec = specs.Load(
                     source=target.tensor_spec((args.size, args.size), dtype=dt),
                     destination=target.tensor_spec((args.size, args.size), dtype=dt),
-                    serial_only=False,
+                    serial_only=args.serial_only,
                 )
                 store_spec = specs.Store(
                     source=target.tensor_spec((args.size, args.size), dtype=dt),
                     destination=target.tensor_spec((args.size, args.size), dtype=dt),
-                    serial_only=False,
+                    serial_only=args.serial_only,
                 )
                 zero_spec = specs.Zero(
                     destination=target.tensor_spec((args.size, args.size), dtype=dt),
-                    serial_only=True,
+                    serial_only=args.serial_only,
                 )
 
                 # Zero depends on Store, not Load, so chain those.
@@ -514,7 +515,7 @@ def main():
                     lhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     rhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     output=target.tensor_spec((args.size, args.size), dtype=dt),
-                    serial_only=False,
+                    serial_only=args.serial_only,
                 )
                 dt_cache = DPTableGraph(
                     dask_client,
@@ -528,7 +529,7 @@ def main():
                     lhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     rhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     output=target.tensor_spec((args.size, args.size), dtype=dt),
-                    serial_only=False,
+                    serial_only=args.serial_only,
                 )
                 dt_cache = DPTableGraph(
                     dask_client,
