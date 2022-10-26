@@ -103,6 +103,13 @@ class MoveLet(Impl):
         assert self.destination.layout != layouts.HEXAGON_TRANSPACKED
         assert not self.prefetching or settings.enable_prefetching_moves.get()
 
+        system = system_config.current_system()
+        source_bank = self.spec.operands[self.source_idx].bank
+        if self.destination.bank not in system.faster_destination_banks(source_bank):
+            raise ValueError(
+                f"Cannot move from {source_bank} to {self.destination.bank}"
+            )
+
     @property
     def is_store(self) -> bool:
         # TODO: This is a heuristic. Shouldn't be needed.
@@ -584,6 +591,4 @@ def transition_contiguous(bank, layout, operand):
     # If it's into memory bank with its own address space, then yes.
     if bank not in current_system().addressed_banks:
         return operand.contiguous_abs
-    return cast(Layout, layout).check_tile_contiguity(
-        operand.dim_sizes, operand.dim_sizes, operand.contiguous_abs
-    )
+    return layout.contiguous_top()

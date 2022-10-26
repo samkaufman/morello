@@ -1,8 +1,8 @@
 import itertools
 from typing import Any, Callable, Optional, Sequence
 
-from hypothesis import strategies as st
 import hypothesis
+from hypothesis import strategies as st
 
 from morello import dtypes, impl, layouts, specs, system_config, tensor
 from morello.system_config import cpu, hexagon
@@ -24,7 +24,9 @@ def layout_st(
     numels_ones: Optional[bool] = None,
     dim_sizes: Optional[tuple[int, ...]] = None,
 ) -> layouts.Layout:
-    assert numels_ones is not None or dim_sizes
+    assert (
+        numels_ones is not None or dim_sizes
+    ), f"numels_ones = {numels_ones} and dim_sizes = {dim_sizes}"
     if numels_ones is None:
         assert dim_sizes
         numels_ones = all(d == 1 for d in dim_sizes)
@@ -102,7 +104,7 @@ def tensorspec_st(
         bank = draw(st.sampled_from(sorted(target.system.banks)))
 
     return target.tensor_spec(
-        dim_sizes, dtype=dtype, contiguous_abs=contiguous_abs, layout=layout, bank=bank,
+        dim_sizes, dtype=dtype, contiguous_abs=contiguous_abs, layout=layout, bank=bank
     )
 
 
@@ -286,6 +288,13 @@ def _smaller_shape(draw, outer: Sequence[int]) -> tuple[int, ...]:
     return tuple(tile_shape)
 
 
+atomic_specs_st = st.one_of(
+    st.from_type(specs.Matmul),
+    st.from_type(specs.Convolution),
+    st.from_type(specs.ReduceSum),
+)
+
+
 def register_default_strategies():
     st.register_type_strategy(layouts.Layout, layout_st(numels_ones=False))
     st.register_type_strategy(dtypes.Dtype, dtype_st)
@@ -300,12 +309,7 @@ def register_default_strategies():
     st.register_type_strategy(specs.ReduceSum, reduce_spec_st())
     st.register_type_strategy(
         specs.Spec,
-        st.one_of(
-            st.from_type(specs.Compose),
-            st.from_type(specs.Matmul),
-            st.from_type(specs.Convolution),
-            st.from_type(specs.ReduceSum),
-        ),
+        st.one_of(atomic_specs_st, st.from_type(specs.Compose)),
     )
 
     # Register default strategies for generating Impls, including Holes, Movelets,

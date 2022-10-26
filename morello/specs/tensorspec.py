@@ -13,6 +13,10 @@ if typing.TYPE_CHECKING:
     from .. import tensor
 
 
+class LayoutDoesntApplyError(ValueError):
+    pass
+
+
 @cython.dataclasses.dataclass(unsafe_hash=True)
 @cython.cclass
 class TensorSpec:
@@ -61,10 +65,12 @@ class TensorSpec:
             raise ValueError("dim_sizes cannot be empty")
         if all(d == 1 for d in self.dim_sizes):
             if not self.layout.is_row_major:
-                raise ValueError("If all dimensions are 1, layout must be row-major")
+                raise LayoutDoesntApplyError(
+                    "If all dimensions are 1, layout must be row-major"
+                )
 
         if not self.layout.applies_to_shape(dim_sizes):
-            raise ValueError(
+            raise LayoutDoesntApplyError(
                 f"Layout {self.layout} does not apply to shape {dim_sizes} with"
                 f" dtype {dtype}"
             )
