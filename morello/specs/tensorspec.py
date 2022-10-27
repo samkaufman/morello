@@ -98,7 +98,7 @@ class TensorSpec:
 
     @property
     def contiguous(self) -> bool:
-        return self.contiguous_abs == len(self.dim_sizes)
+        return self.contiguous_abs == self.layout.contiguous_top()
 
     @property
     @typing.final

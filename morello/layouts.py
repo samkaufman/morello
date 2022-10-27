@@ -29,7 +29,7 @@ class Layout:
         raise NotImplementedError()
 
     def check_tile_contiguity(
-        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous,
+        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous
     ) -> Any:
         """Test whether a tile of a particular shape and layout is contiguous.
 
@@ -94,7 +94,7 @@ class StandardLayout(Layout):
         return contiguous_abs == len(self.dim_order)
 
     def check_tile_contiguity(
-        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous,
+        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous
     ) -> Any:
         if all(d == 1 for d in tile_shape):
             return self.contiguous_top()
@@ -231,7 +231,7 @@ class PackedLayout(Layout):
 
     # TODO: Prefix calls with layout-checking assertions
     def check_tile_contiguity(
-        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous,
+        self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous
     ) -> Any:
         if len(parent_shape) != self.dim_count:
             raise ValueError(f"Expected rank-{self.dim_count} outer shape")

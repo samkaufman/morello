@@ -212,6 +212,14 @@ def compose_spec_st(draw) -> specs.Compose:
     output_dim_sizes = specs.Compose.calculate_output(
         subspec_classes, [inp.dim_sizes for inp in inputs_specs]
     )
+
+    # assert len(output_dim_sizes), (
+    #    f"output_dim_sizes was {output_dim_sizes} and inputs were "
+    #    f"{[inp.dim_sizes for inp in inputs_specs]} for "
+    #    f"({', '.join([c.__name__ for c in subspec_classes])})"
+    # )
+    hypothesis.assume(len(output_dim_sizes))
+
     out_dtype = draw(st.from_type(dtypes.Dtype))
     output_spec = target.tensor_spec(
         dim_sizes=output_dim_sizes,
