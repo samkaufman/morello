@@ -13,7 +13,7 @@
 set -e
 
 REMOTE_DEST="~/morello_bottomup"
-WORKER_NICE=5
+WORKER_NICE=10
 TMUX_SESSION_NAME=dask
 
 # Parse CLI args.

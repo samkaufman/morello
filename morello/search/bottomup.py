@@ -1,3 +1,4 @@
+import abc
 import argparse
 import contextlib
 import copy
@@ -13,7 +14,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Iterable, Optional, Union
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Union
 
 import atomicwrites
 import dask.distributed
@@ -23,6 +24,8 @@ from . import dp
 
 if TYPE_CHECKING:
     from .. import impl
+
+MERGE_DIAGONALS = True
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +47,11 @@ class _AssertingSearch(dp.Search):
     """Wraps dp.Search to assert that no cache misses occur across block boundaries."""
 
     def __init__(
-        self, downscale: int, block_coordinate: Optional["Coord"], *args, **kwargs
+        self, downscale: int, block_coordinate: "Coord", *args, **kwargs
     ) -> None:
-        self.block_coordinate = block_coordinate
         super().__init__(*args, **kwargs)
         self.downscale = downscale
+        self.block_coordinate = block_coordinate
 
     def _choose(
         self,
@@ -57,34 +60,25 @@ class _AssertingSearch(dp.Search):
         memory_limits: pruning.MemoryLimits,
         **kwargs,
     ) -> tuple[list[tuple["impl.Impl", tuple]], int]:
-        assert self.block_coordinate is None or len(
-            _spec_coordinate_to_block_coord(
-                self.downscale, _spec_to_spec_coordinate(spec)
-            ).dim_coords
-        ) == len(self.block_coordinate.dim_coords), (
+        spec_expected_block = _spec_coordinate_to_block_coord(
+            self.downscale, _spec_to_spec_coordinate(spec)
+        )
+        assert len(spec_expected_block.dim_coords) == len(
+            self.block_coordinate.dim_coords
+        ), (
             f"Expected the same number of dim_coords in the Spec: {spec} and "
             f"{_spec_coordinate_to_block_coord(self.downscale, _spec_to_spec_coordinate(spec))}"
         )
-        assert self.block_coordinate is None or len(
-            _spec_coordinate_to_block_coord(
-                self.downscale, _spec_to_spec_coordinate(spec)
-            ).other_coords
-        ) == len(self.block_coordinate.other_coords), (
+        assert len(spec_expected_block.other_coords) == len(
+            self.block_coordinate.other_coords
+        ), (
             f"Expected the same number of other_coords in the Spec: {spec} and "
             f"{_spec_coordinate_to_block_coord(self.downscale, _spec_to_spec_coordinate(spec))}"
         )
-        assert (
-            self.block_coordinate is None
-            or _spec_coordinate_to_block_coord(
-                self.downscale, _spec_to_spec_coordinate(spec)
-            )
-            == self.block_coordinate
-        ), (
-            "Unexpected miss at block coordinate "
-            f"{_spec_coordinate_to_block_coord(self.downscale, _spec_to_spec_coordinate(spec))} from "
-            f"Spec coordinate {_spec_to_spec_coordinate(spec)}; "
-            f"search expected block coord. {self.block_coordinate}; "
-            f"Spec = {spec}"
+        assert spec_expected_block == self.block_coordinate, (
+            f"Cache did not contain {str(spec)}, which should have been computed "
+            f"as part of block {spec_expected_block}. Miss occurred while computing "
+            f"{self.block_coordinate}."
         )
         return super()._choose(spec, leaf, memory_limits, **kwargs)
 
@@ -193,8 +187,11 @@ def _destructure_spec_coordinate(
 
 
 class DPTableGraph:
-    final_cache: dask.distributed.Future
-    _block_caches: dict[Coord, dask.distributed.Future]
+    diagonals: list["DPTableGraphDiagonal"]
+    downscale: int
+    _coords_to_transitive_results: dict[
+        Coord, list[Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]]
+    ]
 
     def __init__(
         self,
@@ -204,67 +201,214 @@ class DPTableGraph:
         top_limits: pruning.MemoryLimits,
         base_cache: Optional[
             Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]
-        ],
+        ] = None,
+        source_link: Optional["IntertableLink"] = None,
     ):
-        self._block_caches = {}
+        self.client = dask_client
+        self.downscale = downscale
 
-        target = system_config.current_target()
-        rid = f"{random.randint(0, 99999)}"
+        rid = f"{random.randint(0, 9999999)}"
+
+        self.diagonals = []
+        self._coords_to_transitive_results = {}
 
         top_spec_pt = _spec_to_spec_coordinate(top_query_spec)
         top_block = _spec_coordinate_to_block_coord(downscale, top_spec_pt)
+        self.top_block = top_block
+
         diagonal_idx = 0
-        last_diagonal: list[tuple[Coord, dask.distributed.Future]] = []
         while True:
-            new_diagonal: list[tuple[Coord, dask.distributed.Future]] = []
-            block_diagonal = [
+            diagonal_coordinates = [
                 Coord.structure(d, top_query_spec)
                 for d in utils.sum_seqs(maxes=top_block.flatten(), total=diagonal_idx)
             ]
-            if not block_diagonal:
+            if not diagonal_coordinates:
                 break
-            for bidx, block in enumerate(block_diagonal):
-                # Each block depends on the blocks in the prior diagonal with no greater
-                # dimension, as well as *their* dependencies (transitive deps.).
-                # (The following loop is slow, but fast enough in practice.)
-                last_diag_deps: list[
-                    Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]
-                ] = [
-                    f
-                    for c, f in last_diagonal
-                    if all(a <= b for a, b in zip(c.flatten(), block.flatten()))
-                ]
-                if diagonal_idx == 0:
-                    assert not last_diag_deps
-                    if base_cache:
-                        last_diag_deps.append(base_cache)
 
-                # Create the task for the block.
-                suffix = f"{type(top_query_spec).__name__}-{diagonal_idx}-{bidx}-{rid}"
-                new_task = dask_client.submit(
-                    _compute_block,
-                    block,
-                    target,
-                    top_query_spec,
-                    top_limits,
-                    last_diag_deps,
-                    downscale,
-                    key=f"block-{suffix}",
-                )
-                merged_resulting_cache = dask_client.submit(
-                    _merge_caches,
-                    last_diag_deps + [new_task],
-                    target,
-                    key=f"resultmerge-{suffix}",
-                )
-                new_diagonal.append((block, merged_resulting_cache))
-                self._block_caches[block] = merged_resulting_cache
+            # Add a number to the task key if all operands have the same rank.
+            suffix = type(top_query_spec).__name__
+            first_rank = len(top_query_spec.operands[0].dim_sizes)
+            if all(len(o.dim_sizes) == first_rank for o in top_query_spec.operands):
+                M = ["Zero", "One", "Two", "Three", "Four", "Five"]
+                try:
+                    suffix += M[len(top_query_spec.operands[0].dim_sizes)]
+                except IndexError:
+                    pass
+            suffix += f"-{diagonal_idx}"
+
+            new_diagonal = DPTableGraphDiagonal(
+                dask_client,
+                diagonal_coordinates,
+                rid=rid,
+                downscale=downscale,
+                suffix=suffix,
+                top_query_spec=top_query_spec,
+                top_limits=top_limits,
+                last_diagonal=(self.diagonals[-1] if self.diagonals else None),
+                initial_cache=(base_cache if diagonal_idx == 0 else None),
+                intertable_link=source_link,
+            )
+            self.diagonals.append(new_diagonal)
+            for idx, coord in enumerate(new_diagonal.coordinates):
+                self._coords_to_transitive_results[
+                    coord
+                ] = new_diagonal.get_transitive_block_cache(idx)
             diagonal_idx += 1
-            last_diagonal = new_diagonal
 
-        # The final result is the transitive deps. of the final, single-element diagnonal.
-        assert len(last_diagonal) == 1
-        self.final_cache = last_diagonal[0][1]
+        assert (
+            tuple(
+                map(
+                    max,
+                    zip(*[c.flatten() for d in self.diagonals for c in d.coordinates]),
+                )
+            )
+            == top_block.flatten()
+        )
+
+    def get_transitive_block_cache(
+        self, block_coord: Coord
+    ) -> Iterable[Union[search_cache.ScheduleCache, dask.distributed.Future]]:
+        return self._coords_to_transitive_results[block_coord]
+
+    @property
+    def final_cache(
+        self,
+    ) -> Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]:
+        target = system_config.current_target()
+        final_diagonal = self.diagonals[-1]
+        assert len(final_diagonal) == 1
+        final_caches = final_diagonal.get_transitive_block_cache(0)
+        assert final_caches
+        if len(final_caches) == 1:
+            return final_caches[0]
+        return self.client.submit(_merge_caches, final_caches, target)
+
+
+class DPTableGraphDiagonal:
+    coordinates: Sequence[Coord]
+
+    def __init__(
+        self,
+        dask_client,
+        diagonal_coordinates: Iterable[Coord],
+        *,
+        rid: str,
+        downscale: int,
+        suffix: str,
+        top_query_spec: specs.Spec,
+        top_limits: pruning.MemoryLimits,
+        last_diagonal: Optional["DPTableGraphDiagonal"] = None,
+        initial_cache: Optional[
+            Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]
+        ] = None,
+        intertable_link: Optional["IntertableLink"] = None,
+    ):
+        self.coordinates = list(diagonal_coordinates)
+        self._client = dask_client
+        self._blocks = []
+        self._merged_result = None
+
+        target = system_config.current_target()
+
+        for bidx, block_coordinate in enumerate(self.coordinates):
+            # Each block depends on the blocks in the prior diagonal with no greater
+            # dimension, as well as *their* dependencies (transitive deps.).
+            last_diag_deps = []
+            if last_diagonal:
+                last_diag_deps.extend(
+                    (
+                        f
+                        for idx, coord in enumerate(last_diagonal.coordinates)
+                        for f in last_diagonal.get_transitive_block_cache(idx)
+                        if all(
+                            a <= b
+                            for a, b in zip(coord.flatten(), block_coordinate.flatten())
+                        )
+                    )
+                )
+            if intertable_link:
+                last_diag_deps.extend(intertable_link(downscale, block_coordinate))
+            if initial_cache:
+                last_diag_deps.append(initial_cache)
+
+            # Create the task for the block. The result will be just the new Specs.
+            new_task = dask_client.submit(
+                _compute_block,
+                block_coordinate,
+                target,
+                top_query_spec,
+                top_limits,
+                last_diag_deps,
+                downscale,
+                key=f"block-{suffix}-{bidx}-{rid}",
+            )
+            self._blocks.append((new_task, last_diag_deps))
+
+    def __len__(self) -> int:
+        return len(self.coordinates)
+
+    def get_transitive_block_cache(
+        self, idx: int
+    ) -> list[Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]]:
+        """Returns the result of a block and all of its dependencies.
+
+        This may return more than *just* that block's results or its dependencies.
+        """
+        target = system_config.current_target()
+
+        if MERGE_DIAGONALS:
+            if self._merged_result:
+                return [self._merged_result]
+            src = []
+            for result, deps in self._blocks:
+                src.append(result)
+                src.extend(deps)
+            self._merged_result = self._client.submit(_merge_caches, src, target)
+            return [self._merged_result]
+
+        result, deps = self._blocks[idx]
+        return [result] + deps
+
+
+class IntertableLink(abc.ABC):
+    @abc.abstractmethod
+    def __call__(
+        self, destination_downscale: int, destination_block_coord: Coord
+    ) -> Iterable[Union[search_cache.ScheduleCache, dask.distributed.Future]]:
+        pass
+
+
+class DirectIntertableLink(IntertableLink):
+    """A callable for linking two same-sized DPTableGraphs one-to-one."""
+
+    def __init__(self, source: DPTableGraph):
+        self._source = source
+
+    def __call__(
+        self, destination_downscale: int, destination_block_coord: Coord
+    ) -> Iterable[Union[search_cache.ScheduleCache, dask.distributed.Future]]:
+        # TODO: Ideally this method would accept query Specs and not care if the two
+        #   graphs are downscaled or blocked in the same way.
+        assert destination_downscale == self._source.downscale
+        return self._source.get_transitive_block_cache(destination_block_coord)
+
+
+class ZeroToStoreLink(IntertableLink):
+    def __init__(self, source: DPTableGraph):
+        self._source = source
+        self._source_bank_dim_max = source.top_block.other_coords[0]
+
+    def __call__(
+        self, destination_downscale: int, destination_block_coord: Coord
+    ) -> Iterable[Union[search_cache.ScheduleCache, dask.distributed.Future]]:
+        # TODO: Ideally this method would accept query Specs and not care if the two
+        #   graphs are downscaled or blocked in the same way.
+        assert destination_downscale == self._source.downscale
+        new_other_coords = (
+            self._source_bank_dim_max,
+        ) + destination_block_coord.other_coords
+        new_coord = Coord(destination_block_coord.dim_coords, new_other_coords)
+        return self._source.get_transitive_block_cache(new_coord)
 
 
 def _merge_caches(
@@ -287,6 +431,12 @@ def _merge_caches(
         return cache
 
 
+def _enumerate_contig_abstractions(
+    spec_type: type, banks: Sequence[str], layouts
+) -> Iterable[Sequence[Any]]:
+    return itertools.product(*[l.all_contiguous_abs_for_shape() for l in layouts])
+
+
 # TODO: Can we design this so that we don't need to reproduce the logic of the top-down
 #   actions expansion? Hate having the logic in two places.
 def _compute_block(
@@ -304,19 +454,19 @@ def _compute_block(
     """
     assert isinstance(top_limits, pruning.StandardMemoryLimits)
 
-    assert caches
-    cache = caches[0]
-    if len(caches) > 1:
-        cache = _merge_caches(caches, target)
+    cache = search_cache.CacheChain(
+        [search_cache.InMemoryScheduleCache()] + list(caches)
+    )
 
     with system_config.with_target(target):
-        # Wrap the cache so that updates end up in a separate, "overlay" cache.
-        cache = search_cache.CacheChain([search_cache.InMemoryScheduleCache(), cache])
-
         all_banks = target.system.ordered_banks
         op_count = len(top_query_spec.operands)
 
-        search_obj = _AssertingSearch(downscale, block_coord, cache=cache)
+        # Use dp.Search instead of _AssertingSearch because we don't compute all
+        # contiguousnesses for all shapes at the moment.
+        # TODO: Turn _AssertingSearch back on with more precise checks.
+        # search_obj = _AssertingSearch(downscale, block_coord, cache=cache)
+        search_obj = dp.Search(cache=cache)
 
         assert set(top_limits.available.keys()) == set(all_banks)
 
@@ -332,45 +482,47 @@ def _compute_block(
             operand_shapes, tensor_banks, serial_only = _destructure_spec_coordinate(
                 top_query_spec, spec_coord
             )
-            for layouts in itertools.product(
-                *[target.all_layouts_for_shape(shp) for shp in operand_shapes]
+            for layouts, aligneds in itertools.product(
+                itertools.product(
+                    *[target.all_layouts_for_shape(shp) for shp in operand_shapes]
+                ),
+                itertools.product([True, False], repeat=op_count),
             ):
-                for contigious_abstractions in itertools.product(
-                    *[l.all_contiguous_abs_for_shape() for l in layouts]
+                for contiguous_abstractions in _enumerate_contig_abstractions(
+                    type(top_query_spec), tensor_banks, layouts
                 ):
-                    for aligneds in itertools.product([True, False], repeat=op_count):
-                        # TODO: We should actually step down according to the memory
-                        #   used by the best Impl.
-                        new_operands = tuple(
-                            target.tensor_spec(
-                                operand_shapes[i],
-                                dtype=top_query_spec.operands[i].dtype,
-                                contiguous_abs=contigious_abstractions[i],
-                                aligned=aligneds[i],
-                                bank=tensor_banks[i],
-                                layout=layouts[i],
-                            )
-                            for i in range(op_count)
+                    # TODO: We should actually step down according to the memory
+                    #   used by the best Impl.
+                    new_operands = tuple(
+                        target.tensor_spec(
+                            operand_shapes[i],
+                            dtype=top_query_spec.operands[i].dtype,
+                            contiguous_abs=contiguous_abstractions[i],
+                            aligned=aligneds[i],
+                            bank=tensor_banks[i],
+                            layout=layouts[i],
                         )
-                        new_inputs, new_output = new_operands[:-1], new_operands[-1]
-                        for limits in itertools.product(
-                            *[
-                                utils.powers_of_two(top_limits.available[bank])
-                                for bank in all_banks
-                            ]
-                        ):
-                            limits_map = pruning.StandardMemoryLimits(
-                                utils.TinyMap(all_banks, limits)
-                            )
+                        for i in range(op_count)
+                    )
+                    new_inputs, new_output = new_operands[:-1], new_operands[-1]
+                    for limits in itertools.product(
+                        *[
+                            utils.powers_of_two(top_limits.available[bank])
+                            for bank in all_banks
+                        ]
+                    ):
+                        limits_map = pruning.StandardMemoryLimits(
+                            utils.TinyMap(all_banks, limits)
+                        )
 
-                            spec = top_query_spec.replace_io(
-                                inputs=new_inputs,
-                                output=new_output,
-                                serial_only=serial_only,
-                            )
-                            # TODO: Pass parent_summary too, if applicable.
-                            # print("Calling search on Spec: " + str(spec))
-                            search_obj(spec, memory_limits=limits_map)
+                        spec = top_query_spec.replace_io(
+                            inputs=new_inputs,
+                            output=new_output,
+                            serial_only=serial_only,
+                        )
+                        # TODO: Pass parent_summary too, if applicable.
+                        # print("Calling search on Spec: " + str(spec))
+                        search_obj(spec, memory_limits=limits_map)
 
         return cache.caches[0]
 
@@ -408,7 +560,7 @@ def _deploy_k8s_cluster(image_tag: str):
         make_pod_spec(
             image=image_tag,
             memory_limit="6G",
-            memory_request="3G",
+            memory_request="5G",
             cpu_limit=1,
             cpu_request=1,
             extra_container_config={"imagePullPolicy": "Always"},
@@ -418,6 +570,52 @@ def _deploy_k8s_cluster(image_tag: str):
     logger.info("Started the Kubernetes cluster")
     logger.info("Kubernetes scheduler address: %s", cluster.scheduler_address)
     return cluster
+
+
+def _moves_subgraph(
+    dask_client, size: int, dt: dtypes.Dtype, serial_only: bool, downscale: int
+) -> dask.distributed.Future:
+    target = system_config.current_target()
+    limits = pruning.StandardMemoryLimits()
+
+    final_caches = []
+
+    for rank in range(2, 5):
+        load_spec = specs.Load(
+            source=target.tensor_spec((size,) * rank, dtype=dt),
+            destination=target.tensor_spec((size,) * rank, dtype=dt),
+            serial_only=serial_only,
+        )
+        store_spec = specs.Store(
+            source=target.tensor_spec((size,) * rank, dtype=dt),
+            destination=target.tensor_spec((size,) * rank, dtype=dt),
+            serial_only=serial_only,
+        )
+        zero_spec = specs.Zero(
+            destination=target.tensor_spec((size,) * rank, dtype=dt),
+            serial_only=serial_only,
+        )
+
+        load_dp_table = DPTableGraph(
+            dask_client, downscale, load_spec, top_limits=limits
+        )
+        final_caches.append(load_dp_table.final_cache)
+
+        # Zero depends on Store, not Load, so chain those.
+        save_dp_table = DPTableGraph(
+            dask_client, downscale, store_spec, top_limits=limits
+        )
+        store_zero_cache = DPTableGraph(
+            dask_client,
+            downscale,
+            zero_spec,
+            top_limits=limits,
+            source_link=ZeroToStoreLink(save_dp_table),
+        )
+        final_caches.append(store_zero_cache.final_cache)
+
+    # Merge the Load table with the Store/Zero table.
+    return dask_client.submit(_merge_caches, final_caches, target)
 
 
 def main():
@@ -430,7 +628,9 @@ def main():
     system_config.set_current_target("cpu")
     target = system_config.current_target()
 
-    loaded_moves_cache = None
+    loaded_moves_cache: Optional[
+        Union[dask.distributed.Future, search_cache.ScheduleCache]
+    ] = None
     if args.moves_cache:
         with args.moves_cache.open(mode="rb") as fo:
             loaded_moves_cache = pickle.load(fo)
@@ -453,61 +653,27 @@ def main():
         cluster_address = cluster
 
     with cluster, dask.distributed.Client(cluster_address) as dask_client:
-        limits = pruning.StandardMemoryLimits()
+        if loaded_moves_cache:
+            scatter_start = time.time()
+            logger.info("Scattering loaded moves cache")
+            loaded_moves_cache = dask_client.scatter(loaded_moves_cache)  # type: ignore
+            logger.info(
+                "Scattering loaded moves cache took %.2f seconds",
+                time.time() - scatter_start,
+            )
 
+        limits = pruning.StandardMemoryLimits()
         per_dt_caches = []
 
         for dt in dtypes.ALL_DTYPES:
+            dt_cache: Union[dask.distributed.Future, search_cache.ScheduleCache]
             if loaded_moves_cache:
                 dt_cache = loaded_moves_cache
+                assert isinstance(dt_cache, dask.distributed.Future)
             else:
                 dt_cache = search_cache.InMemoryScheduleCache()
-                load_spec = specs.Load(
-                    source=target.tensor_spec((args.size, args.size), dtype=dt),
-                    destination=target.tensor_spec((args.size, args.size), dtype=dt),
-                    serial_only=args.serial_only,
-                )
-                store_spec = specs.Store(
-                    source=target.tensor_spec((args.size, args.size), dtype=dt),
-                    destination=target.tensor_spec((args.size, args.size), dtype=dt),
-                    serial_only=args.serial_only,
-                )
-                zero_spec = specs.Zero(
-                    destination=target.tensor_spec((args.size, args.size), dtype=dt),
-                    serial_only=args.serial_only,
-                )
-
-                # Zero depends on Store, not Load, so chain those.
-                store_zero_cache = DPTableGraph(
-                    dask_client,
-                    args.downscale,
-                    store_spec,
-                    top_limits=limits,
-                    base_cache=dt_cache,
-                ).final_cache
-                store_zero_cache = DPTableGraph(
-                    dask_client,
-                    args.downscale,
-                    zero_spec,
-                    top_limits=limits,
-                    base_cache=store_zero_cache,
-                ).final_cache
-
-                # Merge the Load table with the Store/Zero table.
-                dt_cache = dask_client.submit(
-                    _merge_caches,
-                    [
-                        dt_cache,
-                        store_zero_cache,
-                        DPTableGraph(
-                            dask_client,
-                            args.downscale,
-                            load_spec,
-                            top_limits=limits,
-                            base_cache=dt_cache,
-                        ).final_cache,
-                    ],
-                    target,
+                dt_cache = _moves_subgraph(
+                    dask_client, args.size, dt, args.serial_only, args.downscale
                 )
 
             if not args.moves_only:
@@ -517,13 +683,13 @@ def main():
                     output=target.tensor_spec((args.size, args.size), dtype=dt),
                     serial_only=args.serial_only,
                 )
-                dt_cache = DPTableGraph(
+                matmul_accum_dp_table = DPTableGraph(
                     dask_client,
                     args.downscale,
                     matmul_accum_spec,
                     top_limits=limits,
                     base_cache=dt_cache,
-                ).final_cache
+                )
 
                 matmul_spec = specs.Matmul(
                     lhs=target.tensor_spec((args.size, args.size), dtype=dt),
@@ -536,7 +702,7 @@ def main():
                     args.downscale,
                     matmul_spec,
                     top_limits=limits,
-                    base_cache=dt_cache,
+                    source_link=DirectIntertableLink(matmul_accum_dp_table),
                 ).final_cache
 
             per_dt_caches.append(dt_cache)
