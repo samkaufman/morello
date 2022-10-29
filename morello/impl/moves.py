@@ -493,7 +493,6 @@ def common_operand_move_actions(impl: "Impl") -> Iterable[MoveAction]:
         prf_options = [False]
 
     def inner(inp_idx, operand: specs.TensorSpec) -> Iterable[MoveAction]:
-        assert isinstance(operand, specs.TensorSpec)  # TODO: Remove
         move_fn, can_move_fn = impl.move_output, operand.can_move_to
         if inp_idx is not None:
             move_fn = functools.partial(impl.move_input, inp_idx)

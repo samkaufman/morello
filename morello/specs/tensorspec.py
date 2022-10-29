@@ -188,6 +188,23 @@ class TensorSpec:
         tile_spec = self.shrink(new_dims, aligned=aligned)
         return tile_cls(source=operand_idx, spec=tile_spec, name=None, **kw)
 
+    def flatten_inner_contig(self) -> Optional["TensorSpec"]:
+        flattened = self.layout.flatten_inner_contiguous_dimensions(
+            self.dim_sizes, self.contiguous_abs
+        )
+        if flattened is None:
+            return None
+        prefix, _, inner_contig_vol = flattened
+        new_layout = layouts.row_major(len(prefix) + 1)
+        return TensorSpec(
+            dim_sizes=prefix + (inner_contig_vol,),
+            dtype=self.dtype,
+            contiguous_abs=new_layout.contiguous_one(),
+            aligned=self.aligned,
+            bank=self.bank,
+            layout=new_layout,
+        )
+
     def __str__(self):
         layout_epi = ""
         bank_epi = ""

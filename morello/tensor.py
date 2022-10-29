@@ -1,4 +1,6 @@
 import dataclasses
+import sympy
+import re
 import math
 import typing
 from typing import TYPE_CHECKING, Mapping, Optional, Sequence
@@ -7,6 +9,8 @@ from . import dtypes, layouts, system_config
 
 if TYPE_CHECKING:
     from . import specs
+
+_PRE = re.compile(r"p(\d+)")
 
 OperandIdx = typing.NewType("OperandIdx", int)
 
@@ -70,6 +74,9 @@ class TensorLike:
     def frontiers(self) -> tuple[int, ...]:
         """The sizes of non-overlapping regions between consecutive tiles in each dimension."""
         raise NotImplementedError()
+
+    def transform_index_expr(self, orig_index_expr: sympy.Expr) -> sympy.Expr:
+        return orig_index_expr
 
     def transform_origin_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
         return tuple(shape)
@@ -135,14 +142,89 @@ class Tile(TensorLike):
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
+class InnerContigFlatteningTile(Tile):
+    source: OperandIdx
+    inner: TensorLike
+
+    @property
+    def spec(self) -> "specs.TensorSpec":
+        from . import specs
+
+        ispec: "specs.TensorSpec" = self.inner.spec
+        new_dim_sizes = self._flatten_shape()
+        new_layout = layouts.row_major(len(new_dim_sizes))
+        return specs.TensorSpec(
+            dim_sizes=new_dim_sizes,
+            dtype=ispec.dtype,
+            contiguous_abs=new_layout.contiguous_one(),
+            aligned=ispec.aligned,
+            bank=ispec.bank,
+            layout=new_layout,
+        )
+
+    @property
+    def name(self) -> str:
+        return self.inner.name
+
+    def steps_dim(self, dim: int, origin_size: int) -> int:
+        raise NotImplementedError()
+
+    def boundary_size(self, dim: int, origin_size: int) -> int:
+        raise NotImplementedError()
+
+    @property
+    def frontiers(self) -> tuple[int, ...]:
+        raise NotImplementedError()
+
+    def transform_index_expr(self, orig_index_expr: sympy.Expr) -> sympy.Expr:
+        expr = orig_index_expr
+        # expr = self.inner.transform_index_expr(expr)
+
+        dim_sizes = self._flatten_shape()
+
+        ispec = self.inner.spec
+        flattened = ispec.layout.flatten_inner_contiguous_dimensions(
+            ispec.dim_sizes, ispec.contiguous_abs
+        )
+        assert flattened
+        _, dropped_dims, _ = flattened
+
+        shift = 0
+        drop_subs = {}
+        for i in sorted(range(len(ispec.dim_sizes))):
+            if i in dropped_dims:
+                shift += 1
+                drop_subs[f"p{i}"] = 0
+            else:
+                drop_subs[f"p{i}"] = sympy.symbols(f"p{i - shift}")
+        expr = expr.subs(drop_subs, simultaneous=True)
+
+        # Add a simple offset since the flattened dimensions are contiguous.
+        return expr + sympy.symbols(f"p{len(dim_sizes) - 1}")
+
+    def transform_origin_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
+        shape = self.inner.transform_origin_shape(shape)
+
+        ispec: "specs.TensorSpec" = self.inner.spec
+        flattened = ispec.layout.flatten_inner_contiguous_dimensions(
+            shape, ispec.contiguous_abs
+        )
+        assert flattened
+        prefix, _, inner_vol = flattened
+        return prefix + (inner_vol,)
+
+    def __str__(self):
+        return f"{self.inner}.inner_flatten"
+
+    def _flatten_shape(self) -> tuple[int, ...]:
+        return self.transform_origin_shape(self.inner.dim_sizes)
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
 class SqueezingTile(Tile):
     source: OperandIdx
     inner: TensorLike
     dropped_dims: frozenset[int]
-
-    def __post_init__(self):
-        # TODO: Remove
-        self.spec
 
     @property
     def spec(self) -> "specs.TensorSpec":

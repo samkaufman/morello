@@ -130,8 +130,6 @@ def _arb_impls_from_actions(draw, partial_impl: morello.impl.base.Impl):
 
     # If we hit a dead end (no actions), and we haven't already returned, then
     # this isn't a viable example
-    if not len(actions):
-        print("No actions for: " + str(partial_impl.spec))
     hypothesis.assume(len(actions))
 
     action_idx = draw(st.integers(min_value=0, max_value=len(actions) - 1))

@@ -31,7 +31,7 @@ from .ctensors import (
 
 # TODO: Remove
 from .indexexpr import vsub
-from .loops import OperandDetailsLoopExt, emit_tile_out_loop_nest, BOUNDARY_ANCESTORS
+from .loops import BOUNDARY_ANCESTORS, OperandDetailsLoopExt, emit_tile_out_loop_nest
 
 _DCFETCH_EMIT_STRATEGY = "first-pt"
 _SIMD_MOVES = True
@@ -236,6 +236,7 @@ def _inner_generate_c(
         transformed_op_details.append(
             dataclasses.replace(
                 d,
+                index_expr=o.transform_index_expr(d.index_expr),
                 concrete_origin_shape=o.transform_origin_shape(d.concrete_origin_shape),
                 previously_transformed_tiles=d.previously_transformed_tiles | {o},
             )
@@ -278,6 +279,8 @@ def _inner_generate_c(
         for step, op_idxs in zip(imp.steps, imp.op_idxs):
             assert isinstance(step, impl.AppliedImpl)
             _inner_generate_c(step, [op_details[i] for i in op_idxs], allow_holes)
+    elif isinstance(imp, impl.SpecCast):
+        _inner_generate_c(imp.inner, op_details, allow_holes)
     elif isinstance(imp, impl.Pipeline):
         inps_op_details = op_details[:-1]
         output_op_details = op_details[-1]
@@ -817,7 +820,7 @@ def _move_hvx_vmem(
     operand_index_exprs,
     concrete_shapes,
     previously_transformeds,
-    allow_holes: bool
+    allow_holes: bool,
 ):
     writer = common.writer.get()
 

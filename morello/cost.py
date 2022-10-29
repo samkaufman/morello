@@ -3,8 +3,6 @@ from typing import NewType, Optional, Union
 
 import cython
 
-from morello.impl.zero import MemsetZero
-
 if cython.compiled:
     from cython.cimports.libc import math
 else:
@@ -21,10 +19,12 @@ from .impl import (
     Loop,
     MatmulAccumHole,
     MatmulHole,
+    MemsetZero,
     MoveLet,
     Mult,
     Pipeline,
     SlidingWindowLoop,
+    SpecCast,
     ValueAssign,
     VectorAssign,
 )
@@ -112,7 +112,7 @@ def detailed_analytical_cost(
         sum_cost = 0
         for child in op.children:
             sub_cd = detailed_analytical_cost(
-                child, depth=depth + 1, env=env, holes_ok=holes_ok,
+                child, depth=depth + 1, env=env, holes_ok=holes_ok
             )
             cost_dict.update(sub_cd)
             sum_cost += sub_cd[child][0]
@@ -141,7 +141,7 @@ def detailed_analytical_cost(
         return cost_dict
     elif isinstance(op, SlidingWindowLoop):
         cost_dict = detailed_analytical_cost(
-            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok,
+            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
         )
         # The moves are implicit in SlidingWindowLoop, so we'll construct
         # Tiles to serve as operands to `move_cost`.
@@ -180,21 +180,21 @@ def detailed_analytical_cost(
         )
 
         cost_dict = detailed_analytical_cost(
-            op.body, depth=depth + 1, env=env, holes_ok=holes_ok,
+            op.body, depth=depth + 1, env=env, holes_ok=holes_ok
         )
         new_cost = mcost + cost_dict[op.body][0]
 
         if op.prologue:
             cost_dict.update(
                 detailed_analytical_cost(
-                    op.prologue, depth=depth + 1, env=env, holes_ok=holes_ok,
+                    op.prologue, depth=depth + 1, env=env, holes_ok=holes_ok
                 )
             )
             new_cost += cost_dict[op.prologue][0]
         if op.epilogue:
             cost_dict.update(
                 detailed_analytical_cost(
-                    op.epilogue, depth=depth + 1, env=env, holes_ok=holes_ok,
+                    op.epilogue, depth=depth + 1, env=env, holes_ok=holes_ok
                 )
             )
             new_cost += cost_dict[op.epilogue][0]
@@ -202,6 +202,12 @@ def detailed_analytical_cost(
         cost_expl = f"{new_cost:5d} = {mcost} + _"
         assert compute_cost(op) == new_cost
         cost_dict[op] = (new_cost, cost_expl)
+        return cost_dict
+    elif isinstance(op, SpecCast):
+        cost_dict = detailed_analytical_cost(
+            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
+        )
+        cost_dict[op] = (0, "")
         return cost_dict
     elif holes_ok and isinstance(op, (ComposeHole, MatmulHole, MatmulAccumHole)):
         assert compute_cost(op) == 0
@@ -225,6 +231,8 @@ def compute_cost(op: Impl) -> MainCost:
         for c in op.children:
             sum_cost = _clip_add(sum_cost, compute_cost(c))
         return _assign_cost(op, sum_cost)
+    elif isinstance(op, SpecCast):
+        return _assign_cost(op, compute_cost(op.inner))
     elif isinstance(op, Loop):
         if not op.parallel:
             factor: MainCost = op.steps

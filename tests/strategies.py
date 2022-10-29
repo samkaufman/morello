@@ -109,6 +109,12 @@ def tensorspec_st(
 
 
 @st.composite
+def zero_spec_st(draw, max_dim_size: int = 128):
+    t = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=1, max_dims=4))
+    return specs.Zero(t, serial_only=draw(st.booleans()))
+
+
+@st.composite
 def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
     lhs_dtype = draw(st.from_type(dtypes.Dtype))
     rhs_dtype = draw(st.from_type(dtypes.Dtype))
@@ -297,6 +303,7 @@ def _smaller_shape(draw, outer: Sequence[int]) -> tuple[int, ...]:
 
 
 atomic_specs_st = st.one_of(
+    st.from_type(specs.Zero),
     st.from_type(specs.Matmul),
     st.from_type(specs.Convolution),
     st.from_type(specs.ReduceSum),
@@ -312,6 +319,7 @@ def register_default_strategies():
 
     # Register default strategies for generating Specs.
     st.register_type_strategy(specs.Compose, compose_spec_st())
+    st.register_type_strategy(specs.Zero, zero_spec_st())
     st.register_type_strategy(specs.Matmul, matmul_spec_st())
     st.register_type_strategy(specs.Convolution, convolution_spec_st())
     st.register_type_strategy(specs.ReduceSum, reduce_spec_st())

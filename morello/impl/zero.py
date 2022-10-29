@@ -1,16 +1,17 @@
 import dataclasses
 import functools
-from typing import TYPE_CHECKING, Iterable, Callable, Sequence, Optional
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence
 
+from .. import specs, system_config, tensor
+from ..impl import actions, base, speccast
+from ..impl.utils import gen_tile_sizes
+from ..layouts import Layout
 from .moves import (
-    transition_contiguous,
     MoveLet,
     StoreHole,
     common_operand_move_actions,
+    transition_contiguous,
 )
-from .. import specs, system_config
-from ..impl import actions, base
-from ..impl.utils import gen_tile_sizes
 from .pruning import (
     ParentSummary,
     break_matmul_split_symmetries,
@@ -19,7 +20,6 @@ from .pruning import (
     prune_nested_parallel_loops,
     prune_relayout_cycles,
 )
-from ..layouts import Layout
 
 if TYPE_CHECKING:
     from .. import impl
@@ -88,6 +88,38 @@ class ZeroHole(base.NonAllocatingLeaf):
             epilogue=epilogue,
         )
 
+    def flatten(self) -> "impl.Impl":
+        if not self.can_flatten:
+            return self
+
+        new_destination = tensor.InnerContigFlatteningTile(
+            tensor.OperandIdx(0),
+            # TODO: Avoid the need for this pass-through tile.
+            self.spec.destination.simple_tile(
+                tensor.OperandIdx(0), self.spec.destination.dim_sizes
+            ),
+        )
+        return speccast.SpecCast(
+            spec=self.spec,
+            inner=ZeroHole(
+                specs.Zero(new_destination.spec, serial_only=self.spec.serial_only)
+            ),
+            inner_args=frozenset([new_destination]),
+        )
+
+    @property
+    def can_flatten(self) -> bool:
+        destination: specs.TensorSpec = self.spec.destination
+        flattened = destination.layout.flatten_inner_contiguous_dimensions(
+            destination.dim_sizes, destination.contiguous_abs
+        )
+        if flattened is None:
+            return False
+        prefix, _, _ = flattened
+        if len(prefix) + 1 >= len(destination.dim_sizes):
+            return False
+        return True
+
     @prune_nested_parallel_loops
     @prune_relayout_cycles
     @break_moves_symmetries
@@ -96,6 +128,11 @@ class ZeroHole(base.NonAllocatingLeaf):
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], "impl.Impl"]]:
+        # Rank 3+ Zeros can be reinterpreted as 2 dimensional.
+        if self.can_flatten:
+            yield self.flatten
+            return
+
         # Search only over full line sizes
         t = self.spec.destination
         for tile_shape in gen_tile_sizes(t.dim_sizes, filter=self._can_tile_out):

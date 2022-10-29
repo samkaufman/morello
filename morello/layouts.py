@@ -2,7 +2,7 @@ import dataclasses
 import functools
 import math
 import operator
-from typing import TYPE_CHECKING, Any, Iterable, Sequence, Union
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Sequence, Union
 
 import sympy
 
@@ -73,6 +73,16 @@ class Layout:
     ) -> tuple["Layout", Any]:
         raise NotImplementedError()
 
+    def flatten_inner_contiguous_dimensions(
+        self, shape: Sequence[int], contiguous_abs
+    ) -> Optional[tuple[tuple[int, ...], set[int], int]]:
+        """Flatten physically innermost dimensions.
+
+        Returns `None` if there are insufficient contiguous physically innermost
+        dimensions to flatten.
+        """
+        raise NotImplementedError()
+
 
 @dataclasses.dataclass(frozen=True)
 class StandardLayout(Layout):
@@ -85,6 +95,11 @@ class StandardLayout(Layout):
 
     def contiguous_top(self) -> Any:
         return len(self.dim_order)
+
+    @staticmethod
+    def contiguous_one() -> Any:
+        """Returns contig. abstractions for just the physically innermost dimension."""
+        return 1
 
     def all_contiguous_abs_for_shape(self) -> Iterable[Any]:
         yield from range(len(self.dim_order) + 1)
@@ -187,6 +202,21 @@ class StandardLayout(Layout):
                 new_dim_order.append(orig_dim)
         return StandardLayout(tuple(new_dim_order)), contiguous_abs
 
+    def flatten_inner_contiguous_dimensions(
+        self, shape: Sequence[int], contiguous_abs
+    ) -> Optional[tuple[tuple[int, ...], set[int], int]]:
+        if len(shape) != len(self.dim_order):
+            raise ValueError(
+                f"Shape {shape} has the wrong number of dimensions; expected "
+                f"{len(self.dim_order)}"
+            )
+        if contiguous_abs <= 1:
+            return None
+        prefix = tuple(shape[l] for l in self.dim_order[:-contiguous_abs])
+        flat_dims = set(self.dim_order[-contiguous_abs:])
+        inner_vol = functools.reduce(operator.mul, (shape[l] for l in flat_dims), 1)
+        return prefix, flat_dims, inner_vol
+
     def _layout_ordered_dims(self, dim_sizes: Sequence[int]) -> tuple[int, ...]:
         assert len(dim_sizes) == len(
             self.dim_order
@@ -267,10 +297,7 @@ class PackedLayout(Layout):
     ) -> int:
         # Estimate as if the tensor_spec were in row-major but had an extra dim.
         rm_like_shape = self.expand_shape(shape)
-
-        # TODO: Make this more precise. It's always False right now.
         new_contiguous = False
-
         return row_major(len(rm_like_shape)).estimate_cache_lines(
             rm_like_shape, dtype, new_contiguous
         )
@@ -340,6 +367,20 @@ class PackedLayout(Layout):
         new_shape.append(self.strip_size)
         assert all(d > 0 for d in new_shape)
         return tuple(new_shape)
+
+    def flatten_inner_contiguous_dimensions(
+        self, shape: Sequence[int], contiguous_abs
+    ) -> Optional[tuple[tuple[int, ...], set[int], int]]:
+        if contiguous_abs == 0:
+            return None
+        expanded = self.expand_shape(shape)
+        prefix = expanded[:-contiguous_abs]
+        contiguous_inner_shape = expanded[-contiguous_abs:]
+
+        dropped_dimensions = {self.strip_dim}
+        packing_p = sympy.symbols(f"p{self.strip_dim}")
+        v = functools.reduce(operator.mul, contiguous_inner_shape, 1)
+        return prefix, dropped_dimensions, v
 
     def _should_fall_back_to_row_major(self, shape: Sequence[int]) -> bool:
         if shape[self.strip_dim] % self.strip_size != 0:
