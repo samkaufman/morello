@@ -110,6 +110,19 @@ class MoveLet(Impl):
                 f"Cannot move from {source_bank} to {self.destination.bank}"
             )
 
+        # The following check is needed because, as the moment, we don't nest any
+        # Load or Store Impl under MoveLet when not addressed. An alternative would
+        # be to allow this requirement to emerge from the lack of any Load/Store Impl
+        # which is willing to implement this impossible behavior.
+        if (
+            self.destination.bank not in system.addressed_banks
+            and self.destination.layout != self.spec.operands[self.source_idx].layout
+        ):
+            raise ValueError(
+                f"Cannot change layout when {self.destination.bank} is not an "
+                "addressed bank"
+            )
+
     @property
     def is_store(self) -> bool:
         # TODO: This is a heuristic. Shouldn't be needed.

@@ -115,6 +115,11 @@ class TensorSpec:
     ) -> bool:
         if bank is None:
             bank = self.bank
+
+        system = current_system()
+        if layout != self.layout and bank not in system.addressed_banks:
+            return False
+
         if isinstance(layout, layouts.HexagonTranspacked):
             if self.dtype != Uint8:
                 return False
