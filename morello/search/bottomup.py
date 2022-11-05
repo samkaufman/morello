@@ -35,6 +35,7 @@ arg_parser.add_argument("--downscale", type=int, default=1)
 arg_parser.add_argument("--deploy-k8s", action="store_true")
 arg_parser.add_argument("--deploy-k8s-with-custom-image", type=str)
 arg_parser.add_argument("--moves-only", action="store_true")
+arg_parser.add_argument("--moves-rank", type=int, default=2)
 arg_parser.add_argument("--size", type=int, default=512)
 arg_parser.add_argument("--image-name", "-t", type=str, default="samkaufman/morello")
 arg_parser.add_argument("--moves-cache", metavar="CACHE", type=pathlib.Path)
@@ -578,10 +579,18 @@ def _deploy_k8s_cluster(image_tag: str):
 
 
 def _moves_subgraph(
-    dask_client, size: int, dt: dtypes.Dtype, serial_only: bool, downscale: int
+    dask_client,
+    size: int,
+    dt: dtypes.Dtype,
+    serial_only: bool,
+    downscale: int,
+    max_rank: int,
 ) -> dict[
     int, list[Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]]
 ]:
+    if max_rank < 2:
+        raise ValueError("max_rank must be at least 2")
+
     target = system_config.current_target()
     limits = pruning.StandardMemoryLimits()
 
@@ -589,7 +598,7 @@ def _moves_subgraph(
         int, list[Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]]
     ] = {}
 
-    for rank in range(2, 4):
+    for rank in range(1, max_rank + 1):
         final_caches[rank] = []
         load_spec = specs.Load(
             source=target.tensor_spec((size,) * rank, dtype=dt),
@@ -680,7 +689,12 @@ def main():
                 rank2_cache = loaded_moves_cache
             else:
                 per_rank_moves_graphs = _moves_subgraph(
-                    dask_client, args.size, dt, args.serial_only, args.downscale
+                    dask_client,
+                    args.size,
+                    dt,
+                    args.serial_only,
+                    args.downscale,
+                    args.moves_rank,
                 )
                 rank2_cache = dask_client.submit(
                     _merge_caches, per_rank_moves_graphs[2], target
