@@ -192,21 +192,24 @@ def _compute_all(
             [cache] * len(block_diagonal),
             key=f"block-{type(top_query_spec).__name__}",
         )
-        cache = dask_client.submit(_merge_block_results, cache, block_results, target)
+        cache = dask_client.submit(_merge_caches, [cache] + block_results], target)
         slice_idx += 1
 
     assert not isinstance(cache, search_cache.InMemoryScheduleCache)
     return cache
 
 
-def _merge_block_results(
-    base_cache: search_cache.InMemoryScheduleCache,
-    block_results: Sequence[search_cache.InMemoryScheduleCache],
+def _merge_caches(
+    caches: Sequence[search_cache.InMemoryScheduleCache],
     target: system_config.Target,
 ) -> search_cache.InMemoryScheduleCache:
+    if not caches:
+        raise ValueError("No caches to merge")
+    if len(caches) == 1:
+        return caches[0]
     with system_config.with_target(target):
-        cache = copy.deepcopy(base_cache)
-        for block_result in block_results:
+        cache = copy.deepcopy(caches[0])
+        for block_result in caches[1:]:
             cache.update(block_result)
         return cache
 
@@ -309,36 +312,40 @@ def main():
         for dt in dtypes.ALL_DTYPES:
             dt_cache = search_cache.InMemoryScheduleCache()
 
-            futures = []
-            spec0 = specs.Load(
+            load_spec = specs.Load(
                 source=target.tensor_spec((1024, 1024), dtype=dt),
                 destination=target.tensor_spec((1024, 1024), dtype=dt),
                 serial_only=False,
             )
-            futures.append(
-                _compute_all(dask_client, spec0, top_limits=limits, cache=dt_cache)
-            )
-
-            spec1 = specs.Store(
+            store_spec = specs.Store(
                 source=target.tensor_spec((1024, 1024), dtype=dt),
                 destination=target.tensor_spec((1024, 1024), dtype=dt),
                 serial_only=False,
             )
-            futures.append(
-                _compute_all(dask_client, spec1, top_limits=limits, cache=dt_cache)
-            )
-
-            # Merge the Load and Store tables.
-            dt_cache = dask_client.submit(
-                _merge_block_results, dt_cache, futures, target
-            )
-
-            spec2 = specs.Zero(
+            zero_spec = specs.Zero(
                 destination=target.tensor_spec((1024, 1024), dtype=dt),
                 serial_only=True,
             )
-            dt_cache = _compute_all(
-                dask_client, spec2, top_limits=limits, cache=dt_cache
+
+            # Zero depends on Store, not Load, so chain those.
+            store_zero_cache = _compute_all(
+                dask_client, store_spec, top_limits=limits, cache=dt_cache
+            )
+            store_zero_cache = _compute_all(
+                dask_client, zero_spec, top_limits=limits, cache=store_zero_cache
+            )
+
+            # Merge the Load table with the Store/Zero table.
+            dt_cache = dask_client.submit(
+                _merge_caches,
+                [
+                    dt_cache,
+                    store_zero_cache,
+                    _compute_all(
+                        dask_client, load_spec, top_limits=limits, cache=dt_cache
+                    ),
+                ],
+                target,
             )
 
             # spec3 = specs.MatmulAccum(
@@ -356,9 +363,8 @@ def main():
         assert len(per_dt_caches) == 2
 
         combined_cache = dask_client.submit(
-            _merge_block_results,
-            search_cache.InMemoryScheduleCache(),
-            per_dt_caches,
+            _merge_caches,
+            [search_cache.InMemoryScheduleCache(), per_dt_caches],
             target,
         )
         print("Got cache:", combined_cache.result())
