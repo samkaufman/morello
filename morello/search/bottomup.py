@@ -564,8 +564,8 @@ def _deploy_k8s_cluster(image_tag: str):
     cluster = KubeCluster(
         make_pod_spec(
             image=image_tag,
-            memory_limit="6G",
-            memory_request="5G",
+            memory_limit="8.2G",
+            memory_request="7G",
             cpu_limit=1,
             cpu_request=1,
             extra_container_config={"imagePullPolicy": "Always"},
@@ -579,13 +579,18 @@ def _deploy_k8s_cluster(image_tag: str):
 
 def _moves_subgraph(
     dask_client, size: int, dt: dtypes.Dtype, serial_only: bool, downscale: int
-) -> dask.distributed.Future:
+) -> dict[
+    int, list[Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]]
+]:
     target = system_config.current_target()
     limits = pruning.StandardMemoryLimits()
 
-    final_caches = []
+    final_caches: dict[
+        int, list[Union[search_cache.InMemoryScheduleCache, dask.distributed.Future]]
+    ] = {}
 
-    for rank in range(2, 5):
+    for rank in range(2, 4):
+        final_caches[rank] = []
         load_spec = specs.Load(
             source=target.tensor_spec((size,) * rank, dtype=dt),
             destination=target.tensor_spec((size,) * rank, dtype=dt),
@@ -604,7 +609,7 @@ def _moves_subgraph(
         load_dp_table = DPTableGraph(
             dask_client, downscale, load_spec, top_limits=limits
         )
-        final_caches.append(load_dp_table.final_cache)
+        final_caches[rank].append(load_dp_table.final_cache)
 
         # Zero depends on Store, not Load, so chain those.
         save_dp_table = DPTableGraph(
@@ -617,10 +622,9 @@ def _moves_subgraph(
             top_limits=limits,
             source_link=ZeroToStoreLink(save_dp_table),
         )
-        final_caches.append(store_zero_cache.final_cache)
+        final_caches[rank].append(store_zero_cache.final_cache)
 
-    # Merge the Load table with the Store/Zero table.
-    return dask_client.submit(_merge_caches, final_caches, target)
+    return final_caches
 
 
 def main():
@@ -668,20 +672,26 @@ def main():
             )
 
         limits = pruning.StandardMemoryLimits()
-        per_dt_caches = []
+        final_caches_to_merge = []
 
         for dt in dtypes.ALL_DTYPES:
-            dt_cache: Union[dask.distributed.Future, search_cache.ScheduleCache]
+            rank2_cache: Union[dask.distributed.Future, search_cache.ScheduleCache]
             if loaded_moves_cache:
-                dt_cache = loaded_moves_cache
-                assert isinstance(dt_cache, dask.distributed.Future)
+                rank2_cache = loaded_moves_cache
             else:
-                dt_cache = search_cache.InMemoryScheduleCache()
-                dt_cache = _moves_subgraph(
+                per_rank_moves_graphs = _moves_subgraph(
                     dask_client, args.size, dt, args.serial_only, args.downscale
                 )
+                rank2_cache = dask_client.submit(
+                    _merge_caches, per_rank_moves_graphs[2], target
+                )
+                for rank, a in per_rank_moves_graphs.items():
+                    if rank != 2:
+                        final_caches_to_merge.extend(a)
 
-            if not args.moves_only:
+            if args.moves_only:
+                final_caches_to_merge.append(rank2_cache)
+            else:
                 matmul_accum_spec = specs.MatmulAccum(
                     lhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     rhs=target.tensor_spec((args.size, args.size), dtype=dt),
@@ -693,7 +703,7 @@ def main():
                     args.downscale,
                     matmul_accum_spec,
                     top_limits=limits,
-                    base_cache=dt_cache,
+                    base_cache=rank2_cache,
                 )
 
                 matmul_spec = specs.Matmul(
@@ -702,20 +712,17 @@ def main():
                     output=target.tensor_spec((args.size, args.size), dtype=dt),
                     serial_only=args.serial_only,
                 )
-                dt_cache = DPTableGraph(
+                transitive_matmul_graph_table = DPTableGraph(
                     dask_client,
                     args.downscale,
                     matmul_spec,
                     top_limits=limits,
                     source_link=DirectIntertableLink(matmul_accum_dp_table),
                 ).final_cache
-
-            per_dt_caches.append(dt_cache)
-
-        assert len(per_dt_caches) == 2
+                final_caches_to_merge.append(transitive_matmul_graph_table)
 
         combined_cache = dask_client.submit(
-            _merge_caches, per_dt_caches, target
+            _merge_caches, final_caches_to_merge, target
         ).result()
 
         with atomicwrites.atomic_write(args.out_path, mode="wb", overwrite=True) as fo:

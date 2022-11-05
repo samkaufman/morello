@@ -16,13 +16,18 @@ REMOTE_DEST="~/morello_bottomup"
 WORKER_NICE=10
 NWORKERS=-1  # per host
 TMUX_SESSION_NAME=dask
+MEM_LIMIT=7G
 
 # Parse CLI args.
 stopping=false
-while getopts ":s" option; do
+while getopts ":sn:m:" option; do
    case $option in
      s) stopping=true
         shift;;
+     n) NWORKERS="$OPTARG"
+        shift 2;;
+     m) MEM_LIMIT="$OPTARG"
+        shift 2;;
      *) echo "Invalid option: -$OPTARG" >&2
         exit 1;;
    esac
@@ -76,7 +81,7 @@ echo "Starting script, scheduler, and worker on ${MAIN_HOST}."
 ssh "${MAIN_HOST}" "cd $REMOTE_DEST && \
      tmux new-session -d -s '$TMUX_SESSION_NAME' \
     'export DASK_DISTRIBUTED__SCHEDULER__WORKER_TTL=20m; poetry run dask scheduler --host $MAIN_HOST' ';' \
-    split -h 'sleep 10; poetry run nice -n $WORKER_NICE dask worker --nworkers $NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
+    split -h 'sleep 10; poetry run nice -n $WORKER_NICE dask worker --memory-limit $MEM_LIMIT --nworkers $NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
     split 'sleep 5; poetry run python -m morello.search.bottomup --scheduler $MAIN_HOST:8786 ${EXTRA_ARGS[*]}' ';' \
     setw remain-on-exit on ';'"
 
@@ -85,6 +90,6 @@ for d in "${OTHER_HOSTS[@]}"; do
   echo "Starting worker on $d."
   ssh "$d" "cd $REMOTE_DEST && \
       tmux new-session -d -s '$TMUX_SESSION_NAME' \
-      'sleep 5; poetry run nice -n $WORKER_NICE dask worker --name $d --nworkers $NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
+      'sleep 5; poetry run nice -n $WORKER_NICE dask worker --name $d --memory-limit $MEM_LIMIT --nworkers $NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
       setw remain-on-exit on ';'"
 done
