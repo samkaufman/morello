@@ -6,11 +6,17 @@ from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union, 
 from .. import layouts, specs, system_config
 from ..layouts import Layout
 from ..system_config import current_system, current_target
-from ..tensor import Tensor, TensorBase, TensorLike
+from ..tensor import (
+    InnerContigFlatteningTile,
+    OperandIdx,
+    Tensor,
+    TensorBase,
+    TensorLike,
+)
 from ..utils import TinyMap
-from . import MoveAction, settings
+from . import MoveAction, settings, speccast
 from .actions import TileOutAction
-from .base import AppliedImpl, Impl, Leaf, NonAllocatingLeaf, make_applied_impl
+from .base import AppliedImpl, Impl, NonAllocatingLeaf, make_applied_impl
 from .pruning import (
     ParentSummary,
     break_matmul_split_symmetries,
@@ -222,7 +228,7 @@ class MoveLet(Impl):
             yield "epilogue"
 
 
-class _BaseMoveHole(Leaf):
+class _BaseMoveHole(NonAllocatingLeaf):
     spec: Union[specs.Load, specs.Store]
 
     @property
@@ -242,6 +248,11 @@ class _BaseMoveHole(Leaf):
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Impl]]:
+        # Rank 3+ Zeros can be reinterpreted as 2 dimensional.
+        if self.can_flatten:
+            yield self.flatten
+            return
+
         # Search only over full line sizes
         source = self.spec.source
         for tile_shape in gen_tile_sizes(source.dim_sizes, filter=self._can_tile_out):
@@ -258,6 +269,76 @@ class _BaseMoveHole(Leaf):
         if CacheAccess.applies_to_operands(self.spec.operands):
             yield functools.partial(self.place, CacheAccess)
 
+    def flatten(self) -> "Impl":
+        if not self.can_flatten:
+            return self
+
+        lhs, rhs = self.spec.operands
+        cabs = lhs.layout.contiguous_lub(
+            rhs.layout, lhs.contiguous_abs, rhs.contiguous_abs
+        )
+
+        # TODO: Avoid the need for these pass-through tiles.
+        flattened_tiles = []
+        for i, o in enumerate(self.spec.operands):
+            inner = o.simple_tile(OperandIdx(i), o.dim_sizes)
+            flattened_tiles.append(
+                InnerContigFlatteningTile(
+                    OperandIdx(i),
+                    inner,
+                    flattening_contiguous_abs=cabs,
+                )
+            )
+        return speccast.SpecCast(
+            spec=self.spec,
+            inner=type(self)(
+                type(self.spec)(
+                    *[t.spec for t in flattened_tiles],
+                    serial_only=self.spec.serial_only,
+                )
+            ),
+            inner_args=frozenset(flattened_tiles),
+        )
+
+    @property
+    def can_flatten(self) -> bool:
+        lhs, rhs = self.spec.operands
+
+        # TODO: Push this down into the layouts.
+        if type(lhs.layout) != type(rhs.layout):
+            return False
+        elif type(lhs.layout) == layouts.StandardLayout:
+            if lhs.layout != rhs.layout:
+                return False
+
+        cabs = lhs.layout.contiguous_lub(
+            rhs.layout, lhs.contiguous_abs, rhs.contiguous_abs
+        )
+
+        flatteneds = [
+            o.layout.flatten_inner_contiguous_dimensions(o.dim_sizes, cabs)
+            for o in (lhs, rhs)
+        ]
+        new_shape = None
+        for f, operand in zip(flatteneds, self.spec.operands):
+            if f is None:
+                return False
+            prefix, _, volume = f
+            if len(prefix) + 1 >= len(operand.dim_sizes):
+                return False
+
+            # We only support flattening in the result would have the same logical
+            # shape. A example of where this would not happen is:
+            # Load((1×7×1×1, u32, L1, c2, ua), (1×7×1×1, u32, RF, NHWC), serial)
+            # which would (without this check) flatten to
+            # Load((1×7×1, u32, L1, c1, ua), (1×1×7, u32, RF, c1), serial).
+            if new_shape is None:
+                new_shape = prefix + (volume,)
+            elif new_shape != prefix + (volume,):
+                return False
+
+        return True
+
     def complete(self) -> Impl:
         if any(d > 1 for d in self.spec.source.dim_sizes):
             ones = (1,) * len(self.spec.source.dim_sizes)
@@ -266,16 +347,6 @@ class _BaseMoveHole(Leaf):
 
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
         return make_applied_impl(self, operands)
-
-    @property
-    def additional_memories(self) -> list[TinyMap[str, int]]:
-        banks = system_config.current_system().ordered_banks
-        return [TinyMap(banks, (0,) * len(banks))]
-
-    @property
-    def peak_memory(self) -> TinyMap[str, int]:
-        banks = system_config.current_system().ordered_banks
-        return TinyMap(banks, (0,) * len(banks))
 
 
 @dataclasses.dataclass(frozen=True)

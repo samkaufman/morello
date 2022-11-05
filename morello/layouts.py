@@ -22,6 +22,9 @@ class Layout:
     def contiguous_top(self) -> Any:
         raise NotImplementedError()
 
+    def contiguous_lub(self, other_layout: "Layout", a, b):
+        raise NotImplementedError()
+
     def all_contiguous_abs_for_shape(self) -> Iterable[Any]:
         raise NotImplementedError()
 
@@ -95,6 +98,10 @@ class StandardLayout(Layout):
 
     def contiguous_top(self) -> Any:
         return len(self.dim_order)
+
+    def contiguous_lub(self, other_layout: Layout, a, b):
+        assert isinstance(other_layout, StandardLayout)
+        return min(a, b)
 
     @staticmethod
     def contiguous_one() -> Any:
@@ -251,6 +258,10 @@ class PackedLayout(Layout):
 
     def contiguous_top(self) -> Any:
         return self.dim_count + 1
+
+    def contiguous_lub(self, other_layout: Layout, a, b):
+        assert isinstance(other_layout, PackedLayout)
+        return min(a, b)
 
     def all_contiguous_abs_for_shape(self) -> Iterable[Any]:
         yield from range(self.dim_count + 2)

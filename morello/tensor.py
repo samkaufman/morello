@@ -1,9 +1,10 @@
 import dataclasses
-import sympy
-import re
 import math
+import re
 import typing
-from typing import TYPE_CHECKING, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
+
+import sympy
 
 from . import dtypes, layouts, system_config
 
@@ -145,6 +146,7 @@ class Tile(TensorLike):
 class InnerContigFlatteningTile(Tile):
     source: OperandIdx
     inner: TensorLike
+    flattening_contiguous_abs: Any
 
     @property
     def spec(self) -> "specs.TensorSpec":
@@ -184,7 +186,7 @@ class InnerContigFlatteningTile(Tile):
 
         ispec = self.inner.spec
         flattened = ispec.layout.flatten_inner_contiguous_dimensions(
-            ispec.dim_sizes, ispec.contiguous_abs
+            ispec.dim_sizes, self.flattening_contiguous_abs
         )
         assert flattened
         _, dropped_dims, _ = flattened
@@ -207,7 +209,7 @@ class InnerContigFlatteningTile(Tile):
 
         ispec: "specs.TensorSpec" = self.inner.spec
         flattened = ispec.layout.flatten_inner_contiguous_dimensions(
-            shape, ispec.contiguous_abs
+            shape, self.flattening_contiguous_abs
         )
         assert flattened
         prefix, _, inner_vol = flattened

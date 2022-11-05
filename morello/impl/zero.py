@@ -92,12 +92,14 @@ class ZeroHole(base.NonAllocatingLeaf):
         if not self.can_flatten:
             return self
 
+        # TODO: Avoid the need for this pass-through tile.
+        inner = self.spec.destination.simple_tile(
+            tensor.OperandIdx(0), self.spec.destination.dim_sizes
+        )
         new_destination = tensor.InnerContigFlatteningTile(
             tensor.OperandIdx(0),
-            # TODO: Avoid the need for this pass-through tile.
-            self.spec.destination.simple_tile(
-                tensor.OperandIdx(0), self.spec.destination.dim_sizes
-            ),
+            inner,
+            flattening_contiguous_abs=inner.spec.contiguous_abs,
         )
         return speccast.SpecCast(
             spec=self.spec,
