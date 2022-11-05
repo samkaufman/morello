@@ -360,9 +360,14 @@ class DPTableGraphDiagonal:
             if self._merged_result:
                 return [self._merged_result]
             src = []
+            added_keys = set()
             for result, deps in self._blocks:
-                src.append(result)
-                src.extend(deps)
+                for d in itertools.chain([result], deps):
+                    if not hasattr(d, "key"):
+                        src.append(d)
+                    elif d.key not in added_keys:
+                        src.append(d)
+                        added_keys.add(d.key)
             self._merged_result = self._client.submit(_merge_caches, src, target)
             return [self._merged_result]
 
