@@ -86,6 +86,10 @@ class CTensor:
     def declared_type(self) -> str:
         raise NotImplementedError()
 
+    @property
+    def should_unroll(self) -> bool:
+        return False
+
 
 class CNameTensor(CTensor):
     name: str
@@ -278,6 +282,10 @@ class CVecVars(CTensor):
             self._inner_vecs.append(
                 CHeapArray(namer.fresh_name("vbound"), boundary_vol, dtype)
             )
+
+    @property
+    def should_unroll(self) -> bool:
+        return True
 
     def compute_step_sizes(self, shape: Sequence[int]) -> list[int]:
         step_sizes = []

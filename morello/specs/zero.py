@@ -22,6 +22,10 @@ class Zero(base.Spec):
     def inputs_count(cls) -> int:
         return 0
 
+    @property
+    def output_is_read(self) -> bool:
+        return False
+
     @classmethod
     def from_io(
         cls, inputs: tuple[TensorSpec, ...], output: TensorSpec, *, serial_only: bool

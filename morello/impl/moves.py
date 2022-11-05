@@ -137,6 +137,9 @@ class MoveLet(Impl):
     def move_output(self, *args, **kwargs):
         return dataclasses.replace(self, body=self.body.move_output(*args, **kwargs))
 
+    def to_accum(self) -> Impl:
+        return dataclasses.replace(self, body=self.body.to_accum())
+
     @assert_stable_spec
     def complete(self) -> Impl:
         return self.replace_children((c.complete() for c in self.children))
@@ -550,16 +553,18 @@ def common_move(
 
     prologue, epilogue = None, None
     if bank in current_system().addressed_banks:
-        prologue = LoadHole(
-            specs.Load(
-                source=op.spec.operands[operand_idx],
-                destination=new_mat.spec,
-                serial_only=op.spec.serial_only,
-            )
-        )
+        is_output = operand_idx == len(op.spec.operands) - 1
 
-        # Add an epilogue if this is an output
-        if operand_idx == len(op.spec.operands) - 1:
+        if is_output and op.spec.output_is_read:
+            prologue = LoadHole(
+                specs.Load(
+                    source=op.spec.operands[operand_idx],
+                    destination=new_mat.spec,
+                    serial_only=op.spec.serial_only,
+                )
+            )
+
+        if is_output:
             epilogue = StoreHole(
                 specs.Store(
                     # TODO: Source and destination are confusing here. Reversed.

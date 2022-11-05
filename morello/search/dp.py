@@ -126,7 +126,7 @@ class Search:
 
         # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
         best_results, specs_explored_by_options = self._choose(
-            spec, leaf, memory_limits, parent_summary=parent_summary, stats=stats,
+            spec, leaf, memory_limits, parent_summary=parent_summary, stats=stats
         )
         assert len(best_results) <= self.top_k
         specs_explored = specs_explored_by_options + 1

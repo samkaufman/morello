@@ -13,7 +13,7 @@ class Spec:
     serial_only: bool
 
     def replace_io(
-        self, inputs: tuple[TensorSpec, ...], output: TensorSpec, serial_only=None,
+        self, inputs: tuple[TensorSpec, ...], output: TensorSpec, serial_only=None
     ) -> "Spec":
         # This method is similar to the static `from_io` except that it will
         # preserve properties other than the inputs and outputs. This is important for
@@ -62,6 +62,10 @@ class Spec:
     @property
     def operands(self) -> tuple[TensorSpec, ...]:
         return self.inputs + (self.output,)
+
+    @property
+    def output_is_read(self) -> bool:
+        raise NotImplementedError()
 
     def calculate_output_shape(
         self, input_shapes: Iterable[tuple[int, ...]]

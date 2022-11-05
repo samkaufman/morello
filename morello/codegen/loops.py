@@ -119,8 +119,8 @@ def _compute_tile_out_loop_nest(
         applied_operands,
         op_details,
     )
-    # TODO: Only need to unroll loops over vector variables, not all of them.
-    if common.unroll.get():
+    # Unroll the loop if any of the CTensors corresponds to VRF.
+    if any(deets.c_tensor.should_unroll for deets in op_details):
         assert it_var_names is not None
         inner_iterable = _unroll_loop_nest_plans(inner_iterable, it_var_names)
     yield from inner_iterable

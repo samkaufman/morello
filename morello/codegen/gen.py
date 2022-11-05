@@ -138,10 +138,6 @@ class _CHvxVectors(CTensor):
 
 @contextlib.contextmanager
 def _emit_loop_nest_for_shape(shape: Sequence[int]):
-    if common.unroll.get():
-        warnings.warn(
-            "Unrolling not implemented for _emit_loop_nest_for_shape; will be ignored"
-        )
     namer, writer = common.namer.get(), common.writer.get()
     subs = []
     for dim_size in shape:
@@ -793,7 +789,6 @@ def _move_hvx_vmem(
             writer.writeline(
                 f"{destination_name} = *(HVX_Vector *)({source_c_tensor.c_index_ptr(slice_index_expr)});"
             )
-        unroll_token = common.unroll.set(True)
         _inner_generate_c(
             imp.inner,
             [
@@ -807,7 +802,6 @@ def _move_hvx_vmem(
             ],
             allow_holes,
         )
-        common.unroll.reset(unroll_token)
         if imp.is_store:
             for destination_name, slice_index_expr in zip(
                 vectors.names, slice_idx_exprs
@@ -874,11 +868,6 @@ def _move_registers(
     previously_transformeds,
     allow_holes: bool,
 ):
-    system = current_system()
-    unroll_token = None
-    if system.banks[imp.destination.bank].vector_rf:
-        unroll_token = common.unroll.set(True)
-
     dest_c_buf = _make_buffer(
         concrete_shapes[source_idx],
         imp.destination.vector_shape,
@@ -927,9 +916,6 @@ def _move_registers(
         _inner_generate_c(imp.epilogue, move_operand_details, allow_holes)
 
     dest_c_buf.emit_free()
-
-    if unroll_token is not None:
-        common.unroll.reset(unroll_token)
 
 
 def _naive_memset(op, outer_name, writer):

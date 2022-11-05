@@ -95,9 +95,13 @@ class MatmulBase(base.Spec):
 
 @cython.cclass
 class Matmul(MatmulBase):
-    pass
+    @property
+    def output_is_read(self) -> bool:
+        return False
 
 
 @cython.cclass
 class MatmulAccum(MatmulBase):
-    pass
+    @property
+    def output_is_read(self) -> bool:
+        return True

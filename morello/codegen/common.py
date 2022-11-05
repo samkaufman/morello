@@ -13,9 +13,7 @@ if TYPE_CHECKING:
 
 namer: contextvars.ContextVar["Namer"] = contextvars.ContextVar("_namer")
 writer: contextvars.ContextVar["Writer"] = contextvars.ContextVar("_writer")
-unroll: contextvars.ContextVar["bool"] = contextvars.ContextVar(
-    "_unroll", default=False
-)
+
 
 @dataclasses.dataclass(frozen=True)
 class OperandDetails:
@@ -76,4 +74,3 @@ class Writer:
             yield
         finally:
             self.dedent()
-

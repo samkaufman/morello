@@ -104,9 +104,13 @@ class ReduceSumBase(base.Spec):
 
 @cython.cclass
 class ReduceSum(ReduceSumBase):
-    pass
+    @property
+    def output_is_read(self) -> bool:
+        return False
 
 
 @cython.cclass
 class ReduceSumAccum(ReduceSumBase):
-    pass
+    @property
+    def output_is_read(self) -> bool:
+        return True

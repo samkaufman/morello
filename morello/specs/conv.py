@@ -131,6 +131,11 @@ class ConvolutionBase(base.Spec):
 
 @cython.cclass
 class Convolution(ConvolutionBase):
+
+    @property
+    def output_is_read(self) -> bool:
+        return False
+
     @classmethod
     def short_name(cls):
         return "Conv"
@@ -138,6 +143,11 @@ class Convolution(ConvolutionBase):
 
 @cython.cclass
 class ConvolutionAccum(ConvolutionBase):
+
+    @property
+    def output_is_read(self) -> bool:
+        return True
+
     @classmethod
     def short_name(cls):
         return "ConvAccum"
