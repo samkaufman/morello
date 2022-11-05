@@ -14,6 +14,7 @@ set -e
 
 REMOTE_DEST="~/morello_bottomup"
 WORKER_NICE=10
+NWORKERS=-1  # per host
 TMUX_SESSION_NAME=dask
 
 # Parse CLI args.
@@ -52,7 +53,7 @@ if [ "$stopping" = true ]; then
 fi
 
 # Install poetry
-if ssh bicycle "stat ~/.local/bin/poetry" > /dev/null 2>&1; then
+if ssh "$MAIN_HOST" "stat ~/.local/bin/poetry" > /dev/null 2>&1; then
     echo "Poetry already installed on main host."
 else
     echo "Installing poetry on main host."
@@ -73,9 +74,9 @@ ssh "${MAIN_HOST}" "cd $REMOTE_DEST && ~/.local/bin/poetry install --without=eva
 # Run dask-worker, dash-scheduler, and script on main host.
 echo "Starting script, scheduler, and worker on ${MAIN_HOST}."
 ssh "${MAIN_HOST}" "cd $REMOTE_DEST && \
-    tmux new-session -d -s '$TMUX_SESSION_NAME' \
-    'poetry run dask scheduler --host $MAIN_HOST' ';' \
-    split -h 'sleep 10; poetry run nice -n $WORKER_NICE dask worker --nworkers -1 --nthreads 1 $MAIN_HOST:8786' ';' \
+     tmux new-session -d -s '$TMUX_SESSION_NAME' \
+    'export DASK_DISTRIBUTED__SCHEDULER__WORKER_TTL=20m; poetry run dask scheduler --host $MAIN_HOST' ';' \
+    split -h 'sleep 10; poetry run nice -n $WORKER_NICE dask worker --nworkers $NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
     split 'sleep 5; poetry run python -m morello.search.bottomup --scheduler $MAIN_HOST:8786 ${EXTRA_ARGS[*]}' ';' \
     setw remain-on-exit on ';'"
 
@@ -84,6 +85,6 @@ for d in "${OTHER_HOSTS[@]}"; do
   echo "Starting worker on $d."
   ssh "$d" "cd $REMOTE_DEST && \
       tmux new-session -d -s '$TMUX_SESSION_NAME' \
-      'sleep 5; poetry run nice -n $WORKER_NICE dask worker --name $d --nworkers -1 --nthreads 1 $MAIN_HOST:8786' ';' \
+      'sleep 5; poetry run nice -n $WORKER_NICE dask worker --name $d --nworkers $NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
       setw remain-on-exit on ';'"
 done
