@@ -162,18 +162,13 @@ def _perf_events(output_dir: pathlib.Path, pid=None, tid=None):
 
     perf_record_cmd = [
         str(bin_path),
+        "stat",
+        "--quiet",
+        "-ddd",
         "record",
-        # "--call-graph", "dwarf",
-        "--freq=1000",
-        "-e",
-        "cpu-cycles,cache-misses,l2_fill_pending.l2_fill_busy",
-        "--inherit",
-        "-g",
         "-o",
         str(data_path),
     ] + pid_tid_part
-    print("perf record cmd:")
-    print(" ".join(perf_record_cmd))
     with subprocess.Popen(
         perf_record_cmd,
         stdout=subprocess.PIPE,
@@ -183,7 +178,7 @@ def _perf_events(output_dir: pathlib.Path, pid=None, tid=None):
         p.send_signal(signal.SIGINT)
         try:
             _, stderr = p.communicate(timeout=PERF_TERMINATE_TIMEOUT)
-            print("perf stderr:")
+            print("perf record stderr:")
             print(stderr.decode("utf-8"))
         except TimeoutError:
             pass
@@ -194,16 +189,17 @@ def _perf_events(output_dir: pathlib.Path, pid=None, tid=None):
         logger.error("perf exited with error code %d", p.returncode)
         return
 
+    # Produce textual output from the saved report
     with text_path.open("w") as f:
         try:
             subprocess.run(
-                [bin_path, "script", "-i", data_path],
+                [bin_path, "stat", "report", "-i", data_path],
                 check=True,
-                stderr=subprocess.PIPE,
-                stdout=f,
+                stderr=f,
+                stdout=subprocess.PIPE,
             )
         except subprocess.CalledProcessError as e:
-            logger.error("perf script failed; continuing anyway")
+            logger.error("perf stat report failed; continuing anyway")
             if e.stderr:
                 logger.error("stderr from perf script: %s", e.stderr.decode("utf8"))
 
