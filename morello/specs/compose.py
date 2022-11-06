@@ -261,6 +261,9 @@ class Compose(base.Spec):
         assert len(accum) == len(self.inputs) + 1
         return accum
 
+    def output_is_read(self) -> bool:
+        return self.subspec_classes[0].output_is_read_cls()
+
     def __str__(self):
         inner = "·".join(
             getattr(s, "short_name", lambda: s.__name__)() for s in self.subspec_classes

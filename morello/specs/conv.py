@@ -131,9 +131,8 @@ class ConvolutionBase(base.Spec):
 
 @cython.cclass
 class Convolution(ConvolutionBase):
-
-    @property
-    def output_is_read(self) -> bool:
+    @classmethod
+    def output_is_read_cls(cls) -> bool:
         return False
 
     @classmethod
@@ -143,9 +142,8 @@ class Convolution(ConvolutionBase):
 
 @cython.cclass
 class ConvolutionAccum(ConvolutionBase):
-
-    @property
-    def output_is_read(self) -> bool:
+    @classmethod
+    def output_is_read_cls(cls) -> bool:
         return True
 
     @classmethod

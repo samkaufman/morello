@@ -655,7 +655,7 @@ def common_move(
     if bank in current_system().addressed_banks:
         is_output = operand_idx == len(op.spec.operands) - 1
 
-        if not is_output or op.spec.output_is_read:
+        if not is_output or op.spec.output_is_read():
             prologue = LoadHole(
                 specs.Load(
                     source=op.spec.operands[operand_idx],

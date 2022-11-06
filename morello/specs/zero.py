@@ -22,8 +22,8 @@ class Zero(base.Spec):
     def inputs_count(cls) -> int:
         return 0
 
-    @property
-    def output_is_read(self) -> bool:
+    @classmethod
+    def output_is_read_cls(cls) -> bool:
         return False
 
     @classmethod

@@ -63,8 +63,11 @@ class Spec:
     def operands(self) -> tuple[TensorSpec, ...]:
         return self.inputs + (self.output,)
 
-    @property
     def output_is_read(self) -> bool:
+        return self.output_is_read_cls()
+
+    @classmethod
+    def output_is_read_cls(cls) -> bool:
         raise NotImplementedError()
 
     def calculate_output_shape(
