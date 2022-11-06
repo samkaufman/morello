@@ -13,6 +13,10 @@ if typing.TYPE_CHECKING:
     from .. import tensor
 
 
+class LayoutDoesntApplyError(ValueError):
+    pass
+
+
 @cython.dataclasses.dataclass(unsafe_hash=True)
 @cython.cclass
 class TensorSpec:
@@ -66,7 +70,24 @@ class TensorSpec:
             raise ValueError("dim_sizes cannot be empty")
         if all(d == 1 for d in self.dim_sizes):
             if not self.layout.is_row_major:
-                raise ValueError("If all dimensions are 1, layout must be row-major")
+                raise LayoutDoesntApplyError(
+                    "If all dimensions are 1, layout must be row-major"
+                )
+
+        if (self.vector_shape is not None) != system.banks[self.bank].vector_rf:
+            raise ValueError(
+                f"vector_shape must be specified if and only if the bank ({self.bank})"
+                " is a vector register file"
+            )
+
+        if vector_shape is not None:
+            if len(vector_shape) != len(dim_sizes):
+                raise ValueError("vector_shape must have same rank as dim_sizes")
+            if any(i > o for i, o in zip(vector_shape, dim_sizes)):
+                raise ValueError(
+                    f"vector_shape must be smaller than dim_sizes, but "
+                    f"were {vector_shape} and {dim_sizes}"
+                )
 
         if (self.vector_shape is not None) != system.banks[self.bank].vector_rf:
             raise ValueError(
@@ -83,7 +104,7 @@ class TensorSpec:
                 )
 
         if not self.layout.applies_to_shape(dim_sizes):
-            raise ValueError(
+            raise LayoutDoesntApplyError(
                 f"Layout {self.layout} does not apply to shape {dim_sizes} with"
                 f" dtype {dtype}"
             )
@@ -112,7 +133,7 @@ class TensorSpec:
 
     @property
     def contiguous(self) -> bool:
-        return self.contiguous_abs == len(self.dim_sizes)
+        return self.contiguous_abs == self.layout.contiguous_top()
 
     @property
     @typing.final
@@ -129,6 +150,10 @@ class TensorSpec:
     ) -> bool:
         if bank is None:
             bank = self.bank
+
+        system = current_system()
+        if layout != self.layout and bank not in system.addressed_banks:
+            return False
 
         if isinstance(layout, layouts.HexagonTranspacked):
             if self.dtype != Uint8:
@@ -200,6 +225,23 @@ class TensorSpec:
         aligned = utils.aligned_approx(tile_cls, new_dims, self)
         tile_spec = self.shrink(new_dims, aligned=aligned)
         return tile_cls(source=operand_idx, spec=tile_spec, name=None, **kw)
+
+    def flatten_inner_contig(self) -> Optional["TensorSpec"]:
+        flattened = self.layout.flatten_inner_contiguous_dimensions(
+            self.dim_sizes, self.contiguous_abs
+        )
+        if flattened is None:
+            return None
+        prefix, _, inner_contig_vol = flattened
+        new_layout = layouts.row_major(len(prefix) + 1)
+        return TensorSpec(
+            dim_sizes=prefix + (inner_contig_vol,),
+            dtype=self.dtype,
+            contiguous_abs=new_layout.contiguous_one(),
+            aligned=self.aligned,
+            bank=self.bank,
+            layout=new_layout,
+        )
 
     def __str__(self):
         layout_epi = ""

@@ -3,9 +3,9 @@ import typing
 from typing import Callable, Iterable, Optional, Sequence, Tuple, cast
 
 from .. import specs, tiling
-from ..utils import TinyMap
 from ..system_config import current_system, current_target
 from ..tensor import OperandIdx, TensorLike, Tile
+from ..utils import TinyMap
 from .pruning import ParentSummary
 from .utils import assert_stable_spec
 
@@ -429,10 +429,10 @@ def spec_to_hole(spec: specs.Spec) -> "Impl":
     # Import some Impls here to avoid import cycle
     # TODO: Can we move this to its own file instead?
     from .compose import ComposeHole
-    from .convhole import ConvHole, ConvAccumHole
-    from .matmuls import MatmulHole, MatmulAccumHole
-    from .reducesum import ReduceSumHole, ReduceSumAccumHole
+    from .convhole import ConvAccumHole, ConvHole
+    from .matmuls import MatmulAccumHole, MatmulHole
     from .moves import LoadHole, StoreHole
+    from .reducesum import ReduceSumAccumHole, ReduceSumHole
     from .zero import ZeroHole
 
     if isinstance(spec, specs.Convolution):
@@ -456,4 +456,4 @@ def spec_to_hole(spec: specs.Spec) -> "Impl":
     elif isinstance(spec, specs.Zero):
         return ZeroHole(spec)
     else:
-        raise NotImplementedError()
+        raise NotImplementedError(f"No hole type for {type(spec).__name__}")

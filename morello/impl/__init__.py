@@ -14,19 +14,13 @@ from .matmuls import (
     BroadcastVecMult,
     HvxGemvmpybbwAsm,
     HvxVrmpyaccVuwVubRub,
-    MatmulHole,
     MatmulAccumHole,
+    MatmulHole,
     Mult,
 )
-from .moves import (
-    MoveLet,
-    PadTranspack,
-    ValueAssign,
-    CacheAccess,
-    VectorAssign,
-)
+from .moves import CacheAccess, MoveLet, PadTranspack, ValueAssign, VectorAssign
 from .pruning import ParentSummary
-from .reducesum import Add, ReduceSumHole, ReduceSumAccumHole
+from .reducesum import Add, ReduceSumAccumHole, ReduceSumHole
 from .settings import (
     BREAK_MOVE_SYMMETRIES,
     BREAK_SEQUENTIAL_TILES,
@@ -36,8 +30,9 @@ from .settings import (
     allow_sliding_windows,
     tile_size_mode,
 )
+from .speccast import SpecCast
 from .utils import ActionOutOfDomain
-from .zero import ZeroHole, MemsetZero, VectorZero
+from .zero import MemsetZero, VectorZero, ZeroHole
 
 __all__ = [
     "ActionOutOfDomain",
@@ -73,6 +68,7 @@ __all__ = [
     "SlidingTileOutAction",
     "SlidingWindowLoop",
     "spec_to_hole",
+    "SpecCast",
     "SplitNotSupportedByHeadError",
     "tile_size_mode",
     "TileOutAction",

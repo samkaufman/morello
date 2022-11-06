@@ -6,7 +6,7 @@ authors = ["Sam Kaufman <emrysk@gmail.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "~3.10"
+python = ">=3.9,<=3.11"
 tabulate = "^0.8.10"
 frozendict = "^2.3.4"
 pyarrow = "^9.0.0"

@@ -1,6 +1,6 @@
 import hypothesis
 
-hypothesis.settings.register_profile("ci", max_examples=10000, print_blob=True)
+hypothesis.settings.register_profile("ci", max_examples=3000, print_blob=True)
 hypothesis.settings.register_profile("debug", deadline=None, print_blob=True)
 
 

@@ -1,8 +1,8 @@
 import itertools
 from typing import Any, Callable, Optional, Sequence
 
-from hypothesis import strategies as st
 import hypothesis
+from hypothesis import strategies as st
 
 from morello import dtypes, impl, layouts, specs, system_config, tensor
 from morello.system_config import cpu, hexagon
@@ -22,7 +22,9 @@ def layout_st(
     numels_ones: Optional[bool] = None,
     dim_sizes: Optional[tuple[int, ...]] = None,
 ) -> layouts.Layout:
-    assert numels_ones is not None or dim_sizes
+    assert (
+        numels_ones is not None or dim_sizes
+    ), f"numels_ones = {numels_ones} and dim_sizes = {dim_sizes}"
     if numels_ones is None:
         assert dim_sizes
         numels_ones = all(d == 1 for d in dim_sizes)
@@ -136,6 +138,12 @@ def tensorspec_st(
 
 
 @st.composite
+def zero_spec_st(draw, max_dim_size: int = 128):
+    t = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=1, max_dims=4))
+    return specs.Zero(t, serial_only=draw(st.booleans()))
+
+
+@st.composite
 def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
     lhs_dtype = draw(st.from_type(dtypes.Dtype))
     rhs_dtype = draw(st.from_type(dtypes.Dtype))
@@ -239,6 +247,14 @@ def compose_spec_st(draw) -> specs.Compose:
     output_dim_sizes = specs.Compose.calculate_output(
         subspec_classes, [inp.dim_sizes for inp in inputs_specs]
     )
+
+    # assert len(output_dim_sizes), (
+    #    f"output_dim_sizes was {output_dim_sizes} and inputs were "
+    #    f"{[inp.dim_sizes for inp in inputs_specs]} for "
+    #    f"({', '.join([c.__name__ for c in subspec_classes])})"
+    # )
+    hypothesis.assume(len(output_dim_sizes))
+
     out_dtype = draw(st.from_type(dtypes.Dtype))
     output_spec = target.tensor_spec(
         dim_sizes=output_dim_sizes,
@@ -321,6 +337,14 @@ def _smaller_shape(
     return tuple(tile_shape)
 
 
+atomic_specs_st = st.one_of(
+    st.from_type(specs.Zero),
+    st.from_type(specs.Matmul),
+    st.from_type(specs.Convolution),
+    st.from_type(specs.ReduceSum),
+)
+
+
 def register_default_strategies():
     st.register_type_strategy(layouts.Layout, layout_st(numels_ones=False))
     st.register_type_strategy(dtypes.Dtype, dtype_st)
@@ -330,17 +354,13 @@ def register_default_strategies():
 
     # Register default strategies for generating Specs.
     st.register_type_strategy(specs.Compose, compose_spec_st())
+    st.register_type_strategy(specs.Zero, zero_spec_st())
     st.register_type_strategy(specs.Matmul, matmul_spec_st())
     st.register_type_strategy(specs.Convolution, convolution_spec_st())
     st.register_type_strategy(specs.ReduceSum, reduce_spec_st())
     st.register_type_strategy(
         specs.Spec,
-        st.one_of(
-            st.from_type(specs.Compose),
-            st.from_type(specs.Matmul),
-            st.from_type(specs.Convolution),
-            st.from_type(specs.ReduceSum),
-        ),
+        st.one_of(atomic_specs_st, st.from_type(specs.Compose)),
     )
 
     # Register default strategies for generating Impls, including Holes, Movelets,

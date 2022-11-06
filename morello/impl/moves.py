@@ -1,9 +1,22 @@
 import dataclasses
-import operator
 import functools
-from typing import Any, Iterable, Literal, Optional, Callable, Sequence, Union, cast
+import operator
+from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union, cast
 
 from .. import layouts, specs, system_config
+from ..layouts import Layout
+from ..system_config import current_system, current_target
+from ..tensor import (
+    InnerContigFlatteningTile,
+    OperandIdx,
+    Tensor,
+    TensorBase,
+    TensorLike,
+)
+from ..utils import TinyMap
+from . import MoveAction, settings, speccast
+from .actions import TileOutAction
+from .base import AppliedImpl, Impl, NonAllocatingLeaf, make_applied_impl
 from .pruning import (
     ParentSummary,
     break_matmul_split_symmetries,
@@ -12,14 +25,7 @@ from .pruning import (
     prune_nested_parallel_loops,
     prune_relayout_cycles,
 )
-from ..layouts import Layout
-from .actions import TileOutAction
-from ..system_config import current_system, current_target
-from ..tensor import TensorBase, Tensor, TensorLike
-from ..utils import TinyMap
-from . import MoveAction
-from .base import AppliedImpl, Impl, Leaf, NonAllocatingLeaf, make_applied_impl
-from .utils import assert_stable_spec, gen_vector_shapes, gen_tile_sizes
+from .utils import assert_stable_spec, gen_tile_sizes, gen_vector_shapes
 
 
 class _OperandWrapper(Impl):
@@ -101,6 +107,27 @@ class MoveLet(Impl):
     def __post_init__(self):
         assert self.source_idx >= 0
         assert self.destination.layout != layouts.HEXAGON_TRANSPACKED
+        assert not self.prefetching or settings.enable_prefetching_moves.get()
+
+        system = system_config.current_system()
+        source_bank = self.spec.operands[self.source_idx].bank
+        if self.destination.bank not in system.faster_destination_banks(source_bank):
+            raise ValueError(
+                f"Cannot move from {source_bank} to {self.destination.bank}"
+            )
+
+        # The following check is needed because, as the moment, we don't nest any
+        # Load or Store Impl under MoveLet when not addressed. An alternative would
+        # be to allow this requirement to emerge from the lack of any Load/Store Impl
+        # which is willing to implement this impossible behavior.
+        if (
+            self.destination.bank not in system.addressed_banks
+            and self.destination.layout != self.spec.operands[self.source_idx].layout
+        ):
+            raise ValueError(
+                f"Cannot change layout when {self.destination.bank} is not an "
+                "addressed bank"
+            )
 
     @property
     def is_store(self) -> bool:
@@ -204,7 +231,7 @@ class MoveLet(Impl):
             yield "epilogue"
 
 
-class _BaseMoveHole(Leaf):
+class _BaseMoveHole(NonAllocatingLeaf):
     spec: Union[specs.Load, specs.Store]
 
     @property
@@ -224,6 +251,11 @@ class _BaseMoveHole(Leaf):
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Impl]]:
+        # Rank 3+ Zeros can be reinterpreted as 2 dimensional.
+        if self.can_flatten:
+            yield self.flatten
+            return
+
         # Search only over full line sizes
         source = self.spec.source
         for tile_shape in gen_tile_sizes(source.dim_sizes, filter=self._can_tile_out):
@@ -240,6 +272,80 @@ class _BaseMoveHole(Leaf):
         if CacheAccess.applies_to_operands(self.spec.operands):
             yield functools.partial(self.place, CacheAccess)
 
+    def flatten(self) -> "Impl":
+        if not self.can_flatten:
+            return self
+
+        lhs, rhs = self.spec.operands
+        cabs = lhs.layout.contiguous_lub(
+            rhs.layout, lhs.contiguous_abs, rhs.contiguous_abs
+        )
+
+        # TODO: Avoid the need for these pass-through tiles.
+        flattened_tiles = []
+        for i, o in enumerate(self.spec.operands):
+            inner = o.simple_tile(OperandIdx(i), o.dim_sizes)
+            flattened_tiles.append(
+                InnerContigFlatteningTile(
+                    OperandIdx(i),
+                    inner,
+                    flattening_contiguous_abs=cabs,
+                )
+            )
+        return speccast.SpecCast(
+            spec=self.spec,
+            inner=type(self)(
+                type(self.spec)(
+                    *[t.spec for t in flattened_tiles],
+                    serial_only=self.spec.serial_only,
+                )
+            ),
+            inner_args=frozenset(flattened_tiles),
+        )
+
+    @property
+    def can_flatten(self) -> bool:
+        lhs, rhs = self.spec.operands
+
+        # TODO: Add support for vector banks
+        if lhs.vector_shape or rhs.vector_shape:
+            return False
+
+        # TODO: Push this down into the layouts.
+        if type(lhs.layout) != type(rhs.layout):
+            return False
+        elif type(lhs.layout) == layouts.StandardLayout:
+            if lhs.layout != rhs.layout:
+                return False
+
+        cabs = lhs.layout.contiguous_lub(
+            rhs.layout, lhs.contiguous_abs, rhs.contiguous_abs
+        )
+
+        flatteneds = [
+            o.layout.flatten_inner_contiguous_dimensions(o.dim_sizes, cabs)
+            for o in (lhs, rhs)
+        ]
+        new_shape = None
+        for f, operand in zip(flatteneds, self.spec.operands):
+            if f is None:
+                return False
+            prefix, _, volume = f
+            if len(prefix) + 1 >= len(operand.dim_sizes):
+                return False
+
+            # We only support flattening in the result would have the same logical
+            # shape. A example of where this would not happen is:
+            # Load((1×7×1×1, u32, L1, c2, ua), (1×7×1×1, u32, RF, NHWC), serial)
+            # which would (without this check) flatten to
+            # Load((1×7×1, u32, L1, c1, ua), (1×1×7, u32, RF, c1), serial).
+            if new_shape is None:
+                new_shape = prefix + (volume,)
+            elif new_shape != prefix + (volume,):
+                return False
+
+        return True
+
     def complete(self) -> Impl:
         if any(d > 1 for d in self.spec.source.dim_sizes):
             ones = (1,) * len(self.spec.source.dim_sizes)
@@ -248,16 +354,6 @@ class _BaseMoveHole(Leaf):
 
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
         return make_applied_impl(self, operands)
-
-    @property
-    def additional_memories(self) -> list[TinyMap[str, int]]:
-        banks = system_config.current_system().ordered_banks
-        return [TinyMap(banks, (0,) * len(banks))]
-
-    @property
-    def peak_memory(self) -> TinyMap[str, int]:
-        banks = system_config.current_system().ordered_banks
-        return TinyMap(banks, (0,) * len(banks))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -476,15 +572,19 @@ def _move_arguments(
 def common_operand_move_actions(impl: "Impl") -> Iterable[MoveAction]:
     spec = impl.spec
 
+    if settings.enable_prefetching_moves.get():
+        prf_options = [True, False]
+    else:
+        prf_options = [False]
+
     def inner(inp_idx, operand: specs.TensorSpec) -> Iterable[MoveAction]:
-        assert isinstance(operand, specs.TensorSpec)  # TODO: Remove
         move_fn, can_move_fn = impl.move_output, operand.can_move_to
         if inp_idx is not None:
             move_fn = functools.partial(impl.move_input, inp_idx)
             can_move_fn = operand.can_move_to
 
         for bank, layout, kws in _move_arguments(operand):
-            for prf in [True, False]:
+            for prf in prf_options:
                 if can_move_fn(bank, layout):
                     yield MoveAction(move_fn, operand, inp_idx, prf, bank, layout, kws)
 
@@ -590,6 +690,4 @@ def transition_contiguous(bank, layout, operand):
     # If it's into memory bank with its own address space, then yes.
     if bank not in current_system().addressed_banks:
         return operand.contiguous_abs
-    return cast(Layout, layout).check_tile_contiguity(
-        operand.dim_sizes, operand.dim_sizes, operand.contiguous_abs
-    )
+    return layout.contiguous_top()

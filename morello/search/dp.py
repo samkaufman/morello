@@ -5,9 +5,7 @@ import typing
 import cython
 
 try:
-    from cython.cimports.morello import specs
-
-    from ..cython.cimports import common
+    from ..cython.cimports import common, specs
 except ImportError:
     pass
 

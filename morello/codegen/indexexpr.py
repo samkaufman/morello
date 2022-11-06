@@ -1,17 +1,14 @@
-from typing import Optional
-
 import sympy
 
 from ..tensor import (
     ConvolutionImageTile,
+    InnerContigFlatteningTile,
     SimpleTile,
     SqueezingTile,
     Tensor,
-    TensorBase,
     TensorLike,
     TransposingTile,
 )
-from .expr_utils import FloorDiv
 
 
 def vsub(expr, *args, **kwargs) -> sympy.Expr:
@@ -21,50 +18,6 @@ def vsub(expr, *args, **kwargs) -> sympy.Expr:
     result = expr.subs(*args, **kwargs)
     assert isinstance(result, sympy.Expr)
     return result
-
-
-def buffer_indexing_expr(
-    tensor: TensorBase, concrete_shape: Optional[tuple[int, ...]] = None
-) -> sympy.Expr:
-    """Returns a sympy.Expr mapping logical Tensor coordinates to buffer offset."""
-
-    if concrete_shape is None:
-        concrete_shape = tensor.dim_sizes
-    assert len(concrete_shape) == len(tensor.dim_sizes)
-    if tensor.spec.layout.is_row_major:
-        substitutions = {}
-        for idx, dim in enumerate(concrete_shape):
-            substitutions[sympy.symbols(f"s{idx}")] = dim
-            if dim == 1:
-                substitutions[sympy.symbols(f"p{idx}")] = 0
-        if tensor.layout.is_row_major:
-            index_expr = _tensor_row_major_indexing_expr(len(concrete_shape))
-        else:
-            raise NotImplementedError(f"Unsupported layout: {tensor.layout}")
-        index_expr = vsub(index_expr, substitutions, simultaneous=True)
-        assert isinstance(index_expr, sympy.Expr)
-        return index_expr
-    elif tensor.spec.layout == layouts.HEXAGON_TRANSPACKED:
-        # This layout is only used for Uint8, so the following will index
-        # 128-bit blocks (vectors in HVX VMEM).
-        orig_rows, orig_cols = concrete_shape
-        padded_rows = orig_rows - orig_rows % -32
-        p0, p1 = sympy.symbols("p0 p1")
-        # Logical sizes for the 128-byte vectors.
-        row_block = FloorDiv(p0, 4)
-        col_block = FloorDiv(p1, 32)
-        # The blocks in each dimension might differ because of padding, and this
-        # can affect the offsets (e.g., by added intervening all-zero vectors).
-        inner_offset = 4 * sympy.UnevaluatedExpr(p1 % 32) + sympy.UnevaluatedExpr(
-            p0 % 4
-        )
-        block_rows = padded_rows // 4
-        block_offset = (128 * block_rows * col_block) + row_block  # block offset
-        return block_offset + inner_offset
-    else:
-        raise NotImplementedError(
-            f"Indexing expression not defined for {tensor.spec.layout}"
-        )
 
 
 def logical_indexing_expr(source: TensorLike, dim: int) -> sympy.Expr:
@@ -108,7 +61,6 @@ def logical_indexing_expr(source: TensorLike, dim: int) -> sympy.Expr:
         exploded = source._squeezed_to_exploded_dims()
         substitutions = []
         for s, e in exploded.items():
-            # substitutions.append((sympy.symbols(f"i{e}"), sympy.symbols(f"i{s}")))
             substitutions.append((sympy.symbols(f"p{e}"), sympy.symbols(f"p{s}")))
         return vsub(source_expr, substitutions, simultaneous=True)
     elif isinstance(source, TransposingTile):
@@ -123,6 +75,9 @@ def logical_indexing_expr(source: TensorLike, dim: int) -> sympy.Expr:
             source_expr, [(f"p{i}", f"p{j}"), (f"p{j}", f"p{i}")], simultaneous=True
         )
         # return source_expr
+    elif isinstance(source, InnerContigFlatteningTile):
+        assert dim < len(source.dim_sizes)
+        raise NotImplementedError()
     elif isinstance(source, Tensor):
         w = source.dim_sizes[dim]
         return sympy.core.numbers.Zero() if w == 1 else pt

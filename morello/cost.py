@@ -24,6 +24,7 @@ from .impl import (
     Mult,
     Pipeline,
     SlidingWindowLoop,
+    SpecCast,
     ValueAssign,
     VectorZero,
     VectorAssign,
@@ -203,6 +204,12 @@ def detailed_analytical_cost(
         assert compute_cost(op) == new_cost
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
+    elif isinstance(op, SpecCast):
+        cost_dict = detailed_analytical_cost(
+            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
+        )
+        cost_dict[op] = (0, "")
+        return cost_dict
     elif holes_ok and isinstance(op, (ComposeHole, MatmulHole, MatmulAccumHole)):
         assert compute_cost(op) == 0
         return {op: (0, "")}
@@ -225,6 +232,8 @@ def compute_cost(op: Impl) -> MainCost:
         for c in op.children:
             sum_cost = _clip_add(sum_cost, compute_cost(c))
         return _assign_cost(op, sum_cost)
+    elif isinstance(op, SpecCast):
+        return _assign_cost(op, compute_cost(op.inner))
     elif isinstance(op, Loop):
         if not op.parallel:
             factor: MainCost = op.steps

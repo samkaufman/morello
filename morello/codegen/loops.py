@@ -7,7 +7,7 @@ from typing import Callable, Iterable, Mapping, Optional, Sequence, Union
 
 import sympy
 
-from ..tensor import Tensor, TensorLike, Tile
+from ..tensor import TensorLike, Tile
 from . import common, indexexpr
 from .common import OperandDetails
 from .indexexpr import vsub
