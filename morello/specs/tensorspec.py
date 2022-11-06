@@ -17,6 +17,10 @@ class LayoutDoesntApplyError(ValueError):
     pass
 
 
+class OversizedVectorError(ValueError):
+    pass
+
+
 @cython.dataclasses.dataclass(unsafe_hash=True)
 @cython.cclass
 class TensorSpec:
@@ -84,7 +88,7 @@ class TensorSpec:
             if len(vector_shape) != len(dim_sizes):
                 raise ValueError("vector_shape must have same rank as dim_sizes")
             if any(i > o for i, o in zip(vector_shape, dim_sizes)):
-                raise ValueError(
+                raise OversizedVectorError(
                     f"vector_shape must be smaller than dim_sizes, but "
                     f"were {vector_shape} and {dim_sizes}"
                 )

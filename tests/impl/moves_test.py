@@ -38,7 +38,7 @@ def test_moves_from_l1_to_rf_have_contiguous_output(tup_input):
     if tile_shape:
         try:
             imp = imp.tile_out(tile_shape)
-        except specs.LayoutDoesntApplyError:
+        except (specs.LayoutDoesntApplyError, specs.OversizedVectorError):
             hypothesis.assume(False)
     imp = imp.move_output("RF")
     hypothesis.note("Impl:\n" + op_pprint.pformat(imp, show_cost=False))
