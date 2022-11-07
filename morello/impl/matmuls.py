@@ -147,6 +147,15 @@ class MatmulAccumHole(MatmulHoleBase):
         lhs_h, lhs_w = self.spec.inputs[0].dim_sizes
         rhs_h, rhs_w = self.spec.inputs[1].dim_sizes
         assert lhs_w == rhs_h
+
+        # Special-case for splitting to single-element tensors, which will be normalized
+        # to row-major. This is necessary for splits in any other layout to be
+        # discovered by search.
+        # TODO: This is pretty ad-hoc. Should there be an alternative to
+        #   `is_valid_tile_shape` that includes this case?
+        if lhs_h == 1 and rhs_w == 1 and k == 1:
+            return True
+
         if k > lhs_w:
             return False
         if not self.spec.inputs[0].is_valid_tile_shape((lhs_h, k)):
