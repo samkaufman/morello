@@ -120,7 +120,14 @@ def _compute_tile_out_loop_nest(
         op_details,
     )
     # Unroll the loop if any of the CTensors corresponds to VRF.
-    if any(deets.c_tensor.should_unroll for deets in op_details):
+    # TODO: Only actually need to unroll the specific subscripts/loops walking over a
+    #   `should_unroll` tensorlike.
+    assert len(op_details) == len(outer_operands)
+    if any(
+        deets.c_tensor.should_unroll
+        and deets.tiled_operand.dim_sizes != outer.dim_sizes
+        for deets, outer in zip(op_details, outer_operands)
+    ):
         assert it_var_names is not None
         inner_iterable = _unroll_loop_nest_plans(inner_iterable, it_var_names)
     yield from inner_iterable
