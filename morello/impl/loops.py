@@ -62,10 +62,6 @@ class _TilingMixin:
             raise ValueError(f"Expected a replacement with spec {self.inner.spec}")
         return dataclasses.replace(self, inner=replacements[0])
 
-    @assert_stable_spec
-    def subschedule(self, fn: Callable[["Impl"], "Impl"]) -> "Impl":
-        return self.replace_children([fn(self.inner)])
-
 
 # TODO: Re-freeze.
 @dataclasses.dataclass(frozen=False, unsafe_hash=True, eq=True)
@@ -197,7 +193,7 @@ class Loop(Impl):
         # Pass split through to the inner schedule. This method is
         # sugar for calling subschedule.
         assert hasattr(self.inner, "split")
-        return self.subschedule(lambda i: i.split(size))
+        return self.subschedule([0], lambda i: i.split(size))
 
     @assert_stable_spec
     def peel(self, *args, **kwargs) -> "Loop":
@@ -214,10 +210,6 @@ class Loop(Impl):
         if replacements[0].spec != self.inner.spec:
             raise ValueError(f"Expected a replacement with spec {self.inner.spec}")
         return dataclasses.replace(self, inner=replacements[0])
-
-    @assert_stable_spec
-    def subschedule(self, fn: Callable[["Impl"], "Impl"]) -> "Impl":
-        return self.replace_children([fn(self.inner)])
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
         assert [o.spec for o in operands] == list(self.spec.operands), (
@@ -342,10 +334,7 @@ class SlidingWindowLoop(_TilingMixin, Impl):
         live_bytes = self.live_tensor.spec.bytes_used
         adds = TinyMap(
             banks,
-            tuple(
-                live_bytes if i == live_bank_idx else 0
-                for i in range(len(banks))
-            ),
+            tuple(live_bytes if i == live_bank_idx else 0 for i in range(len(banks))),
         )
         return [adds]
 

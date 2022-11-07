@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Iterable, Sequence
 
 from .. import specs, system_config, utils
 from .base import AppliedImpl, Impl, make_applied_impl
@@ -23,11 +23,6 @@ class Block(Impl):
     @property
     def children(self) -> tuple[Impl, ...]:
         return self.steps
-
-    def subschedule(self, idx: int, fn: Callable[[Impl], Impl]) -> "Block":
-        new_steps = list(self.steps)
-        new_steps[idx] = fn(new_steps[idx])
-        return self.replace_children(new_steps)
 
     def replace_children(self, replacements: Iterable[Impl]) -> "Block":
         replacements = tuple(replacements)
@@ -67,4 +62,3 @@ class Block(Impl):
         for child, child_idxs in zip(self.steps, self.op_idxs):
             applied_steps.append(child.apply([operands[i] for i in child_idxs]))
         return make_applied_impl(self.replace_children(applied_steps), operands)
-

@@ -563,13 +563,6 @@ class Pipeline(Impl):
         return self.stages
 
     @assert_stable_spec
-    def subschedule(self, idx: int, fn: Callable[[Impl], Impl]) -> "Pipeline":
-        """Transform the stage at a given index by applying the given function."""
-        new_stages = list(self.stages)
-        new_stages[idx] = fn(new_stages[idx])
-        return dataclasses.replace(self, stages=tuple(new_stages))
-
-    @assert_stable_spec
     def complete(self) -> Impl:
         return dataclasses.replace(
             self, stages=tuple(s.complete() for s in self.stages)

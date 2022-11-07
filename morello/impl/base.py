@@ -1,6 +1,6 @@
 import functools
 import typing
-from typing import Callable, Iterable, Optional, Sequence, Tuple, cast
+from typing import Callable, Iterable, Optional, Sequence, Tuple, Union, cast
 
 from .. import specs, tiling
 from ..system_config import current_system, current_target
@@ -279,12 +279,21 @@ class Impl:
         else:
             raise ValueError("Multiple children. Leaf-to-replace is ambiguous.")
 
+    @typing.final
     @assert_stable_spec
-    def subschedule(self, *args, **kwargs) -> "Impl":
-        if len(self.children) == 1:
-            child = self.children[0]
-            return self.replace_children([child.subschedule(*args, **kwargs)])
-        raise NotImplementedError()
+    def subschedule(
+        self, path: Union[list[int], tuple[int, ...]], fn: Callable[["Impl"], "Impl"]
+    ) -> "Impl":
+        if not path:
+            raise ValueError("path must not be empty")
+
+        new_children = list(self.children)
+        p = path[0]
+        if len(path) == 1:
+            new_children[p] = fn(new_children[p])
+        else:
+            new_children[p] = self.children[p].subschedule(path[1:], fn)
+        return self.replace_children(new_children)
 
     @assert_stable_spec
     def complete(self) -> "Impl":

@@ -143,12 +143,6 @@ class MoveLet(Impl):
         return all(c.is_scheduled for c in self.children)
 
     @assert_stable_spec
-    def subschedule(self, idx: int, fn: Callable[[Impl], Impl]) -> "Pipeline":
-        new_children = list(self.children)
-        new_children[idx] = fn(new_children[idx])
-        return self.replace_children(new_children)
-
-    @assert_stable_spec
     def replace_children(self, replacements: Iterable[Impl]) -> Impl:
         filled_children = list(self._filled_children_names())
         replacements = list(replacements)
