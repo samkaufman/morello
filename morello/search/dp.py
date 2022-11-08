@@ -22,14 +22,13 @@ def schedule_search(
     top_k=1,
     parent_summary=None,
     callbacks=None,
-    return_extra: bool = False,
-) -> Union["SearchResult", list[Impl], Impl, None]:
+) -> list[Impl]:
     """Returns the best Impl for a given Spec and memory limits.
 
     May return `None` if no Impl satisfies the given Spec and memory limits.
     """
     return Search(cache, top_k, callbacks=callbacks)(
-        spec, memory_limits, parent_summary, return_extra=return_extra
+        spec, memory_limits, parent_summary
     )
 
 
@@ -56,8 +55,7 @@ class Search:
         memory_limits=None,
         parent_summary=None,
         stats=None,
-        return_extra: bool = False,
-    ):
+    ) -> list[impl.Impl]:
         """Returns the best Impl for a given Spec and memory limits.
 
         May return `None` if no Impl satisfies the given Spec and memory limits.
@@ -69,20 +67,12 @@ class Search:
         if memory_limits is None:
             memory_limits = pruning.StandardMemoryLimits()
 
-        inner_result = self._search(
+        return self._search(
             spec,
             memory_limits=memory_limits,
             parent_summary=parent_summary,
             stats=stats,
-        )
-
-        if return_extra:
-            return inner_result
-        if self.top_k is not None:
-            return inner_result.impls
-        if len(inner_result.impls):
-            return inner_result.impls[0]
-        return None
+        ).impls
 
     def _search(
         self,
