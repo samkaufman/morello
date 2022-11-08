@@ -74,13 +74,15 @@ rsync -vhra ./ "$MAIN_HOST:$REMOTE_DEST" --include='**.gitignore' \
 # Install Python dependencies
 ssh "${MAIN_HOST}" "cd $REMOTE_DEST && ~/.local/bin/poetry install --without=evaluation"
 
+EXP_BIT="export DASK_DISTRIBUTED__SCHEDULER__WORKER_TTL=20m DASK_DISTRIBUTED__COMM__TIMEOUTS__CONNECT=480"
+
 # Run dask-worker, dash-scheduler, and script on main host.
 echo "Starting script, scheduler, and worker on ${MAIN_HOST}."
 ssh "${MAIN_HOST}" "cd $REMOTE_DEST && \
      tmux new-session -d -s '$TMUX_SESSION_NAME' \
-    'export DASK_DISTRIBUTED__SCHEDULER__WORKER_TTL=20m; poetry run dask scheduler --host $MAIN_HOST' ';' \
-    split -h 'sleep 10; poetry run nice -n $WORKER_NICE dask worker --memory-limit $MEM_LIMIT --nworkers $NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
-    split 'sleep 5; poetry run python -m morello.search.bottomup --scheduler $MAIN_HOST:8786 ${EXTRA_ARGS[*]}' ';' \
+    '$EXP_BIT; poetry run dask scheduler --host $MAIN_HOST' ';' \
+    split -h 'sleep 10; $EXP_BIT; poetry run nice -n $WORKER_NICE dask worker --memory-limit=$MEM_LIMIT --nworkers=$NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
+    split 'sleep 5; $EXP_BIT; poetry run python -m morello.search.bottomup --scheduler $MAIN_HOST:8786 ${EXTRA_ARGS[*]}' ';' \
     setw remain-on-exit on ';'"
 
 # Run dask-workers on the other hosts.
@@ -88,6 +90,6 @@ for d in "${OTHER_HOSTS[@]}"; do
   echo "Starting worker on $d."
   ssh "$d" "cd $REMOTE_DEST && \
       tmux new-session -d -s '$TMUX_SESSION_NAME' \
-      'sleep 5; poetry run nice -n $WORKER_NICE dask worker --name $d --memory-limit $MEM_LIMIT --nworkers $NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
+      'sleep 5; $EXP_BIT; poetry run nice -n $WORKER_NICE dask worker --name $d --memory-limit=$MEM_LIMIT --nworkers=$NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
       setw remain-on-exit on ';'"
 done
