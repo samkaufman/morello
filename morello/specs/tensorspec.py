@@ -168,11 +168,9 @@ class TensorSpec:
             return False
         if not all(i <= o for (i, o) in zip(shape, self.dim_sizes)):
             return False
-        if not self.layout.applies_to_shape(shape):
+        all_ones = all(d == 1 for d in shape)
+        if not all_ones and not self.layout.applies_to_shape(shape):
             return False
-        if self.vector_shape:
-            if any(i < v for i, v in zip(shape, self.vector_shape)):
-                return False
         return True
 
     def simple_tile(
