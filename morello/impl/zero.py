@@ -111,6 +111,8 @@ class ZeroHole(base.NonAllocatingLeaf):
 
     @property
     def can_flatten(self) -> bool:
+        return False
+
         destination: specs.TensorSpec = self.spec.destination
 
         # TODO: Add support for vector banks

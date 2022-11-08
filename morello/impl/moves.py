@@ -299,6 +299,8 @@ class _BaseMoveHole(NonAllocatingLeaf):
 
     @property
     def can_flatten(self) -> bool:
+        return False
+
         lhs, rhs = self.spec.operands
 
         # TODO: Add support for vector banks
