@@ -64,11 +64,11 @@ class CpuTarget(Target):
         return SystemDescription(
             line_size=32,
             banks={
-                "RF": MemoryBankConfig(cache_hit_cost=0, capacity=1024),
+                "RF": MemoryBankConfig(cache_hit_cost=0, capacity=64),
                 "VRF": MemoryBankConfig(
-                    cache_hit_cost=0, capacity=1024, vector_bytes=32  # 256-bit YMMs
+                    cache_hit_cost=0, capacity=1024, vector_bytes=16  # 128-bit XMMs
                 ),
-                "L1": MemoryBankConfig(cache_hit_cost=10, capacity=512 * 1024),
+                "L1": MemoryBankConfig(cache_hit_cost=10, capacity=48 * 1024),
                 "GL": MemoryBankConfig(cache_hit_cost=100, capacity=1024**3),
             },
             default_bank="GL",
@@ -91,7 +91,7 @@ class CpuTarget(Target):
         raise ValueError("Unknown source: " + str(source))
 
     def _next_general_bank(self, source: str) -> Optional[str]:
-        if source == "RF":
+        if source in ("RF", "VRF"):
             return None
         elif source == "GL":
             return "L1"
@@ -106,7 +106,7 @@ class CpuTarget(Target):
         source_cb=None,
         values=None,
         extra_clang_args: Optional[Iterable[str]] = None,
-    ) -> "BuiltArtifact":
+    ) -> "CPUBuiltArtifact":
         dirname = pathlib.Path(tempfile.mkdtemp())
         source_path = dirname / "main.c"
         binary_path = dirname / "a.out"
@@ -172,18 +172,10 @@ class CpuTarget(Target):
         Returns the time in seconds. Measured by executing BENCH_ITERS times and
         returning the mean.
         """
-        source_code = None
-
-        def cb(s):
-            nonlocal source_code
-            if return_source:
-                source_code = s
-
-        artifact = await self.build_impl(impl, source_cb=cb)
-        assert isinstance(source_code, str)
+        artifact = await self.build_impl(impl)
         t = await artifact.measure_time()
         if return_source:
-            return (t, source_code)
+            return (t, artifact.source_code)
         return t
 
 
