@@ -87,26 +87,11 @@ class TensorSpec:
         if vector_shape is not None:
             if len(vector_shape) != len(dim_sizes):
                 raise ValueError("vector_shape must have same rank as dim_sizes")
-            if any(i > o for i, o in zip(vector_shape, dim_sizes)):
-                raise OversizedVectorError(
-                    f"vector_shape must be smaller than dim_sizes, but "
-                    f"were {vector_shape} and {dim_sizes}"
-                )
-
-        if (self.vector_shape is not None) != system.banks[self.bank].vector_rf:
-            raise ValueError(
-                f"vector_shape must be specified if and only if the bank ({self.bank})"
-                " is a vector register file"
-            )
-        if vector_shape is not None:
-            if len(vector_shape) != len(dim_sizes):
-                raise ValueError("vector_shape must have same rank as dim_sizes")
-            if any(i > o for i, o in zip(vector_shape, dim_sizes)):
-                raise ValueError(
-                    f"vector_shape must be smaller than dim_sizes, but "
-                    f"were {vector_shape} and {dim_sizes}"
-                )
-
+            # if any(i > o for i, o in zip(vector_shape, dim_sizes)):
+            #     raise OversizedVectorError(
+            #         f"vector_shape must be smaller than dim_sizes, but "
+            #         f"were {vector_shape} and {dim_sizes}"
+            #     )
         if not self.layout.applies_to_shape(dim_sizes):
             raise LayoutDoesntApplyError(
                 f"Layout {self.layout} does not apply to shape {dim_sizes} with"
