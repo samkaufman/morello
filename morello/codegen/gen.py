@@ -329,7 +329,6 @@ def _inner_generate_c(
                     "  /* Mult (vec boundary) */"
                 )
         else:
-            assert rhs_volume == 8, f"Expected volume of 8, but given {rhs_volume}"
             vtype = GCC_VEC_TYPES[(imp.spec.operands[2].dtype, rhs_volume)][1]
             writer.writeline(
                 f"*({vtype} *)({op_details[-1].c_tensor.c_index_ptr(o)}) "
@@ -569,12 +568,14 @@ def _inner_generate_c(
                     f"(*({vtype} *)({rhs_txt}));  // VectorAssign"
                 )
             else:
-                itype, suffix = GCC_VEC_TYPES[(imp.spec.operands[0].dtype, vol)][2:]
+                itype, (load_inst, store_inst) = GCC_VEC_TYPES[
+                    (imp.spec.operands[0].dtype, vol)
+                ][2:]
                 a, b = rhs_txt, lhs_txt
                 if imp.is_store:
                     a, b = lhs_txt, rhs_txt
                 writer.writeline(
-                    f"_mm256_storeu_{suffix}(({itype} *)({a}), _mm256_loadu_{suffix}(({itype} *)({b})));  // VectorAssign"
+                    f"{store_inst}(({itype} *)({a}), {load_inst}(({itype} *)({b})));  // VectorAssign"
                 )
     elif not imp.is_scheduled and allow_holes:
         writer.writeline(f"/* HOLE */")
