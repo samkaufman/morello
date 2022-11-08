@@ -124,8 +124,6 @@ class BeamScheduleSearchResult(NamedTuple):
 
 def beam_schedule_search(
     spec: specs.Spec,
-    inputs: tuple,
-    output,
     k: int = 10000,
     budget=None,
     stats=None,
@@ -143,7 +141,7 @@ def beam_schedule_search(
         None,
         sys.maxsize,
     )
-    first_impl = spec_to_hole(spec, inputs, output)
+    first_impl = spec_to_hole(spec)
     fresh_limits = (pruning.StandardMemoryLimits(),)
     states = [_State(first_impl, fresh_limits, *cost_fn(first_impl, fresh_limits))]
     all_run_cost_estimates = [states[0].estimated_cost]

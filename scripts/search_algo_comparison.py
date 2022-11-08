@@ -66,7 +66,7 @@ class BeamExperimentResult(ExperimentResult):
     seq_num: int
 
 
-def main():
+async def main():
     logging.basicConfig()
 
     args = arg_parser.parse_args()
@@ -104,7 +104,9 @@ def main():
 
     dp_task_partial = functools.partial(dp_task, cache_path=cache_path)
     all_results: list[ExperimentResult] = []
-    with multiprocessing.Pool(processes=procs) as pool:
+    with multiprocessing.Pool(
+        processes=procs, initializer=set_current_target, initargs=(target,)
+    ) as pool:
         # Do the dynamic programming runs first in parallel
         experiments_to_run = ((n, s) for n, s, _ in specs_to_use)
         if SKIP_DP_IF_BUDGET_KNOWN:
@@ -157,7 +159,7 @@ def main():
                     all_results[idx], execution_time=t
                 )
 
-        asyncio.run(asyncio.gather(*(fill_result(i) for i in range(len(all_results)))))
+        await asyncio.gather(*(fill_result(i) for i in range(len(all_results))))
 
     finally:
         csv_out_path = out_dir_path / "results.csv"
@@ -261,7 +263,7 @@ def dp_task(
             spec,
             callbacks=cbs,
             cache=cache,
-        )
+        )[0]
     print(f"Applied {cbs.compose_visits} actions to Compose sub-problems")
     sys.stdout.flush()
 
@@ -353,8 +355,6 @@ def _beam_task_job(
         stats = search.common.SearchStats()
         single_result, search_log = beam.beam_schedule_search(
             spec,
-            tuple(target.tensor(s) for s in spec.inputs),
-            target.tensor(spec.output),
             k=beam_width,
             budget=remaining_budget,
             stats=stats,
@@ -424,9 +424,7 @@ def random_search(
     start = time.monotonic()
     original_budget = budget
 
-    inputs = tuple(target.tensor(inp_spec, name=None) for inp_spec in spec.inputs)
-    output = target.tensor(spec.output, name=None)
-    hole = morello.impl.base.spec_to_hole(spec, inputs, output)
+    hole = morello.impl.base.spec_to_hole(spec)
 
     run_costs: list[int] = []
     best_cost, best_pformatted = None, None
@@ -528,4 +526,4 @@ def make_cache_path(cache_root_dir: pathlib.Path, spec_name: str) -> pathlib.Pat
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(asyncio.run(main()))
