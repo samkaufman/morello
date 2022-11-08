@@ -156,9 +156,9 @@ class ConvAccumHole(ConvHoleBase):
         yield from super().actions(parent_summary)
 
         if all(d == 1 for d in self.spec.output.dim_sizes[2:]) and all(
-            all(v == 1 for v in inp.vector_shape)
-            for inp in self.spec.inputs
-            if inp.vector_shape
+            all(v == 1 for v in o.vector_shape[2:])
+            for o in self.spec.operands
+            if o.vector_shape
         ):
             yield self.spatial_split
 
@@ -170,6 +170,15 @@ class ConvAccumHole(ConvHoleBase):
                 f"{self.spec.inputs[0].dim_sizes} and "
                 f"{self.spec.inputs[1].dim_sizes}"
             )
+
+        for operand in self.spec.operands:
+            if not operand.vector_shape:
+                continue
+            if any(d != 1 for d in operand.vector_shape[2:]):
+                raise ValueError(
+                    f"spatial_split can only be applied when spatial vector dimensions "
+                    f"are 1, but vector dimensions were {operand.vector_shape}"
+                )
 
         # TODO: This doesn't range over the filters' spatial dims.!
         spatial_subscripts = self.spec.operands_dim_subscripts()[0][2:]
