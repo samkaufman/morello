@@ -20,18 +20,16 @@ MEM_LIMIT=7G
 
 # Parse CLI args.
 stopping=false
-while getopts ":sn:m:" option; do
+while getopts "sn::m::" option; do
    case $option in
-     s) stopping=true
-        shift;;
-     n) NWORKERS="$OPTARG"
-        shift 2;;
-     m) MEM_LIMIT="$OPTARG"
-        shift 2;;
+     s) stopping=true;;
+     n) NWORKERS="$OPTARG";;
+     m) MEM_LIMIT="$OPTARG";;
      *) echo "Invalid option: -$OPTARG" >&2
         exit 1;;
    esac
 done
+shift "$((OPTIND - 1))"
 
 # Read target hosts from the command line. The first will run the script
 # and scheduler.
