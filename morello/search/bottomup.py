@@ -535,9 +535,16 @@ def _compute_block(
                                 for i in range(op_count)
                             )
                             new_inputs, new_output = new_operands[:-1], new_operands[-1]
+                            # TODO: Avoid constructing the below list. Reverse the generator.
                             for limits in itertools.product(
                                 *[
-                                    utils.powers_of_two(top_limits.available[bank])
+                                    reversed(
+                                        list(
+                                            utils.powers_of_two(
+                                                top_limits.available[bank]
+                                            )
+                                        )
+                                    )
                                     for bank in all_banks
                                 ]
                             ):
