@@ -158,6 +158,10 @@ class InnerContigFlatteningTile(Tile):
         from . import specs
 
         ispec: "specs.TensorSpec" = self.inner.spec
+
+        if ispec.vector_shape is not None:
+            raise NotImplementedError()
+
         new_dim_sizes = self._flatten_shape()
         new_layout = layouts.row_major(len(new_dim_sizes))
         return specs.TensorSpec(
@@ -341,6 +345,7 @@ class TransposingTile(Tile):
             aligned=ispec.aligned,
             bank=ispec.bank,
             layout=new_layout,
+            vector_shape=ispec.vector_shape,
         )
 
     @property
