@@ -201,14 +201,15 @@ def detailed_analytical_cost(
             new_cost += cost_dict[op.epilogue][0]
 
         cost_expl = f"{new_cost:5d} = {mcost} + _"
-        assert compute_cost(op) == new_cost
+        assert compute_cost(op) == new_cost, f"{compute_cost(op)} != {new_cost}"
         cost_dict[op] = (new_cost, cost_expl)
         return cost_dict
     elif isinstance(op, SpecCast):
         cost_dict = detailed_analytical_cost(
             op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
         )
-        cost_dict[op] = (0, "")
+        inner_cost = cost_dict[op.inner][0]
+        cost_dict[op] = (inner_cost, "_")
         return cost_dict
     elif holes_ok and isinstance(op, (ComposeHole, MatmulHole, MatmulAccumHole)):
         assert compute_cost(op) == 0
