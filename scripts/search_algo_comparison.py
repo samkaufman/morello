@@ -39,7 +39,7 @@ arg_parser.add_argument(
 arg_parser.add_argument("--beam_trials", type=int, default=100)
 arg_parser.add_argument("output", metavar="OUTPUT", type=pathlib.Path)
 
-SKIP_DP_IF_BUDGET_KNOWN = False
+SKIP_DP_IF_BUDGET_KNOWN = True
 DTYPE = dtypes.Uint32
 BEAM_WIDTHS = [1, 10, 100]
 
@@ -228,7 +228,7 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec, Optional[int]]]:
         target.tensor_spec((4, 4), dtype=DTYPE),
         intermediate_dtypes=(DTYPE,),
         serial_only=True,
-    ), None
+    ), 151940
     yield "gemm3-2048", specs.Compose(
         (specs.Matmul, specs.Matmul),
         (
