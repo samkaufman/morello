@@ -615,6 +615,8 @@ class Pipeline(Impl):
 
     @property
     def peak_memory(self) -> utils.TinyMap[str, int]:
+        system = system_config.current_system()
+
         # Pipeline currently adds an intermediate tensor between each stage, so
         # intermediates is just the output of everything but the last stage
         intermediates: list[specs.TensorSpec] = [
@@ -622,7 +624,7 @@ class Pipeline(Impl):
         ]
         intermed_utils: list[dict[str, int]] = []
         for tensor in intermediates:
-            new_mem = {k: 0 for k in system_config.current_system().banks}
+            new_mem = {k: 0 for k in system.banks}
             new_mem[tensor.bank] += tensor.bytes_used
             intermed_utils.append(new_mem)
 
@@ -643,8 +645,13 @@ class Pipeline(Impl):
         mem = _zipply(
             max, mem, _zipply(sum, self.stages[-1].peak_memory, intermed_utils[-1])
         )
+
+        assert set(mem.keys()) == set(system.ordered_banks)
+
         # TODO: Construct TinyMap directly without all the intermediate dicts
-        return utils.TinyMap(mem)
+        return utils.TinyMap(
+            system.ordered_banks, tuple(mem[b] for b in system.ordered_banks)
+        )
 
     @property
     def is_scheduled(self) -> bool:
