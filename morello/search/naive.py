@@ -59,8 +59,6 @@ def _assert_no_cycles_in_stack(func):
 
 def naive_search(
     spec: specs.Spec,
-    inputs: tuple,
-    output,
     memory_limits=None,
     parent_summary=None,
     parallel_jobs=1,
@@ -82,7 +80,7 @@ def naive_search(
         memory_limits = pruning.StandardMemoryLimits()
 
     # Create a an Impl hole corresponding to the query spec
-    leaf = impl.spec_to_hole(spec, inputs, output)
+    leaf = impl.spec_to_hole(spec)
     assert leaf.depth == 1, f"Expected hole to have depth 1; had {leaf.depth}"
 
     best_result = _best_schedule(
