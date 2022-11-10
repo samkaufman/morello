@@ -111,7 +111,7 @@ def gen_vector_shapes(
     if not outer_shape:
         raise ValueError("outer_shape must be a non-empty list")
     if any(d <= 0 for d in outer_shape):
-        raise ValueError("Each outer_shape entry must be 1 or greater")
+        raise ValueError(f"Got outer_shape: {outer_shape}")
     if vector_bytes <= 0:
         raise ValueError("vector_bytes must be greater than 0")
     if vector_bytes % dtype.size != 0:
