@@ -64,19 +64,19 @@ class _AssertingSearch(dp.Search):
         **kwargs,
     ) -> tuple[list[tuple["impl.Impl", tuple]], int]:
         spec_expected_block = _spec_coordinate_to_block_coord(
-            self.downscale, _spec_to_spec_coordinate(spec)
+            self.downscale, _spec_to_spec_coordinate(spec, memory_limits)
         )
         assert len(spec_expected_block.dim_coords) == len(
             self.block_coordinate.dim_coords
         ), (
             f"Expected the same number of dim_coords in the Spec: {spec} and "
-            f"{_spec_coordinate_to_block_coord(self.downscale, _spec_to_spec_coordinate(spec))}"
+            f"{_spec_coordinate_to_block_coord(self.downscale, _spec_to_spec_coordinate(spec, memory_limits))}"
         )
         assert len(spec_expected_block.other_coords) == len(
             self.block_coordinate.other_coords
         ), (
             f"Expected the same number of other_coords in the Spec: {spec} and "
-            f"{_spec_coordinate_to_block_coord(self.downscale, _spec_to_spec_coordinate(spec))}"
+            f"{_spec_coordinate_to_block_coord(self.downscale, _spec_to_spec_coordinate(spec, memory_limits))}"
         )
         assert spec_expected_block == self.block_coordinate, (
             f"Cache did not contain {str(spec)}, which should have been computed "
@@ -134,7 +134,9 @@ def _spec_coordinate_to_block_coord(downscale: int, spec_coord: Coord) -> Coord:
     return Coord(dim_coords, spec_coord.other_coords)
 
 
-def _spec_to_spec_coordinate(spec: specs.Spec) -> Coord:
+def _spec_to_spec_coordinate(
+    spec: specs.Spec, memory_limits: pruning.MemoryLimits
+) -> Coord:
     system = system_config.current_system()
 
     sb = 0 if spec.serial_only else 1
@@ -147,18 +149,20 @@ def _spec_to_spec_coordinate(spec: specs.Spec) -> Coord:
     bank_idxs = tuple(bank_idxs)
     assert len(bank_idxs) == len(spec.operands)
 
+    ls = tuple(memory_limits.available[b] for b in system.ordered_banks)
+
     if isinstance(spec, (specs.Matmul, specs.MatmulAccum)):
         m, k = spec.lhs.dim_sizes
         _, n = spec.rhs.dim_sizes
-        return Coord((m, k, n), bank_idxs + (sb,))
+        return Coord((m, k, n) + ls, bank_idxs + (sb,))
     elif isinstance(spec, (specs.Convolution, specs.ConvolutionAccum)):
         b, c, h, w = spec.lhs.dim_sizes
         f, _, fh, fw = spec.rhs.dim_sizes
-        return Coord((b, c, f, h, w, fh, fw), bank_idxs + (sb,))
+        return Coord((b, c, f, h, w, fh, fw) + ls, bank_idxs + (sb,))
     elif isinstance(spec, (specs.ReduceSum, specs.ReduceSumAccum)):
-        return Coord(spec.source.dim_sizes, bank_idxs + (sb,))
+        return Coord(spec.source.dim_sizes + ls, bank_idxs + (sb,))
     elif isinstance(spec, (specs.Load, specs.Store, specs.Zero)):
-        return Coord(spec.output.dim_sizes, bank_idxs + (sb,))
+        return Coord(spec.output.dim_sizes + ls, bank_idxs + (sb,))
     elif isinstance(spec, specs.Compose):
         raise ValueError("Compose Specs not supported")
     else:
@@ -168,29 +172,39 @@ def _spec_to_spec_coordinate(spec: specs.Spec) -> Coord:
 # TODO: Can we just automatically invert _spec_to_coordinate? Or derive from Spec?
 def _destructure_spec_coordinate(
     base_spec: specs.Spec, coord: Coord
-) -> tuple[Sequence[tuple[int, ...]], Sequence[Sequence[str]], bool]:
+) -> tuple[
+    Sequence[tuple[int, ...]],
+    pruning.StandardMemoryLimits,
+    Sequence[Sequence[str]],
+    bool,
+]:
     """Return a modified copy of the given Spec with the given coordinate."""
     system = system_config.current_system()
 
-    spec_dims = coord.dim_coords
+    spec_dims = coord.dim_coords[: -len(system.ordered_banks)]
+    limit_dims = coord.dim_coords[-len(system.ordered_banks) :]
+    limits = pruning.StandardMemoryLimits(
+        utils.TinyMap(system.ordered_banks, limit_dims)
+    )
     banks: Sequence[Sequence[str]] = [BANKS_LEVELS[b] for b in coord.other_coords[:-1]]
     serial = coord.other_coords[-1] == 0
 
     if isinstance(base_spec, (specs.Matmul, specs.MatmulAccum)):
         return (
             [spec_dims[:2], spec_dims[1:3], (spec_dims[0], spec_dims[2])],
+            limits,
             banks,
             serial,
         )
     elif isinstance(base_spec, (specs.Convolution, specs.ConvolutionAccum)):
         b, c, f, h, w, fh, fw = spec_dims
-        return [(b, c, h, w), (f, c, fh, fw), (b, f, h, w)], banks, serial
+        return [(b, c, h, w), (f, c, fh, fw), (b, f, h, w)], limits, banks, serial
     elif isinstance(base_spec, (specs.ReduceSum, specs.ReduceSumAccum)):
-        return (spec_dims, spec_dims[:-1]), banks, serial
+        return (spec_dims, spec_dims[:-1]), limits, banks, serial
     elif isinstance(base_spec, (specs.Load, specs.Store)):
-        return (spec_dims, spec_dims), banks, serial
+        return (spec_dims, spec_dims), limits, banks, serial
     elif isinstance(base_spec, specs.Zero):
-        return (spec_dims,), banks, serial
+        return (spec_dims,), limits, banks, serial
     elif isinstance(base_spec, specs.Compose):
         raise ValueError("Compose Specs not supported")
     else:
@@ -223,7 +237,7 @@ class DPTableGraph:
         self.diagonals = []
         self._coords_to_transitive_results = {}
 
-        top_spec_pt = _spec_to_spec_coordinate(top_query_spec)
+        top_spec_pt = _spec_to_spec_coordinate(top_query_spec, top_limits)
         top_block = _spec_coordinate_to_block_coord(downscale, top_spec_pt)
         self.top_block = top_block
 
@@ -468,14 +482,11 @@ def _compute_block(
     The returned cache does not contain Specs in the provided `cache`; just the
     additional Specs computed for this block.
     """
-    assert isinstance(top_limits, pruning.StandardMemoryLimits)
-
     cache = search_cache.CacheChain(
         [search_cache.InMemoryScheduleCache()] + list(caches)
     )
 
     with system_config.with_target(target):
-        all_banks = target.system.ordered_banks
         op_count = len(top_query_spec.operands)
 
         # Use dp.Search instead of _AssertingSearch because we don't compute all
@@ -484,19 +495,18 @@ def _compute_block(
         # search_obj = _AssertingSearch(downscale, block_coord, cache=cache)
         search_obj = dp.Search(cache=cache)
 
-        assert set(top_limits.available.keys()) == set(all_banks)
-
-        top_query_shape = _spec_to_spec_coordinate(top_query_spec)
+        top_block_coord = _spec_to_spec_coordinate(top_query_spec, top_limits)
         for spec_coord in _spec_coordinates_in_block(downscale, block_coord):
             # The larget block might contain Specs which are larger than the bounding
             # query shape (`top_query_shape`). Skip those.
             if any(
-                s > t for s, t in zip(spec_coord.flatten(), top_query_shape.flatten())
+                s > t for s, t in zip(spec_coord.flatten(), top_block_coord.flatten())
             ):
                 continue
 
             (
                 operand_shapes,
+                memory_limits,
                 tensor_bank_groups,
                 serial_only,
             ) = _destructure_spec_coordinate(top_query_spec, spec_coord)
@@ -520,8 +530,6 @@ def _compute_block(
                                 )
                             ]
                         ):
-                            # TODO: We should actually step down according to the memory
-                            #   used by the best Impl.
                             new_operands = tuple(
                                 target.tensor_spec(
                                     operand_shapes[i],
@@ -535,31 +543,14 @@ def _compute_block(
                                 for i in range(op_count)
                             )
                             new_inputs, new_output = new_operands[:-1], new_operands[-1]
-                            # TODO: Avoid constructing the below list. Reverse the generator.
-                            for limits in itertools.product(
-                                *[
-                                    reversed(
-                                        list(
-                                            utils.powers_of_two(
-                                                top_limits.available[bank]
-                                            )
-                                        )
-                                    )
-                                    for bank in all_banks
-                                ]
-                            ):
-                                limits_map = pruning.StandardMemoryLimits(
-                                    utils.TinyMap(all_banks, limits)
-                                )
-
-                                spec = top_query_spec.replace_io(
-                                    inputs=new_inputs,
-                                    output=new_output,
-                                    serial_only=serial_only,
-                                )
-                                # TODO: Pass parent_summary too, if applicable.
-                                # print("Calling search on Spec: " + str(spec))
-                                search_obj(spec, memory_limits=limits_map)
+                            spec = top_query_spec.replace_io(
+                                inputs=new_inputs,
+                                output=new_output,
+                                serial_only=serial_only,
+                            )
+                            # TODO: Pass parent_summary too, if applicable.
+                            # print("Calling search on Spec: " + str(spec))
+                            search_obj(spec, memory_limits=memory_limits)
 
         return cache.caches[0]
 
