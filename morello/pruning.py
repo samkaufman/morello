@@ -78,7 +78,9 @@ class MemoryLimits:
 class StandardMemoryLimits(MemoryLimits):
     _available: TinyMap[str, int]
 
-    def __init__(self, available_memory: Optional[Mapping[str, int]] = None) -> None:
+    def __init__(
+        self, available_memory: Optional[Mapping[str, int]] = None, snap_down=True
+    ) -> None:
         super().__init__()
         if available_memory is None:
             system = system_config.current_system()
@@ -95,7 +97,8 @@ class StandardMemoryLimits(MemoryLimits):
                 self._available = available_memory
             else:
                 self._available = TinyMap(available_memory)
-        self._available = _snap_availables(self._available)
+        if snap_down:
+            self._available = _snap_availables(self._available)
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, StandardMemoryLimits):

@@ -121,7 +121,8 @@ def test_cache_get_returns_just_put_impls(spec, limits, data):
         for b in limits.available.raw_keys
     ]
     adjusted_limits = pruning.StandardMemoryLimits(
-        utils.TinyMap(limits.available.raw_keys, tuple(adjusted_limits_list))
+        utils.TinyMap(limits.available.raw_keys, tuple(adjusted_limits_list)),
+        snap_down=False,
     )
     results = [imp for imp, _ in cache.get(spec, adjusted_limits).contents]
     assert len(results) == 1
