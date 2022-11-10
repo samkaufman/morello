@@ -171,12 +171,12 @@ class Loop(Impl):
     def move_input(self, *args, **kwargs) -> "Loop":
         # Pass move_input through to the inner schedule. This method is
         # basically sugar for calling subschedule.
-        return dataclasses.replace(self, inner=self.inner.move_input(*args, **kwargs))
+        return self.replace_children([self.inner.move_input(*args, **kwargs)])
 
     def move_output(self, *args, **kwargs) -> "Loop":
         # Pass move_output through to the inner schedule. This method is
         # basically sugar for calling subschedule.
-        return dataclasses.replace(self, inner=self.inner.move_output(*args, **kwargs))
+        return self.replace_children([self.inner.move_output(*args, **kwargs)])
 
     def pad_transpack(self, *args, **kwargs) -> "Loop":
         # Pass pad_transpack through to the inner schedule. This method is

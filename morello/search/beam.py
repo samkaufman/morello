@@ -45,10 +45,10 @@ def _dp_schedule_leaves(
         # if _iter_empty(schedule.actions()):
         #     return schedule
         results = dp.schedule_search(
-                schedule.spec,
-                memory_limits=sublimits,
-                cache=cache,
-            )
+            schedule.spec,
+            memory_limits=sublimits,
+            cache=cache,
+        )
         if not results:
             return None
         return results[0]
