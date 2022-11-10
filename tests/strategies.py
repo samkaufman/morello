@@ -315,6 +315,12 @@ atomic_specs_st = st.one_of(
     st.from_type(specs.ReduceSum),
 )
 
+small_atomic_specs_st = st.one_of(
+    zero_spec_st(max_dim_size=4),
+    matmul_spec_st(max_dim_size=4),
+    convolution_spec_st(max_dim_size=4),
+    reduce_spec_st(max_dim_size=4),
+)
 
 def register_default_strategies():
     st.register_type_strategy(layouts.Layout, layout_st(numels_ones=False))
