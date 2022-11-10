@@ -9,6 +9,7 @@ import warnings
 from typing import (
     Iterable,
     Iterator,
+    Literal,
     NamedTuple,
     Optional,
     Sequence,
@@ -24,6 +25,9 @@ from .impl import Impl, spec_to_hole
 from .specs import Spec
 from .utils import TinyMap, zip_dict, snap_availables_up
 from .system_config import current_system
+
+TABLE_STYLE: Literal["dense", "list", "dict"] = "list"
+RAISE_CAPS = True
 
 
 class CachedScheduleSet:
@@ -119,7 +123,7 @@ class ScheduleCache(abc.ABC):
 
 
 class InMemoryScheduleCache(ScheduleCache):
-    _rects: dict[Spec, "_LogScaledTable"]
+    _rects: dict[Spec, Union["_ListTable", "_SharedTable"]]
 
     def __init__(self):
         self._rects = {}
@@ -161,20 +165,26 @@ class InMemoryScheduleCache(ScheduleCache):
             return
 
         mlims = memory_limits.available
-        assert all(
-            m <= c
-            for im, _ in schedules_to_put.contents
-            for _, (m, c) in zip_dict(im.peak_memory, mlims, same_keys=True)
-        )
+
+        for im, _ in schedules_to_put.contents:
+            for _, (m, c) in zip_dict(im.peak_memory, mlims, same_keys=True):
+                if m > c:
+                    raise ValueError(
+                        f"Impl peak memory {im.peak_memory} not bounded by {mlims}"
+                    )
 
         try:
             rects = self._rects[spec]
         except KeyError:
-            # rects = _EntrySpace()
-            table_dims = tuple(
-                current_system().banks[b].capacity for b in mlims.raw_keys
-            )
-            rects = _LogScaledTable(mlims.raw_keys, table_dims)
+            if TABLE_STYLE == "dense":
+                table_dims = tuple(
+                    current_system().banks[b].capacity for b in mlims.raw_keys
+                )
+                rects = _LogScaledTable(mlims.raw_keys, table_dims)
+            elif TABLE_STYLE == "list":
+                rects = _ListTable(mlims.raw_keys)
+            else:
+                rects = _DictTable(mlims.raw_keys)
             self._rects[spec] = rects
 
         schedules_to_put = self._specify_schedule_set(schedules_to_put)
@@ -300,8 +310,159 @@ class CacheChain(ScheduleCache):
         return sum(len(cache) for cache in self.caches)
 
 
+class _SharedTable(abc.ABC):
+    def add(self, entry: _TableEntry):
+        bottom_coord = self._logify(self._bottom_from_entry(entry))
+        top_coord = self._logify(snap_availables_up(entry.caps.raw_values, always=True))
+        self._fill_storage(bottom_coord, top_coord, entry)
+
+    def best_for_cap(self, caps: pruning.StandardMemoryLimits) -> Optional[_TableEntry]:
+        avail = caps.available
+        coord = self._logify(avail.raw_values)
+        assert isinstance(coord, tuple)
+        return self._get_log_scaled_pt(coord)
+
+    @abc.abstractmethod
+    def _banks(self) -> tuple[str, ...]:
+        pass
+
+    @abc.abstractmethod
+    def _get_log_scaled_pt(self, pt) -> Optional[_TableEntry]:
+        pass
+
+    @abc.abstractmethod
+    def _fill_storage(self, lower, upper, value):
+        pass
+
+    @abc.abstractmethod
+    def __iter__(self) -> Iterator[_TableEntry]:
+        pass
+
+    @abc.abstractmethod
+    def __len__(self) -> int:
+        pass
+
+    @staticmethod
+    def _logify(tup: Sequence[int]) -> tuple[int, ...]:
+        return tuple((0 if x == 0 else (x - 1).bit_length() + 1) for x in tup)
+
+    def _bottom_from_entry(self, entry: _TableEntry) -> tuple[int, ...]:
+        if entry.peak_memory is None:
+            assert not len(entry.schedules.contents)
+            return (0,) * len(self._banks())
+        else:
+            return entry.peak_memory.raw_values
+
+
 @dataclasses.dataclass(frozen=False)
-class _LogScaledTable:
+class _DictTable(_SharedTable):
+    banks: tuple[str, ...]
+    storage: dict[tuple[int, ...], _TableEntry] = dataclasses.field(
+        default_factory=dict
+    )
+
+    def _banks(self) -> tuple[str, ...]:
+        return self.banks
+
+    def _fill_storage(self, lower, upper, value):
+        for pt in itertools.product(*[range(l, u + 1) for l, u in zip(lower, upper)]):
+            self.storage[pt] = value
+
+    def _get_log_scaled_pt(self, pt) -> Optional[_TableEntry]:
+        return self.storage.get(pt, None)
+
+    def __iter__(self) -> Iterator[_TableEntry]:
+        for entry in set(self.storage.values()):
+            assert isinstance(entry, _TableEntry)
+            yield entry
+
+    def __len__(self) -> int:
+        return len(set(self.storage.values()))
+
+
+@dataclasses.dataclass(frozen=False)
+class _ListTable:
+    banks: tuple[str, ...]
+    storage: list[_TableEntry] = dataclasses.field(default_factory=list)
+
+    @staticmethod
+    def _raise_entry(r, entry):
+        if RAISE_CAPS:
+            raised_caps = TinyMap(
+                entry.caps.raw_keys,
+                tuple(
+                    max(a, b)
+                    for a, b in zip(
+                        entry.caps.raw_values,
+                        r.caps.raw_values,
+                    )
+                ),
+            )
+            return _TableEntry(entry.spec, entry.schedules, raised_caps)
+        else:
+            return entry
+
+    def add(self, entry: _TableEntry):
+        # First, check for a _TableEntry to update.
+        for rect_idx in range(len(self.storage)):
+            raised_caps = None
+            if RAISE_CAPS:
+                raised_caps = TinyMap(
+                    entry.caps.raw_keys,
+                    tuple(
+                        max(a, b)
+                        for a, b in zip(
+                            entry.caps.raw_values,
+                            self.storage[rect_idx].caps.raw_values,
+                        )
+                    ),
+                )
+
+            # If we're putting no Impls and there exists an entry already for
+            # the no-Impl case, raise its memory caps to whatever we've explored.
+            r = self.storage[rect_idx]
+            if not entry.schedules.contents:
+                if r.schedules.contents:
+                    continue
+                if _mem_dicts_ordered(r.caps, entry.caps):
+                    self.storage[rect_idx] = self._raise_entry(r, entry)
+                    return
+            else:
+                if not r.schedules.contents:
+                    continue
+                assert r.peak_memory is None or isinstance(r.peak_memory, TinyMap)
+                if _mem_dicts_ordered(
+                    r.peak_memory, entry.schedules.peak_memory, r.caps, entry.caps
+                ):
+                    self.storage[rect_idx] = self._raise_entry(r, entry)
+                    return
+            # TODO: Assert that there is at most one intersection
+
+        # If we haven't returned at this point, then we didn't find a _TableEntry to
+        # update, so add one.
+        self.storage.append(entry)
+
+    def best_for_cap(self, caps: pruning.StandardMemoryLimits) -> Optional[_TableEntry]:
+        for entry in self:
+            if _mem_dicts_ordered(entry.peak_memory, caps.available, entry.caps):
+                return entry
+        return None
+
+    def _get_log_scaled_pt(self, pt) -> Optional[_TableEntry]:
+        for entry in self.storage:
+            if _mem_dicts_ordered(entry.peak_memory, pt, entry.caps):
+                return entry
+        return None
+
+    def __iter__(self) -> Iterator[_TableEntry]:
+        yield from iter(self.storage)
+
+    def __len__(self) -> int:
+        return len(self.storage)
+
+
+@dataclasses.dataclass(frozen=False)
+class _LogScaledTable(_SharedTable):
     banks: tuple[str, ...]
     storage: np.ndarray
 
@@ -312,15 +473,13 @@ class _LogScaledTable:
         object.__setattr__(self, "storage", np.empty(storage_dims, dtype=object))
         self.storage.fill(None)
 
-    def add(self, entry: _TableEntry):
-        mlims = entry.caps
-        assert self.banks == mlims.raw_keys
-        bottom_coord = self._logify(self._bottom_from_entry(entry))
-        top_coord = self._logify(snap_availables_up(mlims.raw_values, always=True))
-        assert len(bottom_coord) == len(self.banks)
-        assert len(top_coord) == len(self.banks)
-        slicer = tuple(slice(l, u + 1) for l, u in zip(bottom_coord, top_coord))
-        self.storage[slicer].fill(entry)
+    def _banks(self) -> tuple[str, ...]:
+        return self.banks
+
+    def _fill_storage(self, lower, upper, value):
+        """Fills storage (inclusive)."""
+        slicer = tuple(slice(l, u + 1) for l, u in zip(lower, upper))
+        self.storage[slicer].fill(value)
 
     def __iter__(self) -> Iterator[_TableEntry]:
         flat = self.storage.flatten()
@@ -332,35 +491,11 @@ class _LogScaledTable:
         flat = self.storage.flatten()
         return len(set(flat[flat != None]))
 
-    def get_index(self, idx: int) -> _TableEntry:
-        raise NotImplementedError()
-
-    def replace_index(self, idx: int, entry: _TableEntry):
-        raise NotImplementedError()
-
-    def best_for_cap(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
-        avail = caps.available
-        assert avail.raw_keys == self.banks
-        coord = self._logify(avail.raw_values)
-        assert isinstance(coord, tuple)
-        return self.storage[coord]
-
-    def enum_to_caps(self, caps: pruning.StandardMemoryLimits) -> Iterable[_TableEntry]:
-        region = self.storage[
-            tuple(slice(u + 1) for u in self._logify(caps.available.raw_values))
-        ].flatten()
-        for entry in set(region[region != None]):
-            assert isinstance(entry, _TableEntry), f"entry has type {type(entry)}"
-            yield entry
-
-    def includes_limits(
-        self, min_value: TinyMap[str, int], max_value: TinyMap[str, int]
-    ) -> Iterable[int]:
-        raise NotImplementedError()
-
-    @staticmethod
-    def _logify(tup: Sequence[int]) -> tuple[int, ...]:
-        return tuple((0 if x == 0 else (x - 1).bit_length() + 1) for x in tup)
+    def _get_log_scaled_pt(self, pt) -> Optional[_TableEntry]:
+        try:
+            return self.storage[pt]
+        except IndexError:
+            return None
 
     def _bottom_from_entry(self, entry: _TableEntry) -> tuple[int, ...]:
         if entry.peak_memory is None:
@@ -397,3 +532,34 @@ def persistent_cache(path: Optional[Union[str, pathlib.Path]], save: bool = True
         if save:
             with atomicwrites.atomic_write(path, mode="wb", overwrite=True) as fo:
                 pickle.dump(cache, fo)
+
+
+def _mem_dicts_ordered(*dicts: Optional[TinyMap[str, int]]) -> bool:
+    # This function is pretty verbose. It avoids `range`, `any`, and other
+    # generators for speed.
+    if len(dicts) == 0:
+        return True
+
+    idx: int = 0
+    while dicts[idx] is None:
+        idx += 1
+        if idx == len(dicts):
+            return True
+    head: TinyMap[str, int] = cast(TinyMap[str, int], dicts[idx])
+    val_len = len(head.raw_values)
+
+    idx += 1
+    while idx < len(dicts):
+        cur = dicts[idx]
+        if cur is None:
+            idx += 1
+            continue
+        assert cur.raw_keys == head.raw_keys
+        j = 0
+        while j < val_len:
+            if head.raw_values[j] > cur.raw_values[j]:
+                return False
+            j += 1
+        head = cur
+        idx += 1
+    return True
