@@ -194,7 +194,7 @@ class MoveLet(Impl):
         if self.prefetching:
             additional *= 2
         dest_idx = mem.raw_keys.index(self.destination.bank)
-        return snap_availables_up(
+        return (
             TinyMap(
                 mem.raw_keys,
                 tuple(

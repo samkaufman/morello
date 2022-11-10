@@ -650,10 +650,8 @@ class Pipeline(Impl):
         assert set(mem.keys()) == set(system.ordered_banks)
 
         # TODO: Construct TinyMap directly without all the intermediate dicts
-        return snap_availables_up(
-            utils.TinyMap(
-                system.ordered_banks, tuple(mem[b] for b in system.ordered_banks)
-            )
+        return utils.TinyMap(
+            system.ordered_banks, tuple(mem[b] for b in system.ordered_banks)
         )
 
     @property

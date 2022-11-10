@@ -319,14 +319,12 @@ class SlidingWindowLoop(_TilingMixin, Impl):
         m = self.inner.peak_memory
         live_bank_idx = m.raw_keys.index(self.live_tensor.bank)
         live_bytes = self.live_tensor.spec.bytes_used
-        return snap_availables_up(
-            TinyMap(
-                m.raw_keys,
-                tuple(
-                    v + live_bytes if i == live_bank_idx else v
-                    for i, v in enumerate(m.raw_values)
-                ),
-            )
+        return TinyMap(
+            m.raw_keys,
+            tuple(
+                v + live_bytes if i == live_bank_idx else v
+                for i, v in enumerate(m.raw_values)
+            ),
         )
 
     @property
