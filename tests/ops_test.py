@@ -8,6 +8,7 @@ import pytest
 from hypothesis import strategies as st
 
 import morello.impl.utils
+from morello.impl.utils import LIMIT_VECTORS_TO_ONE_DIM
 from morello import dtypes, impl, op_pprint, specs, tensor
 from morello.impl import Impl
 
@@ -56,12 +57,14 @@ def test_dim_range():
         impl.tile_size_mode.reset(token)
 
 
+@pytest.mark.skipif(LIMIT_VECTORS_TO_ONE_DIM, reason="not valid with LIMIT_VECTORS_TO_ONE_DIM")
 def test_gen_vector_shapes_u8_1():
     assert list(
         morello.impl.utils.gen_vector_shapes([4, 4], dtypes.Uint8, vector_bytes=4 * 4)
     ) == [(4, 4)]
 
 
+@pytest.mark.skipif(LIMIT_VECTORS_TO_ONE_DIM, reason="not valid with LIMIT_VECTORS_TO_ONE_DIM")
 def test_gen_vector_shapes_u8_2():
     assert (
         list(morello.impl.utils.gen_vector_shapes([8], dtypes.Uint8, vector_bytes=16))
@@ -69,6 +72,7 @@ def test_gen_vector_shapes_u8_2():
     )
 
 
+@pytest.mark.skipif(LIMIT_VECTORS_TO_ONE_DIM, reason="not valid with LIMIT_VECTORS_TO_ONE_DIM")
 def test_gen_vector_shapes_u8_3():
     assert list(
         morello.impl.utils.gen_vector_shapes([16, 2], dtypes.Uint8, vector_bytes=16)
@@ -78,12 +82,14 @@ def test_gen_vector_shapes_u8_3():
     ]
 
 
+@pytest.mark.skipif(LIMIT_VECTORS_TO_ONE_DIM, reason="not valid with LIMIT_VECTORS_TO_ONE_DIM")
 def test_gen_vector_shapes_u8_4():
     assert list(
         morello.impl.utils.gen_vector_shapes([16], dtypes.Uint8, vector_bytes=16)
     ) == [(16,)]
 
 
+@pytest.mark.skipif(LIMIT_VECTORS_TO_ONE_DIM, reason="not valid with LIMIT_VECTORS_TO_ONE_DIM")
 def test_gen_vector_shapes_u32_1():
     assert list(
         morello.impl.utils.gen_vector_shapes([8], dtypes.Uint32, vector_bytes=32)

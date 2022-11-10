@@ -6,6 +6,8 @@ from typing import Callable, Iterable, Optional, Sequence
 from .. import dtypes, system_config, utils
 from . import settings
 
+LIMIT_VECTORS_TO_ONE_DIM = True
+
 
 def assert_stable_spec(func):
     """Assert that a method returns a Impl with the same spec as its first input."""
@@ -118,6 +120,18 @@ def gen_vector_shapes(
     adjusted_vector_bytes = vector_bytes
     if dtype.size != 1:
         adjusted_vector_bytes //= dtype.size
+
+    if LIMIT_VECTORS_TO_ONE_DIM:
+        for i in range(len(outer_shape)):
+            if outer_shape[i] >= adjusted_vector_bytes:
+                v: tuple[int, ...] = (
+                    ((1,) * i)
+                    + (adjusted_vector_bytes,)
+                    + ((1,) * (len(outer_shape) - i - 1))
+                )
+                assert len(v) == len(outer_shape)
+                yield v
+        return
 
     for result in _gen_vector_shapes_inner(outer_shape, adjusted_vector_bytes):
         assert (
