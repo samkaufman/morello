@@ -95,7 +95,7 @@ def _env_str(
             istr = f", {_env_str(imp.inner, name_tensor_fn, color=color)})"
 
         left_strs, right_strs = [], []
-        for it in sorted(imp.tiles, key=str):
+        for it in sorted(imp.tiles, key=lambda t: t.source):
             left_strs.append(
                 _loop_operand_str(it, name_tensor_fn=name_tensor_fn, color=color)
             )
