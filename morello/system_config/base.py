@@ -44,7 +44,8 @@ class Target:
     def all_layouts_for_shape(self, shape: Sequence[int]) -> Iterable["Layout"]:
         from ..layouts import NHWC, NCHWc4, NCHWc32, NCHWc64, row_major
 
-        possible_layouts = [row_major(len(shape)), NHWC, NCHWc4, NCHWc32, NCHWc64]
+        # possible_layouts = [row_major(len(shape)), NHWC, NCHWc4, NCHWc32, NCHWc64]
+        possible_layouts = [row_major(len(shape)), NHWC]
         for layout in possible_layouts:
             if layout.applies_to_shape(shape):
                 yield layout
