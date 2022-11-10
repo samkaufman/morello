@@ -19,6 +19,11 @@ ALPHABET_PRODUCT = _ALPHABET + [
     a + b for a, b in itertools.product(_ALPHABET, _ALPHABET)
 ]
 
+# If True, schedules will be saved as if they had memory limits, for all banks,
+# that are the next highest power of 2. This discretizes the cache a bit, even
+# though it
+SNAP_CAP_TO_POWER_OF_TWO = True
+
 
 class TinyMap(Mapping[T, U]):
     __slots__ = ("raw_keys", "raw_values")
@@ -252,3 +257,14 @@ def sum_seqs(maxes: Sequence[int], total: int) -> Iterable[tuple[int, ...]]:
         for v in range(obligation, min(maxes[0], total) + 1):
             for suffix in sum_seqs(maxes[1:], total - v):
                 yield (v,) + suffix
+
+
+def snap_availables_up(available: T, always=False) -> T:
+    if not SNAP_CAP_TO_POWER_OF_TWO and not always:
+        return available
+    if isinstance(available, TinyMap):
+        return available.map_values(
+            lambda n: 0 if n == 0 else 2 ** (n - 1).bit_length()
+        )
+    assert isinstance(available, tuple)
+    return tuple(0 if n == 0 else 2 ** (n - 1).bit_length() for n in available)  # type: ignore

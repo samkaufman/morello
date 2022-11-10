@@ -3,13 +3,7 @@ from collections.abc import Mapping
 from typing import Optional
 
 from . import impl, specs, system_config, utils
-from .utils import TinyMap
-
-
-# If True, schedules will be saved as if they had memory limits, for all banks,
-# that are the next highest power of 2. This discretizes the cache a bit, even
-# though it
-SNAP_CAP_TO_POWER_OF_TWO = True
+from .utils import SNAP_CAP_TO_POWER_OF_TWO, TinyMap
 
 
 class AvailableIsNegativeError(ValueError):
@@ -110,6 +104,9 @@ class StandardMemoryLimits(MemoryLimits):
 
     def __hash__(self) -> int:
         return hash(self.available)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({repr(self._available)})"
 
     def __str__(self) -> str:
         s = f"{type(self).__name__}("
@@ -285,6 +282,7 @@ class PipelineChildMemoryLimits(MemoryLimits):
         )
 
 
+# TODO: Move to morello.utils alongside snap_availables_up
 def _snap_availables(available: TinyMap[str, int]) -> TinyMap[str, int]:
     """Returns limits that are snapped down according to the snapping strategy."""
     # If SNAP_CAP_TO_POWER_OF_TWO isn't set, don't rebuild the data structure.
