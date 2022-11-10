@@ -37,18 +37,21 @@ def _dp_schedule_leaves(
     schedule: Impl,
     limits_queue: list[pruning.MemoryLimits],
     cache: search_cache.ScheduleCache,
-) -> object:
+) -> Optional[Impl]:
     if not len(schedule.children):
         sublimits = limits_queue.pop(0)
-        if not _iter_empty(schedule.actions()):
-            return dp.schedule_search(
+        if schedule.is_scheduled:
+            return schedule
+        # if _iter_empty(schedule.actions()):
+        #     return schedule
+        results = dp.schedule_search(
                 schedule.spec,
-                schedule.inputs,
-                schedule.output,
                 memory_limits=sublimits,
                 cache=cache,
             )
-        return schedule
+        if not results:
+            return None
+        return results[0]
 
     new_children = []
     for child in schedule.children:
