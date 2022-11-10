@@ -52,9 +52,11 @@ class Block(Impl):
     def peak_memory(self) -> utils.TinyMap[str, int]:
         banks = system_config.current_system().ordered_banks
         assert all(c.peak_memory.raw_keys is banks for c in self.steps)
-        return utils.TinyMap(
-            banks,
-            tuple(map(max, zip(*(c.peak_memory.raw_values for c in self.steps)))),
+        return utils.snap_availables_up(
+            utils.TinyMap(
+                banks,
+                tuple(map(max, zip(*(c.peak_memory.raw_values for c in self.steps)))),
+            )
         )
 
     def apply(self, operands: Sequence["TensorLike"]) -> AppliedImpl:

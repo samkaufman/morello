@@ -13,7 +13,7 @@ from ..tensor import (
     TensorBase,
     TensorLike,
 )
-from ..utils import TinyMap
+from ..utils import TinyMap, snap_availables_up
 from . import MoveAction, settings, speccast
 from .actions import TileOutAction
 from .base import AppliedImpl, Impl, NonAllocatingLeaf, make_applied_impl
@@ -194,12 +194,14 @@ class MoveLet(Impl):
         if self.prefetching:
             additional *= 2
         dest_idx = mem.raw_keys.index(self.destination.bank)
-        return TinyMap(
-            mem.raw_keys,
-            tuple(
-                v + additional if dest_idx == i else v
-                for i, v in enumerate(mem.raw_values)
-            ),
+        return snap_availables_up(
+            TinyMap(
+                mem.raw_keys,
+                tuple(
+                    v + additional if dest_idx == i else v
+                    for i, v in enumerate(mem.raw_values)
+                ),
+            )
         )
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:

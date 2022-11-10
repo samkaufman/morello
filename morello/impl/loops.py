@@ -5,7 +5,7 @@ from typing import Callable, Iterable, Optional, Sequence, Tuple, Union
 
 from .. import specs, system_config
 from ..tensor import OperandIdx, Tensor, TensorLike, Tile
-from ..utils import TinyMap
+from ..utils import TinyMap, snap_availables_up
 from .base import AppliedImpl, Impl, make_applied_impl
 from .utils import assert_stable_spec
 
@@ -319,12 +319,14 @@ class SlidingWindowLoop(_TilingMixin, Impl):
         m = self.inner.peak_memory
         live_bank_idx = m.raw_keys.index(self.live_tensor.bank)
         live_bytes = self.live_tensor.spec.bytes_used
-        return TinyMap(
-            m.raw_keys,
-            tuple(
-                v + live_bytes if i == live_bank_idx else v
-                for i, v in enumerate(m.raw_values)
-            ),
+        return snap_availables_up(
+            TinyMap(
+                m.raw_keys,
+                tuple(
+                    v + live_bytes if i == live_bank_idx else v
+                    for i, v in enumerate(m.raw_values)
+                ),
+            )
         )
 
     @property

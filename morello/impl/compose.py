@@ -16,6 +16,7 @@ from typing import (
 
 from .. import layouts, specs, system_config, tiling, utils
 from ..layouts import Layout
+from ..utils import snap_availables_up
 from ..system_config import current_system, current_target
 from ..tensor import OperandIdx, SimpleTile, TensorBase, TensorLike, Tile
 from .actions import PeelAction, SlidingTileOutAction, TileOutAction
@@ -649,8 +650,10 @@ class Pipeline(Impl):
         assert set(mem.keys()) == set(system.ordered_banks)
 
         # TODO: Construct TinyMap directly without all the intermediate dicts
-        return utils.TinyMap(
-            system.ordered_banks, tuple(mem[b] for b in system.ordered_banks)
+        return snap_availables_up(
+            utils.TinyMap(
+                system.ordered_banks, tuple(mem[b] for b in system.ordered_banks)
+            )
         )
 
     @property
