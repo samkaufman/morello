@@ -130,7 +130,6 @@ class MatmulAccumHole(MatmulHoleBase):
 
         split_subscript = self.spec.operands_dim_subscripts()[0][-1]
 
-        warnings.warn("Not yet specializing spec for split Matmuls")
         return Loop(
             spec=self.spec,
             subscripts=(split_subscript,),
