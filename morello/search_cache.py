@@ -257,7 +257,7 @@ class InMemoryScheduleCache(ScheduleCache):
                 )
             new_children.append(child_results.contents[0][0])
 
-        return imp.replace_children(new_children, force=True)
+        return imp.replace_children(new_children)
 
 
 class CacheChain(ScheduleCache):
