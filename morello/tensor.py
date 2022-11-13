@@ -128,19 +128,6 @@ class Tensor(TensorBase):
     def frontiers(self) -> tuple[int, ...]:
         return tuple(0 for _ in self.dim_sizes)
 
-    def __getstate__(self):
-        return {
-            "spec": self.spec,
-            "name": self.name,
-        }
-
-    def __setstate__(self, state_dict):
-        if "__spec" in state_dict:
-            object.__setattr__(self, "spec", state_dict["__spec"])
-        else:
-            object.__setattr__(self, "spec", state_dict["spec"])
-        object.__setattr__(self, "name", state_dict["name"])
-
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class Tile(TensorLike):
@@ -400,18 +387,6 @@ class CommonTileBase(Tile):
             bank_epi = f", {self.bank}"
         return f"{type(self).__name__}({dims_part}{layout_epi}{bank_epi})"
 
-    def __getstate__(self):
-        return {
-            "source": self.source,
-            "spec": self.spec,
-            "name": self.name,
-        }
-
-    def __setstate__(self, state_dict):
-        object.__setattr__(self, "source", state_dict["source"])
-        object.__setattr__(self, "spec", state_dict["spec"])
-        object.__setattr__(self, "name", state_dict["name"])
-
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class SimpleTile(CommonTileBase):
@@ -471,15 +446,6 @@ class ConvolutionImageTile(CommonTileBase):
         return (0, 0) + tuple(
             _s(w, f) for w, f in zip(self.dim_sizes[1:], self.filter_shape)
         )
-
-    def __getstate__(self):
-        state = super().__getstate__()
-        state["filter_shape"] = self.filter_shape
-        return state
-
-    def __setstate__(self, state_dict):
-        super().__setstate__(state_dict)
-        object.__setattr__(self, "filter_shape", state_dict["filter_shape"])
 
 
 def _s(img_size: int, filter_size: int) -> int:

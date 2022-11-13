@@ -51,7 +51,10 @@ class HvxSimulatorTarget(Target):
         return it
 
     def tensor(
-        self, spec: specs.TensorSpec, name: Optional[str] = None, **kwargs,
+        self,
+        spec: specs.TensorSpec,
+        name: Optional[str] = None,
+        **kwargs,
     ) -> tensor.TensorBase:
         if spec.bank == "VMEM":
             assert isinstance(spec, specs.HvxVmemTensorSpec)
@@ -62,7 +65,7 @@ class HvxSimulatorTarget(Target):
         self,
         dim_sizes: tuple[int, ...],
         dtype: dtypes.Dtype,
-        contiguous_abs = None,
+        contiguous_abs=None,
         aligned: bool = True,
         bank: Optional[str] = None,
         layout: Optional[layouts.Layout] = None,
@@ -290,18 +293,6 @@ class HvxVmemTensor(HvxVmemTensorlike, tensor.TensorBase):
             f"{type(self).__name__}({dims_part}{layout_epi}, {self.bank}, {vec_part})"
         )
 
-    def __getstate__(self):
-        return {
-            "spec": self.spec,
-            "name": self.name,
-            "origin": self.origin,
-        }
-
-    def __setstate__(self, state_dict):
-        object.__setattr__(self, "spec", state_dict["spec"])
-        object.__setattr__(self, "name", state_dict["name"])
-        object.__setattr__(self, "origin", state_dict["origin"])
-
 
 class HvxVmemSimpleTile(HvxVmemTensorlike, tensor.SimpleTile):
     def __post_init__(self):
@@ -331,16 +322,14 @@ class HvxVmemSimpleTile(HvxVmemTensorlike, tensor.SimpleTile):
             vector_shape=cast(HvxVmemTensor, self.root).vector_shape,
         )
 
-    def __getstate__(self):
-        raise NotImplementedError()
-
-    def __setstate__(self, state_dict):
-        raise NotImplementedError()
-
 
 @contextlib.contextmanager
 def _build_for_hexagon(
-    impl: Impl, *, source_cb: Callable[[str], None], print_output: bool, values,
+    impl: Impl,
+    *,
+    source_cb: Callable[[str], None],
+    print_output: bool,
+    values,
 ):
     clang_path = _hexagon_sdk_tools_root() / "Tools" / "bin" / "hexagon-clang"
     if not clang_path.is_file():
