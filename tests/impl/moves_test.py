@@ -49,7 +49,7 @@ def test_moves_from_l1_to_rf_have_contiguous_output(tup_input):
     innermost = innermost_impl.spec
     hypothesis.note(f"Innermost TensorSpec: {innermost.output}")
     assert innermost.output.contiguous
-    assert innermost.output.contiguous_abs == innermost.output.layout.contiguous_top()
+    assert innermost.output.contiguous_abs == innermost.output.layout.contiguous_full()
 
 
 @hypothesis.given(strategies.atomic_specs_st)

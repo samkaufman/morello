@@ -47,7 +47,7 @@ class CpuTarget(Target):
         if layout is None:
             layout = layouts.row_major(len(dim_sizes))
         if contiguous_abs is None:
-            contiguous_abs = layout.contiguous_top()
+            contiguous_abs = layout.contiguous_full()
         return specs.TensorSpec(
             dim_sizes,
             dtype,

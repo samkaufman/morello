@@ -122,7 +122,7 @@ class TensorSpec:
 
     @property
     def contiguous(self) -> bool:
-        return self.contiguous_abs == self.layout.contiguous_top()
+        return self.contiguous_abs == self.layout.contiguous_full()
 
     @property
     @typing.final
@@ -240,7 +240,7 @@ class TensorSpec:
             layout_epi = f", {self.layout}"
         if self.bank != current_system().default_bank:
             bank_epi = f", {self.bank}"
-        if self.contiguous_abs != self.layout.contiguous_top():
+        if self.contiguous_abs != self.layout.contiguous_full():
             c_epi = f", c{self.contiguous_abs}"
         if not self.aligned:
             a_epi = ", ua"

@@ -74,7 +74,7 @@ class HvxSimulatorTarget(Target):
         if layout is None:
             layout = layouts.row_major(len(dim_sizes))
         if contiguous_abs is None:
-            contiguous_abs = layout.contiguous_top()
+            contiguous_abs = layout.contiguous_full()
         if bank == "VMEM":
             return layouts.HvxVmemTensorSpec(
                 dim_sizes, dtype, contiguous_abs, bank, layout, **kwargs

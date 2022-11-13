@@ -688,4 +688,4 @@ def transition_contiguous(bank, layout, operand):
     # If it's into memory bank with its own address space, then yes.
     if bank not in current_system().addressed_banks:
         return operand.contiguous_abs
-    return layout.contiguous_top()
+    return layout.contiguous_full()

@@ -19,7 +19,7 @@ class Layout:
     def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
         raise NotImplementedError()
 
-    def contiguous_top(self) -> Any:
+    def contiguous_full(self) -> Any:
         raise NotImplementedError()
 
     def contiguous_lub(self, other_layout: "Layout", a, b):
@@ -96,7 +96,7 @@ class StandardLayout(Layout):
         assert all(d >= 0 for d in self.dim_order)
         assert len(set(self.dim_order)) == len(self.dim_order)
 
-    def contiguous_top(self) -> Any:
+    def contiguous_full(self) -> Any:
         return len(self.dim_order)
 
     def contiguous_lub(self, other_layout: Layout, a, b):
@@ -119,7 +119,7 @@ class StandardLayout(Layout):
         self, tile_shape: Sequence[int], parent_shape: Sequence[int], parent_contiguous
     ) -> Any:
         if all(d == 1 for d in tile_shape):
-            return self.contiguous_top()
+            return self.contiguous_full()
 
         cnt = 1  # Skip first.
 
@@ -256,7 +256,7 @@ class PackedLayout(Layout):
                 "dimension; that is equivalent to a StandardLayout"
             )
 
-    def contiguous_top(self) -> Any:
+    def contiguous_full(self) -> Any:
         return self.dim_count + 1
 
     def contiguous_lub(self, other_layout: Layout, a, b):
