@@ -75,7 +75,10 @@ class Impl:
             )
         for dim, dim_size in enumerate(output_shape):
             if dim_size <= 0:
-                raise ValueError("All dimensions must be size 1 or greater")
+                raise ValueError(
+                    "All dimensions must be size 1 or greater, but "
+                    f"given output shape {output_shape}"
+                )
             elif dim_size > self.spec.output.dim_sizes[dim]:
                 raise ValueError(
                     f"Dimensions {dim} was larger than "

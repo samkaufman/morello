@@ -12,7 +12,7 @@ tile_size_mode: contextvars.ContextVar[TileSizeMode] = contextvars.ContextVar(
     "tile_size_mode", default=TileSizeMode.POWERS_OF_TWO
 )
 allow_sliding_windows: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "allow_sliding_windows", default=True
+    "allow_sliding_windows", default=False
 )
 allow_reduce_splits: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "allow_reduce_splits", default=True
