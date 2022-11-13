@@ -8,7 +8,7 @@ import pytest
 from hypothesis import strategies as st
 
 import morello.impl.utils
-from morello.impl.utils import LIMIT_VECTORS_TO_ONE_DIM
+from morello.impl.utils import limit_vectors_to_one_dim
 from morello import dtypes, impl, op_pprint, specs, tensor
 from morello.impl import Impl
 
@@ -57,43 +57,62 @@ def test_dim_range():
         impl.tile_size_mode.reset(token)
 
 
-@pytest.mark.skipif(LIMIT_VECTORS_TO_ONE_DIM, reason="not valid with LIMIT_VECTORS_TO_ONE_DIM")
 def test_gen_vector_shapes_u8_1():
-    assert list(
-        morello.impl.utils.gen_vector_shapes([4, 4], dtypes.Uint8, vector_bytes=4 * 4)
-    ) == [(4, 4)]
+    token = limit_vectors_to_one_dim.set(False)
+    try:
+        assert list(
+            morello.impl.utils.gen_vector_shapes(
+                [4, 4], dtypes.Uint8, vector_bytes=4 * 4
+            )
+        ) == [(4, 4)]
+    finally:
+        limit_vectors_to_one_dim.reset(token)
 
 
-@pytest.mark.skipif(LIMIT_VECTORS_TO_ONE_DIM, reason="not valid with LIMIT_VECTORS_TO_ONE_DIM")
 def test_gen_vector_shapes_u8_2():
-    assert (
-        list(morello.impl.utils.gen_vector_shapes([8], dtypes.Uint8, vector_bytes=16))
-        == []
-    )
+    token = limit_vectors_to_one_dim.set(False)
+    try:
+        assert (
+            list(
+                morello.impl.utils.gen_vector_shapes([8], dtypes.Uint8, vector_bytes=16)
+            )
+            == []
+        )
+    finally:
+        limit_vectors_to_one_dim.reset(token)
 
 
-@pytest.mark.skipif(LIMIT_VECTORS_TO_ONE_DIM, reason="not valid with LIMIT_VECTORS_TO_ONE_DIM")
 def test_gen_vector_shapes_u8_3():
-    assert list(
-        morello.impl.utils.gen_vector_shapes([16, 2], dtypes.Uint8, vector_bytes=16)
-    ) == [
-        (8, 2),
-        (16, 1),
-    ]
+    token = limit_vectors_to_one_dim.set(False)
+    try:
+        assert list(
+            morello.impl.utils.gen_vector_shapes([16, 2], dtypes.Uint8, vector_bytes=16)
+        ) == [
+            (8, 2),
+            (16, 1),
+        ]
+    finally:
+        limit_vectors_to_one_dim.reset(token)
 
 
-@pytest.mark.skipif(LIMIT_VECTORS_TO_ONE_DIM, reason="not valid with LIMIT_VECTORS_TO_ONE_DIM")
 def test_gen_vector_shapes_u8_4():
-    assert list(
-        morello.impl.utils.gen_vector_shapes([16], dtypes.Uint8, vector_bytes=16)
-    ) == [(16,)]
+    token = limit_vectors_to_one_dim.set(False)
+    try:
+        assert list(
+            morello.impl.utils.gen_vector_shapes([16], dtypes.Uint8, vector_bytes=16)
+        ) == [(16,)]
+    finally:
+        limit_vectors_to_one_dim.reset(token)
 
 
-@pytest.mark.skipif(LIMIT_VECTORS_TO_ONE_DIM, reason="not valid with LIMIT_VECTORS_TO_ONE_DIM")
 def test_gen_vector_shapes_u32_1():
-    assert list(
-        morello.impl.utils.gen_vector_shapes([8], dtypes.Uint32, vector_bytes=32)
-    ) == [(8,)]
+    token = limit_vectors_to_one_dim.set(False)
+    try:
+        assert list(
+            morello.impl.utils.gen_vector_shapes([8], dtypes.Uint32, vector_bytes=32)
+        ) == [(8,)]
+    finally:
+        limit_vectors_to_one_dim.reset(token)
 
 
 @pytest.mark.parametrize("dt", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
@@ -112,18 +131,26 @@ def test_gen_vector_shapes_yields_strictly_positive_dims(
 
 
 @pytest.mark.parametrize("dt", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
+@pytest.mark.parametrize("limit_one", [True, False], ids=["limit_one", "any_shape"])
 @hypothesis.given(
     st.lists(st.integers(min_value=1, max_value=10), min_size=1, max_size=5),
     st.integers(min_value=1, max_value=1024),
 )
-def test_gen_vector_shapes_is_correct(dt: dtypes.Dtype, maxes: list[int], volume: int):
-    # TODO: What about factors of two?
-    vector_bytes = volume * dt.size
-    assert list(morello.impl.utils.gen_vector_shapes(maxes, dt, vector_bytes)) == [
-        shape
-        for shape in itertools.product(*[range(0, m + 1) for m in maxes])
-        if functools.reduce(operator.mul, shape, 1) == volume
-    ]
+def test_gen_vector_shapes_is_correct(
+    dt: dtypes.Dtype, limit_one: bool, maxes: list[int], volume: int
+):
+    token = limit_vectors_to_one_dim.set(limit_one)
+    try:
+        # TODO: What about factors of two?
+        vector_bytes = volume * dt.size
+        assert list(morello.impl.utils.gen_vector_shapes(maxes, dt, vector_bytes)) == [
+            shape
+            for shape in itertools.product(*[range(0, m + 1) for m in maxes])
+            if functools.reduce(operator.mul, shape, 1) == volume
+            and (not limit_one or sum(v > 1 for v in shape) < 2)
+        ]
+    finally:
+        limit_vectors_to_one_dim.reset(token)
 
 
 @pytest.mark.skip

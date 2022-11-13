@@ -1,12 +1,15 @@
 import functools
 import itertools
+import contextvars
 import operator
 from typing import Callable, Iterable, Optional, Sequence
 
 from .. import dtypes, system_config, utils
 from . import settings
 
-LIMIT_VECTORS_TO_ONE_DIM = True
+limit_vectors_to_one_dim = contextvars.ContextVar(
+    "limit_vectors_to_one_dim", default=True
+)
 
 
 def assert_stable_spec(func):
@@ -121,8 +124,11 @@ def gen_vector_shapes(
     if dtype.size != 1:
         adjusted_vector_bytes //= dtype.size
 
-    if LIMIT_VECTORS_TO_ONE_DIM:
-        for i in range(len(outer_shape)):
+    if limit_vectors_to_one_dim.get():
+        if adjusted_vector_bytes == 1:
+            yield (1,) * len(outer_shape)
+            return
+        for i in reversed(range(len(outer_shape))):
             if outer_shape[i] >= adjusted_vector_bytes:
                 v: tuple[int, ...] = (
                     ((1,) * i)
