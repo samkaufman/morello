@@ -228,7 +228,7 @@ python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 
 [[package]]
 name = "dask"
-version = "2022.10.2"
+version = "2022.11.0"
 description = "Parallel PyData with Task Scheduling"
 category = "main"
 optional = false
@@ -245,10 +245,10 @@ toolz = ">=0.8.2"
 
 [package.extras]
 array = ["numpy (>=1.18)"]
-complete = ["bokeh (>=2.4.2,<3)", "distributed (==2022.10.2)", "jinja2", "numpy (>=1.18)", "pandas (>=1.0)"]
+complete = ["bokeh (>=2.4.2)", "distributed (==2022.11.0)", "jinja2", "numpy (>=1.18)", "pandas (>=1.0)"]
 dataframe = ["numpy (>=1.18)", "pandas (>=1.0)"]
-diagnostics = ["bokeh (>=2.4.2,<3)", "jinja2"]
-distributed = ["distributed (==2022.10.2)"]
+diagnostics = ["bokeh (>=2.4.2)", "jinja2"]
+distributed = ["distributed (==2022.11.0)"]
 test = ["pandas[test]", "pre-commit", "pytest", "pytest-rerunfailures", "pytest-xdist"]
 
 [[package]]
@@ -269,9 +269,9 @@ kubernetes-asyncio = ">=12.0.1"
 
 [package.source]
 type = "git"
-url = "https://github.com/samkaufman/dask-kubernetes.git"
-reference = "is_comm_open-fix"
-resolved_reference = "f08302aaa91b5911db1aad38296e2c51b9ed3eb2"
+url = "https://github.com/dask/dask-kubernetes.git"
+reference = "84d3f75db120edd7bb82ef702e137d55e3bcd277"
+resolved_reference = "84d3f75db120edd7bb82ef702e137d55e3bcd277"
 
 [[package]]
 name = "debugpy"
@@ -291,16 +291,16 @@ python-versions = ">=3.5"
 
 [[package]]
 name = "distributed"
-version = "2022.10.2"
+version = "2022.11.0"
 description = "Distributed scheduler for Dask"
 category = "main"
 optional = false
 python-versions = ">=3.8"
 
 [package.dependencies]
-click = ">=6.6"
+click = ">=7.0"
 cloudpickle = ">=1.5.0"
-dask = "2022.10.2"
+dask = "2022.11.0"
 jinja2 = "*"
 locket = ">=1.0.0"
 msgpack = ">=0.6.0"
@@ -316,7 +316,7 @@ zict = ">=0.1.3"
 
 [[package]]
 name = "exceptiongroup"
-version = "1.0.1"
+version = "1.0.4"
 description = "Backport of PEP 654 (exception groups)"
 category = "main"
 optional = false
@@ -467,17 +467,17 @@ tool = ["click (>=6.0.0)"]
 
 [[package]]
 name = "googleapis-common-protos"
-version = "1.56.4"
+version = "1.57.0"
 description = "Common protobufs used in Google APIs"
 category = "dev"
 optional = false
 python-versions = ">=3.7"
 
 [package.dependencies]
-protobuf = ">=3.15.0,<5.0.0dev"
+protobuf = ">=3.19.5,<3.20.0 || >3.20.0,<3.20.1 || >3.20.1,<4.21.1 || >4.21.1,<4.21.2 || >4.21.2,<4.21.3 || >4.21.3,<4.21.4 || >4.21.4,<4.21.5 || >4.21.5,<5.0.0dev"
 
 [package.extras]
-grpc = ["grpcio (>=1.0.0,<2.0.0dev)"]
+grpc = ["grpcio (>=1.44.0,<2.0.0dev)"]
 
 [[package]]
 name = "gspread"
@@ -565,7 +565,7 @@ python-versions = ">=3.6.2,<4.0"
 
 [[package]]
 name = "jax"
-version = "0.3.24"
+version = "0.3.25"
 description = "Differentiate, compile, and transform Numpy code."
 category = "dev"
 optional = false
@@ -579,17 +579,17 @@ typing_extensions = "*"
 
 [package.extras]
 australis = ["protobuf (>=3.13,<4)"]
-ci = ["jaxlib (==0.3.22)"]
-cpu = ["jaxlib (==0.3.24)"]
-cuda = ["jaxlib (==0.3.24+cuda11.cudnn82)"]
-cuda11-cudnn805 = ["jaxlib (==0.3.24+cuda11.cudnn805)"]
-cuda11-cudnn82 = ["jaxlib (==0.3.24+cuda11.cudnn82)"]
+ci = ["jaxlib (==0.3.24)"]
+cpu = ["jaxlib (==0.3.25)"]
+cuda = ["jaxlib (==0.3.25+cuda11.cudnn82)"]
+cuda11-cudnn805 = ["jaxlib (==0.3.25+cuda11.cudnn805)"]
+cuda11-cudnn82 = ["jaxlib (==0.3.25+cuda11.cudnn82)"]
 minimum-jaxlib = ["jaxlib (==0.3.22)"]
-tpu = ["jaxlib (==0.3.24)", "libtpu-nightly (==0.1.dev20221103)", "requests"]
+tpu = ["jaxlib (==0.3.25)", "libtpu-nightly (==0.1.dev20221109)", "requests"]
 
 [[package]]
 name = "jaxlib"
-version = "0.3.24"
+version = "0.3.25"
 description = "XLA library for JAX"
 category = "dev"
 optional = false
@@ -970,7 +970,7 @@ python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 
 [[package]]
 name = "pydrive2"
-version = "1.14.0"
+version = "1.15.0"
 description = "Google Drive API made easy. Maintained fork of PyDrive."
 category = "dev"
 optional = false
@@ -981,11 +981,10 @@ google-api-python-client = ">=1.12.5"
 oauth2client = ">=4.0.0"
 pyOpenSSL = ">=19.1.0"
 PyYAML = ">=3.0"
-six = ">=1.13.0"
 
 [package.extras]
 fsspec = ["appdirs (>=1.4.3)", "fsspec (>=2021.07.0)", "funcy (>=1.14)", "tqdm (>=4.0.0)"]
-tests = ["black (==22.3.0)", "flake8", "flake8-docstrings", "funcy (>=1.14)", "pytest (>=4.6.0)", "pytest-mock", "timeout-decorator"]
+tests = ["black (==22.10.0)", "flake8", "flake8-docstrings", "funcy (>=1.14)", "importlib-resources", "pyinstaller", "pytest (>=4.6.0)", "pytest-mock", "timeout-decorator"]
 
 [[package]]
 name = "pyopenssl"
@@ -1389,7 +1388,7 @@ heapdict = "*"
 [metadata]
 lock-version = "1.1"
 python-versions = ">=3.9,<=3.11"
-content-hash = "099da323ae89f43104e8288105b8f87dcd31ebb8e0c0759aaee88cf8946fddde"
+content-hash = "730b0778286a84b62856cb33c308374cfa1eccda26f022b60f329844a394f9d4"
 
 [metadata.files]
 aiohttp = [
@@ -1691,8 +1690,8 @@ cython = [
     {file = "Cython-3.0.0a11.tar.gz", hash = "sha256:e4672491fb31546b9abb63677f638e738085dc9321398170956ef6fbfc0e1726"},
 ]
 dask = [
-    {file = "dask-2022.10.2-py3-none-any.whl", hash = "sha256:928003a97b890a14c8a09a01f15320d261053bda530a8bf191d84f33db4a63b8"},
-    {file = "dask-2022.10.2.tar.gz", hash = "sha256:42cb43f601709575fa46ce09e74bea83fdd464187024f56954e09d9b428ceaab"},
+    {file = "dask-2022.11.0-py3-none-any.whl", hash = "sha256:dc4ead21507391e4f2c0e5d991255975de3cdf06cc36e399507d1dfdccd692ba"},
+    {file = "dask-2022.11.0.tar.gz", hash = "sha256:0def56f16568c293fddffa9fd92da694e1edb652b366500f97b7fe64e8d3983c"},
 ]
 dask-kubernetes = []
 debugpy = [
@@ -1720,12 +1719,12 @@ decorator = [
     {file = "decorator-5.1.1.tar.gz", hash = "sha256:637996211036b6385ef91435e4fae22989472f9d571faba8927ba8253acbc330"},
 ]
 distributed = [
-    {file = "distributed-2022.10.2-py3-none-any.whl", hash = "sha256:ae4fffdb55c6cb510ba1cbdf2856563af80ebf93e5ceacb91c1ce79e7da108d8"},
-    {file = "distributed-2022.10.2.tar.gz", hash = "sha256:53f0a5bf6efab9a5ab3345cd913f6d3f3d4ea444ee2edbea331c7fef96fd67d0"},
+    {file = "distributed-2022.11.0-py3-none-any.whl", hash = "sha256:af57115b0e094d4598d20ef9c2d141b48d47056d50f9e306ae7476a5eb5b14a2"},
+    {file = "distributed-2022.11.0.tar.gz", hash = "sha256:d5d520bb05ac41ee624191d108600a8c985e074d1c21803219e0f13ed935df78"},
 ]
 exceptiongroup = [
-    {file = "exceptiongroup-1.0.1-py3-none-any.whl", hash = "sha256:4d6c0aa6dd825810941c792f53d7b8d71da26f5e5f84f20f9508e8f2d33b140a"},
-    {file = "exceptiongroup-1.0.1.tar.gz", hash = "sha256:73866f7f842ede6cb1daa42c4af078e2035e5f7607f0e2c762cc51bb31bbe7b2"},
+    {file = "exceptiongroup-1.0.4-py3-none-any.whl", hash = "sha256:542adf9dea4055530d6e1279602fa5cb11dab2395fa650b8674eaec35fc4a828"},
+    {file = "exceptiongroup-1.0.4.tar.gz", hash = "sha256:bd14967b79cd9bdb54d97323216f8fdf533e278df937aa2a90089e7d6e06e5ec"},
 ]
 execnet = [
     {file = "execnet-1.9.0-py2.py3-none-any.whl", hash = "sha256:a295f7cc774947aac58dde7fdc85f4aa00c42adf5d8f5468fc630c1acf30a142"},
@@ -1851,8 +1850,8 @@ google-auth-oauthlib = [
     {file = "google_auth_oauthlib-0.5.3-py2.py3-none-any.whl", hash = "sha256:9e8ff4ed2b21c174a2d6cc2172c698dbf0b1f686509774c663a83c495091fe09"},
 ]
 googleapis-common-protos = [
-    {file = "googleapis-common-protos-1.56.4.tar.gz", hash = "sha256:c25873c47279387cfdcbdafa36149887901d36202cb645a0e4f29686bf6e4417"},
-    {file = "googleapis_common_protos-1.56.4-py2.py3-none-any.whl", hash = "sha256:8eb2cbc91b69feaf23e32452a7ae60e791e09967d81d4fcc7fc388182d1bd394"},
+    {file = "googleapis-common-protos-1.57.0.tar.gz", hash = "sha256:27a849d6205838fb6cc3c1c21cb9800707a661bb21c6ce7fb13e99eb1f8a0c46"},
+    {file = "googleapis_common_protos-1.57.0-py2.py3-none-any.whl", hash = "sha256:a9f4a1d7f6d9809657b7f1316a1aa527f6664891531bcfcc13b6696e685f443c"},
 ]
 gspread = [
     {file = "gspread-5.6.2-py3-none-any.whl", hash = "sha256:41f7a416425f1ec5a1b677f49b8fbf599102766c27ed7be6601a58c9a1550ebc"},
@@ -1883,23 +1882,23 @@ iso8601 = [
     {file = "iso8601-1.1.0.tar.gz", hash = "sha256:32811e7b81deee2063ea6d2e94f8819a86d1f3811e49d23623a41fa832bef03f"},
 ]
 jax = [
-    {file = "jax-0.3.24.tar.gz", hash = "sha256:54c0002926a1898e7c7afdc2a14fbdcac04188bcaa359bc3389a30ea464a513a"},
+    {file = "jax-0.3.25.tar.gz", hash = "sha256:18bea69321cb95ea5ea913adfe5e2c1d453cade9d4cfd0dc814ecba9fc0cb6e3"},
 ]
 jaxlib = [
-    {file = "jaxlib-0.3.24-cp310-cp310-macosx_10_14_x86_64.whl", hash = "sha256:c73e0716f3c473b8f5a17a239d27771e8de2b745b29cbb2467fb6a5815affe45"},
-    {file = "jaxlib-0.3.24-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:ac9f1df0b097e4540df1aeefb4cf241be1e413194d69837a852adc79239a728f"},
-    {file = "jaxlib-0.3.24-cp310-cp310-manylinux2014_x86_64.whl", hash = "sha256:ac17008698a7fd603cb8a39299ebf0559f6cec3c9f64b0020d33f5d539075559"},
-    {file = "jaxlib-0.3.24-cp311-cp311-macosx_10_14_x86_64.whl", hash = "sha256:f4c8f52dd222cf54dfecb4616b72b162e296e12341b58d86f61631f6aac65de5"},
-    {file = "jaxlib-0.3.24-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:0d3c979e40dc6c1b7831504cc277e4a40d3f62f2ef11f363009dbb19a8450de5"},
-    {file = "jaxlib-0.3.24-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:62df5c7d666d960e43f4f455e49e8d13fd77d9f298abc8ec59c12a78844b2d0e"},
-    {file = "jaxlib-0.3.24-cp37-cp37m-macosx_10_14_x86_64.whl", hash = "sha256:fe664cac2786f377a88b17da4e2b0cb060c7066db49ada4596aa8024543170d8"},
-    {file = "jaxlib-0.3.24-cp37-cp37m-manylinux2014_x86_64.whl", hash = "sha256:09d940e1e95fed8a927e7f59d9f4bfff78242ade1cc1aad5a203181bc9eead05"},
-    {file = "jaxlib-0.3.24-cp38-cp38-macosx_10_14_x86_64.whl", hash = "sha256:f8ee0fc1f6abfc9285d323a06d791ae4b2bedc89e38d49dc1a1c4fa06f40732b"},
-    {file = "jaxlib-0.3.24-cp38-cp38-macosx_11_0_arm64.whl", hash = "sha256:dd1406d9553ce5c8c868afd0a07e76a6ddbb965e5846eeaf960438a395fa88d0"},
-    {file = "jaxlib-0.3.24-cp38-cp38-manylinux2014_x86_64.whl", hash = "sha256:ba1bf3766c1cc33dd5fc08d0468980c2fa42c26f5ad08f369fbf3e74dd5c24cb"},
-    {file = "jaxlib-0.3.24-cp39-cp39-macosx_10_14_x86_64.whl", hash = "sha256:7eab08c684473d3141c271250c83c8534e6d1460b34e334998846bfb4f5c3c66"},
-    {file = "jaxlib-0.3.24-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:cee54f5cdfcf4a60c42f775ff59dc2a97cb2660db943b9b05865c093753da4a2"},
-    {file = "jaxlib-0.3.24-cp39-cp39-manylinux2014_x86_64.whl", hash = "sha256:75ab498c064cdea988a0a85209557edd0359c722bb886bd1426e57e8529a083e"},
+    {file = "jaxlib-0.3.25-cp310-cp310-macosx_10_14_x86_64.whl", hash = "sha256:09508f7000c0fa958fba29267338e8de75b31d7ea29bd79719a568c38f0f8d31"},
+    {file = "jaxlib-0.3.25-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:3c75c8efd3702687968820446e3fb9ff997f8a2a07ab92e33b80e2f12eab3d9a"},
+    {file = "jaxlib-0.3.25-cp310-cp310-manylinux2014_x86_64.whl", hash = "sha256:6e2f4e51041b8371aa3976b5a3a9cdcdccb1bd7b040c9b1345cbf24bd28a8d19"},
+    {file = "jaxlib-0.3.25-cp311-cp311-macosx_10_14_x86_64.whl", hash = "sha256:f2d517635fd77e2729c0ab7863be0d290927d01b2abb2f5dc955c821f8b0d53e"},
+    {file = "jaxlib-0.3.25-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:13446a8382aa9ed944c16af636ca111d0afbbead91eed5cc2dc71195045e71b3"},
+    {file = "jaxlib-0.3.25-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:71866aeaafbc9a12b59dcbe443353772ef235b40c53f8bd7403d39311822c276"},
+    {file = "jaxlib-0.3.25-cp37-cp37m-macosx_10_14_x86_64.whl", hash = "sha256:1e59ba58c9e93c1e1cef243f2609ec0b0c0a81160c20b9555aecdea32ccd6a78"},
+    {file = "jaxlib-0.3.25-cp37-cp37m-manylinux2014_x86_64.whl", hash = "sha256:5295354ed5db111e6f3e88cdfa4010d11c33dd926ac61735b9096b4e0746aa7b"},
+    {file = "jaxlib-0.3.25-cp38-cp38-macosx_10_14_x86_64.whl", hash = "sha256:9f3116389ee834b3cdeb30001b085f4b55d7741366034f041c1d377154aa5afa"},
+    {file = "jaxlib-0.3.25-cp38-cp38-macosx_11_0_arm64.whl", hash = "sha256:78b29c72d0680829db9377ed9be326875849258a60b8173b4a388b34ad18bc78"},
+    {file = "jaxlib-0.3.25-cp38-cp38-manylinux2014_x86_64.whl", hash = "sha256:2e008e0a6c10aa7e949555e98dc0471e0d550d5d7c109771e38a971b49480538"},
+    {file = "jaxlib-0.3.25-cp39-cp39-macosx_10_14_x86_64.whl", hash = "sha256:fec043cdd55f3257d02e9d8880b33860eacadcae1bd5e26f43fdd08ada23614d"},
+    {file = "jaxlib-0.3.25-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:a50193ba0cbf879021c9d73d7bcfa7eafb9138895d057b774c301aac3701f9a5"},
+    {file = "jaxlib-0.3.25-cp39-cp39-manylinux2014_x86_64.whl", hash = "sha256:1f1448f102a9d05186f579b6931fa0c607783ecc915fdfaa482c19538affa180"},
 ]
 jinja2 = [
     {file = "Jinja2-3.1.2-py3-none-any.whl", hash = "sha256:6088930bfe239f0e6710546ab9c19c9ef35e29792895fed6e6e31a023a182a61"},
@@ -2302,8 +2301,8 @@ pycparser = [
     {file = "pycparser-2.21.tar.gz", hash = "sha256:e644fdec12f7872f86c58ff790da456218b10f863970249516d60a5eaca77206"},
 ]
 pydrive2 = [
-    {file = "PyDrive2-1.14.0-py3-none-any.whl", hash = "sha256:053a09b5f8e00d275aefc78da7c6b55da9d228aface2dfdbd4d2d49d3713da2b"},
-    {file = "PyDrive2-1.14.0.tar.gz", hash = "sha256:db5da3be671630f571ca7100b281d8b5d72fd078acd425247a6d292e2b3d2840"},
+    {file = "PyDrive2-1.15.0-py3-none-any.whl", hash = "sha256:67636fa0d2244d61952ef505095bc3a4e0873583a4c57aca7acdfcb8595beddb"},
+    {file = "PyDrive2-1.15.0.tar.gz", hash = "sha256:3ae06b66bf963f43524989c87f4d678039441fe059993c6703fb33cc3c6d8aec"},
 ]
 pyopenssl = [
     {file = "pyOpenSSL-22.1.0-py3-none-any.whl", hash = "sha256:b28437c9773bb6c6958628cf9c3bebe585de661dba6f63df17111966363dd15e"},
