@@ -144,7 +144,7 @@ def zero_spec_st(draw, max_dim_size: int = 128):
 
 
 @st.composite
-def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
+def matmul_spec_st(draw, max_dim_size: Optional[int] = 256, accum=False):
     lhs_dtype = draw(st.from_type(dtypes.Dtype))
     rhs_dtype = draw(st.from_type(dtypes.Dtype))
     lhs = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=2))
@@ -168,11 +168,12 @@ def matmul_spec_st(draw, max_dim_size: Optional[int] = 256):
             ),
         )
     )
-    return specs.Matmul(lhs, rhs, out, serial_only=draw(st.booleans()))
+    t = specs.MatmulAccum if accum else specs.Matmul
+    return t(lhs, rhs, out, serial_only=draw(st.booleans()))
 
 
 @st.composite
-def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
+def convolution_spec_st(draw, max_dim_size: Optional[int] = 32, accum=False):
     filters_dtype = draw(st.from_type(dtypes.Dtype))
     out_dtype = draw(st.from_type(dtypes.Dtype))
     image = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=4, max_dims=4))
@@ -185,18 +186,17 @@ def convolution_spec_st(draw, max_dim_size: Optional[int] = 32):
     filters = draw(tensorspec_st(dim_sizes=filters_dim_sizes, dtype=filters_dtype))
     out_dim_sizes = specs.Convolution.output_shape(image.dim_sizes, filters_dim_sizes)
     out = draw(tensorspec_st(dim_sizes=out_dim_sizes, dtype=out_dtype))
-    return specs.Convolution(image, filters, out, serial_only=draw(st.booleans()))
+    t = specs.ConvolutionAccum if accum else specs.Convolution
+    return t(image, filters, out, serial_only=draw(st.booleans()))
 
 
 @st.composite
-def reduce_spec_st(draw, max_dim_size: Optional[int] = 32):
+def reduce_spec_st(draw, max_dim_size: Optional[int] = 32, accum=False):
     source = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=4))
     output_dim_sizes = source.dim_sizes[:-1]
-    out_dtype = draw(st.from_type(dtypes.Dtype))
-    output = draw(tensorspec_st(dim_sizes=output_dim_sizes, dtype=out_dtype))
-    return specs.ReduceSum(
-        source=source, output=output, serial_only=draw(st.booleans())
-    )
+    output = draw(tensorspec_st(dim_sizes=output_dim_sizes, dtype=source.dtype))
+    t = specs.ReduceSumAccum if accum else specs.ReduceSum
+    return t(source=source, output=output, serial_only=draw(st.booleans()))
 
 
 @st.composite
@@ -340,6 +340,33 @@ def register_default_strategies():
         st.one_of(atomic_specs_st, st.from_type(specs.Compose)),
     )
 
+    # Register default strategies for holes.
+    st.register_type_strategy(
+        impl.ComposeHole, compose_spec_st().map(impl.spec_to_hole)
+    )
+    # TODO: Add LoadHole and StoreHole
+    # st.register_type_strategy(impl.LoadHole, load_spec_st().map(impl.spec_to_hole))
+    # st.register_type_strategy(impl.StoreHole, store_spec_st().map(impl.spec_to_hole))
+    st.register_type_strategy(impl.ZeroHole, zero_spec_st().map(impl.spec_to_hole))
+    st.register_type_strategy(
+        impl.MatmulHole, matmul_spec_st(accum=False).map(impl.spec_to_hole)
+    )
+    st.register_type_strategy(
+        impl.MatmulAccumHole, matmul_spec_st(accum=True).map(impl.spec_to_hole)
+    )
+    st.register_type_strategy(
+        impl.ConvHole, convolution_spec_st(accum=False).map(impl.spec_to_hole)
+    )
+    st.register_type_strategy(
+        impl.ConvAccumHole, convolution_spec_st(accum=True).map(impl.spec_to_hole)
+    )
+    st.register_type_strategy(
+        impl.ReduceSumHole, reduce_spec_st(accum=False).map(impl.spec_to_hole)
+    )
+    st.register_type_strategy(
+        impl.ReduceSumAccumHole, reduce_spec_st(accum=True).map(impl.spec_to_hole)
+    )
+
     # Register default strategies for generating Impls, including Holes, Movelets,
     # and Loops.
     st.register_type_strategy(impl.ComposeHole, composehole_op_st())
@@ -350,7 +377,11 @@ def register_default_strategies():
             st.from_type(impl.ComposeHole),
             st.from_type(impl.Pipeline),
             st.from_type(impl.ConvHole),
+            st.from_type(impl.ConvAccumHole),
+            st.from_type(impl.MatmulHole),
+            st.from_type(impl.MatmulAccumHole),
             st.from_type(impl.ReduceSumHole),
+            st.from_type(impl.ReduceSumAccumHole),
             st.from_type(impl.Loop),
             st.from_type(impl.MoveLet),
         ),

@@ -8,7 +8,7 @@ from .actions import (
 from .base import AppliedImpl, Impl, spec_to_hole
 from .block import Block
 from .compose import ComposeHole, Pipeline, SplitNotSupportedByHeadError
-from .convhole import ConvHole
+from .convhole import ConvHole, ConvAccumHole
 from .loops import Loop, SlidingWindowLoop
 from .matmuls import (
     BroadcastVecMult,
@@ -47,6 +47,7 @@ __all__ = [
     "CacheAccess",
     "ComposeHole",
     "ConvHole",
+    "ConvAccumHole",
     "HvxGemvmpybbwAsm",
     "HvxVrmpyaccVuwVubRub",
     "Impl",
