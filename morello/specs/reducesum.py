@@ -41,6 +41,10 @@ class ReduceSumBase(base.Spec):
             f"output shape is {self.output_shape(self.source.dim_sizes)} "
             f"(input shape: {self.source.dim_sizes})"
         )
+        assert self.source.dtype == self.output.dtype, (
+            f"Source and output dtypes must match, but were: {self.source.dtype} "
+            f"and {self.output.dtype}"
+        )
 
     @property
     def inputs(self) -> tuple[TensorSpec, ...]:

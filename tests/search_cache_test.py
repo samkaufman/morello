@@ -91,21 +91,23 @@ def test_cache_common_scenario(dtype):
     }
 
 
-@st.composite
-def _arb_small_limits(draw):
-    return pruning.StandardMemoryLimits(
-        {
-            bank: draw(st.integers(min_value=0, max_value=64))
-            for bank in current_system().ordered_banks
-        }
-    )
+@hypothesis.given(
+    strategies.small_atomic_specs_st, strategies.arb_small_standard_memorylimits()
+)
+def test_cache_raises_keyerror_when_empty(spec, limits):
+    cache = search_cache.InMemoryScheduleCache()
+    with pytest.raises(KeyError):
+        cache.get(spec, limits)
 
 
 # TODO: Add Compose Specs (incl. PipelineChildMemoryLimits)
 # TODO: Test top_k greater than 1
 @hypothesis.settings(deadline=240_000)
-@hypothesis.given(strategies.small_atomic_specs_st, _arb_small_limits(), st.data())
-def test_cache_get_returns_just_put_impls(spec, limits, data):
+@hypothesis.given(
+    strategies.small_atomic_specs_st,
+    strategies.arb_small_standard_memorylimits(),
+)
+def test_cache_get_returns_just_put_impls(spec, limits):
     cache = search_cache.InMemoryScheduleCache()
 
     optimal = dp.schedule_search(spec, limits, cache=cache)
@@ -113,18 +115,7 @@ def test_cache_get_returns_just_put_impls(spec, limits, data):
     optimal = optimal[0]
     assert isinstance(optimal, impl.Impl)
 
-    # Check that we get the right choice for all intermediate limits.
-    adjusted_limits_list = [
-        data.draw(
-            st.integers(min_value=optimal.peak_memory[b], max_value=limits.available[b])
-        )
-        for b in limits.available.raw_keys
-    ]
-    adjusted_limits = pruning.StandardMemoryLimits(
-        utils.TinyMap(limits.available.raw_keys, tuple(adjusted_limits_list)),
-        snap_down=False,
-    )
-    results = [imp for imp, _ in cache.get(spec, adjusted_limits).contents]
+    results = [imp for imp, _ in cache.get(spec, limits).contents]
     assert len(results) == 1
     # TODO: Don't use string comparison.
 
@@ -136,8 +127,10 @@ def test_cache_get_returns_just_put_impls(spec, limits, data):
 # TODO: Add Compose Specs (incl. PipelineChildMemoryLimits)
 # TODO: Test top_k greater than 1
 @hypothesis.settings(deadline=60_000)
-@hypothesis.given(strategies.small_atomic_specs_st, _arb_small_limits())
-def test_cache_reputting_doesnt_increase_ize(spec, limits):
+@hypothesis.given(
+    strategies.small_atomic_specs_st, strategies.arb_small_standard_memorylimits()
+)
+def test_cache_reputting_doesnt_increase_size(spec, limits):
     cache = search_cache.InMemoryScheduleCache()
 
     optimal = dp.schedule_search(spec, limits, cache=cache)

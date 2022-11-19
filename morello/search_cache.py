@@ -1,7 +1,7 @@
 import abc
-import numpy as np
-import dataclasses
 import contextlib
+import contextvars
+import dataclasses
 import itertools
 import pathlib
 import pickle
@@ -19,15 +19,20 @@ from typing import (
 )
 
 import atomicwrites
+import numpy as np
 
 from . import pruning
 from .impl import Impl, spec_to_hole
 from .specs import Spec
-from .utils import TinyMap, zip_dict, snap_availables_up
 from .system_config import current_system
+from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
 
-TABLE_STYLE: Literal["dense", "list", "dict"] = "list"
-RAISE_CAPS = True
+TABLE_STYLE: Literal["dense", "list", "dict"] = "dense"
+RAISE_CAPS_ON_OVERLAP = True
+
+assert_access_on_log_boundaries = contextvars.ContextVar(
+    "assert_access_on_log_boundaries", default=True
+)
 
 
 class CachedScheduleSet:
@@ -47,15 +52,24 @@ class CachedScheduleSet:
         self.dependent_paths = specs_visited
         self.peak_memory = peak_memory
         if contents and not peak_memory:
-            self.peak_memory = TinyMap(
-                self.contents[0][0].peak_memory.raw_keys,
-                tuple(
-                    max(zvals)
-                    for zvals in zip(
-                        *(c[0].peak_memory.raw_values for c in self.contents)
-                    )
-                ),
+            self.peak_memory = snap_availables_up(
+                TinyMap(
+                    self.contents[0][0].peak_memory.raw_keys,
+                    tuple(
+                        max(zvals)
+                        for zvals in zip(
+                            *(c[0].peak_memory.raw_values for c in self.contents)
+                        )
+                    ),
+                )
             )
+        assert not self.contents or (
+            self.peak_memory is not None
+            and (
+                not assert_access_on_log_boundaries.get()
+                or snap_availables_up(self.peak_memory) == self.peak_memory
+            )
+        )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, CachedScheduleSet):
@@ -123,7 +137,7 @@ class ScheduleCache(abc.ABC):
 
 
 class InMemoryScheduleCache(ScheduleCache):
-    _rects: dict[Spec, Union["_ListTable", "_SharedTable"]]
+    _rects: dict[Spec, "_RectTable"]
 
     def __init__(self):
         self._rects = {}
@@ -142,10 +156,13 @@ class InMemoryScheduleCache(ScheduleCache):
             )
             raise KeyError()
 
+        assert (
+            not assert_access_on_log_boundaries.get()
+            or snap_availables_down(memory_limits.available) == memory_limits.available
+        )
+
         rects = self._rects[spec]
         best = rects.best_for_cap(memory_limits)
-        if best is None:
-            raise KeyError(f"({str(spec)}, {str(memory_limits)})")
         return self._despecify_schedule_set(best.schedules, memory_limits)
 
     def put(
@@ -164,7 +181,20 @@ class InMemoryScheduleCache(ScheduleCache):
             )
             return
 
+        for imp, _ in schedules_to_put.contents:
+            for b in imp.peak_memory:
+                if imp.peak_memory[b] > memory_limits.available[b]:
+                    raise ValueError(
+                        f"Impl {imp} has peak memory {imp.peak_memory} which exceeds"
+                        f" available memory {memory_limits.available}"
+                    )
+
         mlims = memory_limits.available
+
+        assert (
+            not assert_access_on_log_boundaries.get()
+            or snap_availables_down(mlims) == memory_limits.available
+        )
 
         for im, _ in schedules_to_put.contents:
             for _, (m, c) in zip_dict(im.peak_memory, mlims, same_keys=True):
@@ -250,13 +280,19 @@ class InMemoryScheduleCache(ScheduleCache):
         all_child_limits = limits.transition(imp)
         assert (
             all_child_limits is not None
-        ), f"Limits violated while transition from {limits} via {imp}"
+        ), f"Limits violated while transitioning from {limits} via {imp}"
         assert len(all_child_limits) == len(imp.children)
 
         new_children: list[Impl] = []
         for spec_child, child_limits in zip(imp.children, all_child_limits):
             assert not spec_child.is_scheduled
-            child_results = self.get(spec_child.spec, child_limits)
+            try:
+                child_results = self.get(spec_child.spec, child_limits)
+            except KeyError:
+                raise Exception(
+                    "Unexpectedly got KeyError while reconstructing "
+                    f"({spec_child.spec}, {child_limits})"
+                )
             assert len(
                 child_results.contents
             ), f"Child Spec {spec_child.spec} was not present in cache"
@@ -310,13 +346,67 @@ class CacheChain(ScheduleCache):
         return sum(len(cache) for cache in self.caches)
 
 
-class _SharedTable(abc.ABC):
+class _RectTable(abc.ABC):
+    @abc.abstractmethod
+    def add(self, entry: _TableEntry):
+        pass
+
+    @abc.abstractmethod
+    def best_for_cap(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
+        pass
+
+    @abc.abstractmethod
+    def __iter__(self) -> Iterator[_TableEntry]:
+        pass
+
+    @abc.abstractmethod
+    def __len__(self) -> int:
+        pass
+
+
+class _SnappingRectTable(_RectTable):
+    def best_for_cap(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
+        snapped = pruning.StandardMemoryLimits(snap_availables_up(caps.available))
+        if snapped == caps:
+            return self._get_entry(caps)
+
+        # If we're not on a snapped/log boundary, then we'll check an uper entry (the
+        # entry where all levels are higher than the given caps) and see if, in
+        # actuality, that Impl is below the requested limits. If it's not, we'll just
+        # grab the Impl from the conservative entry.
+        try:
+            upper_impl = self._get_entry(snapped)
+        except KeyError:
+            pass
+        else:
+            assert (
+                upper_impl is None
+                or upper_impl.peak_memory.raw_keys == caps.available.raw_keys
+            )
+            if upper_impl is None or all(
+                a <= b
+                for a, b in zip(
+                    upper_impl.peak_memory.raw_values, caps.available.raw_values
+                )
+            ):
+                return upper_impl
+        snapped_down = pruning.StandardMemoryLimits(
+            snap_availables_down(caps.available)
+        )
+        return self._get_entry(snapped_down)
+
+    @abc.abstractmethod
+    def _get_entry(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
+        pass
+
+
+class _SharedTable(_SnappingRectTable):
     def add(self, entry: _TableEntry):
         bottom_coord = self._logify(self._bottom_from_entry(entry))
         top_coord = self._logify(snap_availables_up(entry.caps.raw_values, always=True))
         self._fill_storage(bottom_coord, top_coord, entry)
 
-    def best_for_cap(self, caps: pruning.StandardMemoryLimits) -> Optional[_TableEntry]:
+    def _get_entry(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
         avail = caps.available
         coord = self._logify(avail.raw_values)
         assert isinstance(coord, tuple)
@@ -327,7 +417,7 @@ class _SharedTable(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def _get_log_scaled_pt(self, pt) -> Optional[_TableEntry]:
+    def _get_log_scaled_pt(self, pt) -> _TableEntry:
         pass
 
     @abc.abstractmethod
@@ -368,8 +458,8 @@ class _DictTable(_SharedTable):
         for pt in itertools.product(*[range(l, u + 1) for l, u in zip(lower, upper)]):
             self.storage[pt] = value
 
-    def _get_log_scaled_pt(self, pt) -> Optional[_TableEntry]:
-        return self.storage.get(pt, None)
+    def _get_log_scaled_pt(self, pt) -> _TableEntry:
+        return self.storage[pt]
 
     def __iter__(self) -> Iterator[_TableEntry]:
         for entry in set(self.storage.values()):
@@ -381,13 +471,13 @@ class _DictTable(_SharedTable):
 
 
 @dataclasses.dataclass(frozen=False)
-class _ListTable:
+class _ListTable(_SnappingRectTable):
     banks: tuple[str, ...]
     storage: list[_TableEntry] = dataclasses.field(default_factory=list)
 
     @staticmethod
     def _raise_entry(r, entry):
-        if RAISE_CAPS:
+        if RAISE_CAPS_ON_OVERLAP:
             raised_caps = TinyMap(
                 entry.caps.raw_keys,
                 tuple(
@@ -405,19 +495,6 @@ class _ListTable:
     def add(self, entry: _TableEntry):
         # First, check for a _TableEntry to update.
         for rect_idx in range(len(self.storage)):
-            raised_caps = None
-            if RAISE_CAPS:
-                raised_caps = TinyMap(
-                    entry.caps.raw_keys,
-                    tuple(
-                        max(a, b)
-                        for a, b in zip(
-                            entry.caps.raw_values,
-                            self.storage[rect_idx].caps.raw_values,
-                        )
-                    ),
-                )
-
             # If we're putting no Impls and there exists an entry already for
             # the no-Impl case, raise its memory caps to whatever we've explored.
             r = self.storage[rect_idx]
@@ -442,17 +519,17 @@ class _ListTable:
         # update, so add one.
         self.storage.append(entry)
 
-    def best_for_cap(self, caps: pruning.StandardMemoryLimits) -> Optional[_TableEntry]:
+    def _get_entry(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
         for entry in self:
             if _mem_dicts_ordered(entry.peak_memory, caps.available, entry.caps):
                 return entry
-        return None
+        raise KeyError()
 
-    def _get_log_scaled_pt(self, pt) -> Optional[_TableEntry]:
+    def _get_log_scaled_pt(self, pt) -> _TableEntry:
         for entry in self.storage:
             if _mem_dicts_ordered(entry.peak_memory, pt, entry.caps):
                 return entry
-        return None
+        raise KeyError()
 
     def __iter__(self) -> Iterator[_TableEntry]:
         yield from iter(self.storage)
@@ -466,7 +543,7 @@ class _LogScaledTable(_SharedTable):
     banks: tuple[str, ...]
     storage: np.ndarray
 
-    def __init__(self, banks: tuple[str, ...], table_dims: Sequence[int]):
+    def __init__(self, banks: tuple[str, ...], table_dims: tuple[int, ...]):
         storage_dims = self._logify(snap_availables_up(table_dims, always=True))
         storage_dims = tuple(d + 1 for d in storage_dims)
         object.__setattr__(self, "banks", banks)
@@ -491,11 +568,14 @@ class _LogScaledTable(_SharedTable):
         flat = self.storage.flatten()
         return len(set(flat[flat != None]))
 
-    def _get_log_scaled_pt(self, pt) -> Optional[_TableEntry]:
+    def _get_log_scaled_pt(self, pt) -> _TableEntry:
         try:
-            return self.storage[pt]
+            result = self.storage[pt]
+            if result is None:
+                raise KeyError()
+            return result
         except IndexError:
-            return None
+            raise KeyError()
 
     def _bottom_from_entry(self, entry: _TableEntry) -> tuple[int, ...]:
         if entry.peak_memory is None:

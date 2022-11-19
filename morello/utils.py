@@ -3,7 +3,7 @@ import itertools
 import math
 import warnings
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Sequence, TypeVar
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Sequence, TypeVar, Union
 
 from . import layouts, system_config, tensor
 
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 U = TypeVar("U")
 V = TypeVar("V")
+St = TypeVar("St", bound="Union[TinyMap[str, int], tuple[int, ...], int]")
 
 _ALPHABET = list(map(chr, range(97, 123)))
 ALPHABET_PRODUCT = _ALPHABET + [
@@ -259,12 +260,30 @@ def sum_seqs(maxes: Sequence[int], total: int) -> Iterable[tuple[int, ...]]:
                 yield (v,) + suffix
 
 
-def snap_availables_up(available: T, always=False) -> T:
+def snap_availables_up(available: St, always=False) -> St:
     if not SNAP_CAP_TO_POWER_OF_TWO and not always:
         return available
     if isinstance(available, TinyMap):
         return available.map_values(
             lambda n: 0 if n == 0 else 2 ** (n - 1).bit_length()
         )
-    assert isinstance(available, tuple)
-    return tuple(0 if n == 0 else 2 ** (n - 1).bit_length() for n in available)  # type: ignore
+    elif isinstance(available, tuple):
+        return tuple(0 if n == 0 else 2 ** (n - 1).bit_length() for n in available)  # type: ignore
+    else:
+        return 0 if available == 0 else 2 ** (available - 1).bit_length()  # type: ignore
+
+
+def snap_availables_down(available: St, always=False) -> St:
+    """Returns limits that are snapped down according to the snapping strategy."""
+    # If SNAP_CAP_TO_POWER_OF_TWO isn't set, don't rebuild the data structure.
+    if not SNAP_CAP_TO_POWER_OF_TWO and not always:
+        return available
+    if isinstance(available, TinyMap):
+        return available.map_values(
+            lambda n: 0 if n == 0 else 2 ** (n.bit_length() - 1)
+        )
+    elif isinstance(available, tuple):
+        return tuple(0 if n == 0 else 2 ** (n.bit_length() - 1))  # type: ignore
+    else:
+        assert isinstance(available, int)
+        return 0 if available == 0 else 2 ** (available.bit_length() - 1)  # type: ignore

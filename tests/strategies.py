@@ -252,13 +252,7 @@ def compose_spec_st(draw) -> specs.Compose:
 
 @st.composite
 def composehole_op_st(draw) -> impl.ComposeHole:
-    target = system_config.current_target()
-    spec = draw(compose_spec_st())
-    return impl.ComposeHole(
-        spec=spec,
-        inputs=tuple(target.tensor(s, name=None) for s in spec.inputs),
-        output=target.tensor(spec.output, name="output"),
-    )
+    return impl.ComposeHole(draw(compose_spec_st()))
 
 
 @st.composite
@@ -321,6 +315,19 @@ small_atomic_specs_st = st.one_of(
     convolution_spec_st(max_dim_size=4),
     reduce_spec_st(max_dim_size=4),
 )
+
+
+@st.composite
+def arb_small_standard_memorylimits(draw):
+    from morello import pruning
+
+    return pruning.StandardMemoryLimits(
+        {
+            bank: draw(st.integers(min_value=0, max_value=64))
+            for bank in system_config.current_system().ordered_banks
+        }
+    )
+
 
 def register_default_strategies():
     st.register_type_strategy(layouts.Layout, layout_st(numels_ones=False))

@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from typing import Optional
 
 from . import impl, specs, system_config, utils
-from .utils import SNAP_CAP_TO_POWER_OF_TWO, TinyMap
+from .utils import TinyMap, snap_availables_down
 
 
 class AvailableIsNegativeError(ValueError):
@@ -98,7 +98,7 @@ class StandardMemoryLimits(MemoryLimits):
             else:
                 self._available = TinyMap(available_memory)
         if snap_down:
-            self._available = _snap_availables(self._available)
+            self._available = snap_availables_down(self._available)
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, StandardMemoryLimits):
@@ -194,7 +194,7 @@ class PipelineChildMemoryLimits(MemoryLimits):
         # Update input and output consumptions using the adjustments
         adjustments = tuple(
             orig - v
-            for orig, v in zip(base.raw_values, _snap_availables(base).raw_values)
+            for orig, v in zip(base.raw_values, snap_availables_down(base).raw_values)
         )
 
         self.base_available = base
@@ -283,15 +283,6 @@ class PipelineChildMemoryLimits(MemoryLimits):
             self.input_consumption,
             self.output_consumption,
         )
-
-
-# TODO: Move to morello.utils alongside snap_availables_up
-def _snap_availables(available: TinyMap[str, int]) -> TinyMap[str, int]:
-    """Returns limits that are snapped down according to the snapping strategy."""
-    # If SNAP_CAP_TO_POWER_OF_TWO isn't set, don't rebuild the data structure.
-    if not SNAP_CAP_TO_POWER_OF_TWO:
-        return available
-    return available.map_values(lambda n: 0 if n == 0 else 2 ** (n.bit_length() - 1))
 
 
 def _zero_banks() -> TinyMap[str, int]:

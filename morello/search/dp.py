@@ -9,9 +9,14 @@ try:
 except ImportError:
     pass
 
-from .. import impl, layouts, pruning, specs
+from .. import impl, pruning, specs
+from ..utils import snap_availables_down
 from ..impl import Impl
-from ..search_cache import CachedScheduleSet, InMemoryScheduleCache
+from ..search_cache import (
+    CachedScheduleSet,
+    InMemoryScheduleCache,
+    assert_access_on_log_boundaries,
+)
 from . import common
 
 
@@ -66,6 +71,11 @@ class Search:
         # by line size when initializing the limit.
         if memory_limits is None:
             memory_limits = pruning.StandardMemoryLimits()
+
+        assert (
+            not assert_access_on_log_boundaries.get()
+            or snap_availables_down(memory_limits.available) == memory_limits.available
+        )
 
         return self._search(
             spec,
