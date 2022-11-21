@@ -8,7 +8,7 @@ from .actions import (
 from .base import AppliedImpl, Impl, spec_to_hole
 from .block import Block
 from .compose import ComposeHole, Pipeline, SplitNotSupportedByHeadError
-from .convhole import ConvHole, ConvAccumHole
+from .convhole import ConvAccumHole, ConvHole
 from .loops import Loop, SlidingWindowLoop
 from .matmuls import (
     BroadcastVecMult,
@@ -18,7 +18,15 @@ from .matmuls import (
     MatmulHole,
     Mult,
 )
-from .moves import CacheAccess, MoveLet, PadTranspack, ValueAssign, VectorAssign
+from .moves import (
+    CacheAccess,
+    LoadHole,
+    MoveLet,
+    PadTranspack,
+    StoreHole,
+    ValueAssign,
+    VectorAssign,
+)
 from .pruning import ParentSummary
 from .reducesum import Add, ReduceSumAccumHole, ReduceSumHole
 from .settings import (
@@ -46,11 +54,12 @@ __all__ = [
     "BroadcastVecMult",
     "CacheAccess",
     "ComposeHole",
-    "ConvHole",
     "ConvAccumHole",
+    "ConvHole",
     "HvxGemvmpybbwAsm",
     "HvxVrmpyaccVuwVubRub",
     "Impl",
+    "LoadHole",
     "Loop",
     "MatmulAccumHole",
     "MatmulHole",
@@ -71,6 +80,7 @@ __all__ = [
     "spec_to_hole",
     "SpecCast",
     "SplitNotSupportedByHeadError",
+    "StoreHole",
     "tile_size_mode",
     "TileOutAction",
     "TileSizeMode",

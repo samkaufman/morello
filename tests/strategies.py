@@ -1,3 +1,4 @@
+import functools
 import itertools
 from typing import Any, Callable, Optional, Sequence
 
@@ -135,6 +136,23 @@ def tensorspec_st(
         bank=bank,
         vector_shape=vector_shape,
     )
+
+
+@st.composite
+def _move_spec_st(draw, move_cls, max_dim_size: int = 128):
+    target = system_config.current_target()
+    t = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=1, max_dims=4))
+    faster_banks = sorted(target.system.faster_destination_banks(t.bank))
+    hypothesis.assume(faster_banks)
+    faster_bank = draw(st.sampled_from(faster_banks))
+    faster_tensorspec = draw(
+        tensorspec_st(dim_sizes=t.dim_sizes, dtype=t.dtype, bank=faster_bank)
+    )
+    return move_cls(t, faster_tensorspec, serial_only=draw(st.booleans()))
+
+
+load_spec_st = functools.partial(_move_spec_st, move_cls=specs.Load)
+store_spec_st = functools.partial(_move_spec_st, move_cls=specs.Store)
 
 
 @st.composite
@@ -310,9 +328,14 @@ atomic_specs_st = st.one_of(
 )
 
 small_atomic_specs_st = st.one_of(
+    load_spec_st(max_dim_size=4),
+    store_spec_st(max_dim_size=4),
     zero_spec_st(max_dim_size=4),
+    matmul_spec_st(max_dim_size=4, accum=True),
     matmul_spec_st(max_dim_size=4),
+    convolution_spec_st(max_dim_size=4, accum=True),
     convolution_spec_st(max_dim_size=4),
+    reduce_spec_st(max_dim_size=4, accum=True),
     reduce_spec_st(max_dim_size=4),
 )
 
@@ -339,6 +362,8 @@ def register_default_strategies():
     # Register default strategies for generating Specs.
     st.register_type_strategy(specs.Compose, compose_spec_st())
     st.register_type_strategy(specs.Zero, zero_spec_st())
+    st.register_type_strategy(specs.Load, load_spec_st())
+    st.register_type_strategy(specs.Store, store_spec_st())
     st.register_type_strategy(specs.Matmul, matmul_spec_st())
     st.register_type_strategy(specs.Convolution, convolution_spec_st())
     st.register_type_strategy(specs.ReduceSum, reduce_spec_st())
@@ -351,10 +376,10 @@ def register_default_strategies():
     st.register_type_strategy(
         impl.ComposeHole, compose_spec_st().map(impl.spec_to_hole)
     )
-    # TODO: Add LoadHole and StoreHole
-    # st.register_type_strategy(impl.LoadHole, load_spec_st().map(impl.spec_to_hole))
-    # st.register_type_strategy(impl.StoreHole, store_spec_st().map(impl.spec_to_hole))
+    st.register_type_strategy(impl.LoadHole, load_spec_st().map(impl.spec_to_hole))
+    st.register_type_strategy(impl.StoreHole, store_spec_st().map(impl.spec_to_hole))
     st.register_type_strategy(impl.ZeroHole, zero_spec_st().map(impl.spec_to_hole))
+    st.register_type_strategy(impl.LoadHole, load_spec_st().map(impl.spec_to_hole))
     st.register_type_strategy(
         impl.MatmulHole, matmul_spec_st(accum=False).map(impl.spec_to_hole)
     )
