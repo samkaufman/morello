@@ -327,9 +327,7 @@ atomic_specs_st = st.one_of(
     st.from_type(specs.ReduceSum),
 )
 
-small_atomic_specs_st = st.one_of(
-    load_spec_st(max_dim_size=4),
-    store_spec_st(max_dim_size=4),
+small_atomic_moveable_specs_st = st.one_of(
     zero_spec_st(max_dim_size=4),
     matmul_spec_st(max_dim_size=4, accum=True),
     matmul_spec_st(max_dim_size=4),
@@ -337,6 +335,12 @@ small_atomic_specs_st = st.one_of(
     convolution_spec_st(max_dim_size=4),
     reduce_spec_st(max_dim_size=4, accum=True),
     reduce_spec_st(max_dim_size=4),
+)
+
+small_atomic_specs_st = st.one_of(
+    load_spec_st(max_dim_size=4),
+    store_spec_st(max_dim_size=4),
+    small_atomic_moveable_specs_st,
 )
 
 
