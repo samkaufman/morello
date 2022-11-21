@@ -163,7 +163,7 @@ class InMemoryScheduleCache(ScheduleCache):
 
         rects = self._rects[spec]
         best = rects.best_for_cap(memory_limits)
-        return self._despecify_schedule_set(best.schedules, memory_limits)
+        return self._despecify_schedule_set(best.schedules, best.caps)
 
     def put(
         self,
@@ -266,17 +266,19 @@ class InMemoryScheduleCache(ScheduleCache):
         return imp.replace_children((spec_to_hole(c.spec) for c in imp.children))
 
     def _despecify_schedule_set(
-        self, cached_set: CachedScheduleSet, limits
+        self, cached_set: CachedScheduleSet, caps: TinyMap[str, int]
     ) -> CachedScheduleSet:
         new_impls = []
-        for imp, cost in cached_set.contents:
-            new_impls.append((self._despecify_impl(imp, limits), cost))
+        if cached_set.contents:
+            limits = pruning.StandardMemoryLimits(caps)
+            for imp, cost in cached_set.contents:
+                new_impls.append((self._despecify_impl(imp, limits), cost))
 
         return CachedScheduleSet(
             tuple(new_impls), cached_set.dependent_paths, cached_set.peak_memory
         )
 
-    def _despecify_impl(self, imp: Impl, limits) -> Impl:
+    def _despecify_impl(self, imp: Impl, limits: pruning.StandardMemoryLimits) -> Impl:
         all_child_limits = limits.transition(imp)
         assert (
             all_child_limits is not None
