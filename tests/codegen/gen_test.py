@@ -223,7 +223,7 @@ def _arb_reduce_conv_spec(draw, parallel: Optional[bool] = None):
             target.tensor_spec((fc, channels, fh, fw), dtype=dtype),
         ),
         output=target.tensor_spec((batch_count, fc, out_h), dtype=dtype),
-        intermediate_dtypes=(draw(st.from_type(dtypes.Dtype)),),
+        intermediate_dtypes=(dtype,),
         serial_only=(not parallel),
     )
 
