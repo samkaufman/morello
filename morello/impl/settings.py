@@ -18,7 +18,7 @@ allow_reduce_splits: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "allow_reduce_splits", default=True
 )
 prune_nested_parallel_loops: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "prune_nested_parallel_loops", default=True
+    "prune_nested_parallel_loops", default=False
 )
 enable_prefetching_moves: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "enable_prefetching_moves", default=False
