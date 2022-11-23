@@ -162,7 +162,7 @@ def zero_spec_st(draw, max_dim_size: int = 128):
 
 
 @st.composite
-def matmul_spec_st(draw, max_dim_size: Optional[int] = 256, accum=False):
+def matmul_spec_st(draw, max_dim_size: Optional[int] = 128, accum=False):
     lhs_dtype = draw(st.from_type(dtypes.Dtype))
     rhs_dtype = draw(st.from_type(dtypes.Dtype))
     lhs = draw(tensorspec_st(max_dim_size=max_dim_size, min_dims=2, max_dims=2))
