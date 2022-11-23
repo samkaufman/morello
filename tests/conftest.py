@@ -1,7 +1,9 @@
 import hypothesis
 
+hypothesis.settings.register_profile("dev", print_blob=True)
 hypothesis.settings.register_profile("ci", max_examples=3000, print_blob=True)
-hypothesis.settings.register_profile("debug", deadline=None, print_blob=True)
+hypothesis.settings.register_profile("fast", max_examples=3000, print_blob=True)
+hypothesis.settings.load_profile("dev")  # Make 'dev' the default
 
 
 def pytest_sessionstart(session):
