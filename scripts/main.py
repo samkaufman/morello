@@ -195,13 +195,9 @@ def _gemm3_main(
     return search_result, (time.monotonic() - start)
 
 
-def main() -> int:
+async def main() -> None:
     logging.basicConfig()
     logger.setLevel(logging.DEBUG)
-
-    # Run any doctests
-    if doctest.testmod().failed:
-        return 1
 
     # Parse command line arguments
     parsed_args = parser.parse_args()
@@ -286,7 +282,7 @@ def main() -> int:
         async with semaphore:
             return await system_config.current_target().time_impl_robustly(imp)
 
-    benchmarked_runtimes = asyncio.run(asyncio.gather(*(get_time(im) for im in scheds)))
+    benchmarked_runtimes = await asyncio.gather(*[get_time(im) for im in scheds])
 
     results_rows = [["Cost", "Runtime", "Impl", "Source Path"]]
     if scheds:
@@ -326,8 +322,6 @@ def main() -> int:
             writer = csv.writer(f)
             writer.writerows(results_rows)
 
-    return 0
-
 
 if __name__ == "__main__":
-    sys.exit(main())
+    asyncio.run(main())
