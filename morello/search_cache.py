@@ -109,7 +109,9 @@ class _TableEntry(NamedTuple):
 
 class ScheduleCache(abc.ABC):
     @abc.abstractmethod
-    def get(self, spec: Spec, memory_limits: pruning.MemoryLimits) -> CachedScheduleSet:
+    def get(
+        self, spec: Spec, memory_limits: pruning.MemoryLimits, recurse_fn=None
+    ) -> CachedScheduleSet:
         pass
 
     @abc.abstractmethod
@@ -142,7 +144,9 @@ class InMemoryScheduleCache(ScheduleCache):
     def __init__(self):
         self._rects = {}
 
-    def get(self, spec: Spec, memory_limits: pruning.MemoryLimits) -> CachedScheduleSet:
+    def get(
+        self, spec: Spec, memory_limits: pruning.MemoryLimits, recurse_fn=None
+    ) -> CachedScheduleSet:
         """Returns cached Impls. May contain nothing if query has no Impls.
 
         Raises KeyError if no Impl meeting the given limits exists and it is unknown
@@ -163,7 +167,11 @@ class InMemoryScheduleCache(ScheduleCache):
 
         rects = self._rects[spec]
         best = rects.best_for_cap(memory_limits)
-        return self._despecify_schedule_set(best.schedules, best.caps)
+        if recurse_fn is None:
+            recurse_fn = self.get
+        return self._despecify_schedule_set(
+            best.schedules, best.caps, get_fn=recurse_fn
+        )
 
     def put(
         self,
@@ -266,19 +274,21 @@ class InMemoryScheduleCache(ScheduleCache):
         return imp.replace_children((spec_to_hole(c.spec) for c in imp.children))
 
     def _despecify_schedule_set(
-        self, cached_set: CachedScheduleSet, caps: TinyMap[str, int]
+        self, cached_set: CachedScheduleSet, caps: TinyMap[str, int], get_fn
     ) -> CachedScheduleSet:
         new_impls = []
         if cached_set.contents:
             limits = pruning.StandardMemoryLimits(caps)
             for imp, cost in cached_set.contents:
-                new_impls.append((self._despecify_impl(imp, limits), cost))
+                new_impls.append((self._despecify_impl(imp, limits, get_fn), cost))
 
         return CachedScheduleSet(
             tuple(new_impls), cached_set.dependent_paths, cached_set.peak_memory
         )
 
-    def _despecify_impl(self, imp: Impl, limits: pruning.StandardMemoryLimits) -> Impl:
+    def _despecify_impl(
+        self, imp: Impl, limits: pruning.StandardMemoryLimits, get_fn
+    ) -> Impl:
         all_child_limits = limits.transition(imp)
         assert (
             all_child_limits is not None
@@ -289,10 +299,10 @@ class InMemoryScheduleCache(ScheduleCache):
         for spec_child, child_limits in zip(imp.children, all_child_limits):
             assert not spec_child.is_scheduled
             try:
-                child_results = self.get(spec_child.spec, child_limits)
+                child_results = get_fn(spec_child.spec, child_limits)
             except KeyError:
                 raise Exception(
-                    "Unexpectedly got KeyError while reconstructing "
+                    f"Unexpectedly got KeyError while reconstructing "
                     f"({spec_child.spec}, {child_limits})"
                 )
             assert len(
@@ -314,10 +324,14 @@ class CacheChain(ScheduleCache):
             raise ValueError("`caches` must be non-empty")
         self.caches = caches
 
-    def get(self, spec: Spec, memory_limits: pruning.MemoryLimits) -> CachedScheduleSet:
+    def get(
+        self, spec: Spec, memory_limits: pruning.MemoryLimits, recurse_fn=None
+    ) -> CachedScheduleSet:
+        if recurse_fn is not None:
+            raise ValueError("Cannot use `recurse_fn` with CacheChain")
         for cache in self.caches:
             try:
-                return cache.get(spec, memory_limits)
+                return cache.get(spec, memory_limits, recurse_fn=self.get)
             except KeyError:
                 pass
         raise KeyError(f"({str(spec)}, {str(memory_limits)})")

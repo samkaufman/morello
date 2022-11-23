@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from .. import impl
 
 MERGE_DIAGONALS = True
-BANKS_LEVELS = (("RF", "VRF"), ("L1",), ("GL",))
+BANK_GROUPS = (("RF", "VRF"), ("L1",), ("GL",))
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ def _spec_to_spec_coordinate(
     sb = 0 if spec.serial_only else 1
     bank_idxs = []
     for o in spec.operands:
-        for idx, bank_group in enumerate(BANKS_LEVELS):
+        for idx, bank_group in enumerate(BANK_GROUPS):
             if o.bank in bank_group:
                 bank_idxs.append(idx)
                 break
@@ -186,7 +186,7 @@ def _destructure_spec_coordinate(
     limits = pruning.StandardMemoryLimits(
         utils.TinyMap(system.ordered_banks, limit_dims)
     )
-    banks: Sequence[Sequence[str]] = [BANKS_LEVELS[b] for b in coord.other_coords[:-1]]
+    banks: Sequence[Sequence[str]] = [BANK_GROUPS[b] for b in coord.other_coords[:-1]]
     serial = coord.other_coords[-1] == 0
 
     if isinstance(base_spec, (specs.Matmul, specs.MatmulAccum)):
