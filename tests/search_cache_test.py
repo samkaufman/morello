@@ -2,7 +2,7 @@ import hypothesis
 import pytest
 from hypothesis import strategies as st
 
-from morello import dtypes, impl, pformat, pruning, search_cache, specs, utils
+from morello import dtypes, impl, pformat, pruning, search_cache, specs
 from morello.search import dp
 from morello.system_config import current_system, current_target
 
@@ -117,11 +117,11 @@ def test_cache_get_returns_just_put_impls(spec, limits):
 
     results = [imp for imp, _ in cache.get(spec, limits).contents]
     assert len(results) == 1
-    # TODO: Don't use string comparison.
 
-    hypothesis.note(pformat(results[0], show_cost=False))
-    hypothesis.note(pformat(optimal, show_cost=False))
-    assert str(results[0]) == str(optimal)
+    hypothesis.note(pformat(results[0], show_cost=True))
+    hypothesis.note(pformat(optimal, show_cost=True))
+    # TODO: Don't use pformat/string comparison.
+    assert pformat(results[0], show_cost=False) == pformat(optimal, show_cost=False)
 
 
 # TODO: Add Compose Specs (incl. PipelineChildMemoryLimits)
