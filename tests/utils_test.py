@@ -89,7 +89,7 @@ def test_convtile_nhwc_alignment():
 def test_alignment_approximation_is_correct(test_conv: bool, data):
     tile_chain = data.draw(
         strategies.tiling_chain_st(
-            chain_len=1, max_dim_size=96, max_dims=4, allow_conv=test_conv
+            chain_len=1, max_dim_size=64, max_dims=3, allow_conv=test_conv
         )
     )
     if test_conv:
