@@ -170,32 +170,21 @@ async def main():
     return 0
 
 
-def _make_cnn(depth: int = 6) -> specs.Spec:
-    subspecs = (
-        specs.ReduceSum,
-        specs.Convolution,
-    ) * depth
-
-    # ResNet-18 uses 224-by-224 image inputs. Let's borrow that.
-    inputs = [
-        target.tensor_spec((1, 3, 224, 224), dtype=dtypes.Uint8),
-        target.tensor_spec((128, 3, 5, 5), dtype=dtypes.Uint8),
-    ]
-    for _ in range(depth - 1):
-        inputs.insert(0, target.tensor_spec((128, 128, 5, 5), dtype=dtypes.Uint8))
-    inputs = tuple(inputs)
-
-    output_dim = 512 - 4 * depth
-    output = target.tensor_spec((128, output_dim, output_dim), dtype=dtypes.Uint8)
-
-    intermediate_dtypes = (dtypes.Uint8,) * (len(subspecs) - 1)
-
+def _make_2layer_cnn(
+    batch_size: int, image_size: int, fc: int, serial_only=True
+) -> specs.Spec:
+    img = target.tensor_spec((batch_size, 4, image_size, image_size), dtype=DTYPE)
+    filters_a = target.tensor_spec((fc, 4, 3, 3), dtype=DTYPE)
+    filters_b = target.tensor_spec((fc, fc, 3, 3), dtype=DTYPE)
+    output = target.tensor_spec(
+        (batch_size, fc, image_size - 4, image_size - 4), dtype=DTYPE
+    )
     return specs.Compose(
-        subspecs,
-        inputs,
+        (specs.Convolution, specs.Convolution),
+        (filters_b, img, filters_a),
         output,
-        intermediate_dtypes=intermediate_dtypes,
-        serial_only=True,
+        intermediate_dtypes=(DTYPE,),
+        serial_only=serial_only,
     )
 
 
@@ -206,18 +195,6 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec, Optional[int]]]:
     :returns: Tuples with: a short name for the experiment, the Spec to schedul, and,
         if available, a known number of expansions required by the DP search.
     """
-    yield "matmul-512x512x512", specs.Matmul(
-        target.tensor_spec((512, 512), dtype=DTYPE),
-        target.tensor_spec((512, 512), dtype=DTYPE),
-        target.tensor_spec((512, 512), dtype=DTYPE),
-        serial_only=True,
-    ), None
-    yield "conv-256x256-5x5-32", specs.Convolution(
-        target.tensor_spec((1, 3, 256, 256), dtype=DTYPE),
-        target.tensor_spec((32, 3, 5, 5), dtype=DTYPE),
-        target.tensor_spec((1, 32, 256 - 4, 256 - 4), dtype=DTYPE),
-        serial_only=True,
-    ), None
     yield "gemm3-4", specs.Compose(
         (specs.Matmul, specs.Matmul),
         (
@@ -229,19 +206,29 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec, Optional[int]]]:
         intermediate_dtypes=(DTYPE,),
         serial_only=True,
     ), 151940
-    yield "gemm3-2048", specs.Compose(
+    yield "gemm3-128", specs.Compose(
         (specs.Matmul, specs.Matmul),
         (
-            target.tensor_spec((2048, 2048), dtype=DTYPE),
-            target.tensor_spec((2048, 2048), dtype=DTYPE),
-            target.tensor_spec((2048, 2048), dtype=DTYPE),
+            target.tensor_spec((128, 128), dtype=DTYPE),
+            target.tensor_spec((128, 128), dtype=DTYPE),
+            target.tensor_spec((128, 128), dtype=DTYPE),
         ),
-        target.tensor_spec((2048, 2048), dtype=DTYPE),
+        target.tensor_spec((128, 128), dtype=DTYPE),
         intermediate_dtypes=(DTYPE,),
         serial_only=True,
     ), None
-    # yield "cnn-3layer", _make_cnn(depth=3), None
-    # yield "cnn-6layer", _make_cnn(depth=6), None
+    yield "gemm3-256", specs.Compose(
+        (specs.Matmul, specs.Matmul),
+        (
+            target.tensor_spec((256, 256), dtype=DTYPE),
+            target.tensor_spec((256, 256), dtype=DTYPE),
+            target.tensor_spec((256, 256), dtype=DTYPE),
+        ),
+        target.tensor_spec((256, 256), dtype=DTYPE),
+        intermediate_dtypes=(DTYPE,),
+        serial_only=True,
+    ), None
+    yield "cnn-64", _make_2layer_cnn(batch_size=1, image_size=64, fc=4), None
 
 
 def dp_task(
