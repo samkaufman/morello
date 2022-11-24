@@ -4,6 +4,7 @@
 import argparse
 import json
 import multiprocessing
+import random
 import sys
 import time
 from pathlib import Path
@@ -46,10 +47,17 @@ def main():
 
 def job(spec_name: str, root_spec: specs.Spec) -> dict[str, list[int]]:
     target = _setup_target()
+    root_impl = morello.impl.base.spec_to_hole(root_spec)
+    result = {"cost_sample": [], "best_cost": None, "worst_cost": None}
+    for impl in enumerate_impls(root_impl, None, None):
+        c = cost.compute_cost(impl)
+        if random.random() < 0.0000001:
+            result["cost_sample"].append(c)
+        if result["best_cost"] is None or result["best_cost"] > c:
+            result["best_cost"] = c
+        if result["worst_cost"] is None or result["worst_cost"] < c:
+            result["worst_cost"] = c
 
-    inputs = tuple(target.tensor(i) for i in root_spec.inputs)
-    output = target.tensor(root_spec.output)
-    root_impl = morello.impl.base.spec_to_hole(root_spec, inputs, output)
     return {
         spec_name: [
             cost.compute_cost(impl) for impl in enumerate_impls(root_impl, None, None)
