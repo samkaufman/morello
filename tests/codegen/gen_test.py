@@ -8,15 +8,15 @@ import hypothesis
 import numpy as np
 import pytest
 from hypothesis import strategies as st
-from morello.codegen.ctensors import ONES_FOR_NON_ZERO_INIT
 
-from morello.impl import SplitNotSupportedByHeadError
 import morello.impl.actions
 import morello.impl.base
 import morello.impl.compose
-from morello.impl.matmuls import HvxGemvmpybbwAsm
 import morello.impl.moves
-from morello import dtypes, layouts, op_pprint, specs, system_config, tensor
+from morello import dtypes, layouts, op_pprint, search, specs, system_config, tensor
+from morello.codegen.ctensors import ONES_FOR_NON_ZERO_INIT
+from morello.impl import SplitNotSupportedByHeadError
+from morello.impl.matmuls import HvxGemvmpybbwAsm
 from morello.system_config import cpu, hexagon
 
 from .. import strategies
@@ -26,6 +26,18 @@ CC_DEADLINE = 10 * 60 * 1000  # 10 minutes
 CC_SANITIZE = True
 
 strategies.register_default_strategies()
+
+
+def test_codegen_completes_on_matmul_1x1x1():
+    target = cpu.CpuTarget()
+    with system_config.with_target(target):
+        lhs = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
+        rhs = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
+        out = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
+        s = specs.Matmul(lhs, rhs, out, serial_only=True)
+        imp = search.schedule_search(s)[0]
+        assert imp
+        asyncio.run(target.build_impl(imp.to_applied()))
 
 
 @pytest.mark.parallelspec

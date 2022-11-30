@@ -477,3 +477,7 @@ class CValueVar(CNameTensor):
             epi = " = 1"
         common.writer.get().writeline(f"{self.dtype.c_type} {self.name}{epi};")
         return self
+
+    @property
+    def size(self) -> int:
+        return 1

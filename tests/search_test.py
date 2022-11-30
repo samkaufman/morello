@@ -24,11 +24,8 @@ strategies.register_default_strategies()
 
 @pytest.mark.skip(reason="No good way to constrain shapes (e.g. Reduce·Reduce·Reduce)")
 @given(st.from_type(specs.Spec))
-def test_search_passes_on_any_spec(spec: specs.Spec):
-    target = current_target()
-    inputs = tuple(target.tensor(tensor_spec, name=None) for tensor_spec in spec.inputs)
-    output = target.tensor(spec.output, name="output")
-    search.schedule_search(spec, inputs, output)
+def test_search_passes_on_any_spec(s):
+    search.schedule_search(s)
 
 
 class CountingCache(search_cache.InMemoryScheduleCache):
