@@ -21,13 +21,13 @@ from typing import (
 import atomicwrites
 import numpy as np
 
-from . import pruning
+from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
 from .specs import Spec
 from .system_config import current_system
 from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
 
-TABLE_STYLE: Literal["dense", "list", "dict"] = "dense"
+TABLE_STYLE: Literal["dense", "list", "dict", "bsa"] = "bsa"
 RAISE_CAPS_ON_OVERLAP = True
 
 assert_access_on_log_boundaries = contextvars.ContextVar(
@@ -74,9 +74,9 @@ class CachedScheduleSet:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, CachedScheduleSet):
             return NotImplemented
-        if self.contents != other.contents:
-            return False
         if self.dependent_paths != other.dependent_paths:
+            return False
+        if self.contents != other.contents:
             return False
         return True
 
@@ -143,6 +143,9 @@ class InMemoryScheduleCache(ScheduleCache):
 
     def __init__(self):
         self._rects = {}
+
+    def count_values(self):
+        return sum(table.storage.count_values() for table in self._rects.values())
 
     def get(
         self, spec: Spec, memory_limits: pruning.MemoryLimits, recurse_fn=None
@@ -214,11 +217,14 @@ class InMemoryScheduleCache(ScheduleCache):
         try:
             rects = self._rects[spec]
         except KeyError:
-            if TABLE_STYLE == "dense":
+            if TABLE_STYLE in ("dense", "bsa"):
                 table_dims = tuple(
                     current_system().banks[b].capacity for b in mlims.raw_keys
                 )
-                rects = _LogScaledTable(mlims.raw_keys, table_dims)
+                if TABLE_STYLE == "dense":
+                    rects = _DenseNumpyTable(mlims.raw_keys, table_dims)
+                else:
+                    rects = _BlockCompressedTable(mlims.raw_keys, table_dims)
             elif TABLE_STYLE == "list":
                 rects = _ListTable(mlims.raw_keys)
             else:
@@ -236,8 +242,16 @@ class InMemoryScheduleCache(ScheduleCache):
 
         Equivalent to `put`ing every entry from the given cache.
         """
-        for spec, rect_schedule, limits in other:
-            self.put(spec, rect_schedule, limits)
+        for other_spec, other_table in other._rects.items():
+            if other_spec not in self._rects:
+                # TODO: We really want a copy-on-write here. This sharing is surprising.
+                self._rects[other_spec] = other_table
+                continue
+            for rect in other_table:
+                assert rect.spec == other_spec
+                self.put(
+                    other_spec, rect.schedules, pruning.StandardMemoryLimits(rect.caps)
+                )
 
     def specs(self) -> Iterable[Spec]:
         yield from self._rects.keys()
@@ -555,7 +569,7 @@ class _ListTable(_SnappingRectTable):
 
 
 @dataclasses.dataclass(frozen=False)
-class _LogScaledTable(_SharedTable):
+class _DenseNumpyTable(_SharedTable):
     banks: tuple[str, ...]
     storage: np.ndarray
 
@@ -583,6 +597,61 @@ class _LogScaledTable(_SharedTable):
     def __len__(self) -> int:
         flat = self.storage.flatten()
         return len(set(flat[flat != None]))
+
+    def _get_log_scaled_pt(self, pt) -> _TableEntry:
+        try:
+            result = self.storage[pt]
+            if result is None:
+                raise KeyError()
+            return result
+        except IndexError:
+            raise KeyError()
+
+    def _bottom_from_entry(self, entry: _TableEntry) -> tuple[int, ...]:
+        if entry.peak_memory is None:
+            assert not len(entry.schedules.contents)
+            return (0,) * len(self.banks)
+        else:
+            assert entry.peak_memory.raw_keys == self.banks
+            return entry.peak_memory.raw_values
+
+
+@dataclasses.dataclass(frozen=False)
+class _BlockCompressedTable(_SharedTable):
+    banks: tuple[str, ...]
+    storage: bcarray.BlockCompressedArray
+
+    def __init__(self, banks: tuple[str, ...], table_dims: tuple[int, ...]):
+        storage_dims = self._logify(snap_availables_up(table_dims, always=True))
+        storage_dims = tuple(d + 1 for d in storage_dims)
+        object.__setattr__(self, "banks", banks)
+        object.__setattr__(
+            self,
+            "storage",
+            bcarray.BlockCompressedArray(
+                storage_dims,
+                block_shape=tuple(4 for _ in storage_dims),
+                default_value=None,
+            ),
+        )
+
+    def _banks(self) -> tuple[str, ...]:
+        return self.banks
+
+    def _fill_storage(self, lower, upper, value):
+        """Fills storage (inclusive)."""
+        assert not isinstance(value, np.ndarray)
+        self.storage.fill_range(lower, tuple(u + 1 for u in upper), value)
+
+    def __iter__(self) -> Iterator[_TableEntry]:
+        for entry in set(self.storage.iter_values()):
+            if entry is None:
+                continue
+            assert isinstance(entry, _TableEntry)
+            yield entry
+
+    def __len__(self) -> int:
+        return sum(1 for _ in iter(self))
 
     def _get_log_scaled_pt(self, pt) -> _TableEntry:
         try:
