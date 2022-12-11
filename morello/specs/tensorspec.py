@@ -134,12 +134,7 @@ class TensorSpec:
     def bytes_used(self) -> int:
         return self.volume * self.dtype.size
 
-    def can_move_to(
-        self, bank: Optional[str], layout: Optional[layouts.Layout]
-    ) -> bool:
-        if bank is None:
-            bank = self.bank
-
+    def can_move_to(self, bank: str, layout: layouts.Layout) -> bool:
         system = current_system()
         if layout != self.layout and bank not in system.addressed_banks:
             return False

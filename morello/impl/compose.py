@@ -81,12 +81,14 @@ class ComposeHole(Impl):
             #  enumerate the rest. It would also be possible to generate
             #  Tensor-making callables for the peel to populate in a generic way.
             peel_kwargs = [{}]
-            if bank == "VMEM":
+            bank_vec_bytes = system.banks[bank].vector_bytes
+            if bank_vec_bytes:
                 peel_kwargs = (
                     {"vector_shape": shape}
                     for shape in gen_vector_shapes(
                         self.spec.subspec_outputs[1],
-                        dtype=self.spec.intermediate_dtypes[0],
+                        self.spec.intermediate_dtypes[0],
+                        bank_vec_bytes,
                     )
                 )
             for kws in peel_kwargs:
