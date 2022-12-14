@@ -30,7 +30,7 @@ class SearchCallbacks:
         """Called when scheduling an uncached spec."""
         pass
 
-    def applied_action(self, action, impl: "Impl") -> None:
+    def expanded_hole(self, impl: "Impl") -> None:
         pass
 
     def visit_impl(self, spec: specs.Spec, imp: "Impl", impl_cost: int) -> None:

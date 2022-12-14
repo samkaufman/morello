@@ -1,22 +1,23 @@
 import itertools
-from typing import Any, Iterable, List, Optional, Tuple, Union
 import typing
+from typing import Any, Iterable, List, Optional, Tuple
 
 import cython
 
 try:
-    from ..cython.cimports import common, specs
+    from ..cython.cimports import common, specs  # type: ignore
 except ImportError:
     pass
 
 from .. import impl, pruning, specs
-from ..utils import snap_availables_down
 from ..impl import Impl
 from ..search_cache import (
     CachedScheduleSet,
     InMemoryScheduleCache,
+    ScheduleCache,
     assert_access_on_log_boundaries,
 )
+from ..utils import snap_availables_down
 from . import common
 
 
@@ -45,13 +46,16 @@ class SearchResult:
 
 
 class Search:
-    def __init__(self, cache=None, top_k=1, callbacks=None) -> None:
+    def __init__(
+        self, cache: Optional[ScheduleCache] = None, top_k=1, callbacks=None
+    ) -> None:
         # If no cache is provided, initialize a new cache
         self.top_k = top_k
         self.callbacks = callbacks
-        self.cache = cache
-        if self.cache is None:
+        if cache is None:
             self.cache = InMemoryScheduleCache()
+        else:
+            self.cache = cache
 
     @typing.final
     def __call__(
@@ -77,8 +81,10 @@ class Search:
             or snap_availables_down(memory_limits.available) == memory_limits.available
         )
 
+        hole = impl.spec_to_hole(spec)
+        assert hole.spec == spec
         return self._search(
-            spec,
+            hole,
             memory_limits=memory_limits,
             parent_summary=parent_summary,
             stats=stats,
@@ -86,15 +92,15 @@ class Search:
 
     def _search(
         self,
-        spec: specs.Spec,
+        hole: impl.Impl,
         memory_limits: pruning.MemoryLimits,
         parent_summary=None,
         stats: Optional[common.SearchStats] = None,
     ) -> SearchResult:
         """Implements most of the logic of schedule_search.
 
-        Returns a list of Impls which satisfy the given Spec and memory limits,
-        sorted in order of increasing cost, up to `top_k` results. This is the
+        Returns a list of Impls which satisfy the Spec of given `hole` and memory
+        limits, sorted in order of increasing cost, up to `top_k` results. This is the
         empty list if no Impls satisfy the given Spec and memory bounds.
         """
 
@@ -107,7 +113,7 @@ class Search:
         # the caller, and (c) the cache has no information for us and search can
         # proceed.
         try:
-            cache_result = self.cache.get(spec, memory_limits)
+            cache_result = self.cache.get(hole.spec, memory_limits)
         except KeyError:
             pass
         else:
@@ -116,27 +122,26 @@ class Search:
             )
 
         if self.callbacks is not None:
-            self.callbacks.enter_unseen(spec, memory_limits)
+            self.callbacks.enter_unseen(hole.spec, memory_limits)
 
         # Create a an Impl hole corresponding to the query spec
-        leaf = impl.spec_to_hole(spec)
-        assert leaf.depth == 1, f"Expected hole to have depth 1; had {leaf.depth}"
+        assert hole.depth == 1, f"Expected hole to have depth 1; had {hole.depth}"
 
         # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
         best_results, specs_explored_by_options = self._choose(
-            spec, leaf, memory_limits, parent_summary=parent_summary, stats=stats
+            hole, memory_limits, parent_summary=parent_summary, stats=stats
         )
         assert len(best_results) <= self.top_k
         specs_explored = specs_explored_by_options + 1
 
         if self.callbacks is not None:
             if best_results:
-                self.callbacks.exit(spec, [(r[0], r[1][0]) for r in best_results])
+                self.callbacks.exit(hole.spec, [(r[0], r[1][0]) for r in best_results])
             else:
-                self.callbacks.exit(spec, None)
+                self.callbacks.exit(hole.spec, None)
 
         self.cache.put(
-            spec,
+            hole.spec,
             CachedScheduleSet(
                 tuple((im, c) for im, (c, _, _) in best_results), specs_explored
             ),
@@ -146,7 +151,6 @@ class Search:
 
     def _choose(
         self,
-        spec: specs.Spec,
         leaf: impl.Impl,
         memory_limits: pruning.MemoryLimits,
         parent_summary=None,
@@ -157,25 +161,20 @@ class Search:
         Also returns the number of unique Specs explored.
         """
         unique_specs_visited = 0
-        best_results: list[tuple[Impl, Any]] = []
+        reducer = _ImplReducer(self.top_k)
 
         # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
         if all(m >= 0 for m in memory_limits.available.values()) and leaf.is_scheduled:
-            _update_best_results(best_results, leaf, spec, self.callbacks)
+            reducer(leaf, leaf.spec, self.callbacks)
 
         # Yield all the complete expansions of the hole by expanding once into
         # an Impl which may or may not have its own holes. If it does have its
         # own holes, fill them by recursively calling into schedule_search.
-        for act, new_tree in self._gen_actions(spec, leaf, parent_summary):
+        for new_tree in self._iter_expansions(leaf, parent_summary):
             if self.callbacks:
-                self.callbacks.applied_action(act, new_tree)
+                self.callbacks.expanded_hole(new_tree)
 
-            new_parent_summary = impl.ParentSummary.update(
-                parent_summary, parent=new_tree
-            )
-
-            # Ignore the action if it uses more memory than is available for any
-            # hole.
+            # Skip actions using more memory than is available for any hole.
             new_child_memory_limits = memory_limits.transition(new_tree)
             if new_child_memory_limits is None:
                 continue
@@ -185,9 +184,11 @@ class Search:
             subsearch_results: list[list[Impl]] = []
             for child, mem in zip(new_tree.children, new_child_memory_limits):
                 child_result = self._search(
-                    child.spec,
+                    child,
                     memory_limits=mem,
-                    parent_summary=new_parent_summary,
+                    parent_summary=impl.ParentSummary.update(
+                        parent_summary, parent=new_tree
+                    ),
                     stats=stats,
                 )
                 unique_specs_visited += child_result.dependent_paths
@@ -207,13 +208,14 @@ class Search:
                 assert (
                     completed.spec == new_tree.spec
                 ), f"{str(completed.spec)} != {str(new_tree.spec)}"
-                _update_best_results(best_results, completed, spec, self.callbacks)
+                reducer(completed, leaf.spec, self.callbacks)
 
-        return _finalize_best_results(best_results, self.top_k), unique_specs_visited
+        return reducer.finalize(), unique_specs_visited
 
-    def _gen_actions(
-        self, current_spec, leaf, parent_summary
-    ) -> Iterable[tuple[Any, Impl]]:
+    def _iter_expansions(
+        self, leaf: impl.Impl, parent_summary: Optional[impl.ParentSummary]
+    ) -> Iterable[Impl]:
+        """Iterate pairs of action callables and their resulting expanded Impls."""
         for act in leaf.actions(parent_summary=parent_summary):
             try:
                 new_tree = act()
@@ -223,30 +225,35 @@ class Search:
                 # Re-raise the exception with a little more detail about act.
                 raise common.ActionFailedException(act) from e
             assert (
-                new_tree.spec == current_spec
-            ), f"{str(new_tree.spec)} != {str(current_spec)}"
+                new_tree.spec == leaf.spec
+            ), f"{str(new_tree.spec)} != {str(leaf.spec)}"
             assert new_tree != leaf, (
                 f"Action returned self: {new_tree}; spec = {str(new_tree.spec)}; "
                 f"action = {act}"
             )
-            yield act, new_tree
+            yield new_tree
 
 
-@cython.cfunc
-def _update_best_results(
-    results: list[tuple[Impl, Any]], new_impl: impl.Impl, spec, callbacks
-):
-    # TODO: Actually necessary to pass spec *and* new_impl?
-    cost_tuple = common.schedule_key(new_impl)
-    if callbacks:
-        callbacks.visit_impl(spec, new_impl, cost_tuple[0])
-    results.append((new_impl, cost_tuple))
+class _ImplReducer:
+    __slots__ = ["results", "top_k"]
 
+    results: list[tuple[Impl, Any]]
+    top_k: int
 
-@cython.cfunc
-def _finalize_best_results(
-    results: list[tuple[Impl, Any]], top_k: int
-) -> List[Tuple[Impl, Any]]:
-    # Using sorted here for stability.
-    return sorted(results, key=lambda x: x[1])[:top_k]
-    # return heapq.nsmallest(top_k, results, key=lambda x: x[1])
+    def __init__(self, top_k: int):
+        self.results = []
+        self.top_k = top_k
+
+    def __call__(self, new_impl: impl.Impl, spec: specs.Spec, callbacks):
+        # TODO: Actually necessary to pass spec *and* new_impl?
+        assert new_impl.spec == spec, f"{str(new_impl.spec)} != {str(spec)}"
+
+        cost_tuple = common.schedule_key(new_impl)
+        if callbacks:
+            callbacks.visit_impl(spec, new_impl, cost_tuple[0])
+        self.results.append((new_impl, cost_tuple))
+
+    def finalize(self) -> list[tuple[Impl, Any]]:
+        # Using sorted here for stability.
+        return sorted(self.results, key=lambda x: x[1])[: self.top_k]
+        # return heapq.nsmallest(top_k, results, key=lambda x: x[1])
