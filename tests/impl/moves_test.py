@@ -28,7 +28,9 @@ def _atomic_steps_and_tile_out_shape_st(draw):
     return root_spec, tile_out_shape
 
 
-@hypothesis.settings(deadline=600)
+@hypothesis.settings(
+    deadline=600, suppress_health_check=[hypothesis.HealthCheck.filter_too_much]
+)
 @hypothesis.given(_atomic_steps_and_tile_out_shape_st())
 def test_moves_from_l1_to_rf_have_contiguous_output(tup_input):
     root_spec, tile_shape = tup_input

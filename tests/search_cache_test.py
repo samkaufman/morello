@@ -126,7 +126,7 @@ def test_cache_get_returns_just_put_impls(spec, limits):
 
 # TODO: Add Compose Specs (incl. PipelineChildMemoryLimits)
 # TODO: Test top_k greater than 1
-@hypothesis.settings(deadline=60_000)
+@hypothesis.settings(deadline=90_000)
 @hypothesis.given(
     strategies.small_atomic_specs_st, strategies.arb_small_standard_memorylimits()
 )
