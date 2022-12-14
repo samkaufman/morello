@@ -247,8 +247,12 @@ class InMemoryScheduleCache(ScheduleCache):
                 # TODO: We really want a copy-on-write here. This sharing is surprising.
                 self._rects[other_spec] = other_table
                 continue
+            rects_seen = set()
             for rect in other_table:
+                if rect in rects_seen:
+                    continue
                 assert rect.spec == other_spec
+                rects_seen.add(rect)
                 self.put(
                     other_spec, rect.schedules, pruning.StandardMemoryLimits(rect.caps)
                 )
