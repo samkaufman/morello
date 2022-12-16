@@ -503,7 +503,7 @@ class ComposeCountingSearchCallbacks(search.SearchCallbacks):
     def __init__(self):
         self.compose_visits = 0
 
-    def applied_action(self, action, impl: morello.impl.base.Impl) -> None:
+    def expanded_hole(self, impl: morello.impl.base.Impl) -> None:
         if isinstance(impl.spec, specs.Compose):
             self.compose_visits += 1
 

@@ -51,6 +51,7 @@ if [ "$stopping" = true ]; then
     for d in "${ALL_HOSTS[@]}"; do
         echo "Stopping on $d"
         ssh "$d" "tmux kill-session -t '$TMUX_SESSION_NAME'" || true
+        ssh "$d" "killall redis-server" || true
     done
     exit 0
 fi
@@ -74,14 +75,20 @@ rsync -vhra ./ "$MAIN_HOST:$REMOTE_DEST" --include='**.gitignore' \
 # Install Python dependencies
 ssh "${MAIN_HOST}" "cd $REMOTE_DEST && ~/.local/bin/poetry install --without=evaluation"
 
-EXP_BIT="export DASK_DISTRIBUTED__SCHEDULER__WORKER_TTL=20m DASK_DISTRIBUTED__COMM__TIMEOUTS__CONNECT=480"
+# TODO: Grab REDIS_SERVER_PATH from the destination host environment.
+REDIS_SERVER_PATH=/homes/gws/kaufmans/local/bin/redis-server
+REDIS_PORT=7771
+REDIS_URL="redis://127.0.0.1:$REDIS_PORT/"
+
+EXP_BIT="export DASK_DISTRIBUTED__SCHEDULER__WORKER_TTL=20m DASK_DISTRIBUTED__COMM__TIMEOUTS__CONNECT=480 REDIS_URL=$REDIS_URL"
 
 # Run dask-worker, dash-scheduler, and script on main host.
 echo "Starting script, scheduler, and worker on ${MAIN_HOST}."
 ssh "${MAIN_HOST}" "cd $REMOTE_DEST && \
      tmux new-session -d -s '$TMUX_SESSION_NAME' \
     '$EXP_BIT; poetry run dask scheduler --host $MAIN_HOST' ';' \
-    split -h 'sleep 10; $EXP_BIT; poetry run nice -n $WORKER_NICE dask worker --memory-limit=$MEM_LIMIT --nworkers=$NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
+    split -h '$REDIS_SERVER_PATH --port $REDIS_PORT --bind 127.0.0.1' ';' \
+    split 'sleep 10; $EXP_BIT; poetry run nice -n $WORKER_NICE dask worker --memory-limit=$MEM_LIMIT --nworkers=$NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
     split 'sleep 5; $EXP_BIT; poetry run python -m morello.search.bottomup --scheduler $MAIN_HOST:8786 ${EXTRA_ARGS[*]}' ';' \
     setw remain-on-exit on ';'"
 
