@@ -103,6 +103,7 @@ class Search:
         limits, sorted in order of increasing cost, up to `top_k` results. This is the
         empty list if no Impls satisfy the given Spec and memory bounds.
         """
+        assert hole.depth == 1, f"Expected hole to have depth 1; had {hole.depth}"
 
         if stats is not None:
             stats.expansions += 1
@@ -121,47 +122,17 @@ class Search:
                 [im for im, _ in cache_result.contents], cache_result.dependent_paths
             )
 
-        # Create a an Impl hole corresponding to the query spec
-        assert hole.depth == 1, f"Expected hole to have depth 1; had {hole.depth}"
-
-        # A generator of expansions of `leaf`. This will be wrapped with `_best_schedule`.
-        best_results, specs_explored_by_options = self._choose(
-            hole, memory_limits, parent_summary=parent_summary, stats=stats
-        )
-        assert len(best_results) <= self.top_k
-        specs_explored = specs_explored_by_options + 1
-
-        self.cache.put(
-            hole.spec,
-            CachedScheduleSet(
-                tuple((im, c) for im, (c, _, _) in best_results), specs_explored
-            ),
-            memory_limits,
-        )
-        return SearchResult([im for im, _ in best_results], specs_explored)
-
-    def _choose(
-        self,
-        leaf: impl.Impl,
-        memory_limits: pruning.MemoryLimits,
-        parent_summary=None,
-        stats=None,
-    ) -> Tuple[List[Tuple[Impl, tuple]], int]:
-        """Returns top-k best Impls after taking any of leaf's actions (if any).
-
-        Also returns the number of unique Specs explored.
-        """
-        unique_specs_visited = 0
+        unique_specs_visited = 1
         reducer = _ImplReducer(self.top_k)
 
         # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
-        if all(m >= 0 for m in memory_limits.available.values()) and leaf.is_scheduled:
-            reducer(leaf, leaf.spec, self.callbacks)
+        if all(m >= 0 for m in memory_limits.available.values()) and hole.is_scheduled:
+            reducer(hole, hole.spec, self.callbacks)
 
         # Yield all the complete expansions of the hole by expanding once into
         # an Impl which may or may not have its own holes. If it does have its
         # own holes, fill them by recursively calling into schedule_search.
-        for new_tree in self._iter_expansions(leaf, parent_summary):
+        for new_tree in self._iter_expansions(hole, parent_summary):
             if self.callbacks:
                 self.callbacks.expanded_hole(new_tree)
 
@@ -199,9 +170,19 @@ class Search:
                 assert (
                     completed.spec == new_tree.spec
                 ), f"{str(completed.spec)} != {str(new_tree.spec)}"
-                reducer(completed, leaf.spec, self.callbacks)
+                reducer(completed, hole.spec, self.callbacks)
 
-        return reducer.finalize(), unique_specs_visited
+        best_results = reducer.finalize()
+        assert len(best_results) <= self.top_k
+
+        self.cache.put(
+            hole.spec,
+            CachedScheduleSet(
+                tuple((im, c) for im, (c, _, _) in best_results), unique_specs_visited
+            ),
+            memory_limits,
+        )
+        return SearchResult([im for im, _ in best_results], unique_specs_visited)
 
     def _iter_expansions(
         self, leaf: impl.Impl, parent_summary: Optional[impl.ParentSummary]

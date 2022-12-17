@@ -61,21 +61,6 @@ class _DistributedSearch(dp.Search):
         self.downscale = downscale
         self.block_coordinate = block_coordinate
 
-    def _choose(self, *args, **kwargs) -> tuple[list[tuple["impl.Impl", tuple]], int]:
-        # TODO: Make sure we're staying in the expected or dependent Tables.
-        #   With the memory limits change, we don't necessarily need *all* dimensions
-        #   to be <=. The limits aren't.
-        #
-        # spec_expected_block = _spec_coordinate_to_block_coord(
-        #     self.downscale, _spec_to_spec_coordinate(spec, memory_limits)
-        # )
-        # assert spec_expected_block == self.block_coordinate, (
-        #     f"Cache did not contain {str(spec)}, which should have been computed "
-        #     f"as part of block {spec_expected_block}. Miss occurred while computing "
-        #     f"{self.block_coordinate}."
-        # )
-        return super()._choose(*args, **kwargs)
-
     def _iter_expansions(
         self, leaf: "impl.Impl", parent_summary: Optional["impl.ParentSummary"]
     ) -> Iterable["impl.Impl"]:
