@@ -121,9 +121,6 @@ class Search:
                 [im for im, _ in cache_result.contents], cache_result.dependent_paths
             )
 
-        if self.callbacks is not None:
-            self.callbacks.enter_unseen(hole.spec, memory_limits)
-
         # Create a an Impl hole corresponding to the query spec
         assert hole.depth == 1, f"Expected hole to have depth 1; had {hole.depth}"
 
@@ -133,12 +130,6 @@ class Search:
         )
         assert len(best_results) <= self.top_k
         specs_explored = specs_explored_by_options + 1
-
-        if self.callbacks is not None:
-            if best_results:
-                self.callbacks.exit(hole.spec, [(r[0], r[1][0]) for r in best_results])
-            else:
-                self.callbacks.exit(hole.spec, None)
 
         self.cache.put(
             hole.spec,
@@ -247,11 +238,7 @@ class _ImplReducer:
     def __call__(self, new_impl: impl.Impl, spec: specs.Spec, callbacks):
         # TODO: Actually necessary to pass spec *and* new_impl?
         assert new_impl.spec == spec, f"{str(new_impl.spec)} != {str(spec)}"
-
-        cost_tuple = common.schedule_key(new_impl)
-        if callbacks:
-            callbacks.visit_impl(spec, new_impl, cost_tuple[0])
-        self.results.append((new_impl, cost_tuple))
+        self.results.append((new_impl, common.schedule_key(new_impl)))
 
     def finalize(self) -> list[tuple[Impl, Any]]:
         # Using sorted here for stability.

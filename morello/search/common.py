@@ -26,18 +26,7 @@ class ActionFailedException(Exception):
 
 
 class SearchCallbacks:
-    def enter_unseen(self, spec: specs.Spec, limits: pruning.MemoryLimits) -> None:
-        """Called when scheduling an uncached spec."""
-        pass
-
     def expanded_hole(self, impl: "Impl") -> None:
-        pass
-
-    def visit_impl(self, spec: specs.Spec, imp: "Impl", impl_cost: int) -> None:
-        pass
-
-    def exit(self, spec: specs.Spec, best) -> None:
-        """Called when finished scheduling an uncached spec."""
         pass
 
 
