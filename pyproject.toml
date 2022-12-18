@@ -17,7 +17,7 @@ termcolor = "^2.0.1"
 sympy = "^1.11.1"
 dask = "^2022.9.1"
 distributed = "^2022.9.1"
-dask-kubernetes = { git = "https://github.com/dask/dask-kubernetes.git", rev = "84d3f75db120edd7bb82ef702e137d55e3bcd277" }
+dask-kubernetes = "2022.12.0"
 bokeh = ">=2.1.1,<3"  # Required for the Dask dashboard.
 Cython = "3.0.0a11"
 numpy = "^1.23.4"
