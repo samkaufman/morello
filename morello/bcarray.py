@@ -176,7 +176,14 @@ class BlockCompressedArray:
                 for pt in np.ndindex(block.shape):
                     yield block[pt]
             elif isinstance(block, list):
-                for _, value in block:
+                # Lists may contain fully covered ("dead") regions. We could prune
+                # these with a line sweep, but instead we'll do the slower, simpler
+                # thing: temporarily convert to a dense array.
+                temp_arr = np.empty(self._block_shape_at_point(block_pt), dtype=object)
+                for rng, value in self.grid[block_pt]:
+                    spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
+                    temp_arr[spt].fill(value)
+                for _, value in np.ndenumerate(temp_arr):
                     yield value
             else:
                 yield block
