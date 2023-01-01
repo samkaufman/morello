@@ -122,33 +122,30 @@ class BlockCompressedArray:
             lower_misaligned_dim_idxs,
             upper_misaligned_dim_idxs,
         ):
-            block_lower = tuple(l * b for l, b in zip(block_pt, self.block_shape))
-            block_upper = tuple((l + 1) * b for l, b in zip(block_pt, self.block_shape))
-            global_intersection = _intersect(block_lower, block_upper, lower, upper)
-            block_intersection: tuple[tuple[int, ...], tuple[int, ...]] = tuple(
-                tuple(v - l for v, l in zip(coord, block_lower))
-                for coord in global_intersection
+            block_intersection = _block_intersect(
+                block_pt, self.block_shape, lower, upper
             )
-            if isinstance(self.grid[block_pt], np.ndarray):
+            b = self.grid[block_pt]
+            if isinstance(b, np.ndarray):
                 spt = tuple(slice(a, b) for a, b in zip(*block_intersection))
-                self.grid[block_pt][spt].fill(value)
+                b[spt].fill(value)
                 if self.compress_on_fill:
-                    self.grid[block_pt] = _compress_block(self.grid[block_pt])
-            elif isinstance(self.grid[block_pt], list):
-                _drop_covered_entries(block_intersection, self.grid[block_pt])
-                self.grid[block_pt].append((block_intersection, value))
-                if len(self.grid[block_pt]) >= self.dense_block_threshold:
+                    self.grid[block_pt] = _compress_block(b)
+            elif isinstance(b, list):
+                _drop_covered_entries(block_intersection, b)
+                b.append((block_intersection, value))
+                if len(b) >= self.dense_block_threshold:
                     self._convert_list_block_to_ndarray(block_pt)
             else:
                 # Bail here if `value` matches the original value.
-                if self.grid[block_pt] == value:
+                if b == value:
                     continue
                 # Turn a single-value block into a list.
                 block_shape = self._block_shape_at_point(block_pt)
                 self.grid.itemset(
                     block_pt,
                     [
-                        (((0,) * len(block_shape), block_shape), self.grid[block_pt]),
+                        (((0,) * len(block_shape), block_shape), b),
                         (block_intersection, value),
                     ],
                 )
@@ -213,7 +210,7 @@ class BlockCompressedArray:
 
 
 def _drop_covered_entries(
-    covering_rng: tuple[tuple[int, ...], tuple[int, ...]], block_list: list
+    covering_rng: tuple[Sequence[int], Sequence[int]], block_list: list
 ) -> None:
     to_remove = []
     for idx, ((lower, upper), _) in enumerate(block_list):
@@ -225,23 +222,19 @@ def _drop_covered_entries(
         del block_list[idx]
 
 
-def _intersect(
-    rect1_lower: Sequence[int],
-    rect1_upper: Sequence[int],
-    rect2_lower: Sequence[int],
-    rect2_upper: Sequence[int],
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """Compute the intersection of two hyperrectangles.
-
-    For example:
-    >>> _intersect((0, 0), (2, 2), (1, 1), (3, 3))
-    ((1, 1), (2, 2))
-
-    Raises a `ValueError` if the rectangles do not intersect.
-    """
-    intersect_lower = tuple(max(a, b) for a, b in zip(rect1_lower, rect2_lower))
-    intersect_upper = tuple(min(a, b) for a, b in zip(rect1_upper, rect2_upper))
-    return intersect_lower, intersect_upper
+def _block_intersect(
+    block_pt: Sequence[int],
+    block_shape: Sequence[int],
+    lower: Sequence[int],
+    upper: Sequence[int],
+) -> tuple[Sequence[int], Sequence[int]]:
+    global_origin = [l * b for l, b in zip(block_pt, block_shape)]
+    block_origin = [max(0, b - a) for a, b in zip(global_origin, lower)]
+    block_upper = [
+        min((p + 1) * s, b) - c
+        for p, s, b, c in zip(block_pt, block_shape, upper, global_origin)
+    ]
+    return block_origin, block_upper
 
 
 def _surface_pts(

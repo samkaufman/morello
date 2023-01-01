@@ -34,18 +34,20 @@ class CountingCache(search_cache.InMemoryScheduleCache):
         self.get_counts = collections.defaultdict(lambda: 0)
         self.put_counts = collections.defaultdict(lambda: 0)
 
-    def get(self, spec: specs.Spec, *args) -> Optional[search_cache.CachedScheduleSet]:
+    async def get(
+        self, spec: specs.Spec, *args
+    ) -> Optional[search_cache.CachedScheduleSet]:
         self.get_counts[spec] += 1
-        return super().get(spec, *args)
+        return await super().get(spec, *args)
 
-    def put(
+    async def put(
         self,
         spec: specs.Spec,
         schedule: Optional[search_cache.CachedScheduleSet],
         memory_limits: pruning.MemoryLimits,
     ) -> None:
         self.put_counts[spec] += 1
-        return super().put(spec, schedule, memory_limits)
+        return await super().put(spec, schedule, memory_limits)
 
 
 @pytest.mark.skip("Need structural Impl equality for assert")

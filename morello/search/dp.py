@@ -1,6 +1,7 @@
+import asyncio
 import itertools
 import typing
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Generator, Iterable, List, Optional, Sequence
 
 import cython
 
@@ -33,8 +34,8 @@ def schedule_search(
 
     May return `None` if no Impl satisfies the given Spec and memory limits.
     """
-    return Search(cache, top_k, callbacks=callbacks)(
-        spec, memory_limits, parent_summary
+    return asyncio.run(
+        Search(top_k, callbacks=callbacks)(spec, memory_limits, cache, parent_summary)
     )
 
 
@@ -45,30 +46,41 @@ class SearchResult:
     dependent_paths: int
 
 
+class SearchMessage(typing.NamedTuple):
+    needed: Sequence[tuple[specs.Spec, pruning.MemoryLimits]]
+    computed: Sequence[tuple[pruning.MemoryLimits, CachedScheduleSet]]
+
+
+SearchResponse = Sequence[Optional[SearchResult]]
+
+
 class Search:
-    def __init__(
-        self, cache: Optional[ScheduleCache] = None, top_k=1, callbacks=None
-    ) -> None:
+    def __init__(self, top_k=1, callbacks=None) -> None:
         # If no cache is provided, initialize a new cache
         self.top_k = top_k
         self.callbacks = callbacks
-        if cache is None:
-            self.cache = InMemoryScheduleCache()
-        else:
-            self.cache = cache
 
     @typing.final
-    def __call__(
+    async def __call__(
         self,
         spec: specs.Spec,
         memory_limits=None,
         parent_summary=None,
+        cache: Optional[ScheduleCache] = None,
         stats=None,
+        complete: bool = True,
     ) -> list[impl.Impl]:
         """Returns the best Impl for a given Spec and memory limits.
 
         May return `None` if no Impl satisfies the given Spec and memory limits.
         """
+        if complete:
+            raise NotImplementedError("complete=True not implemented")
+
+        if cache is None:
+            cache = InMemoryScheduleCache()
+        else:
+            cache = cache
 
         # The default available memory is the capacities of current_system().
         # These capacities are measured in cache lines, not words, so: multiply
@@ -83,20 +95,32 @@ class Search:
 
         hole = impl.spec_to_hole(spec)
         assert hole.spec == spec
-        return self._search(
+        search_gen = self._search(
             hole,
             memory_limits=memory_limits,
             parent_summary=parent_summary,
             stats=stats,
-        ).impls
+        )
+        msg = next(search_gen)
+        try:
+            cache_response = await cache.get_many(msg.needed)
+            for mlims, entry in msg.computed:
+                await cache.put(entry, mlims)
+            msg = search_gen.send(list(cache_response))
+        except StopIteration as e:
+            return e.value.impls
+        assert False, "Should not reach here"
 
+    # TODO: Make a public method.
+    # TODO: Don't need a return type, just send and yield.
+    # TODO: Do we need the Impls, or just the costs, provided?
     def _search(
         self,
-        hole: impl.Impl,
+        hole: impl.Impl,  # TODO: Take a Spec, not a hole
         memory_limits: pruning.MemoryLimits,
-        parent_summary=None,
+        parent_summary: Optional[impl.ParentSummary] = None,
         stats: Optional[common.SearchStats] = None,
-    ) -> SearchResult:
+    ) -> Generator[SearchMessage, SearchResponse, SearchResult]:
         """Implements most of the logic of schedule_search.
 
         Returns a list of Impls which satisfy the Spec of given `hole` and memory
@@ -108,26 +132,26 @@ class Search:
         if stats is not None:
             stats.expansions += 1
 
-        # Do a cache lookup. There are three outcomes: (a) a cached schedule is
-        # present and can be returned, (b) the cache knows that no Impl
-        # satisfying the given limits exists and we can propagate that fact to
-        # the caller, and (c) the cache has no information for us and search can
-        # proceed.
-        try:
-            cache_result = self.cache.get(hole.spec, memory_limits)
-        except KeyError:
-            pass
-        else:
-            return SearchResult(
-                [im for im, _ in cache_result.contents], cache_result.dependent_paths
-            )
-
         unique_specs_visited = 1
         reducer = _ImplReducer(self.top_k)
 
         # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
         if all(m >= 0 for m in memory_limits.available.values()) and hole.is_scheduled:
             reducer(hole, hole.spec, self.callbacks)
+
+        # First give the caller the opportunity to provide a cached Impl.  There are
+        # three outcomes: (a) a cached schedule is present and can be returned, (b) the
+        # cache knows that no Impl satisfying the given limits exists and we can
+        # propagate that fact to the caller, and (c) the cache has no information for us
+        # and search can proceed.
+        # TODO: Push cache query down and call `get_many`.
+        caller_response = yield SearchMessage(((hole.spec, memory_limits),), [])
+        cache_result = caller_response[0]
+        if cache_result is not None:
+            # TODO: Should we send the computed Impl *back* to the caller?
+            return SearchResult(
+                [im for im, _ in cache_result.contents], cache_result.dependent_paths
+            )
 
         # Yield all the complete expansions of the hole by expanding once into
         # an Impl which may or may not have its own holes. If it does have its
@@ -145,7 +169,7 @@ class Search:
             # cannot be filled, short-circuit because this action is a dead end.
             subsearch_results: list[list[Impl]] = []
             for child, mem in zip(new_tree.children, new_child_memory_limits):
-                child_result = self._search(
+                child_result = yield from self._search(
                     child,
                     memory_limits=mem,
                     parent_summary=impl.ParentSummary.update(
@@ -175,12 +199,18 @@ class Search:
         best_results = reducer.finalize()
         assert len(best_results) <= self.top_k
 
-        self.cache.put(
-            hole.spec,
-            CachedScheduleSet(
-                tuple((im, c) for im, (c, _, _) in best_results), unique_specs_visited
-            ),
-            memory_limits,
+        yield SearchMessage(
+            [],
+            [
+                (
+                    memory_limits,
+                    CachedScheduleSet(
+                        hole.spec,
+                        tuple((im, c) for im, (c, _, _) in best_results),
+                        unique_specs_visited,
+                    ),
+                )
+            ],
         )
         return SearchResult([im for im, _ in best_results], unique_specs_visited)
 

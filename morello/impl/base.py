@@ -50,6 +50,25 @@ class Impl:
     def replace_children(self, replacements: Iterable["Impl"]) -> "Impl":
         raise NotImplementedError()
 
+    @typing.final
+    def replace_leaves(self, replacements: Iterable["Impl"]) -> "Impl":
+        replacements = list(replacements)
+        if not replacements:
+            raise ValueError("Must provide at least one replacement")
+        result = self._replace_leaves_inner(replacements)
+        if replacements:
+            raise ValueError("Too many replacements provided")
+        return result
+
+    @typing.final
+    def _replace_leaves_inner(self, replacements: list["Impl"]) -> "Impl":
+        if len(self.children) == 0:
+            return replacements.pop(0)
+        new_children = []
+        for child in self.children:
+            new_children.append(child._replace_leaves_inner(replacements))
+        return self.replace_children(new_children)
+
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], "Impl"]]:

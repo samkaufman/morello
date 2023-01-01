@@ -1,5 +1,7 @@
+import asyncio
 import hypothesis
 import pytest
+import fakeredis.aioredis
 from hypothesis import strategies as st
 
 from morello import dtypes, impl, pformat, pruning, search_cache, specs
@@ -12,9 +14,26 @@ strategies.register_default_strategies()
 
 # TODO: Add assertion that tests below only put scheduled Impls into the cache.
 
+CACHE_CLASSES = [search_cache.InMemoryScheduleCache, search_cache.RedisCache]
 
+
+def _make_cache(search_cls):
+    if search_cls == search_cache.InMemoryScheduleCache:
+        return search_cache.InMemoryScheduleCache()
+    elif search_cls == search_cache.RedisCache:
+        redis_conn = fakeredis.aioredis.FakeRedis()
+        return search_cache.RedisCache(
+            redis_conn, "test", lambda s, _: (s.operands[0].dim_sizes[0],)
+        )
+    else:
+        raise NotImplementedError(f"Unsupported type {search_cls}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
 @pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
-def test_cache_common_scenario(dtype):
+async def test_cache_common_scenario(cache_cls, dtype):
+    cache = _make_cache(cache_cls)
     target = current_target()
 
     lhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
@@ -37,25 +56,24 @@ def test_cache_common_scenario(dtype):
     )
     impossible_wrapped_schedule = search_cache.CachedScheduleSet(tuple(), 1)
 
-    cache = search_cache.InMemoryScheduleCache()
-    cache.put(
+    await cache.put(
         fast_schedule.spec,
         fast_wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
     )
-    assert set(cache) == {
+    assert {x async for x in cache} == {
         (
             fast_schedule.spec,
             fast_wrapped_schedule,
             pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
         )
     }
-    cache.put(
+    await cache.put(
         slow_schedule.spec,
         slow_wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 50, "VRF": 50, "L1": 50, "GL": 0}),
     )
-    assert set(cache) == {
+    assert {x async for x in cache} == {
         (
             fast_schedule.spec,
             fast_wrapped_schedule,
@@ -67,12 +85,12 @@ def test_cache_common_scenario(dtype):
             pruning.StandardMemoryLimits({"RF": 50, "VRF": 50, "L1": 50, "GL": 0}),
         ),
     }
-    cache.put(
+    await cache.put(
         impossible_schedule.spec,
         impossible_wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 1, "VRF": 1, "L1": 1, "GL": 0}),
     )
-    assert set(cache) == {
+    assert {x async for x in cache} == {
         (
             fast_schedule.spec,
             fast_wrapped_schedule,
@@ -91,31 +109,38 @@ def test_cache_common_scenario(dtype):
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
 @hypothesis.given(
     strategies.small_atomic_specs_st, strategies.arb_small_standard_memorylimits()
 )
-def test_cache_raises_keyerror_when_empty(spec, limits):
-    cache = search_cache.InMemoryScheduleCache()
+async def test_cache_raises_keyerror_when_empty(cache_cls, spec, limits):
+    cache = _make_cache(cache_cls)
     with pytest.raises(KeyError):
-        cache.get(spec, limits)
+        await cache.get(spec, limits)
 
 
 # TODO: Add Compose Specs (incl. PipelineChildMemoryLimits)
 # TODO: Test top_k greater than 1
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
+@hypothesis.reproduce_failure("6.47.5", b"AAAAAAEBAQAAAAAAAAA=")
 @hypothesis.settings(deadline=240_000)
 @hypothesis.given(
     strategies.small_atomic_specs_st,
     strategies.arb_small_standard_memorylimits(),
 )
-def test_cache_get_returns_just_put_impls(spec, limits):
-    cache = search_cache.InMemoryScheduleCache()
+async def test_cache_get_returns_just_put_impls(cache_cls, spec, limits):
+    print("######")  # TODO: Remove
 
-    optimal = dp.schedule_search(spec, limits, cache=cache)
+    cache = _make_cache(cache_cls)
+
+    optimal = await dp.Search(cache, top_k=1)(spec, limits, parent_summary=None)
     hypothesis.assume(optimal)
     optimal = optimal[0]
     assert isinstance(optimal, impl.Impl)
 
-    results = [imp for imp, _ in cache.get(spec, limits).contents]
+    results = [imp for imp, _ in (await cache.get(spec, limits)).contents]
     assert len(results) == 1
 
     hypothesis.note(pformat(results[0], show_cost=True))
@@ -126,26 +151,32 @@ def test_cache_get_returns_just_put_impls(spec, limits):
 
 # TODO: Add Compose Specs (incl. PipelineChildMemoryLimits)
 # TODO: Test top_k greater than 1
+@pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
 @hypothesis.settings(deadline=90_000)
 @hypothesis.given(
     strategies.small_atomic_specs_st, strategies.arb_small_standard_memorylimits()
 )
-def test_cache_reputting_doesnt_increase_size(spec, limits):
-    cache = search_cache.InMemoryScheduleCache()
-
+def test_cache_reputting_doesnt_increase_size(cache_cls, spec, limits):
+    cache = _make_cache(cache_cls)
     optimal = dp.schedule_search(spec, limits, cache=cache)
     hypothesis.assume(optimal)
     optimal = optimal[0]
     assert isinstance(optimal, impl.Impl)
 
+    loop = asyncio.new_event_loop()
+
     initial_count = cache.count_impls()
-    cache.put(spec, cache.get(spec, limits), limits)
+    p = loop.run_until_complete(cache.get(spec, limits))
+    loop.run_until_complete(cache.put(spec, p, limits))
     assert cache.count_impls() == initial_count
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 @pytest.mark.parametrize("contiguous", [True, False], ids=["contig", "noncontig"])
-def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype, contiguous):
+async def test_cache_updates_when_none_result_put_with_higher_memory_cap(
+    dtype, contiguous
+):
     t = specs.TensorSpec(
         (8, 8), dtype=dtype, contiguous_abs=(4 if contiguous else 0), bank="RF"
     )
@@ -153,24 +184,24 @@ def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype, contig
     wrapped_schedule = search_cache.CachedScheduleSet(tuple(), 1)
 
     cache = search_cache.InMemoryScheduleCache()
-    cache.put(
+    await cache.put(
         spec,
         wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0}),
     )
-    assert set(cache) == {
+    assert {x async for x in aiter(cache)} == {
         (
             spec,
             wrapped_schedule,
             pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0}),
         )
     }
-    cache.put(
+    await cache.put(
         spec,
         wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 101, "L1": 101, "GL": 0}),
     )
-    assert set(cache) == {
+    assert {x async for x in aiter(cache)} == {
         (
             spec,
             wrapped_schedule,
@@ -179,8 +210,9 @@ def test_cache_updates_when_none_result_put_with_higher_memory_cap(dtype, contig
     }
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
-def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
+async def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
     target = current_target()
     db = current_system().default_bank
     lhs = target.tensor_spec((8, 8), dtype=dtype, bank=db)
@@ -190,24 +222,24 @@ def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
     wrapped_schedule = search_cache.CachedScheduleSet(((schedule, 10),), 1)
 
     cache = search_cache.InMemoryScheduleCache()
-    cache.put(
+    await cache.put(
         schedule.spec,
         wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
     )
-    assert set(cache) == {
+    assert {x async for x in cache} == {
         (
             schedule.spec,
             wrapped_schedule,
             pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
         )
     }
-    cache.put(
+    await cache.put(
         schedule.spec,
         wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 101, "VRF": 101, "L1": 101, "GL": 0}),
     )
-    assert set(cache) == {
+    assert {x async for x in cache} == {
         (
             schedule.spec,
             wrapped_schedule,

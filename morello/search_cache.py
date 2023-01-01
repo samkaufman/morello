@@ -1,12 +1,21 @@
 import abc
+import random
+import traceback
+import asyncio
 import contextlib
 import contextvars
 import dataclasses
 import itertools
 import pathlib
 import pickle
+import time
+import typing
 import warnings
 from typing import (
+    AsyncIterable,
+    Awaitable,
+    Callable,
+    Generic,
     Iterable,
     Iterator,
     Literal,
@@ -20,6 +29,8 @@ from typing import (
 
 import atomicwrites
 import numpy as np
+import redis.asyncio
+import lz4.frame
 
 from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
@@ -30,9 +41,24 @@ from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
 TABLE_STYLE: Literal["dense", "list", "dict", "bsa"] = "bsa"
 RAISE_CAPS_ON_OVERLAP = True
 
+T = typing.TypeVar("T")
+
 assert_access_on_log_boundaries = contextvars.ContextVar(
     "assert_access_on_log_boundaries", default=True
 )
+
+
+def _leaf_tuples(
+    root_impl: Impl, root_limits: pruning.MemoryLimits
+) -> Iterable[tuple[Impl, pruning.MemoryLimits]]:
+    if len(root_impl.children) == 0:
+        yield root_impl, root_limits
+    else:
+        child_mlims = root_limits.transition(root_impl)
+        assert child_mlims
+        assert len(root_impl.children) == len(child_mlims)
+        for child, m in zip(root_impl.children, child_mlims):
+            yield from _leaf_tuples(child, m)
 
 
 class CachedScheduleSet:
@@ -44,10 +70,15 @@ class CachedScheduleSet:
 
     def __init__(
         self,
-        contents: tuple[tuple[Impl, int]],
-        specs_visited: int,
+        spec: Spec,
+        contents: tuple[tuple[Impl, int], ...],
+        specs_visited: int,  # TODO: Rename to dependent_paths
         peak_memory: Optional[TinyMap[str, int]] = None,
     ):
+        if contents and any(spec != imp.spec for imp, _ in contents):
+            raise ValueError("All Impls must have the given Spec")
+
+        self.spec = spec
         self.contents = contents
         self.dependent_paths = specs_visited
         self.peak_memory = peak_memory
@@ -84,10 +115,10 @@ class CachedScheduleSet:
         return hash(self.contents)
 
     def __str__(self) -> str:
-        return f"CachedScheduleSet({self.contents}, {self.dependent_paths})"
+        return f"CachedScheduleSet({self.spec}, {self.contents}, {self.dependent_paths}, {self.peak_memory})"
 
     def __repr__(self) -> str:
-        return f"CachedScheduleSet({repr(self.contents)}, {repr(self.dependent_paths)})"
+        return f"CachedScheduleSet({self.spec!r}, {self.contents!r}, {self.dependent_paths!r}, {self.peak_memory!r})"
 
 
 class _TableEntry(NamedTuple):
@@ -108,18 +139,80 @@ class _TableEntry(NamedTuple):
 
 
 class ScheduleCache(abc.ABC):
-    @abc.abstractmethod
-    def get(
-        self, spec: Spec, memory_limits: pruning.MemoryLimits, recurse_fn=None
+    @typing.final
+    async def get(
+        self, spec: Spec, memory_limits: pruning.MemoryLimits, complete: bool = True
     ) -> CachedScheduleSet:
-        pass
+        """Returns cached Impls. May contain nothing if query has no Impls.
+
+        Raises KeyError if no Impl meeting the given limits exists and it is unknown
+        whether such an Impl exists (i.e., search should be done).
+
+        :param complete: If `True`, the Impl's nested Specs will also be resolved
+          from the cache. Otherwise, the result, may be a partial Impl (an Impl which
+          may contain Spec holes as children).
+        :param recurse_fn: If non-`None` and `complete` is `True`, this function will be
+          called to look up nested Specs instead of `get`.
+        """
+        result: Optional[CachedScheduleSet] = next(
+            iter(await self.get_many([(spec, memory_limits)]))
+        )
+        if result is None:
+            raise KeyError()
+        if not complete or not result.contents:
+            return result
+        while True:
+            new_impl, old_cost = result.contents[0]
+            assert len(result.contents) == 1, "No support for multiple Impls."
+
+            leaf_tuples = list(_leaf_tuples(new_impl, memory_limits))
+            incomplete_leaf_idxs = [
+                i for i, (leaf, _) in enumerate(leaf_tuples) if not leaf.is_scheduled
+            ]
+            if not incomplete_leaf_idxs:
+                return result
+
+            # Query the next row of leaves.
+            resolved = [
+                await f
+                for f in self.get_many(
+                    [
+                        (leaf_tuples[i][0].spec, leaf_tuples[i][1])
+                        for i in incomplete_leaf_idxs
+                    ]
+                )
+            ]
+            assert all(r is not None for r in resolved)
+            assert len(resolved) == len(incomplete_leaf_idxs)
+
+            new_leaves: list[Impl] = []
+            for leaf, _ in leaf_tuples:
+                if leaf.is_scheduled:
+                    new_leaves.append(leaf)
+                else:
+                    replacement_entry = resolved.pop(0)
+                    assert replacement_entry and len(replacement_entry.contents) == 1
+                    new_leaves.append(replacement_entry.contents[0][0])
+            assert not resolved
+
+            new_impl = new_impl.replace_leaves(new_leaves)
+            result = CachedScheduleSet(
+                spec,
+                ((new_impl, old_cost),),
+                result.dependent_paths,
+                result.peak_memory,
+            )
 
     @abc.abstractmethod
-    def put(
-        self,
-        spec: Spec,
-        schedules_to_put: CachedScheduleSet,
-        memory_limits: pruning.MemoryLimits,
+    async def get_many(
+        self, subproblems: Iterable[tuple[Spec, pruning.MemoryLimits]]
+    ) -> Iterable[Optional[CachedScheduleSet]]:
+        pass
+
+    # TODO: Raise exception if sub-Specs aren't in the cache or document behavior.
+    @abc.abstractmethod
+    async def put(
+        self, schedules_to_put: CachedScheduleSet, memory_limits: pruning.MemoryLimits
     ) -> None:
         pass
 
@@ -128,9 +221,14 @@ class ScheduleCache(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def __iter__(
+    async def __aiter__(
         self,
-    ) -> Iterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
+    ) -> AsyncIterable[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
+        """Iterate over subproblems (Specs and MemoryLimits) and associated Impls.
+
+        There is no guarantee that each step of the iterator corresponds to a single
+        `put` entry.
+        """
         pass
 
     @abc.abstractmethod
@@ -147,42 +245,42 @@ class InMemoryScheduleCache(ScheduleCache):
     def count_values(self):
         return sum(table.storage.count_values() for table in self._rects.values())
 
-    def get(
-        self, spec: Spec, memory_limits: pruning.MemoryLimits, recurse_fn=None
-    ) -> CachedScheduleSet:
-        """Returns cached Impls. May contain nothing if query has no Impls.
+    async def get_many(
+        self, subproblems: Iterable[tuple[Spec, pruning.MemoryLimits]]
+    ) -> Iterable[Optional[CachedScheduleSet]]:
+        results = []
 
-        Raises KeyError if no Impl meeting the given limits exists and it is unknown
-        whether or not such an Impl exists (i.e., search should be done).
-        """
-        if not isinstance(memory_limits, pruning.StandardMemoryLimits):
-            # TODO: Add support for PipelineChildMemoryLimits
-            warnings.warn(
-                "ScheduleCache only supports StandardMemoryLimits. Queries with"
-                " other MemoryLimits implementations always miss."
+        for spec, memory_limits in subproblems:
+            if not isinstance(memory_limits, pruning.StandardMemoryLimits):
+                # TODO: Add support for PipelineChildMemoryLimits
+                warnings.warn(
+                    "ScheduleCache only supports StandardMemoryLimits. Queries with"
+                    " other MemoryLimits implementations always miss."
+                )
+                results.append(None)
+                continue
+
+            assert (
+                not assert_access_on_log_boundaries.get()
+                or snap_availables_down(memory_limits.available)
+                == memory_limits.available
             )
-            raise KeyError()
 
-        assert (
-            not assert_access_on_log_boundaries.get()
-            or snap_availables_down(memory_limits.available) == memory_limits.available
-        )
+            try:
+                rects = self._rects[spec]
+                best = rects.best_for_cap(memory_limits)
+            except KeyError:
+                results.append(None)
+                continue
 
-        rects = self._rects[spec]
-        best = rects.best_for_cap(memory_limits)
-        if recurse_fn is None:
-            recurse_fn = self.get
-        return self._despecify_schedule_set(
-            best.schedules, best.caps, get_fn=recurse_fn
-        )
+            results.append(best.schedules)
 
-    def put(
-        self,
-        spec: Spec,
-        schedules_to_put: CachedScheduleSet,
-        memory_limits: pruning.MemoryLimits,
+        return results
+
+    async def put(
+        self, schedules_to_put: CachedScheduleSet, memory_limits: pruning.MemoryLimits
     ) -> None:
-        assert all(spec == imp.spec for imp, _ in schedules_to_put.contents)
+        spec = schedules_to_put.spec
 
         if not isinstance(memory_limits, pruning.StandardMemoryLimits):
             # TODO: Add support for PipelineChildMemoryLimits
@@ -237,7 +335,7 @@ class InMemoryScheduleCache(ScheduleCache):
         # update, so add one.
         rects.add(_TableEntry(spec, schedules_to_put, mlims))
 
-    def update(self, other: "ScheduleCache") -> None:
+    async def update(self, other: "ScheduleCache") -> None:
         """Update with the contents of another cache.
 
         Equivalent to `put`ing every entry from the given cache.
@@ -253,8 +351,8 @@ class InMemoryScheduleCache(ScheduleCache):
                     continue
                 assert rect.spec == other_spec
                 rects_seen.add(rect)
-                self.put(
-                    other_spec, rect.schedules, pruning.StandardMemoryLimits(rect.caps)
+                await self.put(
+                    rect.schedules, pruning.StandardMemoryLimits(rect.caps)
                 )
 
     def specs(self) -> Iterable[Spec]:
@@ -266,9 +364,9 @@ class InMemoryScheduleCache(ScheduleCache):
     def __len__(self) -> int:
         return len(self._rects)
 
-    def __iter__(
+    async def __aiter__(
         self,
-    ) -> Iterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
+    ) -> AsyncIterable[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
         for spec, rects in self._rects.items():
             for rect in rects:
                 assert rect.spec == spec
@@ -278,6 +376,7 @@ class InMemoryScheduleCache(ScheduleCache):
         self, schedules_to_put: CachedScheduleSet
     ) -> CachedScheduleSet:
         return CachedScheduleSet(
+            schedules_to_put.spec,
             tuple(
                 (self._specify_impl(imp), cost)
                 for imp, cost in schedules_to_put.contents
@@ -291,20 +390,24 @@ class InMemoryScheduleCache(ScheduleCache):
             return imp
         return imp.replace_children((spec_to_hole(c.spec) for c in imp.children))
 
-    def _despecify_schedule_set(
+    async def _despecify_schedule_set(
         self, cached_set: CachedScheduleSet, caps: TinyMap[str, int], get_fn
     ) -> CachedScheduleSet:
         new_impls = []
         if cached_set.contents:
             limits = pruning.StandardMemoryLimits(caps)
             for imp, cost in cached_set.contents:
-                new_impls.append((self._despecify_impl(imp, limits, get_fn), cost))
+                despecified = await self._despecify_impl(imp, limits, get_fn)
+                new_impls.append((despecified, cost))
 
         return CachedScheduleSet(
-            tuple(new_impls), cached_set.dependent_paths, cached_set.peak_memory
+            cached_set.spec,
+            tuple(new_impls),
+            cached_set.dependent_paths,
+            cached_set.peak_memory,
         )
 
-    def _despecify_impl(
+    async def _despecify_impl(
         self, imp: Impl, limits: pruning.StandardMemoryLimits, get_fn
     ) -> Impl:
         all_child_limits = limits.transition(imp)
@@ -317,7 +420,7 @@ class InMemoryScheduleCache(ScheduleCache):
         for spec_child, child_limits in zip(imp.children, all_child_limits):
             assert not spec_child.is_scheduled
             try:
-                child_results = get_fn(spec_child.spec, child_limits)
+                child_results = await get_fn(spec_child.spec, child_limits)
             except KeyError:
                 raise Exception(
                     f"Unexpectedly got KeyError while reconstructing "
@@ -336,48 +439,184 @@ class InMemoryScheduleCache(ScheduleCache):
         return imp.replace_children(new_children)
 
 
-class CacheChain(ScheduleCache):
-    def __init__(self, caches: Sequence[ScheduleCache]):
-        if len(caches) == 0:
-            raise ValueError("`caches` must be non-empty")
-        self.caches = caches
+class _PendingEntry(Generic[T]):
+    __slots__ = ("event", "result")
 
-    def get(
-        self, spec: Spec, memory_limits: pruning.MemoryLimits, recurse_fn=None
-    ) -> CachedScheduleSet:
-        if recurse_fn is not None:
-            raise ValueError("Cannot use `recurse_fn` with CacheChain")
-        for cache in self.caches:
-            try:
-                return cache.get(spec, memory_limits, recurse_fn=self.get)
-            except KeyError:
-                pass
-        raise KeyError(f"({str(spec)}, {str(memory_limits)})")
+    def __init__(self) -> None:
+        self.event = asyncio.Event()
+        self.result: Optional[T] = None
 
-    def put(
+    def set(self, result: T) -> None:
+        self.result = result
+        self.event.set()
+
+
+class RedisCache(ScheduleCache):
+    """A cache which streams blocks to and from a Redis backend.
+
+    Puts are sent to an in-memory, "overlay" cache. That cache is sent to Redis and
+    and deleted when `flush` is called. Gets are serviced first by the overlay cache
+    and, if the get misses, then by querying the Redis cache.
+    """
+
+    def __init__(
         self,
-        spec: Spec,
-        schedules_to_put: CachedScheduleSet,
-        memory_limits: pruning.MemoryLimits,
+        redis_connection: redis.asyncio.Redis,
+        namespace: str,
+        subproblem_to_block_coordinate_fn: Callable[
+            [Spec, pruning.MemoryLimits], tuple[int, ...]
+        ],
+        autoflush: bool = True,
     ) -> None:
-        self.caches[0].put(spec, schedules_to_put, memory_limits)
+        # TODO: Document that this class takes "ownership" of the redis_connection
+        super().__init__()
+        self.redis_connection = redis_connection
+        self.namespace = namespace
+        self.overlay = InMemoryScheduleCache()
+        self.autoflush = autoflush
+        self._dirty_block: Optional[str] = None
+        self._dirty_block_culprit: Optional[tuple[Spec, pruning.MemoryLimits]] = None
+        self._subproblem_to_block_coordinate_fn = subproblem_to_block_coordinate_fn
+        self._running_block_task: Optional[
+            tuple[str, asyncio.Future[InMemoryScheduleCache]]
+        ] = None
+        self._pending: dict[str, _PendingEntry[Optional[InMemoryScheduleCache]]] = {}
+        self._get_block_lock = asyncio.Lock()
 
-    @property
+    async def get_many(
+        self, subproblems: Iterable[tuple["Spec", pruning.MemoryLimits]]
+    ) -> Iterable[Optional[CachedScheduleSet]]:
+        # TODO: Read-ahead one from Redis.
+        subproblems = list(subproblems)  # TODO: Just require Sequence in signature.
+        results: list[Optional[CachedScheduleSet]] = list(
+            await self.overlay.get_many(subproblems)
+        )
+
+        none_idxs = [i for i, r in enumerate(results) if r is None]
+
+        # Map needed block keys to subproblems indices.
+        blocks_needed: dict[str, list[int]] = {}
+        for idx in none_idxs:
+            blocks_needed.setdefault(
+                self.redis_block_key(*subproblems[idx]), []
+            ).append(idx)
+
+        # Send requests to the Redis server (or wait if one is already running).
+        blocks = await asyncio.gather(*[self._get_block(k) for k in blocks_needed])
+
+        for subproblem_idxs, block in zip(blocks_needed.values(), blocks):
+            if not block:
+                continue
+            for i in subproblem_idxs:
+                assert results[i] is None
+                results[i] = next(iter(await block.get_many([subproblems[i]])))
+
+        return results
+
+    async def _get_block(self, block_key):
+        try:
+            pending_entry: _PendingEntry[
+                Optional[InMemoryScheduleCache]
+            ] = self._pending[block_key]
+        except KeyError:
+            # No ongoing request for the block, so start one.
+            pending_entry = _PendingEntry()
+            self._pending[block_key] = pending_entry
+            # Await the task instead of the event to propogate exceptions.
+            await asyncio.create_task(
+                self._download_block(block_key), name=f"RedisGetBlock-{block_key}"
+            )
+        else:
+            await pending_entry.event.wait()
+        return pending_entry.result
+
+    async def put(
+        self, schedules_to_put: CachedScheduleSet, memory_limits: pruning.MemoryLimits
+    ) -> None:
+        spec = schedules_to_put.spec
+        block_key = self.redis_block_key(spec, memory_limits)
+
+        if self._dirty_block and self._dirty_block != block_key:
+            assert self._dirty_block_culprit, "_dirty_block_culprit should be set is _dirty_block is set"
+            if not self.autoflush:
+                c_spec, c_memory_limits = self._dirty_block_culprit
+                raise Exception(
+                    "Putting into a block other than the current dirty "
+                    "block. Call `flush` before `put`ing to a new block. "
+                    f"Current dirty block is {self._dirty_block}, which was "
+                    f"set while updating {c_spec} at {c_memory_limits}. However, "
+                    f"this put was to {block_key}, for {spec} at {memory_limits}."
+                )
+            await self.flush()
+        self._dirty_block = block_key
+        self._dirty_block_culprit = (spec, memory_limits)
+        await self.overlay.put(schedules_to_put, memory_limits)
+
+    async def flush(self):
+        if not self._dirty_block:
+            return
+
+        # TODO: There should never be a block, so just check that this is the case,
+        #   instead of getting it.
+        payload = lz4.frame.compress(pickle.dumps(self.overlay))
+        set_response = await self.redis_connection.setnx(self._dirty_block, payload)
+        assert set_response, f"Block already exists: {self._dirty_block}"
+
+        self.overlay = InMemoryScheduleCache()
+        self._dirty_block = None
+        self._dirty_block_culprit = None
+
     def specs(self) -> Iterable[Spec]:
-        seen = set()
-        for cache in self.caches:
-            for spec in cache.specs():
-                if spec not in seen:
-                    yield spec
-                    seen.add(spec)
+        raise NotImplementedError()
 
-    def __iter__(
+    async def __aiter__(
         self,
-    ) -> Iterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
-        yield from itertools.chain(*self.caches)
+    ) -> AsyncIterable[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
+        assert "*" not in self.namespace
+        for key in await self.redis_connection.keys(self.namespace + "*"):
+            if key == self._dirty_block:
+                continue
+            block_cache = await self._download_block(key)
+            assert block_cache is not None
+            async for x in aiter(block_cache):
+                yield x
+        if self._dirty_block:
+            async for x in aiter(self.overlay):
+                yield x
 
     def __len__(self) -> int:
-        return sum(len(cache) for cache in self.caches)
+        raise NotImplementedError()
+
+    async def _download_block(self, key: str) -> Optional[InMemoryScheduleCache]:
+        # TODO: Though we only have one GET out at once, there's no guarantee we'll wait
+        #   for it to be processed by all waiting searches before we start the next GET.
+        #   Fix this.
+        async with self._get_block_lock:
+            start = time.time()
+            print(f"\033[94mRedis:\033[0m query {key} started")
+            blob = await asyncio.wait_for(self.redis_connection.get(key), timeout=10.0)
+            print(
+                f"\033[94mRedis:\033[0m query {key} done after "
+                f"{time.time() - start:.2f}s (isnone = {blob is None})"
+            )
+            if blob is None:
+                self._pending.pop(key).set(None)
+                return
+            assert isinstance(
+                blob, bytes
+            ), f"blob was not bytes, was {type(blob).__name__}"
+            decoded = pickle.loads(lz4.frame.decompress(blob))
+            assert isinstance(
+                decoded, InMemoryScheduleCache
+            ), f"decoded was not InMemoryScheduleCache; was {type(decoded).__name__}"
+            self._pending.pop(key).set(decoded)
+            return
+
+    def redis_block_key(self, spec: Spec, memory_limits: pruning.MemoryLimits) -> str:
+        # TODO: Move the Spec type name prefix outside this class.
+        block_pt = self._subproblem_to_block_coordinate_fn(spec, memory_limits)
+        block_description = ",".join(map(str, block_pt))
+        return f"{self.namespace}-{type(spec).__name__}-{block_description}"
 
 
 class _RectTable(abc.ABC):

@@ -109,16 +109,28 @@ def gen_tile_sizes(
 
 
 def gen_vector_shapes(
-    outer_shape: Sequence[int], dtype: dtypes.Dtype, vector_bytes: int
+    outer_shape: Optional[Sequence[int]],
+    dtype: dtypes.Dtype,
+    vector_bytes: int,
+    rank: Optional[int] = None,
 ) -> Iterable[tuple[int, ...]]:
-    if not outer_shape:
-        raise ValueError("outer_shape must be a non-empty list")
-    if any(d <= 0 for d in outer_shape):
+    """Return possible vector shapes.
+
+    :param outer_shape: The shape of the tensor to be vectorized. If `None`, all
+      vector shapes for any tensor will be returned.
+    """
+    if bool(outer_shape) == bool(rank):
+        raise ValueError("Must specify either outer_shape or rank, but not both")
+    if outer_shape and any(d <= 0 for d in outer_shape):
         raise ValueError(f"Got outer_shape: {outer_shape}")
     if vector_bytes <= 0:
         raise ValueError("vector_bytes must be greater than 0")
     if vector_bytes % dtype.size != 0:
         raise ValueError(f"vector_bytes must be a multiple of dtype size: {dtype.size}")
+
+    if not rank:
+        assert outer_shape
+        rank = len(outer_shape)
 
     adjusted_vector_bytes = vector_bytes
     if dtype.size != 1:
@@ -126,18 +138,21 @@ def gen_vector_shapes(
 
     if limit_vectors_to_one_dim.get():
         if adjusted_vector_bytes == 1:
-            yield (1,) * len(outer_shape)
+            yield (1,) * rank
             return
-        for i in reversed(range(len(outer_shape))):
-            if outer_shape[i] >= adjusted_vector_bytes:
+        for i in reversed(range(rank)):
+            if not outer_shape or outer_shape[i] >= adjusted_vector_bytes:
                 v: tuple[int, ...] = (
-                    ((1,) * i)
-                    + (adjusted_vector_bytes,)
-                    + ((1,) * (len(outer_shape) - i - 1))
+                    ((1,) * i) + (adjusted_vector_bytes,) + ((1,) * (rank - i - 1))
                 )
-                assert len(v) == len(outer_shape)
+                assert len(v) == rank
                 yield v
         return
+
+    if not outer_shape:
+        raise NotImplementedError(
+            "outer_shape=None is not implemented yet for limit_vectors_to_one_dim=False"
+        )
 
     for result in _gen_vector_shapes_inner(outer_shape, adjusted_vector_bytes):
         assert (

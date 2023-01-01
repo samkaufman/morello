@@ -1,5 +1,6 @@
 #!python3
 import argparse
+import asyncio
 import pickle
 import sys
 import tqdm
@@ -33,7 +34,7 @@ def main() -> int:
                     "Input file was not a ScheduleCache", file=sys.stderr
                 )
                 return 1
-            accumulated_cache.update(loaded_cache)
+            asyncio.run(accumulated_cache.update(loaded_cache))
             progress_bar.update(inp_size)
 
     print(f"Saving combined cache: {parsed_args.output.name}")
