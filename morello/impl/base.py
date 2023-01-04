@@ -30,10 +30,14 @@ class Impl:
             for child in self.children:
                 yield from child.leaves
 
-    @typing.final
     @property
     def depth(self) -> int:
-        return 1 + max((c.depth for c in self.children), default=0)
+        cached_value = getattr(self, "_cached_depth", None)
+        if cached_value is not None:
+            return cached_value
+        d = 1 + max((c.depth for c in self.children), default=0)
+        object.__setattr__(self, "_cached_depth", d)
+        return d
 
     @property
     def is_scheduled(self) -> bool:
