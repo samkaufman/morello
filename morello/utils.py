@@ -1,6 +1,5 @@
 import functools
 import itertools
-import math
 import warnings
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Sequence, TypeVar, Union
@@ -220,23 +219,6 @@ def factors(n: int) -> list[int]:
             )
         )
     )
-
-
-def powers_of_two(maximum: int) -> Iterable[int]:
-    """Yields positive powers of two up to maximum, exclusive."""
-    return itertools.takewhile(
-        lambda v: v < maximum, (2**i for i in itertools.count())
-    )
-
-
-def next_power_of_two(x: int) -> int:
-    """Return next highest power of 2, or `x` if a power of two or zero."""
-    if x == 0:
-        return 0
-    assert x >= 1, f"x must be 1 or greater; was: {x}"
-    result = int(2 ** math.ceil(math.log2(x)))
-    assert result >= x
-    return result
 
 
 def sum_seqs(maxes: Sequence[int], total: int) -> Iterable[tuple[int, ...]]:

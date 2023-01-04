@@ -57,6 +57,9 @@ class TensorSpec:
         system = current_system()
 
         self.dim_sizes = dim_sizes
+        if any(d < 1 for d in dim_sizes):
+            raise ValueError(f"Invalid shape: {dim_sizes}")
+
         self.dtype = dtype
         if bank is None:
             self.bank = current_system().default_bank

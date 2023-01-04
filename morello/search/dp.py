@@ -95,7 +95,7 @@ class Search:
 
         hole = impl.spec_to_hole(spec)
         assert hole.spec == spec
-        search_gen = self._search(
+        search_gen = self.interactive_search(
             hole,
             memory_limits=memory_limits,
             parent_summary=parent_summary,
@@ -111,21 +111,20 @@ class Search:
             return e.value.impls
         assert False, "Should not reach here"
 
-    # TODO: Make a public method.
     # TODO: Don't need a return type, just send and yield.
     # TODO: Do we need the Impls, or just the costs, provided?
-    def _search(
+    def interactive_search(
         self,
         hole: impl.Impl,  # TODO: Take a Spec, not a hole
         memory_limits: pruning.MemoryLimits,
         parent_summary: Optional[impl.ParentSummary] = None,
         stats: Optional[common.SearchStats] = None,
     ) -> Generator[SearchMessage, SearchResponse, SearchResult]:
-        """Implements most of the logic of schedule_search.
+        """Returns a search generator, with memoization provided by the caller.
 
-        Returns a list of Impls which satisfy the Spec of given `hole` and memory
-        limits, sorted in order of increasing cost, up to `top_k` results. This is the
-        empty list if no Impls satisfy the given Spec and memory bounds.
+        The generator returns a list of Impls which satisfy the Spec of given `hole` and
+        memory limits, sorted in order of increasing cost, up to `top_k` results. This
+        is the empty list if no Impls satisfy the given Spec and memory bounds.
         """
         assert hole.depth == 1, f"Expected hole to have depth 1; had {hole.depth}"
 
@@ -136,8 +135,9 @@ class Search:
         reducer = _ImplReducer(self.top_k)
 
         # If the leaf is itself scheduled, yield it (i.e. no action) as an option.
+        assert not hole.is_scheduled  # TODO: If holds, remove.
         if all(m >= 0 for m in memory_limits.available.values()) and hole.is_scheduled:
-            reducer(hole, hole.spec, self.callbacks)
+            reducer(hole, hole.spec)
 
         # First give the caller the opportunity to provide a cached Impl.  There are
         # three outcomes: (a) a cached schedule is present and can be returned, (b) the
@@ -169,7 +169,7 @@ class Search:
             # cannot be filled, short-circuit because this action is a dead end.
             subsearch_results: list[list[Impl]] = []
             for child, mem in zip(new_tree.children, new_child_memory_limits):
-                child_result = yield from self._search(
+                child_result = yield from self.interactive_search(
                     child,
                     memory_limits=mem,
                     parent_summary=impl.ParentSummary.update(
@@ -194,7 +194,7 @@ class Search:
                 assert (
                     completed.spec == new_tree.spec
                 ), f"{str(completed.spec)} != {str(new_tree.spec)}"
-                reducer(completed, hole.spec, self.callbacks)
+                reducer(completed, hole.spec)
 
         best_results = reducer.finalize()
         assert len(best_results) <= self.top_k
@@ -246,7 +246,7 @@ class _ImplReducer:
         self.results = []
         self.top_k = top_k
 
-    def __call__(self, new_impl: impl.Impl, spec: specs.Spec, callbacks):
+    def __call__(self, new_impl: impl.Impl, spec: specs.Spec):
         # TODO: Actually necessary to pass spec *and* new_impl?
         assert new_impl.spec == spec, f"{str(new_impl.spec)} != {str(spec)}"
         self.results.append((new_impl, common.schedule_key(new_impl)))

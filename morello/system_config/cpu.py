@@ -68,7 +68,8 @@ class CpuTarget(Target):
                 "VRF": MemoryBankConfig(
                     cache_hit_cost=0, capacity=1024, vector_bytes=16  # 128-bit XMMs
                 ),
-                "L1": MemoryBankConfig(cache_hit_cost=10, capacity=48 * 1024),
+                # 48*1024 would be more accurate for L1, but we want a power of two.
+                "L1": MemoryBankConfig(cache_hit_cost=10, capacity=32_768),
                 "GL": MemoryBankConfig(cache_hit_cost=100, capacity=1024**3),
             },
             default_bank="GL",

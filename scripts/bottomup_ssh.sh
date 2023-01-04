@@ -13,7 +13,7 @@
 set -e
 
 REMOTE_DEST="~/morello_bottomup"
-WORKER_NICE=10
+WORKER_NICE=20
 NWORKERS=-1  # per host
 TMUX_SESSION_NAME=dask
 MEM_LIMIT=7G
@@ -70,7 +70,7 @@ scp .gitignore "$MAIN_HOST:$REMOTE_DEST/.gitignore"
 
 # Sync project directory.
 rsync -vhra ./ "$MAIN_HOST:$REMOTE_DEST" --include='**.gitignore' \
-  --exclude='/.git' --filter=':- .gitignore' --delete-after
+  --exclude='/.git' --exclude='/dump.rdb' --filter=':- .gitignore' --delete-after
 
 # Install Python dependencies
 ssh "${MAIN_HOST}" "cd $REMOTE_DEST && ~/.local/bin/poetry install --without=evaluation"
@@ -78,17 +78,18 @@ ssh "${MAIN_HOST}" "cd $REMOTE_DEST && ~/.local/bin/poetry install --without=eva
 # TODO: Grab REDIS_SERVER_PATH from the destination host environment.
 REDIS_SERVER_PATH=/homes/gws/kaufmans/local/bin/redis-server
 REDIS_PORT=7771
-REDIS_URL="redis://127.0.0.1:$REDIS_PORT/"
+REDIS_PWD=RememberToNiceYourWorkers30
+REDIS_URL="redis://:$REDIS_PWD@$MAIN_HOST:$REDIS_PORT/"
 
-EXP_BIT="export DASK_DISTRIBUTED__SCHEDULER__WORKER_TTL=20m DASK_DISTRIBUTED__COMM__TIMEOUTS__CONNECT=480 REDIS_URL=$REDIS_URL"
+EXP_BIT="export DASK_DISTRIBUTED__SCHEDULER__WORKER_TTL=20m DASK_DISTRIBUTED__COMM__TIMEOUTS__CONNECT=480 DASK_DISTRIBUTED__WORKER__PROFILE__ENABLED=False REDIS_URL=$REDIS_URL"
 
 # Run dask-worker, dash-scheduler, and script on main host.
 echo "Starting script, scheduler, and worker on ${MAIN_HOST}."
 ssh "${MAIN_HOST}" "cd $REMOTE_DEST && \
      tmux new-session -d -s '$TMUX_SESSION_NAME' \
     '$EXP_BIT; poetry run dask scheduler --host $MAIN_HOST' ';' \
-    split '$REDIS_SERVER_PATH --port $REDIS_PORT --bind 127.0.0.1' ';' \
-    split 'sleep 10; $EXP_BIT; poetry run nice -n $WORKER_NICE dask worker --memory-limit=$MEM_LIMIT --nworkers=$NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
+    split '$REDIS_SERVER_PATH --port $REDIS_PORT --bind $MAIN_HOST --requirepass $REDIS_PWD' ';' \
+    split 'sleep 20; $EXP_BIT; poetry run nice -n $WORKER_NICE dask worker --memory-limit=$MEM_LIMIT --nworkers=$NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
     split 'sleep 5; $EXP_BIT; poetry run python -m morello.search.bottomup --scheduler $MAIN_HOST:8786 ${EXTRA_ARGS[*]}' ';' \
     setw remain-on-exit on ';'"
 
@@ -97,6 +98,6 @@ for d in "${OTHER_HOSTS[@]}"; do
   echo "Starting worker on $d."
   ssh "$d" "cd $REMOTE_DEST && \
       tmux new-session -d -s '$TMUX_SESSION_NAME' \
-      'sleep 5; $EXP_BIT; poetry run nice -n $WORKER_NICE dask worker --name $d --memory-limit=$MEM_LIMIT --nworkers=$NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
+      'sleep 20; $EXP_BIT; poetry run nice -n $WORKER_NICE dask worker --name $d --memory-limit=$MEM_LIMIT --nworkers=$NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
       setw remain-on-exit on ';'"
 done

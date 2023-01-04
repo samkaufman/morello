@@ -84,7 +84,7 @@ class BlockCompressedArray:
         """Fill a (hyper-)rectangular sub-region of the array with a value.
 
         :param lower: The lower coordinate of the region to fill.
-        :param upper: The lower coordinate of the region to fill.
+        :param upper: The upper coordinate of the region to fill.
         :param value: The value with which to fill the region.
         """
         if any(l < 0 for l in lower) or any(u > b for u, b in zip(upper, self.shape)):
@@ -227,13 +227,13 @@ def _block_intersect(
     block_shape: Sequence[int],
     lower: Sequence[int],
     upper: Sequence[int],
-) -> tuple[Sequence[int], Sequence[int]]:
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
     global_origin = [l * b for l, b in zip(block_pt, block_shape)]
-    block_origin = [max(0, b - a) for a, b in zip(global_origin, lower)]
-    block_upper = [
+    block_origin = tuple(max(0, b - a) for a, b in zip(global_origin, lower))
+    block_upper = tuple(
         min((p + 1) * s, b) - c
         for p, s, b, c in zip(block_pt, block_shape, upper, global_origin)
-    ]
+    )
     return block_origin, block_upper
 
 

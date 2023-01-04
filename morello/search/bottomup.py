@@ -1,34 +1,29 @@
 import argparse
 import asyncio
-from collections.abc import Sequence
 import concurrent.futures
-import copy
-import dataclasses
+import contextlib
+import functools
 import itertools
 import logging
 import os
 import pathlib
+import random
 import secrets
 import subprocess
+import sys
 import time
-from typing import (
-    Generator,
-    TypeVar,
-    Any,
-    Callable,
-    Iterable,
-    Optional,
-    TYPE_CHECKING,
-    Union,
-)
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Generator, Iterable, Optional, TypeVar, Union
 
 import dask.distributed
 import redis.asyncio as redis
+import tqdm
+import tqdm.contrib.logging
 
-from . import dp
-from .. import dtypes, pruning, search_cache, specs, system_config, utils
+from .. import dtypes, geometry, pruning, search_cache, specs, system_config, utils
 from ..impl import spec_to_hole
 from ..impl.utils import gen_vector_shapes
+from . import dp
 
 if TYPE_CHECKING:
     from .. import impl
@@ -38,6 +33,7 @@ T = TypeVar("T")
 MERGE_DIAGONALS = True
 BANK_GROUPS = (("RF", "VRF"), ("L1",), ("GL",))
 NAMESPACE = "BOOP"  # TODO: Generate real namespaces.
+KEEP_LOCAL_LIM = 2
 
 CacheOrFut = Union[
     search_cache.InMemoryScheduleCache,
@@ -45,6 +41,9 @@ CacheOrFut = Union[
 ]
 
 logger = logging.getLogger(__name__)
+red: Optional[redis.Redis] = None
+results_cache = None
+results_cache_graph_group = None
 
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("--scheduler", type=str)
@@ -59,67 +58,7 @@ arg_parser.add_argument("--moves-cache", metavar="CACHE", type=pathlib.Path)
 arg_parser.add_argument("--serial-only", action="store_true")
 
 
-_all_limits_cached: Optional[tuple[Any, system_config.Target]] = None
-
-
-async def _wait_futures_with_short_circuit(futures):
-    pending = list(futures)
-    try:
-        while pending:
-            done, pending = await asyncio.wait(
-                pending, return_when=asyncio.FIRST_EXCEPTION
-            )
-            for fut in done:
-                # Call `result` to re-raise exceptions.
-                # TODO: This is wasteful. We don't actually need the result.
-                fut.result()
-    finally:
-        for fut in pending:
-            fut.cancel()
-
-
-def _all_limits() -> list[pruning.MemoryLimits]:
-    global _all_limits_cached
-
-    if _all_limits_cached:
-        limits, limits_target = _all_limits_cached
-        if limits_target is system_config.current_target():
-            return limits
-
-    target = system_config.current_target()
-    limits = [
-        pruning.StandardMemoryLimits(utils.TinyMap(target.system.ordered_banks, lims))
-        for lims in itertools.product(
-            *[
-                [
-                    2**x
-                    for x in range(
-                        (target.system.banks[b].capacity - 1).bit_length(),
-                        -1,
-                        -1,
-                    )
-                ]
-                + [0]
-                for b in target.system.ordered_banks
-            ]
-        )
-    ]
-    _all_limits_cached = limits, target
-    return limits
-
-
 class _DistributedSearch(dp.Search):
-    def __init__(
-        self,
-        subproblem_to_block_coordinate_fn: Callable[
-            [specs.Spec, pruning.MemoryLimits], tuple[int, ...]
-        ],
-        *args,
-        **kwargs,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        self.subproblem_to_block_coordinate_fn = subproblem_to_block_coordinate_fn
-
     def _iter_expansions(
         self, leaf: "impl.Impl", parent_summary: Optional["impl.ParentSummary"]
     ) -> Iterable["impl.Impl"]:
@@ -133,62 +72,69 @@ class _DistributedSearch(dp.Search):
             yield from impl_group
 
 
-@dataclasses.dataclass(frozen=True)
-class Coord:
-    dim_coords: tuple[int, ...]
-    other_coords: tuple[int, ...]
+def _spec_coordinate_to_specs(
+    top_query: specs.Spec, coord: tuple[int, ...]
+) -> Iterable[specs.Spec]:
+    target = system_config.current_target()
+    operand_count = len(top_query.operands)
 
-    def flatten(self) -> tuple[int, ...]:
-        return self.dim_coords + self.other_coords
+    spec_sizes = list(coord[: -operand_count - 1])
+    operand_shapes: list[list[int]] = []
+    subs_to_sizes: dict[Any, int] = {}
+    for operand_subs in top_query.operands_dim_subscripts():
+        operand_shapes.append([])
+        for sub in operand_subs:
+            if sub in subs_to_sizes:
+                operand_shapes[-1].append(subs_to_sizes[sub])
+            else:
+                size = spec_sizes.pop(0)
+                operand_shapes[-1].append(size)
+                subs_to_sizes[sub] = size
 
-    @staticmethod
-    def structure(flattened: tuple[int, ...], reference_spec: specs.Spec) -> "Coord":
-        other_coords_cnt = Coord.other_coords_count(type(reference_spec))
-        return Coord(
-            dim_coords=flattened[:-other_coords_cnt],
-            other_coords=flattened[-other_coords_cnt:],
-        )
-
-    @staticmethod
-    def other_coords_count(spec_type: type):
-        if spec_type in (specs.Matmul, specs.MatmulAccum):
-            return 4
-        elif spec_type in (specs.Convolution, specs.ConvolutionAccum):
-            return 4
-        elif spec_type in (specs.ReduceSum, specs.ReduceSumAccum):
-            return 3
-        elif spec_type in (specs.Load, specs.Store):
-            return 3
-        elif spec_type == specs.Zero:
-            return 2
-        elif spec_type == specs.Compose:
-            raise ValueError("Compose Specs not supported")
-        else:
-            raise ValueError("Unexpected type: " + str(spec_type))
-
-
-def _spec_coordinates_in_block(downscale: int, block_coord: Coord) -> Iterable[Coord]:
-    for log_pts in itertools.product(
-        *[range(b * downscale, (b + 1) * downscale) for b in block_coord.dim_coords]
+    for (layouts, aligneds, tensor_banks,) in itertools.product(
+        itertools.product(
+            *[target.all_layouts_for_shape(shp) for shp in operand_shapes]
+        ),
+        itertools.product([True, False], repeat=operand_count),
+        itertools.product(*[BANK_GROUPS[i] for i in coord[-operand_count - 1 : -1]]),
     ):
-        yield Coord(
-            tuple(2 ** (p - 1) if p > 0 else 0 for p in log_pts),
-            block_coord.other_coords,
-        )
+        for (contiguous_abstractions, vec_kwargs) in itertools.product(
+            itertools.product(*[l.all_contiguous_abs() for l in layouts]),
+            itertools.product(
+                *[
+                    _iter_vector_shape_args(b, shp, o.dtype)
+                    for o, b, shp in zip(
+                        top_query.operands,
+                        tensor_banks,
+                        operand_shapes,
+                    )
+                ]
+            ),
+        ):
+            new_operands = tuple(
+                target.tensor_spec(
+                    tuple(operand_shapes[i]),
+                    dtype=top_query.operands[i].dtype,
+                    contiguous_abs=contiguous_abstractions[i],
+                    aligned=aligneds[i],
+                    bank=tensor_banks[i],
+                    layout=layouts[i],
+                    **vec_kwargs[i],
+                )
+                for i in range(operand_count)
+            )
+            inps, out = new_operands[:-1], new_operands[-1]
+
+            r = top_query.replace_io(inps, out, serial_only=not bool(coord[-1]))
+            assert coord == _spec_to_spec_coordinate(
+                r
+            ), f"{coord} != {_spec_to_spec_coordinate(r)}"
+            yield r
 
 
-def _spec_coordinate_to_block_coord(downscale: int, spec_coord: Coord) -> Coord:
-    # Scale the tensor dimensions down.
-    # TODO: Handle zero such that exactly `downscale` dimensions in end up in a block.
-    dim_coords = tuple(
-        (0 if x == 0 else (x - 1).bit_length() + 1) // downscale
-        for x in spec_coord.dim_coords
-    )
-    return Coord(dim_coords, spec_coord.other_coords)
-
-
-def _spec_to_spec_coordinate(spec: specs.Spec) -> Coord:
+def _spec_to_spec_coordinate(spec: specs.Spec) -> tuple[int, ...]:
     sb = 0 if spec.serial_only else 1
+
     bank_idxs = []
     for o in spec.operands:
         for idx, bank_group in enumerate(BANK_GROUPS):
@@ -201,418 +147,190 @@ def _spec_to_spec_coordinate(spec: specs.Spec) -> Coord:
     if isinstance(spec, (specs.Matmul, specs.MatmulAccum)):
         m, k = spec.lhs.dim_sizes
         _, n = spec.rhs.dim_sizes
-        return Coord((m - 1, k - 1, n - 1), bank_idxs + (sb,))
+        return (m, k, n) + bank_idxs + (sb,)  # TODO: Need `-1`
     elif isinstance(spec, (specs.Convolution, specs.ConvolutionAccum)):
-        b, c, h, w = (d - 1 for d in spec.lhs.dim_sizes)
-        f, _, fh, fw = (d - 1 for d in spec.rhs.dim_sizes)
-        return Coord((b, c, f, h, w, fh, fw), bank_idxs + (sb,))
+        b, c, h, w = spec.lhs.dim_sizes
+        f, _, fh, fw = spec.rhs.dim_sizes
+        return (b, c, f, h, w, fh, fw) + bank_idxs + (sb,)
     elif isinstance(spec, (specs.ReduceSum, specs.ReduceSumAccum)):
-        return Coord(tuple(d - 1 for d in spec.source.dim_sizes), bank_idxs + (sb,))
+        return spec.source.dim_sizes + bank_idxs + (sb,)
     elif isinstance(spec, (specs.Load, specs.Store, specs.Zero)):
-        return Coord(tuple(d - 1 for d in spec.output.dim_sizes), bank_idxs + (sb,))
+        return spec.output.dim_sizes + bank_idxs + (sb,)
     elif isinstance(spec, specs.Compose):
         raise ValueError("Compose Specs not supported")
     else:
         raise NotImplementedError("Unsupported Spec: " + str(spec))
 
 
-# TODO: Can we just automatically invert _spec_to_coordinate? Or derive from Spec?
-def _destructure_spec_coordinate(
-    base_spec: specs.Spec, coord: Coord
-) -> tuple[Sequence[tuple[int, ...]], Sequence[Sequence[str]], bool,]:
-    """Return a modified copy of the given Spec with the given coordinate."""
-    spec_dims = tuple(d + 1 for d in coord.dim_coords)
-    bank_grps: Sequence[Sequence[str]] = [
-        BANK_GROUPS[b] for b in coord.other_coords[:-1]
-    ]
-    serial = coord.other_coords[-1] == 0
-
-    if isinstance(base_spec, (specs.Matmul, specs.MatmulAccum)):
-        return (
-            [spec_dims[:2], spec_dims[1:3], (spec_dims[0], spec_dims[2])],
-            bank_grps,
-            serial,
-        )
-    elif isinstance(base_spec, (specs.Convolution, specs.ConvolutionAccum)):
-        b, c, f, h, w, fh, fw = spec_dims
-        return [(b, c, h, w), (f, c, fh, fw), (b, f, h, w)], bank_grps, serial
-    elif isinstance(base_spec, (specs.ReduceSum, specs.ReduceSumAccum)):
-        return (spec_dims, spec_dims[:-1]), bank_grps, serial
-    elif isinstance(base_spec, (specs.Load, specs.Store)):
-        return (spec_dims, spec_dims), bank_grps, serial
-    elif isinstance(base_spec, specs.Zero):
-        return (spec_dims,), bank_grps, serial
-    elif isinstance(base_spec, specs.Compose):
-        raise ValueError("Compose Specs not supported")
-    else:
-        raise NotImplementedError("Unsupported Spec: " + str(base_spec))
-
-
-class DPTableGraph:
-    diagonals: list["DPTableGraphDiagonal"]
-    downscale: int
-
-    def __init__(
-        self,
-        executor: concurrent.futures.Executor,
-        downscale: int,
-        top_query_spec: specs.Spec,
-        top_limits: pruning.MemoryLimits,
-        base_cache: Optional[CacheOrFut] = None,
-    ):
-        self.downscale = downscale
-        self.diagonals = []
-
-        top_spec_pt = _spec_to_spec_coordinate(top_query_spec)
-        top_block = _spec_coordinate_to_block_coord(downscale, top_spec_pt)
-        self.top_block = top_block
-
-        diagonal_idx = 0
-        while True:
-            diagonal_coordinates = [
-                Coord.structure(d, top_query_spec)
-                for d in utils.sum_seqs(maxes=top_block.flatten(), total=diagonal_idx)
-            ]
-            if not diagonal_coordinates:
-                break
-
-            # Add a number to the task key if all operands have the same rank.
-            suffix = type(top_query_spec).__name__
-            first_rank = len(top_query_spec.operands[0].dim_sizes)
-            if all(len(o.dim_sizes) == first_rank for o in top_query_spec.operands):
-                M = ["Zero", "One", "Two", "Three", "Four", "Five"]
-                try:
-                    suffix += M[len(top_query_spec.operands[0].dim_sizes)]
-                except IndexError:
-                    pass
-            suffix += f"-{diagonal_idx}"
-
-            # TODO: Remove
-            print(f"## Spawning diagonal {diagonal_idx}")
-
-            new_diagonal = DPTableGraphDiagonal(
-                executor=executor,
-                diagonal_coordinates=diagonal_coordinates,
-                downscale=downscale,
-                top_query_spec=top_query_spec,
-                top_limits=top_limits,
-                initial_cache=(base_cache if diagonal_idx == 0 else None),
-            )
-            self.diagonals.append(new_diagonal)
-
-            diagonal_idx += 1
-
-        assert (
-            tuple(
-                map(
-                    max,
-                    zip(*[c.flatten() for d in self.diagonals for c in d.coordinates]),
-                )
-            )
-            == top_block.flatten()
-        )
-
-
-class DPTableGraphDiagonal:
-    coordinates: Sequence[Coord]
-    _futures: list[concurrent.futures.Future[search_cache.InMemoryScheduleCache]]
-    _merged_result: Optional[concurrent.futures.Future[search_cache.ScheduleCache]]
-
-    def __init__(
-        self,
-        executor: concurrent.futures.Executor,
-        diagonal_coordinates: Iterable[Coord],
-        *,
-        downscale: int,
-        top_query_spec: specs.Spec,
-        top_limits: pruning.MemoryLimits,
-        initial_cache: Optional[CacheOrFut] = None,
-    ):
-        target = system_config.current_target()
-
-        self.coordinates = list(diagonal_coordinates)
-        self._merged_result = None
-        self._futures = [
-            executor.submit(
-                _compute_block,
-                block_coordinate,
-                target,
-                top_query_spec,
-                downscale,
-                os.getenv("REDIS_URL"),
-            )
-            for block_coordinate in self.coordinates
-        ]
-
-        # Wait for diagonal futures to complete.
-        futures_pending = list(self._futures)
-        try:
-            while futures_pending:
-                futures_done, futures_pending = concurrent.futures.wait(
-                    futures_pending, return_when=concurrent.futures.FIRST_EXCEPTION
-                )
-                for fut in futures_done:
-                    # `result` will re-raise exceptions, if any.
-                    fut.result()
-        finally:
-            for fut in futures_pending:
-                fut.cancel()
-        print(f"Finished waiting on coordinates: {self.coordinates}")
-
-    def __len__(self) -> int:
-        return len(self.coordinates)
-
-    def __getitem__(
-        self, idx: int
-    ) -> concurrent.futures.Future[search_cache.InMemoryScheduleCache]:
-        return self._futures[idx]
-
-
-async def _merge_caches(
-    caches: Sequence[CacheOrFut],
-    target: system_config.Target,
-) -> search_cache.InMemoryScheduleCache:
-    if not caches:
-        raise ValueError("No caches to merge")
-
-    if len(caches) == 1 and isinstance(caches[0], search_cache.InMemoryScheduleCache):
-        return caches[0]
-
-    resolved_caches = []
-    future_caches = []
-    for c in caches:
-        if isinstance(c, search_cache.ScheduleCache):
-            resolved_caches.append(c)
-        else:
-            future_caches.append(c)
-
-    with system_config.with_target(target):
-        if isinstance(resolved_caches[0], search_cache.InMemoryScheduleCache):
-            cache = copy.deepcopy(resolved_caches[0])
-            resolved_caches = resolved_caches[1:]
-        else:
-            cache = search_cache.InMemoryScheduleCache()
-
-        for c in resolved_caches:
-            await cache.update(c)
-        for c in concurrent.futures.as_completed(future_caches):
-            await cache.update(c.result())
-        return cache
-
-
-def _enumerate_contig_abstractions(
-    spec_type: type, banks: Sequence[str], layouts
-) -> Iterable[Sequence[Any]]:
-    return itertools.product(*[l.all_contiguous_abs_for_shape() for l in layouts])
-
-
-def _step_memory_limits(
-    completed_cap: pruning.StandardMemoryLimits,
-    completed_peak: pruning.StandardMemoryLimits,
-    next_limits: list[pruning.StandardMemoryLimits],
+def _compute_dp_table_graph(
+    executor: concurrent.futures.Executor,
+    grid: geometry.Grid,
+    *,
+    redis_url: str,
+    desc: Optional[str] = None,
 ):
-    """Modifies `next_limits` in response to a completed search step."""
-    pass
+    target = system_config.current_target()
+
+    graph_group = random.randint(0, 2**32 - 1)
+
+    with tqdm.contrib.logging.logging_redirect_tqdm():
+        for diagonal in tqdm.tqdm(list(grid.block_diagonals_northeast()), desc=desc):
+            for _ in executor.map(
+                functools.partial(
+                    _compute_block,
+                    target=target,
+                    redis_url=redis_url,
+                    graph_group=graph_group,
+                ),
+                diagonal,
+            ):
+                pass
+
+
+def _redis_block(spec: specs.Spec, memory_limits: pruning.MemoryLimits) -> str:
+    # TODO: Instead use the block somehow. Will need to have all grids to dispatch between
+    #   Spec types.
+    # TODO: Move the Spec type name prefix outside this class.
+    block_pt = _spec_to_spec_coordinate(spec)
+    block_part = ",".join(map(str, block_pt))
+    types_part = ",".join([str(o.dtype) for o in spec.operands])
+    return f"{type(spec).__name__}-{block_part}-{types_part}"
+
+
+def _keep_local(block_key: str) -> bool:
+    try:
+        _, _, block_part, _ = block_key.split("-")
+        dims = list(map(int, block_part.split(",")))
+        return all(d < KEEP_LOCAL_LIM for d in dims)
+    except ValueError:
+        raise ValueError("Unable to parse: " + block_key)
 
 
 # TODO: Can we design this so that we don't need to reproduce the logic of the
 #   top-down actions expansion? Hate having the logic in two places.
 def _compute_block(
-    block_coord: Coord,
+    block: geometry.GridBlock[specs.Spec],
     target: system_config.Target,
-    top_query_spec: specs.Spec,
-    downscale: int,
+    graph_group,
     redis_url: str,
 ) -> None:
     """Compute a block and save into the Redis cache."""
-    start_time = time.time()
-
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    results_cache = search_cache.RedisCache(
-        redis.Redis.from_url(redis_url),
-        NAMESPACE,
-        lambda spec, _: _spec_coordinate_to_block_coord(
-            downscale, _spec_to_spec_coordinate(spec)
-        ).flatten(),
-        autoflush=False,
-    )
+    # TODO: Scope this more nicely, somehow.
+    global red, results_cache, results_cache_graph_group
+    if results_cache is not None and results_cache_graph_group != graph_group:
+        results_cache = None
+    if red is None:
+        red = redis.Redis.from_url(redis_url)
+    if results_cache is None:
+        # TODO: Assert block membership in lambda
+        results_cache = search_cache.RedisCache(
+            red, NAMESPACE, _redis_block, keep_local=_keep_local, autoflush=False
+        )
+        results_cache_graph_group = graph_group
+    assert red is not None and results_cache is not None
 
     with system_config.with_target(target):
-        searcher = _DistributedSearch(
-            lambda spec, _: _spec_coordinate_to_block_coord(
-                downscale, _spec_to_spec_coordinate(spec)
-            ).flatten(),
-        )
-
-        search_tasks: dict[
-            int, Generator[dp.SearchMessage, dp.SearchResponse, dp.SearchResult]
-        ] = {}
-
-        # TODO: Remove following
-        all_specs = set()
-
-        top_block_coord = _spec_to_spec_coordinate(top_query_spec)
-        for spec_coord in _spec_coordinates_in_block(downscale, block_coord):
-            # The largest block might contain Specs which are larger than the bounding
-            # query shape (`top_query_shape`). Skip those.
-            if any(
-                s > t for s, t in zip(spec_coord.flatten(), top_block_coord.flatten())
-            ):
-                continue
-
-            print(f"{os.getpid()}\tEntering spec coord {spec_coord}")
-
-            (
-                operand_shapes,
-                tensor_bank_groups,
-                serial_only,
-            ) = _destructure_spec_coordinate(top_query_spec, spec_coord)
-            for spec, mlims in _block_subproblems(
-                top_query_spec, operand_shapes, tensor_bank_groups, serial_only
-            ):
-                # TODO: Pass parent_summary too, if applicable.
-                # TODO: Skip ahead to corners of peak memory. This will add
-                #   repeated loading of blocks, but it's probably worth it.
-                all_specs.add(spec)
-                new_task = searcher._search(spec_to_hole(spec), mlims)
-                search_tasks[len(search_tasks)] = new_task
-
-        print(f"About to run {len(search_tasks)} coroutines")  # TODO: remove
-
-        # TODO: Do we need to merge needed Specs or can we rely on the cache to do it?
-        subproblems_requested: list[tuple[specs.Spec, pruning.MemoryLimits]] = []
-        tasks_neededs = {k: [] for k in search_tasks}
-        first_step = True  # TODO: Need this, really?
-        while search_tasks:
-            # Query the cache once to get all the needed subproblems for all search
-            # coroutines.
-            subproblem_results = list(
-                loop.run_until_complete(results_cache.get_many(subproblems_requested))
+        searcher = _DistributedSearch()
+        # Run every Spec concurrently, stepping (and reloading) only for new memory limits.
+        subproblems_to_run = [(s, pruning.StandardMemoryLimits()) for s in block]
+        while subproblems_to_run:
+            subproblems_to_run = _step_compute_block(
+                loop, results_cache, searcher, subproblems_to_run
             )
-            assert len(subproblem_results) == len(subproblems_requested)
-            subproblems_requested.clear()
-
-            tasks_to_remove = []
-            for gen_ident, search_gen in search_tasks.items():
-                try:
-                    if first_step:
-                        msg = next(search_gen)
-                    else:
-                        msg = search_gen.send(
-                            [subproblem_results[i] for i in tasks_neededs[gen_ident]]
-                        )
-                except StopIteration:
-                    tasks_to_remove.append(gen_ident)
-                else:
-                    tasks_neededs[gen_ident] = list(
-                        range(
-                            len(subproblems_requested),
-                            len(subproblems_requested) + len(msg.needed),
-                        )
-                    )
-                    subproblems_requested.extend(msg.needed)
-                    for mlims, entry in msg.computed:
-                        loop.run_until_complete(results_cache.put(entry, mlims))
-            for task_ident in tasks_to_remove:
-                del search_tasks[task_ident]
-                del tasks_neededs[task_ident]
-            first_step = False
-
-        # for search_gen in search_tasks:
-        #     msg = next(search_gen)
-        #     combined_needed.extend(msg.needed)
-        #     assert not msg.computed  # TODO: Support on first step too.
-        #
-        #     try:
-        #         cache_response = await cache.get_many(msg.needed)
-        #         for mlims, entry in msg.computed:
-        #             print(f"Writing entry {entry}")
-        #             await cache.put(entry, mlims)
-        #         msg = search_gen.send(list(cache_response))
-        #     except StopIteration as e:
-        #         return e.value.impls
-        #     assert False, "Should not reach here"
-        #
-        # loop.run_until_complete(_wait_futures_with_short_circuit(search_tasks))
-
-        # # Confirm that the overlay object is filled.
-        # # TODO: Remove following
-        # for spec in all_specs:
-        #     s = results_cache.overlay._rects[spec].storage
-        #     for v in s.iter_values():
-        #         assert v != s.default_value
-
         loop.run_until_complete(results_cache.flush())
+        loop.run_until_complete(red.close(close_connection_pool=True))
         loop.close()
 
-        print(
-            f"# Done computing block {type(top_query_spec).__name__} {block_coord} after {time.time() - start_time:.2f} seconds"
-        )
 
+def _step_compute_block(
+    loop: asyncio.AbstractEventLoop,
+    results_cache: search_cache.RedisCache,
+    searcher: dp.Search,
+    subproblems_to_run: Iterable[tuple[specs.Spec, pruning.StandardMemoryLimits]],
+) -> list[tuple[specs.Spec, pruning.StandardMemoryLimits]]:
+    search_tasks: dict[int, Generator] = {}
+    for spec, mlims in subproblems_to_run:
+        # TODO: Pass parent_summary too, if applicable.
+        new_task = searcher.interactive_search(spec_to_hole(spec), mlims)
+        search_tasks[len(search_tasks)] = new_task
 
-def _block_subproblems(
-    top_query_spec, operand_shapes, tensor_bank_groups, serial_only
-) -> Iterable[tuple[specs.Spec, pruning.MemoryLimits]]:
-    """Enumerate all subproblems (Spec-memory limit pairs) of a block."""
-    target = system_config.current_target()
-    op_count = len(top_query_spec.operands)
+    # TODO: Assert that each of our search generators requests each dependent block
+    #   exactly once.
+    needs: dict[int, Sequence[tuple[specs.Spec, pruning.MemoryLimits]]] = {
+        k: [] for k in search_tasks
+    }
+    first_step = True  # TODO: Need this, really?
+    next_subproblems_to_run = []
+    while search_tasks:
+        # `subproblems_requested` will have duplicates. Rely on the cache to merge.
+        subproblems_requested = list(itertools.chain.from_iterable(needs.values()))
+        cache_results_flat = list(
+            loop.run_until_complete(results_cache.get_many(subproblems_requested))
+        )
+        assert len(subproblems_requested) == len(cache_results_flat)
+        cache_results_grouped = {}
+        taken = 0
+        for k in needs:
+            cache_results_grouped[k] = cache_results_flat[taken : taken + len(needs[k])]
+            taken += len(needs[k])
+        assert taken == len(
+            cache_results_flat
+        ), f"Did not consume all {len(cache_results_flat)} results"
 
-    product_iters_a = []
-    product_iters_a.append(
-        itertools.product(
-            *[target.all_layouts_for_shape(shp) for shp in operand_shapes]
-        )
-    )
-    product_iters_a.append(itertools.product([True, False], repeat=op_count))
-    product_iters_a.append(_all_limits())
-    product_iters_a.append(itertools.product(*tensor_bank_groups))
-    for (
-        layouts,
-        aligneds,
-        memory_limits,
-        tensor_banks,
-    ) in itertools.product(*product_iters_a):
-        product_iters_b = []
-        product_iters_b.append(
-            _enumerate_contig_abstractions(type(top_query_spec), tensor_banks, layouts)
-        )
-        product_iters_b.append(
-            itertools.product(
-                *[
-                    _iter_vector_shape_args(b, shp, o.dtype)
-                    for o, b, shp in zip(
-                        top_query_spec.operands,
-                        tensor_banks,
-                        operand_shapes,
-                    )
-                ]
-            )
-        )
-
-        for (contiguous_abstractions, vec_kwargs) in itertools.product(
-            *product_iters_b
-        ):
-            new_operands = tuple(
-                target.tensor_spec(
-                    operand_shapes[i],
-                    dtype=top_query_spec.operands[i].dtype,
-                    contiguous_abs=contiguous_abstractions[i],
-                    aligned=aligneds[i],
-                    bank=tensor_banks[i],
-                    layout=layouts[i],
-                    **vec_kwargs[i],
+        completed_task_keys = []
+        assert len(search_tasks) == len(set(search_tasks.keys()))
+        for task_key, search_gen in search_tasks.items():
+            try:
+                if first_step:
+                    msg: dp.SearchMessage = next(search_gen)
+                else:
+                    # Pop from front of the cache response.
+                    msg = search_gen.send(cache_results_grouped[task_key])
+            except StopIteration:
+                completed_task_keys.append(task_key)
+                continue
+            needs[task_key] = msg.needed
+            for mlims, entry in msg.computed:
+                loop.run_until_complete(results_cache.put(entry, mlims))
+                # TODO: Clean up dominated limits?
+                next_subproblems_to_run.extend(
+                    (entry.spec, smaller_mlims)
+                    for smaller_mlims in _next_limits(mlims, entry.bottom_peak)
                 )
-                for i in range(op_count)
+        for task_ident in completed_task_keys:
+            del search_tasks[task_ident]
+            del needs[task_ident]
+        first_step = False
+
+    return next_subproblems_to_run
+
+
+def _next_limits(
+    caps: pruning.StandardMemoryLimits, peak: utils.TinyMap
+) -> Iterable[pruning.StandardMemoryLimits]:
+    keys_ordered = caps.available.raw_keys
+    assert keys_ordered == peak.raw_keys
+    for idx in range(len(keys_ordered)):
+        new_values = list(caps.available.raw_values)
+        if peak.raw_values[idx] == 0:
+            continue
+        if peak.raw_values[idx] == 1:
+            new_values[idx] = 0
+        else:
+            new_values[idx] = 2 ** (peak.raw_values[idx].bit_length() - 2)
+        new_cap = pruning.StandardMemoryLimits(
+            utils.TinyMap(keys_ordered, tuple(new_values))
+        )
+        assert any(
+            a > b
+            for a, b in zip(
+                caps.available.raw_values, new_cap.available.raw_values, strict=True
             )
-            new_inputs, new_output = new_operands[:-1], new_operands[-1]
-            spec = top_query_spec.replace_io(
-                inputs=new_inputs,
-                output=new_output,
-                serial_only=serial_only,
-            )
-            yield spec, memory_limits
+        )
+        yield new_cap
 
 
 def _iter_vector_shape_args(
@@ -672,19 +390,54 @@ def _deploy_k8s_cluster(image_tag: str):
     return cluster
 
 
-def _compute_moves_subgraph(
+def _grid_for_query_spec(spec: specs.Spec, downscale: int) -> geometry.Grid[specs.Spec]:
+    """Build a Grid including the given `spec` and its dependencies.
+
+    Overapproximates the dependencies.
+
+    NOTE: `downscale` is only applied to the operand dimensions.
+    """
+    grid_dims: list[geometry.BlockedRange] = []
+
+    # Add ranges for the Spec dimensions.
+    if isinstance(spec, specs.Compose):
+        raise ValueError("Compose Specs not supported")
+    seen_dims = set()
+    for operand, operand_subs in zip(spec.operands, spec.operands_dim_subscripts()):
+        for size, sub in zip(operand.dim_sizes, operand_subs):
+            if sub in seen_dims:
+                continue
+            seen_dims.add(sub)
+            grid_dims.append(geometry.log_range(1, size + 1, downscale))
+
+    # Add ranges for the operands' banks.
+    for _ in range(len(spec.operands)):
+        grid_dims.append(geometry.SimpleBlockedRange(0, len(BANK_GROUPS)))
+
+    # Add a dimension for serial-parallel.
+    grid_dims.append(geometry.SimpleBlockedRange(0, 1 if spec.serial_only else 2))
+
+    return geometry.Grid(
+        grid_dims,
+        mapper=functools.partial(_spec_coordinate_to_specs, spec),
+        rev_mapper=_spec_to_spec_coordinate,
+    )
+
+
+def _compute_moves_subgraphs(
     executor: concurrent.futures.Executor,
     size: int,
     dt: dtypes.Dtype,
     serial_only: bool,
     downscale: int,
     max_rank: int,
+    *,
+    redis_url: str,
 ) -> None:
     if max_rank < 2:
         raise ValueError("max_rank must be at least 2")
 
     target = system_config.current_target()
-    limits = pruning.StandardMemoryLimits()
 
     for rank in range(1, max_rank + 1):
         load_spec = specs.Load(
@@ -702,18 +455,26 @@ def _compute_moves_subgraph(
             serial_only=serial_only,
         )
 
-        DPTableGraph(executor, downscale, load_spec, top_limits=limits)
+        load_grid = _grid_for_query_spec(load_spec, downscale)
+        store_grid = _grid_for_query_spec(store_spec, downscale)
+        zero_grid = _grid_for_query_spec(zero_spec, downscale)
 
-        # TODO: Re-enable the following
-        # # Zero depends on Store, not Load, so chain those.
-        # save_dp_table = DPTableGraph(executor, downscale, store_spec, top_limits=limits)
-        # store_zero_cache = DPTableGraph(
-        #     executor, downscale, zero_spec, top_limits=limits
-        # )
+        # Load and Store have no deps. Zero depends on Store, so it goes last.
+        _compute_dp_table_graph(
+            executor, load_grid, redis_url=redis_url, desc=f"Load, rank {rank}"
+        )
+        _compute_dp_table_graph(
+            executor, store_grid, redis_url=redis_url, desc=f"Store, rank {rank}"
+        )
+        _compute_dp_table_graph(
+            executor, zero_grid, redis_url=redis_url, desc=f"Zero, rank {rank}"
+        )
 
 
 def main(args=None):
     logging.basicConfig(level=logging.INFO)
+
+    redis_url = os.environ["REDIS_URL"]
 
     if not args:
         args = arg_parser.parse_args()
@@ -723,38 +484,36 @@ def main(args=None):
     system_config.set_current_target("cpu")
     target = system_config.current_target()
 
-    # if args.scheduler:
-    #     cluster = contextlib.nullcontext()
-    #     cluster_address = args.scheduler
-    # elif args.deploy_k8s or args.deploy_k8s_with_custom_image:
-    #     if args.deploy_k8s_with_custom_image:
-    #         if args.image_name:
-    #             print("--image_name ignored when using a custom image", file=sys.stderr)
-    #         tag = args.deploy_k8s_with_custom_image
-    #     else:
-    #         assert args.image_name
-    #         tag = _make_docker_image(args.image_name)
-    #     cluster = _deploy_k8s_cluster(tag)
-    #     cluster_address = cluster
-    # else:
-    #     cluster = dask.distributed.LocalCluster(threads_per_worker=1)
-    #     cluster_address = cluster
+    if args.scheduler:
+        cluster = contextlib.nullcontext()
+        cluster_address = args.scheduler
+    elif args.deploy_k8s or args.deploy_k8s_with_custom_image:
+        if args.deploy_k8s_with_custom_image:
+            if args.image_name:
+                print("--image_name ignored when using a custom image", file=sys.stderr)
+            tag = args.deploy_k8s_with_custom_image
+        else:
+            assert args.image_name
+            tag = _make_docker_image(args.image_name)
+        cluster = _deploy_k8s_cluster(tag)
+        cluster_address = cluster
+    else:
+        cluster = dask.distributed.LocalCluster(threads_per_worker=1)
+        cluster_address = cluster
 
-    # with cluster, dask.distributed.Client(
-    #     cluster_address
-    # ) as dask_client, dask.config.set(scheduler=dask_client):
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        # executor = dask_client.get_executor()
-        limits = pruning.StandardMemoryLimits()
-
+    with cluster, dask.distributed.Client(
+        cluster_address
+    ) as dask_client, dask.config.set(scheduler=dask_client):
+        executor = dask_client.get_executor()
         for dt in dtypes.ALL_DTYPES:
-            _compute_moves_subgraph(
+            _compute_moves_subgraphs(
                 executor,
                 args.size,
                 dt,
                 args.serial_only,
                 args.downscale,
                 args.moves_rank,
+                redis_url=redis_url,
             )
 
             if not args.moves_only:
@@ -764,22 +523,22 @@ def main(args=None):
                     output=target.tensor_spec((args.size, args.size), dtype=dt),
                     serial_only=args.serial_only,
                 )
-                DPTableGraph(
-                    executor, args.downscale, matmul_accum_spec, top_limits=limits
-                )
-
                 matmul_spec = specs.Matmul(
                     lhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     rhs=target.tensor_spec((args.size, args.size), dtype=dt),
                     output=target.tensor_spec((args.size, args.size), dtype=dt),
                     serial_only=args.serial_only,
                 )
-                DPTableGraph(
-                    executor,
-                    args.downscale,
-                    matmul_spec,
-                    top_limits=limits,
+
+                matmul_accum_grid = _grid_for_query_spec(
+                    matmul_accum_spec, args.downscale
                 )
+                matmul_grid = _grid_for_query_spec(matmul_spec, args.downscale)
+
+                _compute_dp_table_graph(
+                    executor, matmul_accum_grid, redis_url=redis_url
+                )
+                _compute_dp_table_graph(executor, matmul_grid, redis_url=redis_url)
 
     print(f"Total time: {time.time() - start:.1f}s")
 

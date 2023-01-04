@@ -25,7 +25,7 @@ class Layout:
     def contiguous_lub(self, other_layout: "Layout", a, b):
         raise NotImplementedError()
 
-    def all_contiguous_abs_for_shape(self) -> Iterable[Any]:
+    def all_contiguous_abs(self) -> Iterable[Any]:
         raise NotImplementedError()
 
     def tile_is_contiguous(self, contiguous_abs) -> bool:
@@ -108,7 +108,7 @@ class StandardLayout(Layout):
         """Returns contig. abstractions for just the physically innermost dimension."""
         return 1
 
-    def all_contiguous_abs_for_shape(self) -> Iterable[Any]:
+    def all_contiguous_abs(self) -> Iterable[Any]:
         yield from range(len(self.dim_order) + 1)
 
     def tile_is_contiguous(self, contiguous_abs) -> bool:
@@ -263,7 +263,7 @@ class PackedLayout(Layout):
         assert isinstance(other_layout, PackedLayout)
         return min(a, b)
 
-    def all_contiguous_abs_for_shape(self) -> Iterable[Any]:
+    def all_contiguous_abs(self) -> Iterable[Any]:
         yield from range(self.dim_count + 2)
 
     def tile_is_contiguous(self, contiguous_abs) -> bool:

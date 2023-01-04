@@ -1,6 +1,4 @@
 import abc
-import random
-import traceback
 import asyncio
 import contextlib
 import contextvars
@@ -8,18 +6,15 @@ import dataclasses
 import itertools
 import pathlib
 import pickle
-import time
 import typing
 import warnings
 from typing import (
     AsyncIterable,
-    Awaitable,
     Callable,
     Generic,
     Iterable,
     Iterator,
     Literal,
-    NamedTuple,
     Optional,
     Sequence,
     Tuple,
@@ -28,9 +23,9 @@ from typing import (
 )
 
 import atomicwrites
+import lz4.frame
 import numpy as np
 import redis.asyncio
-import lz4.frame
 
 from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
@@ -38,7 +33,7 @@ from .specs import Spec
 from .system_config import current_system
 from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
 
-TABLE_STYLE: Literal["dense", "list", "dict", "bsa"] = "bsa"
+TABLE_STYLE: Literal["dense", "list", "dict", "bca"] = "bca"
 RAISE_CAPS_ON_OVERLAP = True
 
 T = typing.TypeVar("T")
@@ -102,6 +97,14 @@ class CachedScheduleSet:
             )
         )
 
+    @property
+    def bottom_peak(self) -> TinyMap[str, int]:
+        if self.peak_memory is not None:
+            return self.peak_memory
+        return TinyMap(
+            current_system().ordered_banks, (0,) * len(current_system().banks)
+        )
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, CachedScheduleSet):
             return NotImplemented
@@ -115,13 +118,14 @@ class CachedScheduleSet:
         return hash(self.contents)
 
     def __str__(self) -> str:
-        return f"CachedScheduleSet({self.spec}, {self.contents}, {self.dependent_paths}, {self.peak_memory})"
+        return f"CachedScheduleSet({self.spec}, {self.contents}, {self.dependent_paths}, peak={self.peak_memory})"
 
     def __repr__(self) -> str:
         return f"CachedScheduleSet({self.spec!r}, {self.contents!r}, {self.dependent_paths!r}, {self.peak_memory!r})"
 
 
-class _TableEntry(NamedTuple):
+@dataclasses.dataclass(frozen=True)
+class _TableEntry:
     """Stores the best Impl for a region from its used memory to `caps`.
 
     A _TableEntry is a record of the best Impls that exist up to `caps`.  That schedule
@@ -136,6 +140,9 @@ class _TableEntry(NamedTuple):
     @property
     def peak_memory(self) -> Optional[TinyMap[str, int]]:
         return self.schedules.peak_memory
+
+    def __str__(self) -> str:
+        return f"_TableEntry({self.spec}, {self.schedules}, caps={self.caps})"
 
 
 class ScheduleCache(abc.ABC):
@@ -315,7 +322,7 @@ class InMemoryScheduleCache(ScheduleCache):
         try:
             rects = self._rects[spec]
         except KeyError:
-            if TABLE_STYLE in ("dense", "bsa"):
+            if TABLE_STYLE in ("dense", "bca"):
                 table_dims = tuple(
                     current_system().banks[b].capacity for b in mlims.raw_keys
                 )
@@ -351,9 +358,7 @@ class InMemoryScheduleCache(ScheduleCache):
                     continue
                 assert rect.spec == other_spec
                 rects_seen.add(rect)
-                await self.put(
-                    rect.schedules, pruning.StandardMemoryLimits(rect.caps)
-                )
+                await self.put(rect.schedules, pruning.StandardMemoryLimits(rect.caps))
 
     def specs(self) -> Iterable[Spec]:
         yield from self._rects.keys()
@@ -463,9 +468,8 @@ class RedisCache(ScheduleCache):
         self,
         redis_connection: redis.asyncio.Redis,
         namespace: str,
-        subproblem_to_block_coordinate_fn: Callable[
-            [Spec, pruning.MemoryLimits], tuple[int, ...]
-        ],
+        subproblem_to_block_coordinate_fn: Callable[[Spec, pruning.MemoryLimits], str],
+        keep_local: Optional[Callable[[str], bool]] = None,
         autoflush: bool = True,
     ) -> None:
         # TODO: Document that this class takes "ownership" of the redis_connection
@@ -474,9 +478,11 @@ class RedisCache(ScheduleCache):
         self.namespace = namespace
         self.overlay = InMemoryScheduleCache()
         self.autoflush = autoflush
+        self._keep_local = keep_local
+        self._local_cache = {}
         self._dirty_block: Optional[str] = None
         self._dirty_block_culprit: Optional[tuple[Spec, pruning.MemoryLimits]] = None
-        self._subproblem_to_block_coordinate_fn = subproblem_to_block_coordinate_fn
+        self._given_block_key = subproblem_to_block_coordinate_fn
         self._running_block_task: Optional[
             tuple[str, asyncio.Future[InMemoryScheduleCache]]
         ] = None
@@ -524,7 +530,8 @@ class RedisCache(ScheduleCache):
             self._pending[block_key] = pending_entry
             # Await the task instead of the event to propogate exceptions.
             await asyncio.create_task(
-                self._download_block(block_key), name=f"RedisGetBlock-{block_key}"
+                self._download_and_broadcast_block(block_key),
+                name=f"RedisGetBlock-{block_key}",
             )
         else:
             await pending_entry.event.wait()
@@ -537,7 +544,9 @@ class RedisCache(ScheduleCache):
         block_key = self.redis_block_key(spec, memory_limits)
 
         if self._dirty_block and self._dirty_block != block_key:
-            assert self._dirty_block_culprit, "_dirty_block_culprit should be set is _dirty_block is set"
+            assert (
+                self._dirty_block_culprit
+            ), "_dirty_block_culprit should be set is _dirty_block is set"
             if not self.autoflush:
                 c_spec, c_memory_limits = self._dirty_block_culprit
                 raise Exception(
@@ -587,36 +596,39 @@ class RedisCache(ScheduleCache):
     def __len__(self) -> int:
         raise NotImplementedError()
 
+    async def _download_and_broadcast_block(self, key: str) -> None:
+        self._pending.pop(key).set(await self._download_block(key))
+
     async def _download_block(self, key: str) -> Optional[InMemoryScheduleCache]:
         # TODO: Though we only have one GET out at once, there's no guarantee we'll wait
         #   for it to be processed by all waiting searches before we start the next GET.
         #   Fix this.
+
+        should_keep_local = self._keep_local and self._keep_local(key)
+        if should_keep_local:
+            try:
+                return self._local_cache[key]
+            except KeyError:
+                pass
+
         async with self._get_block_lock:
-            start = time.time()
-            print(f"\033[94mRedis:\033[0m query {key} started")
-            blob = await asyncio.wait_for(self.redis_connection.get(key), timeout=10.0)
-            print(
-                f"\033[94mRedis:\033[0m query {key} done after "
-                f"{time.time() - start:.2f}s (isnone = {blob is None})"
-            )
+            blob = await asyncio.wait_for(self.redis_connection.get(key), timeout=300)
             if blob is None:
-                self._pending.pop(key).set(None)
-                return
+                return None
             assert isinstance(
                 blob, bytes
             ), f"blob was not bytes, was {type(blob).__name__}"
-            decoded = pickle.loads(lz4.frame.decompress(blob))
+            decoded = lz4.frame.decompress(blob)
+            decoded = pickle.loads(decoded)
             assert isinstance(
                 decoded, InMemoryScheduleCache
             ), f"decoded was not InMemoryScheduleCache; was {type(decoded).__name__}"
-            self._pending.pop(key).set(decoded)
-            return
+            if should_keep_local:
+                self._local_cache[key] = decoded
+            return decoded
 
-    def redis_block_key(self, spec: Spec, memory_limits: pruning.MemoryLimits) -> str:
-        # TODO: Move the Spec type name prefix outside this class.
-        block_pt = self._subproblem_to_block_coordinate_fn(spec, memory_limits)
-        block_description = ",".join(map(str, block_pt))
-        return f"{self.namespace}-{type(spec).__name__}-{block_description}"
+    def redis_block_key(self, *args, **kwargs):
+        return f"{self.namespace}-{self._given_block_key(*args, **kwargs)}"
 
 
 class _RectTable(abc.ABC):
@@ -675,8 +687,11 @@ class _SnappingRectTable(_RectTable):
 
 class _SharedTable(_SnappingRectTable):
     def add(self, entry: _TableEntry):
-        bottom_coord = self._logify(self._bottom_from_entry(entry))
-        top_coord = self._logify(snap_availables_up(entry.caps.raw_values, always=True))
+        bottom_coord = tuple(v.bit_length() for v in self._bottom_from_entry(entry))
+        top_coord = tuple(
+            v.bit_length()
+            for v in snap_availables_up(entry.caps.raw_values, always=True)
+        )
         self._fill_storage(bottom_coord, top_coord, entry)
 
     def _get_entry(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
@@ -695,6 +710,10 @@ class _SharedTable(_SnappingRectTable):
 
     @abc.abstractmethod
     def _fill_storage(self, lower, upper, value):
+        """Fills storage.
+
+        Lower and upper points are inclusive.
+        """
         pass
 
     @abc.abstractmethod
@@ -827,7 +846,6 @@ class _DenseNumpyTable(_SharedTable):
         return self.banks
 
     def _fill_storage(self, lower, upper, value):
-        """Fills storage (inclusive)."""
         slicer = tuple(slice(l, u + 1) for l, u in zip(lower, upper))
         self.storage[slicer].fill(value)
 
@@ -872,9 +890,7 @@ class _BlockCompressedTable(_SharedTable):
             self,
             "storage",
             bcarray.BlockCompressedArray(
-                storage_dims,
-                block_shape=tuple(4 for _ in storage_dims),
-                default_value=None,
+                storage_dims, block_shape=tuple(4 for _ in storage_dims)
             ),
         )
 
@@ -882,7 +898,6 @@ class _BlockCompressedTable(_SharedTable):
         return self.banks
 
     def _fill_storage(self, lower, upper, value):
-        """Fills storage (inclusive)."""
         assert not isinstance(value, np.ndarray)
         self.storage.fill_range(lower, tuple(u + 1 for u in upper), value)
 
