@@ -34,6 +34,8 @@ MERGE_DIAGONALS = True
 BANK_GROUPS = (("RF", "VRF"), ("L1",), ("GL",))
 NAMESPACE = "BOOP"  # TODO: Generate real namespaces.
 KEEP_LOCAL_LIM = 2
+PING_TRIES = 10
+PING_WAIT_SECS = 15
 
 CacheOrFut = Union[
     search_cache.InMemoryScheduleCache,
@@ -224,6 +226,17 @@ def _compute_block(
         results_cache = None
     if red is None:
         red = redis.Redis.from_url(redis_url)
+
+        # Wait for Redis to be up.
+        for _ in range(PING_TRIES):
+            try:
+                loop.run_until_complete(red.ping())
+            except redis.BusyLoadingError:
+                time.sleep(PING_WAIT_SECS)
+                pass
+            else:
+                break
+
     if results_cache is None:
         # TODO: Assert block membership in lambda
         results_cache = search_cache.RedisCache(
