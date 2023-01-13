@@ -33,6 +33,7 @@ typeguard = "^2.13.3"
 pytest-asyncio = "^0.20.3"
 fakeredis = "^2.4.0"
 pyperf = "^2.5.0"
+memray = "^1.5.0"
 
 [tool.poetry.group.evaluation]
 optional = true

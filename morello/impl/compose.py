@@ -44,7 +44,7 @@ class SplitNotSupportedByHeadError(NotImplementedError):
     pass
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class ComposeHole(Impl):
     spec: specs.Compose
 

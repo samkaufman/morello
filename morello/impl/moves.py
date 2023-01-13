@@ -354,12 +354,12 @@ class _BaseMoveHole(NonAllocatingLeaf):
         return make_applied_impl(self, operands)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class LoadHole(_BaseMoveHole):
     spec: specs.Load
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class StoreHole(_BaseMoveHole):
     spec: specs.Store
 

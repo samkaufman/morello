@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from .. import impl
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class ZeroHole(base.NonAllocatingLeaf):
     spec: specs.Zero
 

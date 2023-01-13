@@ -21,7 +21,7 @@ from .utils import assert_stable_spec, dim_range, gen_tile_sizes
 from .zero import ZeroHole
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class ReduceSumHoleBase(NonAllocatingLeaf, Moveable):
     spec: specs.Spec
 

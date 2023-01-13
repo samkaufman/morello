@@ -21,7 +21,7 @@ class OversizedVectorError(ValueError):
     pass
 
 
-@cython.dataclasses.dataclass(unsafe_hash=True)
+@cython.dataclasses.dataclass(unsafe_hash=True, slots=True)
 @cython.cclass
 class TensorSpec:
     """A TensorSpec describes an operand to a Spec.

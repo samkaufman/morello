@@ -25,7 +25,7 @@ _convhole_tile_out_params_cache = {}
 _convhole_sliding_tile_out_params_cache = {}
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class ConvHoleBase(NonAllocatingLeaf, Moveable):
     spec: specs.Spec
 
