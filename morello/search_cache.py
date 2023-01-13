@@ -612,7 +612,7 @@ class RedisCache(ScheduleCache):
                 pass
 
         async with self._get_block_lock:
-            blob = await asyncio.wait_for(self.redis_connection.get(key), timeout=300)
+            blob = await asyncio.wait_for(self.redis_connection.get(key), timeout=900)
             if blob is None:
                 return None
             assert isinstance(
