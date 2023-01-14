@@ -73,6 +73,9 @@ class GridBlock(Generic[S]):
         for diagonal in self.iter_northeast():
             yield from diagonal
 
+    def __str__(self) -> str:
+        return f"GridBlock({self.point})"
+
 
 class BlockedRange(abc.ABC):
     """A range of integers, divided into blocks."""

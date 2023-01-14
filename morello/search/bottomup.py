@@ -189,7 +189,7 @@ def _compute_dp_table_graph(
                 pass
 
 
-def _redis_block(spec: specs.Spec, memory_limits: pruning.MemoryLimits) -> str:
+def _redis_coord_key(spec: specs.Spec, memory_limits: pruning.MemoryLimits) -> str:
     # TODO: Instead use the block somehow. Will need to have all grids to dispatch between
     #   Spec types.
     # TODO: Move the Spec type name prefix outside this class.
@@ -240,7 +240,7 @@ def _compute_block(
     if results_cache is None:
         # TODO: Assert block membership in lambda
         results_cache = search_cache.RedisCache(
-            red, NAMESPACE, _redis_block, keep_local=_keep_local, autoflush=False
+            red, NAMESPACE, _redis_coord_key, keep_local=_keep_local, autoflush=False
         )
         results_cache_graph_group = graph_group
     assert red is not None and results_cache is not None
