@@ -77,6 +77,7 @@ ssh "${MAIN_HOST}" "cd $REMOTE_DEST && ~/.local/bin/poetry install --without=eva
 
 # TODO: Grab REDIS_SERVER_PATH from the destination host environment.
 REDIS_SERVER_PATH=/homes/gws/kaufmans/local/bin/redis-server
+REDIS_DIR=/scratch/kaufmans/morello_redis
 REDIS_PORT=7771
 REDIS_PWD=RememberToNiceYourWorkers30
 REDIS_URL="redis://:$REDIS_PWD@$MAIN_HOST:$REDIS_PORT/"
@@ -88,7 +89,7 @@ echo "Starting script, scheduler, and worker on ${MAIN_HOST}."
 ssh "${MAIN_HOST}" "cd $REMOTE_DEST && \
      tmux new-session -d -s '$TMUX_SESSION_NAME' \
     '$EXP_BIT; poetry run dask scheduler --host $MAIN_HOST' ';' \
-    split '$REDIS_SERVER_PATH --port $REDIS_PORT --bind $MAIN_HOST --requirepass $REDIS_PWD' ';' \
+    split '$REDIS_SERVER_PATH  --dir $REDIS_DIR --port $REDIS_PORT --bind $MAIN_HOST --requirepass $REDIS_PWD' ';' \
     split 'sleep 20; $EXP_BIT; poetry run nice -n $WORKER_NICE dask worker --memory-limit=$MEM_LIMIT --nworkers=$NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
     split 'sleep 5; $EXP_BIT; poetry run python -m morello.search.bottomup --scheduler $MAIN_HOST:8786 ${EXTRA_ARGS[*]}' ';' \
     setw remain-on-exit on ';'"
