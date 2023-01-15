@@ -38,7 +38,9 @@ def main() -> int:
             progress_bar.update(inp_size)
 
     print(f"Saving combined cache: {parsed_args.output.name}")
-    pickle.dump(accumulated_cache, parsed_args.output)
+    pickle.dump(
+        accumulated_cache, parsed_args.output, protocol=search_cache.PICKLE_PROTOCOL
+    )
     return 0
 
 

@@ -35,6 +35,7 @@ from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
 
 TABLE_STYLE: Literal["dense", "list", "dict", "bca"] = "bca"
 RAISE_CAPS_ON_OVERLAP = True
+PICKLE_PROTOCOL = 5
 
 T = typing.TypeVar("T")
 
@@ -492,7 +493,6 @@ class RedisCache(ScheduleCache):
     async def get_many(
         self, subproblems: Iterable[tuple["Spec", pruning.MemoryLimits]]
     ) -> Iterable[Optional[CachedScheduleSet]]:
-        # TODO: Read-ahead one from Redis.
         subproblems = list(subproblems)  # TODO: Just require Sequence in signature.
         results: list[Optional[CachedScheduleSet]] = list(
             await self.overlay.get_many(subproblems)
@@ -567,7 +567,9 @@ class RedisCache(ScheduleCache):
 
         # TODO: There should never be a block, so just check that this is the case,
         #   instead of getting it.
-        payload = lz4.frame.compress(pickle.dumps(self.overlay))
+        payload = lz4.frame.compress(
+            pickle.dumps(self.overlay, protocol=PICKLE_PROTOCOL)
+        )
         set_response = await self.redis_connection.setnx(self._dirty_block, payload)
         assert set_response, f"Block already exists: {self._dirty_block}"
 
@@ -954,7 +956,7 @@ def persistent_cache(path: Optional[Union[str, pathlib.Path]], save: bool = True
     finally:
         if save:
             with atomicwrites.atomic_write(path, mode="wb", overwrite=True) as fo:
-                pickle.dump(cache, fo)
+                pickle.dump(cache, fo, protocol=PICKLE_PROTOCOL)
 
 
 def _mem_dicts_ordered(*dicts: Optional[TinyMap[str, int]]) -> bool:
