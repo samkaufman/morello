@@ -205,14 +205,13 @@ class MatmulLeaf(NonAllocatingLeaf):
 @dataclasses.dataclass(frozen=True)
 class Mult(MatmulLeaf):
     def __post_init__(self):
-        assert all(o.bank in ("RF", "HexagonRF") for o in self.spec.operands)
+        assert all(o.bank == "RF" for o in self.spec.operands)
         assert all(d == 1 for o in self.spec.operands for d in o.dim_sizes)
 
     @staticmethod
     def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
         return all(
-            o.bank in ("RF", "HexagonRF") and all(d == 1 for d in o.dim_sizes)
-            for o in operands
+            o.bank == "RF" and all(d == 1 for d in o.dim_sizes) for o in operands
         )
 
 
@@ -266,115 +265,5 @@ class BroadcastVecMult(MatmulLeaf):
             return f"rhs should have shape 1xn, but had shape: {rhs.dim_sizes}"
         if out.dim_sizes != (1, rhs.dim_sizes[1]):
             return f"out should have shape 1x{rhs.dim_sizes[1]}, but had shape: {out.dim_sizes}"
-
-        return None
-
-
-@dataclasses.dataclass(frozen=True)
-class HvxGemvmpybbwAsm(MatmulLeaf):
-    """Impl that invokes hexagon_nn's gemvmpybbw_asm function."""
-
-    def __post_init__(self):
-        super().__post_init__()
-        check_result = HvxGemvmpybbwAsm._check_operands(self.operands)
-        if check_result:
-            raise ValueError(check_result)
-
-    @staticmethod
-    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
-        if HvxGemvmpybbwAsm._check_operands(operands):
-            return False
-        return True
-
-    @staticmethod
-    def _check_operands(operands: Sequence[specs.TensorSpec]) -> Optional[str]:
-        lhs, rhs, out = operands
-
-        if lhs.bank != "L2":
-            # The left-hand side will be prefetched into L1 by the operation
-            # itself.
-            return "lhs must be in L2"
-        if rhs.bank != "L2":
-            return "rhs must be in L2"
-        if out.bank != "L2":
-            return "out must be in L2"
-
-        if not lhs.layout.is_row_major:
-            return "lhs must be in row-major"
-        if rhs.layout != layouts.HEXAGON_TRANSPACKED:
-            return "rhs must be transpacked"
-        if not out.layout.is_row_major:
-            return "out must be in row-major"
-
-        if lhs.dtype != dtypes.Uint8:
-            return "lhs should be uint8"
-        if rhs.dtype != dtypes.Uint8:
-            return "rhs should be uint8"
-        if out.dtype != dtypes.Uint32:
-            return "out should be uint32"
-
-        # The n dimension below is called m by the implementation.
-        m, _ = lhs.dim_sizes
-        k, n = rhs.dim_sizes
-        if m != 1:
-            return f"m must be 1; was: {m}"
-        if k < 16 or k % 16 != 0:
-            return f"k dimension must be a non-zero multiple of 16; was {k}"
-        if n > 32:
-            return f"n must be at most 32; was {n}"
-
-        return None
-
-
-@dataclasses.dataclass(frozen=True)
-class HvxVrmpyaccVuwVubRub(MatmulLeaf):
-    def __post_init__(self):
-        super().__post_init__()
-        check_result = HvxVrmpyaccVuwVubRub._check_operands(self.spec.operands)
-        if check_result:
-            raise ValueError(check_result)
-
-    @staticmethod
-    def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
-        if HvxVrmpyaccVuwVubRub._check_operands(operands):
-            return False
-        return True
-
-    @staticmethod
-    def _check_operands(operands: Sequence[specs.TensorSpec]) -> Optional[str]:
-        lhs, rhs, out = operands
-
-        if lhs.bank != "VMEM":
-            return "lhs must be in vector memory"
-        if rhs.bank != "HexagonRF":
-            return "rhs must be in scalar registers"
-        if out.bank != "VMEM":
-            return "out must be in vector memory"
-
-        if lhs.dtype != dtypes.Uint8:
-            return "lhs should be uint8"
-        if rhs.dtype != dtypes.Uint8:
-            return "rhs should be uint8"
-        if out.dtype != dtypes.Uint32:
-            return "out should be uint8"
-
-        if lhs.dim_sizes != (32, 4):
-            return f"lhs must have shape 32x4, but had shape: {lhs.dim_sizes}"
-        if rhs.dim_sizes != (4, 1):
-            return f"rhs must have shape 4x1, but had shape: {rhs.dim_sizes}"
-        if out.dim_sizes != (32, 1):
-            return f"out must have shape 1x1, but had shape: {out.dim_sizes}"
-
-        if not lhs.contiguous:
-            return "lhs must be contiguous, but was: " + str(lhs)
-        if not rhs.contiguous:
-            return "rhs must be contiguous, but was: " + str(rhs)
-        if not out.contiguous:
-            return "out must be contiguous, but was: " + str(out)
-
-        if not lhs.vector_count == 1:
-            return f"lhs must be a single HVX vector, but was: {lhs}"
-        if not out.vector_count == 1:
-            return f"out must be a single HVX vector, but was: {out}"
 
         return None

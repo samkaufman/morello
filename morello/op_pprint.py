@@ -114,11 +114,9 @@ def _env_str(
         left_concat = ", ".join(left_strs)
         right_concat = ", ".join(right_strs)
         return f"{keyword} ({left_concat}) {arrow} ({right_concat}{istr}"
-    elif isinstance(imp, (impl.MoveLet, impl.PadTranspack)):
+    elif isinstance(imp, impl.MoveLet):
         keyword = "move"
-        if isinstance(imp, impl.PadTranspack):
-            keyword = "padtranspack"
-        elif imp.prefetching:
+        if imp.prefetching:
             keyword += "[p]"
 
         arrow = "<-"

@@ -16,8 +16,7 @@ import morello.impl.moves
 from morello import dtypes, layouts, op_pprint, search, specs, system_config, tensor
 from morello.codegen.ctensors import ONES_FOR_NON_ZERO_INIT
 from morello.impl import SplitNotSupportedByHeadError
-from morello.impl.matmuls import HvxGemvmpybbwAsm
-from morello.system_config import cpu, hexagon
+from morello.system_config import cpu
 
 from .. import strategies
 from .. import utils as test_utils
@@ -377,11 +376,8 @@ def _calculator_to_test(spec_st_fn):
         @pytest.mark.slow
         @pytest.mark.parametrize(
             "target",
-            [
-                cpu.CpuTarget(),
-                pytest.param(hexagon.HvxSimulatorTarget(), marks=pytest.mark.hexagon),
-            ],
-            ids=["cpu", "hexagon"],
+            [cpu.CpuTarget()],
+            ids=["cpu"],
         )
         @pytest.mark.parametrize(
             "parallel",
@@ -553,49 +549,6 @@ def test_codegen_for_zero(spec, _):
 @_calculator_to_test(_arb_matmul_spec)
 def test_codegen_for_matmul(_, inp_values):
     return inp_values[0] @ inp_values[1]
-
-
-@pytest.mark.slow
-@pytest.mark.hexagon
-@hypothesis.settings(deadline=CC_DEADLINE)
-@hypothesis.given(
-    m_mult=st.integers(min_value=1, max_value=6),
-    k_mult=st.integers(min_value=1, max_value=6),
-    n=st.integers(min_value=32, max_value=144),
-    serial_only=st.booleans(),
-)
-def test_codegen_for_matmul_with_hvx_gemvmpebbw_with_aligned_k_without_split(
-    m_mult, k_mult, n, serial_only
-):
-    m = m_mult * 4
-    k = k_mult * 16
-
-    target = hexagon.HvxSimulatorTarget()
-    with system_config.with_target(target):
-        spec = specs.Matmul(
-            target.tensor_spec((m, k), dtype=dtypes.Uint8),
-            target.tensor_spec((k, n), dtype=dtypes.Uint8),
-            target.tensor_spec((m, n), dtype=dtypes.Uint32),
-            serial_only=serial_only,
-        )
-        hole = morello.impl.base.spec_to_hole(spec)
-        imp = hole.tile_out((1, 32))
-        # TODO: Re-introduce split
-        # if spec.lhs.dim_sizes[1] > 16:
-        #     imp = imp.split(16)
-        imp = (
-            imp.move_input(0, bank="L2")
-            .pad_transpack(1)
-            .move_input(1, bank="L2")
-            .move_output(bank="L2")
-            .place(HvxGemvmpybbwAsm)
-        )
-
-        inp_values = [
-            np.arange(m * k, dtype=np.uint32).reshape((m, k)),
-            np.arange(k * n, dtype=np.uint32).reshape((k, n)),
-        ]
-        _test_impl(imp, inp_values, lambda _, v: v[0] @ v[1])
 
 
 @_calculator_to_test(_arb_matmul_matmul_spec)

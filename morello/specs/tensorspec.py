@@ -141,20 +141,6 @@ class TensorSpec:
         system = current_system()
         if layout != self.layout and bank not in system.addressed_banks:
             return False
-
-        if isinstance(layout, layouts.HexagonTranspacked):
-            if self.dtype != Uint8:
-                return False
-            if len(self.dim_sizes) != 2:
-                return False
-            if self.dim_sizes[0] % 4 != 0 or self.dim_sizes[1] % 32 != 0:
-                return False
-        # TODO: Factor the following check out into a Hexagon-specific tensorlike
-        if system_config.current_system().has_hvx and bank == "L2":
-            if len([d for d in self.dim_sizes if d != 1]) != 2:
-                return False
-            if any(d >= 256 for d in self.dim_sizes):
-                return False
         if bank == "VMEM":
             if (self.volume * self.dtype.size) % 128 != 0:
                 return False
@@ -246,46 +232,3 @@ class TensorSpec:
             v_epi = f", {'×'.join(str(s) for s in self.vector_shape)}"
         dims_part = "×".join(str(s) for s in self.dim_sizes)
         return f"({dims_part}, {self.dtype}{bank_epi}{layout_epi}{c_epi}{a_epi}{v_epi})"
-
-
-@cython.dataclasses.dataclass(unsafe_hash=True)
-@cython.cclass
-class HvxVmemTensorSpec(TensorSpec):
-    vector_shape: tuple[int, ...]
-
-    def __init__(self, *args, vector_shape: tuple[int, ...], **kwargs):
-        super().__init__(*args, **kwargs)
-        self.vector_shape = vector_shape
-        if any(s < vs for s, vs in zip(self.dim_sizes, self.vector_shape)):
-            raise ValueError(
-                f"Shape {self.dim_sizes} is smaller in some dimensions than vector shape {vector_shape}"
-            )
-
-    def is_valid_tile_shape(self, shape: tuple[int, ...]) -> bool:
-        if not super().is_valid_tile_shape(shape):
-            return False
-        if any(i > v for (i, v) in zip(shape, self.vector_shape)):
-            return False
-        if functools.reduce(operator.mul, shape, 1) % 128 != 0:
-            return False
-        return True
-
-    def shrink(
-        self, new_dim_sizes: Sequence[int], contiguous: bool
-    ) -> "HvxVmemTensorSpec":
-        new_layout = self.layout
-        if all(d == 1 for d in new_dim_sizes):
-            new_layout = layouts.row_major(len(new_dim_sizes))
-        return HvxVmemTensorSpec(
-            tuple(new_dim_sizes),
-            dtype=self.dtype,
-            contiguous=contiguous,
-            bank=self.bank,
-            layout=new_layout,
-        )
-
-    def __str__(self):
-        base_str = super().__str__()[:-1]
-        vs_dims_part = "×".join(str(s) for s in self.vector_shape)
-        base_str = f"{base_str}, {vs_dims_part})"
-        return base_str

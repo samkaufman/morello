@@ -35,11 +35,9 @@ def with_target(target: Target):
 
 def target_by_name(target_name: str) -> Target:
     # Import inside the method to solve a circular dependency
-    from . import cpu, hexagon
+    from . import cpu
 
-    if target_name == "hvxsim":
-        return hexagon.HvxSimulatorTarget()
-    elif target_name == "cpu":
+    if target_name == "cpu":
         return cpu.CpuTarget()
     else:
         raise ValueError("Unknown target: " + target_name)

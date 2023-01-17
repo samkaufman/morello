@@ -12,7 +12,6 @@ import sympy
 
 from .. import impl, layouts, utils
 from ..dtypes import Dtype, Uint8, Uint32
-from ..system_config import hexagon
 from ..system_config.state import current_system
 from ..tensor import Tensor, TensorLike
 from . import common, expr_utils, indexexpr
@@ -99,41 +98,6 @@ def _make_buffer(
         return CStackArray(name, size, dtype)
     else:
         return CValueVar(name, dtype)
-
-
-@dataclasses.dataclass(frozen=True)
-class _CHvxVectors(CTensor):
-    names: list[str]
-    dtype_bytes: int
-
-    # TODO: Use this static emit pattern for all _CTensor types
-    @staticmethod
-    def emit(tensor: hexagon.HvxVmemTensor) -> "_CHvxVectors":
-        namer, writer = common.namer.get(), common.writer.get()
-        assert (tensor.volume * tensor.dtype.size) % 128 == 0
-        names = []
-        for _ in range(tensor.vector_count):
-            new_name = namer.fresh_name("vv")
-            writer.writeline(f"HVX_Vector {new_name};")
-            names.append(new_name)
-        return _CHvxVectors(names=names, dtype_bytes=tensor.dtype.size)
-
-    def c_index(self, expr, reinterpret: Optional[str] = None) -> str:
-        if reinterpret:
-            raise NotImplementedError()
-        offset = int(expr)
-        assert 128 % self.dtype_bytes == 0
-        increment = 128 // self.dtype_bytes
-
-        if offset % increment != 0:
-            raise ValueError(
-                f"Unexpected expression: {expr}. HVX vectors can only be indexed by "
-                f"the first coordinate in their corresponding vector tile."
-            )
-        return self.names[offset // increment]
-
-    def emit_free(self):
-        pass
 
 
 @contextlib.contextmanager
@@ -337,27 +301,6 @@ def _inner_generate_c(
                 f"(*({vtype} *)({op_details[1].c_tensor.c_index_ptr(r)}));"
                 " /* BroadcastVecMult */"
             )
-    elif isinstance(imp, impl.HvxVrmpyaccVuwVubRub):
-        lhs, rhs, out = op_details
-        lhs_ref_fn, rhs_ref_fn, out_ref_fn = (
-            d.c_tensor.c_index_ptr for d in op_details
-        )
-
-        assert imp.spec.inputs[0].contiguous
-        assert imp.spec.inputs[1].contiguous
-        assert imp.spec.output.contiguous
-
-        # Rewrite index exprs. to refer to first element.
-        lhs_index_expr = expr_utils.zero_points(lhs.index_expr)
-        rhs_index_expr = expr_utils.zero_points(rhs.index_expr)
-        out_index_expr = expr_utils.zero_points(out.index_expr)
-
-        out_val = f"*(HVX_Vector *)({out_ref_fn(out_index_expr)})"
-        writer.writeline(f"{out_val} = Q6_Vuw_vrmpyacc_VuwVubRub(")
-        writer.writeline(f"  {out_val},")
-        writer.writeline(f"  *(HVX_Vector *)({lhs_ref_fn(lhs_index_expr)}),")
-        writer.writeline(f"  *(uint32_t *)({rhs_ref_fn(rhs_index_expr)})")
-        writer.writeline(f");")
     elif isinstance(imp, impl.Add):
         assert all(d == 1 for d in imp.output.dim_sizes)
         i_ref, o_ref = [d.c_tensor.c_index for d in op_details]
@@ -375,54 +318,9 @@ def _inner_generate_c(
 
         concrete_shape = op_details[source_idx].concrete_origin_shape
 
-        # On the Hexagon target:
-        if current_system().has_hvx:
-            if not imp.is_store and imp.destination.bank == "L2":
-                assert imp.source.bank == "GL"
-                _emit_hvx_l2fetch(imp, imp.is_store, op_details[source_idx])
-                _inner_generate_c(imp.body, op_details, allow_holes)
-            # HVX scalar L1/dc-to-register case
-            elif not imp.is_store and imp.destination.bank == "L1":
-                assert imp.source.bank == "L2"
-                _emit_hvx_dcfetch(imp, imp.operands[source_idx], op_details[source_idx])
-                _inner_generate_c(imp.body, op_details, allow_holes)
-            elif imp.is_store and imp.destination.bank == "L2":
-                # Generate no code for moves from L2 to global.
-                assert imp.source.bank == "GL"
-                _inner_generate_c(imp.body, op_details, allow_holes)
-            elif imp.is_store and imp.destination.bank == "L1":
-                # Generate no code for writing from L1 back to L2
-                assert imp.source.bank == "L2"
-                _inner_generate_c(imp.body, op_details, allow_holes)
-            elif imp.destination.bank == "VMEM":
-                assert imp.source.bank == "L2"
-                _move_hvx_vmem(
-                    imp,
-                    source_idx,
-                    [d.c_tensor for d in op_details],
-                    operand_index_exprs,
-                    concrete_shapes,
-                    [d.previously_transformed_tiles for d in op_details],
-                    allow_holes,
-                )
-            elif imp.destination.bank == "HexagonRF":
-                _move_registers(
-                    imp,
-                    source_idx,
-                    [d.c_tensor for d in op_details],
-                    operand_index_exprs,
-                    concrete_shapes,
-                    [d.previously_transformed_tiles for d in op_details],
-                    allow_holes,
-                )
-            else:
-                word = "store" if imp.is_store else "load"
-                raise Exception(f"Unexpected {word} case: {imp.destination.bank}")
-        # On CPU and Hexagon targets: code is only generated (after the
-        # previous cases) for MoveLet if there is a layout or contiguity change.
-        # Otherwise, we just recurse.
-        #
-        elif imp.destination.bank in ("RF", "VRF"):
+        # Code is only generated (after the previous cases) for MoveLet if there is a
+        # layout or contiguity change.  Otherwise, we just recurse.
+        if imp.destination.bank in ("RF", "VRF"):
             _move_registers(
                 imp,
                 source_idx,
@@ -438,98 +336,6 @@ def _inner_generate_c(
                 op_details,
                 allow_holes,
             )
-    elif isinstance(imp, impl.HvxGemvmpybbwAsm):
-        lhs, rhs, out = op_details
-        lhs_ref_fn, rhs_ref_fn, out_ref_fn = (
-            d.c_tensor.c_index_ptr for d in op_details
-        )
-
-        # Rewrite index exprs. to refer to first element.
-        lhs_index_expr = expr_utils.zero_points(lhs.index_expr)
-        rhs_index_expr = expr_utils.zero_points(rhs.index_expr)
-        out_index_expr = expr_utils.zero_points(out.index_expr)
-
-        k, n = rhs.concrete_origin_shape
-
-        # Allocate an output buffer which is guaranteed to be aligned. This is
-        # not an especially good solution as it stands: it consumes more memory
-        # and potentially does a lot of unnecessary allocation. Ideally, the
-        # TensorSpec should carry alignment guarantees when they exist and, even
-        # if they don't, we could be able to: (a) introduce an aligned buffer
-        # with the scheduling language rather than silently inside this Impl
-        # leaf, and (b) bypass it when the output is, coincidentally, aligned.
-        # TODO: Make these improvements.
-        kout_name = namer.fresh_name("kout")
-        misalign_name = namer.fresh_name("misalign")
-        writer.writeline(
-            f"const int8_t {misalign_name} = !is_aligned(({out_ref_fn(out_index_expr)}), 128);"
-        )
-        writer.writeline(f"int *restrict {kout_name};")
-        writer.writeline(f"if ({misalign_name}) {{")
-        with writer.indent_block():
-            aligned_output = CHeapArray(namer.fresh_name("ab"), n, Uint32)
-            aligned_output.emit(zero_init=False)
-            writer.writeline(f"{kout_name} = {aligned_output.c_index_ptr(0)};")
-        writer.writeline("} else {")
-        with writer.indent_block():
-            writer.writeline(f"{kout_name} = {out_ref_fn(out_index_expr)};")
-        writer.writeline("}")
-
-        writer.writeline(f"gemvmpybbw_asm(")
-        writer.writeline(f"  {lhs_ref_fn(lhs_index_expr)},")
-        writer.writeline(f"  0,")
-        writer.writeline(f"  {rhs_ref_fn(rhs_index_expr)},")
-        writer.writeline(f"  0,")
-        writer.writeline(f"  {kout_name},")
-        writer.writeline(f"  {n},")
-        writer.writeline(f"  {k}")
-        writer.writeline(f");")
-
-        writer.writeline(f"if ({misalign_name}) {{")
-        with writer.indent_block():
-            # Copy from the buffer that's guaranteed to be aligned to destination.
-            writer.writeline("vmemcpy_asm(")
-            writer.writeline(f"  (void *)({out_ref_fn(out_index_expr)}),")
-            writer.writeline(f"  (void *){kout_name},")
-            writer.writeline(f"  4*{n}")
-            writer.writeline(");")
-            writer.writeline(f"free({kout_name});")
-        writer.writeline("}")
-    elif isinstance(imp, impl.PadTranspack):
-        # Make a _CHeapArray for the result of the pad2d_and_transpack call.
-        source_op_details = op_details[imp.input_idx]
-        concrete_shape = source_op_details.concrete_origin_shape
-        assert len(concrete_shape) == 2
-        result = CUnsizedHeapArray(namer.fresh_name("tp"), Uint8)
-        imp.destination.layout.buffer_indexing_expr(concrete_shape)
-
-        new_op_details = list(op_details)
-        new_op_details[imp.input_idx] = OperandDetails(
-            result,
-            result_index_expr,
-            concrete_shape,
-            new_op_details[imp.input_idx].previously_transformed_tiles,
-        )
-
-        op_txt = op_details[imp.input_idx].c_tensor.c_index_ptr(
-            expr_utils.zero_points(op_details[imp.input_idx].index_expr)
-        )
-
-        struct_name = namer.fresh_name("tst")
-        writer.writeline(
-            f"struct tensor *{struct_name} = malloc(sizeof(struct tensor));"
-        )
-        writer.writeline(f"{struct_name}->shape.batches = 1;")
-        writer.writeline(f"{struct_name}->shape.height = 1;")
-        writer.writeline(f"{struct_name}->shape.width = {concrete_shape[0]};")
-        writer.writeline(f"{struct_name}->shape.depth = {concrete_shape[1]};")
-        writer.writeline(f"{struct_name}->data = (void *){op_txt};")
-        writer.writeline(
-            f"uint8_t *{result.name} = pad2d_and_transpack({struct_name});"
-        )
-        _inner_generate_c(imp.inner, new_op_details, allow_holes)
-        writer.writeline(f"free({result.name});")
-        writer.writeline(f"free({struct_name});")
     elif isinstance(imp, impl.ValueAssign):
         l_ref, o_ref = (d.c_tensor.c_index for d in op_details)
         l, o = (d.index_expr for d in op_details)
@@ -666,203 +472,6 @@ def _pipeline_emit_stage(
     )
 
 
-def _emit_hvx_l2fetch(
-    imp: impl.MoveLet, is_store: bool, source_operand: OperandDetails
-) -> None:
-    assert isinstance(imp, impl.MoveLet)
-
-    writer = common.writer.get()
-
-    # TODO: Assert we're *not* in a boundary loop
-    assert not imp.is_store
-    if not imp.prefetching:
-        warnings.warn("l2fetch prefetching not implemented")
-
-    if isinstance(imp.destination.layout, layouts.HexagonTranspacked):
-        if len(imp.destination.dim_sizes) != 2:
-            warnings.warn("Not emitting l2fetch for transpacked, non-rank-2 tensor")
-            return
-        h, w = imp.destination.dim_sizes
-        assert h % 4 == 0 and w % 32 == 0, f"Unexpected shape: {h}-by-{w}"
-
-        # Compute the *packed* logical width
-        outer_w = imp.source.address_root.dim_sizes[1]
-        outer_w = outer_w % -16
-
-        # Set `w`, `h`, and `outer_w` to correspond to underlying memory layout.
-        # (i.e., row-major)
-        h = h // 4
-        w = w * 4
-        outer_w = outer_w * 4
-    else:
-        # Swap w and h if column-major.
-        # TODO: Add test for following parameter choices.
-        lod = utils.layout_ordered_dims(imp.destination)
-        head, w = lod[:-1], lod[-1]
-        h = functools.reduce(operator.mul, head, 1)
-        assert w < 256, f"Maximum size of l2fetch is 255; tile width is: {w}"
-        assert h < 256, f"Maximum size of l2fetch is 255; tile height is: {h}"
-        outer_w = utils.layout_ordered_dims(imp.source.address_root)[1]
-
-    stride = outer_w
-    assert stride < 65536
-
-    source_ref_ptr_fn = source_operand.c_tensor.c_index_ptr
-    source_index_expr = expr_utils.zero_points(source_operand.index_expr)
-    if not is_store:
-        writer.writeline(
-            f"l2fetch({source_ref_ptr_fn(source_index_expr)}, {stride}, {w}, {h});"
-        )
-
-
-def _emit_hvx_dcfetch(
-    imp: impl.MoveLet, source: TensorLike, source_operand: OperandDetails
-) -> None:
-    writer = common.writer.get()
-
-    if isinstance(source.layout, layouts.HexagonTranspacked):
-        # TODO: Add support for HEXAGON_TRANSPACKED.
-        raise NotImplementedError("dcfetch doesn't support HEXAGON_TRANSPACKED")
-
-    if not imp.prefetching:
-        warnings.warn("dcfetch prefetching not implemented")
-    # TODO: Assert we're *not* in a boundary loop
-
-    # TODO: Determine cache line size and implement a correct strategy.
-    if _DCFETCH_EMIT_STRATEGY == "first-pt":
-        source_ref_ptr_fn = source_operand.c_tensor.c_index_ptr
-        source_index_expr = expr_utils.zero_points(source_operand.index_expr)
-        writer.writeline(f"Q6_dcfetch_A({source_ref_ptr_fn(source_index_expr)});")
-    elif _DCFETCH_EMIT_STRATEGY == "every-pt":
-        # Just dcfetch every point not on the innermost dimension. We do this
-        # because we don't know the cache line size.
-        sizes_to_scan = source.dim_sizes[:-1]
-        for dims in itertools.product(
-            *[range(0, dim_max + 1) for dim_max in sizes_to_scan]
-        ):
-            enumerated = list(enumerate(dims))
-            subs = {f"p{i}": d for i, d in enumerated}
-            for i in range(len(source.dim_sizes)):
-                subs.setdefault(f"p{i}", 0)
-            new_index_expr = vsub(source_operand.index_expr, subs) + 512
-            writer.writeline(f"Q6_dcfetch_A(&{source_ref_fn(new_index_expr)});")
-    else:
-        raise Exception("Unknown emit strategy: " + _DCFETCH_EMIT_STRATEGY)
-
-
-def _move_hvx_vmem(
-    imp: impl.MoveLet,
-    source_idx,
-    c_tensors: Sequence[CTensor],
-    operand_index_exprs,
-    concrete_shapes,
-    previously_transformeds,
-    allow_holes: bool,
-):
-    writer = common.writer.get()
-
-    # TODO: If source is contiguous, just assign. Else, add move loop.
-
-    assert imp.destination.bank == "VMEM"
-    assert isinstance(imp.destination, hexagon.HvxVmemTensor)
-    if imp.prefetching:
-        raise NotImplementedError()
-
-    assert (
-        imp.destination.dim_sizes == concrete_shapes[source_idx]
-    ), "Shapes don't match. This may be a loop boundary."
-
-    source_c_tensor = c_tensors[source_idx]
-    source_index_expr = operand_index_exprs[source_idx]
-
-    vectors = _CHvxVectors.emit(imp.destination)
-
-    new_c_tensors = list(c_tensors)
-    new_c_tensors[source_idx] = vectors
-
-    new_operand_index_exprs = list(operand_index_exprs)
-    new_operand_index_exprs[source_idx] = imp.destination.layout.buffer_indexing_expr(
-        concrete_shapes[source_idx]
-    )
-
-    slice_idx_exprs, slices_contig = _iter_vectors(imp.destination, source_index_expr)
-    if slices_contig:
-        # source_index_expr = _subs(source_index_expr, "p0", 0)
-        for destination_name, slice_index_expr in zip(vectors.names, slice_idx_exprs):
-            slice_index_expr = expr_utils.zero_points(slice_index_expr)
-            writer.writeline(
-                f"{destination_name} = *(HVX_Vector *)({source_c_tensor.c_index_ptr(slice_index_expr)});"
-            )
-        _inner_generate_c(
-            imp.inner,
-            [
-                OperandDetails(*t)
-                for t in zip(
-                    new_c_tensors,
-                    new_operand_index_exprs,
-                    concrete_shapes,
-                    previously_transformeds,
-                )
-            ],
-            allow_holes,
-        )
-        if imp.is_store:
-            for destination_name, slice_index_expr in zip(
-                vectors.names, slice_idx_exprs
-            ):
-                slice_index_expr = expr_utils.zero_points(slice_index_expr)
-                writer.writeline(
-                    f"*(HVX_Vector *)({source_c_tensor.c_index_ptr(slice_index_expr)}) = {destination_name};"
-                )
-    else:
-        raise NotImplementedError(
-            "The below needs to copy for *all* vectors in this tensor."
-        )
-
-
-def _iter_vectors(
-    destination: hexagon.HvxVmemTensor, source_index_expr: sympy.Expr
-) -> tuple[Iterable[sympy.Expr], bool]:
-    """Compute source slices for HVX vectors in `destination`.
-
-    This doesn't accept a concrete shapes parameter because it is intended to only be
-    used in non-boundary cases. (In that case, the destination and origin should already
-    have the correct concrete shape.)
-
-    :param destination:
-    :param source_index_expr:
-    :return: Indexing expressions for concrete source tensors corresponding to each
-             concrete vector, as well as whether or not source tiles are contiguous.
-    """
-    vector_tiling = destination.simple_tile(destination.vector_shape)
-    steps_dim: Callable[[int], int] = getattr(vector_tiling, "steps_dim", lambda _: 1)
-
-    substitutions = {}
-    for dim in range(len(vector_tiling.dim_sizes)):
-        assert isinstance(vector_tiling, hexagon.HvxVmemSimpleTile)
-        substitutions[f"p{dim}"] = indexexpr.logical_indexing_expr(vector_tiling, dim)
-    source_index_expr = vsub(source_index_expr, substitutions)
-
-    exprs = []
-    for step_idxs in itertools.product(  # Loop over each concrete vector tile
-        *[range(steps_dim(i)) for i in range(len(vector_tiling.dim_sizes))]
-    ):
-        subs = {}
-        for dim_idx, step in enumerate(step_idxs):
-            subs[f"i{dim_idx}"] = step
-        exprs.append(vsub(source_index_expr, subs))
-    assert len(exprs) == destination.vector_count
-
-    # Approximate whether or not the tiles are contiguous in the backing address space.
-    contiguous = destination.layout.check_tile_contiguity(
-        destination.vector_shape,
-        destination.address_root.dim_sizes,
-        destination.address_root.contiguous_abs,
-    )
-
-    return exprs, contiguous
-
-
 def _move_registers(
     imp: impl.MoveLet,
     source_idx: int,
@@ -960,12 +569,6 @@ def generate_c(
     writer.writeline("#include <string.h>")
     writer.writeline("#include <time.h>")
     writer.writeline("#include <immintrin.h>")
-    if current_system().has_hvx:
-        writer.writeline("#include <hexagon_types.h>")
-        writer.writeline("#include <hexagon_protos.h>")
-        writer.writeline("#include <hvx_inlines.h>")
-        writer.writeline("#include <hexagon_sim_timer.h>")
-
     writer.writeline("#define is_aligned(POINTER, BYTE_COUNT) \\")
     writer.writeline("  (((uintptr_t)(const void *)(POINTER)) % (BYTE_COUNT) == 0)")
 
@@ -977,269 +580,24 @@ def generate_c(
             f"((vector_size ({vec_bytes})));"
         )
 
-    # TODO: The following prelude is a mess. Include decls/defs on demand, and
-    #  don't embed them here, in Python.
-
-    if current_system().has_hvx:
-        writer.writeline("struct shape {")
-        writer.writeline("	union {")
-        writer.writeline("		struct {")
-        writer.writeline("			uint32_t batches;")
-        writer.writeline("			uint32_t height;")
-        writer.writeline("			uint32_t width;")
-        writer.writeline("			uint32_t depth;")
-        writer.writeline("		};")
-        writer.writeline("		struct {")
-        writer.writeline("			uint32_t filt_height;")
-        writer.writeline("			uint32_t filt_width;")
-        writer.writeline("			uint32_t filt_depth;")
-        writer.writeline("			uint32_t filt_batches;")
-        writer.writeline("		};")
-        writer.writeline("		struct {")
-        writer.writeline("			uint64_t batches_height;")
-        writer.writeline("			uint64_t width_depth;")
-        writer.writeline("		};")
-        writer.writeline("		uint32_t dimension[4];")
-        writer.writeline("	};")
-        writer.writeline("};")
-        writer.writeline("")
-        writer.writeline("struct tensor {")
-        writer.writeline("	struct shape shape;")
-        writer.writeline("	void *data;")
-        writer.writeline("};")
-        writer.writeline("")
-        writer.writeline(
-            "static inline void __attribute__((always_inline)) l2pref(const void *p, uint32_t height, uint32_t width, uint32_t stride) {"
-        )
-        writer.writeline("#if defined(__hexagon__)")
-        writer.writeline(
-            "  uint64_t control = Q6_P_combine_RR(stride,Q6_R_combine_RlRl(width,height));"
-        )
-        writer.writeline('  asm volatile (" l2fetch(%0,%1) " : :"r"(p),"r"(control));')
-        writer.writeline("#endif")
-        writer.writeline("}")
-        writer.writeline("")
-        writer.writeline(
-            "static inline void __attribute__((always_inline)) l2fetch(const void *p, uint32_t stride, uint32_t width, uint32_t height) {"
-        )
-        writer.writeline("  return l2pref(p,height,width,stride);")
-        writer.writeline("}")
-        writer.writeline("")
-        writer.writeline("void vmemset_32_2d_general_asm(")
-        writer.writeline("    void *dst,")
-        writer.writeline("    int val,")
-        writer.writeline("    int width,")
-        writer.writeline("    int height,")
-        writer.writeline("    int stride);")
-        writer.writeline("")
-        writer.writeline("#if defined(__hexagon__)")
-        writer.writeline("void vmemcpy_asm(void *dst, const void *src, int len);")
-        writer.writeline("#endif")
-        writer.writeline("")
-        writer.writeline("void vmemcpy_2d_asm(")
-        writer.writeline("    unsigned wid,   ")
-        writer.writeline("    unsigned ht,    ")
-        writer.writeline("    void *dst,      ")
-        writer.writeline("    int dst_pitch,  ")
-        writer.writeline("    void const *src,")
-        writer.writeline("    int src_pitch); ")
-        writer.writeline("")
-        writer.writeline("void vmemcpy_2d_general_asm(")
-        writer.writeline("    unsigned wid,   ")
-        writer.writeline("    unsigned ht,    ")
-        writer.writeline("    void *dst,      ")
-        writer.writeline("    int dst_pitch,  ")
-        writer.writeline("    void const *src,")
-        writer.writeline("    int src_pitch); ")
-        writer.writeline("")
-        writer.writeline("static void pad2d_generic(")
-        writer.writeline("	void const *input_data, //  { inh,  inw ,  (elbytes)}")
-        writer.writeline("	int input_height,")
-        writer.writeline("	int input_width,")
-        writer.writeline("	void *output_data, //  { outh,  outw ,  (elbytes)}")
-        writer.writeline("	int output_height,")
-        writer.writeline("	int output_width,")
-        writer.writeline("	int pad_value,")
-        writer.writeline("	int elbytes) // may be 1,2 or 4 (or any, if pad_value=0)")
-        writer.writeline("{")
-        writer.writeline("	if (elbytes == 1)")
-        writer.writeline("		pad_value = Q6_R_vsplatb_R(pad_value);")
-        writer.writeline("	else if (elbytes == 2)")
-        writer.writeline("		pad_value = Q6_R_combine_RlRl(pad_value, pad_value);")
-        writer.writeline("")
-        writer.writeline("	const uint8_t *ptr_in = input_data;")
-        writer.writeline("	uint8_t *ptr_out = output_data;")
-        writer.writeline("	int pad_x = output_width - input_width;")
-        writer.writeline("	int pad_y = output_height - input_height;")
-        writer.writeline("	if (pad_x > 0)")
-        writer.writeline("	{")
-        writer.writeline("		vmemcpy_2d_general_asm(")
-        writer.writeline(
-            "			input_width * elbytes, input_height, // rect width, height"
-        )
-        writer.writeline("			ptr_out, output_width * elbytes,	 // dst address, stride")
-        writer.writeline("			ptr_in, input_width * elbytes);")
-        writer.writeline("		vmemset_32_2d_general_asm(")
-        writer.writeline("			ptr_out + input_width * elbytes, // location")
-        writer.writeline("			pad_value,						 // pad value (32 bits)")
-        writer.writeline("			pad_x * elbytes, input_height,	 // w,h of region")
-        writer.writeline("			output_width * elbytes			 // stride")
-        writer.writeline("		);")
-        writer.writeline("	}")
-        writer.writeline("	else")
-        writer.writeline("	{")
-        writer.writeline(
-            "		vmemcpy_asm(ptr_out, ptr_in, input_height * output_width * elbytes);"
-        )
-        writer.writeline("	}")
-        writer.writeline("	if (pad_y > 0)")
-        writer.writeline("	{")
-        writer.writeline("		ptr_out += input_height * output_width * elbytes;")
-        writer.writeline("		// fill as 'single row'")
-        writer.writeline("		vmemset_32_2d_general_asm(")
-        writer.writeline("			ptr_out,")
-        writer.writeline("			pad_value,")
-        writer.writeline("			pad_y * output_width * elbytes, 1, // width, height")
-        writer.writeline("			0);")
-        writer.writeline("	}")
-        writer.writeline("}")
-        writer.writeline("")
-        writer.writeline("void pad2d(")
-        writer.writeline(
-            "	const uint8_t *input_data, int input_height, int input_width,"
-        )
-        writer.writeline(
-            "	uint8_t *output_data, int output_height, int output_width, int pad_value)"
-        )
-        writer.writeline("{")
-        writer.writeline("	pad2d_generic(input_data, input_height, input_width,")
-        writer.writeline(
-            "				  output_data, output_height, output_width, pad_value, sizeof(uint8_t));"
-        )
-        writer.writeline("}")
-        writer.writeline("")
-        writer.writeline("void transpack(")
-        writer.writeline("	const uint8_t *in_data, int K, int M, uint8_t *out_data)")
-        writer.writeline("{")
-        writer.writeline("	int x, y, z;")
-        writer.writeline("")
-        writer.writeline("	//out_width = 32*K;")
-        writer.writeline("	//out_height = M/32;")
-        writer.writeline("")
-        writer.writeline("	for (x = 0; x < M; x += 32)")
-        writer.writeline("	{")
-        writer.writeline("		for (y = 0; y < K; y += 4)")
-        writer.writeline("			for (z = 0; z < 32; z += 1)")
-        writer.writeline("			{")
-        writer.writeline(
-            "				out_data[32 * y + K * x + 4 * z + 0] = in_data[M * (y + 0) + x + z];"
-        )
-        writer.writeline(
-            "				out_data[32 * y + K * x + 4 * z + 1] = in_data[M * (y + 1) + x + z];"
-        )
-        writer.writeline(
-            "				out_data[32 * y + K * x + 4 * z + 2] = in_data[M * (y + 2) + x + z];"
-        )
-        writer.writeline(
-            "				out_data[32 * y + K * x + 4 * z + 3] = in_data[M * (y + 3) + x + z];"
-        )
-        writer.writeline("			}")
-        writer.writeline("	}")
-        writer.writeline("	return;")
-        writer.writeline("}")
-        writer.writeline("")
-        writer.writeline("/**")
-        writer.writeline(" * Pads and transpacks the rhs operand.")
-        writer.writeline(" */")
-        writer.writeline(
-            "uint8_t *pad2d_and_transpack(const struct tensor *const filt_tensor)"
-        )
-        writer.writeline("{")
-        writer.writeline("	uint32_t filt_batches = filt_tensor->shape.filt_batches;")
-        writer.writeline("	uint32_t filt_depth = filt_tensor->shape.filt_depth;")
-        writer.writeline("	uint32_t out_depth = filt_batches;")
-        writer.writeline("	uint8_t *filt = filt_tensor->data;")
-        writer.writeline("#define BPAD 32")
-        writer.writeline("#define APAD 16")
-        writer.writeline("#define ALIGN_SIZE 128")
-        writer.writeline(
-            "	uint32_t filt_elements_pad = (filt_depth + APAD - 1) & (~(APAD - 1));"
-        )
-        writer.writeline("	int out_depth_pad = (out_depth + BPAD - 1) & ~(BPAD - 1);")
-        writer.writeline("	uint32_t consts_size;")
-        writer.writeline(
-            "	filt_elements_pad = (filt_elements_pad < 32) ? 32 : filt_elements_pad;"
-        )
-        writer.writeline("	consts_size = filt_elements_pad * out_depth_pad;")
-        writer.writeline("")
-        writer.writeline("	// Allocate our result buffer")
-        writer.writeline("	uint8_t *const opaque;")
-        writer.writeline(
-            "	if (posix_memalign((void **)&opaque, ALIGN_SIZE, consts_size) != 0)"
-        )
-        writer.writeline("	{")
-        writer.writeline(
-            'fprintf(stderr, "couldn\'t allocate buffer for const rearrangement\\n");'
-        )
-        writer.writeline("		exit(102);")
-        writer.writeline("	}")
-        writer.writeline("")
-        writer.writeline("	// Allocate a temporary buffer for the output of pad2d.")
-        writer.writeline("	uint8_t *const pad_output;")
-        writer.writeline(
-            "	if (posix_memalign((void **)&pad_output, ALIGN_SIZE, filt_elements_pad * out_depth_pad + 256) != 0)"
-        )
-        writer.writeline("	{")
-        writer.writeline(
-            '		fprintf(stderr, "couldn\'t allocate buffer pad2d output\\n");'
-        )
-        writer.writeline("		exit(103);")
-        writer.writeline("	}")
-        writer.writeline("")
-        writer.writeline("	// Pad, transpose, and pack.")
-        writer.writeline(
-            "	pad2d(filt, filt_depth, out_depth, pad_output, filt_elements_pad, out_depth_pad, 0);"
-        )
-        writer.writeline(
-            "	transpack(pad_output, filt_elements_pad, out_depth_pad, opaque);"
-        )
-        writer.writeline("")
-        writer.writeline("	free(pad_output);")
-        writer.writeline("	return opaque;")
-        writer.writeline("}")
-        writer.writeline("")
-        writer.writeline("void gemvmpybbw_asm(")
-        writer.writeline("    const uint8_t *x,")
-        writer.writeline("    int x_offset,")
-        writer.writeline("    const uint8_t *y,")
-        writer.writeline("    int y_offset,")
-        writer.writeline("    int *z,")
-        writer.writeline("    int MSTEP,")
-        writer.writeline("    int K);")
-        writer.writeline("")
-
     if mode == "benchmark":
-        # TODO: Don't branch on `has_hvx`. Abstract over Targets instead.
-        if not current_system().has_hvx:
-            writer.writeline(
-                "struct timespec ts_diff(struct timespec start, struct timespec end) {"
-            )
+        writer.writeline(
+            "struct timespec ts_diff(struct timespec start, struct timespec end) {"
+        )
+        with writer.indent_block():
+            writer.writeline("struct timespec temp;")
+            writer.writeline("if ((end.tv_nsec-start.tv_nsec)<0) {")
             with writer.indent_block():
-                writer.writeline("struct timespec temp;")
-                writer.writeline("if ((end.tv_nsec-start.tv_nsec)<0) {")
-                with writer.indent_block():
-                    writer.writeline("temp.tv_sec = end.tv_sec-start.tv_sec-1;")
-                    writer.writeline(
-                        "temp.tv_nsec = 1000000000+end.tv_nsec-start.tv_nsec;"
-                    )
-                writer.writeline("} else {")
-                with writer.indent_block():
-                    writer.writeline("temp.tv_sec = end.tv_sec-start.tv_sec;")
-                    writer.writeline("temp.tv_nsec = end.tv_nsec-start.tv_nsec;")
-                writer.writeline("}")
-                writer.writeline("return temp;")
+                writer.writeline("temp.tv_sec = end.tv_sec-start.tv_sec-1;")
+                writer.writeline("temp.tv_nsec = 1000000000+end.tv_nsec-start.tv_nsec;")
+            writer.writeline("} else {")
+            with writer.indent_block():
+                writer.writeline("temp.tv_sec = end.tv_sec-start.tv_sec;")
+                writer.writeline("temp.tv_nsec = end.tv_nsec-start.tv_nsec;")
             writer.writeline("}")
-            writer.writeline("")
+            writer.writeline("return temp;")
+        writer.writeline("}")
+        writer.writeline("")
 
     # Construct the program inputs, but don't emit anything yet.
     # NOTE: Names are assigned to each buffer here, and that name is used
@@ -1312,31 +670,23 @@ def generate_c(
 
             # NOTE: This benchmark does not zero output memory after each iteration.
             #   As a result, the result may be incorrect, though the times are right.
-            if current_system().has_hvx:
-                writer.writeline(
-                    "unsigned long long start = hexagon_sim_read_pcycles();"
-                )
-            else:
-                writer.writeline("")
-                writer.writeline("struct timespec start, end;")
-                writer.writeline("clock_gettime(CLOCK_MONOTONIC, &start);")
-                writer.writeline("#pragma clang loop unroll(disable)")
-                writer.writeline(
-                    f"for (unsigned long benchiter = 0; benchiter < {BENCH_ITERS}; ++benchiter) {{"
-                )
+            writer.writeline("")
+            writer.writeline("struct timespec start, end;")
+            writer.writeline("clock_gettime(CLOCK_MONOTONIC, &start);")
+            writer.writeline("#pragma clang loop unroll(disable)")
+            writer.writeline(
+                f"for (unsigned long benchiter = 0; benchiter < {BENCH_ITERS}; ++benchiter) {{"
+            )
 
             with writer.indent_block():
                 kernel()
-            if current_system().has_hvx:
-                writer.writeline("unsigned long long end = hexagon_sim_read_pcycles();")
-                writer.writeline('printf("pcycles: %llu\\n", end - start);')
-            else:
-                writer.writeline("}")
-                writer.writeline("clock_gettime(CLOCK_MONOTONIC, &end);")
-                writer.writeline("struct timespec delta = ts_diff(start, end);")
-                writer.writeline(
-                    'printf("cpu: %llds %lldns\\n", (long long)delta.tv_sec, (long long)delta.tv_nsec);'
-                )
+            
+            writer.writeline("}")
+            writer.writeline("clock_gettime(CLOCK_MONOTONIC, &end);")
+            writer.writeline("struct timespec delta = ts_diff(start, end);")
+            writer.writeline(
+                'printf("cpu: %llds %lldns\\n", (long long)delta.tv_sec, (long long)delta.tv_nsec);'
+            )
         elif mode == "print_output":
             kernel()
             _emit_tensor_print(

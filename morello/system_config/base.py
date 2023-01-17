@@ -112,7 +112,6 @@ class SystemDescription:
     banks: dict[str, "MemoryBankConfig"]
     default_bank: str
     processors: int
-    has_hvx: bool
     faster_destination_banks: Callable[[str], set[str]]
     next_general_bank: Callable[[str], Optional[str]]
     ordered_banks: tuple[str, ...]

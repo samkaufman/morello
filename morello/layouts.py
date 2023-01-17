@@ -408,48 +408,10 @@ class PackedLayout(Layout):
         return f"pack({self.dim_count}, {self.strip_dim}, {self.strip_size})"
 
 
-class HexagonTranspacked(Layout):
-    def applies_to_shape(self, shape: Sequence[int]) -> bool:
-        from .dtypes import Uint8
-
-        if not super().applies_to_shape(shape):
-            return False
-
-        raise NotImplementedError("Should check that this only applies to uint8 tensor")
-
-        if len(shape) != 2:
-            return False
-        if shape[0] % 4 != 0 or shape[1] % 32 != 0:
-            return False
-        return True
-
-    def buffer_indexing_expr(self, concrete_shape: Sequence[int]) -> sympy.Expr:
-        # This layout is only used for Uint8, so the following will index
-        # 128-bit blocks (vectors in HVX VMEM).
-        orig_rows, orig_cols = concrete_shape
-        padded_rows = orig_rows - orig_rows % -32
-        p0, p1 = sympy.symbols("p0 p1")
-        # Logical sizes for the 128-byte vectors.
-        row_block = FloorDiv(p0, 4)
-        col_block = FloorDiv(p1, 32)
-        # The blocks in each dimension might differ because of padding, and this
-        # can affect the offsets (e.g., by added intervening all-zero vectors).
-        inner_offset = 4 * sympy.UnevaluatedExpr(p1 % 32) + sympy.UnevaluatedExpr(
-            p0 % 4
-        )
-        block_rows = padded_rows // 4
-        block_offset = (128 * block_rows * col_block) + row_block  # block offset
-        return block_offset + inner_offset
-
-    def __str__(self) -> str:
-        return "TP"
-
-
 NHWC = StandardLayout((0, 2, 3, 1))
 NCHWc4 = PackedLayout(4, 1, 4)
 NCHWc32 = PackedLayout(4, 1, 32)
 NCHWc64 = PackedLayout(4, 1, 64)
-HEXAGON_TRANSPACKED = HexagonTranspacked()  # singleton
 
 
 def row_major(rank: int) -> StandardLayout:

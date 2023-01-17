@@ -106,7 +106,6 @@ class MoveLet(Impl):
 
     def __post_init__(self):
         assert self.source_idx >= 0
-        assert self.destination.layout != layouts.HEXAGON_TRANSPACKED
         assert not self.prefetching or settings.enable_prefetching_moves.get()
 
         system = system_config.current_system()
@@ -194,14 +193,12 @@ class MoveLet(Impl):
         if self.prefetching:
             additional *= 2
         dest_idx = mem.raw_keys.index(self.destination.bank)
-        return (
-            TinyMap(
-                mem.raw_keys,
-                tuple(
-                    v + additional if dest_idx == i else v
-                    for i, v in enumerate(mem.raw_values)
-                ),
-            )
+        return TinyMap(
+            mem.raw_keys,
+            tuple(
+                v + additional if dest_idx == i else v
+                for i, v in enumerate(mem.raw_values)
+            ),
         )
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
@@ -469,50 +466,6 @@ class CacheAccess(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveL
         return False
 
 
-@dataclasses.dataclass(frozen=True)
-class PadTranspack(_OperandWrapper):
-    """Impl that pads and transpacks an input tensor.
-
-    Output transpacking not supported.
-    """
-
-    # TODO: With padding, Morello is perfectly capable of generating this
-    #  without the call to the one-off transpack method. Add padding and remove
-    #  this instruction.
-
-    spec: specs.Spec
-    source_idx: int
-    destination: Tensor
-    input_idx: int
-    inner: Impl
-
-    def __post_init__(self):
-        source_spec = self.spec.operands[self.source_idx]
-        if self.source is self.destination:
-            raise ValueError("Source and destination cannot be the same tensor")
-        if source_spec.dim_sizes != self.destination.dim_sizes:
-            raise ValueError("Source and dest. must have matching shapes")
-        if source_spec.bank != "GL":
-            raise ValueError(f"Source must be in GL, but is in {source_spec.bank}")
-        if self.destination.bank != "GL":
-            raise ValueError(f"Dest. must be in GL, but is in {self.destination.bank}")
-        if not source_spec.layout.is_row_major:
-            raise ValueError("Source must have a row-major layout")
-        if self.destination.layout != layouts.HEXAGON_TRANSPACKED:
-            raise ValueError("Destination must be HEXAGON_TRANSPACKED")
-
-    @property
-    def additional_memories(self) -> list[TinyMap[str, int]]:
-        # TODO: Include memory used between pad and transpack.
-        banks = system_config.current_system().ordered_banks
-        return [TinyMap(banks, (0,) * len(banks))]
-
-    @property
-    def peak_memory(self) -> TinyMap[str, int]:
-        # TODO: Include memory used between pad and transpack.
-        return self.inner.peak_memory
-
-
 class Moveable:
     """A mixin providing the most common `move_input` and `move_output` actions."""
 
@@ -546,12 +499,6 @@ def _move_arguments(
     target = system_config.current_target()
 
     allowable_layouts = list(target.all_layouts_for_shape(operand.dim_sizes))
-
-    # TODO: Moves into HEXAGON_TRANSPACKED are handled by pad_transpack, not
-    #   move_{input, output} at the moment.
-    allowable_layouts = [
-        l for l in allowable_layouts if not isinstance(l, layouts.HexagonTranspacked)
-    ]
 
     # Yield actions for movement with register file destination, which
     # includes relayouts in registers and movements from level 1 to RF.

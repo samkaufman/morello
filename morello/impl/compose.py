@@ -72,10 +72,6 @@ class ComposeHole(Impl):
         for bank, layout in itertools.product(
             system.addressed_banks, target.all_layouts_for_shape(peeling_shape)
         ):
-            # TODO: Remove following check once cost.move_cost handles it correctly.
-            if not system.has_hvx and layout == layouts.HEXAGON_TRANSPACKED:
-                continue
-
             # TODO: The below special-casing for VMEM stinks. If we had partial
             #  finite functions/lenses, we could just constrain a few properties and
             #  enumerate the rest. It would also be possible to generate

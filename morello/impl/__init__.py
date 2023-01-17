@@ -10,23 +10,8 @@ from .block import Block
 from .compose import ComposeHole, Pipeline, SplitNotSupportedByHeadError
 from .convhole import ConvAccumHole, ConvHole
 from .loops import Loop, SlidingWindowLoop
-from .matmuls import (
-    BroadcastVecMult,
-    HvxGemvmpybbwAsm,
-    HvxVrmpyaccVuwVubRub,
-    MatmulAccumHole,
-    MatmulHole,
-    Mult,
-)
-from .moves import (
-    CacheAccess,
-    LoadHole,
-    MoveLet,
-    PadTranspack,
-    StoreHole,
-    ValueAssign,
-    VectorAssign,
-)
+from .matmuls import BroadcastVecMult, MatmulAccumHole, MatmulHole, Mult
+from .moves import CacheAccess, LoadHole, MoveLet, StoreHole, ValueAssign, VectorAssign
 from .pruning import ParentSummary
 from .reducesum import Add, ReduceSumAccumHole, ReduceSumHole
 from .settings import (
@@ -56,8 +41,6 @@ __all__ = [
     "ComposeHole",
     "ConvAccumHole",
     "ConvHole",
-    "HvxGemvmpybbwAsm",
-    "HvxVrmpyaccVuwVubRub",
     "Impl",
     "LoadHole",
     "Loop",
@@ -68,7 +51,6 @@ __all__ = [
     "MoveAction",
     "MoveLet",
     "Mult",
-    "PadTranspack",
     "ParentSummary",
     "PeelAction",
     "Pipeline",

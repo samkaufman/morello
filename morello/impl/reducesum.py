@@ -169,8 +169,7 @@ class Add(NonAllocatingLeaf, Moveable):
     @staticmethod
     def applies_to_operands(operands: Sequence[specs.TensorSpec]) -> bool:
         return all(
-            o.bank in ("RF", "HexagonRF") and all(d == 1 for d in o.dim_sizes)
-            for o in operands
+            o.bank == "RF" and all(d == 1 for d in o.dim_sizes) for o in operands
         )
 
     def actions(

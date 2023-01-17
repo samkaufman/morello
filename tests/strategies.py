@@ -6,7 +6,7 @@ import hypothesis
 from hypothesis import strategies as st
 
 from morello import dtypes, impl, layouts, specs, system_config, tensor
-from morello.system_config import cpu, hexagon
+from morello.system_config import cpu
 
 dtype_st = st.sampled_from([dtypes.Uint8, dtypes.Uint32])
 

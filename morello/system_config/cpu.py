@@ -74,7 +74,6 @@ class CpuTarget(Target):
             },
             default_bank="GL",
             processors=32,
-            has_hvx=False,
             faster_destination_banks=self._faster_destination_banks,
             next_general_bank=self._next_general_bank,
             ordered_banks=("RF", "VRF", "L1", "GL"),

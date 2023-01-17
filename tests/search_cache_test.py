@@ -40,13 +40,17 @@ async def test_cache_common_scenario(cache_cls, dtype):
     rhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
     output = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
     fast_schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
-    fast_wrapped_schedule = search_cache.CachedScheduleSet(((fast_schedule, 10),), 1)
+    fast_wrapped_schedule = search_cache.CachedScheduleSet(
+        fast_schedule.spec, ((fast_schedule, 10),), 1
+    )
 
     lhs = target.tensor_spec((100, 100), dtype=dtype, bank="RF")
     rhs = target.tensor_spec((100, 100), dtype=dtype, bank="RF")
     output = target.tensor_spec((100, 100), dtype=dtype, bank="RF")
     slow_schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
-    slow_wrapped_schedule = search_cache.CachedScheduleSet(((slow_schedule, 50),), 1)
+    slow_wrapped_schedule = search_cache.CachedScheduleSet(
+        slow_schedule.spec, ((slow_schedule, 50),), 1
+    )
 
     lhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
     rhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
@@ -54,7 +58,9 @@ async def test_cache_common_scenario(cache_cls, dtype):
     impossible_schedule = impl.MatmulHole(
         specs.Matmul(lhs, rhs, output, serial_only=False)
     )
-    impossible_wrapped_schedule = search_cache.CachedScheduleSet(tuple(), 1)
+    impossible_wrapped_schedule = search_cache.CachedScheduleSet(
+        impossible_schedule.spec, tuple(), 1
+    )
 
     await cache.put(
         fast_schedule.spec,
@@ -181,13 +187,11 @@ async def test_cache_updates_when_none_result_put_with_higher_memory_cap(
         (8, 8), dtype=dtype, contiguous_abs=(4 if contiguous else 0), bank="RF"
     )
     spec = specs.Matmul(t, t, t, serial_only=False)
-    wrapped_schedule = search_cache.CachedScheduleSet(tuple(), 1)
+    wrapped_schedule = search_cache.CachedScheduleSet(spec, tuple(), 1)
 
     cache = search_cache.InMemoryScheduleCache()
     await cache.put(
-        spec,
-        wrapped_schedule,
-        pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0}),
+        wrapped_schedule, pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0})
     )
     assert {x async for x in aiter(cache)} == {
         (
@@ -197,9 +201,7 @@ async def test_cache_updates_when_none_result_put_with_higher_memory_cap(
         )
     }
     await cache.put(
-        spec,
-        wrapped_schedule,
-        pruning.StandardMemoryLimits({"RF": 101, "L1": 101, "GL": 0}),
+        wrapped_schedule, pruning.StandardMemoryLimits({"RF": 101, "L1": 101, "GL": 0})
     )
     assert {x async for x in aiter(cache)} == {
         (
@@ -219,11 +221,12 @@ async def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
     rhs = target.tensor_spec((8, 8), dtype=dtype, bank=db)
     output = target.tensor_spec((8, 8), dtype=dtype, bank=db)
     schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
-    wrapped_schedule = search_cache.CachedScheduleSet(((schedule, 10),), 1)
+    wrapped_schedule = search_cache.CachedScheduleSet(
+        schedule.spec, ((schedule, 10),), 1
+    )
 
     cache = search_cache.InMemoryScheduleCache()
     await cache.put(
-        schedule.spec,
         wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
     )
@@ -235,7 +238,6 @@ async def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
         )
     }
     await cache.put(
-        schedule.spec,
         wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 101, "VRF": 101, "L1": 101, "GL": 0}),
     )

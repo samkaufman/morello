@@ -11,10 +11,5 @@ from .matmul import Matmul, MatmulAccum
 from .moves import Load, Store
 from .original import *
 from .reducesum import ReduceSum, ReduceSumAccum
-from .tensorspec import (
-    HvxVmemTensorSpec,
-    LayoutDoesntApplyError,
-    OversizedVectorError,
-    TensorSpec,
-)
+from .tensorspec import LayoutDoesntApplyError, OversizedVectorError, TensorSpec
 from .zero import Zero
