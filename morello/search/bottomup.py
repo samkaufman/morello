@@ -164,29 +164,32 @@ def _spec_to_spec_coordinate(spec: specs.Spec) -> tuple[int, ...]:
         raise NotImplementedError("Unsupported Spec: " + str(spec))
 
 
-def _compute_dp_table_graph(
+async def _compute_dp_table_graph(
     executor: concurrent.futures.Executor,
     grid: geometry.Grid,
     *,
     redis_url: str,
     desc: Optional[str] = None,
+    pb_position: int = 0,
 ):
     target = system_config.current_target()
 
     graph_group = random.randint(0, 2**32 - 1)
 
+    curried = functools.partial(
+        _compute_block,
+        target=target,
+        redis_url=redis_url,
+        graph_group=graph_group,
+    )
+
     with tqdm.contrib.logging.logging_redirect_tqdm():
-        for diagonal in tqdm.tqdm(list(grid.block_diagonals_northeast()), desc=desc):
-            for _ in executor.map(
-                functools.partial(
-                    _compute_block,
-                    target=target,
-                    redis_url=redis_url,
-                    graph_group=graph_group,
-                ),
-                diagonal,
-            ):
-                pass
+        for diagonal in tqdm.tqdm(
+            list(grid.block_diagonals_northeast()), desc=desc, position=pb_position
+        ):
+            await asyncio.gather(
+                *[asyncio.wrap_future(executor.submit(curried, x)) for x in diagonal]
+            )
 
 
 def _redis_coord_key(spec: specs.Spec, memory_limits: pruning.MemoryLimits) -> str:
@@ -437,7 +440,7 @@ def _grid_for_query_spec(spec: specs.Spec, downscale: int) -> geometry.Grid[spec
     )
 
 
-def _compute_moves_subgraphs(
+async def _compute_moves_subgraphs(
     executor: concurrent.futures.Executor,
     size: int,
     dt: dtypes.Dtype,
@@ -446,6 +449,7 @@ def _compute_moves_subgraphs(
     max_rank: int,
     *,
     redis_url: str,
+    pb_offset: int = 0,
 ) -> None:
     if max_rank < 2:
         raise ValueError("max_rank must be at least 2")
@@ -473,18 +477,64 @@ def _compute_moves_subgraphs(
         zero_grid = _grid_for_query_spec(zero_spec, downscale)
 
         # Load and Store have no deps. Zero depends on Store, so it goes last.
-        _compute_dp_table_graph(
-            executor, load_grid, redis_url=redis_url, desc=f"Load, rank {rank}"
+        load_fut = _compute_dp_table_graph(
+            executor,
+            load_grid,
+            redis_url=redis_url,
+            desc=f"Load, rank {rank}, {dt}",
+            pb_position=pb_offset,
         )
-        _compute_dp_table_graph(
-            executor, store_grid, redis_url=redis_url, desc=f"Store, rank {rank}"
+        store_fut = _compute_dp_table_graph(
+            executor,
+            store_grid,
+            redis_url=redis_url,
+            desc=f"Store, rank {rank}, {dt}",
+            pb_position=pb_offset + 1,
         )
-        _compute_dp_table_graph(
-            executor, zero_grid, redis_url=redis_url, desc=f"Zero, rank {rank}"
+        await asyncio.gather(load_fut, store_fut)
+        await _compute_dp_table_graph(
+            executor, zero_grid, redis_url=redis_url, desc=f"Zero, rank {rank}, {dt}"
         )
 
 
-def main(args=None):
+async def _compute_dtype_graph(args, redis_url, target, executor, dt_idx, dt) -> None:
+    await _compute_moves_subgraphs(
+        executor,
+        args.size,
+        dt,
+        args.serial_only,
+        args.downscale,
+        args.moves_rank,
+        redis_url=redis_url,
+        pb_offset=(dt_idx * 2),
+    )
+
+    if not args.moves_only:
+        matmul_accum_spec = specs.MatmulAccum(
+            lhs=target.tensor_spec((args.size, args.size), dtype=dt),
+            rhs=target.tensor_spec((args.size, args.size), dtype=dt),
+            output=target.tensor_spec((args.size, args.size), dtype=dt),
+            serial_only=args.serial_only,
+        )
+        matmul_spec = specs.Matmul(
+            lhs=target.tensor_spec((args.size, args.size), dtype=dt),
+            rhs=target.tensor_spec((args.size, args.size), dtype=dt),
+            output=target.tensor_spec((args.size, args.size), dtype=dt),
+            serial_only=args.serial_only,
+        )
+
+        matmul_accum_grid = _grid_for_query_spec(matmul_accum_spec, args.downscale)
+        matmul_grid = _grid_for_query_spec(matmul_spec, args.downscale)
+
+        await _compute_dp_table_graph(
+            executor, matmul_accum_grid, redis_url=redis_url, pb_position=(dt_idx * 2)
+        )
+        await _compute_dp_table_graph(
+            executor, matmul_grid, redis_url=redis_url, pb_position=(dt_idx * 2)
+        )
+
+
+async def main(args=None):
     logging.basicConfig(level=logging.INFO)
 
     redis_url = os.environ["REDIS_URL"]
@@ -518,43 +568,15 @@ def main(args=None):
         cluster_address
     ) as dask_client, dask.config.set(scheduler=dask_client):
         executor = dask_client.get_executor()
-        for dt in dtypes.ALL_DTYPES:
-            _compute_moves_subgraphs(
-                executor,
-                args.size,
-                dt,
-                args.serial_only,
-                args.downscale,
-                args.moves_rank,
-                redis_url=redis_url,
-            )
-
-            if not args.moves_only:
-                matmul_accum_spec = specs.MatmulAccum(
-                    lhs=target.tensor_spec((args.size, args.size), dtype=dt),
-                    rhs=target.tensor_spec((args.size, args.size), dtype=dt),
-                    output=target.tensor_spec((args.size, args.size), dtype=dt),
-                    serial_only=args.serial_only,
-                )
-                matmul_spec = specs.Matmul(
-                    lhs=target.tensor_spec((args.size, args.size), dtype=dt),
-                    rhs=target.tensor_spec((args.size, args.size), dtype=dt),
-                    output=target.tensor_spec((args.size, args.size), dtype=dt),
-                    serial_only=args.serial_only,
-                )
-
-                matmul_accum_grid = _grid_for_query_spec(
-                    matmul_accum_spec, args.downscale
-                )
-                matmul_grid = _grid_for_query_spec(matmul_spec, args.downscale)
-
-                _compute_dp_table_graph(
-                    executor, matmul_accum_grid, redis_url=redis_url
-                )
-                _compute_dp_table_graph(executor, matmul_grid, redis_url=redis_url)
+        await asyncio.gather(
+            *[
+                _compute_dtype_graph(args, redis_url, target, executor, dt_idx, dt)
+                for dt_idx, dt in enumerate(dtypes.ALL_DTYPES)
+            ]
+        )
 
     print(f"Total time: {time.time() - start:.1f}s")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
