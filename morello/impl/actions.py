@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from .compose import ComposeHole
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class MoveAction:
     """Wraps a function which wraps a Impl in a MoveLet.
 
@@ -52,7 +52,7 @@ class MoveAction:
         )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class PeelAction:
     impl: "ComposeHole"
     bank: Optional[str] = None
@@ -66,7 +66,7 @@ class PeelAction:
         return self.impl.peel(self.bank, self.layout, **kws)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class TileOutAction:
     impl: "Impl"
     shape: Tuple[int, ...]
@@ -76,7 +76,7 @@ class TileOutAction:
         return self.impl.tile_out(self.shape, parallel=self.parallel)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class SlidingTileOutAction:
     func: Callable[[int, int, str], "Impl"]
     sliding_dim: int
@@ -87,7 +87,7 @@ class SlidingTileOutAction:
         return self.func(self.sliding_dim, self.output_size, self.bank)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class MatmulSplitAction:
     func: Callable[[int], "Impl"]
     size: int

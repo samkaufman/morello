@@ -87,7 +87,7 @@ class Layout:
         raise NotImplementedError()
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class StandardLayout(Layout):
 
     dim_order: tuple[int, ...]
@@ -167,7 +167,7 @@ class StandardLayout(Layout):
         return False
 
     def applies_to_shape(self, shape: Sequence[int]) -> bool:
-        if not super().applies_to_shape(shape):
+        if not super(StandardLayout, self).applies_to_shape(shape):
             return False
         if len(shape) != len(self.dim_order):
             return False
@@ -238,7 +238,7 @@ class StandardLayout(Layout):
         return f"<{','.join(map(str, self.dim_order))}>"
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class PackedLayout(Layout):
     dim_count: int
     strip_dim: int
@@ -314,7 +314,7 @@ class PackedLayout(Layout):
         )
 
     def applies_to_shape(self, shape: Sequence[int]) -> bool:
-        if not super().applies_to_shape(shape):
+        if not super(PackedLayout, self).applies_to_shape(shape):
             return False
         if self.dim_count != len(shape):
             return False

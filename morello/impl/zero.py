@@ -168,7 +168,7 @@ class ZeroHole(base.NonAllocatingLeaf):
         return self.place(MemsetZero)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class MemsetZero(base.NonAllocatingLeaf):
     spec: specs.Zero
 
@@ -202,7 +202,7 @@ class MemsetZero(base.NonAllocatingLeaf):
         return None
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class VectorZero(base.NonAllocatingLeaf):
     spec: specs.Zero
 

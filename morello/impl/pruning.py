@@ -13,7 +13,7 @@ from .settings import (
 )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class ParentSummary:
     parent: "impl.Impl"
     movements: FrozenSet[tuple[Union[Tensor, Tile], str]]

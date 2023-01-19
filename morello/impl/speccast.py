@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from ..tensor import TensorLike, Tile
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class SpecCast(Impl):
     """A simple wrapper for Impls with casting operands."""
 

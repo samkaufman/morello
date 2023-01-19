@@ -5,7 +5,7 @@ from . import base
 from .tensorspec import TensorSpec
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _MoveBase(base.Spec):
     source: TensorSpec
     destination: TensorSpec

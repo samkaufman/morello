@@ -104,7 +104,7 @@ class TensorBase(TensorLike):
         return self.spec.bank
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
+@dataclasses.dataclass(frozen=True, eq=False, slots=True)
 class Tensor(TensorBase):
     """An n-dimensional array."""
 
@@ -129,12 +129,12 @@ class Tensor(TensorBase):
         return tuple(0 for _ in self.dim_sizes)
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
+@dataclasses.dataclass(frozen=True, eq=False, slots=True)
 class Tile(TensorLike):
     pass
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
+@dataclasses.dataclass(frozen=True, eq=False, slots=True)
 class InnerContigFlatteningTile(Tile):
     source: OperandIdx
     inner: TensorLike
@@ -218,7 +218,7 @@ class InnerContigFlatteningTile(Tile):
         return self.transform_origin_shape(self.inner.dim_sizes)
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
+@dataclasses.dataclass(frozen=True, eq=False, slots=True)
 class SqueezingTile(Tile):
     source: OperandIdx
     inner: TensorLike
@@ -301,7 +301,7 @@ class SqueezingTile(Tile):
         return f"{self.inner}.squeeze"
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
+@dataclasses.dataclass(frozen=True, eq=False, slots=True)
 class TransposingTile(Tile):
     source: OperandIdx
     inner: TensorLike
@@ -371,7 +371,7 @@ class TransposingTile(Tile):
         return d
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
+@dataclasses.dataclass(frozen=True, eq=False, slots=True)
 class CommonTileBase(Tile):
     source: OperandIdx
     spec: "specs.TensorSpec"
@@ -388,7 +388,7 @@ class CommonTileBase(Tile):
         return f"{type(self).__name__}({dims_part}{layout_epi}{bank_epi})"
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
+@dataclasses.dataclass(frozen=True, eq=False, slots=True)
 class SimpleTile(CommonTileBase):
     def steps_dim(self, dim: int, origin_size: int) -> int:
         return math.ceil(origin_size / self.dim_sizes[dim])
@@ -401,7 +401,7 @@ class SimpleTile(CommonTileBase):
         return tuple(0 for _ in self.dim_sizes)
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
+@dataclasses.dataclass(frozen=True, eq=False, slots=True)
 class ConvolutionImageTile(CommonTileBase):
 
     filter_shape: tuple[int, ...]

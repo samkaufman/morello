@@ -74,7 +74,7 @@ class _OperandWrapper(Impl):
         return self.replace_children((self.children[0].complete(),))
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class MoveLet(Impl):
     """A Move operation composed with some subsequent Impl.
 
@@ -361,7 +361,7 @@ class StoreHole(_BaseMoveHole):
     spec: specs.Store
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class ValueAssign(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveLet.
     spec: Union[specs.Load, specs.Store]
 
@@ -400,7 +400,7 @@ class ValueAssign(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveL
         return None
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class VectorAssign(NonAllocatingLeaf):
     spec: Union[specs.Load, specs.Store]
 
@@ -454,7 +454,7 @@ class VectorAssign(NonAllocatingLeaf):
         return None
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class CacheAccess(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveLet.
     spec: specs.Spec
 

@@ -185,7 +185,7 @@ class MatmulAccumHole(MatmulHoleBase):
         return self.place(Mult)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class MatmulLeaf(NonAllocatingLeaf):
     spec: specs.Matmul
 
@@ -202,7 +202,7 @@ class MatmulLeaf(NonAllocatingLeaf):
         return self
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class Mult(MatmulLeaf):
     def __post_init__(self):
         assert all(o.bank == "RF" for o in self.spec.operands)
@@ -215,7 +215,7 @@ class Mult(MatmulLeaf):
         )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class BroadcastVecMult(MatmulLeaf):
     """A leaf for a scalar-vector multiplication (Clang vector extensions)."""
 

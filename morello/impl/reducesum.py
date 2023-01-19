@@ -153,7 +153,7 @@ class ReduceSumAccumHole(ReduceSumHoleBase):
         return self
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class Add(NonAllocatingLeaf, Moveable):
     """Implements `output += source;` in the target language."""
 
