@@ -2,7 +2,7 @@ import abc
 import dataclasses
 import typing
 from collections.abc import Iterator
-from typing import Callable, Generic, Iterable, Sequence
+from typing import Callable, Generic, Iterable, Literal, Sequence
 
 from . import utils
 
@@ -120,10 +120,12 @@ class BlockedRange(abc.ABC):
 
 class SimpleBlockedRange(BlockedRange):
     def __init__(
-        self, start: int, stop: int, step: int = 1, block_size: int = 1
+        self, start: int, stop: int, step: Literal[1, -1] = 1, block_size: int = 1
     ) -> None:
         if block_size < 1:
             raise ValueError(f"block_size {block_size} must be 1 or greater")
+        if step not in (-1, 1):
+            raise ValueError(f"step {step} must be 1 or -1")
         self.block_size = block_size
         self._range = range(start, stop, step)
 
