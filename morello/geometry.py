@@ -154,7 +154,7 @@ class SimpleBlockedRange(BlockedRange):
 
     @property
     def block_count(self) -> int:
-        return (len(self._range) + (self.block_size - 1)) // self.block_size
+        return -(len(self._range) // -self.block_size)
 
     def block_index(self, input: int) -> int:
         return self.index(input) // self.block_size
