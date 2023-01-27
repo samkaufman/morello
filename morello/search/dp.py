@@ -70,15 +70,11 @@ class Search:
         parent_summary=None,
         cache: Optional[ScheduleCache] = None,
         stats=None,
-        complete: bool = True,
     ) -> list[impl.Impl]:
         """Returns the best Impl for a given Spec and memory limits.
 
         May return `None` if no Impl satisfies the given Spec and memory limits.
         """
-        if complete:
-            raise NotImplementedError("complete=True not implemented")
-
         if cache is None:
             cache = InMemoryScheduleCache()
         else:
