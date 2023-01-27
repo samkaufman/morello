@@ -181,15 +181,14 @@ class ScheduleCache(abc.ABC):
                 return result
 
             # Query the next row of leaves.
-            resolved = [
-                await f
-                for f in self.get_many(
+            resolved = list(
+                await self.get_many(
                     [
                         (leaf_tuples[i][0].spec, leaf_tuples[i][1])
                         for i in incomplete_leaf_idxs
                     ]
                 )
-            ]
+            )
             assert all(r is not None for r in resolved)
             assert len(resolved) == len(incomplete_leaf_idxs)
 

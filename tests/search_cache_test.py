@@ -63,7 +63,6 @@ async def test_cache_common_scenario(cache_cls, dtype):
     )
 
     await cache.put(
-        fast_schedule.spec,
         fast_wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
     )
@@ -75,7 +74,6 @@ async def test_cache_common_scenario(cache_cls, dtype):
         )
     }
     await cache.put(
-        slow_schedule.spec,
         slow_wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 50, "VRF": 50, "L1": 50, "GL": 0}),
     )
@@ -92,7 +90,6 @@ async def test_cache_common_scenario(cache_cls, dtype):
         ),
     }
     await cache.put(
-        impossible_schedule.spec,
         impossible_wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 1, "VRF": 1, "L1": 1, "GL": 0}),
     )
@@ -130,18 +127,15 @@ async def test_cache_raises_keyerror_when_empty(cache_cls, spec, limits):
 # TODO: Test top_k greater than 1
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
-@hypothesis.reproduce_failure("6.47.5", b"AAAAAAEBAQAAAAAAAAA=")
 @hypothesis.settings(deadline=240_000)
 @hypothesis.given(
     strategies.small_atomic_specs_st,
     strategies.arb_small_standard_memorylimits(),
 )
 async def test_cache_get_returns_just_put_impls(cache_cls, spec, limits):
-    print("######")  # TODO: Remove
-
     cache = _make_cache(cache_cls)
 
-    optimal = await dp.Search(cache, top_k=1)(spec, limits, parent_summary=None)
+    optimal = await dp.Search(top_k=1)(spec, limits, parent_summary=None, cache=cache)
     hypothesis.assume(optimal)
     optimal = optimal[0]
     assert isinstance(optimal, impl.Impl)

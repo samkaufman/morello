@@ -23,7 +23,7 @@ from morello import (
 )
 from morello.codegen import gen
 from morello.impl import TileSizeMode
-from morello.search import schedule_search
+from morello.search import dp
 
 T = TypeVar("T")
 
@@ -74,35 +74,35 @@ parser_gemm3 = subparsers.add_parser("gemm3", help="Schedule a GEMM3")
 parser_gemm3.add_argument("matrix_size", type=int)
 
 
-def _zero_main(
+async def _zero_main(
     m: int, n: int, serial: bool, top_k: int, cache: search_cache.ScheduleCache
 ):
     target = system_config.current_target()
     single = target.tensor(target.tensor_spec((m, n), dtype=DTYPE), name="single")
     start = time.time()
-    s = schedule_search(
+    s = await dp.Search(top_k=top_k)(
         specs.Zero(single.spec, serial_only=serial),
-        top_k=top_k,
         cache=cache,
     )
     return s, (time.time() - start)
 
 
-def _matmul_main(m, k, n, serial: bool, top_k: int, cache: search_cache.ScheduleCache):
+async def _matmul_main(
+    m, k, n, serial: bool, top_k: int, cache: search_cache.ScheduleCache
+):
     target = system_config.current_target()
     left = target.tensor(target.tensor_spec((m, k), dtype=DTYPE), name="left")
     right = target.tensor(target.tensor_spec((k, n), dtype=DTYPE), name="right")
     output = target.tensor(target.tensor_spec((m, n), dtype=DTYPE), name="output")
     start = time.monotonic()
-    s = schedule_search(
+    s = await dp.Search(top_k=top_k)(
         specs.Matmul(left.spec, right.spec, output.spec, serial_only=serial),
-        top_k=top_k,
         cache=cache,
     )
     return s, (time.monotonic() - start)
 
 
-def _conv_main(
+async def _conv_main(
     batch_size,
     image_width,
     image_height,
@@ -112,7 +112,7 @@ def _conv_main(
     serial: bool,
     top_k: int,
     cache: search_cache.ScheduleCache,
-) -> tuple[Optional[impl.Impl], float]:
+):
     target = system_config.current_target()
     assert filter_width <= image_width and filter_height <= image_height
     left = target.tensor(
@@ -136,15 +136,14 @@ def _conv_main(
         name="output",
     )
     start = time.monotonic()
-    s = schedule_search(
+    s = await dp.Search(top_k=top_k)(
         specs.Convolution(left.spec, right.spec, output.spec, serial_only=serial),
-        top_k=top_k,
         cache=cache,
     )
     return s, (time.monotonic() - start)
 
 
-def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCache):
+async def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCache):
     target = system_config.current_target()
 
     d = 128
@@ -161,7 +160,7 @@ def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCache):
     )
 
     start = time.monotonic()
-    s = schedule_search(
+    s = await dp.Search(top_k=top_k)(
         specs.Compose(
             (specs.Convolution, specs.Convolution),
             (filters_b.spec, img.spec, filters_a.spec),
@@ -169,13 +168,12 @@ def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCache):
             intermediate_dtypes=(DTYPE,),
             serial_only=serial,
         ),
-        top_k=top_k,
         cache=cache,
     )
     return s, (time.monotonic() - start)
 
 
-def _gemm3_main(
+async def _gemm3_main(
     matrix_size: int, serial: bool, top_k: int, cache: search_cache.ScheduleCache
 ):
     target = system_config.current_target()
@@ -191,7 +189,7 @@ def _gemm3_main(
         serial_only=True,
     )
     start = time.monotonic()
-    search_result = schedule_search(spec, top_k=top_k, cache=cache)
+    search_result = await dp.Search(top_k=top_k)(spec, cache=cache)
     return search_result, (time.monotonic() - start)
 
 
@@ -226,7 +224,7 @@ async def main() -> None:
             parsed_args.cache, save=parsed_args.save_cache
         ) as cache:
             if parsed_args.spec == "zero":
-                scheds, runtime = _zero_main(
+                scheds, runtime = await _zero_main(
                     parsed_args.m,
                     parsed_args.n,
                     parsed_args.serial,
@@ -234,7 +232,7 @@ async def main() -> None:
                     cache,
                 )
             elif parsed_args.spec == "matmul":
-                scheds, runtime = _matmul_main(
+                scheds, runtime = await _matmul_main(
                     parsed_args.m,
                     parsed_args.k,
                     parsed_args.n,
@@ -243,7 +241,7 @@ async def main() -> None:
                     cache,
                 )
             elif parsed_args.spec == "conv":
-                scheds, runtime = _conv_main(
+                scheds, runtime = await _conv_main(
                     parsed_args.batch_size,
                     parsed_args.image_width,
                     parsed_args.image_height,
@@ -255,11 +253,11 @@ async def main() -> None:
                     cache,
                 )
             elif parsed_args.spec == "convnet":
-                scheds, runtime = _convnet_main(
+                scheds, runtime = await _convnet_main(
                     parsed_args.serial, parsed_args.top, cache
                 )
             elif parsed_args.spec == "gemm3":
-                scheds, runtime = _gemm3_main(
+                scheds, runtime = await _gemm3_main(
                     parsed_args.matrix_size, parsed_args.serial, parsed_args.top, cache
                 )
             else:

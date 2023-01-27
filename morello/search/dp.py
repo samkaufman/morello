@@ -35,7 +35,9 @@ def schedule_search(
     May return `None` if no Impl satisfies the given Spec and memory limits.
     """
     return asyncio.run(
-        Search(top_k, callbacks=callbacks)(spec, memory_limits, cache, parent_summary)
+        Search(top_k, callbacks=callbacks)(
+            spec, memory_limits, parent_summary=parent_summary, cache=cache
+        )
     )
 
 
@@ -102,14 +104,14 @@ class Search:
             stats=stats,
         )
         msg = next(search_gen)
-        try:
-            cache_response = await cache.get_many(msg.needed)
-            for mlims, entry in msg.computed:
-                await cache.put(entry, mlims)
-            msg = search_gen.send(list(cache_response))
-        except StopIteration as e:
-            return e.value.impls
-        assert False, "Should not reach here"
+        while True:
+            try:
+                cache_response = await cache.get_many(msg.needed)
+                for mlims, entry in msg.computed:
+                    await cache.put(entry, mlims)
+                msg = search_gen.send(list(cache_response))
+            except StopIteration as e:
+                return e.value.impls
 
     # TODO: Don't need a return type, just send and yield.
     # TODO: Do we need the Impls, or just the costs, provided?
