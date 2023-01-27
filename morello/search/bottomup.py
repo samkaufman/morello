@@ -243,7 +243,12 @@ def _compute_block(
     if results_cache is None:
         # TODO: Assert block membership in lambda
         results_cache = search_cache.RedisCache(
-            red, NAMESPACE, _redis_coord_key, keep_local=_keep_local, autoflush=False
+            red,
+            NAMESPACE,
+            _redis_coord_key,
+            keep_local=_keep_local,
+            autoflush=False,
+            updating=False,
         )
         results_cache_graph_group = graph_group
     assert red is not None and results_cache is not None

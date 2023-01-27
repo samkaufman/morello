@@ -26,6 +26,7 @@ import atomicwrites
 import lz4.frame
 import numpy as np
 import redis.asyncio
+import redis.asyncio.lock
 
 from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
@@ -471,6 +472,7 @@ class RedisCache(ScheduleCache):
         subproblem_to_block_coordinate_fn: Callable[[Spec, pruning.MemoryLimits], str],
         keep_local: Optional[Callable[[str], bool]] = None,
         autoflush: bool = True,
+        updating: bool = True,
     ) -> None:
         # TODO: Document that this class takes "ownership" of the redis_connection
         super().__init__()
@@ -478,10 +480,12 @@ class RedisCache(ScheduleCache):
         self.namespace = namespace
         self.overlay = InMemoryScheduleCache()
         self.autoflush = autoflush
+        self.updating = updating
         self._keep_local = keep_local
         self._local_cache = {}
         self._dirty_block: Optional[str] = None
         self._dirty_block_culprit: Optional[tuple[Spec, pruning.MemoryLimits]] = None
+        self._dirty_block_lock: Optional[redis.asyncio.lock.Lock] = None
         self._given_block_key = subproblem_to_block_coordinate_fn
         self._running_block_task: Optional[
             tuple[str, asyncio.Future[InMemoryScheduleCache]]
@@ -518,7 +522,7 @@ class RedisCache(ScheduleCache):
 
         return results
 
-    async def _get_block(self, block_key):
+    async def _get_block(self, block_key) -> Optional[InMemoryScheduleCache]:
         try:
             pending_entry: _PendingEntry[
                 Optional[InMemoryScheduleCache]
@@ -542,6 +546,7 @@ class RedisCache(ScheduleCache):
         spec = schedules_to_put.spec
         block_key = self.redis_block_key(spec, memory_limits)
 
+        should_load = False
         if self._dirty_block and self._dirty_block != block_key:
             assert (
                 self._dirty_block_culprit
@@ -556,25 +561,49 @@ class RedisCache(ScheduleCache):
                     f"this put was to {block_key}, for {spec} at {memory_limits}."
                 )
             await self.flush()
+            # TODO: Load new overlay here?
+            should_load = True
+        elif not self._dirty_block:
+            should_load = True
+
+        if should_load and self.updating:
+            loaded_block = await self._get_block(block_key)
+            if loaded_block:
+                self.overlay = loaded_block
+
         self._dirty_block = block_key
         self._dirty_block_culprit = (spec, memory_limits)
+        self._dirty_block_lock = self.redis_connection.lock(
+            f"Lock-{self.namespace}-{block_key}",
+            timeout=2 * 60.0,  # TODO: Need to extend periodically.
+        )
+        await self._dirty_block_lock.acquire()
+        if self.updating:
+            pass
         await self.overlay.put(schedules_to_put, memory_limits)
 
     async def flush(self):
         if not self._dirty_block:
             return
+        assert self._dirty_block_lock
 
         # TODO: There should never be a block, so just check that this is the case,
         #   instead of getting it.
         payload = lz4.frame.compress(
             pickle.dumps(self.overlay, protocol=PICKLE_PROTOCOL)
         )
-        set_response = await self.redis_connection.setnx(self._dirty_block, payload)
-        assert set_response, f"Block already exists: {self._dirty_block}"
+        if self.updating:
+            await self.redis_connection.set(self._dirty_block, payload)
+        else:
+            set_response = await self.redis_connection.setnx(self._dirty_block, payload)
+            if not set_response:
+                raise Exception(f"Block already exists: {self._dirty_block}")
 
         self.overlay = InMemoryScheduleCache()
         self._dirty_block = None
         self._dirty_block_culprit = None
+        await self._dirty_block_lock.release()
+        self._dirty_block_lock = None
 
     def specs(self) -> Iterable[Spec]:
         raise NotImplementedError()
