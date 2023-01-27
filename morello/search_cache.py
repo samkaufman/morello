@@ -9,7 +9,9 @@ import pickle
 import typing
 import warnings
 from typing import (
+    AsyncGenerator,
     AsyncIterable,
+    AsyncIterator,
     Callable,
     Generic,
     Iterable,
@@ -229,9 +231,13 @@ class ScheduleCache(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def count_impls(self) -> int:
+        pass
+
+    @abc.abstractmethod
     async def __aiter__(
         self,
-    ) -> AsyncIterable[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
+    ) -> AsyncIterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
         """Iterate over subproblems (Specs and MemoryLimits) and associated Impls.
 
         There is no guarantee that each step of the iterator corresponds to a single
@@ -364,7 +370,7 @@ class InMemoryScheduleCache(ScheduleCache):
     def specs(self) -> Iterable[Spec]:
         yield from self._rects.keys()
 
-    def count_impls(self) -> int:
+    async def count_impls(self) -> int:
         return sum(len(rect) for rect in self._rects.values())
 
     def __len__(self) -> int:
@@ -372,7 +378,7 @@ class InMemoryScheduleCache(ScheduleCache):
 
     async def __aiter__(
         self,
-    ) -> AsyncIterable[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
+    ) -> AsyncIterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
         for spec, rects in self._rects.items():
             for rect in rects:
                 assert rect.spec == spec
@@ -608,23 +614,35 @@ class RedisCache(ScheduleCache):
     def specs(self) -> Iterable[Spec]:
         raise NotImplementedError()
 
+    async def count_impls(self) -> int:
+        total_count = 0
+        async for block in self._iter_blocks():
+            total_count += await block.count_impls()
+        return total_count
+
     async def __aiter__(
         self,
-    ) -> AsyncIterable[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
-        assert "*" not in self.namespace
-        for key in await self.redis_connection.keys(self.namespace + "*"):
+    ) -> AsyncIterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
+        async for block in self._iter_blocks():
+            async for x in block:
+                yield x
+
+    async def _iter_blocks(self) -> AsyncGenerator[InMemoryScheduleCache, None]:
+        for key in await self._all_block_keys():
             if key == self._dirty_block:
                 continue
             block_cache = await self._download_block(key)
             assert block_cache is not None
-            async for x in aiter(block_cache):
-                yield x
+            yield block_cache
         if self._dirty_block:
-            async for x in aiter(self.overlay):
-                yield x
+            yield self.overlay
 
     def __len__(self) -> int:
+        assert "*" not in self.namespace
         raise NotImplementedError()
+
+    async def _all_block_keys(self) -> Iterable[str]:
+        return await self.redis_connection.keys(self.namespace + "*")
 
     async def _download_and_broadcast_block(self, key: str) -> None:
         self._pending.pop(key).set(await self._download_block(key))

@@ -165,10 +165,10 @@ def test_cache_reputting_doesnt_increase_size(cache_cls, spec, limits):
 
     loop = asyncio.new_event_loop()
 
-    initial_count = cache.count_impls()
+    initial_count = loop.run_until_complete(cache.count_impls())
     p = loop.run_until_complete(cache.get(spec, limits))
-    loop.run_until_complete(cache.put(spec, p, limits))
-    assert cache.count_impls() == initial_count
+    loop.run_until_complete(cache.put(p, limits))
+    assert loop.run_until_complete(cache.count_impls()) == initial_count
 
 
 @pytest.mark.asyncio
