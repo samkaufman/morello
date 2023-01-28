@@ -466,6 +466,9 @@ class _PendingEntry(Generic[T]):
 class RedisCache(ScheduleCache):
     """A cache which streams blocks to and from a Redis backend.
 
+    Gets are always serviced with a Redis query, so it can be useful to batch many
+    queries into large `get_many` calls.
+
     Puts are sent to an in-memory, "overlay" cache. That cache is sent to Redis and
     and deleted when `flush` is called. Gets are serviced first by the overlay cache
     and, if the get misses, then by querying the Redis cache.
@@ -480,6 +483,24 @@ class RedisCache(ScheduleCache):
         autoflush: bool = True,
         updating: bool = True,
     ) -> None:
+        """Create a new RedisCache using the given `redis_connection`.
+
+        Args:
+            redis_connection: The Redis connection to use.
+            namespace: A string which will be included in all Redis keys.
+            subproblem_to_block_coordinate_fn: A function which maps a subproblem
+              to a string identifying a particular block.
+            keep_local: A function which takes a block-identifying string and returns
+              `True` is that block should be permanently kept in the local cache after
+              its first get.
+            autoflush: If `True`, the cache will automatically flush its in-memory data
+              when `put` is called on a new block.
+            updating: If `True`, puts will update blocks rather than assume they are not
+              present in the Redis database. On the first put to a new block, a
+              distributed lock will be acquired and any existing block will be
+              downloaded. That and subsequent puts will update that block in memory.
+              On flush, the updated block will be stored in Redis and the lock released.
+        """
         # TODO: Document that this class takes "ownership" of the redis_connection
         super().__init__()
         self.redis_connection = redis_connection
