@@ -600,19 +600,17 @@ class RedisCache(ScheduleCache):
 
         self._dirty_block = block_key
         self._dirty_block_culprit = (spec, memory_limits)
-        self._dirty_block_lock = self.redis_connection.lock(
-            f"Lock-{self.namespace}-{block_key}",
-            timeout=2 * 60.0,  # TODO: Need to extend periodically.
-        )
-        await self._dirty_block_lock.acquire()
         if self.updating:
-            pass
+            self._dirty_block_lock = self.redis_connection.lock(
+                f"Lock-{self.namespace}-{block_key}",
+                timeout=2 * 60.0,  # TODO: Need to extend periodically.
+            )
+            await self._dirty_block_lock.acquire()
         await self.overlay.put(schedules_to_put, memory_limits)
 
     async def flush(self):
         if not self._dirty_block:
             return
-        assert self._dirty_block_lock
 
         # TODO: There should never be a block, so just check that this is the case,
         #   instead of getting it.
@@ -629,8 +627,10 @@ class RedisCache(ScheduleCache):
         self.overlay = InMemoryScheduleCache()
         self._dirty_block = None
         self._dirty_block_culprit = None
-        await self._dirty_block_lock.release()
-        self._dirty_block_lock = None
+        if self.updating:
+            assert self._dirty_block_lock
+            await self._dirty_block_lock.release()
+            self._dirty_block_lock = None
 
     def specs(self) -> Iterable[Spec]:
         raise NotImplementedError()
