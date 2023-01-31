@@ -11,6 +11,7 @@ import random
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Generator, Iterable, Optional, TypeVar, Union
@@ -43,9 +44,6 @@ CacheOrFut = Union[
 ]
 
 logger = logging.getLogger(__name__)
-red: Optional[redis.Redis] = None
-results_cache = None
-results_cache_graph_group = None
 
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("--scheduler", type=str)
@@ -58,6 +56,8 @@ arg_parser.add_argument("--size", type=int, default=512)
 arg_parser.add_argument("--image-name", "-t", type=str, default="samkaufman/morello")
 arg_parser.add_argument("--moves-cache", metavar="CACHE", type=pathlib.Path)
 arg_parser.add_argument("--serial-only", action="store_true")
+
+_tlocal = None
 
 
 class _DistributedSearch(dp.Search):
@@ -192,9 +192,9 @@ async def _compute_dp_table_graph(
             )
 
 
-def _redis_coord_key(spec: specs.Spec, memory_limits: pruning.MemoryLimits) -> str:
-    # TODO: Instead use the block somehow. Will need to have all grids to dispatch between
-    #   Spec types.
+def redis_coord_key(spec: specs.Spec, memory_limits: pruning.MemoryLimits) -> str:
+    # TODO: Instead use the block somehow. Will need to have all grids to
+    #  dispatch between Spec types.
     # TODO: Move the Spec type name prefix outside this class.
     block_pt = _spec_to_spec_coordinate(spec)
     block_part = ",".join(map(str, block_pt))
@@ -216,42 +216,44 @@ def _keep_local(block_key: str) -> bool:
 def _compute_block(
     block: geometry.GridBlock[specs.Spec],
     target: system_config.Target,
-    graph_group,
+    graph_group: int,
     redis_url: str,
 ) -> None:
     """Compute a block and save into the Redis cache."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     # TODO: Scope this more nicely, somehow.
-    global red, results_cache, results_cache_graph_group
-    if results_cache is not None and results_cache_graph_group != graph_group:
-        results_cache = None
-    if red is None:
-        red = redis.Redis.from_url(redis_url)
+    global _tlocal
+    if _tlocal is None:
+        _tlocal = threading.local()
+    if not hasattr(_tlocal, "loop"):
+        _tlocal.loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_tlocal.loop)
+    if getattr(_tlocal, "results_cache_graph_group", None) != graph_group:
+        _tlocal.results_cache = None
+    if getattr(_tlocal, "red", None) is None:
+        _tlocal.red = redis.Redis.from_url(redis_url)
 
         # Wait for Redis to be up.
         for _ in range(PING_TRIES):
             try:
-                loop.run_until_complete(red.ping())
+                _tlocal.loop.run_until_complete(_tlocal.red.ping())
             except redis.BusyLoadingError:
                 time.sleep(PING_WAIT_SECS)
                 pass
             else:
                 break
 
-    if results_cache is None:
+    if _tlocal.results_cache is None:
         # TODO: Assert block membership in lambda
-        results_cache = search_cache.RedisCache(
-            red,
+        _tlocal.results_cache = search_cache.RedisCache(
+            _tlocal.red,
             NAMESPACE,
-            _redis_coord_key,
+            redis_coord_key,
             keep_local=_keep_local,
             autoflush=False,
             updating=False,
         )
-        results_cache_graph_group = graph_group
-    assert red is not None and results_cache is not None
+        _tlocal.results_cache_graph_group = graph_group
+    assert _tlocal.red is not None and _tlocal.results_cache is not None
 
     with system_config.with_target(target):
         searcher = _DistributedSearch()
@@ -259,19 +261,20 @@ def _compute_block(
         subproblems_to_run = [(s, pruning.StandardMemoryLimits()) for s in block]
         while subproblems_to_run:
             subproblems_to_run = _step_compute_block(
-                loop, results_cache, searcher, subproblems_to_run
+                _tlocal.results_cache, searcher, subproblems_to_run
             )
-        loop.run_until_complete(results_cache.flush())
-        loop.run_until_complete(red.close(close_connection_pool=True))
-        loop.close()
+        _tlocal.loop.run_until_complete(_tlocal.results_cache.flush())
+        _tlocal.loop.run_until_complete(_tlocal.red.close(close_connection_pool=True))
 
 
 def _step_compute_block(
-    loop: asyncio.AbstractEventLoop,
     results_cache: search_cache.RedisCache,
     searcher: dp.Search,
     subproblems_to_run: Iterable[tuple[specs.Spec, pruning.StandardMemoryLimits]],
 ) -> list[tuple[specs.Spec, pruning.StandardMemoryLimits]]:
+    global _tlocal
+    assert _tlocal is not None
+
     search_tasks: dict[int, Generator] = {}
     for spec, mlims in subproblems_to_run:
         # TODO: Pass parent_summary too, if applicable.
@@ -289,7 +292,9 @@ def _step_compute_block(
         # `subproblems_requested` will have duplicates. Rely on the cache to merge.
         subproblems_requested = list(itertools.chain.from_iterable(needs.values()))
         cache_results_flat = list(
-            loop.run_until_complete(results_cache.get_many(subproblems_requested))
+            _tlocal.loop.run_until_complete(
+                results_cache.get_many(subproblems_requested)
+            )
         )
         assert len(subproblems_requested) == len(cache_results_flat)
         cache_results_grouped = {}
@@ -315,7 +320,7 @@ def _step_compute_block(
                 continue
             needs[task_key] = msg.needed
             for mlims, entry in msg.computed:
-                loop.run_until_complete(results_cache.put(entry, mlims))
+                _tlocal.loop.run_until_complete(results_cache.put(entry, mlims))
                 # TODO: Clean up dominated limits?
                 next_subproblems_to_run.extend(
                     (entry.spec, smaller_mlims)
@@ -515,28 +520,17 @@ async def _compute_dtype_graph(args, redis_url, target, executor, dt_idx, dt) ->
     )
 
     if not args.moves_only:
-        matmul_accum_spec = specs.MatmulAccum(
-            lhs=target.tensor_spec((args.size, args.size), dtype=dt),
-            rhs=target.tensor_spec((args.size, args.size), dtype=dt),
-            output=target.tensor_spec((args.size, args.size), dtype=dt),
-            serial_only=args.serial_only,
-        )
-        matmul_spec = specs.Matmul(
-            lhs=target.tensor_spec((args.size, args.size), dtype=dt),
-            rhs=target.tensor_spec((args.size, args.size), dtype=dt),
-            output=target.tensor_spec((args.size, args.size), dtype=dt),
-            serial_only=args.serial_only,
-        )
-
-        matmul_accum_grid = _grid_for_query_spec(matmul_accum_spec, args.downscale)
-        matmul_grid = _grid_for_query_spec(matmul_spec, args.downscale)
-
-        await _compute_dp_table_graph(
-            executor, matmul_accum_grid, redis_url=redis_url, pb_position=(dt_idx * 2)
-        )
-        await _compute_dp_table_graph(
-            executor, matmul_grid, redis_url=redis_url, pb_position=(dt_idx * 2)
-        )
+        for matmul_cls in (specs.MatmulAccum, specs.Matmul):
+            matmul_spec = matmul_cls(
+                lhs=target.tensor_spec((args.size, args.size), dtype=dt),
+                rhs=target.tensor_spec((args.size, args.size), dtype=dt),
+                output=target.tensor_spec((args.size, args.size), dtype=dt),
+                serial_only=args.serial_only,
+            )
+            matmul_grid = _grid_for_query_spec(matmul_spec, args.downscale)
+            await _compute_dp_table_graph(
+                executor, matmul_grid, redis_url=redis_url, pb_position=(dt_idx * 2)
+            )
 
 
 async def main(args=None):
