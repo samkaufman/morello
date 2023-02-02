@@ -402,23 +402,6 @@ class InMemoryScheduleCache(ScheduleCache):
             return imp
         return imp.replace_children((spec_to_hole(c.spec) for c in imp.children))
 
-    async def _despecify_schedule_set(
-        self, cached_set: CachedScheduleSet, caps: TinyMap[str, int], get_fn
-    ) -> CachedScheduleSet:
-        new_impls = []
-        if cached_set.contents:
-            limits = pruning.StandardMemoryLimits(caps)
-            for imp, cost in cached_set.contents:
-                despecified = await self._despecify_impl(imp, limits, get_fn)
-                new_impls.append((despecified, cost))
-
-        return CachedScheduleSet(
-            cached_set.spec,
-            tuple(new_impls),
-            cached_set.dependent_paths,
-            cached_set.peak_memory,
-        )
-
     async def _despecify_impl(
         self, imp: Impl, limits: pruning.StandardMemoryLimits, get_fn
     ) -> Impl:
