@@ -459,7 +459,7 @@ class RedisCache(ScheduleCache):
 
     def __init__(
         self,
-        redis_connection: redis.asyncio.Redis,
+        redis_connection: Union[redis.asyncio.Redis, str],
         namespace: str,
         subproblem_to_block_coordinate_fn: Callable[[Spec, pruning.MemoryLimits], str],
         keep_local: Optional[Callable[[str], bool]] = None,
@@ -469,7 +469,8 @@ class RedisCache(ScheduleCache):
         """Create a new RedisCache using the given `redis_connection`.
 
         Args:
-            redis_connection: The Redis connection to use.
+            redis_connection: The Redis connection to use. This should either be a
+              `redis.asyncio.Redis` object for a connection URL.
             namespace: A string which will be included in all Redis keys.
             subproblem_to_block_coordinate_fn: A function which maps a subproblem
               to a string identifying a particular block.
@@ -487,6 +488,8 @@ class RedisCache(ScheduleCache):
         # TODO: Document that this class takes "ownership" of the redis_connection
         super().__init__()
         self.redis_connection = redis_connection
+        if isinstance(self.redis_connection, str):
+            self.redis_connection = redis.asyncio.Redis.from_url(self.redis_connection)
         self.namespace = namespace
         self.overlay = InMemoryScheduleCache()
         self.autoflush = autoflush
