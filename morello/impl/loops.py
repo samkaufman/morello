@@ -22,15 +22,6 @@ class _TilingMixin:
         return None
 
     @property
-    def additional_memories(self) -> list[TinyMap[str, int]]:
-        banks = system_config.current_system().ordered_banks
-        return [TinyMap(banks, (0,) * len(banks))]
-
-    @property
-    def peak_memory(self) -> TinyMap[str, int]:
-        return self.inner.peak_memory
-
-    @property
     def children(self) -> Tuple[Impl, ...]:
         return (self.inner,)
 
@@ -154,15 +145,6 @@ class Loop(Impl):
                     osize = self.spec.operands[tile.source].dim_sizes[dim]
                     return fn(tile)(dim, *args, origin_size=osize, **kwargs)
         raise ValueError(f"No subscript {subscript} found among tiles")
-
-    @property
-    def additional_memories(self) -> list[dict[str, int]]:
-        banks = system_config.current_system().ordered_banks
-        return [TinyMap(banks, (0,) * len(banks))]
-
-    @property
-    def peak_memory(self) -> dict[str, int]:
-        return self.inner.peak_memory
 
     @property
     def children(self) -> Tuple[Impl, ...]:
@@ -316,15 +298,13 @@ class SlidingWindowLoop(_TilingMixin, Impl):
 
     @property
     def peak_memory(self) -> TinyMap[str, int]:
+        # Add the inner peak memory to the additional_memories.
+        adds = self.additional_memories[0]
         m = self.inner.peak_memory
-        live_bank_idx = m.raw_keys.index(self.live_tensor.bank)
-        live_bytes = self.live_tensor.spec.bytes_used
+        assert m.raw_keys == adds.raw_keys
         return TinyMap(
-            m.raw_keys,
-            tuple(
-                v + live_bytes if i == live_bank_idx else v
-                for i, v in enumerate(m.raw_values)
-            ),
+            adds.raw_keys,
+            tuple(a + b for a, b in zip(adds.raw_values, m.raw_values)),
         )
 
     @property

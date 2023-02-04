@@ -335,15 +335,26 @@ class Impl:
     def additional_memories(self) -> list[TinyMap[str, int]]:
         """Memory costs of self when the corresponding child is executed.
 
+        The default implementation incurs no memory cost.
+
         :returns: A list of amounts of memory to remove from that available. The
           outermost list has the same length as the number of children in this
           Impl.
         """
-        raise NotImplementedError()
+        banks = current_system().ordered_banks
+        z = TinyMap(banks, (0,) * len(banks))
+        return [z] * len(self.children)
 
     @property
     def peak_memory(self) -> TinyMap[str, int]:
-        raise NotImplementedError(f"Not implemented for {type(self)}")
+        # Default implementation just takes the max of the peak memory of each child,
+        # per memory level.
+        banks = current_system().ordered_banks
+        vals = [0] * len(banks)
+        for child in self.children:
+            for i in range(len(banks)):
+                vals[i] = max(vals[i], child.peak_memory[banks[i]])
+        return TinyMap(banks, tuple(vals))
 
     @property
     def operands_subscripts(self) -> Sequence[tuple[int, ...]]:
@@ -372,17 +383,11 @@ class Leaf(Impl):
         return make_applied_impl(self, operands)
 
 
+# TODO: Remove this now-useless class.
 class NonAllocatingLeaf(Leaf):
     """A helper base class for leaf Impls that do not allocate memory."""
 
-    @property
-    def additional_memories(self) -> list[TinyMap[str, int]]:
-        return []
-
-    @property
-    def peak_memory(self) -> TinyMap[str, int]:
-        banks = current_system().ordered_banks
-        return TinyMap(banks, (0,) * len(banks))
+    pass
 
 
 class AppliedImpl(Impl):

@@ -472,16 +472,6 @@ class ComposeHole(Impl):
         return self
 
     @property
-    def additional_memories(self) -> list[utils.TinyMap[str, int]]:
-        banks = system_config.current_system().ordered_banks
-        return [utils.TinyMap(banks, (0,) * len(banks))]
-
-    @property
-    def peak_memory(self) -> utils.TinyMap[str, int]:
-        banks = system_config.current_system().ordered_banks
-        return utils.TinyMap(banks, (0,) * len(banks))
-
-    @property
     def is_scheduled(self) -> bool:
         return False
 
@@ -590,8 +580,8 @@ class Pipeline(Impl):
 
         # Initialize peaks to dependencies of the first stage, which is just its
         # output
-        first_peak: list[int] = [0] * len(banks)
-        first_peak[banks.index(stages[0].spec.output.bank)] = stages[
+        output_lims: list[int] = [0] * len(banks)
+        output_lims[banks.index(stages[0].spec.output.bank)] = stages[
             0
         ].spec.output.bytes_used
 
@@ -609,7 +599,7 @@ class Pipeline(Impl):
             -2
         ].spec.output.bytes_used
 
-        peaks = [first_peak] + middle_peaks + [last_peak]
+        peaks = [output_lims] + middle_peaks + [last_peak]
         return [utils.TinyMap(banks, tuple(p)) for p in peaks]
 
     @property
@@ -618,11 +608,9 @@ class Pipeline(Impl):
 
         # Pipeline currently adds an intermediate tensor between each stage, so
         # intermediates is just the output of everything but the last stage
-        intermediates: list[specs.TensorSpec] = [
-            o.spec.output for o in self.stages[:-1]
-        ]
         intermed_utils: list[dict[str, int]] = []
-        for tensor in intermediates:
+        for o in self.stages[:-1]:
+            tensor = o.spec.output
             new_mem = {k: 0 for k in system.banks}
             new_mem[tensor.bank] += tensor.bytes_used
             intermed_utils.append(new_mem)
@@ -644,8 +632,6 @@ class Pipeline(Impl):
         mem = _zipply(
             max, mem, _zipply(sum, self.stages[-1].peak_memory, intermed_utils[-1])
         )
-
-        assert set(mem.keys()) == set(system.ordered_banks)
 
         # TODO: Construct TinyMap directly without all the intermediate dicts
         return utils.TinyMap(
@@ -684,7 +670,7 @@ class Pipeline(Impl):
         )
 
 
-def _zipply(fn: Callable[[tuple[U]], V], *args: Mapping[T, U]) -> dict[T, V]:
+def _zipply(fn: Callable[[tuple[U, ...]], V], *args: Mapping[T, U]) -> dict[T, V]:
     if not args:
         return {}
     return {k: fn(v) for k, v in utils.zip_dict(args[0], *args[1:], same_keys=True)}

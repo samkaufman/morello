@@ -46,15 +46,6 @@ class SpecCast(Impl):
     def complete(self) -> Impl:
         return self.replace_children([self.inner.complete()])
 
-    @property
-    def additional_memories(self) -> list[utils.TinyMap[str, int]]:
-        banks = system_config.current_system().ordered_banks
-        return [utils.TinyMap(banks, (0,) * len(banks))]
-
-    @property
-    def peak_memory(self) -> utils.TinyMap[str, int]:
-        return self.inner.peak_memory
-
     def apply(self, operands: Sequence["TensorLike"]) -> AppliedImpl:
         assert [o.spec for o in operands] == list(self.spec.operands), (
             f"Operands do not match Spec. Spec operands were "

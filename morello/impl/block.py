@@ -42,21 +42,6 @@ class Block(Impl):
     def complete(self) -> Impl:
         return self.replace_children((c.complete() for c in self.steps))
 
-    @property
-    def additional_memories(self) -> list[utils.TinyMap[str, int]]:
-        banks = system_config.current_system().ordered_banks
-        z = utils.TinyMap(banks, (0,) * len(banks))
-        return [z] * len(self.steps)
-
-    @property
-    def peak_memory(self) -> utils.TinyMap[str, int]:
-        banks = system_config.current_system().ordered_banks
-        assert all(c.peak_memory.raw_keys is banks for c in self.steps)
-        return utils.TinyMap(
-            banks,
-            tuple(map(max, zip(*(c.peak_memory.raw_values for c in self.steps)))),
-        )
-
     def apply(self, operands: Sequence["TensorLike"]) -> AppliedImpl:
         applied_steps = []
         for child, child_idxs in zip(self.steps, self.op_idxs):
