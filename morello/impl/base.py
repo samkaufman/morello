@@ -332,28 +332,43 @@ class Impl:
         return self.apply([current_target().tensor(o) for o in self.spec.operands])
 
     @property
-    def additional_memories(self) -> list[TinyMap[str, int]]:
-        """Memory costs of self when the corresponding child is executed.
+    def memory_allocated(self) -> tuple[TinyMap[str, int], list[TinyMap[str, int]]]:
+        """Returns the amount of memory allocated by this Impl.
 
-        The default implementation incurs no memory cost.
+        Returns a tuple of, first, the amount of memory allocated by this Impl which is
+        live for the duration of its execution, and second, the amount of memory
+        allocated which will be live during the execution of each child Impl.
 
-        :returns: A list of amounts of memory to remove from that available. The
-          outermost list has the same length as the number of children in this
-          Impl.
+        The default implementation of this method returns zero for all.
         """
         banks = current_system().ordered_banks
         z = TinyMap(banks, (0,) * len(banks))
-        return [z] * len(self.children)
+        return z, [z] * len(self.children)
 
+    @typing.final
     @property
     def peak_memory(self) -> TinyMap[str, int]:
-        # Default implementation just takes the max of the peak memory of each child,
-        # per memory level.
         banks = current_system().ordered_banks
+
+        base_adds, per_child_adds = self.memory_allocated
+        assert base_adds.raw_keys == banks
+
+        # The max of each per-child, per-bank bytes allocated, including any additional
+        # from this Impl.
         vals = [0] * len(banks)
-        for child in self.children:
+        for child_adds, child in zip(per_child_adds, self.children):
+            child_peak = child.peak_memory
+            assert child_peak.raw_keys == banks
+            assert child_adds.raw_keys == banks
             for i in range(len(banks)):
-                vals[i] = max(vals[i], child.peak_memory[banks[i]])
+                vals[i] = max(
+                    vals[i], child_peak.raw_values[i] + child_adds.raw_values[i]
+                )
+
+        # Add the base memory allocated. This is the memory live for the entire
+        # execution of this Impl.
+        vals = [v + b for v, b in zip(vals, base_adds.raw_values)]
+
         return TinyMap(banks, tuple(vals))
 
     @property

@@ -297,18 +297,7 @@ class SlidingWindowLoop(_TilingMixin, Impl):
         )
 
     @property
-    def peak_memory(self) -> TinyMap[str, int]:
-        # Add the inner peak memory to the additional_memories.
-        adds = self.additional_memories[0]
-        m = self.inner.peak_memory
-        assert m.raw_keys == adds.raw_keys
-        return TinyMap(
-            adds.raw_keys,
-            tuple(a + b for a, b in zip(adds.raw_values, m.raw_values)),
-        )
-
-    @property
-    def additional_memories(self) -> list[TinyMap[str, int]]:
+    def memory_allocated(self) -> tuple[TinyMap[str, int], list[TinyMap[str, int]]]:
         banks = system_config.current_system().ordered_banks
         live_bank_idx = banks.index(self.live_tensor.bank)
         live_bytes = self.live_tensor.spec.bytes_used
@@ -316,7 +305,8 @@ class SlidingWindowLoop(_TilingMixin, Impl):
             banks,
             tuple(live_bytes if i == live_bank_idx else 0 for i in range(len(banks))),
         )
-        return [adds]
+        z = TinyMap(banks, (0,) * len(banks))
+        return z, [adds]
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
         inner_operands = list(operands)

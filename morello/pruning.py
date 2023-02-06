@@ -126,7 +126,12 @@ class StandardMemoryLimits(MemoryLimits):
 
         # base->base
         child_limits = []
-        for adds in schedule.additional_memories:
+        if any(v != 0 for v in schedule.memory_allocated[0].raw_values):
+            raise NotImplementedError(
+                f"Cannot transition {type(schedule).__name__} with non-zero "
+                f"base memory, but base memory was {schedule.memory_allocated[0]}"
+            )
+        for adds in schedule.memory_allocated[1]:
             assert self._available.raw_keys == adds.raw_keys, (
                 f"Memory levels do not match; {self._available.raw_keys} != "
                 f"{adds.raw_keys}"

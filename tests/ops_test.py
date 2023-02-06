@@ -155,7 +155,7 @@ def test_gen_vector_shapes_is_correct(
 
 @pytest.mark.skip
 @pytest.mark.parametrize(
-    "intermed_shapes,dtype,op_mems,expected_peaks,expected_additionals",
+    "intermed_shapes,dtype,op_mems,expected_peaks,expected_child_allocs",
     [
         (
             [(10,)],
@@ -174,7 +174,7 @@ def test_gen_vector_shapes_is_correct(
     ],
 )
 def test_pipeline_peak_and_additional_memory(
-    intermed_shapes, dtype, op_mems, expected_peaks, expected_additionals
+    intermed_shapes, dtype, op_mems, expected_peaks, expected_child_allocs
 ):
     class SubImplStub:
         """A stub for an impl.Impl with some arbitrary output and peak mem.
@@ -221,7 +221,8 @@ def test_pipeline_peak_and_additional_memory(
     )
 
     assert pipeline.peak_memory == expected_peaks
-    assert pipeline.additional_memories == expected_additionals
+    assert all(v == 0 for v in pipeline.memory_allocated[0].values())
+    assert pipeline.memory_allocated[1] == expected_child_allocs
 
 
 @pytest.mark.parametrize(

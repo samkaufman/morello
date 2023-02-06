@@ -165,7 +165,7 @@ class MoveLet(Impl):
         return self.replace_children((c.complete() for c in self.children))
 
     @property
-    def additional_memories(self) -> list[TinyMap[str, int]]:
+    def memory_allocated(self) -> tuple[TinyMap[str, int], list[TinyMap[str, int]]]:
         additional = self.destination.spec.bytes_used
         if self.prefetching:
             additional *= 2
@@ -184,22 +184,7 @@ class MoveLet(Impl):
             to_return.insert(0, zeros)
         if self.epilogue is not None:
             to_return.append(zeros)
-        return to_return
-
-    @property
-    def peak_memory(self) -> TinyMap[str, int]:
-        mem = self.body.peak_memory
-        additional = self.destination.spec.bytes_used
-        if self.prefetching:
-            additional *= 2
-        dest_idx = mem.raw_keys.index(self.destination.bank)
-        return TinyMap(
-            mem.raw_keys,
-            tuple(
-                v + additional if dest_idx == i else v
-                for i, v in enumerate(mem.raw_values)
-            ),
-        )
+        return zeros, to_return
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
         move_op_operands = [operands[self.source_idx], self.destination]

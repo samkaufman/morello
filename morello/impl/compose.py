@@ -16,7 +16,7 @@ from typing import (
 
 from .. import layouts, specs, system_config, tiling, utils
 from ..layouts import Layout
-from ..utils import snap_availables_up
+from ..utils import TinyMap, snap_availables_up
 from ..system_config import current_system, current_target
 from ..tensor import OperandIdx, SimpleTile, TensorBase, TensorLike, Tile
 from .actions import PeelAction, SlidingTileOutAction, TileOutAction
@@ -574,7 +574,7 @@ class Pipeline(Impl):
         return dataclasses.replace(self, stages=replacements)
 
     @property
-    def additional_memories(self) -> list[utils.TinyMap[str, int]]:
+    def memory_allocated(self) -> tuple[TinyMap[str, int], list[TinyMap[str, int]]]:
         stages = self.stages
         banks = system_config.current_system().ordered_banks
 
@@ -600,43 +600,8 @@ class Pipeline(Impl):
         ].spec.output.bytes_used
 
         peaks = [output_lims] + middle_peaks + [last_peak]
-        return [utils.TinyMap(banks, tuple(p)) for p in peaks]
-
-    @property
-    def peak_memory(self) -> utils.TinyMap[str, int]:
-        system = system_config.current_system()
-
-        # Pipeline currently adds an intermediate tensor between each stage, so
-        # intermediates is just the output of everything but the last stage
-        intermed_utils: list[dict[str, int]] = []
-        for o in self.stages[:-1]:
-            tensor = o.spec.output
-            new_mem = {k: 0 for k in system.banks}
-            new_mem[tensor.bank] += tensor.bytes_used
-            intermed_utils.append(new_mem)
-
-        # Utilization is the memory used by an operand and, where present, input and
-        # output intermediate buffers
-        mem = _zipply(sum, self.stages[0].peak_memory, intermed_utils[0])
-        for stage_idx in range(1, len(self.stages) - 1):
-            mem = _zipply(
-                max,
-                mem,
-                _zipply(
-                    sum,
-                    intermed_utils[stage_idx - 1],
-                    self.stages[stage_idx].peak_memory,
-                    intermed_utils[stage_idx],
-                ),
-            )
-        mem = _zipply(
-            max, mem, _zipply(sum, self.stages[-1].peak_memory, intermed_utils[-1])
-        )
-
-        # TODO: Construct TinyMap directly without all the intermediate dicts
-        return utils.TinyMap(
-            system.ordered_banks, tuple(mem[b] for b in system.ordered_banks)
-        )
+        z = TinyMap(banks, (0,) * len(banks))
+        return z, [TinyMap(banks, tuple(p)) for p in peaks]
 
     @property
     def is_scheduled(self) -> bool:
