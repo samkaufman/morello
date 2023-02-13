@@ -77,6 +77,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--ignore-environment", action="store_true")
 parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=pathlib.Path, default=None)
+parser.add_argument("--redis", type=str, default=None)
+parser.add_argument("--redis-namespace", type=str, default=None)
 parser.add_argument(
     "--trials",
     type=int,
@@ -213,6 +215,7 @@ class Benchmark:
         self,
         cache: Union[str, pathlib.Path, None],
         save_cache: bool,
+        red: Optional[tuple[str, str]],
         extras_dir: pathlib.Path,
     ) -> Iterable[tuple[str, Callable[[], "BenchmarkBackend"]]]:
 
@@ -232,7 +235,7 @@ class Benchmark:
         yield "jax", lambda: self._jax_backend(extras_dir / "jax")
         yield "halide", lambda: self._halide_backend(extras_dir / "halide")
         yield "morello", lambda: MorelloBackend(
-            self, cache, save_cache, extras_dir / "morello"
+            self, cache, save_cache, red, extras_dir / "morello"
         )
 
     @property
@@ -275,17 +278,19 @@ class MorelloBackend(BenchmarkBackend):
         benchmark: Benchmark,
         cache: Union[str, pathlib.Path, None],
         save_cache: bool,
+        red: Optional[tuple[str, str]],
         extras_dir: pathlib.Path,
     ):
         super().__init__(extras_dir)
         self.benchmark = benchmark
         self.cache_path = cache
         self.save_cache = save_cache
+        self.red = red
 
     def run(self, trials: int) -> list[float]:
         spec = self.benchmark.spec
         with search_cache.persistent_cache(
-            self.cache_path, save=self.save_cache
+            self.cache_path, self.red, save=self.save_cache
         ) as cache:
             impl = search.schedule_search(spec, cache=cache)[0]
         assert impl
@@ -1108,16 +1113,6 @@ class CNNHCHWcBenchmark(CNNBenchmark):
     def short_name(self) -> str:
         return "cnn-nchwc"
 
-    def make_backends(
-        self,
-        cache: Union[str, pathlib.Path, None],
-        save_cache: bool,
-        extras_dir: pathlib.Path,
-    ) -> Iterable["BenchmarkBackend"]:
-        # TODO: Yield the Relay backend
-        # yield RelayCNNNCHWcBackend(extras_dir)
-        yield MorelloBackend(self, cache, save_cache, extras_dir)
-
 
 class RelayCNNNCHWcBackend(LoopingBackend):
     def __init__(self, extras_dir: pathlib.Path):
@@ -1459,6 +1454,10 @@ def main():
 
     args = parser.parse_args()
 
+    red: Optional[tuple[str, str]] = None
+    if args.redis:
+        red = (args.redis, args.redis_namespace)
+
     if not args.ignore_environment:
         _check_environment()
 
@@ -1513,7 +1512,7 @@ def main():
                 )
                 work_dir_backend.mkdir(parents=True, exist_ok=False)
                 for short_name, backend_constructor in benchmark.backends(
-                    args.cache, args.save_cache, work_dir_backend
+                    args.cache, args.save_cache, red, work_dir_backend
                 ):
                     if args.backend and short_name not in args.backend:
                         print(f"Skipping backend named", short_name)
@@ -1548,7 +1547,7 @@ def main():
                                 benchmark.cpus_used,
                                 ", ".join(f"{s:.8f}" for s in runtime_samples),
                                 uploaded_url,
-                                "vectormoves",
+                                "blockdistributed",
                             ],
                             value_input_option="USER_ENTERED",
                         )

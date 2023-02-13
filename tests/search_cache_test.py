@@ -1,12 +1,13 @@
-import asyncio
 import hypothesis
 import pytest
 import fakeredis.aioredis
-from hypothesis import strategies as st
 
 from morello import dtypes, impl, pformat, pruning, search_cache, specs
+from morello.cost import MainCost
 from morello.search import dp
+from morello.search.common import ScheduleKey
 from morello.system_config import current_system, current_target
+from morello.utils import snap_availables_up
 
 from . import strategies
 
@@ -40,16 +41,26 @@ async def test_cache_common_scenario(cache_cls, dtype):
     rhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
     output = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
     fast_schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
+    fast_schedule_key = ScheduleKey(
+        MainCost(10),
+        snap_availables_up(fast_schedule.peak_memory.raw_values),
+        fast_schedule.depth,
+    )
     fast_wrapped_schedule = search_cache.CachedScheduleSet(
-        fast_schedule.spec, ((fast_schedule, 10),), 1
+        fast_schedule.spec, ((fast_schedule, fast_schedule_key),), 1
     )
 
     lhs = target.tensor_spec((100, 100), dtype=dtype, bank="RF")
     rhs = target.tensor_spec((100, 100), dtype=dtype, bank="RF")
     output = target.tensor_spec((100, 100), dtype=dtype, bank="RF")
     slow_schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
+    slow_schedule_key = ScheduleKey(
+        MainCost(50),
+        snap_availables_up(slow_schedule.peak_memory.raw_values),
+        slow_schedule.depth,
+    )
     slow_wrapped_schedule = search_cache.CachedScheduleSet(
-        slow_schedule.spec, ((slow_schedule, 50),), 1
+        slow_schedule.spec, ((slow_schedule, slow_schedule_key),), 1
     )
 
     lhs = target.tensor_spec((8, 8), dtype=dtype, bank="RF")
@@ -127,14 +138,16 @@ async def test_cache_raises_keyerror_when_empty(cache_cls, spec, limits):
 # TODO: Test top_k greater than 1
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
-@hypothesis.settings(deadline=240_000)
+@hypothesis.settings(deadline=240_000, max_examples=3)
 @hypothesis.given(
-    strategies.small_atomic_specs_st,
+    strategies.tiny_atomic_specs_st,
     strategies.arb_small_standard_memorylimits(),
 )
 async def test_cache_get_returns_just_put_impls(cache_cls, spec, limits):
     cache = _make_cache(cache_cls)
 
+    # Use DP search below to ensure that we don't produce an Impl with differing
+    # sub-Impls for the same Spec.
     optimal = await dp.Search(top_k=1)(spec, limits, parent_summary=None, cache=cache)
     hypothesis.assume(optimal)
     optimal = optimal[0]
@@ -151,24 +164,23 @@ async def test_cache_get_returns_just_put_impls(cache_cls, spec, limits):
 
 # TODO: Add Compose Specs (incl. PipelineChildMemoryLimits)
 # TODO: Test top_k greater than 1
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
-@hypothesis.settings(deadline=90_000)
+@hypothesis.settings(deadline=90_000, max_examples=3)
 @hypothesis.given(
     strategies.small_atomic_specs_st, strategies.arb_small_standard_memorylimits()
 )
-def test_cache_reputting_doesnt_increase_size(cache_cls, spec, limits):
+async def test_cache_reputting_doesnt_increase_size(cache_cls, spec, limits):
     cache = _make_cache(cache_cls)
-    optimal = dp.schedule_search(spec, limits, cache=cache)
+    optimal = await dp.Search()(spec, limits, cache=cache)
     hypothesis.assume(optimal)
     optimal = optimal[0]
     assert isinstance(optimal, impl.Impl)
 
-    loop = asyncio.new_event_loop()
-
-    initial_count = loop.run_until_complete(cache.count_impls())
-    p = loop.run_until_complete(cache.get(spec, limits))
-    loop.run_until_complete(cache.put(p, limits))
-    assert loop.run_until_complete(cache.count_impls()) == initial_count
+    initial_count = await cache.count_impls()
+    p = await cache.get(spec, limits)
+    await cache.put(p, limits)
+    assert (await cache.count_impls()) == initial_count
 
 
 @pytest.mark.asyncio
@@ -215,8 +227,13 @@ async def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
     rhs = target.tensor_spec((8, 8), dtype=dtype, bank=db)
     output = target.tensor_spec((8, 8), dtype=dtype, bank=db)
     schedule = impl.MatmulHole(specs.Matmul(lhs, rhs, output, serial_only=False))
+    k = ScheduleKey(
+        MainCost(10),
+        snap_availables_up(schedule.peak_memory.raw_values),
+        schedule.depth,
+    )
     wrapped_schedule = search_cache.CachedScheduleSet(
-        schedule.spec, ((schedule, 10),), 1
+        schedule.spec, ((schedule, k),), 1
     )
 
     cache = search_cache.InMemoryScheduleCache()

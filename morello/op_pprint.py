@@ -158,7 +158,6 @@ def pprint(
     show_scheduled: bool = False,
     color: bool = True,
     file=sys.stdout,
-    holes_ok: bool = False,
 ):
     def _cfmt(text, **kwargs):
         if not color:
@@ -172,7 +171,7 @@ def pprint(
     if show_spec:
         headers.append("spec")
     if show_cost:
-        cost_dict = cost.detailed_analytical_cost(op, holes_ok=holes_ok)
+        cost_dict = cost.detailed_analytical_cost(op)
         headers.append("cost")
     if show_utilization:
         headers.extend(current_system().ordered_banks)

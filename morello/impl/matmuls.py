@@ -1,9 +1,8 @@
 import dataclasses
 import functools
-import warnings
 from typing import Callable, Iterable, Optional, Sequence
 
-from .. import dtypes, layouts, specs, system_config
+from .. import specs, system_config
 from ..tensor import OperandIdx, TensorLike
 from .actions import MatmulSplitAction, TileOutAction
 from .base import AppliedImpl, Impl, NonAllocatingLeaf, make_applied_impl
@@ -220,8 +219,6 @@ class BroadcastVecMult(MatmulLeaf):
     """A leaf for a scalar-vector multiplication (Clang vector extensions)."""
 
     def __post_init__(self):
-        # TODO: Remove following.
-        assert isinstance(self.spec, specs.MatmulAccum)
         check_result = BroadcastVecMult._check_operands(self.spec.operands)
         if check_result:
             raise ValueError(check_result)

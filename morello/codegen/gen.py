@@ -1,20 +1,17 @@
 import contextlib
 import dataclasses
 import functools
-import itertools
 import operator
 import string
-import warnings
 from collections.abc import Sequence
-from typing import Callable, Iterable, Literal, Optional, Union, cast
+from typing import Callable, Literal, Optional, Union, cast
 
 import sympy
 
-from .. import impl, layouts, utils
-from ..dtypes import Dtype, Uint8, Uint32
-from ..system_config.state import current_system
-from ..tensor import Tensor, TensorLike
-from . import common, expr_utils, indexexpr
+from .. import impl, utils
+from ..dtypes import Dtype
+from ..tensor import Tensor
+from . import common, expr_utils
 from .common import OperandDetails
 from .ctensors import (
     GCC_VEC_TYPES,
@@ -22,14 +19,11 @@ from .ctensors import (
     CPtr,
     CStackArray,
     CTensor,
-    CUnsizedHeapArray,
     CValueVar,
     CVecVars,
 )
 from .indexexpr import vsub
 from .loops import BOUNDARY_ANCESTORS, OperandDetailsLoopExt, emit_tile_out_loop_nest
-
-_DCFETCH_EMIT_STRATEGY = "first-pt"
 
 STACK_CUTOFF = 256
 BENCH_ITERS = 10
@@ -680,7 +674,7 @@ def generate_c(
 
             with writer.indent_block():
                 kernel()
-            
+
             writer.writeline("}")
             writer.writeline("clock_gettime(CLOCK_MONOTONIC, &end);")
             writer.writeline("struct timespec delta = ts_diff(start, end);")

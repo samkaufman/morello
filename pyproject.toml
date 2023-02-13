@@ -49,6 +49,7 @@ PyDrive2 = "^1.14.0"
 gspread = "^5.5.0"
 jax = "~0.3.13"
 jaxlib = "~0.3.13"
+absl-py = "^1.4.0"  # Required by jax
 apache-tvm = "~0.9"
 torch = "^1.12.1"
 

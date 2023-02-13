@@ -3,10 +3,9 @@ import functools
 import itertools
 import logging
 import multiprocessing
-from collections.abc import Sequence
-from typing import Any, Generator, Iterable, Optional
+from typing import Generator, Iterable, Optional
 
-from .. import impl, layouts, pruning, specs
+from .. import impl, pruning, specs
 from ..impl import Impl
 from . import common
 
@@ -19,7 +18,7 @@ def _best_schedule(it: Iterable[Impl]):
     This uses schedule_key, so it will return the lowest cost schedule,
     breaking ties as described in schedule_key's docstring.
     """
-    new_it = ((s, common.schedule_key(s)) for s in it)
+    new_it = ((s, common.ScheduleKey.from_complete_impl(s)) for s in it)
     return min(new_it, key=lambda x: x[1], default=None)
 
 
@@ -62,7 +61,7 @@ def naive_search(
     memory_limits=None,
     parent_summary=None,
     parallel_jobs=1,
-):
+) -> Optional[Impl]:
     """Returns the best Impl for a given Spec and memory limits.
 
     Search explicitly enumerates every possible Impl of the given Spec,

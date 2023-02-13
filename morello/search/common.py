@@ -1,23 +1,16 @@
-import contextvars
 import dataclasses
 import functools
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Callable, Tuple
+from typing import Any, Callable
 
 import cython
 
 if cython.compiled:
-    from cython.cimports.libc import limits
     from cython.cimports.morello import cost
-else:
-    import sys
 
 
-if TYPE_CHECKING:
-    from morello.impl.base import Impl
-
-from .. import cost, pruning, specs, system_config
-from ..impl import actions
+from .. import cost, system_config, utils
+from ..impl import Impl, actions
 
 
 class ActionFailedException(Exception):
@@ -36,21 +29,48 @@ class SearchStats:
     expansions: int = 0
 
 
-@cython.ccall
-def schedule_key(schedule: "Impl") -> Tuple[int, Sequence[int], Any]:
-    """Returns a key for ordering schedules during search.
+# TODO: Just merge this into the cost model. Key and cost distinction is useless.
+@dataclasses.dataclass(frozen=True, order=True, slots=True)
+class ScheduleKey:
+    """A key for ordering schedules during search.
 
-    The returned key is a tuple of the schedule cost, peak memory usage, and
-    schedule depth. In Python, tuples are compared by their first non-equal
-    term, so this key can be used to select a schedule with the lowest cost
-    with peak memory and then syntactic depth as tie-breakers.
+    Can be seen as the "true" cost of an Impl.
+
+    When ordering ScheduleKeys, the `MainCost` will be compared first, with
+    ties broken by minimizing memory peaks and then Impl depth.
     """
-    system = system_config.current_system()
-    base_cost = limits.LONG_MAX if cython.compiled else sys.maxsize
-    if schedule.is_scheduled:
-        base_cost = cost.compute_cost(schedule)
-    peaks = tuple([schedule.peak_memory[b] for b in system.ordered_banks])
-    return base_cost, peaks, schedule.depth
+
+    main_cost: cost.MainCost
+    peaks: tuple[int, ...]
+    depth: int
+
+    @staticmethod
+    def from_complete_impl(imp: "Impl") -> "ScheduleKey":
+        if not imp.is_scheduled:
+            raise ValueError("Impl must be complete")
+        if not imp.children:
+            return ScheduleKey.from_child_keys(imp, [])
+        return ScheduleKey.from_child_keys(
+            imp, [ScheduleKey.from_complete_impl(c) for c in imp.children]
+        )
+
+    # TODO: Make callers check memory correctness when calling this.
+    @staticmethod
+    def from_child_keys(
+        imp: "Impl", child_keys: Sequence["ScheduleKey"]
+    ) -> "ScheduleKey":
+        banks = system_config.current_system().ordered_banks
+        main_cost = cost.compute_cost_node(imp, [k.main_cost for k in child_keys])
+        # TODO: Handle other kinds of memory, not just standard/TinyMap peaks.
+        raised_peaks = Impl.peak_memory_from_child_peaks(
+            imp.memory_allocated, [utils.TinyMap(banks, k.peaks) for k in child_keys]
+        )
+        raised_peaks = utils.snap_availables_up(raised_peaks)
+        return ScheduleKey(
+            main_cost=main_cost,
+            peaks=raised_peaks.raw_values,
+            depth=1 + max((k.depth for k in child_keys), default=0),
+        )
 
 
 # TODO: Consider making this a default implementation of `actions` itself.

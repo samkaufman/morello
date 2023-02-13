@@ -4,13 +4,15 @@ import contextlib
 import contextvars
 import dataclasses
 import itertools
+import logging
 import pathlib
 import pickle
+import time
 import typing
 import warnings
 from typing import (
+    TYPE_CHECKING,
     AsyncGenerator,
-    AsyncIterable,
     AsyncIterator,
     Callable,
     Generic,
@@ -36,15 +38,22 @@ from .specs import Spec
 from .system_config import current_system
 from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
 
+if TYPE_CHECKING:
+    from .search.common import ScheduleKey
+
+
 TABLE_STYLE: Literal["dense", "list", "dict", "bca"] = "bca"
 RAISE_CAPS_ON_OVERLAP = True
 PICKLE_PROTOCOL = 5
+KEEP_LOCAL_LIM = 3
 
 T = typing.TypeVar("T")
 
 assert_access_on_log_boundaries = contextvars.ContextVar(
     "assert_access_on_log_boundaries", default=True
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _leaf_tuples(
@@ -60,17 +69,19 @@ def _leaf_tuples(
             yield from _leaf_tuples(child, m)
 
 
+# TODO: Add __slots__. (Will break compatibility old pickles.)
 class CachedScheduleSet:
     """Wraps Impls with their cost and other metadata."""
 
-    contents: tuple[tuple[Impl, int], ...]
+    spec: Spec
+    contents: tuple[tuple[Impl, "ScheduleKey"], ...]
     peak_memory: Optional[TinyMap[str, int]]
     dependent_paths: int
 
     def __init__(
         self,
         spec: Spec,
-        contents: tuple[tuple[Impl, int], ...],
+        contents: tuple[tuple[Impl, "ScheduleKey"], ...],
         specs_visited: int,  # TODO: Rename to dependent_paths
         peak_memory: Optional[TinyMap[str, int]] = None,
     ):
@@ -82,27 +93,24 @@ class CachedScheduleSet:
         self.dependent_paths = specs_visited
         self.peak_memory = peak_memory
         if contents and not peak_memory:
-            self.peak_memory = snap_availables_up(
-                TinyMap(
-                    self.contents[0][0].peak_memory.raw_keys,
-                    tuple(
-                        max(zvals)
-                        for zvals in zip(
-                            *(c[0].peak_memory.raw_values for c in self.contents)
-                        )
-                    ),
-                )
-            )
-        assert not self.contents or (
-            self.peak_memory is not None
-            and (
-                not assert_access_on_log_boundaries.get()
-                or snap_availables_up(self.peak_memory) == self.peak_memory
-            )
-        )
+            banks = current_system().ordered_banks
+            peak_vals: list[int] = [0] * len(contents[0][1].peaks)
+            for i in range(len(peak_vals)):
+                peak_vals[i] = max(c[1].peaks[i] for c in contents)
+            self.peak_memory = TinyMap(banks, tuple(peak_vals))
+
+        if (
+            __debug__
+            and self.contents
+            and self.peak_memory
+            and assert_access_on_log_boundaries.get()
+        ):
+            assert (
+                snap_availables_up(self.peak_memory) == self.peak_memory
+            ), f"{snap_availables_up(self.peak_memory)} != {self.peak_memory}"
 
     @property
-    def bottom_peak(self) -> TinyMap[str, int]:
+    def peak_or_zero(self) -> TinyMap[str, int]:
         if self.peak_memory is not None:
             return self.peak_memory
         return TinyMap(
@@ -574,7 +582,6 @@ class RedisCache(ScheduleCache):
                     f"this put was to {block_key}, for {spec} at {memory_limits}."
                 )
             await self.flush()
-            # TODO: Load new overlay here?
             should_load = True
         elif not self._dirty_block:
             should_load = True
@@ -608,7 +615,12 @@ class RedisCache(ScheduleCache):
         else:
             set_response = await self.redis_connection.setnx(self._dirty_block, payload)
             if not set_response:
-                raise Exception(f"Block already exists: {self._dirty_block}")
+                assert self._dirty_block_culprit
+                raise Exception(
+                    f"Block already exists: {self._dirty_block}. "
+                    "The overlay block was originally created by a put to: "
+                    f"{tuple(map(str, self._dirty_block_culprit))}."
+                )
 
         self.overlay = InMemoryScheduleCache()
         self._dirty_block = None
@@ -666,20 +678,43 @@ class RedisCache(ScheduleCache):
             except KeyError:
                 pass
 
+        logger.debug("Downloading block: %s", key)
+        start = time.time()
+
         async with self._get_block_lock:
+            lock_got_time = time.time()
             blob = await asyncio.wait_for(self.redis_connection.get(key), timeout=900)
             if blob is None:
+                stop = time.time()
+                logger.info(
+                    "Missed block: %s (total %.2fs, lock %.2fs)",
+                    key,
+                    stop - start,
+                    lock_got_time - start,
+                )
                 return None
             assert isinstance(
                 blob, bytes
             ), f"blob was not bytes, was {type(blob).__name__}"
+            decode_start = time.time()
             decoded = lz4.frame.decompress(blob)
+            lz4_stop = time.time()
             decoded = pickle.loads(decoded)
+            decode_stop = time.time()
             assert isinstance(
                 decoded, InMemoryScheduleCache
             ), f"decoded was not InMemoryScheduleCache; was {type(decoded).__name__}"
             if should_keep_local:
                 self._local_cache[key] = decoded
+            stop = time.time()
+            logger.info(
+                "Downloaded block: %s (total %.2fs, lock %.2fs, decode %.2fs, lz4 %.2fs)",
+                key,
+                stop - start,
+                lock_got_time - start,
+                decode_stop - decode_start,
+                lz4_stop - decode_start,
+            )
             return decoded
 
     def redis_block_key(self, *args, **kwargs):
@@ -984,8 +1019,84 @@ class _BlockCompressedTable(_SharedTable):
             return entry.peak_memory.raw_values
 
 
+class ChainCache(ScheduleCache):
+    def __init__(self, caches: Iterable[ScheduleCache]) -> None:
+        self._inner_caches = list(caches)
+
+    async def get_many(
+        self, subproblems: Iterable[tuple[Spec, pruning.MemoryLimits]]
+    ) -> Iterable[Optional[CachedScheduleSet]]:
+        subproblems = list(subproblems)  # TODO: Just require Sequence in signature.
+        remaining_idxs: list[int] = list(range(len(subproblems)))
+        results: list[Optional[CachedScheduleSet]] = [None] * len(remaining_idxs)
+        for cache in self._inner_caches:
+            one_result = await cache.get_many((subproblems[i] for i in remaining_idxs))
+            to_del = set()  # TODO: Don't use a set
+            for subproblem_idx, entry in zip(remaining_idxs, one_result):
+                if entry is not None:
+                    to_del.add(subproblem_idx)
+                    results[subproblem_idx] = entry
+            remaining_idxs = [i for i in remaining_idxs if i not in to_del]
+        return results
+
+    async def put(self, *args, **kwargs) -> None:
+        return await self._inner_caches[0].put(*args, **kwargs)
+
+    def specs(self) -> Iterable[Spec]:
+        result = set()
+        for cache in self._inner_caches:
+            result.update(cache.specs())
+        return result
+
+    async def count_impls(self) -> int:
+        raise NotImplementedError()
+
+    async def __aiter__(
+        self,
+    ) -> AsyncIterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
+        raise NotImplementedError()
+
+    def __len__(self) -> int:
+        raise NotImplementedError()
+
+
 @contextlib.contextmanager
-def persistent_cache(path: Optional[Union[str, pathlib.Path]], save: bool = True):
+def persistent_cache(
+    path: Optional[Union[str, pathlib.Path]],
+    redis: Optional[tuple[str, str]] = None,
+    save: bool = True,
+):
+    from .search import bottomup
+
+    with _local_persistent_cache(path, save=save) as local_cache:
+        if not redis:
+            yield local_cache
+            return
+        # Below will keep everything in memory after the first fetch
+        redis_cache = _ReadonlyRedis(
+            *redis, bottomup.redis_coord_key, keep_local=_keep_local
+        )
+        yield ChainCache([local_cache, redis_cache])
+
+
+def _keep_local(block_key: str) -> bool:
+    try:
+        _, _, block_part, _ = block_key.split("-")
+        dims = list(map(int, block_part.split(",")))
+        return all(d < KEEP_LOCAL_LIM for d in dims)
+    except ValueError:
+        raise ValueError("Unable to parse: " + block_key)
+
+
+class _ReadonlyRedis(RedisCache):
+    def put(self, *args, **kwargs):
+        raise Exception("Should never put. This is read-only.")
+
+
+@contextlib.contextmanager
+def _local_persistent_cache(
+    path: Optional[Union[str, pathlib.Path]], save: bool = True
+):
     if path is None:
         yield InMemoryScheduleCache()
         return

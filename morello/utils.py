@@ -1,3 +1,4 @@
+import dataclasses
 import functools
 import itertools
 import warnings
@@ -25,34 +26,25 @@ ALPHABET_PRODUCT = _ALPHABET + [
 SNAP_CAP_TO_POWER_OF_TWO = True
 
 
+@dataclasses.dataclass(frozen=True, order=True, slots=True)
 class TinyMap(Mapping[T, U]):
-    __slots__ = ("raw_keys", "raw_values")
-
     raw_keys: tuple[T, ...]
     raw_values: tuple[U, ...]
 
     def __init__(self, *args) -> None:
-        super().__init__()
         if len(args) == 1 and isinstance(args[0], TinyMap):
-            self.raw_keys = args[0].raw_keys
-            self.raw_values = args[0].raw_values
+            object.__setattr__(self, "raw_keys", args[0].raw_keys)
+            object.__setattr__(self, "raw_values", args[0].raw_values)
         elif len(args) == 1:
-            self.raw_keys = tuple(args[0].keys())
-            self.raw_values = tuple(args[0][k] for k in self.raw_keys)
+            object.__setattr__(self, "raw_keys", tuple(args[0].keys()))
+            object.__setattr__(
+                self, "raw_values", tuple(args[0][k] for k in self.raw_keys)
+            )
         else:
             keys, values = args
-            self.raw_keys = keys
-            self.raw_values = values
+            object.__setattr__(self, "raw_keys", keys)
+            object.__setattr__(self, "raw_values", values)
         assert len(self.raw_keys) == len(self.raw_values)
-
-    def __hash__(self) -> int:
-        # Just use the values. In most cases, the keys will be the same.
-        return hash(self.raw_values)
-
-    def __eq__(self, other) -> bool:
-        if not isinstance(other, TinyMap):
-            return NotImplemented
-        return self.raw_keys == other.raw_keys and self.raw_values == other.raw_values
 
     def __len__(self) -> int:
         return len(self.raw_keys)
@@ -78,12 +70,6 @@ class TinyMap(Mapping[T, U]):
                 new_value if i == index else v for i, v in enumerate(self.raw_values)
             ),
         )
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({repr(self.raw_keys)}, {repr(self.raw_values)})"
-
-    def __str__(self) -> str:
-        return repr(self)
 
 
 def zip_dict(
@@ -265,7 +251,7 @@ def snap_availables_down(available: St, always=False) -> St:
             lambda n: 0 if n == 0 else 2 ** (n.bit_length() - 1)
         )
     elif isinstance(available, tuple):
-        return tuple(0 if n == 0 else 2 ** (n.bit_length() - 1))  # type: ignore
+        return tuple(0 if n == 0 else 2 ** (n.bit_length() - 1) for n in available)  # type: ignore
     else:
         assert isinstance(available, int)
         return 0 if available == 0 else 2 ** (available.bit_length() - 1)  # type: ignore

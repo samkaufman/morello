@@ -2,21 +2,18 @@
 import argparse
 import asyncio
 import csv
-import doctest
 import logging
 import os
 import pathlib
 import sys
 import time
-from typing import Optional, TypeVar, Union
+from typing import TypeVar
 
-import morello.impl.base
 from morello import (
     cost,
     dtypes,
     impl,
     op_pprint,
-    search,
     search_cache,
     specs,
     system_config,
@@ -33,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--results", type=pathlib.Path, default=None)
+parser.add_argument("--redis", type=str, default=None)
+parser.add_argument("--redis-namespace", type=str, default=None)
 parser.add_argument("--target", type=str, default="cpu")
 parser.add_argument("--cache", type=str)
 parser.add_argument("--top", type=int, default=1)
@@ -194,8 +193,7 @@ async def _gemm3_main(
 
 
 async def main() -> None:
-    logging.basicConfig()
-    logger.setLevel(logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
 
     # Parse command line arguments
     parsed_args = parser.parse_args()
@@ -220,8 +218,12 @@ async def main() -> None:
     tile_size_mode_token = impl.tile_size_mode.set(tile_size_mode)
 
     try:
+        red_param = None
+        if parsed_args.redis:
+            red_param = (parsed_args.redis, parsed_args.redis_namespace)
+
         with search_cache.persistent_cache(
-            parsed_args.cache, save=parsed_args.save_cache
+            parsed_args.cache, redis=red_param, save=parsed_args.save_cache
         ) as cache:
             if parsed_args.spec == "zero":
                 scheds, runtime = await _zero_main(

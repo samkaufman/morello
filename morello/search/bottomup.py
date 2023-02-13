@@ -56,6 +56,7 @@ arg_parser.add_argument("--size", type=int, default=512)
 arg_parser.add_argument("--image-name", "-t", type=str, default="samkaufman/morello")
 arg_parser.add_argument("--moves-cache", metavar="CACHE", type=pathlib.Path)
 arg_parser.add_argument("--serial-only", action="store_true")
+arg_parser.add_argument("--only-u32", action="store_true")
 
 _tlocal = None
 
@@ -227,8 +228,6 @@ def _compute_block(
     if not hasattr(_tlocal, "loop"):
         _tlocal.loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_tlocal.loop)
-    if getattr(_tlocal, "results_cache_graph_group", None) != graph_group:
-        _tlocal.results_cache = None
     if getattr(_tlocal, "red", None) is None:
         _tlocal.red = redis.Redis.from_url(redis_url)
 
@@ -242,6 +241,9 @@ def _compute_block(
             else:
                 break
 
+    if getattr(_tlocal, "results_cache_graph_group", None) != graph_group:
+        _tlocal.results_cache = None
+        _tlocal.results_cache_graph_group = graph_group
     if _tlocal.results_cache is None:
         # TODO: Assert block membership in lambda
         _tlocal.results_cache = search_cache.RedisCache(
@@ -252,7 +254,6 @@ def _compute_block(
             autoflush=False,
             updating=False,
         )
-        _tlocal.results_cache_graph_group = graph_group
     assert _tlocal.red is not None and _tlocal.results_cache is not None
 
     with system_config.with_target(target):
@@ -318,13 +319,14 @@ def _step_compute_block(
             except StopIteration:
                 completed_task_keys.append(task_key)
                 continue
+
             needs[task_key] = msg.needed
             for mlims, entry in msg.computed:
                 _tlocal.loop.run_until_complete(results_cache.put(entry, mlims))
                 # TODO: Clean up dominated limits?
                 next_subproblems_to_run.extend(
                     (entry.spec, smaller_mlims)
-                    for smaller_mlims in _next_limits(mlims, entry.bottom_peak)
+                    for smaller_mlims in next_limits(mlims, entry.peak_or_zero)
                 )
         for task_ident in completed_task_keys:
             del search_tasks[task_ident]
@@ -334,27 +336,29 @@ def _step_compute_block(
     return next_subproblems_to_run
 
 
-def _next_limits(
-    caps: pruning.StandardMemoryLimits, peak: utils.TinyMap
+def next_limits(
+    result_limits: pruning.StandardMemoryLimits, result_peak: utils.TinyMap
 ) -> Iterable[pruning.StandardMemoryLimits]:
-    keys_ordered = caps.available.raw_keys
-    assert keys_ordered == peak.raw_keys
+    """Returns next memory limits to try, given limits and peak of the last result."""
+    if any(
+        l < p
+        for l, p in zip(result_limits.available.raw_values, result_peak.raw_values)
+    ):
+        raise ValueError(f"Peak {result_peak} exceeds limits {result_limits}")
+
+    keys_ordered = result_limits.available.raw_keys
+    assert keys_ordered == result_peak.raw_keys
     for idx in range(len(keys_ordered)):
-        new_values = list(caps.available.raw_values)
-        if peak.raw_values[idx] == 0:
+        new_values = list(result_limits.available.raw_values)
+        if result_peak.raw_values[idx] == 0:
             continue
-        if peak.raw_values[idx] == 1:
+        if result_peak.raw_values[idx] == 1:
             new_values[idx] = 0
         else:
-            new_values[idx] = 2 ** (peak.raw_values[idx].bit_length() - 2)
+            new_values[idx] = 2 ** (result_peak.raw_values[idx].bit_length() - 2)
+            assert isinstance(new_values[idx], int) and new_values[0] >= 0
         new_cap = pruning.StandardMemoryLimits(
             utils.TinyMap(keys_ordered, tuple(new_values))
-        )
-        assert any(
-            a > b
-            for a, b in zip(
-                caps.available.raw_values, new_cap.available.raw_values, strict=True
-            )
         )
         yield new_cap
 
@@ -529,7 +533,11 @@ async def _compute_dtype_graph(args, redis_url, target, executor, dt_idx, dt) ->
             )
             matmul_grid = _grid_for_query_spec(matmul_spec, args.downscale)
             await _compute_dp_table_graph(
-                executor, matmul_grid, redis_url=redis_url, pb_position=(dt_idx * 2)
+                executor,
+                matmul_grid,
+                redis_url=redis_url,
+                pb_position=(dt_idx * 2),
+                desc=f"{matmul_cls.__name__}, {dt}",
             )
 
 
@@ -540,6 +548,10 @@ async def main(args=None):
 
     if not args:
         args = arg_parser.parse_args()
+
+    dtypes_to_enum = dtypes.ALL_DTYPES
+    if args.only_u32:
+        dtypes_to_enum = [dtypes.Uint32]
 
     start = time.time()
 
@@ -570,7 +582,7 @@ async def main(args=None):
         await asyncio.gather(
             *[
                 _compute_dtype_graph(args, redis_url, target, executor, dt_idx, dt)
-                for dt_idx, dt in enumerate(dtypes.ALL_DTYPES)
+                for dt_idx, dt in enumerate(dtypes_to_enum)
             ]
         )
 

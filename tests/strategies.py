@@ -6,7 +6,6 @@ import hypothesis
 from hypothesis import strategies as st
 
 from morello import dtypes, impl, layouts, specs, system_config, tensor
-from morello.system_config import cpu
 
 dtype_st = st.sampled_from([dtypes.Uint8, dtypes.Uint32])
 
@@ -327,16 +326,27 @@ atomic_specs_st = st.one_of(
     st.from_type(specs.ReduceSum),
 )
 
-small_atomic_moveable_specs_st = st.one_of(
-    zero_spec_st(max_dim_size=4),
-    matmul_spec_st(max_dim_size=4, accum=True),
-    matmul_spec_st(max_dim_size=4),
-    convolution_spec_st(max_dim_size=4, accum=True),
-    convolution_spec_st(max_dim_size=4),
-    reduce_spec_st(max_dim_size=4, accum=True),
-    reduce_spec_st(max_dim_size=4),
-)
 
+def atomic_moveable_specs_st(size):
+    return st.one_of(
+        zero_spec_st(max_dim_size=size),
+        matmul_spec_st(max_dim_size=size, accum=True),
+        matmul_spec_st(max_dim_size=size),
+        convolution_spec_st(max_dim_size=size, accum=True),
+        convolution_spec_st(max_dim_size=size),
+        reduce_spec_st(max_dim_size=size, accum=True),
+        reduce_spec_st(max_dim_size=size),
+    )
+
+
+tiny_atomic_moveable_specs_st = atomic_moveable_specs_st(2)
+small_atomic_moveable_specs_st = atomic_moveable_specs_st(4)
+
+tiny_atomic_specs_st = st.one_of(
+    load_spec_st(max_dim_size=2),
+    store_spec_st(max_dim_size=2),
+    tiny_atomic_moveable_specs_st,
+)
 small_atomic_specs_st = st.one_of(
     load_spec_st(max_dim_size=4),
     store_spec_st(max_dim_size=4),

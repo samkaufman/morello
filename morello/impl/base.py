@@ -348,16 +348,23 @@ class Impl:
     @typing.final
     @property
     def peak_memory(self) -> TinyMap[str, int]:
+        return self.peak_memory_from_child_peaks(
+            self.memory_allocated, [c.peak_memory for c in self.children]
+        )
+
+    @staticmethod
+    def peak_memory_from_child_peaks(
+        imp_memory_allocated, child_peaks: Sequence[TinyMap[str, int]]
+    ) -> TinyMap[str, int]:
         banks = current_system().ordered_banks
 
-        base_adds, per_child_adds = self.memory_allocated
+        base_adds, per_child_adds = imp_memory_allocated
         assert base_adds.raw_keys == banks
 
         # The max of each per-child, per-bank bytes allocated, including any additional
         # from this Impl.
         vals = [0] * len(banks)
-        for child_adds, child in zip(per_child_adds, self.children):
-            child_peak = child.peak_memory
+        for child_adds, child_peak in zip(per_child_adds, child_peaks):
             assert child_peak.raw_keys == banks
             assert child_adds.raw_keys == banks
             for i in range(len(banks)):

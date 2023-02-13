@@ -1,5 +1,5 @@
 import sys
-from typing import NewType, Optional, Union
+from typing import NewType, Sequence
 
 import cython
 
@@ -29,7 +29,6 @@ from .impl import (
     VectorAssign,
 )
 from .system_config import current_system
-from .tensor import Tensor, Tile
 
 COST_ATTR = "_cost"
 INST_COST = 1000
@@ -88,12 +87,7 @@ def move_cost(
     return cost
 
 
-def detailed_analytical_cost(
-    op: Impl,
-    depth: int = 0,
-    env: Optional[dict[Union[Tensor, Tile], str]] = None,
-    holes_ok=False,
-) -> dict[Impl, tuple[int, str]]:
+def detailed_analytical_cost(op: Impl, depth: int = 0) -> dict[Impl, tuple[int, str]]:
     """Compute costs for a given Impl and its children.
 
     Returns a dict mapping each Impl to a 2-tuple of its cost and a
@@ -101,48 +95,38 @@ def detailed_analytical_cost(
 
     :param op: The root of the schedule for which to calculate a cost.
     :param depth: The amount of whitespace to prefix logs.
-    :param env: Names for matrices and views. Used for prettier printing.
-    :param holes_ok: If `True`, cost holes as zero. Otherwise, raise an exception.
     """
-    if env is None:
-        env = {}
+    d = {}
+    _detailed_analytical_cost_inner(d, op, depth=depth)
+    return d
 
+
+def _detailed_analytical_cost_inner(
+    out_dict: dict[Impl, tuple[int, str]], op: Impl, depth: int
+) -> None:
+    for child in op.children:
+        _detailed_analytical_cost_inner(out_dict, child, depth=depth + 1)
+    child_costs: list[MainCost] = [out_dict[c][0] for c in op.children]
+    c = compute_cost_node(op, child_costs)
+    new_str = _detailed_node_str(op, c, child_costs, depth=depth)
+    out_dict[op] = (c, new_str)
+
+
+def _detailed_node_str(
+    op: Impl, op_cost: MainCost, child_costs: Sequence[MainCost], depth: int
+) -> str:
     if isinstance(op, (Block, Pipeline)):
-        cost_dict: dict[Impl, tuple[int, str]] = {}
-        sum_cost = 0
-        for child in op.children:
-            sub_cd = detailed_analytical_cost(
-                child, depth=depth + 1, env=env, holes_ok=holes_ok
-            )
-            cost_dict.update(sub_cd)
-            sum_cost += sub_cd[child][0]
-        assert compute_cost(op) == sum_cost
-        cost_dict[op] = (sum_cost, f"{sum_cost} (sum of {len(op.children)})")
-        return cost_dict
+        return f"{op_cost} (sum of {len(op.children)})"
     elif isinstance(op, Loop):
-        # Non-sliding loops are just the inner cost times the number of iterations.
-        cost_dict = detailed_analytical_cost(
-            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
-        )
-
-        if not op.parallel:
-            factor = op.steps
-        else:
+        factor = op.steps
+        if op.parallel:
             main_steps = op.full_steps
             factor = cython.cast(
                 cython.int, math.ceil(main_steps / current_system().processors)
             )
             factor += op.steps - main_steps
-
-        new_cost = factor * cost_dict[op.inner][0]
-        cost_expl = f"{new_cost:5d} = {factor} * _"
-        # assert compute_cost(op) == new_cost, f"{compute_cost(op)} != {new_cost}"
-        cost_dict[op] = (new_cost, cost_expl)
-        return cost_dict
+        return f"{op_cost:5d} = {factor} * _"
     elif isinstance(op, SlidingWindowLoop):
-        cost_dict = detailed_analytical_cost(
-            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
-        )
         # The moves are implicit in SlidingWindowLoop, so we'll construct
         # Tiles to serve as operands to `move_cost`.
         whole_window_tile = op.operands[op.live_tensor_idx].simple_tile(
@@ -155,64 +139,27 @@ def detailed_analytical_cost(
         new_cost = (
             (op.whole_loads * whole_load_cost)
             + (op.update_loads * update_cost)
-            + (op.steps * cost_dict[op.inner][0])
+            + (op.steps * child_costs[0])
         )
-        cost_expl = (
+        return (
             f"{new_cost:5d} = {op.whole_loads}({whole_load_cost}) + "
             f"{op.update_loads}({update_cost}) + {op.steps}(_)"
         )
-        cost_dict[op] = (new_cost, cost_expl)
-        assert compute_cost(op) == new_cost
-        return cost_dict
     elif isinstance(op, (Add, Mult, BroadcastVecMult)):
         # Tensor multiplication is free but its operands must be in memory.
         # (This cost model is only interested in the cost of moving data.)
-        assert compute_cost(op) == INST_COST
-        return {op: (INST_COST, f"{INST_COST:5}")}
+        return f"{INST_COST:5}"
     elif isinstance(op, (ValueAssign, VectorAssign, MemsetZero, VectorZero)):
-        assert compute_cost(op) == ASSIGN_INST_COST
-        return {op: (ASSIGN_INST_COST, f"{ASSIGN_INST_COST:5}")}
+        return f"{ASSIGN_INST_COST:5}"
     elif isinstance(op, MoveLet):
         # This is the core of the cost model; the cost of a schedule is derived
         # entirely from its moves, which are done by MoveLet operations.
         mcost: int = move_cost(
             op.spec.operands[op.source_idx], op.destination.spec, op.prefetching
         )
-
-        cost_dict = detailed_analytical_cost(
-            op.body, depth=depth + 1, env=env, holes_ok=holes_ok
-        )
-        new_cost = mcost + cost_dict[op.body][0]
-
-        if op.prologue:
-            cost_dict.update(
-                detailed_analytical_cost(
-                    op.prologue, depth=depth + 1, env=env, holes_ok=holes_ok
-                )
-            )
-            new_cost += cost_dict[op.prologue][0]
-        if op.epilogue:
-            cost_dict.update(
-                detailed_analytical_cost(
-                    op.epilogue, depth=depth + 1, env=env, holes_ok=holes_ok
-                )
-            )
-            new_cost += cost_dict[op.epilogue][0]
-
-        cost_expl = f"{new_cost:5d} = {mcost} + _"
-        assert compute_cost(op) == new_cost, f"{compute_cost(op)} != {new_cost}"
-        cost_dict[op] = (new_cost, cost_expl)
-        return cost_dict
+        return f"{op_cost:5d} = {mcost} + _"
     elif isinstance(op, SpecCast):
-        cost_dict = detailed_analytical_cost(
-            op.inner, depth=depth + 1, env=env, holes_ok=holes_ok
-        )
-        inner_cost = cost_dict[op.inner][0]
-        cost_dict[op] = (inner_cost, "_")
-        return cost_dict
-    elif holes_ok and isinstance(op, (ComposeHole, MatmulHole, MatmulAccumHole)):
-        assert compute_cost(op) == 0
-        return {op: (0, "")}
+        return "_"
     else:
         raise TypeError(f"Unsupported op. {type(op)}")
 
@@ -226,14 +173,20 @@ def compute_cost(op: Impl) -> MainCost:
         return cython.cast(MainCost, getattr(op, COST_ATTR), typecheck=True)
     except AttributeError:
         pass
+    return compute_cost_node(op, [compute_cost(child) for child in op.children])
 
+
+# TODO: Reduce code duplication with detailed_analytical_cost
+@cython.exceptval(-1)
+@cython.cdivision(True)
+def compute_cost_node(op: Impl, child_costs: list[MainCost]) -> MainCost:
     if isinstance(op, (Block, Pipeline)):
         sum_cost: MainCost = 0
-        for c in op.children:
-            sum_cost = _clip_add(sum_cost, compute_cost(c))
+        for child_cost in child_costs:
+            sum_cost = _clip_add(sum_cost, child_cost)
         return _assign_cost(op, sum_cost)
     elif isinstance(op, SpecCast):
-        return _assign_cost(op, compute_cost(op.inner))
+        return _assign_cost(op, child_costs[0])
     elif isinstance(op, Loop):
         if not op.parallel:
             factor: MainCost = op.steps
@@ -246,7 +199,10 @@ def compute_cost(op: Impl) -> MainCost:
                     cython.int, (main_steps + system_processors - 1) / system_processors
                 )
                 factor += _clip_sub(op_steps, main_steps)
-        return _assign_cost(op, _clip_mul(factor, compute_cost(op.inner)))
+        assert isinstance(
+            child_costs[0], int
+        ), f"{child_costs[0]} was {type(child_costs[0])}"
+        return _assign_cost(op, _clip_mul(factor, child_costs[0]))
     elif isinstance(op, SlidingWindowLoop):
         raise NotImplementedError()
     elif isinstance(op, (Add, Mult, BroadcastVecMult)):
@@ -257,11 +213,10 @@ def compute_cost(op: Impl) -> MainCost:
         mcost: MainCost = move_cost(  # type: ignore
             op.spec.operands[op.source_idx], op.destination.spec, op.prefetching
         )
-        v = _clip_add(mcost, compute_cost(op.body))
-        if op.prologue:
-            v = _clip_add(v, compute_cost(op.prologue))
-        if op.epilogue:
-            v = _clip_add(v, compute_cost(op.epilogue))
+        # TODO: Replace following with child costs
+        v: MainCost = mcost
+        for child_cost in child_costs:
+            v = _clip_add(v, child_cost)
         return _assign_cost(op, v)
     elif isinstance(op, (ComposeHole, MatmulHole, MatmulAccumHole)):
         return _assign_cost(op, 0)

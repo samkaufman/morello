@@ -60,6 +60,26 @@ class BlockCompressedArray:
         else:
             return block
 
+    def full(self) -> bool:
+        if self.default_value in self.grid:
+            return False
+        for block_pt in np.ndindex(self.grid.shape):
+            block = self.grid[block_pt]
+            if isinstance(block, np.ndarray):
+                if self.default_value in block:
+                    return False
+            elif isinstance(block, list):
+                # TODO: Below is used here and in iter_values. Extract a method.
+                temp_arr = np.empty(self._block_shape_at_point(block_pt), dtype=object)
+                for rng, value in self.grid[block_pt]:
+                    spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
+                    temp_arr[spt].fill(value)
+                if self.default_value in temp_arr:
+                    return False
+            else:
+                assert block != self.default_value  # Already checked above
+        return True
+
     def count_values(self) -> int:
         """Count the number of stored values.
 
