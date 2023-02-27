@@ -412,6 +412,7 @@ NHWC = StandardLayout((0, 2, 3, 1))
 NCHWc4 = PackedLayout(4, 1, 4)
 NCHWc32 = PackedLayout(4, 1, 32)
 NCHWc64 = PackedLayout(4, 1, 64)
+COL_MAJOR = StandardLayout((1, 0))
 
 
 def row_major(rank: int) -> StandardLayout:

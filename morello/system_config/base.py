@@ -42,10 +42,9 @@ class Target:
         raise NotImplementedError()
 
     def all_layouts_for_shape(self, shape: Sequence[int]) -> Iterable["Layout"]:
-        from ..layouts import NHWC, NCHWc4, NCHWc32, NCHWc64, row_major
+        from ..layouts import NHWC, COL_MAJOR, row_major
 
-        # possible_layouts = [row_major(len(shape)), NHWC, NCHWc4, NCHWc32, NCHWc64]
-        possible_layouts = [row_major(len(shape)), NHWC]
+        possible_layouts = [row_major(len(shape)), COL_MAJOR, NHWC]
         for layout in possible_layouts:
             if layout.applies_to_shape(shape):
                 yield layout

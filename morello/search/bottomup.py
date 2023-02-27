@@ -36,6 +36,7 @@ BANK_GROUPS = (("RF", "VRF"), ("L1",), ("GL",))
 NAMESPACE = "BOOP"  # TODO: Generate real namespaces.
 PING_TRIES = 10
 PING_WAIT_SECS = 15
+CONV_CHANNELS = 4
 
 CacheOrFut = Union[
     search_cache.InMemoryScheduleCache,
@@ -51,7 +52,7 @@ arg_parser.add_argument("--deploy-k8s", action="store_true")
 arg_parser.add_argument("--deploy-k8s-with-custom-image", type=str)
 arg_parser.add_argument("--moves-only", action="store_true")
 arg_parser.add_argument("--moves-rank", type=int, default=2)
-arg_parser.add_argument("--size", type=int, default=512)
+arg_parser.add_argument("--size", type=int, default=64)
 arg_parser.add_argument("--image-name", "-t", type=str, default="samkaufman/morello")
 arg_parser.add_argument("--moves-cache", metavar="CACHE", type=pathlib.Path)
 arg_parser.add_argument("--serial-only", action="store_true")
@@ -128,9 +129,10 @@ def _spec_coordinate_to_specs(
             inps, out = new_operands[:-1], new_operands[-1]
 
             r = top_query.replace_io(inps, out, serial_only=not bool(coord[-1]))
-            assert coord == _spec_to_spec_coordinate(
-                r
-            ), f"{coord} != {_spec_to_spec_coordinate(r)}"
+            assert coord == _spec_to_spec_coordinate(r), (
+                f"During generation of Specs with grid coordinate {coord}, a Spec "
+                f"with {_spec_to_spec_coordinate(r)} was generated. That Spec is {r}."
+            )
             yield r
 
 
@@ -153,7 +155,7 @@ def _spec_to_spec_coordinate(spec: specs.Spec) -> tuple[int, ...]:
     elif isinstance(spec, (specs.Convolution, specs.ConvolutionAccum)):
         b, c, h, w = spec.lhs.dim_sizes
         f, _, fh, fw = spec.rhs.dim_sizes
-        return (b, c, f, h, w, fh, fw) + bank_idxs + (sb,)
+        return (b, c, h, w, f, fh, fw) + bank_idxs + (sb,)
     elif isinstance(spec, (specs.ReduceSum, specs.ReduceSumAccum)):
         return spec.source.dim_sizes + bank_idxs + (sb,)
     elif isinstance(spec, (specs.Load, specs.Store, specs.Zero)):
@@ -529,6 +531,29 @@ async def _compute_dtype_graph(args, redis_url, target, executor, dt_idx, dt) ->
                 pb_position=(dt_idx * 2),
                 desc=f"{matmul_cls.__name__}, {dt}",
             )
+
+        if args.moves_rank < 4:
+            print("Skipping convolutions because moves rank < 4", file=sys.stderr)
+        else:
+            for conv_cls in (specs.ConvolutionAccum, specs.Convolution):
+                img_shape = (args.size, CONV_CHANNELS, args.size, args.size)
+                filters_shape = (args.size, CONV_CHANNELS, args.size, args.size)
+                conv_spec = conv_cls(
+                    lhs=target.tensor_spec(img_shape, dtype=dt),
+                    rhs=target.tensor_spec(filters_shape, dtype=dt),
+                    output=target.tensor_spec(
+                        conv_cls.output_shape(img_shape, filters_shape), dtype=dt
+                    ),
+                    serial_only=args.serial_only,
+                )
+                conv_grid = _grid_for_query_spec(conv_spec, args.downscale)
+                await _compute_dp_table_graph(
+                    executor,
+                    conv_grid,
+                    redis_url=redis_url,
+                    pb_position=(dt_idx * 2),
+                    desc=f"{conv_cls.__name__}, {dt}",
+                )
 
 
 async def main(args=None):

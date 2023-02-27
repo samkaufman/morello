@@ -292,7 +292,9 @@ class MorelloBackend(BenchmarkBackend):
         with search_cache.persistent_cache(
             self.cache_path, self.red, save=self.save_cache
         ) as cache:
+            start = time.time()
             impl = search.schedule_search(spec, cache=cache)[0]
+            logger.info("Completed synthesis. Took %.2fs", time.time() - start)
         assert impl
 
         runtime_samples, impl_str, source_code = _benchmark(impl, trials)
