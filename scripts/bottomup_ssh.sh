@@ -89,7 +89,7 @@ echo "Starting script, scheduler, and worker on ${MAIN_HOST}."
 ssh "${MAIN_HOST}" "cd $REMOTE_DEST && \
      tmux new-session -d -s '$TMUX_SESSION_NAME' \
     '$EXP_BIT; poetry run dask scheduler --host $MAIN_HOST' ';' \
-    split '$REDIS_SERVER_PATH  --dir $REDIS_DIR --port $REDIS_PORT --bind $MAIN_HOST --requirepass $REDIS_PWD' ';' \
+    split '$REDIS_SERVER_PATH  --dir $REDIS_DIR --port $REDIS_PORT --bind 0.0.0.0 --requirepass $REDIS_PWD' ';' \
     split 'sleep 20; $EXP_BIT; poetry run nice -n $WORKER_NICE dask worker --memory-limit=$MEM_LIMIT --nworkers=$NWORKERS --nthreads 1 $MAIN_HOST:8786' ';' \
     split 'sleep 5; $EXP_BIT; poetry run python -m morello.search.bottomup --scheduler $MAIN_HOST:8786 ${EXTRA_ARGS[*]}' ';' \
     setw remain-on-exit on ';'"

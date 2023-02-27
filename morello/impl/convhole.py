@@ -154,31 +154,32 @@ class ConvAccumHole(ConvHoleBase):
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], Impl]]:
         yield from super().actions(parent_summary)
-
-        if all(d == 1 for d in self.spec.output.dim_sizes[2:]) and all(
-            all(v == 1 for v in o.vector_shape[2:])
-            for o in self.spec.operands
-            if o.vector_shape
-        ):
+        if not self._check_spatial_split():
             yield self.spatial_split
-
-    def spatial_split(self) -> "Impl":
+    
+    def _check_spatial_split(self) -> Optional[str]:
+        """Returns `None` if spatial_split is valid, and an error message otherwise."""
         if self.spec.inputs[0].dim_sizes[2:] != self.spec.inputs[1].dim_sizes[2:]:
-            raise ValueError(
+            return (
                 f"spatial_split can only be applied when image patch and filter "
                 f"spatial dimensions match, but dimensions were "
                 f"{self.spec.inputs[0].dim_sizes} and "
                 f"{self.spec.inputs[1].dim_sizes}"
             )
-
         for operand in self.spec.operands:
             if not operand.vector_shape:
                 continue
             if any(d != 1 for d in operand.vector_shape[2:]):
-                raise ValueError(
+                return (
                     f"spatial_split can only be applied when spatial vector dimensions "
                     f"are 1, but vector dimensions were {operand.vector_shape}"
                 )
+        return None
+
+    def spatial_split(self) -> "Impl":
+        check_result = self._check_spatial_split()
+        if check_result:
+            raise ValueError(check_result)
 
         # TODO: This doesn't range over the filters' spatial dims.!
         spatial_subscripts = self.spec.operands_dim_subscripts()[0][2:]
