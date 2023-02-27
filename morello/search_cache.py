@@ -1,4 +1,5 @@
 import abc
+import heapq
 import asyncio
 import contextlib
 import contextvars
@@ -45,9 +46,9 @@ if TYPE_CHECKING:
 TABLE_STYLE: Literal["dense", "list", "dict", "bca"] = "bca"
 RAISE_CAPS_ON_OVERLAP = True
 PICKLE_PROTOCOL = 5
-KEEP_LOCAL_LIM = 3
 
 T = typing.TypeVar("T")
+U = typing.TypeVar("U")
 
 assert_access_on_log_boundaries = contextvars.ContextVar(
     "assert_access_on_log_boundaries", default=True
@@ -454,6 +455,36 @@ class _PendingEntry(Generic[T]):
         self.event.set()
 
 
+class _MemAwareCache(Generic[T, U]):
+    def __init__(self, max_size: int = 160):
+        self._data: dict[T, U] = {}
+        self._heap = []
+        self._index = 0
+        self.max_size = max_size
+
+    def _push(self, priority, item):
+        heapq.heappush(self._heap, (priority, self._index, item))
+        self._index += 1
+
+    def __getitem__(self, key: T) -> U:
+        return self._data[key]
+
+    def set(self, key: T, value: U, priority: Union[int, float]) -> None:
+        self._data[key] = value
+        self._push(priority, key)
+        if len(self._heap) > self.max_size:
+            v = heapq.heappop(self._heap)[-1]
+            del self._data[v]
+            assert len(self._heap) == len(self._data)
+            logger.debug(
+                f"Dropping {v} from cache. Top priorities are now: {self._heap[:5]}"
+            )
+        logger.debug("Cache size: %d", len(self._heap))
+
+    def __len__(self) -> int:
+        return len(self._heap)
+
+
 class RedisCache(ScheduleCache):
     """A cache which streams blocks to and from a Redis backend.
 
@@ -469,8 +500,10 @@ class RedisCache(ScheduleCache):
         self,
         redis_connection: Union[redis.asyncio.Redis, str],
         namespace: str,
-        subproblem_to_block_coordinate_fn: Callable[[Spec, pruning.MemoryLimits], str],
-        keep_local: Optional[Callable[[str], bool]] = None,
+        subproblem_to_block_coordinate_fn: Callable[
+            [Spec, pruning.MemoryLimits], Optional[str]
+        ],
+        local: Union[bool, int] = True,
         autoflush: bool = True,
         updating: bool = True,
     ) -> None:
@@ -482,9 +515,6 @@ class RedisCache(ScheduleCache):
             namespace: A string which will be included in all Redis keys.
             subproblem_to_block_coordinate_fn: A function which maps a subproblem
               to a string identifying a particular block.
-            keep_local: A function which takes a block-identifying string and returns
-              `True` is that block should be permanently kept in the local cache after
-              its first get.
             autoflush: If `True`, the cache will automatically flush its in-memory data
               when `put` is called on a new block.
             updating: If `True`, puts will update blocks rather than assume they are not
@@ -502,8 +532,13 @@ class RedisCache(ScheduleCache):
         self.overlay = InMemoryScheduleCache()
         self.autoflush = autoflush
         self.updating = updating
-        self._keep_local = keep_local
-        self._local_cache = {}
+        self._local_cache = None
+        if local != False:
+            lckwargs = {}
+            if local != True:
+                lckwargs["max_size"] = local
+            print(f"local was {local} so passing {lckwargs} to _MemAwareCache")
+            self._local_cache = _MemAwareCache(**lckwargs)
         self._dirty_block: Optional[str] = None
         self._dirty_block_culprit: Optional[tuple[Spec, pruning.MemoryLimits]] = None
         self._dirty_block_lock: Optional[redis.asyncio.lock.Lock] = None
@@ -527,9 +562,9 @@ class RedisCache(ScheduleCache):
         # Map needed block keys to subproblems indices.
         blocks_needed: dict[str, list[int]] = {}
         for idx in none_idxs:
-            blocks_needed.setdefault(
-                self.redis_block_key(*subproblems[idx]), []
-            ).append(idx)
+            k = self.redis_block_key(*subproblems[idx])
+            if k:
+                blocks_needed.setdefault(k, []).append(idx)
 
         # Send requests to the Redis server (or wait if one is already running).
         blocks = await asyncio.gather(*[self._get_block(k) for k in blocks_needed])
@@ -566,6 +601,8 @@ class RedisCache(ScheduleCache):
     ) -> None:
         spec = schedules_to_put.spec
         block_key = self.redis_block_key(spec, memory_limits)
+        if not block_key:
+            return
 
         should_load = False
         if self._dirty_block and self._dirty_block != block_key:
@@ -671,14 +708,12 @@ class RedisCache(ScheduleCache):
         #   for it to be processed by all waiting searches before we start the next GET.
         #   Fix this.
 
-        should_keep_local = self._keep_local and self._keep_local(key)
-        if should_keep_local:
+        if self._local_cache is not None:
             try:
                 return self._local_cache[key]
             except KeyError:
                 pass
 
-        logger.debug("Downloading block: %s", key)
         start = time.time()
 
         async with self._get_block_lock:
@@ -704,21 +739,25 @@ class RedisCache(ScheduleCache):
             assert isinstance(
                 decoded, InMemoryScheduleCache
             ), f"decoded was not InMemoryScheduleCache; was {type(decoded).__name__}"
-            if should_keep_local:
-                self._local_cache[key] = decoded
+            if self._local_cache is not None:
+                self._local_cache.set(key, decoded, decode_stop - decode_start)
             stop = time.time()
             logger.info(
-                "Downloaded block: %s (total %.2fs, lock %.2fs, decode %.2fs, lz4 %.2fs)",
+                "Downloaded block: %s (total %.2fs, lock %.2fs, decode %.2fs, lz4 %.2fs%s)",
                 key,
                 stop - start,
                 lock_got_time - start,
                 decode_stop - decode_start,
                 lz4_stop - decode_start,
+                ", saved" if self._local_cache is not None else "",
             )
             return decoded
 
-    def redis_block_key(self, *args, **kwargs):
-        return f"{self.namespace}-{self._given_block_key(*args, **kwargs)}"
+    def redis_block_key(self, *args, **kwargs) -> Optional[str]:
+        inner_key = self._given_block_key(*args, **kwargs)
+        if not inner_key:
+            return inner_key
+        return f"{self.namespace}-{inner_key}"
 
 
 class _RectTable(abc.ABC):
@@ -1073,19 +1112,8 @@ def persistent_cache(
             yield local_cache
             return
         # Below will keep everything in memory after the first fetch
-        redis_cache = _ReadonlyRedis(
-            *redis, bottomup.redis_coord_key, keep_local=_keep_local
-        )
+        redis_cache = _ReadonlyRedis(*redis, bottomup.redis_coord_key)
         yield ChainCache([local_cache, redis_cache])
-
-
-def _keep_local(block_key: str) -> bool:
-    try:
-        _, _, block_part, _ = block_key.split("-")
-        dims = list(map(int, block_part.split(",")))
-        return all(d < KEEP_LOCAL_LIM for d in dims)
-    except ValueError:
-        raise ValueError("Unable to parse: " + block_key)
 
 
 class _ReadonlyRedis(RedisCache):

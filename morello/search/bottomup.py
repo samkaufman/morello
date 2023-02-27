@@ -34,7 +34,6 @@ T = TypeVar("T")
 MERGE_DIAGONALS = True
 BANK_GROUPS = (("RF", "VRF"), ("L1",), ("GL",))
 NAMESPACE = "BOOP"  # TODO: Generate real namespaces.
-KEEP_LOCAL_LIM = 2
 PING_TRIES = 10
 PING_WAIT_SECS = 15
 
@@ -193,7 +192,12 @@ async def _compute_dp_table_graph(
             )
 
 
-def redis_coord_key(spec: specs.Spec, memory_limits: pruning.MemoryLimits) -> str:
+def redis_coord_key(
+    spec: specs.Spec, memory_limits: pruning.MemoryLimits
+) -> Optional[str]:
+    if isinstance(spec, specs.Compose):
+        return None
+
     # TODO: Instead use the block somehow. Will need to have all grids to
     #  dispatch between Spec types.
     # TODO: Move the Spec type name prefix outside this class.
@@ -201,15 +205,6 @@ def redis_coord_key(spec: specs.Spec, memory_limits: pruning.MemoryLimits) -> st
     block_part = ",".join(map(str, block_pt))
     types_part = ",".join([str(o.dtype) for o in spec.operands])
     return f"{type(spec).__name__}-{block_part}-{types_part}"
-
-
-def _keep_local(block_key: str) -> bool:
-    try:
-        _, _, block_part, _ = block_key.split("-")
-        dims = list(map(int, block_part.split(",")))
-        return all(d < KEEP_LOCAL_LIM for d in dims)
-    except ValueError:
-        raise ValueError("Unable to parse: " + block_key)
 
 
 # TODO: Can we design this so that we don't need to reproduce the logic of the
@@ -247,12 +242,7 @@ def _compute_block(
     if _tlocal.results_cache is None:
         # TODO: Assert block membership in lambda
         _tlocal.results_cache = search_cache.RedisCache(
-            _tlocal.red,
-            NAMESPACE,
-            redis_coord_key,
-            keep_local=_keep_local,
-            autoflush=False,
-            updating=False,
+            _tlocal.red, NAMESPACE, redis_coord_key, autoflush=False, updating=False
         )
     assert _tlocal.red is not None and _tlocal.results_cache is not None
 
