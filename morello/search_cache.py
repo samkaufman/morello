@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import contextvars
 import dataclasses
-import itertools
 import logging
 import pathlib
 import pickle
@@ -19,7 +18,6 @@ from typing import (
     Generic,
     Iterable,
     Iterator,
-    Literal,
     Optional,
     Sequence,
     Tuple,
@@ -43,7 +41,6 @@ if TYPE_CHECKING:
     from .search.common import ScheduleKey
 
 
-TABLE_STYLE: Literal["dense", "list", "dict", "bca"] = "bca"
 RAISE_CAPS_ON_OVERLAP = True
 PICKLE_PROTOCOL = 5
 
@@ -260,7 +257,7 @@ class ScheduleCache(abc.ABC):
 
 
 class InMemoryScheduleCache(ScheduleCache):
-    _rects: dict[Spec, "_RectTable"]
+    _rects: dict[Spec, "_BlockCompressedTable"]
 
     def __init__(self):
         self._rects = {}
@@ -338,18 +335,10 @@ class InMemoryScheduleCache(ScheduleCache):
         try:
             rects = self._rects[spec]
         except KeyError:
-            if TABLE_STYLE in ("dense", "bca"):
-                table_dims = tuple(
-                    current_system().banks[b].capacity for b in mlims.raw_keys
-                )
-                if TABLE_STYLE == "dense":
-                    rects = _DenseNumpyTable(mlims.raw_keys, table_dims)
-                else:
-                    rects = _BlockCompressedTable(mlims.raw_keys, table_dims)
-            elif TABLE_STYLE == "list":
-                rects = _ListTable(mlims.raw_keys)
-            else:
-                rects = _DictTable(mlims.raw_keys)
+            table_dims = tuple(
+                current_system().banks[b].capacity for b in mlims.raw_keys
+            )
+            rects = _BlockCompressedTable(mlims.raw_keys, table_dims)
             self._rects[spec] = rects
 
         schedules_to_put = self._specify_schedule_set(schedules_to_put)
@@ -760,25 +749,23 @@ class RedisCache(ScheduleCache):
         return f"{self.namespace}-{inner_key}"
 
 
-class _RectTable(abc.ABC):
-    @abc.abstractmethod
-    def add(self, entry: _TableEntry):
-        pass
+@dataclasses.dataclass(frozen=False)
+class _BlockCompressedTable:
+    banks: tuple[str, ...]
+    storage: bcarray.BlockCompressedArray
 
-    @abc.abstractmethod
-    def best_for_cap(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
-        pass
+    def __init__(self, banks: tuple[str, ...], table_dims: tuple[int, ...]):
+        storage_dims = self._logify(snap_availables_up(table_dims, always=True))
+        storage_dims = tuple(d + 1 for d in storage_dims)
+        object.__setattr__(self, "banks", banks)
+        object.__setattr__(
+            self,
+            "storage",
+            bcarray.BlockCompressedArray(
+                storage_dims, block_shape=tuple(4 for _ in storage_dims)
+            ),
+        )
 
-    @abc.abstractmethod
-    def __iter__(self) -> Iterator[_TableEntry]:
-        pass
-
-    @abc.abstractmethod
-    def __len__(self) -> int:
-        pass
-
-
-class _SnappingRectTable(_RectTable):
     def best_for_cap(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
         snapped = pruning.StandardMemoryLimits(snap_availables_up(caps.available))
         if snapped == caps:
@@ -809,12 +796,6 @@ class _SnappingRectTable(_RectTable):
         )
         return self._get_entry(snapped_down)
 
-    @abc.abstractmethod
-    def _get_entry(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
-        pass
-
-
-class _SharedTable(_SnappingRectTable):
     def add(self, entry: _TableEntry):
         bottom_coord = tuple(v.bit_length() for v in self._bottom_from_entry(entry))
         top_coord = tuple(
@@ -822,206 +803,6 @@ class _SharedTable(_SnappingRectTable):
             for v in snap_availables_up(entry.caps.raw_values, always=True)
         )
         self._fill_storage(bottom_coord, top_coord, entry)
-
-    def _get_entry(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
-        avail = caps.available
-        coord = self._logify(avail.raw_values)
-        assert isinstance(coord, tuple)
-        return self._get_log_scaled_pt(coord)
-
-    @abc.abstractmethod
-    def _banks(self) -> tuple[str, ...]:
-        pass
-
-    @abc.abstractmethod
-    def _get_log_scaled_pt(self, pt) -> _TableEntry:
-        pass
-
-    @abc.abstractmethod
-    def _fill_storage(self, lower, upper, value):
-        """Fills storage.
-
-        Lower and upper points are inclusive.
-        """
-        pass
-
-    @abc.abstractmethod
-    def __iter__(self) -> Iterator[_TableEntry]:
-        pass
-
-    @abc.abstractmethod
-    def __len__(self) -> int:
-        pass
-
-    @staticmethod
-    def _logify(tup: Sequence[int]) -> tuple[int, ...]:
-        return tuple((0 if x == 0 else (x - 1).bit_length() + 1) for x in tup)
-
-    def _bottom_from_entry(self, entry: _TableEntry) -> tuple[int, ...]:
-        if entry.peak_memory is None:
-            assert not len(entry.schedules.contents)
-            return (0,) * len(self._banks())
-        else:
-            return entry.peak_memory.raw_values
-
-
-@dataclasses.dataclass(frozen=False)
-class _DictTable(_SharedTable):
-    banks: tuple[str, ...]
-    storage: dict[tuple[int, ...], _TableEntry] = dataclasses.field(
-        default_factory=dict
-    )
-
-    def _banks(self) -> tuple[str, ...]:
-        return self.banks
-
-    def _fill_storage(self, lower, upper, value):
-        for pt in itertools.product(*[range(l, u + 1) for l, u in zip(lower, upper)]):
-            self.storage[pt] = value
-
-    def _get_log_scaled_pt(self, pt) -> _TableEntry:
-        return self.storage[pt]
-
-    def __iter__(self) -> Iterator[_TableEntry]:
-        for entry in set(self.storage.values()):
-            assert isinstance(entry, _TableEntry)
-            yield entry
-
-    def __len__(self) -> int:
-        return len(set(self.storage.values()))
-
-
-@dataclasses.dataclass(frozen=False)
-class _ListTable(_SnappingRectTable):
-    banks: tuple[str, ...]
-    storage: list[_TableEntry] = dataclasses.field(default_factory=list)
-
-    @staticmethod
-    def _raise_entry(r, entry):
-        if RAISE_CAPS_ON_OVERLAP:
-            raised_caps = TinyMap(
-                entry.caps.raw_keys,
-                tuple(
-                    max(a, b)
-                    for a, b in zip(
-                        entry.caps.raw_values,
-                        r.caps.raw_values,
-                    )
-                ),
-            )
-            return _TableEntry(entry.spec, entry.schedules, raised_caps)
-        else:
-            return entry
-
-    def add(self, entry: _TableEntry):
-        # First, check for a _TableEntry to update.
-        for rect_idx in range(len(self.storage)):
-            # If we're putting no Impls and there exists an entry already for
-            # the no-Impl case, raise its memory caps to whatever we've explored.
-            r = self.storage[rect_idx]
-            if not entry.schedules.contents:
-                if r.schedules.contents:
-                    continue
-                if _mem_dicts_ordered(r.caps, entry.caps):
-                    self.storage[rect_idx] = self._raise_entry(r, entry)
-                    return
-            else:
-                if not r.schedules.contents:
-                    continue
-                assert r.peak_memory is None or isinstance(r.peak_memory, TinyMap)
-                if _mem_dicts_ordered(
-                    r.peak_memory, entry.schedules.peak_memory, r.caps, entry.caps
-                ):
-                    self.storage[rect_idx] = self._raise_entry(r, entry)
-                    return
-            # TODO: Assert that there is at most one intersection
-
-        # If we haven't returned at this point, then we didn't find a _TableEntry to
-        # update, so add one.
-        self.storage.append(entry)
-
-    def _get_entry(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
-        for entry in self:
-            if _mem_dicts_ordered(entry.peak_memory, caps.available, entry.caps):
-                return entry
-        raise KeyError()
-
-    def _get_log_scaled_pt(self, pt) -> _TableEntry:
-        for entry in self.storage:
-            if _mem_dicts_ordered(entry.peak_memory, pt, entry.caps):
-                return entry
-        raise KeyError()
-
-    def __iter__(self) -> Iterator[_TableEntry]:
-        yield from iter(self.storage)
-
-    def __len__(self) -> int:
-        return len(self.storage)
-
-
-@dataclasses.dataclass(frozen=False)
-class _DenseNumpyTable(_SharedTable):
-    banks: tuple[str, ...]
-    storage: np.ndarray
-
-    def __init__(self, banks: tuple[str, ...], table_dims: tuple[int, ...]):
-        storage_dims = self._logify(snap_availables_up(table_dims, always=True))
-        storage_dims = tuple(d + 1 for d in storage_dims)
-        object.__setattr__(self, "banks", banks)
-        object.__setattr__(self, "storage", np.empty(storage_dims, dtype=object))
-        self.storage.fill(None)
-
-    def _banks(self) -> tuple[str, ...]:
-        return self.banks
-
-    def _fill_storage(self, lower, upper, value):
-        slicer = tuple(slice(l, u + 1) for l, u in zip(lower, upper))
-        self.storage[slicer].fill(value)
-
-    def __iter__(self) -> Iterator[_TableEntry]:
-        flat = self.storage.flatten()
-        for entry in set(flat[flat != None]):
-            assert isinstance(entry, _TableEntry)
-            yield entry
-
-    def __len__(self) -> int:
-        flat = self.storage.flatten()
-        return len(set(flat[flat != None]))
-
-    def _get_log_scaled_pt(self, pt) -> _TableEntry:
-        try:
-            result = self.storage[pt]
-            if result is None:
-                raise KeyError()
-            return result
-        except IndexError:
-            raise KeyError()
-
-    def _bottom_from_entry(self, entry: _TableEntry) -> tuple[int, ...]:
-        if entry.peak_memory is None:
-            assert not len(entry.schedules.contents)
-            return (0,) * len(self.banks)
-        else:
-            assert entry.peak_memory.raw_keys == self.banks
-            return entry.peak_memory.raw_values
-
-
-@dataclasses.dataclass(frozen=False)
-class _BlockCompressedTable(_SharedTable):
-    banks: tuple[str, ...]
-    storage: bcarray.BlockCompressedArray
-
-    def __init__(self, banks: tuple[str, ...], table_dims: tuple[int, ...]):
-        storage_dims = self._logify(snap_availables_up(table_dims, always=True))
-        storage_dims = tuple(d + 1 for d in storage_dims)
-        object.__setattr__(self, "banks", banks)
-        object.__setattr__(
-            self,
-            "storage",
-            bcarray.BlockCompressedArray(
-                storage_dims, block_shape=tuple(4 for _ in storage_dims)
-            ),
-        )
 
     def _banks(self) -> tuple[str, ...]:
         return self.banks
@@ -1056,6 +837,16 @@ class _BlockCompressedTable(_SharedTable):
         else:
             assert entry.peak_memory.raw_keys == self.banks
             return entry.peak_memory.raw_values
+
+    def _get_entry(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
+        avail = caps.available
+        coord = self._logify(avail.raw_values)
+        assert isinstance(coord, tuple)
+        return self._get_log_scaled_pt(coord)
+
+    @staticmethod
+    def _logify(tup: Sequence[int]) -> tuple[int, ...]:
+        return tuple((0 if x == 0 else (x - 1).bit_length() + 1) for x in tup)
 
 
 class ChainCache(ScheduleCache):
@@ -1149,34 +940,3 @@ def _local_persistent_cache(
         if save:
             with atomicwrites.atomic_write(path, mode="wb", overwrite=True) as fo:
                 pickle.dump(cache, fo, protocol=PICKLE_PROTOCOL)
-
-
-def _mem_dicts_ordered(*dicts: Optional[TinyMap[str, int]]) -> bool:
-    # This function is pretty verbose. It avoids `range`, `any`, and other
-    # generators for speed.
-    if len(dicts) == 0:
-        return True
-
-    idx: int = 0
-    while dicts[idx] is None:
-        idx += 1
-        if idx == len(dicts):
-            return True
-    head: TinyMap[str, int] = cast(TinyMap[str, int], dicts[idx])
-    val_len = len(head.raw_values)
-
-    idx += 1
-    while idx < len(dicts):
-        cur = dicts[idx]
-        if cur is None:
-            idx += 1
-            continue
-        assert cur.raw_keys == head.raw_keys
-        j = 0
-        while j < val_len:
-            if head.raw_values[j] > cur.raw_values[j]:
-                return False
-            j += 1
-        head = cur
-        idx += 1
-    return True
