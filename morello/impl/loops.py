@@ -190,7 +190,10 @@ class Loop(Impl):
         if len(replacements) != 1:
             raise ValueError(f"One replacement child expected; got {len(replacements)}")
         if replacements[0].spec != self.inner.spec:
-            raise ValueError(f"Expected a replacement with spec {self.inner.spec}")
+            raise ValueError(
+                f"Expected a replacement with spec {self.inner.spec}, but got "
+                f"{replacements[0].spec}"
+            )
         return dataclasses.replace(self, inner=replacements[0])
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:
