@@ -1,6 +1,5 @@
 import hypothesis
 import pytest
-import fakeredis.aioredis
 
 from morello import dtypes, impl, pformat, pruning, search_cache, specs
 from morello.cost import MainCost
@@ -15,17 +14,12 @@ strategies.register_default_strategies()
 
 # TODO: Add assertion that tests below only put scheduled Impls into the cache.
 
-CACHE_CLASSES = [search_cache.InMemoryScheduleCache, search_cache.RedisCache]
+CACHE_CLASSES = [search_cache.ScheduleCache]
 
 
 def _make_cache(search_cls):
-    if search_cls == search_cache.InMemoryScheduleCache:
-        return search_cache.InMemoryScheduleCache()
-    elif search_cls == search_cache.RedisCache:
-        redis_conn = fakeredis.aioredis.FakeRedis()
-        return search_cache.RedisCache(
-            redis_conn, "test", lambda s, _: (s.operands[0].dim_sizes[0],)
-        )
+    if search_cls == search_cache.ScheduleCache:
+        return search_cache.ScheduleCache()
     else:
         raise NotImplementedError(f"Unsupported type {search_cls}")
 
@@ -195,7 +189,7 @@ async def test_cache_updates_when_none_result_put_with_higher_memory_cap(
     spec = specs.Matmul(t, t, t, serial_only=False)
     wrapped_schedule = search_cache.CachedScheduleSet(spec, tuple(), 1)
 
-    cache = search_cache.InMemoryScheduleCache()
+    cache = search_cache.ScheduleCache()
     await cache.put(
         wrapped_schedule, pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0})
     )
@@ -236,7 +230,7 @@ async def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
         schedule.spec, ((schedule, k),), 1
     )
 
-    cache = search_cache.InMemoryScheduleCache()
+    cache = search_cache.ScheduleCache()
     await cache.put(
         wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),

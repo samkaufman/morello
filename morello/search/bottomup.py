@@ -39,8 +39,8 @@ PING_WAIT_SECS = 15
 CONV_CHANNELS = 4
 
 CacheOrFut = Union[
-    search_cache.InMemoryScheduleCache,
-    concurrent.futures.Future[search_cache.InMemoryScheduleCache],
+    search_cache.ScheduleCache,
+    concurrent.futures.Future[search_cache.ScheduleCache],
 ]
 
 logger = logging.getLogger(__name__)
@@ -194,21 +194,6 @@ async def _compute_dp_table_graph(
             )
 
 
-def redis_coord_key(
-    spec: specs.Spec, memory_limits: pruning.MemoryLimits
-) -> Optional[str]:
-    if isinstance(spec, specs.Compose):
-        return None
-
-    # TODO: Instead use the block somehow. Will need to have all grids to
-    #  dispatch between Spec types.
-    # TODO: Move the Spec type name prefix outside this class.
-    block_pt = _spec_to_spec_coordinate(spec)
-    block_part = ",".join(map(str, block_pt))
-    types_part = ",".join([str(o.dtype) for o in spec.operands])
-    return f"{type(spec).__name__}-{block_part}-{types_part}"
-
-
 # TODO: Can we design this so that we don't need to reproduce the logic of the
 #   top-down actions expansion? Hate having the logic in two places.
 def _compute_block(
@@ -243,8 +228,8 @@ def _compute_block(
         _tlocal.results_cache_graph_group = graph_group
     if _tlocal.results_cache is None:
         # TODO: Assert block membership in lambda
-        _tlocal.results_cache = search_cache.RedisCache(
-            _tlocal.red, NAMESPACE, redis_coord_key, autoflush=False, updating=False
+        _tlocal.results_cache = search_cache.ScheduleCache(
+            use_redis=(_tlocal.red, NAMESPACE)
         )
     assert _tlocal.red is not None and _tlocal.results_cache is not None
 
@@ -261,7 +246,7 @@ def _compute_block(
 
 
 def _step_compute_block(
-    results_cache: search_cache.RedisCache,
+    results_cache: search_cache.ScheduleCache,
     searcher: dp.Search,
     subproblems_to_run: Iterable[tuple[specs.Spec, pruning.StandardMemoryLimits]],
 ) -> list[tuple[specs.Spec, pruning.StandardMemoryLimits]]:

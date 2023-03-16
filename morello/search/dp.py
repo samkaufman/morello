@@ -14,7 +14,6 @@ from .. import impl, pruning, specs
 from ..impl import Impl
 from ..search_cache import (
     CachedScheduleSet,
-    InMemoryScheduleCache,
     ScheduleCache,
     assert_access_on_log_boundaries,
 )
@@ -90,7 +89,7 @@ class Search:
             raise NotImplementedError("Search for top_k > 1 not yet implemented.")
 
         if cache is None:
-            cache = InMemoryScheduleCache()
+            cache = ScheduleCache()
 
         # The default available memory is the capacities of current_system().
         # These capacities are measured in cache lines, not words, so: multiply
@@ -317,7 +316,7 @@ async def _step_search_generators(
     cache, search_gens, msgs
 ) -> tuple[list[tuple[int, list[Impl]]], list[SearchMessage]]:
     assert len(search_gens) == len(msgs)
-    cache_response = list(await cache.get_many((n for msg in msgs for n in msg.needed)))
+    cache_response = list(await cache.get_many([n for msg in msgs for n in msg.needed]))
     for msg in msgs:
         for mlims, entry in msg.computed:
             await cache.put(entry, mlims)

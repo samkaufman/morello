@@ -1,7 +1,12 @@
 import itertools
-from typing import Iterable, Sequence
+import pickle
+from typing import Any, AsyncIterator, Iterable, Optional, Sequence, Union
+
+import lz4.frame
 
 import numpy as np
+
+PICKLE_PROTOCOL = 5
 
 
 class BlockCompressedArray:
@@ -13,7 +18,7 @@ class BlockCompressedArray:
     value in memory.
     """
 
-    grid: np.ndarray
+    grid: Union["_NumpyStore", "_BCARedisStore"]
 
     def __init__(
         self,
@@ -22,6 +27,7 @@ class BlockCompressedArray:
         default_value=None,
         dense_block_threshold: int = 4,
         compress_on_fill: bool = False,
+        use_redis: Optional[tuple[Any, str]] = None,
     ):
         """Create a new BlockCompressedArray.
 
@@ -36,16 +42,25 @@ class BlockCompressedArray:
         self.default_value = default_value
         self.dense_block_threshold = dense_block_threshold
         self.compress_on_fill = compress_on_fill
-        self.grid = np.full(
-            tuple((o + b - 1) // b for b, o in zip(block_shape, shape)),
-            fill_value=default_value,
-            dtype=object,
-        )
+        if not use_redis:
+            self.grid = _NumpyStore(
+                np.full(
+                    tuple(
+                        (o + b - 1) // b for b, o in zip(self.block_shape, self.shape)
+                    ),
+                    fill_value=self.default_value,
+                    dtype=object,
+                )
+            )
+        else:
+            redis_client, namespace = use_redis
+            prefix = f"{namespace}"
+            self.grid = _BCARedisStore(redis_client, prefix)
 
-    def __getitem__(self, pt):
+    async def get(self, pt):
         """Get a value from the array."""
         block_pt = tuple(p // b for p, b in zip(pt, self.block_shape))
-        block = self.grid[block_pt]
+        block = await self.grid.get(block_pt)
         if isinstance(block, np.ndarray):
             adjusted_pt = tuple(p % b for p, b in zip(pt, self.block_shape))
             return block[adjusted_pt]
@@ -60,18 +75,19 @@ class BlockCompressedArray:
         else:
             return block
 
-    def full(self) -> bool:
-        if self.default_value in self.grid:
+    async def full(self) -> bool:
+        # if self.default_value in self.grid:
+        if await self.grid.contains(self.default_value):
             return False
         for block_pt in np.ndindex(self.grid.shape):
-            block = self.grid[block_pt]
+            block = await self.grid.get(block_pt)
             if isinstance(block, np.ndarray):
                 if self.default_value in block:
                     return False
             elif isinstance(block, list):
                 # TODO: Below is used here and in iter_values. Extract a method.
                 temp_arr = np.empty(self._block_shape_at_point(block_pt), dtype=object)
-                for rng, value in self.grid[block_pt]:
+                for rng, value in await self.grid.get(block_pt):
                     spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
                     temp_arr[spt].fill(value)
                 if self.default_value in temp_arr:
@@ -80,14 +96,14 @@ class BlockCompressedArray:
                 assert block != self.default_value  # Already checked above
         return True
 
-    def count_values(self) -> int:
+    async def count_values(self) -> int:
         """Count the number of stored values.
 
         Compressed blocks are counted as 1.
         """
         result = 0
         for block_pt in np.ndindex(self.grid.shape):
-            block = self.grid[block_pt]
+            block = await self.grid.get(block_pt)
             if isinstance(block, np.ndarray):
                 result += block.size
             elif isinstance(block, list):
@@ -96,11 +112,13 @@ class BlockCompressedArray:
                 result += 1
         return result
 
-    def fill(self, value) -> None:
+    async def fill(self, value) -> None:
         """Fill the array with a value."""
-        self.grid.fill(value)
+        await self.grid.fill(value)
 
-    def fill_range(self, lower: Sequence[int], upper: Sequence[int], value) -> None:
+    async def fill_range(
+        self, lower: Sequence[int], upper: Sequence[int], value
+    ) -> None:
         """Fill a (hyper-)rectangular sub-region of the array with a value.
 
         :param lower: The lower coordinate of the region to fill.
@@ -133,36 +151,38 @@ class BlockCompressedArray:
         for block_pt in itertools.product(
             *[range(l, u) for l, u in zip(block_enclosed_lower, block_enclosed_upper)]
         ):
-            self.grid[block_pt] = value
+            await self.grid.itemset(block_pt, value)
 
         # Fill regions in the boundary blocks.
-        for block_pt in _surface_pts(
-            block_enclosed_lower,
-            block_enclosed_upper,
-            lower_misaligned_dim_idxs,
-            upper_misaligned_dim_idxs,
-        ):
+        surf_pts = list(
+            _surface_pts(
+                block_enclosed_lower,
+                block_enclosed_upper,
+                lower_misaligned_dim_idxs,
+                upper_misaligned_dim_idxs,
+            )
+        )
+        for block_pt, b in zip(surf_pts, await self.grid.get_many(surf_pts)):
             block_intersection = _block_intersect(
                 block_pt, self.block_shape, lower, upper
             )
-            b = self.grid[block_pt]
             if isinstance(b, np.ndarray):
                 spt = tuple(slice(a, b) for a, b in zip(*block_intersection))
                 b[spt].fill(value)
                 if self.compress_on_fill:
-                    self.grid[block_pt] = _compress_block(b)
+                    await self.grid.itemset(block_pt, _compress_block(b))
             elif isinstance(b, list):
                 _drop_covered_entries(block_intersection, b)
                 b.append((block_intersection, value))
                 if len(b) >= self.dense_block_threshold:
-                    self._convert_list_block_to_ndarray(block_pt)
+                    await self._convert_list_block_to_ndarray(block_pt)
             else:
                 # Bail here if `value` matches the original value.
                 if b == value:
                     continue
                 # Turn a single-value block into a list.
                 block_shape = self._block_shape_at_point(block_pt)
-                self.grid.itemset(
+                await self.grid.itemset(
                     block_pt,
                     [
                         (((0,) * len(block_shape), block_shape), b),
@@ -170,15 +190,15 @@ class BlockCompressedArray:
                     ],
                 )
 
-    def _convert_list_block_to_ndarray(self, block_pt):
-        assert isinstance(self.grid[block_pt], list)
+    async def _convert_list_block_to_ndarray(self, block_pt):
+        assert isinstance((await self.grid.get(block_pt)), list)
         new_arr = np.empty(self._block_shape_at_point(block_pt), dtype=object)
         new_arr.fill(self.default_value)
         # Iterate forward so the later, last-filled entries have priority.
-        for rng, value in self.grid[block_pt]:
+        for rng, value in await self.grid.get(block_pt):
             spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
             new_arr[spt].fill(value)
-        self.grid.itemset(block_pt, new_arr)
+        await self.grid.itemset(block_pt, new_arr)
 
     def _block_shape_at_point(self, pt: Sequence[int]) -> tuple[int, ...]:
         """Get the shape of the block at a given grid coordinate."""
@@ -186,9 +206,9 @@ class BlockCompressedArray:
             min(b, o - (p * b)) for o, b, p in zip(self.shape, self.block_shape, pt)
         )
 
-    def iter_values(self):
+    async def iter_values(self) -> AsyncIterator[Any]:
         for block_pt in np.ndindex(self.grid.shape):
-            block = self.grid[block_pt]
+            block = await self.grid.get(block_pt)
             if isinstance(block, np.ndarray):
                 for pt in np.ndindex(block.shape):
                     yield block[pt]
@@ -197,7 +217,7 @@ class BlockCompressedArray:
                 # these with a line sweep, but instead we'll do the slower, simpler
                 # thing: temporarily convert to a dense array.
                 temp_arr = np.empty(self._block_shape_at_point(block_pt), dtype=object)
-                for rng, value in self.grid[block_pt]:
+                for rng, value in await self.grid.get(block_pt):
                     spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
                     temp_arr[spt].fill(value)
                 for _, value in np.ndenumerate(temp_arr):
@@ -205,13 +225,13 @@ class BlockCompressedArray:
             else:
                 yield block
 
-    def to_dense(self) -> np.ndarray:
+    async def to_dense(self) -> np.ndarray:
         """Convert to a dense numpy array.
 
         Note that this is slow and memory-hungry. It'll peak at about twice the memory
         required by the result.
         """
-        new_grid = self.grid.copy()
+        new_grid = await self.grid.copy()
         for block_pt in np.ndindex(new_grid.shape):
             if isinstance(new_grid[block_pt], np.ndarray):
                 continue
@@ -219,14 +239,93 @@ class BlockCompressedArray:
             new_grid[block_pt] = np.empty(
                 self._block_shape_at_point(block_pt), dtype=object
             )
-            if isinstance(self.grid[block_pt], list):
+            block_entry = await self.grid.get(block_pt)
+            if isinstance(block_entry, list):
                 # Iterate forward so the later, last-filled entries have priority.
-                for rng, value in self.grid[block_pt]:
+                for rng, value in block_entry:
                     spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
                     new_grid[block_pt][spt].fill(value)
             else:
-                new_grid[block_pt].fill(self.grid[block_pt])
+                new_grid[block_pt].fill(block_entry)
         return np.block(new_grid.tolist())
+
+
+class _NumpyStore:
+    def __init__(self, np_arr: np.ndarray):
+        self._inner = np_arr
+
+    @property
+    def shape(self):
+        return self._inner.shape
+
+    async def get(self, key: str):
+        try:
+            return self._inner[key]
+        except IndexError:
+            return None
+
+    async def get_many(self, keys) -> list[Any]:
+        return [self.get(k) for k in keys]
+
+    async def itemset(self, key, value) -> None:
+        self._inner.itemset(key, value)
+
+    async def contains(self, key):
+        return key in self._inner
+
+    async def fill(self, value):
+        self._inner.fill(value)
+
+    async def copy(self):
+        return self._inner.copy()
+
+
+class _BCARedisStore:
+    def __init__(self, redis_client, prefix: str):
+        self.redis_client = redis_client
+        self.prefix = prefix
+
+    @property
+    def shape(self):
+        raise NotImplementedError(
+            f"shape not implemented for {self.__class__.__name__}"
+        )
+
+    # TODO: Don't need this *and* `get_many`.
+    async def get(self, key):
+        redis_key = self._redis_key(key)
+        result = await self.redis_client.get(redis_key)
+        if result is None:
+            return None
+        else:
+            return pickle.loads(lz4.frame.decompress(result))
+
+    # async def get_many(self, keys) -> AsyncIterable[Optional[str]]:
+    async def get_many(self, keys) -> list[Any]:
+        redis_keys = [self._redis_key(key) for key in keys]
+        results = await self.redis_client.mget(redis_keys)
+        for i in range(len(results)):
+            if results[i] is not None:
+                results[i] = pickle.loads(lz4.frame.decompress(results[i]))
+        return results
+
+    async def itemset(self, key, value) -> None:
+        redis_key = self._redis_key(key)
+        data = lz4.frame.compress(pickle.dumps(value, protocol=PICKLE_PROTOCOL))
+        await self.redis_client.set(redis_key, data)
+
+    async def contains(self, key):
+        raise NotImplementedError()
+
+    async def fill(self, value):
+        raise NotImplementedError()
+
+    async def copy(self):
+        # TODO: Should actually produce an ndarray, despite the name.
+        raise NotImplementedError(f"copy not implemented for {self.__class__.__name__}")
+
+    def _redis_key(self, input_key) -> str:
+        return f"{self.prefix}:BCA-{','.join(str(k) for k in input_key)}"
 
 
 def _drop_covered_entries(
