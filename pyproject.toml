@@ -32,7 +32,7 @@ pytest-xdist = "^2.5.0"
 debugpy = "^1.6.3"
 typeguard = "^2.13.3"
 pytest-asyncio = "^0.20.3"
-fakeredis = "^2.4.0"
+fakeredis = {version = "^2.4.0", extras = ["lua"]}
 pyperf = "^2.5.0"
 memray = "^1.5.0"
 lupa = "^1.14.1"

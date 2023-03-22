@@ -7,7 +7,6 @@ import logging
 import pathlib
 import pickle
 import sys
-import time
 import typing
 import warnings
 from typing import (
@@ -24,7 +23,6 @@ from typing import (
 
 import atomicwrites
 import numpy as np
-import redis.asyncio.lock
 
 from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
@@ -153,14 +151,10 @@ class _TableEntry:
 
 class ScheduleCache:
     def __init__(self, use_redis: Optional[tuple[Any, str]] = None):
+        # TODO: `_rects` is unneeded tech. debt. They're identical except for a prefix.
         self._rects: dict[Spec, "_BlockCompressedTable"] = {}
+        self._dirty_rects: set[Spec] = set()
         self._use_redis = use_redis
-
-    async def count_values(self):
-        accum = 0
-        for table in self._rects.values():
-            accum += await table.storage.count_values()
-        return accum
 
     @typing.final
     async def get(
@@ -244,8 +238,9 @@ class ScheduleCache:
                 == memory_limits.available
             )
 
+            rects = self._get_rects(spec)
             try:
-                best = await self._rects[spec].best_for_cap(memory_limits)
+                best = await rects.best_for_cap(memory_limits)
             except KeyError:
                 continue
             results[idx] = best.schedules
@@ -254,8 +249,6 @@ class ScheduleCache:
     async def put(
         self, schedules_to_put: CachedScheduleSet, memory_limits: pruning.MemoryLimits
     ) -> None:
-        spec = schedules_to_put.spec
-
         if not isinstance(memory_limits, pruning.StandardMemoryLimits):
             # TODO: Add support for PipelineChildMemoryLimits
             warnings.warn(
@@ -267,93 +260,94 @@ class ScheduleCache:
         # Raise exception if a put Impl exceeds the memory bound.
         mlims = memory_limits.available
         for imp, _ in schedules_to_put.contents:
-            for b in imp.peak_memory:
-                if imp.peak_memory[b] > mlims[b]:
-                    raise ValueError(
-                        f"Impl {imp} has peak memory {imp.peak_memory} which exceeds"
-                        f" available memory {mlims}"
-                    )
+            if any(imp.peak_memory[b] > mlims[b] for b in imp.peak_memory):
+                raise ValueError(
+                    f"Impl {imp} has peak memory {imp.peak_memory} which exceeds"
+                    f" available memory {mlims}"
+                )
 
         assert (
             not assert_access_on_log_boundaries.get()
             or snap_availables_down(mlims) == memory_limits.available
         )
 
-        try:
-            rects = self._rects[spec]
-        except KeyError:
-            table_dims = tuple(
-                current_system().banks[b].capacity for b in mlims.raw_keys
-            )
-            redis_param = None
-            if self._use_redis:
-                redis_param = (self._use_redis[0], f"{self._use_redis[1]}-{spec}")
-            rects = _BlockCompressedTable(
-                mlims.raw_keys, table_dims, use_redis=redis_param
-            )
-            self._rects[spec] = rects
+        spec = schedules_to_put.spec
+        self._dirty_rects.add(spec)
 
         schedules_to_put = self._specify_schedule_set(schedules_to_put)
 
         # If we haven't returned at this point, then we didn't find a _TableEntry to
         # update, so add one.
-        await rects.add(_TableEntry(spec, schedules_to_put, mlims))
+        await self._get_rects(spec).add(_TableEntry(spec, schedules_to_put, mlims))
 
-    async def update(self, other: "ScheduleCache") -> None:
-        """Update with the contents of another cache.
-
-        Equivalent to `put`ing every entry from the given cache.
-        """
-        for other_spec, other_table in other._rects.items():
-            if other_spec not in self._rects:
-                # TODO: We really want a copy-on-write here. This sharing is surprising.
-                self._rects[other_spec] = other_table
-                continue
-            rects_seen = set()
-            for rect in other_table:
-                if rect in rects_seen:
-                    continue
-                assert rect.spec == other_spec
-                rects_seen.add(rect)
-                await self.put(rect.schedules, pruning.StandardMemoryLimits(rect.caps))
+    def _get_rects(self, spec):
+        """Lazily initializes and returns an entry in `_rects`."""
+        banks = current_system().ordered_banks
+        try:
+            rects = self._rects[spec]
+        except KeyError:
+            table_dims = tuple(current_system().banks[b].capacity for b in banks)
+            redis_param = None
+            if self._use_redis:
+                redis_param = (self._use_redis[0], f"{self._use_redis[1]}-{spec}")
+            rects = _BlockCompressedTable(banks, table_dims, use_redis=redis_param)
+            self._rects[spec] = rects
+        return rects
 
     async def flush(self) -> None:
-        warnings.warn("ScheduleCache.flush() is a no-op.")
+        for spec in self._dirty_rects:
+            await self._get_rects(spec).flush()
+        self._dirty_rects.clear()
 
-    def specs(self) -> Iterable[Spec]:
-        yield from self._rects.keys()
+    async def specs(self) -> Iterable[Spec]:
+        if not self._use_redis:
+            return self._rects.keys()
+        else:
+            # TODO: Speed this up by grouping and returning keys in Lua.
+            redis_db, prefix = self._use_redis
+            db_keys = await redis_db.keys(f"{prefix}-*")
+            spec_strs = {
+                k[len(prefix) + 1 :].decode().split(":BCA")[0] for k in db_keys
+            }
+            print(f"specs: {spec_strs}")
+            raise NotImplementedError()
 
     async def count_impls(self) -> int:
+        # TODO: This needs to guarantee that Impls don't re-occur across Specs
+        #   or blocks
+        raise NotImplementedError()
         total = 0
-        for rect in self._rects.values():
+        for spec in self.specs():
+            rect = self._get_rects(spec)
             total += await rect.count_impls()
         return total
 
-    def __len__(self) -> int:
-        return len(self._rects)
+    async def count_specs(self) -> int:
+        return sum(1 for _ in await self.specs())
 
     async def __aiter__(
         self,
     ) -> AsyncIterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
-        for spec, rects in self._rects.items():
+        for spec in await self.specs():
+            rects = self._get_rects(spec)
             async for rect in rects:
                 assert rect.spec == spec
                 yield spec, rect.schedules, pruning.StandardMemoryLimits(rect.caps)
 
-    def _specify_schedule_set(
-        self, schedules_to_put: CachedScheduleSet
-    ) -> CachedScheduleSet:
+    @staticmethod
+    def _specify_schedule_set(schedules_to_put: CachedScheduleSet) -> CachedScheduleSet:
         return CachedScheduleSet(
             schedules_to_put.spec,
             tuple(
-                (self._specify_impl(imp), cost)
+                (ScheduleCache._specify_impl(imp), cost)
                 for imp, cost in schedules_to_put.contents
             ),
             schedules_to_put.dependent_paths,
             peak_memory=schedules_to_put.peak_memory,
         )
 
-    def _specify_impl(self, imp: Impl) -> Impl:
+    @staticmethod
+    def _specify_impl(imp: Impl) -> Impl:
         if not len(imp.children):
             return imp
         return imp.replace_children((spec_to_hole(c.spec) for c in imp.children))
@@ -451,7 +445,7 @@ class _BlockCompressedTable:
             "storage",
             bcarray.BlockCompressedArray(
                 storage_dims,
-                block_shape=tuple(8 for _ in storage_dims),
+                block_shape=tuple(6 for _ in storage_dims),
                 use_redis=use_redis,
             ),
         )
@@ -487,12 +481,18 @@ class _BlockCompressedTable:
         return await self._get_entry(snapped_down)
 
     async def add(self, entry: _TableEntry):
-        bottom_coord = tuple(v.bit_length() for v in self._bottom_from_entry(entry))
-        top_coord = tuple(
-            v.bit_length()
-            for v in snap_availables_up(entry.caps.raw_values, always=True)
+        bot = self._bottom_from_entry(entry)
+        top = snap_availables_up(entry.caps.raw_values, always=True)
+        bottom_coord = tuple(v.bit_length() for v in bot)
+        top_coord = tuple(v.bit_length() for v in top)
+        assert all(b <= t for b, t in zip(bottom_coord, top_coord)), (
+            f"Bottom coord {bottom_coord} is not less than or equal to "
+            f"top coord {top_coord}; bot = {bot}; top = {top}"
         )
         await self._fill_storage(bottom_coord, top_coord, entry)
+
+    async def flush(self) -> None:
+        await self.storage.flush()
 
     def _banks(self) -> tuple[str, ...]:
         return self.banks
@@ -570,14 +570,11 @@ class ChainCache(ScheduleCache):
         for c in self._inner_caches:
             await c.flush()
 
-    def specs(self) -> Iterable[Spec]:
+    async def specs(self) -> Iterable[Spec]:
         result = set()
         for cache in self._inner_caches:
-            result.update(cache.specs())
+            result.update(await cache.specs())
         return result
-
-    async def count_impls(self) -> int:
-        raise NotImplementedError()
 
     async def __aiter__(
         self,
