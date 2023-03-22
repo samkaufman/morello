@@ -37,6 +37,7 @@ NAMESPACE = "BOOP"  # TODO: Generate real namespaces.
 PING_TRIES = 180
 PING_WAIT_SECS = 5
 CONV_CHANNELS = 4
+CHECK_CROSS_SPEC_MISSES = True
 
 CacheOrFut = Union[
     search_cache.ScheduleCache,
@@ -275,6 +276,25 @@ def _step_compute_block(
             )
         )
         assert len(subproblems_requested) == len(cache_results_flat)
+
+        # Check that we don't miss any Specs with coordinates below the current Spec
+        # in the data dependency grid.
+        # NOTE: This is checking Spec, not block, coordinates, so if we downscale, we
+        #       might raise for intra-block misses, which may or may not be expected!
+        if CHECK_CROSS_SPEC_MISSES:
+            for (target_spec, _), request, cache_result in zip(
+                subproblems_to_run, subproblems_requested, cache_results_flat
+            ):
+                if cache_result is None and _spec_to_spec_coordinate(
+                    target_spec
+                ) != _spec_to_spec_coordinate(request[0]):
+                    raise Exception(
+                        f"Unexpected, cross-task miss! While computing {target_spec} "
+                        f"at coordinate {_spec_to_spec_coordinate(target_spec)}, "
+                        f"missed {', '.join(map(str, request))} at coordinate  "
+                        f"{_spec_to_spec_coordinate(request[0])}."
+                    )
+
         cache_results_grouped = {}
         taken = 0
         for k in needs:
