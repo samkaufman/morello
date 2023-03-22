@@ -34,8 +34,8 @@ T = TypeVar("T")
 MERGE_DIAGONALS = True
 BANK_GROUPS = (("RF", "VRF"), ("L1",), ("GL",))
 NAMESPACE = "BOOP"  # TODO: Generate real namespaces.
-PING_TRIES = 10
-PING_WAIT_SECS = 15
+PING_TRIES = 180
+PING_WAIT_SECS = 5
 CONV_CHANNELS = 4
 
 CacheOrFut = Union[
