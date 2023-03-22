@@ -312,16 +312,6 @@ class ScheduleCache:
             print(f"specs: {spec_strs}")
             raise NotImplementedError()
 
-    async def count_impls(self) -> int:
-        # TODO: This needs to guarantee that Impls don't re-occur across Specs
-        #   or blocks
-        raise NotImplementedError()
-        total = 0
-        for spec in self.specs():
-            rect = self._get_rects(spec)
-            total += await rect.count_impls()
-        return total
-
     async def count_specs(self) -> int:
         return sum(1 for _ in await self.specs())
 
@@ -509,12 +499,6 @@ class _BlockCompressedTable:
             assert isinstance(entry, _TableEntry)
             yield entry
             seen.add(entry)
-
-    async def count_impls(self) -> int:
-        accum = 0
-        async for _ in self:
-            accum += 1
-        return accum
 
     async def _get_log_scaled_pt(self, pt) -> _TableEntry:
         try:

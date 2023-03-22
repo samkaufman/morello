@@ -156,27 +156,6 @@ async def test_cache_get_returns_just_put_impls(cache_cls, spec, limits):
     assert pformat(results[0], show_cost=False) == pformat(optimal, show_cost=False)
 
 
-# TODO: Add Compose Specs (incl. PipelineChildMemoryLimits)
-# TODO: Test top_k greater than 1
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
-@hypothesis.settings(deadline=90_000, max_examples=3)
-@hypothesis.given(
-    strategies.small_atomic_specs_st, strategies.arb_small_standard_memorylimits()
-)
-async def test_cache_reputting_doesnt_increase_size(cache_cls, spec, limits):
-    cache = _make_cache(cache_cls)
-    optimal = await dp.Search()(spec, limits, cache=cache)
-    hypothesis.assume(optimal)
-    optimal = optimal[0]
-    assert isinstance(optimal, impl.Impl)
-
-    initial_count = await cache.count_impls()
-    p = await cache.get(spec, limits)
-    await cache.put(p, limits)
-    assert (await cache.count_impls()) == initial_count
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 @pytest.mark.parametrize("contiguous", [True, False], ids=["contig", "noncontig"])
