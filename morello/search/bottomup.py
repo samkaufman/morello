@@ -94,14 +94,14 @@ def _spec_coordinate_to_specs(
                 operand_shapes[-1].append(size)
                 subs_to_sizes[sub] = size
 
-    for (layouts, aligneds, tensor_banks,) in itertools.product(
+    for layouts, aligneds, tensor_banks in itertools.product(
         itertools.product(
             *[target.all_layouts_for_shape(shp) for shp in operand_shapes]
         ),
         itertools.product([True, False], repeat=operand_count),
         itertools.product(*[BANK_GROUPS[i] for i in coord[-operand_count - 1 : -1]]),
     ):
-        for (contiguous_abstractions, vec_kwargs) in itertools.product(
+        for contiguous_abstractions, vec_kwargs in itertools.product(
             itertools.product(*[l.all_contiguous_abs() for l in layouts]),
             itertools.product(
                 *[
@@ -431,41 +431,31 @@ def _grid_for_query_spec(spec: specs.Spec, downscale: int) -> geometry.Grid[spec
     )
 
 
-async def _compute_moves_subgraphs(
-    executor: concurrent.futures.Executor,
-    size: int,
-    dt: dtypes.Dtype,
-    serial_only: bool,
-    downscale: int,
-    max_rank: int,
-    *,
-    redis_url: str,
-    pb_offset: int = 0,
-) -> None:
-    if max_rank < 2:
-        raise ValueError("max_rank must be at least 2")
+async def _compute_dtype_graph(args, redis_url, target, executor, dt_idx, dt) -> None:
+    if args.moves_rank < 2:
+        raise ValueError("args.moves_rank must be at least 2")
 
     target = system_config.current_target()
 
-    for rank in range(1, max_rank + 1):
+    for rank in range(1, args.moves_rank + 1):
         load_spec = specs.Load(
-            source=target.tensor_spec((size,) * rank, dtype=dt),
-            destination=target.tensor_spec((size,) * rank, dtype=dt),
-            serial_only=serial_only,
+            source=target.tensor_spec((args.size,) * rank, dtype=dt),
+            destination=target.tensor_spec((args.size,) * rank, dtype=dt),
+            serial_only=args.serial_only,
         )
         store_spec = specs.Store(
-            source=target.tensor_spec((size,) * rank, dtype=dt),
-            destination=target.tensor_spec((size,) * rank, dtype=dt),
-            serial_only=serial_only,
+            source=target.tensor_spec((args.size,) * rank, dtype=dt),
+            destination=target.tensor_spec((args.size,) * rank, dtype=dt),
+            serial_only=args.serial_only,
         )
         zero_spec = specs.Zero(
-            destination=target.tensor_spec((size,) * rank, dtype=dt),
-            serial_only=serial_only,
+            destination=target.tensor_spec((args.size,) * rank, dtype=dt),
+            serial_only=args.serial_only,
         )
 
-        load_grid = _grid_for_query_spec(load_spec, downscale)
-        store_grid = _grid_for_query_spec(store_spec, downscale)
-        zero_grid = _grid_for_query_spec(zero_spec, downscale)
+        load_grid = _grid_for_query_spec(load_spec, args.downscale)
+        store_grid = _grid_for_query_spec(store_spec, args.downscale)
+        zero_grid = _grid_for_query_spec(zero_spec, args.downscale)
 
         # Load and Store have no deps. Zero depends on Store, so it goes last.
         load_fut = _compute_dp_table_graph(
@@ -473,32 +463,19 @@ async def _compute_moves_subgraphs(
             load_grid,
             redis_url=redis_url,
             desc=f"Load, rank {rank}, {dt}",
-            pb_position=pb_offset,
+            pb_position=(dt_idx * 2),
         )
         store_fut = _compute_dp_table_graph(
             executor,
             store_grid,
             redis_url=redis_url,
             desc=f"Store, rank {rank}, {dt}",
-            pb_position=pb_offset + 1,
+            pb_position=(dt_idx * 2) + 1,
         )
         await asyncio.gather(load_fut, store_fut)
         await _compute_dp_table_graph(
             executor, zero_grid, redis_url=redis_url, desc=f"Zero, rank {rank}, {dt}"
         )
-
-
-async def _compute_dtype_graph(args, redis_url, target, executor, dt_idx, dt) -> None:
-    await _compute_moves_subgraphs(
-        executor,
-        args.size,
-        dt,
-        args.serial_only,
-        args.downscale,
-        args.moves_rank,
-        redis_url=redis_url,
-        pb_offset=(dt_idx * 2),
-    )
 
     if not args.moves_only:
         for matmul_cls in (specs.MatmulAccum, specs.Matmul):

@@ -1,9 +1,11 @@
+import asyncio
 import itertools
+import os
 import pickle
+import random
 from typing import Any, AsyncIterator, Iterable, Optional, Sequence, Union
 
 import lz4.frame
-
 import numpy as np
 
 PICKLE_PROTOCOL = 5
@@ -122,7 +124,9 @@ class BlockCompressedArray:
         """Fill a (hyper-)rectangular sub-region of the array with a value.
 
         :param lower: The lower coordinate of the region to fill.
-        :param upper: The upper coordinate of the region to fill.
+        :param upper: The upper coordinate of the region to fill. Every dimension must
+            be greater than the corresponding dimension in lower or `fill_range` will
+            do nothing.
         :param value: The value with which to fill the region.
         """
         if any(l < 0 for l in lower) or any(u > b for u, b in zip(upper, self.shape)):
@@ -130,10 +134,12 @@ class BlockCompressedArray:
                 f"Range given by {lower} and {upper} is out of bounds for a "
                 f"{type(self).__name__} of shape {self.shape}"
             )
-        if not all(l < u for l, u in zip(lower, upper)):
+        if any(l >= u for l, u in zip(lower, upper)):
             return
 
         # Fill all blocks which are fully contained within the range.
+        # Blocks which are full-enclosed can be filled quickly by replacing those
+        # entries in `self.grid` with the value itself; no list or ndarray needed.
         block_enclosed_lower = []
         lower_misaligned_dim_idxs: list[int] = []
         for i, (l, b) in enumerate(zip(lower, self.block_shape)):
