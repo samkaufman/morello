@@ -243,7 +243,7 @@ def _compute_block(
                 _tlocal.results_cache, searcher, subproblems_to_run
             )
         _tlocal.loop.run_until_complete(_tlocal.results_cache.flush())
-        _tlocal.loop.run_until_complete(_tlocal.red.close(close_connection_pool=True))
+    _tlocal.loop.run_until_complete(_tlocal.red.close(close_connection_pool=True))
 
 
 def _step_compute_block(

@@ -26,7 +26,7 @@ import numpy as np
 
 from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
-from .specs import Spec
+from .specs import Spec, Load, Store, Zero
 from .system_config import current_system
 from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
 
@@ -290,7 +290,12 @@ class ScheduleCache:
             redis_param = None
             if self._use_redis:
                 redis_param = (self._use_redis[0], f"{self._use_redis[1]}-{spec}")
-            rects = _BlockCompressedTable(banks, table_dims, use_redis=redis_param)
+            bs = None
+            if isinstance(spec, (Load, Store, Zero)):
+                bs = 64  # Should cover whole space, using a single block.
+            rects = _BlockCompressedTable(
+                banks, table_dims, use_redis=redis_param, block_shape=bs
+            )
             self._rects[spec] = rects
         return rects
 
@@ -426,17 +431,20 @@ class _BlockCompressedTable:
         banks: tuple[str, ...],
         table_dims: tuple[int, ...],
         use_redis: Optional[tuple[Any, str]] = None,
+        block_shape: Optional[Union[int, Sequence[int]]] = None,
     ):
         storage_dims = self._logify(snap_availables_up(table_dims, always=True))
         storage_dims = tuple(d + 1 for d in storage_dims)
+        if not block_shape:
+            block_shape = tuple(6 for _ in storage_dims)
+        if isinstance(block_shape, int):
+            block_shape = tuple(block_shape for _ in storage_dims)
         object.__setattr__(self, "banks", banks)
         object.__setattr__(
             self,
             "storage",
             bcarray.BlockCompressedArray(
-                storage_dims,
-                block_shape=tuple(6 for _ in storage_dims),
-                use_redis=use_redis,
+                storage_dims, block_shape=tuple(block_shape), use_redis=use_redis
             ),
         )
 
