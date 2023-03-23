@@ -195,13 +195,17 @@ class BlockCompressedArray:
                 # Turn a single-value block into a list.
                 # TODO: Handle the special case where block_intersection == block_shape.
                 block_shape = self._block_shape_at_point(block_pt)
-                await self.grid.itemset(
-                    block_pt,
-                    [
-                        (((0,) * len(block_shape), block_shape), b),
-                        (block_intersection, value),
-                    ],
-                )
+                covering_shape = ((0,) * len(block_shape), block_shape)
+                if covering_shape == block_intersection:
+                    await self.grid.itemset(block_pt, value)
+                else:
+                    await self.grid.itemset(
+                        block_pt,
+                        [
+                            (covering_shape, b),
+                            (block_intersection, value),
+                        ],
+                    )
 
     async def _convert_list_block_to_ndarray(self, block_pt):
         convertee = await self.grid.get(block_pt)
