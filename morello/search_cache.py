@@ -23,10 +23,11 @@ from typing import (
 
 import atomicwrites
 import numpy as np
+import redis.asyncio as redis
 
 from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
-from .specs import Spec, Load, Store, Zero
+from .specs import Load, Spec, Store, Zero
 from .system_config import current_system
 from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
 
@@ -154,6 +155,8 @@ class ScheduleCache:
         # TODO: `_rects` is unneeded tech. debt. They're identical except for a prefix.
         self._rects: dict[Spec, bcarray.BlockCompressedArray] = {}
         self._dirty_rects: set[Spec] = set()
+        if use_redis and isinstance(use_redis[0], str):
+            use_redis = (redis.Redis.from_url(use_redis[0]),) + use_redis[1:]
         self._use_redis = use_redis
 
     @typing.final
@@ -550,7 +553,7 @@ class ChainCache(ScheduleCache):
 @contextlib.contextmanager
 def persistent_cache(
     path: Optional[Union[str, pathlib.Path]],
-    redis: Optional[tuple[str, str]] = None,
+    redis: Optional[tuple[Any, str]] = None,
     save: bool = True,
 ):
     with _local_persistent_cache(path, save=save) as local_cache:
