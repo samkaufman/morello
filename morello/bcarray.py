@@ -9,6 +9,7 @@ import lz4.frame
 import numpy as np
 
 PICKLE_PROTOCOL = 5
+REDIS_LOCK_WRITES = True
 
 
 class BlockCompressedArray:
@@ -356,7 +357,7 @@ class _BCARedisStore:
         return results
 
     async def itemset(self, key, value) -> None:
-        if not self._prefix_lock:
+        if not self._prefix_lock and REDIS_LOCK_WRITES:
             self._prefix_lock = self.redis_client.lock(
                 f"Lock:{self.prefix}", blocking=False
             )
