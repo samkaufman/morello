@@ -479,7 +479,9 @@ class _PendingEntry(Generic[T]):
         self.event.set()
 
 
-class _MemAwareCache(Generic[T, U]):
+class _PriorityCache(Generic[T, U]):
+    """A cache which keeps the top-k entries according to an arbitrary priority."""
+
     def __init__(self, max_size: int = 160):
         self._data: dict[T, U] = {}
         self._heap = []

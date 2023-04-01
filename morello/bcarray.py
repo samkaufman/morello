@@ -61,13 +61,17 @@ class BlockCompressedArray:
         """
         block_pt = tuple(p // b for p, b in zip(pt, self.block_shape))
         block = await self.grid.get(block_pt)
+        return self._extract_from_block(pt, block, self.block_shape)
+
+    @staticmethod
+    def _extract_from_block(pt, block, block_shape):
         if isinstance(block, np.ndarray):
-            adjusted_pt = tuple(p % b for p, b in zip(pt, self.block_shape))
+            adjusted_pt = tuple(p % b for p, b in zip(pt, block_shape))
             return block[adjusted_pt]
         elif isinstance(block, list):
             # Walk over the list in reverse order so the latest-added entry
             # has priority when there is overlap.
-            adjusted_pt = tuple(p % b for p, b in zip(pt, self.block_shape))
+            adjusted_pt = tuple(p % b for p, b in zip(pt, block_shape))
             for rng, value in reversed(block):
                 if all(l <= p < u for l, p, u in zip(rng[0], adjusted_pt, rng[1])):
                     return value
