@@ -31,12 +31,15 @@ class BlockCompressedArray:
         dense_block_threshold: int = 4,
         compress_on_fill: bool = False,
         use_redis: Optional[tuple[Any, str]] = None,
+        local_cache: Optional[dict[str, Any]] = None,
     ):
         """Create a new BlockCompressedArray.
 
         Args:
             shape: The shape of the array.
             block_shape: The maximum shape of each block.
+            local_cache: A shared local cache on top of Redis. Ignored if
+              constructing an in-memory cache only.
         """
         if isinstance(default_value, (np.ndarray, list)):
             raise ValueError("default_value can not be an ndarray or list")
@@ -50,7 +53,12 @@ class BlockCompressedArray:
         else:
             redis_client, prefix = use_redis
             self.grid = _BCARedisStore(
-                self.shape, self.block_shape, redis_client, prefix, self.default_value
+                self.shape,
+                self.block_shape,
+                redis_client,
+                prefix,
+                self.default_value,
+                local_cache=local_cache,
             )
 
     async def get(self, pt):
@@ -312,7 +320,13 @@ class _NumpyStore:
 
 class _BCARedisStore:
     def __init__(
-        self, expanded_shape, block_shape, redis_client, prefix: str, default_value
+        self,
+        expanded_shape,
+        block_shape,
+        redis_client,
+        prefix: str,
+        default_value,
+        local_cache: Optional[dict[str, Any]] = None,
     ):
         self.shape = tuple(
             (o + b - 1) // b for b, o in zip(block_shape, expanded_shape)
@@ -320,16 +334,19 @@ class _BCARedisStore:
         self.redis_client = redis_client
         self.prefix = prefix
         self.default_value = default_value
-        self._local_cache = {}  # TODO: Make an array
+        self._local_entries = {}  # TODO: Make an array
         self._updated = set()
         self._prefix_lock = None
+        self._local_get_cache = local_cache
 
     # TODO: Don't need this *and* `get_many`.
     async def get(self, key):
         if any(p < 0 for p in key):
             raise IndexError("Negative indices not supported")
-        if key in self._local_cache:
-            return self._local_cache[key]
+        if key in self._local_entries:
+            return self._local_entries[key]
+        if self._local_get_cache and key in self._local_get_cache:
+            return self._local_get_cache[key]
         redis_key = self._redis_key(key)
         result = await self.redis_client.get(redis_key)
         if result is None:
@@ -345,19 +362,26 @@ class _BCARedisStore:
 
         # Get the local results.
         missing = []
-        for i, key in enumerate(keys):
-            try:
-                results[i] = self._local_cache[key]
-            except KeyError:
-                missing.append((i, key))
+        for src in [self._local_entries, self._local_get_cache]:
+            if src is None:
+                continue
+            for i, key in enumerate(keys):
+                try:
+                    results[i] = src[key]
+                except KeyError:
+                    missing.append((i, key))
 
         # Fill in the locally-missing results with Redis results.
-        redis_results = await self.redis_client.mget(
-            [self._redis_key(k) for _, k in missing]
-        )
-        for (m, _), red_result in zip(missing, redis_results):
+        redis_keys_missing = [self._redis_key(k) for _, k in missing]
+        redis_results = await self.redis_client.mget(redis_keys_missing)
+        for (m, _), red_result, red_key in zip(
+            missing, redis_results, redis_keys_missing
+        ):
             if red_result is not None:
-                results[m] = pickle.loads(lz4.frame.decompress(red_result))
+                loaded_val = pickle.loads(lz4.frame.decompress(red_result))
+                results[m] = loaded_val
+                if self._local_get_cache is not None:
+                    self._local_get_cache[red_key] = loaded_val
         return results
 
     async def itemset(self, key, value) -> None:
@@ -376,14 +400,14 @@ class _BCARedisStore:
                         f"Couldn't acquire lock: Lock:{self.prefix} (PID: {os.getpid()})"
                     )
 
-        self._local_cache[key] = value
+        self._local_entries[key] = value
         self._updated.add(key)
 
     async def flush(self) -> None:
         batch_to_set = {}
         for key in self._updated:
             redis_key = self._redis_key(key)
-            value = self._local_cache[key]
+            value = self._local_entries[key]
             # Check for ndarray since that has no __eq__ but also can't be the default.
             if not isinstance(value, np.ndarray) and value == self.default_value:
                 # TODO: Instead, just delete the key in this case?
@@ -391,7 +415,7 @@ class _BCARedisStore:
             data = lz4.frame.compress(pickle.dumps(value, protocol=PICKLE_PROTOCOL))
             batch_to_set[redis_key] = data
         await self.redis_client.mset(batch_to_set)
-        self._local_cache.clear()
+        self._local_entries.clear()
         self._updated.clear()
         if self._prefix_lock is not None:
             await self._prefix_lock.release()
@@ -408,7 +432,7 @@ class _BCARedisStore:
         result = np.full(self.shape, fill_value=self.default_value, dtype=object)
         for redis_key in await self.redis_client.keys(f"{self.prefix}:BCA-*"):
             pt = tuple(int(k) for k in redis_key.split(":BCA-")[-1].split(","))
-            if pt in self._local_cache:
+            if pt in self._local_entries:
                 continue
             result.itemset(
                 pt,
@@ -416,7 +440,7 @@ class _BCARedisStore:
                     lz4.frame.decompress(await self.redis_client.get(redis_key))
                 ),
             )
-        for pt, val in self._local_cache.items():
+        for pt, val in self._local_entries.items():
             result.itemset(pt, val)
         return result
 

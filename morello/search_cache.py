@@ -158,6 +158,7 @@ class ScheduleCache:
         if use_redis and isinstance(use_redis[0], str):
             use_redis = (redis.Redis.from_url(use_redis[0]),) + use_redis[1:]
         self._use_redis = use_redis
+        self._shared_local_get_cache = {}
 
     @typing.final
     async def get(
@@ -361,7 +362,10 @@ class ScheduleCache:
                 bs = (bs,) * len(storage_dims)
 
             storage = bcarray.BlockCompressedArray(
-                storage_dims, block_shape=tuple(bs), use_redis=redis_param
+                storage_dims,
+                block_shape=tuple(bs),
+                use_redis=redis_param,
+                local_cache=self._shared_local_get_cache,
             )
 
             rects = storage
