@@ -16,7 +16,6 @@ def _arb_test_bcarray_fills_result_array_matching_ndarray_args(draw):
     rank = draw(st.integers(min_value=1, max_value=4))
     arr_shape = tuple(draw(st.integers(min_value=1, max_value=8)) for _ in range(rank))
     block_shape = tuple(draw(st.integers(min_value=1, max_value=d)) for d in arr_shape)
-    default_value = draw(st.one_of(st.none(), st.integers()))
     fills = []
     for _ in range(draw(st.integers(min_value=0, max_value=2))):
         fill_lower = tuple(
@@ -37,9 +36,6 @@ def _arb_test_bcarray_fills_result_array_matching_ndarray_args(draw):
     bs_arr = bcarray.BlockCompressedArray(
         arr_shape,
         block_shape,
-        default_value,
-        dense_block_threshold=draw(st.integers(min_value=0, max_value=5)),
-        compress_on_fill=draw(st.booleans()),
         use_redis=use_redis,
     )
 
@@ -47,17 +43,17 @@ def _arb_test_bcarray_fills_result_array_matching_ndarray_args(draw):
         for fill_lower, fill_upper, fill_value in fills:
             await bs_arr.fill_range(fill_lower, fill_upper, fill_value)
 
-    return ainit, arr_shape, block_shape, default_value, bs_arr, fills
+    return ainit, arr_shape, block_shape, bs_arr, fills
 
 
 @hypothesis.settings(deadline=2000)
 @hypothesis.given(_arb_test_bcarray_fills_result_array_matching_ndarray_args())
 @pytest.mark.asyncio
 async def test_bcarray_fills_result_array_matching_ndarray(example):
-    (ainit, arr_shape, _, default_value, bs_arr, fills) = example
+    (ainit, arr_shape, _, bs_arr, fills) = example
     await ainit()
 
-    np_arr = np.full(arr_shape, fill_value=default_value, dtype=object)
+    np_arr = np.full(arr_shape, fill_value=bcarray._BCA_DEFAULT_VALUE, dtype=object)
     for fill_lower, fill_upper, fill_value in fills:
         np_arr[tuple(slice(a, b) for a, b in zip(fill_lower, fill_upper))] = fill_value
 
@@ -68,7 +64,7 @@ async def test_bcarray_fills_result_array_matching_ndarray(example):
 @hypothesis.given(_arb_test_bcarray_fills_result_array_matching_ndarray_args())
 @pytest.mark.asyncio
 async def test_bcarray_to_dense_returns_correct_shape(example):
-    (ainit, _, _, _, bs_arr, _) = example
+    (ainit, _, _, bs_arr, _) = example
     await ainit()
     assert (await bs_arr.to_dense()).shape == bs_arr.shape
 
@@ -77,7 +73,7 @@ async def test_bcarray_to_dense_returns_correct_shape(example):
 @hypothesis.given(_arb_test_bcarray_fills_result_array_matching_ndarray_args())
 @pytest.mark.asyncio
 async def test_bcarray_iter_values_returns_set_present_in_dense(example):
-    (ainit, _, _, _, bs_arr, _) = example
+    (ainit, _, _, bs_arr, _) = example
     await ainit()
     assert set([x async for x in bs_arr.iter_values()]) == set(
         (await bs_arr.to_dense()).flatten().tolist()
@@ -88,12 +84,11 @@ async def test_bcarray_iter_values_returns_set_present_in_dense(example):
 async def test_bcarray_raises_indexerror_on_fill_range_greater_than_shape():
     arr_shape = (3, 3)
     block_shape = (2, 2)
-    default_value = 0
     fill_lower = (0, 0)
     fill_upper = (3, 4)
     fill_value = 1
 
-    bs_arr = bcarray.BlockCompressedArray(arr_shape, block_shape, default_value)
+    bs_arr = bcarray.BlockCompressedArray(arr_shape, block_shape)
     with pytest.raises(IndexError):
         await bs_arr.fill_range(fill_lower, fill_upper, fill_value)
 

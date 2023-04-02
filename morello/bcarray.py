@@ -11,6 +11,10 @@ import numpy as np
 PICKLE_PROTOCOL = 5
 REDIS_LOCK_WRITES = True
 
+_BCA_DEFAULT_VALUE = None
+_BCA_DENSE_BLOCK_THRESHOLD = 4
+_BCA_COMPRESS_ON_FILL = False
+
 
 class BlockCompressedArray:
     """A block-compressed, multi-dimensional array.
@@ -27,9 +31,6 @@ class BlockCompressedArray:
         self,
         shape: tuple[int, ...],
         block_shape: tuple[int, ...],
-        default_value=None,
-        dense_block_threshold: int = 4,
-        compress_on_fill: bool = False,
         use_redis: Optional[tuple[Any, str]] = None,
     ):
         """Create a new BlockCompressedArray.
@@ -38,19 +39,16 @@ class BlockCompressedArray:
             shape: The shape of the array.
             block_shape: The maximum shape of each block.
         """
-        if isinstance(default_value, (np.ndarray, list)):
-            raise ValueError("default_value can not be an ndarray or list")
+        if isinstance(_BCA_DEFAULT_VALUE, (np.ndarray, list)):
+            raise ValueError("Default value can not be an ndarray or list")
         self.shape = shape
         self.block_shape = block_shape
-        self.default_value = default_value
-        self.dense_block_threshold = dense_block_threshold
-        self.compress_on_fill = compress_on_fill
         if not use_redis:
-            self.grid = _NumpyStore(self.shape, self.block_shape, self.default_value)
+            self.grid = _NumpyStore(self.shape, self.block_shape, _BCA_DEFAULT_VALUE)
         else:
             redis_client, prefix = use_redis
             self.grid = _BCARedisStore(
-                self.shape, self.block_shape, redis_client, prefix, self.default_value
+                self.shape, self.block_shape, redis_client, prefix, _BCA_DEFAULT_VALUE
             )
 
     async def get(self, pt):
@@ -83,13 +81,12 @@ class BlockCompressedArray:
         await self.grid.flush()
 
     async def full(self) -> bool:
-        # if self.default_value in self.grid:
-        if await self.grid.contains(self.default_value):
+        if await self.grid.contains(_BCA_DEFAULT_VALUE):
             return False
         for block_pt in np.ndindex(self.grid.shape):
             block = await self.grid.get(block_pt)
             if isinstance(block, np.ndarray):
-                if self.default_value in block:
+                if _BCA_DEFAULT_VALUE in block:
                     return False
             elif isinstance(block, list):
                 # TODO: Below is used here and in iter_values. Extract a method.
@@ -97,10 +94,10 @@ class BlockCompressedArray:
                 for rng, value in await self.grid.get(block_pt):
                     spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
                     temp_arr[spt].fill(value)
-                if self.default_value in temp_arr:
+                if _BCA_DEFAULT_VALUE in temp_arr:
                     return False
             else:
-                assert block != self.default_value  # Already checked above
+                assert block != _BCA_DEFAULT_VALUE  # Already checked above
         return True
 
     async def fill(self, value) -> None:
@@ -186,12 +183,12 @@ class BlockCompressedArray:
             if isinstance(b, np.ndarray):
                 spt = tuple(slice(a, b) for a, b in zip(*block_intersection))
                 b[spt].fill(value)
-                if self.compress_on_fill:
+                if _BCA_COMPRESS_ON_FILL:
                     await self.grid.itemset(block_pt, _compress_block(b))
             elif isinstance(b, list):
                 _drop_covered_entries(block_intersection, b)
                 b.append((block_intersection, value))
-                if len(b) >= self.dense_block_threshold:
+                if len(b) >= _BCA_DENSE_BLOCK_THRESHOLD:
                     await self._convert_list_block_to_ndarray(block_pt)
             else:
                 # Bail here if `value` matches the original value.
@@ -216,7 +213,7 @@ class BlockCompressedArray:
         convertee = await self.grid.get(block_pt)
         assert isinstance(convertee, list), f"Expected list, got {type(convertee)}"
         new_arr = np.empty(self._block_shape_at_point(block_pt), dtype=object)
-        new_arr.fill(self.default_value)
+        new_arr.fill(_BCA_DEFAULT_VALUE)
         # Iterate forward so the later, last-filled entries have priority.
         for rng, value in convertee:
             spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
