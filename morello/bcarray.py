@@ -11,7 +11,7 @@ import numpy as np
 PICKLE_PROTOCOL = 5
 REDIS_LOCK_WRITES = True
 
-_BCA_DEFAULT_VALUE = None
+BCA_DEFAULT_VALUE = None
 _BCA_DENSE_BLOCK_THRESHOLD = 4
 _BCA_COMPRESS_ON_FILL = False
 
@@ -25,13 +25,11 @@ class BlockCompressedArray:
     value in memory.
     """
 
-    grid: Union["_NumpyStore", "_BCARedisStore"]
-
     def __init__(
         self,
         shape: tuple[int, ...],
         block_shape: tuple[int, ...],
-        use_redis: Optional[tuple[Any, str]] = None,
+        grid: Union["NumpyStore", "BCARedisStore"],
     ):
         """Create a new BlockCompressedArray.
 
@@ -39,17 +37,11 @@ class BlockCompressedArray:
             shape: The shape of the array.
             block_shape: The maximum shape of each block.
         """
-        if isinstance(_BCA_DEFAULT_VALUE, (np.ndarray, list)):
+        if isinstance(BCA_DEFAULT_VALUE, (np.ndarray, list)):
             raise ValueError("Default value can not be an ndarray or list")
         self.shape = shape
         self.block_shape = block_shape
-        if not use_redis:
-            self.grid = _NumpyStore(self.shape, self.block_shape, _BCA_DEFAULT_VALUE)
-        else:
-            redis_client, prefix = use_redis
-            self.grid = _BCARedisStore(
-                self.shape, self.block_shape, redis_client, prefix, _BCA_DEFAULT_VALUE
-            )
+        self.grid = grid
 
     async def get(self, pt):
         """Get a value from the array.
@@ -57,36 +49,28 @@ class BlockCompressedArray:
         This will raise an IndexError if the point is out of bounds, but
         un-set points which are in-bounds will return the default value.
         """
-        block_pt = tuple(p // b for p, b in zip(pt, self.block_shape))
+        block_pt = _block_coord_from_global_coord(pt, self.block_shape)
         block = await self.grid.get(block_pt)
-        return self._extract_from_block(pt, block, self.block_shape)
+        return _extract_from_block(pt, block, self.block_shape)
 
-    @staticmethod
-    def _extract_from_block(pt, block, block_shape):
-        if isinstance(block, np.ndarray):
-            adjusted_pt = tuple(p % b for p, b in zip(pt, block_shape))
-            return block[adjusted_pt]
-        elif isinstance(block, list):
-            # Walk over the list in reverse order so the latest-added entry
-            # has priority when there is overlap.
-            adjusted_pt = tuple(p % b for p, b in zip(pt, block_shape))
-            for rng, value in reversed(block):
-                if all(l <= p < u for l, p, u in zip(rng[0], adjusted_pt, rng[1])):
-                    return value
-            raise IndexError()
-        else:
-            return block
+    async def get_many(self, pts):
+        block_pts = [_block_coord_from_global_coord(pt, self.block_shape) for pt in pts]
+        blocks = await self.grid.get_many(block_pts)
+        return [
+            _extract_from_block(pt, block, self.block_shape)
+            for pt, block in zip(pts, blocks)
+        ]
 
     async def flush(self) -> None:
         await self.grid.flush()
 
     async def full(self) -> bool:
-        if await self.grid.contains(_BCA_DEFAULT_VALUE):
+        if await self.grid.contains(BCA_DEFAULT_VALUE):
             return False
         for block_pt in np.ndindex(self.grid.shape):
             block = await self.grid.get(block_pt)
             if isinstance(block, np.ndarray):
-                if _BCA_DEFAULT_VALUE in block:
+                if BCA_DEFAULT_VALUE in block:
                     return False
             elif isinstance(block, list):
                 # TODO: Below is used here and in iter_values. Extract a method.
@@ -94,10 +78,10 @@ class BlockCompressedArray:
                 for rng, value in await self.grid.get(block_pt):
                     spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
                     temp_arr[spt].fill(value)
-                if _BCA_DEFAULT_VALUE in temp_arr:
+                if BCA_DEFAULT_VALUE in temp_arr:
                     return False
             else:
-                assert block != _BCA_DEFAULT_VALUE  # Already checked above
+                assert block != BCA_DEFAULT_VALUE  # Already checked above
         return True
 
     async def fill(self, value) -> None:
@@ -213,7 +197,7 @@ class BlockCompressedArray:
         convertee = await self.grid.get(block_pt)
         assert isinstance(convertee, list), f"Expected list, got {type(convertee)}"
         new_arr = np.empty(self._block_shape_at_point(block_pt), dtype=object)
-        new_arr.fill(_BCA_DEFAULT_VALUE)
+        new_arr.fill(BCA_DEFAULT_VALUE)
         # Iterate forward so the later, last-filled entries have priority.
         for rng, value in convertee:
             spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
@@ -270,7 +254,7 @@ class BlockCompressedArray:
         return np.block(new_grid.tolist())
 
 
-class _NumpyStore:
+class NumpyStore:
     def __init__(self, expanded_shape, block_shape, default_value):
         self._inner = np.full(
             tuple((o + b - 1) // b for b, o in zip(block_shape, expanded_shape)),
@@ -307,7 +291,7 @@ class _NumpyStore:
         return self._inner.copy()
 
 
-class _BCARedisStore:
+class BCARedisStore:
     def __init__(
         self, expanded_shape, block_shape, redis_client, prefix: str, default_value
     ):
@@ -419,6 +403,28 @@ class _BCARedisStore:
 
     def _redis_key(self, input_key) -> str:
         return f"{self.prefix}:BCA-{','.join(str(k) for k in input_key)}"
+
+
+def _block_coord_from_global_coord(
+    pt: Sequence[int], block_shape: Sequence[int]
+) -> tuple[int, ...]:
+    return tuple(p // b for p, b in zip(pt, block_shape))
+
+
+def _extract_from_block(pt, block, block_shape):
+    if isinstance(block, np.ndarray):
+        adjusted_pt = tuple(p % b for p, b in zip(pt, block_shape))
+        return block[adjusted_pt]
+    elif isinstance(block, list):
+        # Walk over the list in reverse order so the latest-added entry
+        # has priority when there is overlap.
+        adjusted_pt = tuple(p % b for p, b in zip(pt, block_shape))
+        for rng, value in reversed(block):
+            if all(l <= p < u for l, p, u in zip(rng[0], adjusted_pt, rng[1])):
+                return value
+        raise IndexError()
+    else:
+        return block
 
 
 def _drop_covered_entries(

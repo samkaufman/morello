@@ -225,7 +225,7 @@ class ScheduleCache:
     async def get_many(
         self, subproblems: Sequence[tuple[Spec, pruning.MemoryLimits]]
     ) -> Iterable[Optional[CachedScheduleSet]]:
-        results: list[Optional[CachedScheduleSet]] = [None] * len(subproblems)
+        stage1_queries = []
         for idx, (spec, memory_limits) in enumerate(subproblems):
             if not isinstance(memory_limits, pruning.StandardMemoryLimits):
                 # TODO: Add support for PipelineChildMemoryLimits
@@ -242,44 +242,59 @@ class ScheduleCache:
             )
 
             rects = self._get_rects(spec)
-            try:
-                snapped = pruning.StandardMemoryLimits(
-                    snap_availables_up(memory_limits.available)
-                )
-                if snapped == memory_limits:
-                    best = await self._get_table_entry(rects, memory_limits)
-                else:
-                    # If we're not on a snapped/log boundary, then we'll check an uper entry (the
-                    # entry where all levels are higher than the given caps) and see if, in
-                    # actuality, that Impl is below the requested limits. If it's not, we'll just
-                    # grab the Impl from the conservative entry.
-                    best = -1
-                    try:
-                        upper_impl = await self._get_table_entry(rects, snapped)
-                    except KeyError:
-                        pass
-                    else:
-                        assert (
-                            upper_impl is None
-                            or upper_impl.peak_memory.raw_keys
-                            == memory_limits.available.raw_keys
-                        )
-                        if upper_impl is None or all(
-                            a <= b
-                            for a, b in zip(
-                                upper_impl.peak_memory.raw_values,
-                                memory_limits.available.raw_values,
-                            )
-                        ):
-                            best = upper_impl
+            snapped = pruning.StandardMemoryLimits(
+                snap_availables_up(memory_limits.available)
+            )
+            stage1_queries.append((rects, snapped))
 
-                    if best == -1:
-                        snapped_down = pruning.StandardMemoryLimits(
-                            snap_availables_down(memory_limits.available)
-                        )
-                        best = await self._get_table_entry(rects, snapped_down)
-            except KeyError:
+        # Run stage1_queries and fill in stage1_results
+        stage1_results = await self._get_table_entries(stage1_queries)
+        assert len(stage1_results) == len(stage1_queries)  # TODO: Remove this line
+        stage1_consumed = 0
+
+        results: list[Optional[CachedScheduleSet]] = [None] * len(subproblems)
+        for idx, (spec, memory_limits) in enumerate(subproblems):
+            if not isinstance(memory_limits, pruning.StandardMemoryLimits):
                 continue
+
+            initial_result, (rects, snapped) = (
+                stage1_results[stage1_consumed],
+                stage1_queries[stage1_consumed],
+            )
+            if initial_result is None:
+                continue
+            stage1_consumed += 1
+            best = initial_result
+
+            if snapped != memory_limits:
+                # If we're not on a snapped/log boundary, then we'll check an uper entry (the
+                # entry where all levels are higher than the given caps) and see if, in
+                # actuality, that Impl is below the requested limits. If it's not, we'll just
+                # grab the Impl from the conservative entry.
+                best = -1
+                if initial_result is not None:
+                    upper_impl = initial_result
+                    assert (
+                        upper_impl is None
+                        or upper_impl.peak_memory.raw_keys
+                        == memory_limits.available.raw_keys
+                    )
+                    if upper_impl is None or all(
+                        a <= b
+                        for a, b in zip(
+                            upper_impl.peak_memory.raw_values,
+                            memory_limits.available.raw_values,
+                        )
+                    ):
+                        best = upper_impl
+
+                if best == -1:
+                    snapped_down = pruning.StandardMemoryLimits(
+                        snap_availables_down(memory_limits.available)
+                    )
+                    # TODO: Vectorize the following too
+                    best = await self._get_table_entry(rects, snapped_down)
+
             results[idx] = best.schedules
         return results
 
@@ -337,34 +352,45 @@ class ScheduleCache:
         assert not isinstance(entry, np.ndarray)
         await r.fill_range(bottom_coord, tuple(u + 1 for u in top_coord), entry)
 
-    def _get_rects(self, spec):
+    def _get_rects(self, spec) -> bcarray.BlockCompressedArray:
         """Lazily initializes and returns an entry in `_rects`."""
         try:
             rects = self._rects[spec]
         except KeyError:
-            redis_param = None
-            if self._use_redis:
-                redis_param = (self._use_redis[0], f"{self._use_redis[1]}-{spec}")
-            bs = None
-            if isinstance(spec, (Load, Store, Zero)):
-                bs = 64  # Should cover whole space, using a single block.
-
             table_dims = tuple(
                 current_system().banks[b].capacity
                 for b in current_system().ordered_banks
             )
             storage_dims = _logify(snap_availables_up(table_dims, always=True))
             storage_dims = tuple(d + 1 for d in storage_dims)
+
+            bs = None
+            if isinstance(spec, (Load, Store, Zero)):
+                bs = 64  # Should cover whole space, using a single block.
             if not bs:
                 bs = tuple(6 for _ in storage_dims)
             if isinstance(bs, int):
                 bs = (bs,) * len(storage_dims)
 
-            storage = bcarray.BlockCompressedArray(
-                storage_dims, block_shape=tuple(bs), use_redis=redis_param
-            )
+            redis_param = None
+            if self._use_redis:
+                redis_param = (self._use_redis[0], f"{self._use_redis[1]}-{spec}")
 
-            rects = storage
+            if not redis_param:
+                grid = bcarray.NumpyStore(
+                    storage_dims, tuple(bs), bcarray.BCA_DEFAULT_VALUE
+                )
+            else:
+                redis_client, prefix = redis_param
+                grid = bcarray.BCARedisStore(
+                    storage_dims,
+                    tuple(bs),
+                    redis_client,
+                    prefix,
+                    bcarray.BCA_DEFAULT_VALUE,
+                )
+
+            rects = bcarray.BlockCompressedArray(storage_dims, tuple(bs), grid)
             self._rects[spec] = rects
         return rects
 
@@ -417,17 +443,40 @@ class ScheduleCache:
 
     @staticmethod
     async def _get_table_entry(
-        storage: bcarray.BlockCompressedArray, caps: pruning.StandardMemoryLimits
+        bca: bcarray.BlockCompressedArray, caps: pruning.StandardMemoryLimits
     ) -> _TableEntry:
-        coord = _logify(caps.available.raw_values)
-        try:
-            result = await storage.get(coord)
-            if result is None:
-                raise KeyError()
-            assert isinstance(result, _TableEntry)
-            return result
-        except IndexError:
+        """Get an entry for a particular memory limit.
+
+        Will raise an KeyError is any of the limits are out-of-bounds.
+        """
+        r = (await ScheduleCache._get_table_entries([(bca, caps)]))[0]
+        if r is None:
             raise KeyError()
+        return r
+
+    @staticmethod
+    async def _get_table_entries(
+        queries: Sequence[
+            tuple[bcarray.BlockCompressedArray, pruning.StandardMemoryLimits]
+        ],
+    ) -> Sequence[Optional[_TableEntry]]:
+        """Get entries for a collection of memory limits across BCAs.
+
+        Will raise an IndexError is any of the limits are out-of-bounds.
+        """
+        results: list[Optional[_TableEntry]] = [None] * len(queries)
+        bca_groups: dict[
+            bcarray.BlockCompressedArray, list[tuple[int, pruning.StandardMemoryLimits]]
+        ] = {}
+        for i, (bca, caps) in enumerate(queries):
+            bca_groups.setdefault(bca, []).append((i, caps))
+        for bca, qs in bca_groups.items():
+            grp_results = await bca.get_many(
+                [_logify(caps.available.raw_values) for _, caps in qs]
+            )
+            for (i, _), r in zip(qs, grp_results):
+                results[i] = r
+        return results
 
     @staticmethod
     def _specify_impl(imp: Impl) -> Impl:

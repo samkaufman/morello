@@ -53,7 +53,7 @@ async def test_bcarray_fills_result_array_matching_ndarray(example):
     (ainit, arr_shape, _, bs_arr, fills) = example
     await ainit()
 
-    np_arr = np.full(arr_shape, fill_value=bcarray._BCA_DEFAULT_VALUE, dtype=object)
+    np_arr = np.full(arr_shape, fill_value=bcarray.BCA_DEFAULT_VALUE, dtype=object)
     for fill_lower, fill_upper, fill_value in fills:
         np_arr[tuple(slice(a, b) for a, b in zip(fill_lower, fill_upper))] = fill_value
 
