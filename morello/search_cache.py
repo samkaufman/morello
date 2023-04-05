@@ -14,6 +14,7 @@ from typing import (
     Any,
     AsyncIterator,
     Generic,
+    Generator,
     Iterable,
     Optional,
     Sequence,
@@ -27,7 +28,7 @@ import redis.asyncio as redis
 
 from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
-from .specs import Load, Spec, Store, Zero
+from .specs import Load, Spec, Store, Zero, Spec
 from .system_config import current_system
 from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
 
@@ -158,6 +159,7 @@ class ScheduleCache:
         if use_redis and isinstance(use_redis[0], str):
             use_redis = (redis.Redis.from_url(use_redis[0]),) + use_redis[1:]
         self._use_redis = use_redis
+        self._shared_local_get_cache = {}
 
     @typing.final
     async def get(
@@ -352,8 +354,9 @@ class ScheduleCache:
         assert not isinstance(entry, np.ndarray)
         await r.fill_range(bottom_coord, tuple(u + 1 for u in top_coord), entry)
 
-    def _get_rects(self, spec) -> bcarray.BlockCompressedArray:
+    def _get_rects(self, spec: Spec) -> bcarray.BlockCompressedArray:
         """Lazily initializes and returns an entry in `_rects`."""
+        assert isinstance(spec, Spec)  # TODO: Remove
         try:
             rects = self._rects[spec]
         except KeyError:
@@ -388,6 +391,7 @@ class ScheduleCache:
                     redis_client,
                     prefix,
                     bcarray.BCA_DEFAULT_VALUE,
+                    local_cache=self._shared_local_get_cache,
                 )
 
             rects = bcarray.BlockCompressedArray(storage_dims, tuple(bs), grid)
@@ -464,18 +468,70 @@ class ScheduleCache:
 
         Will raise an IndexError is any of the limits are out-of-bounds.
         """
+
+        # TODO: This is an awful, hacky implementation. Instead, we should
+        #  either flatten or abstract batching queries to the same underlying
+        #  database.
+
         results: list[Optional[_TableEntry]] = [None] * len(queries)
-        bca_groups: dict[
-            bcarray.BlockCompressedArray, list[tuple[int, pruning.StandardMemoryLimits]]
-        ] = {}
+
+        # Group according to Redis client instance
+        redis_groups: dict[Any, tuple[redis.Redis, list[tuple[int, Generator]]]] = {}
+        pending_responses = {}
         for i, (bca, caps) in enumerate(queries):
-            bca_groups.setdefault(bca, []).append((i, caps))
-        for bca, qs in bca_groups.items():
-            grp_results = await bca.get_many(
-                [_logify(caps.available.raw_values) for _, caps in qs]
-            )
-            for (i, _), r in zip(qs, grp_results):
-                results[i] = r
+            grid = bca.grid
+            if isinstance(grid, bcarray.BCARedisStore):
+                red = grid.redis_client
+                get_gen = bca.interactive_get_many([_logify(caps.available.raw_values)])
+                redis_groups.setdefault(id(red), (red, []))[1].append((i, get_gen))
+                assert id(get_gen) not in pending_responses
+                pending_responses[id(get_gen)] = None
+            else:
+                # TODO: Call get_many for NumpyStores too!
+                results[i] = await bca.get(_logify(caps.available.raw_values))
+            assert results[i] is None or isinstance(results[i], _TableEntry)
+
+        # Drive generators in query-batching steps.
+        while redis_groups:
+            groups_completed = []
+
+            for group_key, (redis_client, generator_group) in redis_groups.items():
+                idxs_to_del = []
+                keys_accum: list[str] = []
+                key_runs: list[int] = []
+
+                # Send any pending responses and get new requests
+                for i, get_gen in generator_group:
+                    try:
+                        keys = get_gen.send(pending_responses[id(get_gen)])
+                    except StopIteration as e:
+                        assert len(e.value) == 1
+                        results[i] = e.value[0]
+                        idxs_to_del.append(i)
+                    else:
+                        keys_accum.extend(keys)
+                        key_runs.append(len(keys))
+
+                # Remove completed generators
+                for i in reversed(idxs_to_del):
+                    del generator_group[i]
+                if not generator_group:
+                    groups_completed.append(group_key)
+                    continue
+
+                # Do the per-grid queries
+                flattened_results = await redis_client.mget(keys_accum)
+
+                # Distribute the query results to the correct generators
+                taken = 0
+                for (_, get_gen), request_count in zip(generator_group, key_runs):
+                    pending_responses[id(get_gen)] = flattened_results[
+                        taken : taken + request_count
+                    ]
+                    taken += request_count
+
+            for k in groups_completed:
+                del redis_groups[k]
         return results
 
     @staticmethod

@@ -63,7 +63,7 @@ class SearchMessage(typing.NamedTuple):
     computed: Sequence[tuple[pruning.MemoryLimits, CachedScheduleSet]]
 
 
-SearchResponse = Sequence[Optional[SearchResult]]
+SearchResponse = Sequence[Optional[CachedScheduleSet]]
 
 
 class Search:
@@ -213,9 +213,7 @@ class Search:
         # propagate that fact to the caller, and (c) the cache has no information for us
         # and search can proceed.
         # TODO: Push cache query down and call `get_many`.
-        caller_response = yield SearchMessage(((hole.spec, memory_limits),), [])
-        assert len(caller_response) == 1
-        cache_result = caller_response[0]
+        cache_result = (yield SearchMessage(((hole.spec, memory_limits),), []))[0]
         if cache_result is not None:
             # TODO: Document: we allow the caller to give an incomplete Impl, where
             #  there's no guarantee the result of interactive_search is a complete Impl.
@@ -224,37 +222,67 @@ class Search:
             #  This requires the caller to also provide costs for provided Impls.
             return SearchResult(cache_result.contents, cache_result.dependent_paths)
 
+        # Collect all the sub-problem dependencies for a batched query.
+        unskippeds: list[tuple[Impl, Optional[Sequence[pruning.MemoryLimits]]]] = []
+        deps: list[tuple[specs.Spec, pruning.MemoryLimits]] = []
+        for new_tree in self._iter_expansions(hole, parent_summary):
+            # Skip actions using more memory than is available for any hole.
+            new_child_memory_limits = memory_limits.transition(new_tree)
+            unskippeds.append((new_tree, new_child_memory_limits))
+            if new_child_memory_limits is None:
+                continue
+            for c, l in zip(new_tree.children, new_child_memory_limits):
+                deps.append((c.spec, l))
+        resultzzzz: SearchResponse = yield SearchMessage(deps, [])
+        resultzzzz_consumed = 0
+
         # Yield all the complete expansions of the hole by expanding once into
         # an Impl which may or may not have its own holes. If it does have its
         # own holes, fill them by recursively calling into schedule_search.
-        for new_tree in self._iter_expansions(hole, parent_summary):
-            if self.callbacks:
-                self.callbacks.expanded_hole(new_tree)
-
-            # Skip actions using more memory than is available for any hole.
-            new_child_memory_limits = memory_limits.transition(new_tree)
+        for i, (new_tree, new_child_memory_limits) in enumerate(unskippeds):
             if new_child_memory_limits is None:
                 continue
 
+            if self.callbacks:
+                self.callbacks.expanded_hole(new_tree)
+
+            child_resultz = resultzzzz[
+                resultzzzz_consumed : resultzzzz_consumed + len(new_tree.children)
+            ]
+            resultzzzz_consumed += len(new_tree.children)
+
             # Recurse for all holes (nested Specs) in the new Impl. If any hole
             # cannot be filled, short-circuit because this action is a dead end.
-            subsearch_results: list[list[tuple[Impl, "cost.MainCost"]]] = []
-            for child, mem in zip(new_tree.children, new_child_memory_limits):
-                child_result = yield from self.interactive_search(
-                    child,
-                    memory_limits=mem,
-                    parent_summary=impl.ParentSummary.update(
-                        parent_summary, parent=new_tree
-                    ),
-                    stats=stats,
-                )
-                unique_specs_visited += child_result.dependent_paths
+            subsearch_results: list[list[tuple[Impl, common.ScheduleKey]]] = []
+            for j, (child, mem) in enumerate(
+                zip(new_tree.children, new_child_memory_limits)
+            ):
+                child_cache_result = child_resultz[j]
+
+                if child_cache_result is not None:
+                    child_impl_tuples = list(child_cache_result.contents)
+                    assert (  # TODO: Remove this assertion
+                        not child_impl_tuples
+                        or child_impl_tuples[0][0].spec == child.spec
+                    ), f"{child_impl_tuples[0][0].spec} != {child.spec}"
+                else:
+                    child_search_result = yield from self.interactive_search(
+                        child,
+                        memory_limits=mem,
+                        parent_summary=impl.ParentSummary.update(
+                            parent_summary, parent=new_tree
+                        ),
+                        stats=stats,
+                    )
+                    child_impl_tuples = child_search_result.impl_tuples
+                    unique_specs_visited += child_search_result.dependent_paths
                 # If any hole could not be filled--this can happen, for
                 # instance, if every possible action uses too much memory--then
                 # exit the outer loop.
-                if not child_result.impl_tuples:
+                if not child_impl_tuples:
                     break
-                subsearch_results.append(child_result.impl_tuples)
+
+                subsearch_results.append(child_impl_tuples)
             if len(subsearch_results) < len(new_tree.children):
                 continue
 
@@ -293,7 +321,11 @@ class Search:
     def _iter_expansions(
         self, leaf: impl.Impl, parent_summary: Optional[impl.ParentSummary]
     ) -> Iterable[Impl]:
-        """Iterate pairs of action callables and their resulting expanded Impls."""
+        """Iterate pairs of action callables and their resulting expanded Impls.
+
+        Essentially walks `actions()`, calling each, filtering those which raise
+        ActionOutOfDomain.
+        """
         for act in leaf.actions(parent_summary=parent_summary):
             try:
                 new_tree = act()
@@ -313,7 +345,9 @@ class Search:
 
 
 async def _step_search_generators(
-    cache, search_gens, msgs
+    cache: ScheduleCache,
+    search_gens: Sequence[Generator[SearchMessage, SearchResponse, SearchResult]],
+    msgs,
 ) -> tuple[list[tuple[int, list[Impl]]], list[SearchMessage]]:
     assert len(search_gens) == len(msgs)
     cache_response = list(await cache.get_many([n for msg in msgs for n in msg.needed]))
