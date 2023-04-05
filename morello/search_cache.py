@@ -28,7 +28,7 @@ import redis.asyncio as redis
 
 from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
-from .specs import Load, Spec, Store, Zero, Spec
+from .specs import Load, Spec, Store, Zero, Matmul, MatmulAccum, Spec
 from .system_config import current_system
 from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
 
@@ -227,8 +227,17 @@ class ScheduleCache:
     async def get_many(
         self, subproblems: Sequence[tuple[Spec, pruning.MemoryLimits]]
     ) -> Iterable[Optional[CachedScheduleSet]]:
+
         stage1_queries = []
+        unskipped: list[int] = []
         for idx, (spec, memory_limits) in enumerate(subproblems):
+
+            # Don't look up tiny-dim. Specs.
+            if self._use_redis and all(
+                d <= 8 for o in spec.operands for d in o.dim_sizes
+            ):
+                continue
+
             if not isinstance(memory_limits, pruning.StandardMemoryLimits):
                 # TODO: Add support for PipelineChildMemoryLimits
                 warnings.warn(
@@ -236,6 +245,8 @@ class ScheduleCache:
                     " other MemoryLimits implementations always miss."
                 )
                 continue
+
+            unskipped.append(idx)
 
             assert (
                 not assert_access_on_log_boundaries.get()
@@ -255,9 +266,8 @@ class ScheduleCache:
         stage1_consumed = 0
 
         results: list[Optional[CachedScheduleSet]] = [None] * len(subproblems)
-        for idx, (spec, memory_limits) in enumerate(subproblems):
-            if not isinstance(memory_limits, pruning.StandardMemoryLimits):
-                continue
+        for idx in unskipped:
+            spec, memory_limits = subproblems[idx]
 
             initial_result, (rects, snapped) = (
                 stage1_results[stage1_consumed],
