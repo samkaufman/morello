@@ -570,7 +570,7 @@ async def main(args=None):
 
     start = time.time()
 
-    system_config.set_current_target("cpu")
+    system_config.set_current_target("x86")
     target = system_config.current_target()
 
     if args.scheduler:

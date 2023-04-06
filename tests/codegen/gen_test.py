@@ -28,7 +28,7 @@ strategies.register_default_strategies()
 
 
 def test_codegen_completes_on_matmul_1x1x1():
-    target = cpu.CpuTarget()
+    target = cpu.X86Target()
     with system_config.with_target(target):
         lhs = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
         rhs = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
@@ -46,7 +46,7 @@ def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
     This test's goals are subsumed by the property-based tests in codegen/gen_test.py.
     It exists to educate new Morello users/developers.
     """
-    target = cpu.CpuTarget()
+    target = cpu.X86Target()
     with system_config.with_target(target):
         spec = specs.Matmul(
             target.tensor_spec((256, 256), dtype=dtypes.Uint32),
@@ -379,8 +379,8 @@ def _calculator_to_test(spec_st_fn):
         @pytest.mark.slow
         @pytest.mark.parametrize(
             "target",
-            [cpu.CpuTarget()],
-            ids=["cpu"],
+            [cpu.X86Target(), cpu.ArmTarget()],
+            ids=["x86", "arm"],
         )
         @pytest.mark.parametrize(
             "parallel",

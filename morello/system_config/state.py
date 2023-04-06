@@ -37,8 +37,10 @@ def target_by_name(target_name: str) -> Target:
     # Import inside the method to solve a circular dependency
     from . import cpu
 
-    if target_name == "cpu":
-        return cpu.CpuTarget()
+    if target_name == "x86":
+        return cpu.X86Target()
+    elif target_name == "arm":
+        return cpu.ArmTarget()
     else:
         raise ValueError("Unknown target: " + target_name)
 

@@ -43,7 +43,7 @@ SKIP_DP_IF_BUDGET_KNOWN = True
 DTYPE = dtypes.Uint32
 BEAM_WIDTHS = [1, 10, 100]
 
-target = target_by_name("cpu")
+target = target_by_name("x86")
 
 
 @dataclasses.dataclass(frozen=True)

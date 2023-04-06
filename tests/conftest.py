@@ -12,4 +12,4 @@ def pytest_sessionstart(session):
     from morello import system_config
     from morello.system_config import cpu
 
-    system_config.set_current_target(cpu.CpuTarget())
+    system_config.set_current_target(cpu.X86Target())
