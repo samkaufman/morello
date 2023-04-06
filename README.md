@@ -4,7 +4,7 @@ Morello is an experimental scheduling language and auto-scheduler for tensor pro
 
 ## Getting Started
 
-Want to start playing with Morello? Great! You'll need Python 3, probably Python 3.9 or newer. The simplest way to get started is to install Morello's requirements with:
+Want to start playing with Morello? Great! The simplest way to get started is to install Morello's requirements with:
 
 ```sh
 poetry install
@@ -59,7 +59,7 @@ Note that `store` is not itself a real Impl; it is introduced only for readabili
 As a conseqeuence, its Spec, cost, and peak memory measurement columns are blank.
 
 A pipeline introduces tensors which bridge the output of each of its children to an input of the subsequent child.
-These tensors live from the beginning of the producer's execution to the completion of the consumer. 
+These tensors live from the beginning of the producer's execution to the completion of the consumer.
 Pipelines are flattened when nested, so a nested pipeline will never appear in output.
 
 Tiles over tensors are added by the tiling iterators `tile` and `convTile` and are live for the duration of the iterator.
@@ -92,7 +92,7 @@ sched = spec.simple_tile(2, 2).complete()
 op_pprint.pprint(sched)
 ```
 
-Or: 
+Or:
 
 ```python
 spec = ConvHole(Tensor(m, k, name="lhs"), Tensor(k, n, name="rhs"))
