@@ -7,20 +7,12 @@ Morello is an experimental scheduling language and auto-scheduler for tensor pro
 Want to start playing with Morello? Great! You'll need Python 3, probably Python 3.9 or newer. The simplest way to get started is to install Morello's requirements with:
 
 ```sh
-pip install -r requirements.txt
+poetry install
 ```
-
-Want to isolate the Python interpreter and its dependencies? Use [Conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html)! Switch to a new Conda environment and run:
-
-```sh
-conda install --file requirements.txt
-```
-
-(You can achieve much the same thing with [venv](https://docs.python.org/3/library/venv.html).)
 
 Once installed, try auto-scheduling a small matrix multiplication by running from the source directory root:
 ```sh
-PYTHONPATH=. scripts/main.py --cache seed_cache.pkl 8 4 8 matmul
+poetry run ./scripts/main.py --cache seed_cache.pkl matmul 8 4 8
 ```
 
 If that works, you're in good shape. Find out how to schedule some other pre-baked Specs by running `scripts/main.py --help' or dig into the source code of [scripts/main.py](main.py) to schedule your own programs.
