@@ -347,7 +347,7 @@ class Search:
 async def _step_search_generators(
     cache: ScheduleCache,
     search_gens: Sequence[Generator[SearchMessage, SearchResponse, SearchResult]],
-    msgs,
+    msgs: Sequence[SearchMessage],
 ) -> tuple[list[tuple[int, list[Impl]]], list[SearchMessage]]:
     assert len(search_gens) == len(msgs)
     cache_response = list(await cache.get_many([n for msg in msgs for n in msg.needed]))

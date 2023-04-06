@@ -37,7 +37,7 @@ NAMESPACE = "BOOP"  # TODO: Generate real namespaces.
 PING_TRIES = 720
 PING_WAIT_SECS = 5
 CONV_CHANNELS = 4
-CHECK_CROSS_SPEC_MISSES = True
+CHECK_CROSS_SPEC_MISSES = False
 
 CacheOrFut = Union[
     search_cache.ScheduleCache,
@@ -228,9 +228,15 @@ def _compute_block(
         _tlocal.results_cache = None
         _tlocal.results_cache_graph_group = graph_group
     if _tlocal.results_cache is None:
+        # Construct a ChainCache where the Redis cache is *first*.
+        # The Redis cache will ignore very small Specs, and in these cases,
+        # we want to hit the backup local cache.
+        #
         # TODO: Assert block membership in lambda
-        _tlocal.results_cache = search_cache.ScheduleCache(
-            use_redis=(_tlocal.red, NAMESPACE)
+        redis_cache = search_cache.ScheduleCache(use_redis=(_tlocal.red, NAMESPACE))
+        local_cache = search_cache.ScheduleCache(max_dim=search_cache.REDIS_MIN_DIM)
+        _tlocal.results_cache = search_cache.ChainCache(
+            [redis_cache, local_cache], put_all=True
         )
     assert _tlocal.red is not None and _tlocal.results_cache is not None
 
@@ -291,7 +297,7 @@ def _step_compute_block(
                     raise Exception(
                         f"Unexpected, cross-task miss! While computing {target_spec} "
                         f"at coordinate {_spec_to_spec_coordinate(target_spec)}, "
-                        f"missed {', '.join(map(str, request))} at coordinate  "
+                        f"missed {', '.join(map(str, request))} at coordinate "
                         f"{_spec_to_spec_coordinate(request[0])}."
                     )
 

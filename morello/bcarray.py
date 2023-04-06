@@ -331,29 +331,9 @@ class BCARedisStore:
 
     # TODO: Don't need this *and* `get_many`.
     async def get(self, key):
-        if any(p < 0 for p in key):
-            raise IndexError("Negative indices not supported")
-        if key in self._local_entries:
-            return self._local_entries[key]
-        redis_key = self._redis_key(key)
-        if self._local_get_cache and redis_key in self._local_get_cache:
-            in_redis, cached_redis_val = self._local_get_cache[redis_key]
-            if not in_redis:
-                return self.default_value
-            return cached_redis_val
-        result = await self.redis_client.get(redis_key)
-        if result is None:
-            if self._local_get_cache is not None:
-                self._local_get_cache[redis_key] = (False, None)
-            return self.default_value
-        deserialized = pickle.loads(lz4.frame.decompress(result))
-        # TODO: The following isn't always hit
-        if self._local_get_cache is not None:
-            self._local_get_cache[redis_key] = (True, deserialized)
-        return deserialized
+        return (await self.get_many([key]))[0]
 
     async def get_many(self, keys) -> list[Any]:
-        raise NotImplementedError()
         get_gen = self.interactive_get_many(keys)
         redis_results = None
         while True:
@@ -430,7 +410,14 @@ class BCARedisStore:
                 pass
             data = lz4.frame.compress(pickle.dumps(value, protocol=PICKLE_PROTOCOL))
             batch_to_set[redis_key] = data
-        await self.redis_client.mset(batch_to_set)
+            if self._local_get_cache:
+                self._local_get_cache.pop(redis_key, None)
+
+        was_set = await self.redis_client.msetnx(batch_to_set)
+        if not was_set:
+            raise Exception(
+                f"One of the following keys was already set: {sorted(batch_to_set.keys())}"
+            )
         self._local_entries.clear()
         self._updated.clear()
         if self._prefix_lock is not None:

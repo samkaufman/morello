@@ -39,6 +39,8 @@ assert sys.version_info >= (3, 7), "Use Python 3.7 or newer"
 
 RAISE_CAPS_ON_OVERLAP = True
 PICKLE_PROTOCOL = 5
+REDIS_MIN_DIM = 8
+REDIS_ALLOWED_SPECS = (Load, Store, Zero)
 
 T = typing.TypeVar("T")
 U = typing.TypeVar("U")
@@ -152,7 +154,9 @@ class _TableEntry:
 
 
 class ScheduleCache:
-    def __init__(self, use_redis: Optional[tuple[Any, str]] = None):
+    def __init__(
+        self, use_redis: Optional[tuple[Any, str]] = None, max_dim: Optional[int] = None
+    ):
         # TODO: `_rects` is unneeded tech. debt. They're identical except for a prefix.
         self._rects: dict[Spec, bcarray.BlockCompressedArray] = {}
         self._dirty_rects: set[Spec] = set()
@@ -160,6 +164,7 @@ class ScheduleCache:
             use_redis = (redis.Redis.from_url(use_redis[0]),) + use_redis[1:]
         self._use_redis = use_redis
         self._shared_local_get_cache = {}
+        self._max_dim = max_dim
 
     @typing.final
     async def get(
@@ -227,25 +232,11 @@ class ScheduleCache:
     async def get_many(
         self, subproblems: Sequence[tuple[Spec, pruning.MemoryLimits]]
     ) -> Iterable[Optional[CachedScheduleSet]]:
-
         stage1_queries = []
         unskipped: list[int] = []
         for idx, (spec, memory_limits) in enumerate(subproblems):
-
-            # Don't look up tiny-dim. Specs.
-            if self._use_redis and all(
-                d <= 8 for o in spec.operands for d in o.dim_sizes
-            ):
+            if self._should_ignore_problem(spec, memory_limits):
                 continue
-
-            if not isinstance(memory_limits, pruning.StandardMemoryLimits):
-                # TODO: Add support for PipelineChildMemoryLimits
-                warnings.warn(
-                    "ScheduleCache only supports StandardMemoryLimits. Queries with"
-                    " other MemoryLimits implementations always miss."
-                )
-                continue
-
             unskipped.append(idx)
 
             assert (
@@ -308,17 +299,13 @@ class ScheduleCache:
                     best = await self._get_table_entry(rects, snapped_down)
 
             results[idx] = best.schedules
+
         return results
 
     async def put(
         self, schedules_to_put: CachedScheduleSet, memory_limits: pruning.MemoryLimits
     ) -> None:
-        if not isinstance(memory_limits, pruning.StandardMemoryLimits):
-            # TODO: Add support for PipelineChildMemoryLimits
-            warnings.warn(
-                "ScheduleCache only supports StandardMemoryLimits. Puts with"
-                " other MemoryLimits implementations always miss."
-            )
+        if self._should_ignore_problem(schedules_to_put.spec, memory_limits):
             return
 
         # Raise exception if a put Impl exceeds the memory bound.
@@ -363,6 +350,28 @@ class ScheduleCache:
         )
         assert not isinstance(entry, np.ndarray)
         await r.fill_range(bottom_coord, tuple(u + 1 for u in top_coord), entry)
+
+    def _should_ignore_problem(
+        self, spec: Spec, memory_limits: pruning.MemoryLimits
+    ) -> bool:
+        # Don't look up tiny-dim. Specs.
+        if self._max_dim is not None:
+            if any(d > self._max_dim for o in spec.operands for d in o.dim_sizes):
+                return True
+        if self._use_redis and not isinstance(spec, REDIS_ALLOWED_SPECS):
+            return True
+        if self._use_redis and all(
+            d <= REDIS_MIN_DIM for o in spec.operands for d in o.dim_sizes
+        ):
+            return True
+        if not isinstance(memory_limits, pruning.StandardMemoryLimits):
+            # TODO: Add support for PipelineChildMemoryLimits
+            warnings.warn(
+                "ScheduleCache only supports StandardMemoryLimits. Queries with"
+                " other MemoryLimits implementations always miss."
+            )
+            return True
+        return False
 
     def _get_rects(self, spec: Spec) -> bcarray.BlockCompressedArray:
         """Lazily initializes and returns an entry in `_rects`."""
@@ -627,8 +636,9 @@ class _PriorityCache(Generic[T, U]):
 
 
 class ChainCache(ScheduleCache):
-    def __init__(self, caches: Iterable[ScheduleCache]) -> None:
+    def __init__(self, caches: Iterable[ScheduleCache], put_all: bool = False) -> None:
         self._inner_caches = list(caches)
+        self.put_all = put_all
 
     async def get_many(
         self, subproblems: Sequence[tuple[Spec, pruning.MemoryLimits]]
@@ -636,9 +646,11 @@ class ChainCache(ScheduleCache):
         remaining_idxs: list[int] = list(range(len(subproblems)))
         results: list[Optional[CachedScheduleSet]] = [None] * len(remaining_idxs)
         for cache in self._inner_caches:
-            one_result = await cache.get_many([subproblems[i] for i in remaining_idxs])
+            cache_results = await cache.get_many(
+                [subproblems[i] for i in remaining_idxs]
+            )
             to_del = set()  # TODO: Don't use a set
-            for subproblem_idx, entry in zip(remaining_idxs, one_result):
+            for subproblem_idx, entry in zip(remaining_idxs, cache_results):
                 if entry is not None:
                     to_del.add(subproblem_idx)
                     results[subproblem_idx] = entry
@@ -646,7 +658,11 @@ class ChainCache(ScheduleCache):
         return results
 
     async def put(self, *args, **kwargs) -> None:
-        return await self._inner_caches[0].put(*args, **kwargs)
+        if self.put_all:
+            for cache in self._inner_caches:
+                await cache.put(*args, **kwargs)
+        else:
+            await self._inner_caches[0].put(*args, **kwargs)
 
     async def flush(self) -> None:
         for c in self._inner_caches:
@@ -677,13 +693,8 @@ def persistent_cache(
         if not redis:
             yield local_cache
         else:
-            redis_cache = _ReadonlyCache(use_redis=redis)
+            redis_cache = ScheduleCache(use_redis=redis)
             yield ChainCache([local_cache, redis_cache])
-
-
-class _ReadonlyCache(ScheduleCache):
-    def put(self, *args, **kwargs):
-        raise Exception("Should never put. This is read-only.")
 
 
 @contextlib.contextmanager
