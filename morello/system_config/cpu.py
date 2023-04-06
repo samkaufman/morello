@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Iterable, Optional, Union
+from typing import Iterable, Optional, Sequence, Union
 
 from .. import dtypes, layouts, specs
 from ..codegen import gen
@@ -17,7 +17,7 @@ from .base import BuiltArtifact, MemoryBankConfig, RunResult, SystemDescription,
 _OUTPUT_RE = re.compile(r"cpu:\s+(\d+)s\s*(\d+)ns")
 
 
-class CpuTarget(Target):
+class _CpuTarget(Target):
     def __new__(cls, *args, **kwargs):
         # Singleton pattern. Constructor will return the first instance made.
         it = cls.__dict__.get("__one__")
@@ -127,10 +127,9 @@ class CpuTarget(Target):
         clang_cmd = (
             [str(_clang_path())]
             + list(extra_clang_args)
+            + list(self._clang_vec_flags())
             + [
-                "-mavx2",
                 "-std=gnu99",
-                "-fopenmp",
                 "-O3",
                 "-o",
                 str(binary_path),
@@ -177,6 +176,9 @@ class CpuTarget(Target):
         if return_source:
             return (t, artifact.source_code)
         return t
+
+    def _clang_vec_flags(self) -> Sequence[str]:
+        raise NotImplementedError()
 
 
 class CPUBuiltArtifact(BuiltArtifact):
@@ -230,6 +232,16 @@ class CPUBuiltArtifact(BuiltArtifact):
 
     def delete(self):
         shutil.rmtree(self.whole_dir)
+
+
+class X86Target(_CpuTarget):
+    def _clang_vec_flags(self) -> Sequence[str]:
+        return ["-fopenmp", "-mavx2"]
+
+
+class ArmTarget(_CpuTarget):
+    def _clang_vec_flags(self) -> Sequence[str]:
+        return ["--target=arm64"]
 
 
 def _parse_benchmark_output(output: str) -> float:

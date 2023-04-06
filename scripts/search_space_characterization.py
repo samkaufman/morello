@@ -93,7 +93,7 @@ def experiment_specs() -> Iterable[tuple[str, specs.Spec]]:
 
 
 def _setup_target():
-    target = target_by_name("cpu")
+    target = target_by_name("x86")
     set_current_target(target)
     return target
 

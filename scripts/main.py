@@ -9,15 +9,7 @@ import sys
 import time
 from typing import TypeVar
 
-from morello import (
-    cost,
-    dtypes,
-    impl,
-    op_pprint,
-    search_cache,
-    specs,
-    system_config,
-)
+from morello import cost, dtypes, impl, op_pprint, search_cache, specs, system_config
 from morello.codegen import gen
 from morello.impl import TileSizeMode
 from morello.search import dp
@@ -32,7 +24,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--results", type=pathlib.Path, default=None)
 parser.add_argument("--redis", type=str, default=None)
 parser.add_argument("--redis-namespace", type=str, default=None)
-parser.add_argument("--target", type=str, default="cpu")
+parser.add_argument("--target", type=str, default="x86")
 parser.add_argument("--cache", type=str)
 parser.add_argument("--top", type=int, default=1)
 parser.add_argument("--no-save-cache", action="store_false", dest="save_cache")
