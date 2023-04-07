@@ -76,4 +76,6 @@ testpaths = [ "tests" ]
 markers = [
     "slow: test is time-consuming.",
     "parallelspec: test of is a Spec/Impl with a parallel loop.",
+    "x86: test generates/executes X86 code.",
+    "arm: test generates/executes ARM code.",
 ]
