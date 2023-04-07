@@ -44,7 +44,7 @@ RUN unzip /hexagon.zip && \
 # Install libffi6, which is needed by qaic in hexagon_nn, but not in
 # Ubuntu 20 (focal).
 RUN apt-get install -y --no-install-recommends \
-      curl make bash lib32z1 libncurses5 lib32ncurses-dev lsb-release && \
+    curl make bash lib32z1 libncurses5 lib32ncurses-dev lsb-release && \
     curl -LO http://mirrors.kernel.org/ubuntu/pool/main/libf/libffi/libffi6_3.2.1-8_amd64.deb && \
     dpkg -i libffi6_3.2.1-8_amd64.deb && \
     rm libffi6_3.2.1-8_amd64.deb && \
@@ -89,7 +89,7 @@ FROM base as poetry
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    POETRY_VERSION=1.2.1 \
+    POETRY_VERSION=1.4.1 \
     POETRY_VENV=/opt/poetry-venv
 
 # Install poetry in its own venv

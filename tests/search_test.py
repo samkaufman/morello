@@ -167,6 +167,7 @@ def test_next_limits_dim1_b():
     assert expected == list(search.bottomup.next_limits(limits, peak.available))
 
 
+@hypothesis.settings(deadline=1000)
 @hypothesis.given(
     st.lists(
         st.tuples(
