@@ -29,15 +29,18 @@ def _arb_test_bcarray_fills_result_array_matching_ndarray_args(draw):
         fills.append((fill_lower, fill_upper, fill_value))
 
     # Decide whether or not to back with Redis.
-    use_redis = None
+    grid = bcarray.NumpyStore(arr_shape, block_shape, bcarray.BCA_DEFAULT_VALUE)
     if draw(st.booleans()):
-        use_redis = (fakeredis.FakeRedis(), "TEST")
+        grid = bcarray.BCARedisStore(
+            arr_shape,
+            block_shape,
+            fakeredis.FakeRedis(),
+            "TEST",
+            bcarray.BCA_DEFAULT_VALUE,
+            local_cache={},
+        )
 
-    bs_arr = bcarray.BlockCompressedArray(
-        arr_shape,
-        block_shape,
-        use_redis=use_redis,
-    )
+    bs_arr = bcarray.BlockCompressedArray(arr_shape, block_shape, grid)
 
     async def ainit():
         for fill_lower, fill_upper, fill_value in fills:
@@ -88,7 +91,8 @@ async def test_bcarray_raises_indexerror_on_fill_range_greater_than_shape():
     fill_upper = (3, 4)
     fill_value = 1
 
-    bs_arr = bcarray.BlockCompressedArray(arr_shape, block_shape)
+    grid = bcarray.NumpyStore(arr_shape, block_shape, bcarray.BCA_DEFAULT_VALUE)
+    bs_arr = bcarray.BlockCompressedArray(arr_shape, block_shape, grid)
     with pytest.raises(IndexError):
         await bs_arr.fill_range(fill_lower, fill_upper, fill_value)
 
