@@ -380,7 +380,8 @@ def _calculator_to_test(spec_st_fn):
         @pytest.mark.slow
         @pytest.mark.parametrize(
             "target",
-            [cpu.X86Target(), cpu.ArmTarget()],
+            [pytest.param(cpu.X86Target(), marks=pytest.mark.x86),
+             pytest.param(cpu.ArmTarget(), marks=pytest.mark.arm)],
             ids=["x86", "arm"],
         )
         @pytest.mark.parametrize(
