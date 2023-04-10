@@ -55,6 +55,12 @@ class Impl:
         raise NotImplementedError()
 
     @typing.final
+    def replace_child(self, idx: int, replacement: "Impl") -> "Impl":
+        new_children = list(self.children)
+        new_children[idx] = replacement
+        return self.replace_children(new_children)
+
+    @typing.final
     def replace_leaves(self, replacements: Iterable["Impl"]) -> "Impl":
         replacements = list(replacements)
         if not replacements:
@@ -321,6 +327,27 @@ class Impl:
             new_children[p] = self.children[p].subschedule(path[1:], fn)
         return self.replace_children(new_children)
 
+    @typing.final
+    def enter(self, path: Union[int, Sequence[int]]) -> "Subscheduler":
+        if isinstance(path, int):
+            path = (path,)
+
+        # Subscheduler accepts the full path, including single-child sub-Impls, but it's
+        # more ergonomic to require the caller to only pass in child indices where there
+        # is a real choice between multiple children, so let's convert.
+        full_path = []
+        remaining_choices = list(path)
+        cur = self
+        while remaining_choices:
+            if len(cur.children) > 1:
+                full_path.append(remaining_choices.pop(0))
+                cur = cur.children[full_path[-1]]
+            else:
+                full_path.append(0)
+                cur = next(iter(cur.children))
+
+        return Subscheduler(self, full_path)
+
     @assert_stable_spec
     def complete(self) -> "Impl":
         return self.replace_children(c.complete() for c in self.children)
@@ -469,6 +496,54 @@ class AppliedImpl(Impl):
 
     def __setattr__(self, name, value):
         setattr(self.unapplied, name, value)
+
+
+class Subscheduler:
+    def __init__(self, root: Union[Impl, "Subscheduler"], full_path: Sequence[int]):
+        if not full_path:
+            raise ValueError("full_path must not be empty")
+
+        self.root = root
+        self.full_path = list(full_path)
+
+        child = root
+        for child_idx in full_path:
+            child = child.children[child_idx]  # type: ignore
+        self.child = child
+
+        # TODO: Assert that child is a leaf
+
+    def enter(self, *args, **kwargs):
+        raise NotImplementedError("Recursive `enter` not yet implemented.")
+
+    def exit(self) -> Union[Impl, "Subscheduler"]:
+        # TODO: Forward exit to child if it exists
+
+        # Recursively replace children after following the path of child indices.
+        stack: list[Union[Impl, "Subscheduler"]] = [self.root]
+        for child_idx in self.full_path[:-1]:
+            stack.append(stack[-1].children[child_idx])  # type: ignore
+        last: Impl = self.child
+        for p in reversed(self.full_path):
+            last = stack.pop().replace_child(p, last)
+        assert last.spec == self.root.spec
+        return last
+
+    # Forward properties and methods to the sub-Impl at `path`.
+    def __getattr__(self, name):
+        child_attr = getattr(self.child, name)
+        if not callable(child_attr):
+            return child_attr
+
+        def result_captured(*args, **kwargs):
+            # Unlike normal scheduling, this will capture results until exit,
+            # returning the Subscheduler itself.
+            r = child_attr(*args, **kwargs)
+            assert isinstance(r, Impl), f"Expected Impl, but got {r}"
+            self.child = r
+            return self
+
+        return result_captured
 
 
 @functools.lru_cache(maxsize=None)
