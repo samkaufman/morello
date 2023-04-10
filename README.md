@@ -15,7 +15,7 @@ Once installed, try auto-scheduling a small matrix multiplication by running fro
 poetry run ./scripts/main.py --cache seed_cache.pkl matmul 8 4 8
 ```
 
-If that works, you're in good shape. Find out how to schedule some other pre-baked Specs by running `scripts/main.py --help' or dig into the source code of [scripts/main.py](main.py) to schedule your own programs.
+If that works, you're in good shape. Find out how to schedule some other pre-baked Specs by running `scripts/main.py --help' or dig into the source code of [scripts/main.py] to schedule your own programs.
 
 ## Understanding the Output
 
@@ -66,7 +66,7 @@ Tiles over tensors are added by the tiling iterators `tile` and `convTile` and a
 
 ## Scheduling Language
 
-Implementations are scheduled using a tree of operators deriving from `Impl`, and are defined in [ops.py](ops.py). They are:
+Implementations are scheduled using a tree of operators deriving from `Impl`, and are defined in the [impl module]. They are:
 
   * `MoveLet` represents a memory move. It moves from slow to fast memory, and, in fast memory, may optionally change the layout of the underlying matrix.
   * `MatmulTilesLoop` represents a loop over the operand tiles required to calculate a tiled output.
@@ -78,7 +78,7 @@ Tree leaves are either `Matmul` or `ConvHole`.
 
 Every `Impl` has two operands: `lhs` and `rhs`. All except `Matmul` and `ConvHole` have an inner `Impl`.
 
-Operands are either tensors or views into tensors (tiles). These are defined in [tensor.py](tensor.py).
+Operands are either tensors or views into tensors (tiles). These are defined in [tensor.py].
 
 Schedules should be interpreted as having loop orders zipped with the logical dimensions of underlying tensors/tiles. The memory layout of the underlying buffers is described by the `layout` member on tensors/tiles.
 
@@ -111,12 +111,19 @@ The operators are:
 
 All costs are derived from moves, multiplied by the ranges of its containing loops. The model ignores the cost of stores. It schedules loads only. Tensor multiplication is free, but the cost model is only defined over matmuls. with 1x1, in-registers operands or direct convolutions with equally shaped image-filter pairs.
 
-To determine the cost of a schedule, pass it to `analytical_cost` ([cost.py](cost.py)). The returned cost has no meaning other than being suitable for ranking the performance of schedules.
+To determine the cost of a schedule, pass it to `analytical_cost` ([cost.py]). The returned cost has no meaning other than being suitable for ranking the performance of schedules.
 
-A proposed schedule is considered unschedulable—and `analytical cost` will raise `UnscheduledSpecError`—if it would move more data into a level of memory than is available according to our hypothetical system description in [system_config.py](system_config.py), if it fails to move operands into registers or tile to 1x1, or memory layout is changed at a level other than registers.
+A proposed schedule is considered unschedulable—and `analytical cost` will raise `UnscheduledSpecError`—if it would move more data into a level of memory than is available according to our hypothetical system description in [system_config], if it fails to move operands into registers or tile to 1x1, or memory layout is changed at a level other than registers.
 
-The crux of the cost model is implemented by `move_cost` in [cost.py](cost.py), which is pretty simple. The cost of a move is:
+The crux of the cost model is implemented by `move_cost` in [cost.py], which is pretty simple. The cost of a move is:
 
 `10 * c * major * ceil(minor / line)`
 
 where **major** is the rows dimension for a row-major source and the columns dimension otherwise, **minor** is the other, **line** is the cache line size in the toy system, and **c** is a coefficient associated with the cost of reading a cache line from the source's level of the memory hierarchy.
+
+<!-- Links -->
+[scripts/main.py]: scripts/main.py
+[tensor.py]: morello/tensor.py
+[impl module]: morello/impl/__init__.py
+[system_config]: morello/system_config
+[cost.py]: morello/cost.py
