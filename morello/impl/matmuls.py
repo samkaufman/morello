@@ -236,8 +236,16 @@ class BroadcastVecMult(MatmulLeaf):
         if rhs.bank != "VRF" or out.bank != "VRF":
             return "BroadcastVecMult only applies to VRF vector operands"
 
-        if rhs.dim_sizes != rhs.vector_shape or out.dim_sizes != out.vector_shape:
-            return "BroadcastVecMult only applies to single vector tiles."
+        if rhs.dim_sizes != rhs.vector_shape:
+            return (
+                f"BroadcastVecMult only applies to single vector tiles, but rhs "
+                f"shape is {rhs.dim_sizes} and vector shape is {rhs.vector_shape}."
+            )
+        if out.dim_sizes != out.vector_shape:
+            return (
+                f"BroadcastVecMult only applies to single vector tiles, but out "
+                f"shape is {out.dim_sizes} and vector shape is {out.vector_shape}."
+            )
 
         # The Clang vector extensions require the rhs and output to be aligned.
         if not rhs.aligned:
