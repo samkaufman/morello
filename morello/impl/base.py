@@ -229,7 +229,10 @@ class Impl:
             )
         )
 
-    def split(self, k: int) -> "Impl":
+    def split(self, *args, **kwargs) -> "Impl":
+        if len(self.children) == 1:
+            return self.replace_child(0, self.children[0].split(*args, **kwargs))
+
         raise NotImplementedError(f"Not implemented for {type(self).__name__}")
 
     @assert_stable_spec
