@@ -390,11 +390,12 @@ class BCARedisStore:
                 if lock_result:
                     break
                 if i < 9:
-                    await asyncio.sleep(0.1 + random.random())
-                else:
-                    raise Exception(
-                        f"Couldn't acquire lock: Lock:{self.prefix} (PID: {os.getpid()})"
-                    )
+                    # Exponential backoff pause with some random jitter.
+                    await asyncio.sleep(0.1 * (2**i) * (0.5 + random.random()))
+                    continue
+                raise Exception(
+                    f"Couldn't acquire lock: Lock:{self.prefix} (PID: {os.getpid()})"
+                )
 
         self._local_entries[key] = value
         self._updated.add(key)
