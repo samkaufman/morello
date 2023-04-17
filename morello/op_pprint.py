@@ -130,7 +130,7 @@ def _env_str(
         )
     elif isinstance(imp, impl.AppliedImpl):
         operands_str = ", ".join(name_tensor_fn(o) for o in imp.operands)
-        return f"{type(imp).__name__}({operands_str})"
+        return f"{type(imp.unapplied).__name__}({operands_str})"
     else:
         raise ValueError(f"Unsupported type: {type(imp)}")
 
