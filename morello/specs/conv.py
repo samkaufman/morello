@@ -126,7 +126,7 @@ class ConvolutionBase(base.Spec):
         epi = ""
         if self.serial_only:
             epi = ", serial"
-        return f"Conv({self.lhs}, {self.rhs}, {self.output}{epi})"
+        return f"{type(self).__name__}({self.lhs}, {self.rhs}, {self.output}{epi})"
 
 
 @cython.cclass

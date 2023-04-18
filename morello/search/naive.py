@@ -18,7 +18,7 @@ def _best_schedule(it: Iterable[Impl]):
     This uses schedule_key, so it will return the lowest cost schedule,
     breaking ties as described in schedule_key's docstring.
     """
-    new_it = ((s, common.ScheduleKey.from_complete_impl(s)) for s in it)
+    new_it = ((s, common.ScheduleKey.from_complete_impl(s, cache=True)) for s in it)
     return min(new_it, key=lambda x: x[1], default=None)
 
 

@@ -90,10 +90,6 @@ class Search:
 
         if cache is None:
             cache = ScheduleCache()
-
-        # The default available memory is the capacities of current_system().
-        # These capacities are measured in cache lines, not words, so: multiply
-        # by line size when initializing the limit.
         if memory_limits is None:
             memory_limits = pruning.StandardMemoryLimits()
 
@@ -233,6 +229,7 @@ class Search:
                 continue
             for c, l in zip(new_tree.children, new_child_memory_limits):
                 deps.append((c.spec, l))
+
         resultzzzz: SearchResponse = yield SearchMessage(deps, [])
         resultzzzz_consumed = 0
 
@@ -264,7 +261,11 @@ class Search:
                     assert (  # TODO: Remove this assertion
                         not child_impl_tuples
                         or child_impl_tuples[0][0].spec == child.spec
-                    ), f"{child_impl_tuples[0][0].spec} != {child.spec}"
+                    ), (
+                        f"Found result {child_impl_tuples[0][0].spec} at index {j}, "
+                        f"but expected {child.spec}. Other results' Specs were: "
+                        f"{[str(t.spec) if t else t for t in resultzzzz]}"
+                    )
                 else:
                     child_search_result = yield from self.interactive_search(
                         child,
@@ -360,6 +361,10 @@ async def _step_search_generators(
     consumed = 0
     for gen_idx, (search_gen, msg) in enumerate(zip(search_gens, msgs)):
         subresponse = cache_response[consumed : consumed + len(msg.needed)]
+        assert all(
+            css is None or css.spec == n[0]
+            for css, n in zip(subresponse, msg.needed, strict=True)
+        )
         try:
             next_msgs.append(search_gen.send(subresponse))
         except StopIteration as e:

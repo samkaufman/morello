@@ -2,12 +2,12 @@ import functools
 import typing
 from typing import Callable, Iterable, Optional, Sequence, Tuple, Union, cast
 
+from .pruning import ParentSummary
+from .utils import assert_stable_spec
 from .. import specs, tiling
 from ..system_config import current_system, current_target
 from ..tensor import OperandIdx, TensorLike, Tile
 from ..utils import TinyMap
-from .pruning import ParentSummary
-from .utils import assert_stable_spec
 
 
 class Impl:
@@ -38,6 +38,16 @@ class Impl:
         d = 1 + max((c.depth for c in self.children), default=0)
         object.__setattr__(self, "_cached_depth", d)
         return d
+
+    def equals_node(self, other) -> bool:
+        """Compare with another Impl, ignoring children and tensor instances."""
+        # TODO: Don't use pformat
+        from .. import pformat
+
+        other = other.replace_children(self.children)
+        l = pformat(self, show_cost=False, show_utilization=False)
+        r = pformat(other, show_cost=False, show_utilization=False)
+        return l == r
 
     @property
     def is_scheduled(self) -> bool:
@@ -455,6 +465,9 @@ class AppliedImpl(Impl):
     @property
     def output(self):
         return self.operands[-1]
+
+    def equals_node(self, other) -> bool:
+        raise NotImplementedError("equals_node not implemented for applied Impls.")
 
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
         if len(operands):

@@ -1,3 +1,4 @@
+import abc
 import asyncio
 import itertools
 import os
@@ -13,7 +14,6 @@ REDIS_LOCK_WRITES = True
 
 BCA_DEFAULT_VALUE = None
 _BCA_DENSE_BLOCK_THRESHOLD = 4
-_BCA_COMPRESS_ON_FILL = False
 
 
 class BlockCompressedArray:
@@ -25,7 +25,7 @@ class BlockCompressedArray:
     value in memory.
     """
 
-    grid: Union["_NumpyStore", "_BCARedisStore"]
+    grid: "Store"  # TODO: Rename member to `store`
 
     def __init__(
         self,
@@ -60,11 +60,11 @@ class BlockCompressedArray:
         response = None
         while True:
             try:
-                block_pts = gen.send(response)
+                redis_keys = gen.send(response)
             except StopIteration as e:
                 return e.value
             else:
-                response = await self.grid.get_many(block_pts)
+                response = await self.grid.redis_client.mget(redis_keys)
 
     # TODO: Specialize return type
     def interactive_get_many(self, pts) -> Generator[list[str], list[Any], Any]:
@@ -77,26 +77,6 @@ class BlockCompressedArray:
 
     async def flush(self) -> None:
         await self.grid.flush()
-
-    async def full(self) -> bool:
-        if await self.grid.contains(BCA_DEFAULT_VALUE):
-            return False
-        for block_pt in np.ndindex(self.grid.shape):
-            block = await self.grid.get(block_pt)
-            if isinstance(block, np.ndarray):
-                if BCA_DEFAULT_VALUE in block:
-                    return False
-            elif isinstance(block, list):
-                # TODO: Below is used here and in iter_values. Extract a method.
-                temp_arr = np.empty(self._block_shape_at_point(block_pt), dtype=object)
-                for rng, value in await self.grid.get(block_pt):
-                    spt = tuple(slice(a, b) for a, b in zip(rng[0], rng[1]))
-                    temp_arr[spt].fill(value)
-                if BCA_DEFAULT_VALUE in temp_arr:
-                    return False
-            else:
-                assert block != BCA_DEFAULT_VALUE  # Already checked above
-        return True
 
     async def fill(self, value) -> None:
         """Fill the array with a value."""
@@ -181,8 +161,6 @@ class BlockCompressedArray:
             if isinstance(b, np.ndarray):
                 spt = tuple(slice(a, b) for a, b in zip(*block_intersection))
                 b[spt].fill(value)
-                if _BCA_COMPRESS_ON_FILL:
-                    await self.grid.itemset(block_pt, _compress_block(b))
             elif isinstance(b, list):
                 _drop_covered_entries(block_intersection, b)
                 b.append((block_intersection, value))
@@ -268,7 +246,39 @@ class BlockCompressedArray:
         return np.block(new_grid.tolist())
 
 
-class NumpyStore:
+class Store(abc.ABC):
+    @abc.abstractmethod
+    async def get(self, key: tuple[int, ...]):
+        pass
+
+    @abc.abstractmethod
+    async def get_many(self, keys: Sequence[tuple[int, ...]]) -> list[Any]:
+        pass
+
+    @abc.abstractmethod
+    def interactive_get_many(
+        self, keys: Sequence[tuple[int, ...]]
+    ) -> Generator[list[str], list[Any], list[Any]]:
+        pass
+
+    @abc.abstractmethod
+    async def itemset(self, key, value) -> None:
+        pass
+
+    @abc.abstractmethod
+    async def flush(self) -> None:
+        pass
+
+    @abc.abstractmethod
+    async def fill(self, value):
+        pass
+
+    @abc.abstractmethod
+    async def copy(self) -> np.ndarray:
+        pass
+
+
+class NumpyStore(Store):
     def __init__(self, expanded_shape, block_shape, default_value):
         self._inner = np.full(
             tuple((o + b - 1) // b for b, o in zip(block_shape, expanded_shape)),
@@ -280,16 +290,23 @@ class NumpyStore:
     def shape(self):
         return self._inner.shape
 
-    async def get(self, key):
+    async def get(self, key: tuple[int, ...]):
         if any(p < 0 for p in key):
             raise IndexError("Negative indices not supported")
         return self._inner[key]
 
-    async def get_many(self, keys) -> list[Any]:
+    async def get_many(self, keys: Sequence[tuple[int, ...]]) -> list[Any]:
         return [await self.get(k) for k in keys]
 
-    def interactive_get_many(self, keys) -> Generator[list[str], list[Any], list[Any]]:
-        raise NotImplementedError()
+    def interactive_get_many(
+        self, keys: Sequence[tuple[int, ...]]
+    ) -> Generator[list[str], list[Any], list[Any]]:
+        if False:
+            yield  # Ensures this is a generator
+
+        if any(p < 0 for key in keys for p in key):
+            raise IndexError("Negative indices not supported")
+        return [self._inner[k] for k in keys]
 
     async def itemset(self, key, value) -> None:
         self._inner.itemset(key, value)
@@ -308,7 +325,7 @@ class NumpyStore:
         return self._inner.copy()
 
 
-class BCARedisStore:
+class BCARedisStore(Store):
     def __init__(
         self,
         expanded_shape,
@@ -330,10 +347,10 @@ class BCARedisStore:
         self._local_get_cache: Optional[dict[str, tuple[bool, Any]]] = local_cache
 
     # TODO: Don't need this *and* `get_many`.
-    async def get(self, key):
+    async def get(self, key: tuple[int, ...]):
         return (await self.get_many([key]))[0]
 
-    async def get_many(self, keys) -> list[Any]:
+    async def get_many(self, keys: Sequence[tuple[int, ...]]) -> list[Any]:
         get_gen = self.interactive_get_many(keys)
         redis_results = None
         while True:
@@ -345,7 +362,9 @@ class BCARedisStore:
                 redis_results = await self.redis_client.mget(redis_keys)
 
     # TODO: Specialize return type
-    def interactive_get_many(self, keys) -> Generator[list[str], list[Any], list[Any]]:
+    def interactive_get_many(
+        self, keys: Sequence[tuple[int, ...]]
+    ) -> Generator[list[str], list[Any], list[Any]]:
         for key in keys:
             if any(p < 0 for p in key):
                 raise IndexError("Negative indices not supported")
@@ -385,17 +404,18 @@ class BCARedisStore:
             self._prefix_lock = self.redis_client.lock(
                 f"Lock:{self.prefix}", blocking=False
             )
-            for i in range(10):
+            for i in range(7):
                 lock_result = await self._prefix_lock.acquire()
                 if lock_result:
                     break
-                if i < 9:
+                if i < 6:
                     # Exponential backoff pause with some random jitter.
                     await asyncio.sleep(0.1 * (2**i) * (0.5 + random.random()))
                     continue
                 raise Exception(
                     f"Couldn't acquire lock: Lock:{self.prefix} (PID: {os.getpid()})"
                 )
+            print(f"PID {os.getpid()} acquired lock: Lock:{self.prefix}")
 
         self._local_entries[key] = value
         self._updated.add(key)
@@ -414,16 +434,19 @@ class BCARedisStore:
             if self._local_get_cache:
                 self._local_get_cache.pop(redis_key, None)
 
-        was_set = await self.redis_client.msetnx(batch_to_set)
-        if not was_set:
-            raise Exception(
-                f"One of the following keys was already set: {sorted(batch_to_set.keys())}"
-            )
+        if batch_to_set:
+            was_set = await self.redis_client.msetnx(batch_to_set)
+            if not was_set:
+                raise Exception(
+                    "One of the following keys was already set: "
+                    + str(sorted(batch_to_set.keys()))
+                )
         self._local_entries.clear()
         self._updated.clear()
         if self._prefix_lock is not None:
             await self._prefix_lock.release()
             self._prefix_lock = None
+            print(f"PID {os.getpid()} released lock: Lock:{self.prefix}")
 
     async def contains(self, key):
         raise NotImplementedError()
@@ -591,20 +614,3 @@ def surface_pts(
                     b = 1 if (i in upper_misaligned_dim_idxs and i < outer_idx) else 0
                     parts.append(range(l - a, u + b))
             yield from itertools.product(*parts)
-
-
-def _compress_block(block: np.ndarray):
-    # This implementation is slow. To check if all values in `block` are equal, we
-    # materialize a whole new block filled with the first element and check (without
-    # short-circuiting) for equality between the corresponding elements. To save *some*
-    # time in cases where nothing matches, we first check an arbitrary element and bail
-    # early, but this is still slow in the general case (and downstream of wanting to
-    # lower everything into numpy for speed).
-    if block.item(0) != block.item(1):
-        return block
-    v = block.flatten()[0]
-    rhs = np.empty_like(block)
-    rhs.fill(v)
-    if np.array_equal(block, rhs):
-        return v
-    return block

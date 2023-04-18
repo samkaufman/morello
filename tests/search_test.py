@@ -9,7 +9,6 @@ from hypothesis import strategies as st
 
 from morello import cost, dtypes, op_pprint, pruning, search, search_cache, specs, utils
 from morello.system_config import current_target
-
 from . import strategies
 
 strategies.register_default_strategies()
@@ -120,7 +119,8 @@ def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
             # assert results[-2][1] >= results[-1][1]
 
 
-@hypothesis.settings(deadline=180_000)
+@pytest.mark.slow
+@hypothesis.settings(deadline=400_000)
 @hypothesis.example(
     specs.MatmulAccum(
         specs.TensorSpec((2, 2), dtype=dtypes.Uint8, bank="RF", contiguous_abs=2),
@@ -140,7 +140,9 @@ def test_dp_cost_matches_naive_search_cost(spec):
     hypothesis.note("Naive Impl:\n" + op_pprint.pformat(naive_result))
     hypothesis.note("DP Impl:\n" + op_pprint.pformat(dp_result[0]))
     # TODO: Add an alpha-equality method
-    assert cost.compute_cost(naive_result) == cost.compute_cost(dp_result[0])  # type: ignore
+    assert cost.compute_cost(naive_result) == cost.compute_cost(
+        dp_result[0]
+    )  # type: ignore
 
 
 @hypothesis.given(

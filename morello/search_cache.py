@@ -19,18 +19,20 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
+    Type,
     Union,
 )
 
 import atomicwrites
+import lz4.frame
 import numpy as np
 import redis.asyncio as redis
 
 from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
-from .specs import Load, Spec, Store, Zero, Matmul, MatmulAccum, Spec
+from .specs import Load, Store, Zero, Spec
 from .system_config import current_system
-from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
+from .utils import TinyMap, snap_availables_down, snap_availables_up
 
 if TYPE_CHECKING:
     from .search.common import ScheduleKey
@@ -39,8 +41,6 @@ assert sys.version_info >= (3, 7), "Use Python 3.7 or newer"
 
 RAISE_CAPS_ON_OVERLAP = True
 PICKLE_PROTOCOL = 5
-REDIS_MIN_DIM = 8
-REDIS_ALLOWED_SPECS = (Load, Store, Zero)
 
 T = typing.TypeVar("T")
 U = typing.TypeVar("U")
@@ -155,7 +155,11 @@ class _TableEntry:
 
 class ScheduleCache:
     def __init__(
-        self, use_redis: Optional[tuple[Any, str]] = None, max_dim: Optional[int] = None
+        self,
+        use_redis: Optional[tuple[Any, str]] = None,
+        max_dim: Optional[int] = None,
+        min_dim: int = -1,
+        allowed_spec_types: Optional[tuple[Type[Spec], ...]] = None,
     ):
         # TODO: `_rects` is unneeded tech. debt. They're identical except for a prefix.
         self._rects: dict[Spec, bcarray.BlockCompressedArray] = {}
@@ -165,6 +169,14 @@ class ScheduleCache:
         self._use_redis = use_redis
         self._shared_local_get_cache = {}
         self._max_dim = max_dim
+        self.min_dim = min_dim
+        self.allowed_spec_types = allowed_spec_types
+
+    async def __aenter__(self):
+        pass
+
+    async def __aexit__(self, exc_t, exc_v, exc_tb):
+        await self.flush()
 
     @typing.final
     async def get(
@@ -308,8 +320,15 @@ class ScheduleCache:
         if self._should_ignore_problem(schedules_to_put.spec, memory_limits):
             return
 
-        # Raise exception if a put Impl exceeds the memory bound.
+        banks = current_system().ordered_banks
         mlims = memory_limits.available
+        if len(mlims) != len(banks):
+            raise ValueError(
+                f"Memory limits {mlims} has {len(mlims)} banks, but the system has"
+                f" {len(banks)} banks."
+            )
+
+        # Raise exception if a put Impl exceeds the memory bound.
         for imp, _ in schedules_to_put.contents:
             if any(imp.peak_memory[b] > mlims[b] for b in imp.peak_memory):
                 raise ValueError(
@@ -333,7 +352,6 @@ class ScheduleCache:
         entry = _TableEntry(spec, schedules_to_put, mlims)
 
         # compute bottom from entry
-        banks = current_system().ordered_banks
         if entry.peak_memory is None:
             assert not len(entry.schedules.contents)
             bot = (0,) * len(banks)
@@ -344,7 +362,7 @@ class ScheduleCache:
         top = snap_availables_up(entry.caps.raw_values, always=True)
         bottom_coord = tuple(v.bit_length() for v in bot)
         top_coord = tuple(v.bit_length() for v in top)
-        assert all(b <= t for b, t in zip(bottom_coord, top_coord)), (
+        assert all(b <= t for b, t in zip(bottom_coord, top_coord, strict=True)), (
             f"Bottom coord {bottom_coord} is not less than or equal to "
             f"top coord {top_coord}; bot = {bot}; top = {top}"
         )
@@ -358,10 +376,14 @@ class ScheduleCache:
         if self._max_dim is not None:
             if any(d > self._max_dim for o in spec.operands for d in o.dim_sizes):
                 return True
-        if self._use_redis and not isinstance(spec, REDIS_ALLOWED_SPECS):
+        if (
+            self._use_redis
+            and self.allowed_spec_types is not None
+            and not isinstance(spec, self.allowed_spec_types)
+        ):
             return True
         if self._use_redis and all(
-            d <= REDIS_MIN_DIM for o in spec.operands for d in o.dim_sizes
+            d <= self.min_dim for o in spec.operands for d in o.dim_sizes
         ):
             return True
         if not isinstance(memory_limits, pruning.StandardMemoryLimits):
@@ -422,18 +444,36 @@ class ScheduleCache:
             await self._get_rects(spec).flush()
         self._dirty_rects.clear()
 
-    async def specs(self) -> Iterable[Spec]:
+    async def specs(self) -> AsyncIterator[Spec]:
         if not self._use_redis:
-            return self._rects.keys()
+            for spec in self._rects.keys():
+                yield spec
         else:
-            # TODO: Speed this up by grouping and returning keys in Lua.
+            # TODO: Speed this up by grouping and returning keys in Lua, then parsing
+            #   keys into Specs.
+            # TODO: The following depends on the internal representation of the values,
+            #   which breaks the Store abstraction.
+            for dirty_rect in self._dirty_rects:
+                yield dirty_rect
+            seen = set(self._dirty_rects)
             redis_db, prefix = self._use_redis
             db_keys = await redis_db.keys(f"{prefix}-*")
-            spec_strs = {
-                k[len(prefix) + 1 :].decode().split(":BCA")[0] for k in db_keys
-            }
-            print(f"specs: {spec_strs}")
-            raise NotImplementedError()
+            for key in db_keys:
+                value = pickle.loads(lz4.frame.decompress(await redis_db.get(key)))
+                flattened = iter([value])
+                if isinstance(value, np.ndarray):
+                    flattened = value.flat
+                elif isinstance(value, list):
+                    flattened = (v for _, v in value)
+                for entry in flattened:
+                    if entry is None:
+                        continue
+                    spec = entry.spec
+                    assert isinstance(spec, Spec)
+                    if spec in seen:
+                        continue
+                    seen.add(spec)
+                    yield spec
 
     async def count_specs(self) -> int:
         return sum(1 for _ in await self.specs())
@@ -441,7 +481,7 @@ class ScheduleCache:
     async def __aiter__(
         self,
     ) -> AsyncIterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
-        for spec in await self.specs():
+        async for spec in self.specs():
             seen = set()
             rects = self._get_rects(spec)
             async for entry in rects.iter_values():
@@ -671,7 +711,7 @@ class ChainCache(ScheduleCache):
     async def specs(self) -> Iterable[Spec]:
         result = set()
         for cache in self._inner_caches:
-            result.update(await cache.specs())
+            result.update([s async for s in cache.specs()])
         return result
 
     async def __aiter__(

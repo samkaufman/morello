@@ -38,6 +38,7 @@ PING_TRIES = 720
 PING_WAIT_SECS = 5
 CONV_CHANNELS = 4
 CHECK_CROSS_SPEC_MISSES = False
+REDIS_MIN_DIM = 8
 
 CacheOrFut = Union[
     search_cache.ScheduleCache,
@@ -233,8 +234,11 @@ def _compute_block(
         # we want to hit the backup local cache.
         #
         # TODO: Assert block membership in lambda
-        redis_cache = search_cache.ScheduleCache(use_redis=(_tlocal.red, NAMESPACE))
-        local_cache = search_cache.ScheduleCache(max_dim=search_cache.REDIS_MIN_DIM)
+        redis_cache = search_cache.ScheduleCache(
+            use_redis=(_tlocal.red, NAMESPACE), min_dim=REDIS_MIN_DIM,
+            allowed_spec_types=(specs.Load, specs.Store, specs.Zero)
+        )
+        local_cache = search_cache.ScheduleCache(max_dim=REDIS_MIN_DIM)
         _tlocal.results_cache = search_cache.ChainCache(
             [redis_cache, local_cache], put_all=True
         )
