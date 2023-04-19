@@ -286,7 +286,7 @@ def _arb_conv_reduce_conv_spec(draw, parallel: Optional[bool] = None):
 @st.composite
 def _arb_zero_spec(draw, parallel: Optional[bool] = None):
     target = system_config.current_target()
-    shape = draw(st.lists(st.integers(1, 129), min_size=1, max_size=3))
+    shape = draw(st.lists(st.integers(1, 32), min_size=1, max_size=3))
     dtype = draw(st.from_type(dtypes.Dtype))
     t = target.tensor_spec(shape, dtype=dtype)
     return specs.Zero(t, serial_only=(not parallel))

@@ -137,9 +137,6 @@ def test_dp_cost_matches_naive_search_cost(spec):
     dp_result = search.schedule_search(spec, mlims)
     assert (naive_result is None) == (not dp_result)
     hypothesis.assume(naive_result is not None)
-    hypothesis.note("Naive Impl:\n" + op_pprint.pformat(naive_result))
-    hypothesis.note("DP Impl:\n" + op_pprint.pformat(dp_result[0]))
-    # TODO: Add an alpha-equality method
     assert cost.compute_cost(naive_result) == cost.compute_cost(
         dp_result[0]
     )  # type: ignore
@@ -187,10 +184,12 @@ def test_next_limits_covers_space_disjointly(inp: list[tuple[int, int]]):
     banks = tuple(map(str, range(len(initial_cap_bits))))
     covered = np.zeros([d + 1 for d in initial_cap_bits], dtype=bool)
     assert not covered.any()
-    working_set = [pruning.StandardMemoryLimits(utils.TinyMap(banks, initial_cap))]
+    working_set = collections.deque(
+        [pruning.StandardMemoryLimits(utils.TinyMap(banks, initial_cap))]
+    )
     hypothesis.note("Initial limits: " + str(working_set[0]))
     while working_set:
-        limits = working_set.pop(0)
+        limits = working_set.popleft()
         limits_vals = limits.available.raw_values
         lower_peak_vals = _consume(limits_vals, step)
         lower_peak = utils.TinyMap(banks, lower_peak_vals)
