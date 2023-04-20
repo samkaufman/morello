@@ -246,11 +246,11 @@ def dp_task(
     cache_context = search_cache.persistent_cache(cache_path(spec_name))
 
     with cache_context as cache:
-        search_result = search.dp.schedule_search(
+        search_result = asyncio.run(search.dp.schedule_search(
             spec,
             callbacks=cbs,
             cache=cache,
-        )[0]
+        ))[0]
     print(f"Applied {cbs.compose_visits} actions to Compose sub-problems")
     sys.stdout.flush()
 

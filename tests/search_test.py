@@ -1,3 +1,4 @@
+import asyncio
 import collections
 from typing import Optional
 
@@ -15,9 +16,10 @@ strategies.register_default_strategies()
 
 
 @pytest.mark.skip(reason="No good way to constrain shapes (e.g. Reduce·Reduce·Reduce)")
+@pytest.mark.asyncio
 @given(st.from_type(specs.Spec))
-def test_search_passes_on_any_spec(s):
-    search.schedule_search(s)
+async def test_search_passes_on_any_spec(s):
+    await search.schedule_search(s)
 
 
 class CountingCache(search_cache.ScheduleCache):
@@ -44,11 +46,12 @@ class CountingCache(search_cache.ScheduleCache):
 
 @pytest.mark.skip("Need structural Impl equality for assert")
 @pytest.mark.slow
+@pytest.mark.asyncio
 @given(st.from_type(specs.Spec))
-def test_nested_loop_pruning_doesnt_change_solutions(spec):
+async def test_nested_loop_pruning_doesnt_change_solutions(spec):
     token = impl.settings.prune_nested_parallel_loops.set(False)
     try:
-        no_pruning_solution = search.schedule_search(spec)
+        no_pruning_solution = await search.schedule_search(spec)
         if no_pruning_solution:
             hypothesis.note(
                 f"no_pruning_solution:\n{op_pprint.pformat(no_pruning_solution)}"
@@ -58,7 +61,7 @@ def test_nested_loop_pruning_doesnt_change_solutions(spec):
 
     token = impl.settings.prune_nested_parallel_loops.set(True)
     try:
-        with_pruning_solution = search.schedule_search(spec)
+        with_pruning_solution = await search.schedule_search(spec)
         if with_pruning_solution:
             hypothesis.note(
                 f"with_pruning_solution:\n{op_pprint.pformat(with_pruning_solution)}"
@@ -75,10 +78,11 @@ def test_nested_loop_pruning_doesnt_change_solutions(spec):
 # (3*3 + 3*3 + 1 words).
 @pytest.mark.skip("Skipping due to performance issues")
 @pytest.mark.slow
+@pytest.mark.asyncio
 @hypothesis.settings(deadline=30 * 60 * 1000)
 @given(st.integers(min_value=5), st.from_type(dtypes.Dtype))
 @hypothesis.example(16)
-def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
+async def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
     target = current_target()
     system = target.system
 
@@ -96,7 +100,7 @@ def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
         try:
             system.level_configs[0].capacity = cap
             results.append(
-                search.schedule_search(
+                await search.schedule_search(
                     specs.Compose(
                         (specs.ReduceSum, specs.Convolution),
                         (img.spec, filters_a.spec),
@@ -134,7 +138,7 @@ def test_dp_cost_matches_naive_search_cost(spec):
     mlims = pruning.StandardMemoryLimits()
 
     naive_result = search.naive_search(spec, mlims)
-    dp_result = search.schedule_search(spec, mlims)
+    dp_result = asyncio.run(search.schedule_search(spec, mlims))
     assert (naive_result is None) == (not dp_result)
     hypothesis.assume(naive_result is not None)
     assert cost.compute_cost(naive_result) == cost.compute_cost(

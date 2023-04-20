@@ -26,16 +26,17 @@ CC_SANITIZE = True
 strategies.register_default_strategies()
 
 
-def test_codegen_completes_on_matmul_1x1x1():
+@pytest.mark.asyncio
+async def test_codegen_completes_on_matmul_1x1x1():
     target = cpu.CpuTarget()
     with system_config.with_target(target):
         lhs = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
         rhs = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
         out = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
         s = specs.Matmul(lhs, rhs, out, serial_only=True)
-        imp = search.schedule_search(s)[0]
+        imp = (await search.schedule_search(s))[0]
         assert imp
-        asyncio.run(target.build_impl(imp.to_applied()))
+        await target.build_impl(imp.to_applied())
 
 
 @pytest.mark.parallelspec

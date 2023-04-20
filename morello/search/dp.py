@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from .. import cost
 
 
-def schedule_search(
+async def schedule_search(
     spec: specs.Spec,
     memory_limits=None,
     cache=None,
@@ -36,10 +36,8 @@ def schedule_search(
 
     May return `None` if no Impl satisfies the given Spec and memory limits.
     """
-    return asyncio.run(
-        Search(top_k, callbacks=callbacks)(
-            spec, memory_limits, parent_summary=parent_summary, cache=cache
-        )
+    return await Search(top_k, callbacks=callbacks)(
+        spec, memory_limits, parent_summary=parent_summary, cache=cache
     )
 
 

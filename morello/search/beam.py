@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import os
@@ -44,11 +45,11 @@ def _dp_schedule_leaves(
             return schedule
         # if _iter_empty(schedule.actions()):
         #     return schedule
-        results = dp.schedule_search(
+        results = asyncio.run(dp.schedule_search(
             schedule.spec,
             memory_limits=sublimits,
             cache=cache,
-        )
+        ))
         if not results:
             return None
         return results[0]
