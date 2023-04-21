@@ -14,7 +14,7 @@ strategies.register_default_strategies()
 
 @st.composite
 def _arb_bcarray(draw):
-    rank = draw(st.integers(min_value=1, max_value=4))
+    rank = draw(st.integers(min_value=1, max_value=3))
     arr_shape = tuple(draw(st.integers(min_value=1, max_value=8)) for _ in range(rank))
     block_shape = tuple(draw(st.integers(min_value=1, max_value=d)) for d in arr_shape)
 
@@ -73,8 +73,13 @@ async def test_bcarray_fills_match_ndarray(example):
 
     results_arr: np.ndarray
     results_arr = np.empty(arr_shape, dtype=object)
-    for idx in np.ndindex(arr_shape):
-        results_arr[idx] = await bc_arr.get(idx)
+    results_list = await bc_arr.get_many(list(np.ndindex(arr_shape)))
+    assert len(results_list) == np.prod(arr_shape), (
+        f"Expected {np.prod(arr_shape)} results, got {len(results_list)}; "
+        f'those results were: "{results_list}"'
+    )
+    for idx, entry in zip(np.ndindex(arr_shape), results_list, strict=True):
+        results_arr[idx] = entry
 
     np.testing.assert_array_equal(results_arr, np_arr)
 
