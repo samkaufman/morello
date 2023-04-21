@@ -415,7 +415,6 @@ class BCARedisStore(Store):
                 raise Exception(
                     f"Couldn't acquire lock: Lock:{self.prefix} (PID: {os.getpid()})"
                 )
-            print(f"PID {os.getpid()} acquired lock: Lock:{self.prefix}")
 
         self._local_entries[key] = value
         self._updated.add(key)

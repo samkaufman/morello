@@ -1,10 +1,12 @@
 import asyncio
+import enum
 import collections
 from typing import Optional
 
 import hypothesis
 import numpy as np
 import pytest
+import fakeredis.aioredis as fakeredis
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -15,11 +17,50 @@ from . import strategies
 strategies.register_default_strategies()
 
 
+# TODO: Share the following code with search_cache_test.py, in which it's duplicated.
+class CacheConfig(enum.Enum):
+    inmem = enum.auto()
+    redis = enum.auto()
+
+
+def _make_cache(config: CacheConfig):
+    match config:
+        case CacheConfig.inmem:
+            return search_cache.ScheduleCache()
+        case CacheConfig.redis:
+            return search_cache.ScheduleCache(use_redis=(fakeredis.FakeRedis(), "TEST"))
+        case _:
+            raise NotImplementedError(f"Unsupported config {config}")
+
+
 @pytest.mark.skip(reason="No good way to constrain shapes (e.g. Reduce·Reduce·Reduce)")
 @pytest.mark.asyncio
 @given(st.from_type(specs.Spec))
 async def test_search_passes_on_any_spec(s):
     await search.schedule_search(s)
+
+
+@pytest.mark.parametrize("cache_cls", CacheConfig)
+@pytest.mark.parametrize("count", [1, 2])
+@hypothesis.example(
+    specs.Matmul(
+        specs.TensorSpec((1, 32), dtype=dtypes.Uint32, bank="GL", contiguous_abs=2),
+        specs.TensorSpec((32, 5), dtype=dtypes.Uint32, bank="GL", contiguous_abs=2),
+        specs.TensorSpec((1, 5), dtype=dtypes.Uint32, bank="GL", contiguous_abs=2),
+        serial_only=True,
+    )
+)
+@hypothesis.settings(deadline=1_992_328)
+@hypothesis.given(strategies.atomic_specs_st)
+def test_search_passes_on_primitive_spec(cache_cls, count, s):
+    # Drive our own event loop to avoid a problem with hypothesis.example.
+    loop = asyncio.new_event_loop()
+    try:
+        cache = _make_cache(cache_cls)
+        for _ in range(count):
+            loop.run_until_complete(search.schedule_search(s, cache=cache))
+    finally:
+        loop.close()
 
 
 class CountingCache(search_cache.ScheduleCache):

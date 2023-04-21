@@ -33,8 +33,6 @@ def _make_cache(config: CacheConfig):
             raise NotImplementedError(f"Unsupported config {config}")
 
 
-CACHE_CONFIGS = ["inmem", "redis"]
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cache_cls", CacheConfig)

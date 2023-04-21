@@ -83,6 +83,38 @@ class Impl:
             new_children.append(child._replace_leaves_inner(replacements))
         return self.replace_children(new_children)
 
+    def replace_holes_by_index(
+        self, hole_replacements: Sequence[tuple[int, "Impl"]]
+    ) -> tuple["Impl", Sequence[range]]:
+        """Replaces specific holes at the leaves of `partial_impl` with new Impls."""
+        if not hole_replacements:
+            return self, []
+        if not all(
+            i < j
+            for (i, _), (j, _) in zip(hole_replacements[:-1], hole_replacements[1:])
+        ):
+            raise ValueError("Replacements must be in ascending order")
+
+        hole_idxs = [i for i, leaf in enumerate(self.leaves) if not leaf.is_scheduled]
+
+        # Sub. in new leaves, tracking what was inserted for the next step.
+        new_leaf_idxs_grouped: list[range] = []
+        leaf_offset = 0
+        new_leaves = list(self.leaves)
+        for i, imp in hole_replacements:
+            leaf_idx = hole_idxs[i]
+            new_leaves[leaf_idx] = imp
+            inserted_leaf_count = sum(1 for _ in imp.leaves)
+            new_leaf_idxs_grouped.append(
+                range(
+                    leaf_idx + leaf_offset,
+                    leaf_idx + leaf_offset + inserted_leaf_count,
+                )
+            )
+            leaf_offset += inserted_leaf_count - 1
+
+        return self.replace_leaves(new_leaves), new_leaf_idxs_grouped
+
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
     ) -> Iterable[Callable[[], "Impl"]]:
