@@ -45,7 +45,7 @@ class BlockCompressedArray:
         self.block_shape = block_shape
         self.grid = grid
 
-    async def get(self, pt):
+    async def get(self, pt: Sequence[int]):
         """Get a value from the array.
 
         This will raise an IndexError if the point is out of bounds, but
@@ -55,7 +55,7 @@ class BlockCompressedArray:
         block = await self.grid.get(block_pt)
         return _extract_from_block(pt, block, self.block_shape)
 
-    async def get_many(self, pts):
+    async def get_many(self, pts: Sequence[Sequence[int]]):
         gen = self.interactive_get_many(pts)
         response = None
         while True:
@@ -67,7 +67,9 @@ class BlockCompressedArray:
                 response = await self.grid.redis_client.mget(redis_keys)
 
     # TODO: Specialize return type
-    def interactive_get_many(self, pts) -> Generator[list[str], list[Any], Any]:
+    def interactive_get_many(
+        self, pts: Sequence[Sequence[int]]
+    ) -> Generator[list[str], list[Any], Any]:
         block_pts = [_block_coord_from_global_coord(pt, self.block_shape) for pt in pts]
         blocks = yield from self.grid.interactive_get_many(block_pts)
         return [
