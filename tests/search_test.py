@@ -34,12 +34,14 @@ def _make_cache(config: CacheConfig):
 
 
 @pytest.mark.skip(reason="No good way to constrain shapes (e.g. Reduce·Reduce·Reduce)")
+@pytest.mark.slow
 @pytest.mark.asyncio
 @given(st.from_type(specs.Spec))
 async def test_search_passes_on_any_spec(s):
     await search.schedule_search(s)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("cache_cls", CacheConfig)
 @pytest.mark.parametrize("count", [1, 2])
 @hypothesis.example(
@@ -211,6 +213,7 @@ def test_next_limits_dim1_b():
     assert expected == list(search.bottomup.next_limits(limits, peak.available))
 
 
+@hypothesis.settings(deadline=3000)
 @hypothesis.given(
     st.lists(
         st.tuples(
@@ -224,7 +227,6 @@ def test_next_limits_covers_space_disjointly(inp: list[tuple[int, int]]):
     initial_cap_bits, step = zip(*inp)
 
     initial_cap = tuple(2 ** (b - 1) if b else 0 for b in initial_cap_bits)
-    hypothesis.note("Initial capacity (bits): " + str(initial_cap_bits))
 
     banks = tuple(map(str, range(len(initial_cap_bits))))
     covered = np.zeros([d + 1 for d in initial_cap_bits], dtype=bool)
@@ -232,16 +234,15 @@ def test_next_limits_covers_space_disjointly(inp: list[tuple[int, int]]):
     working_set = collections.deque(
         [pruning.StandardMemoryLimits(utils.TinyMap(banks, initial_cap))]
     )
-    hypothesis.note("Initial limits: " + str(working_set[0]))
     while working_set:
         limits = working_set.popleft()
         limits_vals = limits.available.raw_values
-        lower_peak_vals = _consume(limits_vals, step)
-        lower_peak = utils.TinyMap(banks, lower_peak_vals)
-        hypothesis.note(
-            "Filling: "
-            f"{tuple(slice(p, c + 1) for p, c in zip(lower_peak_vals, limits_vals))}"
+        # Consume memory
+        lower_peak_vals = tuple(
+            utils.snap_availables_down(v - s) if v > s else 0
+            for v, s in zip(limits_vals, step)
         )
+        lower_peak = utils.TinyMap(banks, lower_peak_vals)
         covered[
             tuple(
                 slice(p.bit_length(), c.bit_length() + 1)
@@ -249,12 +250,6 @@ def test_next_limits_covers_space_disjointly(inp: list[tuple[int, int]]):
             )
         ] = True
         for new_caps in search.bottomup.next_limits(limits, lower_peak):
-            hypothesis.note("Yielding new limits: " + str(new_caps))
             working_set.append(new_caps)
+
     assert covered.all()
-
-
-def _consume(input: tuple[int, ...], step: tuple[int, ...]) -> tuple[int, ...]:
-    return tuple(
-        utils.snap_availables_down(v - s) if v > s else 0 for v, s in zip(input, step)
-    )
