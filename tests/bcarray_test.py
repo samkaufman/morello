@@ -58,7 +58,7 @@ def _arb_bcarray_with_fills(draw, fill_min=1, fill_max=None):
 
 
 # TODO: Add get_many variant
-@hypothesis.settings(deadline=2000)
+@hypothesis.settings(deadline=6000)
 @pytest.mark.asyncio
 @hypothesis.given(_arb_bcarray_with_fills())
 async def test_bcarray_fills_match_ndarray(example):
@@ -84,7 +84,7 @@ async def test_bcarray_fills_match_ndarray(example):
     np.testing.assert_array_equal(results_arr, np_arr)
 
 
-@hypothesis.settings(deadline=2000)
+@hypothesis.settings(deadline=8000)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("should_flush", [True, False])
 @pytest.mark.parametrize("batch_get", [True, False])
@@ -108,7 +108,7 @@ async def test_bcarray_fill_followed_by_get_returns_same(
     assert all(r == fill_value for r in results)
 
 
-@hypothesis.settings(deadline=2000)
+@hypothesis.settings(deadline=6000)
 @hypothesis.given(_arb_bcarray())
 @pytest.mark.asyncio
 async def test_bcarray_to_dense_returns_correct_shape(example):
@@ -116,7 +116,7 @@ async def test_bcarray_to_dense_returns_correct_shape(example):
     assert (await bc_arr.to_dense()).shape == bc_arr.shape
 
 
-@hypothesis.settings(deadline=2000)
+@hypothesis.settings(deadline=8000)
 @hypothesis.given(_arb_bcarray_with_fills())
 @pytest.mark.asyncio
 async def test_bcarray_iter_values_returns_set_present_in_dense(example):

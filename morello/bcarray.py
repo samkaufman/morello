@@ -447,7 +447,6 @@ class BCARedisStore(Store):
         if self._prefix_lock is not None:
             await self._prefix_lock.release()
             self._prefix_lock = None
-            print(f"PID {os.getpid()} released lock: Lock:{self.prefix}")
 
     async def contains(self, key):
         raise NotImplementedError()
