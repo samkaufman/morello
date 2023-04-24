@@ -37,11 +37,8 @@ class SpecCast(Impl):
             )
         return dataclasses.replace(self, inner=replacements[0])
 
-    def move_input(self, *args, **kwargs) -> "SpecCast":
-        return self.replace_children([self.inner.move_input(*args, **kwargs)])
-
-    def move_output(self, *args, **kwargs) -> "SpecCast":
-        return self.replace_children([self.inner.move_output(*args, **kwargs)])
+    def move(self, *args, **kwargs) -> "SpecCast":
+        return self.replace_children([self.inner.move(*args, **kwargs)])
 
     def complete(self) -> Impl:
         return self.replace_children([self.inner.complete()])

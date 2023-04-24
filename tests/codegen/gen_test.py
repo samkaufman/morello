@@ -57,12 +57,12 @@ def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
         hole = morello.impl.base.spec_to_hole(spec)
         imp = (
             hole.tile_out((8, 8), parallel=True)
-            .move_input(0, bank="L1")
-            .move_input(1, bank="L1")
-            .move_output(bank="L1")
-            .move_input(0, bank="RF")
-            .move_input(1, bank="RF")
-            .move_output(bank="RF")
+            .move(0, bank="L1")
+            .move(1, bank="L1")
+            .move(2, bank="L1")
+            .move(0, bank="RF")
+            .move(1, bank="RF")
+            .move(2, bank="RF")
             .complete()
         )
 

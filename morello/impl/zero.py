@@ -38,13 +38,17 @@ class ZeroHole(base.NonAllocatingLeaf):
             raise TypeError(f"Spec had unexpected type: {type(new_spec).__name__}")
         return type(self)(new_spec)  # type: ignore
 
-    def move_output(
+    def move(
         self,
+        operand_idx: int,
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
         **kwargs,
     ) -> "MoveLet":
+        if operand_idx != 0:
+            raise ValueError("operand_idx must be 0")
+
         target = system_config.current_target()
         output = self.spec.output
 

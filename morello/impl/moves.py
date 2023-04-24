@@ -1,7 +1,7 @@
 import dataclasses
 import functools
-import operator
-from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union, cast
+import typing
+from typing import Any, Callable, Iterable, Literal, Optional, Sequence, Union
 
 from .. import layouts, specs, system_config
 from ..layouts import Layout
@@ -13,7 +13,7 @@ from ..tensor import (
     TensorBase,
     TensorLike,
 )
-from ..utils import TinyMap, snap_availables_up
+from ..utils import TinyMap
 from . import MoveAction, settings, speccast
 from .actions import TileOutAction
 from .base import AppliedImpl, Impl, NonAllocatingLeaf, make_applied_impl
@@ -26,52 +26,6 @@ from .pruning import (
     prune_relayout_cycles,
 )
 from .utils import assert_stable_spec, gen_tile_sizes, gen_vector_shapes
-
-
-class _OperandWrapper(Impl):
-    @property
-    def children(self) -> tuple[Impl, ...]:
-        return (self.inner,)  # type: ignore
-
-    @property
-    def is_scheduled(self) -> bool:
-        return all(c.is_scheduled for c in self.children)
-
-    @assert_stable_spec
-    def replace_children(self, replacements: Iterable[Impl]) -> Impl:
-        replacements = list(replacements)
-        if len(replacements) != 1:
-            raise ValueError(f"One replacement child expected; got {len(replacements)}")
-        inner_spec: specs.Spec = self.inner.spec  # type: ignore
-        if replacements[0].spec != inner_spec:
-            raise ValueError(
-                f"Expected a replacement with spec {inner_spec}, "
-                f"but received {replacements[0].spec}"
-            )
-        return dataclasses.replace(self, inner=replacements[0])
-
-    def move_input(self, *args, **kwargs) -> "Impl":
-        # Pass move_input through to the inner schedule
-        return self.replace_children((self.children[0].move_input(*args, **kwargs),))
-
-    def move_output(self, *args, **kwargs) -> "Impl":
-        # Pass move_output through to the inner schedule
-        return self.replace_children((self.children[0].move_output(*args, **kwargs),))
-
-    def pad_transpack(self, *args, **kwargs) -> "Impl":
-        # Pass pad_transpack through to the inner schedule
-        return self.replace_children((self.children[0].pad_transpack(*args, **kwargs),))
-
-    @assert_stable_spec
-    def split(self, size: int) -> "Impl":
-        return self.replace_children((self.children[0].split(size),))
-
-    def spatial_split(self, *args, **kwargs) -> "Impl":
-        return self.replace_children((self.children[0].spatial_split(*args, **kwargs),))
-
-    @assert_stable_spec
-    def complete(self) -> Impl:
-        return self.replace_children((self.children[0].complete(),))
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -151,11 +105,8 @@ class MoveLet(Impl):
             )
         return dataclasses.replace(self, **dict(zip(filled_children, replacements)))
 
-    def move_input(self, *args, **kwargs):
-        return dataclasses.replace(self, body=self.body.move_input(*args, **kwargs))
-
-    def move_output(self, *args, **kwargs):
-        return dataclasses.replace(self, body=self.body.move_output(*args, **kwargs))
+    def move(self, *args, **kwargs):
+        return dataclasses.replace(self, body=self.body.move(*args, **kwargs))
 
     def to_accum(self) -> Impl:
         return dataclasses.replace(self, body=self.body.to_accum())
@@ -452,21 +403,20 @@ class CacheAccess(NonAllocatingLeaf):  # "Allocation" happens in enclosing MoveL
 
 
 class Moveable:
-    """A mixin providing the most common `move_input` and `move_output` actions."""
+    """A mixin providing the most common `move` and `move_output` actions."""
 
-    def move_input(
+    def move(
         self,
-        input_idx: int,
+        operand_idx: int,
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
         **kwargs,
     ) -> "MoveLet":
         assert isinstance(self, Impl)
-        if input_idx >= self.spec.inputs_count():
-            raise ValueError(f"Input index {input_idx} out of range")
-        return common_move(self, input_idx, bank, layout, prefetching, **kwargs)
+        return common_move(self, operand_idx, bank, layout, prefetching, **kwargs)
 
+    @typing.final
     def move_output(
         self,
         bank: Optional[str] = None,
@@ -475,7 +425,7 @@ class Moveable:
         **kwargs,
     ) -> "MoveLet":
         assert isinstance(self, Impl)
-        return common_move(self, -1, bank, layout, prefetching, **kwargs)
+        return self.move(self.operand_count - 1, bank, layout, prefetching, **kwargs)
 
 
 def _move_arguments(
@@ -507,20 +457,17 @@ def common_operand_move_actions(impl: "Impl") -> Iterable[MoveAction]:
     else:
         prf_options = [False]
 
-    def inner(inp_idx, operand: specs.TensorSpec) -> Iterable[MoveAction]:
-        move_fn, can_move_fn = impl.move_output, operand.can_move_to
-        if inp_idx is not None:
-            move_fn = functools.partial(impl.move_input, inp_idx)
-            can_move_fn = operand.can_move_to
-
+    def inner(operand_idx, operand: specs.TensorSpec) -> Iterable[MoveAction]:
+        move_fn = functools.partial(impl.move, operand_idx)
         for bank, layout, kws in _move_arguments(operand):
             for prf in prf_options:
-                if can_move_fn(bank, layout):
-                    yield MoveAction(move_fn, operand, inp_idx, prf, bank, layout, kws)
+                if operand.can_move_to(bank, layout):
+                    yield MoveAction(
+                        move_fn, operand, operand_idx, prf, bank, layout, kws
+                    )
 
-    for i, inp in enumerate(spec.inputs):
+    for i, inp in enumerate(spec.operands):
         yield from inner(i, inp)
-    yield from inner(None, spec.output)
 
 
 # TODO: Use this everywhere sliding_tile_out actions are produced
@@ -535,7 +482,7 @@ def common_move(
 ) -> "MoveLet":
     """Wraps a dataclass-based Impl in a MoveLet moving one of its operands.
 
-    This is the logic underpinning some ops' move_input actions.
+    This is the logic underpinning some ops' move actions.
 
     :param attr_name: The name of the field holding the operand to move.
     :param bank: The bank to which the operand should be moved, if not None.
