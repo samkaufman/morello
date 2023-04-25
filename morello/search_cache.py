@@ -667,7 +667,11 @@ def persistent_cache(
         if not redis:
             yield local_cache
         else:
-            redis_cache = ScheduleCache(use_redis=redis)
+            redis_cache = ScheduleCache(
+                use_redis=redis,
+                min_dim=8,  # TODO: Macro-ize
+                allowed_spec_types=(Load, Store, Zero),
+            )
             yield ChainCache([local_cache, redis_cache])
 
 

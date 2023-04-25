@@ -235,8 +235,9 @@ def _compute_block(
         #
         # TODO: Assert block membership in lambda
         redis_cache = search_cache.ScheduleCache(
-            use_redis=(_tlocal.red, NAMESPACE), min_dim=REDIS_MIN_DIM,
-            allowed_spec_types=(specs.Load, specs.Store, specs.Zero)
+            use_redis=(_tlocal.red, NAMESPACE),
+            min_dim=REDIS_MIN_DIM,
+            allowed_spec_types=(specs.Load, specs.Store, specs.Zero),
         )
         local_cache = search_cache.ScheduleCache(max_dim=REDIS_MIN_DIM)
         _tlocal.results_cache = search_cache.ChainCache(
