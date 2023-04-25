@@ -154,12 +154,6 @@ class BlockCompressedArray:
             if block_intersection is None:
                 continue
 
-            # TODO: Check for empty intersection, which would be a surface_pts error.
-            assert all(l < r for l, r in zip(*block_intersection)), (
-                f"Got empty block intersection: {block_intersection}; inputs "
-                f"were {block_pt}, {self.block_shape}, {lower}, {upper}."
-            )
-
             if isinstance(b, np.ndarray):
                 spt = tuple(slice(a, b) for a, b in zip(*block_intersection))
                 b[spt].fill(value)
