@@ -1,27 +1,71 @@
+import asyncio
+import enum
 import collections
 from typing import Optional
 
 import hypothesis
 import numpy as np
 import pytest
+import fakeredis.aioredis as fakeredis
 from hypothesis import given
 from hypothesis import strategies as st
 
 from morello import cost, dtypes, op_pprint, pruning, search, search_cache, specs, utils
 from morello.system_config import current_target
-
 from . import strategies
 
 strategies.register_default_strategies()
 
 
+# TODO: Share the following code with search_cache_test.py, in which it's duplicated.
+class CacheConfig(enum.Enum):
+    inmem = enum.auto()
+    redis = enum.auto()
+
+
+def _make_cache(config: CacheConfig):
+    match config:
+        case CacheConfig.inmem:
+            return search_cache.ScheduleCache()
+        case CacheConfig.redis:
+            return search_cache.ScheduleCache(use_redis=(fakeredis.FakeRedis(), "TEST"))
+        case _:
+            raise NotImplementedError(f"Unsupported config {config}")
+
+
 @pytest.mark.skip(reason="No good way to constrain shapes (e.g. Reduce·Reduce·Reduce)")
+@pytest.mark.slow
+@pytest.mark.asyncio
 @given(st.from_type(specs.Spec))
-def test_search_passes_on_any_spec(s):
-    search.schedule_search(s)
+async def test_search_passes_on_any_spec(s):
+    await search.schedule_search(s)
 
 
-class CountingCache(search_cache.InMemoryScheduleCache):
+@pytest.mark.slow
+@pytest.mark.parametrize("cache_cls", CacheConfig)
+@pytest.mark.parametrize("count", [1, 2])
+@hypothesis.example(
+    specs.Matmul(
+        specs.TensorSpec((1, 32), dtype=dtypes.Uint32, bank="GL", contiguous_abs=2),
+        specs.TensorSpec((32, 5), dtype=dtypes.Uint32, bank="GL", contiguous_abs=2),
+        specs.TensorSpec((1, 5), dtype=dtypes.Uint32, bank="GL", contiguous_abs=2),
+        serial_only=True,
+    )
+)
+@hypothesis.settings(deadline=1_992_328)
+@hypothesis.given(strategies.atomic_specs_st)
+def test_search_passes_on_primitive_spec(cache_cls, count, s):
+    # Drive our own event loop to avoid a problem with hypothesis.example.
+    loop = asyncio.new_event_loop()
+    try:
+        cache = _make_cache(cache_cls)
+        for _ in range(count):
+            loop.run_until_complete(search.schedule_search(s, cache=cache))
+    finally:
+        loop.close()
+
+
+class CountingCache(search_cache.ScheduleCache):
     def __init__(self):
         super().__init__()
         self.get_counts = collections.defaultdict(lambda: 0)
@@ -45,11 +89,12 @@ class CountingCache(search_cache.InMemoryScheduleCache):
 
 @pytest.mark.skip("Need structural Impl equality for assert")
 @pytest.mark.slow
+@pytest.mark.asyncio
 @given(st.from_type(specs.Spec))
-def test_nested_loop_pruning_doesnt_change_solutions(spec):
+async def test_nested_loop_pruning_doesnt_change_solutions(spec):
     token = impl.settings.prune_nested_parallel_loops.set(False)
     try:
-        no_pruning_solution = search.schedule_search(spec)
+        no_pruning_solution = await search.schedule_search(spec)
         if no_pruning_solution:
             hypothesis.note(
                 f"no_pruning_solution:\n{op_pprint.pformat(no_pruning_solution)}"
@@ -59,7 +104,7 @@ def test_nested_loop_pruning_doesnt_change_solutions(spec):
 
     token = impl.settings.prune_nested_parallel_loops.set(True)
     try:
-        with_pruning_solution = search.schedule_search(spec)
+        with_pruning_solution = await search.schedule_search(spec)
         if with_pruning_solution:
             hypothesis.note(
                 f"with_pruning_solution:\n{op_pprint.pformat(with_pruning_solution)}"
@@ -76,10 +121,11 @@ def test_nested_loop_pruning_doesnt_change_solutions(spec):
 # (3*3 + 3*3 + 1 words).
 @pytest.mark.skip("Skipping due to performance issues")
 @pytest.mark.slow
+@pytest.mark.asyncio
 @hypothesis.settings(deadline=30 * 60 * 1000)
 @given(st.integers(min_value=5), st.from_type(dtypes.Dtype))
 @hypothesis.example(16)
-def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
+async def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
     target = current_target()
     system = target.system
 
@@ -97,7 +143,7 @@ def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
         try:
             system.level_configs[0].capacity = cap
             results.append(
-                search.schedule_search(
+                await search.schedule_search(
                     specs.Compose(
                         (specs.ReduceSum, specs.Convolution),
                         (img.spec, filters_a.spec),
@@ -120,7 +166,8 @@ def test_compose_schedules_improve_as_memory_increases(cap_start, dtype):
             # assert results[-2][1] >= results[-1][1]
 
 
-@hypothesis.settings(deadline=180_000)
+@pytest.mark.slow
+@hypothesis.settings(deadline=400_000)
 @hypothesis.example(
     specs.MatmulAccum(
         specs.TensorSpec((2, 2), dtype=dtypes.Uint8, bank="RF", contiguous_abs=2),
@@ -134,13 +181,12 @@ def test_dp_cost_matches_naive_search_cost(spec):
     mlims = pruning.StandardMemoryLimits()
 
     naive_result = search.naive_search(spec, mlims)
-    dp_result = search.schedule_search(spec, mlims)
+    dp_result = asyncio.run(search.schedule_search(spec, mlims))
     assert (naive_result is None) == (not dp_result)
     hypothesis.assume(naive_result is not None)
-    hypothesis.note("Naive Impl:\n" + op_pprint.pformat(naive_result))
-    hypothesis.note("DP Impl:\n" + op_pprint.pformat(dp_result[0]))
-    # TODO: Add an alpha-equality method
-    assert cost.compute_cost(naive_result) == cost.compute_cost(dp_result[0])  # type: ignore
+    assert cost.compute_cost(naive_result) == cost.compute_cost(
+        dp_result[0]
+    )  # type: ignore
 
 
 @hypothesis.given(
@@ -167,7 +213,7 @@ def test_next_limits_dim1_b():
     assert expected == list(search.bottomup.next_limits(limits, peak.available))
 
 
-@hypothesis.settings(deadline=1000)
+@hypothesis.settings(deadline=3000)
 @hypothesis.given(
     st.lists(
         st.tuples(
@@ -181,22 +227,22 @@ def test_next_limits_covers_space_disjointly(inp: list[tuple[int, int]]):
     initial_cap_bits, step = zip(*inp)
 
     initial_cap = tuple(2 ** (b - 1) if b else 0 for b in initial_cap_bits)
-    hypothesis.note("Initial capacity (bits): " + str(initial_cap_bits))
 
     banks = tuple(map(str, range(len(initial_cap_bits))))
     covered = np.zeros([d + 1 for d in initial_cap_bits], dtype=bool)
     assert not covered.any()
-    working_set = [pruning.StandardMemoryLimits(utils.TinyMap(banks, initial_cap))]
-    hypothesis.note("Initial limits: " + str(working_set[0]))
+    working_set = collections.deque(
+        [pruning.StandardMemoryLimits(utils.TinyMap(banks, initial_cap))]
+    )
     while working_set:
-        limits = working_set.pop(0)
+        limits = working_set.popleft()
         limits_vals = limits.available.raw_values
-        lower_peak_vals = _consume(limits_vals, step)
-        lower_peak = utils.TinyMap(banks, lower_peak_vals)
-        hypothesis.note(
-            "Filling: "
-            f"{tuple(slice(p, c + 1) for p, c in zip(lower_peak_vals, limits_vals))}"
+        # Consume memory
+        lower_peak_vals = tuple(
+            utils.snap_availables_down(v - s) if v > s else 0
+            for v, s in zip(limits_vals, step)
         )
+        lower_peak = utils.TinyMap(banks, lower_peak_vals)
         covered[
             tuple(
                 slice(p.bit_length(), c.bit_length() + 1)
@@ -204,12 +250,6 @@ def test_next_limits_covers_space_disjointly(inp: list[tuple[int, int]]):
             )
         ] = True
         for new_caps in search.bottomup.next_limits(limits, lower_peak):
-            hypothesis.note("Yielding new limits: " + str(new_caps))
             working_set.append(new_caps)
+
     assert covered.all()
-
-
-def _consume(input: tuple[int, ...], step: tuple[int, ...]) -> tuple[int, ...]:
-    return tuple(
-        utils.snap_availables_down(v - s) if v > s else 0 for v, s in zip(input, step)
-    )

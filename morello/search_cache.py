@@ -1,45 +1,41 @@
-import abc
-import heapq
-import asyncio
 import contextlib
 import contextvars
 import dataclasses
 import logging
 import pathlib
 import pickle
-import time
+import sys
 import typing
 import warnings
 from typing import (
     TYPE_CHECKING,
-    AsyncGenerator,
+    Any,
     AsyncIterator,
-    Callable,
     Generic,
+    Generator,
     Iterable,
-    Iterator,
     Optional,
     Sequence,
     Tuple,
+    Type,
     Union,
-    cast,
 )
 
 import atomicwrites
 import lz4.frame
 import numpy as np
-import redis.asyncio
-import redis.asyncio.lock
+import redis.asyncio as redis
 
 from . import bcarray, pruning
 from .impl import Impl, spec_to_hole
-from .specs import Spec
+from .specs import Load, Store, Zero, Spec
 from .system_config import current_system
-from .utils import TinyMap, snap_availables_down, snap_availables_up, zip_dict
+from .utils import TinyMap, snap_availables_down, snap_availables_up
 
 if TYPE_CHECKING:
     from .search.common import ScheduleKey
 
+assert sys.version_info >= (3, 7), "Use Python 3.7 or newer"
 
 RAISE_CAPS_ON_OVERLAP = True
 PICKLE_PROTOCOL = 5
@@ -155,7 +151,31 @@ class _TableEntry:
         return f"_TableEntry({self.spec}, {self.schedules}, caps={self.caps})"
 
 
-class ScheduleCache(abc.ABC):
+class ScheduleCache:
+    def __init__(
+        self,
+        use_redis: Optional[tuple[Any, str]] = None,
+        max_dim: Optional[int] = None,
+        min_dim: int = -1,
+        allowed_spec_types: Optional[tuple[Type[Spec], ...]] = None,
+    ):
+        # TODO: `_rects` is unneeded tech. debt. They're identical except for a prefix.
+        self._rects: dict[Spec, bcarray.BlockCompressedArray] = {}
+        self._dirty_rects: set[Spec] = set()
+        if use_redis and isinstance(use_redis[0], str):
+            use_redis = (redis.Redis.from_url(use_redis[0]),) + use_redis[1:]
+        self._use_redis = use_redis
+        self._shared_local_get_cache = {}
+        self._max_dim = max_dim
+        self.min_dim = min_dim
+        self.allowed_spec_types = allowed_spec_types
+
+    async def __aenter__(self):
+        pass
+
+    async def __aexit__(self, exc_t, exc_v, exc_tb):
+        await self.flush()
+
     @typing.final
     async def get(
         self, spec: Spec, memory_limits: pruning.MemoryLimits, complete: bool = True
@@ -219,66 +239,15 @@ class ScheduleCache(abc.ABC):
                 result.peak_memory,
             )
 
-    @abc.abstractmethod
     async def get_many(
-        self, subproblems: Iterable[tuple[Spec, pruning.MemoryLimits]]
+        self, subproblems: Sequence[tuple[Spec, pruning.MemoryLimits]]
     ) -> Iterable[Optional[CachedScheduleSet]]:
-        pass
-
-    # TODO: Raise exception if sub-Specs aren't in the cache or document behavior.
-    @abc.abstractmethod
-    async def put(
-        self, schedules_to_put: CachedScheduleSet, memory_limits: pruning.MemoryLimits
-    ) -> None:
-        pass
-
-    @abc.abstractmethod
-    def specs(self) -> Iterable[Spec]:
-        pass
-
-    @abc.abstractmethod
-    async def count_impls(self) -> int:
-        pass
-
-    @abc.abstractmethod
-    async def __aiter__(
-        self,
-    ) -> AsyncIterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
-        """Iterate over subproblems (Specs and MemoryLimits) and associated Impls.
-
-        There is no guarantee that each step of the iterator corresponds to a single
-        `put` entry.
-        """
-        pass
-
-    @abc.abstractmethod
-    def __len__(self) -> int:
-        pass
-
-
-class InMemoryScheduleCache(ScheduleCache):
-    _rects: dict[Spec, "_BlockCompressedTable"]
-
-    def __init__(self):
-        self._rects = {}
-
-    def count_values(self):
-        return sum(table.storage.count_values() for table in self._rects.values())
-
-    async def get_many(
-        self, subproblems: Iterable[tuple[Spec, pruning.MemoryLimits]]
-    ) -> Iterable[Optional[CachedScheduleSet]]:
-        results = []
-
-        for spec, memory_limits in subproblems:
-            if not isinstance(memory_limits, pruning.StandardMemoryLimits):
-                # TODO: Add support for PipelineChildMemoryLimits
-                warnings.warn(
-                    "ScheduleCache only supports StandardMemoryLimits. Queries with"
-                    " other MemoryLimits implementations always miss."
-                )
-                results.append(None)
+        stage1_queries = []
+        unskipped: list[int] = []
+        for idx, (spec, memory_limits) in enumerate(subproblems):
+            if self._should_ignore_problem(spec, memory_limits):
                 continue
+            unskipped.append(idx)
 
             assert (
                 not assert_access_on_log_boundaries.get()
@@ -286,583 +255,371 @@ class InMemoryScheduleCache(ScheduleCache):
                 == memory_limits.available
             )
 
-            try:
-                rects = self._rects[spec]
-                best = rects.best_for_cap(memory_limits)
-            except KeyError:
-                results.append(None)
-                continue
+            rects = self._get_rects(spec)
+            snapped = pruning.StandardMemoryLimits(
+                snap_availables_up(memory_limits.available)
+            )
+            stage1_queries.append((rects, snapped))
 
-            results.append(best.schedules)
+        # Run stage1_queries and fill in stage1_results
+        stage1_results = await self._get_table_entries(stage1_queries)
+        assert len(stage1_results) == len(stage1_queries)  # TODO: Remove this line
+        stage1_consumed = 0
+
+        results: list[Optional[CachedScheduleSet]] = [None] * len(subproblems)
+        for idx in unskipped:
+            spec, memory_limits = subproblems[idx]
+
+            initial_result, (rects, snapped) = (
+                stage1_results[stage1_consumed],
+                stage1_queries[stage1_consumed],
+            )
+            if initial_result is None:
+                continue
+            stage1_consumed += 1
+            best = initial_result
+
+            if snapped != memory_limits:
+                # If we're not on a snapped/log boundary, then we'll check an uper entry (the
+                # entry where all levels are higher than the given caps) and see if, in
+                # actuality, that Impl is below the requested limits. If it's not, we'll just
+                # grab the Impl from the conservative entry.
+                best = -1
+                if initial_result is not None:
+                    upper_impl = initial_result
+                    assert (
+                        upper_impl is None
+                        or upper_impl.peak_memory.raw_keys
+                        == memory_limits.available.raw_keys
+                    )
+                    if upper_impl is None or all(
+                        a <= b
+                        for a, b in zip(
+                            upper_impl.peak_memory.raw_values,
+                            memory_limits.available.raw_values,
+                        )
+                    ):
+                        best = upper_impl
+
+                if best == -1:
+                    snapped_down = pruning.StandardMemoryLimits(
+                        snap_availables_down(memory_limits.available)
+                    )
+                    # TODO: Vectorize the following too
+                    best = await self._get_table_entry(rects, snapped_down)
+
+            results[idx] = best.schedules
 
         return results
 
     async def put(
         self, schedules_to_put: CachedScheduleSet, memory_limits: pruning.MemoryLimits
     ) -> None:
-        spec = schedules_to_put.spec
-
-        if not isinstance(memory_limits, pruning.StandardMemoryLimits):
-            # TODO: Add support for PipelineChildMemoryLimits
-            warnings.warn(
-                "ScheduleCache only supports StandardMemoryLimits. Puts with"
-                " other MemoryLimits implementations always miss."
-            )
+        if self._should_ignore_problem(schedules_to_put.spec, memory_limits):
             return
 
-        for imp, _ in schedules_to_put.contents:
-            for b in imp.peak_memory:
-                if imp.peak_memory[b] > memory_limits.available[b]:
-                    raise ValueError(
-                        f"Impl {imp} has peak memory {imp.peak_memory} which exceeds"
-                        f" available memory {memory_limits.available}"
-                    )
-
+        banks = current_system().ordered_banks
         mlims = memory_limits.available
+        if len(mlims) != len(banks):
+            raise ValueError(
+                f"Memory limits {mlims} has {len(mlims)} banks, but the system has"
+                f" {len(banks)} banks."
+            )
+
+        # Raise exception if a put Impl exceeds the memory bound.
+        for imp, _ in schedules_to_put.contents:
+            if any(imp.peak_memory[b] > mlims[b] for b in imp.peak_memory):
+                raise ValueError(
+                    f"Impl {imp} has peak memory {imp.peak_memory} which exceeds"
+                    f" available memory {mlims}"
+                )
 
         assert (
             not assert_access_on_log_boundaries.get()
             or snap_availables_down(mlims) == memory_limits.available
         )
 
-        for im, _ in schedules_to_put.contents:
-            for _, (m, c) in zip_dict(im.peak_memory, mlims, same_keys=True):
-                if m > c:
-                    raise ValueError(
-                        f"Impl peak memory {im.peak_memory} not bounded by {mlims}"
-                    )
-
-        try:
-            rects = self._rects[spec]
-        except KeyError:
-            table_dims = tuple(
-                current_system().banks[b].capacity for b in mlims.raw_keys
-            )
-            rects = _BlockCompressedTable(mlims.raw_keys, table_dims)
-            self._rects[spec] = rects
+        spec = schedules_to_put.spec
+        self._dirty_rects.add(spec)
 
         schedules_to_put = self._specify_schedule_set(schedules_to_put)
 
         # If we haven't returned at this point, then we didn't find a _TableEntry to
         # update, so add one.
-        rects.add(_TableEntry(spec, schedules_to_put, mlims))
+        r = self._get_rects(spec)
+        entry = _TableEntry(spec, schedules_to_put, mlims)
 
-    async def update(self, other: "ScheduleCache") -> None:
-        """Update with the contents of another cache.
+        # compute bottom from entry
+        if entry.peak_memory is None:
+            assert not len(entry.schedules.contents)
+            bot = (0,) * len(banks)
+        else:
+            assert entry.peak_memory.raw_keys == banks
+            bot = entry.peak_memory.raw_values
 
-        Equivalent to `put`ing every entry from the given cache.
-        """
-        for other_spec, other_table in other._rects.items():
-            if other_spec not in self._rects:
-                # TODO: We really want a copy-on-write here. This sharing is surprising.
-                self._rects[other_spec] = other_table
-                continue
-            rects_seen = set()
-            for rect in other_table:
-                if rect in rects_seen:
-                    continue
-                assert rect.spec == other_spec
-                rects_seen.add(rect)
-                await self.put(rect.schedules, pruning.StandardMemoryLimits(rect.caps))
+        top = snap_availables_up(entry.caps.raw_values, always=True)
+        bottom_coord = tuple(v.bit_length() for v in bot)
+        top_coord = tuple(v.bit_length() for v in top)
+        assert all(b <= t for b, t in zip(bottom_coord, top_coord, strict=True)), (
+            f"Bottom coord {bottom_coord} is not less than or equal to "
+            f"top coord {top_coord}; bot = {bot}; top = {top}"
+        )
+        assert not isinstance(entry, np.ndarray)
+        await r.fill_range(bottom_coord, tuple(u + 1 for u in top_coord), entry)
 
-    def specs(self) -> Iterable[Spec]:
-        yield from self._rects.keys()
+    def _should_ignore_problem(
+        self, spec: Spec, memory_limits: pruning.MemoryLimits
+    ) -> bool:
+        # Don't look up tiny-dim. Specs.
+        if self._max_dim is not None:
+            if any(d > self._max_dim for o in spec.operands for d in o.dim_sizes):
+                return True
+        if (
+            self._use_redis
+            and self.allowed_spec_types is not None
+            and not isinstance(spec, self.allowed_spec_types)
+        ):
+            return True
+        if self._use_redis and all(
+            d <= self.min_dim for o in spec.operands for d in o.dim_sizes
+        ):
+            return True
+        if not isinstance(memory_limits, pruning.StandardMemoryLimits):
+            # TODO: Add support for PipelineChildMemoryLimits
+            warnings.warn(
+                "ScheduleCache only supports StandardMemoryLimits. Queries with"
+                " other MemoryLimits implementations always miss."
+            )
+            return True
+        return False
 
-    async def count_impls(self) -> int:
-        return sum(len(rect) for rect in self._rects.values())
+    def _get_rects(self, spec: Spec) -> bcarray.BlockCompressedArray:
+        """Lazily initializes and returns an entry in `_rects`."""
+        assert isinstance(spec, Spec)  # TODO: Remove
+        try:
+            rects = self._rects[spec]
+        except KeyError:
+            table_dims = tuple(
+                current_system().banks[b].capacity
+                for b in current_system().ordered_banks
+            )
+            storage_dims = _logify(snap_availables_up(table_dims, always=True))
+            storage_dims = tuple(d + 1 for d in storage_dims)
 
-    def __len__(self) -> int:
-        return len(self._rects)
+            bs = None
+            if isinstance(spec, (Load, Store, Zero)):
+                bs = 64  # Should cover whole space, using a single block.
+            if not bs:
+                bs = tuple(6 for _ in storage_dims)
+            if isinstance(bs, int):
+                bs = (bs,) * len(storage_dims)
+
+            redis_param = None
+            if self._use_redis:
+                redis_param = (self._use_redis[0], f"{self._use_redis[1]}-{spec}")
+
+            if not redis_param:
+                grid = bcarray.NumpyStore(
+                    storage_dims, tuple(bs), bcarray.BCA_DEFAULT_VALUE
+                )
+            else:
+                redis_client, prefix = redis_param
+                grid = bcarray.BCARedisStore(
+                    storage_dims,
+                    tuple(bs),
+                    redis_client,
+                    prefix,
+                    bcarray.BCA_DEFAULT_VALUE,
+                    local_cache=self._shared_local_get_cache,
+                )
+
+            rects = bcarray.BlockCompressedArray(storage_dims, tuple(bs), grid)
+            self._rects[spec] = rects
+        return rects
+
+    async def flush(self) -> None:
+        for spec in self._dirty_rects:
+            await self._get_rects(spec).flush()
+        self._dirty_rects.clear()
+
+    async def specs(self) -> AsyncIterator[Spec]:
+        if not self._use_redis:
+            for spec in self._rects.keys():
+                yield spec
+        else:
+            # TODO: Speed this up by grouping and returning keys in Lua, then parsing
+            #   keys into Specs.
+            # TODO: The following depends on the internal representation of the values,
+            #   which breaks the Store abstraction.
+            for dirty_rect in self._dirty_rects:
+                yield dirty_rect
+            seen = set(self._dirty_rects)
+            redis_db, prefix = self._use_redis
+            db_keys = await redis_db.keys(f"{prefix}-*")
+            for key in db_keys:
+                value = pickle.loads(lz4.frame.decompress(await redis_db.get(key)))
+                flattened = iter([value])
+                if isinstance(value, np.ndarray):
+                    flattened = value.flat
+                elif isinstance(value, list):
+                    flattened = (v for _, v in value)
+                for entry in flattened:
+                    if entry is None:
+                        continue
+                    spec = entry.spec
+                    assert isinstance(spec, Spec)
+                    if spec in seen:
+                        continue
+                    seen.add(spec)
+                    yield spec
+
+    async def count_specs(self) -> int:
+        return sum(1 for _ in await self.specs())
 
     async def __aiter__(
         self,
     ) -> AsyncIterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
-        for spec, rects in self._rects.items():
-            for rect in rects:
-                assert rect.spec == spec
-                yield spec, rect.schedules, pruning.StandardMemoryLimits(rect.caps)
+        async for spec in self.specs():
+            seen = set()
+            rects = self._get_rects(spec)
+            async for entry in rects.iter_values():
+                if entry is None or entry in seen:
+                    continue
+                assert isinstance(entry, _TableEntry)
+                assert entry.spec == spec
+                yield spec, entry.schedules, pruning.StandardMemoryLimits(entry.caps)
+                seen.add(entry)
 
-    def _specify_schedule_set(
-        self, schedules_to_put: CachedScheduleSet
-    ) -> CachedScheduleSet:
+    @staticmethod
+    def _specify_schedule_set(schedules_to_put: CachedScheduleSet) -> CachedScheduleSet:
         return CachedScheduleSet(
             schedules_to_put.spec,
             tuple(
-                (self._specify_impl(imp), cost)
+                (ScheduleCache._specify_impl(imp), cost)
                 for imp, cost in schedules_to_put.contents
             ),
             schedules_to_put.dependent_paths,
             peak_memory=schedules_to_put.peak_memory,
         )
 
-    def _specify_impl(self, imp: Impl) -> Impl:
+    @staticmethod
+    async def _get_table_entry(
+        bca: bcarray.BlockCompressedArray, caps: pruning.StandardMemoryLimits
+    ) -> _TableEntry:
+        """Get an entry for a particular memory limit.
+
+        Will raise an KeyError is any of the limits are out-of-bounds.
+        """
+        r = (await ScheduleCache._get_table_entries([(bca, caps)]))[0]
+        if r is None:
+            raise KeyError()
+        return r
+
+    @staticmethod
+    async def _get_table_entries(
+        queries: Sequence[
+            tuple[bcarray.BlockCompressedArray, pruning.StandardMemoryLimits]
+        ],
+    ) -> Sequence[Optional[_TableEntry]]:
+        """Get entries for a collection of memory limits across BCAs.
+
+        Will raise an IndexError is any of the limits are out-of-bounds.
+        """
+
+        # TODO: This is an awful, hacky implementation. Instead, we should
+        #  either flatten or abstract batching queries to the same underlying
+        #  database.
+
+        results: list[Optional[_TableEntry]] = [None] * len(queries)
+
+        # Group according to Redis client instance
+        redis_groups: dict[Any, tuple[redis.Redis, list[tuple[int, Generator]]]] = {}
+        pending_responses = {}
+        for i, (bca, caps) in enumerate(queries):
+            grid = bca.grid
+            if isinstance(grid, bcarray.BCARedisStore):
+                red = grid.redis_client
+                get_gen = bca.interactive_get_many([_logify(caps.available.raw_values)])
+                redis_groups.setdefault(id(red), (red, []))[1].append((i, get_gen))
+                assert id(get_gen) not in pending_responses
+                pending_responses[id(get_gen)] = None
+            else:
+                # TODO: Call get_many for NumpyStores too!
+                results[i] = await bca.get(_logify(caps.available.raw_values))
+            assert results[i] is None or isinstance(results[i], _TableEntry)
+
+        # Drive generators in query-batching steps.
+        while redis_groups:
+            groups_completed = []
+
+            for group_key, (redis_client, generator_group) in redis_groups.items():
+                idxs_to_del = []
+                keys_accum: list[str] = []
+                key_runs: list[int] = []
+
+                # Send any pending responses and get new requests
+                for i, get_gen in generator_group:
+                    try:
+                        keys = get_gen.send(pending_responses[id(get_gen)])
+                    except StopIteration as e:
+                        assert len(e.value) == 1
+                        results[i] = e.value[0]
+                        idxs_to_del.append(i)
+                    else:
+                        keys_accum.extend(keys)
+                        key_runs.append(len(keys))
+
+                # Remove completed generators
+                for i in reversed(idxs_to_del):
+                    del generator_group[i]
+                if not generator_group:
+                    groups_completed.append(group_key)
+                    continue
+
+                # Do the per-grid queries
+                flattened_results = await redis_client.mget(keys_accum)
+
+                # Distribute the query results to the correct generators
+                taken = 0
+                for (_, get_gen), request_count in zip(generator_group, key_runs):
+                    pending_responses[id(get_gen)] = flattened_results[
+                        taken : taken + request_count
+                    ]
+                    taken += request_count
+
+            for k in groups_completed:
+                del redis_groups[k]
+        return results
+
+    @staticmethod
+    def _specify_impl(imp: Impl) -> Impl:
         if not len(imp.children):
             return imp
         return imp.replace_children((spec_to_hole(c.spec) for c in imp.children))
 
-    async def _despecify_impl(
-        self, imp: Impl, limits: pruning.StandardMemoryLimits, get_fn
-    ) -> Impl:
-        all_child_limits = limits.transition(imp)
-        assert (
-            all_child_limits is not None
-        ), f"Limits violated while transitioning from {limits} via {imp}"
-        assert len(all_child_limits) == len(imp.children)
-
-        new_children: list[Impl] = []
-        for spec_child, child_limits in zip(imp.children, all_child_limits):
-            assert not spec_child.is_scheduled
-            try:
-                child_results = await get_fn(spec_child.spec, child_limits)
-            except KeyError:
-                raise Exception(
-                    f"Unexpectedly got KeyError while reconstructing "
-                    f"({spec_child.spec}, {child_limits})"
-                )
-            assert len(
-                child_results.contents
-            ), f"Child Spec {spec_child.spec} was not present in cache"
-            if len(child_results.contents) > 1:
-                raise NotImplementedError(
-                    "Need to test proper reductions with top_k > 1. "
-                    f"Got {len(child_results.contents)} results for {spec_child.spec}."
-                )
-            new_children.append(child_results.contents[0][0])
-
-        return imp.replace_children(new_children)
-
-
-class _PendingEntry(Generic[T]):
-    __slots__ = ("event", "result")
-
-    def __init__(self) -> None:
-        self.event = asyncio.Event()
-        self.result: Optional[T] = None
-
-    def set(self, result: T) -> None:
-        self.result = result
-        self.event.set()
-
-
-class _MemAwareCache(Generic[T, U]):
-    def __init__(self, max_size: int = 160):
-        self._data: dict[T, U] = {}
-        self._heap = []
-        self._index = 0
-        self.max_size = max_size
-
-    def _push(self, priority, item):
-        heapq.heappush(self._heap, (priority, self._index, item))
-        self._index += 1
-
-    def __getitem__(self, key: T) -> U:
-        return self._data[key]
-
-    def set(self, key: T, value: U, priority: Union[int, float]) -> None:
-        self._data[key] = value
-        self._push(priority, key)
-        if len(self._heap) > self.max_size:
-            v = heapq.heappop(self._heap)[-1]
-            del self._data[v]
-            assert len(self._heap) == len(self._data)
-            logger.debug(
-                f"Dropping {v} from cache. Top priorities are now: {self._heap[:5]}"
-            )
-        logger.debug("Cache size: %d", len(self._heap))
-
-    def __len__(self) -> int:
-        return len(self._heap)
-
-
-class RedisCache(ScheduleCache):
-    """A cache which streams blocks to and from a Redis backend.
-
-    Gets are always serviced with a Redis query, so it can be useful to batch many
-    queries into large `get_many` calls.
-
-    Puts are sent to an in-memory, "overlay" cache. That cache is sent to Redis and
-    and deleted when `flush` is called. Gets are serviced first by the overlay cache
-    and, if the get misses, then by querying the Redis cache.
-    """
-
-    def __init__(
-        self,
-        redis_connection: Union[redis.asyncio.Redis, str],
-        namespace: str,
-        subproblem_to_block_coordinate_fn: Callable[
-            [Spec, pruning.MemoryLimits], Optional[str]
-        ],
-        local: Union[bool, int] = True,
-        autoflush: bool = True,
-        updating: bool = True,
-    ) -> None:
-        """Create a new RedisCache using the given `redis_connection`.
-
-        Args:
-            redis_connection: The Redis connection to use. This should either be a
-              `redis.asyncio.Redis` object for a connection URL.
-            namespace: A string which will be included in all Redis keys.
-            subproblem_to_block_coordinate_fn: A function which maps a subproblem
-              to a string identifying a particular block.
-            autoflush: If `True`, the cache will automatically flush its in-memory data
-              when `put` is called on a new block.
-            updating: If `True`, puts will update blocks rather than assume they are not
-              present in the Redis database. On the first put to a new block, a
-              distributed lock will be acquired and any existing block will be
-              downloaded. That and subsequent puts will update that block in memory.
-              On flush, the updated block will be stored in Redis and the lock released.
-        """
-        # TODO: Document that this class takes "ownership" of the redis_connection
-        super().__init__()
-        self.redis_connection = redis_connection
-        if isinstance(self.redis_connection, str):
-            self.redis_connection = redis.asyncio.Redis.from_url(self.redis_connection)
-        self.namespace = namespace
-        self.overlay = InMemoryScheduleCache()
-        self.autoflush = autoflush
-        self.updating = updating
-        self._local_cache = None
-        if local != False:
-            lckwargs = {}
-            if local != True:
-                lckwargs["max_size"] = local
-            print(f"local was {local} so passing {lckwargs} to _MemAwareCache")
-            self._local_cache = _MemAwareCache(**lckwargs)
-        self._dirty_block: Optional[str] = None
-        self._dirty_block_culprit: Optional[tuple[Spec, pruning.MemoryLimits]] = None
-        self._dirty_block_lock: Optional[redis.asyncio.lock.Lock] = None
-        self._given_block_key = subproblem_to_block_coordinate_fn
-        self._running_block_task: Optional[
-            tuple[str, asyncio.Future[InMemoryScheduleCache]]
-        ] = None
-        self._pending: dict[str, _PendingEntry[Optional[InMemoryScheduleCache]]] = {}
-        self._get_block_lock = asyncio.Lock()
-
-    async def get_many(
-        self, subproblems: Iterable[tuple["Spec", pruning.MemoryLimits]]
-    ) -> Iterable[Optional[CachedScheduleSet]]:
-        subproblems = list(subproblems)  # TODO: Just require Sequence in signature.
-        results: list[Optional[CachedScheduleSet]] = list(
-            await self.overlay.get_many(subproblems)
-        )
-
-        none_idxs = [i for i, r in enumerate(results) if r is None]
-
-        # Map needed block keys to subproblems indices.
-        blocks_needed: dict[str, list[int]] = {}
-        for idx in none_idxs:
-            k = self.redis_block_key(*subproblems[idx])
-            if k:
-                blocks_needed.setdefault(k, []).append(idx)
-
-        # Send requests to the Redis server (or wait if one is already running).
-        blocks = await asyncio.gather(*[self._get_block(k) for k in blocks_needed])
-
-        for subproblem_idxs, block in zip(blocks_needed.values(), blocks):
-            if not block:
-                continue
-            for i in subproblem_idxs:
-                assert results[i] is None
-                results[i] = next(iter(await block.get_many([subproblems[i]])))
-
-        return results
-
-    async def _get_block(self, block_key) -> Optional[InMemoryScheduleCache]:
-        try:
-            pending_entry: _PendingEntry[
-                Optional[InMemoryScheduleCache]
-            ] = self._pending[block_key]
-        except KeyError:
-            # No ongoing request for the block, so start one.
-            pending_entry = _PendingEntry()
-            self._pending[block_key] = pending_entry
-            # Await the task instead of the event to propogate exceptions.
-            await asyncio.create_task(
-                self._download_and_broadcast_block(block_key),
-                name=f"RedisGetBlock-{block_key}",
-            )
-        else:
-            await pending_entry.event.wait()
-        return pending_entry.result
-
-    async def put(
-        self, schedules_to_put: CachedScheduleSet, memory_limits: pruning.MemoryLimits
-    ) -> None:
-        spec = schedules_to_put.spec
-        block_key = self.redis_block_key(spec, memory_limits)
-        if not block_key:
-            return
-
-        should_load = False
-        if self._dirty_block and self._dirty_block != block_key:
-            assert (
-                self._dirty_block_culprit
-            ), "_dirty_block_culprit should be set is _dirty_block is set"
-            if not self.autoflush:
-                c_spec, c_memory_limits = self._dirty_block_culprit
-                raise Exception(
-                    "Putting into a block other than the current dirty "
-                    "block. Call `flush` before `put`ing to a new block. "
-                    f"Current dirty block is {self._dirty_block}, which was "
-                    f"set while updating {c_spec} at {c_memory_limits}. However, "
-                    f"this put was to {block_key}, for {spec} at {memory_limits}."
-                )
-            await self.flush()
-            should_load = True
-        elif not self._dirty_block:
-            should_load = True
-
-        if should_load and self.updating:
-            loaded_block = await self._get_block(block_key)
-            if loaded_block:
-                self.overlay = loaded_block
-
-        self._dirty_block = block_key
-        self._dirty_block_culprit = (spec, memory_limits)
-        if self.updating:
-            self._dirty_block_lock = self.redis_connection.lock(
-                f"Lock-{self.namespace}-{block_key}",
-                timeout=2 * 60.0,  # TODO: Need to extend periodically.
-            )
-            await self._dirty_block_lock.acquire()
-        await self.overlay.put(schedules_to_put, memory_limits)
-
-    async def flush(self):
-        if not self._dirty_block:
-            return
-
-        # TODO: There should never be a block, so just check that this is the case,
-        #   instead of getting it.
-        payload = lz4.frame.compress(
-            pickle.dumps(self.overlay, protocol=PICKLE_PROTOCOL)
-        )
-        if self.updating:
-            await self.redis_connection.set(self._dirty_block, payload)
-        else:
-            set_response = await self.redis_connection.setnx(self._dirty_block, payload)
-            if not set_response:
-                assert self._dirty_block_culprit
-                raise Exception(
-                    f"Block already exists: {self._dirty_block}. "
-                    "The overlay block was originally created by a put to: "
-                    f"{tuple(map(str, self._dirty_block_culprit))}."
-                )
-
-        self.overlay = InMemoryScheduleCache()
-        self._dirty_block = None
-        self._dirty_block_culprit = None
-        if self.updating:
-            assert self._dirty_block_lock
-            await self._dirty_block_lock.release()
-            self._dirty_block_lock = None
-
-    def specs(self) -> Iterable[Spec]:
-        raise NotImplementedError()
-
-    async def count_impls(self) -> int:
-        total_count = 0
-        async for block in self._iter_blocks():
-            total_count += await block.count_impls()
-        return total_count
-
-    async def __aiter__(
-        self,
-    ) -> AsyncIterator[Tuple[Spec, CachedScheduleSet, pruning.MemoryLimits]]:
-        async for block in self._iter_blocks():
-            async for x in block:
-                yield x
-
-    async def _iter_blocks(self) -> AsyncGenerator[InMemoryScheduleCache, None]:
-        for key in await self._all_block_keys():
-            if key == self._dirty_block:
-                continue
-            block_cache = await self._download_block(key)
-            assert block_cache is not None
-            yield block_cache
-        if self._dirty_block:
-            yield self.overlay
-
-    def __len__(self) -> int:
-        assert "*" not in self.namespace
-        raise NotImplementedError()
-
-    async def _all_block_keys(self) -> Iterable[str]:
-        return await self.redis_connection.keys(self.namespace + "*")
-
-    async def _download_and_broadcast_block(self, key: str) -> None:
-        self._pending.pop(key).set(await self._download_block(key))
-
-    async def _download_block(self, key: str) -> Optional[InMemoryScheduleCache]:
-        # TODO: Though we only have one GET out at once, there's no guarantee we'll wait
-        #   for it to be processed by all waiting searches before we start the next GET.
-        #   Fix this.
-
-        if self._local_cache is not None:
-            try:
-                return self._local_cache[key]
-            except KeyError:
-                pass
-
-        start = time.time()
-
-        async with self._get_block_lock:
-            lock_got_time = time.time()
-            blob = await asyncio.wait_for(self.redis_connection.get(key), timeout=900)
-            if blob is None:
-                stop = time.time()
-                logger.info(
-                    "Missed block: %s (total %.2fs, lock %.2fs)",
-                    key,
-                    stop - start,
-                    lock_got_time - start,
-                )
-                return None
-            assert isinstance(
-                blob, bytes
-            ), f"blob was not bytes, was {type(blob).__name__}"
-            decode_start = time.time()
-            decoded = lz4.frame.decompress(blob)
-            lz4_stop = time.time()
-            decoded = pickle.loads(decoded)
-            decode_stop = time.time()
-            assert isinstance(
-                decoded, InMemoryScheduleCache
-            ), f"decoded was not InMemoryScheduleCache; was {type(decoded).__name__}"
-            if self._local_cache is not None:
-                self._local_cache.set(key, decoded, decode_stop - decode_start)
-            stop = time.time()
-            logger.info(
-                "Downloaded block: %s (total %.2fs, lock %.2fs, decode %.2fs, lz4 %.2fs%s)",
-                key,
-                stop - start,
-                lock_got_time - start,
-                decode_stop - decode_start,
-                lz4_stop - decode_start,
-                ", saved" if self._local_cache is not None else "",
-            )
-            return decoded
-
-    def redis_block_key(self, *args, **kwargs) -> Optional[str]:
-        inner_key = self._given_block_key(*args, **kwargs)
-        if not inner_key:
-            return inner_key
-        return f"{self.namespace}-{inner_key}"
-
-
-@dataclasses.dataclass(frozen=False)
-class _BlockCompressedTable:
-    banks: tuple[str, ...]
-    storage: bcarray.BlockCompressedArray
-
-    def __init__(self, banks: tuple[str, ...], table_dims: tuple[int, ...]):
-        storage_dims = self._logify(snap_availables_up(table_dims, always=True))
-        storage_dims = tuple(d + 1 for d in storage_dims)
-        object.__setattr__(self, "banks", banks)
-        object.__setattr__(
-            self,
-            "storage",
-            bcarray.BlockCompressedArray(
-                storage_dims, block_shape=tuple(4 for _ in storage_dims)
-            ),
-        )
-
-    def best_for_cap(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
-        snapped = pruning.StandardMemoryLimits(snap_availables_up(caps.available))
-        if snapped == caps:
-            return self._get_entry(caps)
-
-        # If we're not on a snapped/log boundary, then we'll check an uper entry (the
-        # entry where all levels are higher than the given caps) and see if, in
-        # actuality, that Impl is below the requested limits. If it's not, we'll just
-        # grab the Impl from the conservative entry.
-        try:
-            upper_impl = self._get_entry(snapped)
-        except KeyError:
-            pass
-        else:
-            assert (
-                upper_impl is None
-                or upper_impl.peak_memory.raw_keys == caps.available.raw_keys
-            )
-            if upper_impl is None or all(
-                a <= b
-                for a, b in zip(
-                    upper_impl.peak_memory.raw_values, caps.available.raw_values
-                )
-            ):
-                return upper_impl
-        snapped_down = pruning.StandardMemoryLimits(
-            snap_availables_down(caps.available)
-        )
-        return self._get_entry(snapped_down)
-
-    def add(self, entry: _TableEntry):
-        bottom_coord = tuple(v.bit_length() for v in self._bottom_from_entry(entry))
-        top_coord = tuple(
-            v.bit_length()
-            for v in snap_availables_up(entry.caps.raw_values, always=True)
-        )
-        self._fill_storage(bottom_coord, top_coord, entry)
-
-    def _banks(self) -> tuple[str, ...]:
-        return self.banks
-
-    def _fill_storage(self, lower, upper, value):
-        assert not isinstance(value, np.ndarray)
-        self.storage.fill_range(lower, tuple(u + 1 for u in upper), value)
-
-    def __iter__(self) -> Iterator[_TableEntry]:
-        for entry in set(self.storage.iter_values()):
-            if entry is None:
-                continue
-            assert isinstance(entry, _TableEntry)
-            yield entry
-
-    def __len__(self) -> int:
-        return sum(1 for _ in iter(self))
-
-    def _get_log_scaled_pt(self, pt) -> _TableEntry:
-        try:
-            result = self.storage[pt]
-            if result is None:
-                raise KeyError()
-            return result
-        except IndexError:
-            raise KeyError()
-
-    def _bottom_from_entry(self, entry: _TableEntry) -> tuple[int, ...]:
-        if entry.peak_memory is None:
-            assert not len(entry.schedules.contents)
-            return (0,) * len(self.banks)
-        else:
-            assert entry.peak_memory.raw_keys == self.banks
-            return entry.peak_memory.raw_values
-
-    def _get_entry(self, caps: pruning.StandardMemoryLimits) -> _TableEntry:
-        avail = caps.available
-        coord = self._logify(avail.raw_values)
-        assert isinstance(coord, tuple)
-        return self._get_log_scaled_pt(coord)
-
-    @staticmethod
-    def _logify(tup: Sequence[int]) -> tuple[int, ...]:
-        return tuple((0 if x == 0 else (x - 1).bit_length() + 1) for x in tup)
-
 
 class ChainCache(ScheduleCache):
-    def __init__(self, caches: Iterable[ScheduleCache]) -> None:
+    def __init__(self, caches: Iterable[ScheduleCache], put_all: bool = False) -> None:
         self._inner_caches = list(caches)
+        self.put_all = put_all
 
     async def get_many(
-        self, subproblems: Iterable[tuple[Spec, pruning.MemoryLimits]]
+        self, subproblems: Sequence[tuple[Spec, pruning.MemoryLimits]]
     ) -> Iterable[Optional[CachedScheduleSet]]:
-        subproblems = list(subproblems)  # TODO: Just require Sequence in signature.
+        """Return subproblem entries from any of the inner caches.
+
+        This method loops through the inner caches and collects the results from each
+        cache. If a result is found in a cache, it is removed from the remaining indices
+        to be searched.
+        """
         remaining_idxs: list[int] = list(range(len(subproblems)))
         results: list[Optional[CachedScheduleSet]] = [None] * len(remaining_idxs)
         for cache in self._inner_caches:
-            one_result = await cache.get_many((subproblems[i] for i in remaining_idxs))
+            cache_results = await cache.get_many(
+                [subproblems[i] for i in remaining_idxs]
+            )
             to_del = set()  # TODO: Don't use a set
-            for subproblem_idx, entry in zip(remaining_idxs, one_result):
+            for subproblem_idx, entry in zip(remaining_idxs, cache_results):
                 if entry is not None:
                     to_del.add(subproblem_idx)
                     results[subproblem_idx] = entry
@@ -870,16 +627,26 @@ class ChainCache(ScheduleCache):
         return results
 
     async def put(self, *args, **kwargs) -> None:
-        return await self._inner_caches[0].put(*args, **kwargs)
+        """Save an entry to one or all of the inner caches.
 
-    def specs(self) -> Iterable[Spec]:
+        If the put_all flag is set to True, the entry will be put in all the inner
+        caches. Otherwise, the entry will be put only in the first inner cache.
+        """
+        if self.put_all:
+            for cache in self._inner_caches:
+                await cache.put(*args, **kwargs)
+        else:
+            await self._inner_caches[0].put(*args, **kwargs)
+
+    async def flush(self) -> None:
+        for c in self._inner_caches:
+            await c.flush()
+
+    async def specs(self) -> Iterable[Spec]:
         result = set()
         for cache in self._inner_caches:
-            result.update(cache.specs())
+            result.update([s async for s in cache.specs()])
         return result
-
-    async def count_impls(self) -> int:
-        raise NotImplementedError()
 
     async def __aiter__(
         self,
@@ -893,23 +660,19 @@ class ChainCache(ScheduleCache):
 @contextlib.contextmanager
 def persistent_cache(
     path: Optional[Union[str, pathlib.Path]],
-    redis: Optional[tuple[str, str]] = None,
+    redis: Optional[tuple[Any, str]] = None,
     save: bool = True,
 ):
-    from .search import bottomup
-
     with _local_persistent_cache(path, save=save) as local_cache:
         if not redis:
             yield local_cache
-            return
-        # Below will keep everything in memory after the first fetch
-        redis_cache = _ReadonlyRedis(*redis, bottomup.redis_coord_key)
-        yield ChainCache([local_cache, redis_cache])
-
-
-class _ReadonlyRedis(RedisCache):
-    def put(self, *args, **kwargs):
-        raise Exception("Should never put. This is read-only.")
+        else:
+            redis_cache = ScheduleCache(
+                use_redis=redis,
+                min_dim=8,  # TODO: Macro-ize
+                allowed_spec_types=(Load, Store, Zero),
+            )
+            yield ChainCache([local_cache, redis_cache])
 
 
 @contextlib.contextmanager
@@ -917,7 +680,7 @@ def _local_persistent_cache(
     path: Optional[Union[str, pathlib.Path]], save: bool = True
 ):
     if path is None:
-        yield InMemoryScheduleCache()
+        yield ScheduleCache()
         return
 
     if isinstance(path, str):
@@ -932,7 +695,7 @@ def _local_persistent_cache(
         # If we're going to save the cache, make any parent directories
         if save:
             path.parent.mkdir(parents=True, exist_ok=True)
-        cache = InMemoryScheduleCache()
+        cache = ScheduleCache()
 
     try:
         yield cache
@@ -940,3 +703,7 @@ def _local_persistent_cache(
         if save:
             with atomicwrites.atomic_write(path, mode="wb", overwrite=True) as fo:
                 pickle.dump(cache, fo, protocol=PICKLE_PROTOCOL)
+
+
+def _logify(tup: Sequence[int]) -> tuple[int, ...]:
+    return tuple((0 if x == 0 else (x - 1).bit_length() + 1) for x in tup)

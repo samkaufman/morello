@@ -339,18 +339,23 @@ def atomic_moveable_specs_st(size):
     )
 
 
-tiny_atomic_moveable_specs_st = atomic_moveable_specs_st(2)
 small_atomic_moveable_specs_st = atomic_moveable_specs_st(4)
+tiny_atomic_moveable_specs_st = atomic_moveable_specs_st(2)
 
-tiny_atomic_specs_st = st.one_of(
-    load_spec_st(max_dim_size=2),
-    store_spec_st(max_dim_size=2),
-    tiny_atomic_moveable_specs_st,
+atomic_specs_st = st.one_of(
+    load_spec_st(max_dim_size=32),
+    store_spec_st(max_dim_size=32),
+    atomic_moveable_specs_st(32),
 )
 small_atomic_specs_st = st.one_of(
     load_spec_st(max_dim_size=4),
     store_spec_st(max_dim_size=4),
     small_atomic_moveable_specs_st,
+)
+tiny_atomic_specs_st = st.one_of(
+    load_spec_st(max_dim_size=2),
+    store_spec_st(max_dim_size=2),
+    tiny_atomic_moveable_specs_st,
 )
 
 

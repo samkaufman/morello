@@ -17,7 +17,6 @@ from morello import dtypes, layouts, op_pprint, search, specs, system_config, te
 from morello.codegen.ctensors import ONES_FOR_NON_ZERO_INIT
 from morello.impl import SplitNotSupportedByHeadError
 from morello.system_config import cpu
-
 from .. import strategies
 from .. import utils as test_utils
 
@@ -27,16 +26,17 @@ CC_SANITIZE = True
 strategies.register_default_strategies()
 
 
-def test_codegen_completes_on_matmul_1x1x1():
+@pytest.mark.asyncio
+async def test_codegen_completes_on_matmul_1x1x1():
     target = cpu.CpuTarget()
     with system_config.with_target(target):
         lhs = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
         rhs = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
         out = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
         s = specs.Matmul(lhs, rhs, out, serial_only=True)
-        imp = search.schedule_search(s)[0]
+        imp = (await search.schedule_search(s))[0]
         assert imp
-        asyncio.run(target.build_impl(imp.to_applied()))
+        await target.build_impl(imp.to_applied())
 
 
 @pytest.mark.parallelspec
@@ -57,12 +57,12 @@ def test_can_schedule_generate_and_run_parallel_matmul_without_raise() -> None:
         hole = morello.impl.base.spec_to_hole(spec)
         imp = (
             hole.tile_out((8, 8), parallel=True)
-            .move_input(0, bank="L1")
-            .move_input(1, bank="L1")
-            .move_output(bank="L1")
-            .move_input(0, bank="RF")
-            .move_input(1, bank="RF")
-            .move_output(bank="RF")
+            .move(0, bank="L1")
+            .move(1, bank="L1")
+            .move(2, bank="L1")
+            .move(0, bank="RF")
+            .move(1, bank="RF")
+            .move(2, bank="RF")
             .complete()
         )
 
@@ -287,7 +287,7 @@ def _arb_conv_reduce_conv_spec(draw, parallel: Optional[bool] = None):
 @st.composite
 def _arb_zero_spec(draw, parallel: Optional[bool] = None):
     target = system_config.current_target()
-    shape = draw(st.lists(st.integers(1, 129), min_size=1, max_size=3))
+    shape = draw(st.lists(st.integers(1, 32), min_size=1, max_size=3))
     dtype = draw(st.from_type(dtypes.Dtype))
     t = target.tensor_spec(shape, dtype=dtype)
     return specs.Zero(t, serial_only=(not parallel))

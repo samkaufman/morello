@@ -247,7 +247,7 @@ class SqueezingTile(Tile):
 
         if all(d == 1 for d in new_dim_sizes):
             new_layout = layouts.row_major(len(new_dim_sizes))
-            new_contig = True
+            new_contig = new_layout.contiguous_full()
         else:
             new_layout, new_contig = ispec.layout.dim_drop(
                 self.dropped_dims, ispec.contiguous_abs

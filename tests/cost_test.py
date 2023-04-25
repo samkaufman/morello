@@ -31,9 +31,7 @@ def _move_operand(draw, b: Impl, underlying_system: system_config.SystemDescript
     bank = draw(st.sampled_from(sorted(underlying_system.banks)))
     layout = draw(st.from_type(layouts.Layout))
     b = draw(b)
-    if operand_idx == len(b.inputs):
-        return b.move_output(operand_idx, bank=bank, layout=layout)
-    return b.move_input(operand_idx, bank=bank, layout=layout)
+    return b.move(operand_idx, bank=bank, layout=layout)
 
 
 @st.composite
@@ -82,15 +80,15 @@ def _make_tiled_matmul(
 
     schedule = morello.impl.MatmulHole(a, b, o).tile_out((m_dim, tile_width))
     # if make_contiguous:
-    #    schedule = schedule.move_input(1, 0, matrix.Layout.COL_MAJOR)
+    #    schedule = schedule.move(1, 0, matrix.Layout.COL_MAJOR)
     #    n = tile_width
     if maximize_register_use:
         # We've already broken columns into tile_width tiles, so lets just move panels
         # into registers
         schedule = (
             schedule.tile_out((1, target.system.line_size))
-            .move_input(0, level=0)
-            .move_input(1, level=0)
+            .move(0, level=0)
+            .move(1, level=0)
         )
     return schedule.complete()
 

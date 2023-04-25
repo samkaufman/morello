@@ -134,10 +134,10 @@ class ConvHole(ConvHoleBase):
         lhs, rhs, out = self.spec.operands
         next_general_lhs = system.next_general_bank(lhs.bank)
         if next_general_lhs:
-            return self.move_input(0, bank=next_general_lhs).complete()
+            return self.move(0, bank=next_general_lhs).complete()
         next_general_rhs = system.next_general_bank(rhs.bank)
         if next_general_rhs:
-            return self.move_input(1, bank=next_general_rhs).complete()
+            return self.move(1, bank=next_general_rhs).complete()
         next_general_out = system.next_general_bank(out.bank)
         if next_general_out:
             return self.move_output(bank=next_general_out).complete()
@@ -249,10 +249,10 @@ class ConvAccumHole(ConvHoleBase):
         lhs, rhs, out = self.spec.operands
         next_general_lhs = system.next_general_bank(lhs.bank)
         if next_general_lhs:
-            return self.move_input(0, bank=next_general_lhs).complete()
+            return self.move(0, bank=next_general_lhs).complete()
         next_general_rhs = system.next_general_bank(rhs.bank)
         if next_general_rhs:
-            return self.move_input(1, bank=next_general_rhs).complete()
+            return self.move(1, bank=next_general_rhs).complete()
         next_general_out = system.next_general_bank(out.bank)
         if next_general_out:
             return self.move_output(bank=next_general_out).complete()

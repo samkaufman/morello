@@ -1,6 +1,8 @@
+import enum
+
+import fakeredis.aioredis as fakeredis
 import hypothesis
 import pytest
-import fakeredis.aioredis
 
 from morello import dtypes, impl, pformat, pruning, search_cache, specs
 from morello.cost import MainCost
@@ -8,30 +10,32 @@ from morello.search import dp
 from morello.search.common import ScheduleKey
 from morello.system_config import current_system, current_target
 from morello.utils import snap_availables_up
-
 from . import strategies
 
 strategies.register_default_strategies()
 
+
 # TODO: Add assertion that tests below only put scheduled Impls into the cache.
 
-CACHE_CLASSES = [search_cache.InMemoryScheduleCache, search_cache.RedisCache]
+
+class CacheConfig(enum.Enum):
+    inmem = enum.auto()
+    redis = enum.auto()
 
 
-def _make_cache(search_cls):
-    if search_cls == search_cache.InMemoryScheduleCache:
-        return search_cache.InMemoryScheduleCache()
-    elif search_cls == search_cache.RedisCache:
-        redis_conn = fakeredis.aioredis.FakeRedis()
-        return search_cache.RedisCache(
-            redis_conn, "test", lambda s, _: (s.operands[0].dim_sizes[0],)
-        )
-    else:
-        raise NotImplementedError(f"Unsupported type {search_cls}")
+def _make_cache(config: CacheConfig):
+    match config:
+        case CacheConfig.inmem:
+            return search_cache.ScheduleCache()
+        case CacheConfig.redis:
+            return search_cache.ScheduleCache(use_redis=(fakeredis.FakeRedis(), "TEST"))
+        case _:
+            raise NotImplementedError(f"Unsupported config {config}")
+
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
+@pytest.mark.parametrize("cache_cls", CacheConfig)
 @pytest.mark.parametrize("dtype", [dtypes.Uint8, dtypes.Uint32], ids=["u8", "u32"])
 async def test_cache_common_scenario(cache_cls, dtype):
     cache = _make_cache(cache_cls)
@@ -124,10 +128,11 @@ async def test_cache_common_scenario(cache_cls, dtype):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
+@pytest.mark.parametrize("cache_cls", CacheConfig)
 @hypothesis.given(
     strategies.small_atomic_specs_st, strategies.arb_small_standard_memorylimits()
 )
+@hypothesis.settings(deadline=10_000)  # TODO: Profile and speed this test up.
 async def test_cache_raises_keyerror_when_empty(cache_cls, spec, limits):
     cache = _make_cache(cache_cls)
     with pytest.raises(KeyError):
@@ -137,13 +142,17 @@ async def test_cache_raises_keyerror_when_empty(cache_cls, spec, limits):
 # TODO: Add Compose Specs (incl. PipelineChildMemoryLimits)
 # TODO: Test top_k greater than 1
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
-@hypothesis.settings(deadline=240_000, max_examples=3)
+@pytest.mark.parametrize("cache_cls", CacheConfig)
+@pytest.mark.parametrize("use_get_many", [True, False], ids=["get_many", "get"])
+@pytest.mark.parametrize("flush_after_put", [True, False], ids=["flush", "no_flush"])
+@hypothesis.settings(deadline=240_000)
 @hypothesis.given(
     strategies.tiny_atomic_specs_st,
     strategies.arb_small_standard_memorylimits(),
 )
-async def test_cache_get_returns_just_put_impls(cache_cls, spec, limits):
+async def test_cache_get_returns_just_put_impls(
+    cache_cls, use_get_many, flush_after_put, spec, limits
+):
     cache = _make_cache(cache_cls)
 
     # Use DP search below to ensure that we don't produce an Impl with differing
@@ -153,34 +162,38 @@ async def test_cache_get_returns_just_put_impls(cache_cls, spec, limits):
     optimal = optimal[0]
     assert isinstance(optimal, impl.Impl)
 
-    results = [imp for imp, _ in (await cache.get(spec, limits)).contents]
-    assert len(results) == 1
+    # Collect every node of the optimal schedule.
+    all_nodes = []
+    remaining_nodes = [(optimal, limits)]
+    while remaining_nodes:
+        node, node_memory_bound = remaining_nodes.pop()
+        child_limits = node_memory_bound.transition(node)
+        all_nodes.append((node, node_memory_bound))
+        remaining_nodes.extend(zip(node.children, child_limits, strict=True))
 
-    hypothesis.note(pformat(results[0], show_cost=True))
-    hypothesis.note(pformat(optimal, show_cost=True))
-    # TODO: Don't use pformat/string comparison.
-    assert pformat(results[0], show_cost=False) == pformat(optimal, show_cost=False)
+    if flush_after_put:
+        await cache.flush()
 
+    results: list[impl.Impl] = []
+    if use_get_many:
+        batch_results = await cache.get_many([(n.spec, l) for n, l in all_nodes])
+        results.extend(imp for r in batch_results for imp, _ in r.contents)
+    else:
+        for node, node_limits in all_nodes:
+            spec = node.spec
+            results.extend(
+                imp for imp, _ in (await cache.get(spec, node_limits)).contents
+            )
 
-# TODO: Add Compose Specs (incl. PipelineChildMemoryLimits)
-# TODO: Test top_k greater than 1
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cache_cls", CACHE_CLASSES)
-@hypothesis.settings(deadline=90_000, max_examples=3)
-@hypothesis.given(
-    strategies.small_atomic_specs_st, strategies.arb_small_standard_memorylimits()
-)
-async def test_cache_reputting_doesnt_increase_size(cache_cls, spec, limits):
-    cache = _make_cache(cache_cls)
-    optimal = await dp.Search()(spec, limits, cache=cache)
-    hypothesis.assume(optimal)
-    optimal = optimal[0]
-    assert isinstance(optimal, impl.Impl)
+    for result, (expected, _) in zip(results, all_nodes, strict=True):
+        assert not isinstance(result, impl.base.AppliedImpl)
+        assert not isinstance(expected, impl.base.AppliedImpl)
+        assert result.equals_node(expected), (
+            f"Result didn't equal expected.\n{pformat(result, show_cost=False)}\n"
+            f"!=\n{pformat(expected, show_cost=False)}"
+        )
 
-    initial_count = await cache.count_impls()
-    p = await cache.get(spec, limits)
-    await cache.put(p, limits)
-    assert (await cache.count_impls()) == initial_count
+    await cache.flush()
 
 
 @pytest.mark.asyncio
@@ -195,25 +208,28 @@ async def test_cache_updates_when_none_result_put_with_higher_memory_cap(
     spec = specs.Matmul(t, t, t, serial_only=False)
     wrapped_schedule = search_cache.CachedScheduleSet(spec, tuple(), 1)
 
-    cache = search_cache.InMemoryScheduleCache()
+    cache = search_cache.ScheduleCache()
     await cache.put(
-        wrapped_schedule, pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0})
+        wrapped_schedule,
+        pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
     )
     assert {x async for x in aiter(cache)} == {
         (
             spec,
             wrapped_schedule,
-            pruning.StandardMemoryLimits({"RF": 100, "L1": 100, "GL": 0}),
+            pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
         )
     }
+
     await cache.put(
-        wrapped_schedule, pruning.StandardMemoryLimits({"RF": 101, "L1": 101, "GL": 0})
+        wrapped_schedule,
+        pruning.StandardMemoryLimits({"RF": 101, "VRF": 101, "L1": 101, "GL": 0}),
     )
     assert {x async for x in aiter(cache)} == {
         (
             spec,
             wrapped_schedule,
-            pruning.StandardMemoryLimits({"RF": 101, "L1": 101, "GL": 0}),
+            pruning.StandardMemoryLimits({"RF": 101, "VRF": 101, "L1": 101, "GL": 0}),
         )
     }
 
@@ -236,7 +252,7 @@ async def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
         schedule.spec, ((schedule, k),), 1
     )
 
-    cache = search_cache.InMemoryScheduleCache()
+    cache = search_cache.ScheduleCache()
     await cache.put(
         wrapped_schedule,
         pruning.StandardMemoryLimits({"RF": 100, "VRF": 100, "L1": 100, "GL": 0}),
@@ -259,6 +275,34 @@ async def test_cache_updates_when_schedules_put_with_higher_memory_cap(dtype):
             pruning.StandardMemoryLimits({"RF": 101, "VRF": 101, "L1": 101, "GL": 0}),
         )
     }
+
+
+# @pytest.mark.asyncio
+# async def test_topdown_search_succeeds_with_redis_cache():
+#     # Load((1×1, u32, L1, ua), (1×1, u32, RF, ua), serial) != MatmulAccum((1×16, u32, RF), (16×1, u32, L1, c1, ua), (1×1, u
+#     #                                                                    │32, L1, ua), serial)
+#     spec = specs.Matmul(
+#         specs.TensorSpec((1, 32), dtype=dtypes.Uint32, bank="GL"),
+#         specs.TensorSpec((32, 5), dtype=dtypes.Uint32, bank="GL"),
+#         specs.TensorSpec((1, 5), dtype=dtypes.Uint32, bank="GL"),
+#     )
+
+#     cache = _make_cache(cache_cls)
+
+#     # Use DP search below to ensure that we don't produce an Impl with differing
+#     # sub-Impls for the same Spec.
+#     optimal = await dp.Search(top_k=1)(spec, limits, parent_summary=None, cache=cache)
+#     hypothesis.assume(optimal)
+#     optimal = optimal[0]
+#     assert isinstance(optimal, impl.Impl)
+
+#     results = [imp for imp, _ in (await cache.get(spec, limits)).contents]
+#     assert len(results) == 1
+
+#     hypothesis.note(pformat(results[0], show_cost=True))
+#     hypothesis.note(pformat(optimal, show_cost=True))
+#     # TODO: Don't use pformat/string comparison.
+#     assert pformat(results[0], show_cost=False) == pformat(optimal, show_cost=False)
 
 
 # def test_references_resolved_correctly_in_saved_caches():

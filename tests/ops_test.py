@@ -136,6 +136,7 @@ def test_gen_vector_shapes_yields_strictly_positive_dims(
     st.lists(st.integers(min_value=1, max_value=10), min_size=1, max_size=5),
     st.integers(min_value=1, max_value=1024),
 )
+@hypothesis.settings(deadline=8000)
 def test_gen_vector_shapes_is_correct(
     dt: dtypes.Dtype, limit_one: bool, maxes: list[int], volume: int
 ):

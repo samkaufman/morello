@@ -2,12 +2,12 @@ import functools
 import typing
 from typing import Callable, Iterable, Optional, Sequence, Tuple, Union, cast
 
+from .pruning import ParentSummary
+from .utils import assert_stable_spec
 from .. import specs, tiling
 from ..system_config import current_system, current_target
 from ..tensor import OperandIdx, TensorLike, Tile
 from ..utils import TinyMap
-from .pruning import ParentSummary
-from .utils import assert_stable_spec
 
 
 class Impl:
@@ -38,6 +38,16 @@ class Impl:
         d = 1 + max((c.depth for c in self.children), default=0)
         object.__setattr__(self, "_cached_depth", d)
         return d
+
+    def equals_node(self, other) -> bool:
+        """Compare with another Impl, ignoring children and tensor instances."""
+        # TODO: Don't use pformat
+        from .. import pformat
+
+        other = other.replace_children(self.children)
+        l = pformat(self, show_cost=False, show_utilization=False)
+        r = pformat(other, show_cost=False, show_utilization=False)
+        return l == r
 
     @property
     def is_scheduled(self) -> bool:
@@ -78,6 +88,38 @@ class Impl:
         for child in self.children:
             new_children.append(child._replace_leaves_inner(replacements))
         return self.replace_children(new_children)
+
+    def replace_holes_by_index(
+        self, hole_replacements: Sequence[tuple[int, "Impl"]]
+    ) -> tuple["Impl", Sequence[range]]:
+        """Replaces specific holes at the leaves of `partial_impl` with new Impls."""
+        if not hole_replacements:
+            return self, []
+        if not all(
+            i < j
+            for (i, _), (j, _) in zip(hole_replacements[:-1], hole_replacements[1:])
+        ):
+            raise ValueError("Replacements must be in ascending order")
+
+        hole_idxs = [i for i, leaf in enumerate(self.leaves) if not leaf.is_scheduled]
+
+        # Sub. in new leaves, tracking what was inserted for the next step.
+        new_leaf_idxs_grouped: list[range] = []
+        leaf_offset = 0
+        new_leaves = list(self.leaves)
+        for i, imp in hole_replacements:
+            leaf_idx = hole_idxs[i]
+            new_leaves[leaf_idx] = imp
+            inserted_leaf_count = sum(1 for _ in imp.leaves)
+            new_leaf_idxs_grouped.append(
+                range(
+                    leaf_idx + leaf_offset,
+                    leaf_idx + leaf_offset + inserted_leaf_count,
+                )
+            )
+            leaf_offset += inserted_leaf_count - 1
+
+        return self.replace_leaves(new_leaves), new_leaf_idxs_grouped
 
     def actions(
         self, parent_summary: Optional[ParentSummary] = None
@@ -485,6 +527,9 @@ class AppliedImpl(Impl):
     @property
     def output(self):
         return self.operands[-1]
+
+    def equals_node(self, other) -> bool:
+        raise NotImplementedError("equals_node not implemented for applied Impls.")
 
     def apply(self, operands: Sequence[TensorLike]) -> "AppliedImpl":
         if len(operands):

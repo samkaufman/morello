@@ -8,7 +8,6 @@ import cython
 if cython.compiled:
     from cython.cimports.morello import cost
 
-
 from .. import cost, system_config, utils
 from ..impl import Impl, actions
 
@@ -45,14 +44,23 @@ class ScheduleKey:
     depth: int
 
     @staticmethod
-    def from_complete_impl(imp: "Impl") -> "ScheduleKey":
+    def from_complete_impl(imp: "Impl", cache: bool = False) -> "ScheduleKey":
+        cached_key = getattr(imp, "_schedule_key_cached", None)
+        if cached_key:
+            return cached_key
+
         if not imp.is_scheduled:
             raise ValueError("Impl must be complete")
         if not imp.children:
-            return ScheduleKey.from_child_keys(imp, [])
-        return ScheduleKey.from_child_keys(
-            imp, [ScheduleKey.from_complete_impl(c) for c in imp.children]
-        )
+            r = ScheduleKey.from_child_keys(imp, [])
+        else:
+            r = ScheduleKey.from_child_keys(
+                imp,
+                [ScheduleKey.from_complete_impl(c, cache=cache) for c in imp.children],
+            )
+        if cache:
+            object.__setattr__(imp, "_schedule_key_cached", r)
+        return r
 
     # TODO: Make callers check memory correctness when calling this.
     @staticmethod

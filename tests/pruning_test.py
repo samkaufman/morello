@@ -21,15 +21,15 @@ def test_transition_always_snaps(base: pruning.StandardMemoryLimits, hole, data)
     target = current_target()
 
     assert utils.snap_availables_down(base.available) == base.available
-    faster = sorted(target.system.faster_destination_banks(hole.spec.output.bank))
+    faster = sorted(target.system.faster_destination_banks(hole.spec.operands[0].bank))
     hypothesis.assume(faster)
     new_bank = data.draw(st.sampled_from(faster))
     hypothesis.assume(new_bank)
 
     move_kws = {"bank": new_bank}
     if target.system.banks[new_bank].vector_rf:
-        outer_shape = hole.spec.output.dim_sizes
-        dtype = hole.spec.output.dtype
+        outer_shape = hole.spec.operands[0].dim_sizes
+        dtype = hole.spec.operands[0].dtype
         vector_value_cnt: int = target.system.banks[new_bank].vector_bytes // dtype.size
         all_shapes = list(
             impl.utils.gen_vector_shapes(
@@ -44,7 +44,7 @@ def test_transition_always_snaps(base: pruning.StandardMemoryLimits, hole, data)
     if isinstance(hole, impl.ComposeHole) and data.draw(st.booleans()):
         imp = hole.peel(**move_kws)
     else:
-        imp = hole.move_output(**move_kws)
+        imp = hole.move(0, **move_kws)
 
     transitioned = base.transition(imp)
     hypothesis.assume(transitioned)  # not None or empty

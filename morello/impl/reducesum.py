@@ -145,7 +145,7 @@ class ReduceSumAccumHole(ReduceSumHoleBase):
         system = system_config.current_system()
         next_general_source = system.next_general_bank(self.spec.inputs[0].bank)
         if next_general_source:
-            return self.move_input(0, bank=next_general_source).complete()
+            return self.move(0, bank=next_general_source).complete()
         next_general_out = system.next_general_bank(self.spec.output.bank)
         if next_general_out:
             return self.move_output(bank=next_general_out).complete()

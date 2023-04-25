@@ -25,15 +25,10 @@ class _TilingMixin:
     def children(self) -> Tuple[Impl, ...]:
         return (self.inner,)
 
-    def move_input(self, *args, **kwargs) -> "Impl":
-        # Pass move_input through to the inner schedule. This method is
-        # basically sugar for calling subschedule.
-        return dataclasses.replace(self, inner=self.inner.move_input(*args, **kwargs))
-
-    def move_output(self, *args, **kwargs) -> "Impl":
+    def move(self, *args, **kwargs) -> "Impl":
         # Pass move_output through to the inner schedule. This method is
         # basically sugar for calling subschedule.
-        return dataclasses.replace(self, inner=self.inner.move_output(*args, **kwargs))
+        return dataclasses.replace(self, inner=self.inner.move(*args, **kwargs))
 
     def pad_transpack(self, *args, **kwargs) -> "Impl":
         return dataclasses.replace(
@@ -150,15 +145,10 @@ class Loop(Impl):
     def children(self) -> Tuple[Impl, ...]:
         return (self.inner,)
 
-    def move_input(self, *args, **kwargs) -> "Loop":
-        # Pass move_input through to the inner schedule. This method is
-        # basically sugar for calling subschedule.
-        return self.replace_children([self.inner.move_input(*args, **kwargs)])
-
-    def move_output(self, *args, **kwargs) -> "Loop":
+    def move(self, *args, **kwargs) -> "Loop":
         # Pass move_output through to the inner schedule. This method is
         # basically sugar for calling subschedule.
-        return self.replace_children([self.inner.move_output(*args, **kwargs)])
+        return self.replace_children([self.inner.move(*args, **kwargs)])
 
     def pad_transpack(self, *args, **kwargs) -> "Loop":
         # Pass pad_transpack through to the inner schedule. This method is
@@ -190,7 +180,10 @@ class Loop(Impl):
         if len(replacements) != 1:
             raise ValueError(f"One replacement child expected; got {len(replacements)}")
         if replacements[0].spec != self.inner.spec:
-            raise ValueError(f"Expected a replacement with spec {self.inner.spec}")
+            raise ValueError(
+                f"Expected a replacement with spec {self.inner.spec}, but got "
+                f"{replacements[0].spec}"
+            )
         return dataclasses.replace(self, inner=replacements[0])
 
     def apply(self, operands: Sequence[TensorLike]) -> AppliedImpl:

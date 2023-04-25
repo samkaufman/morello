@@ -143,25 +143,15 @@ class ComposeHole(Impl):
                 pass
 
     @assert_stable_spec
-    def move_input(
+    def move(
         self,
-        input_idx: int,
+        operand_idx: int,
         bank: Optional[str] = None,
         layout: Optional[Layout] = None,
         prefetching: bool = False,
         **kwargs,
     ):
-        return common_move(self, input_idx, bank, layout, prefetching, **kwargs)
-
-    @assert_stable_spec
-    def move_output(
-        self,
-        bank: Optional[str] = None,
-        layout: Optional[Layout] = None,
-        prefetching: bool = False,
-        **kwargs,
-    ) -> "Impl":
-        return common_move(self, -1, bank, layout, prefetching, **kwargs)
+        return common_move(self, operand_idx, bank, layout, prefetching, **kwargs)
 
     def _can_peel(self, bank: str, layout: Layout, **kwargs) -> bool:
         # Check if we can peel by just trying to make the intermediate tensor that peel

@@ -293,7 +293,7 @@ class MorelloBackend(BenchmarkBackend):
             self.cache_path, self.red, save=self.save_cache
         ) as cache:
             start = time.time()
-            impl = search.schedule_search(spec, cache=cache)[0]
+            impl = asyncio.run(search.schedule_search(spec, cache=cache))[0]
             logger.info("Completed synthesis. Took %.2fs", time.time() - start)
         assert impl
 

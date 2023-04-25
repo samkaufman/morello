@@ -34,13 +34,15 @@ T = TypeVar("T")
 MERGE_DIAGONALS = True
 BANK_GROUPS = (("RF", "VRF"), ("L1",), ("GL",))
 NAMESPACE = "BOOP"  # TODO: Generate real namespaces.
-PING_TRIES = 10
-PING_WAIT_SECS = 15
+PING_TRIES = 720
+PING_WAIT_SECS = 5
 CONV_CHANNELS = 4
+CHECK_CROSS_SPEC_MISSES = False
+REDIS_MIN_DIM = 8
 
 CacheOrFut = Union[
-    search_cache.InMemoryScheduleCache,
-    concurrent.futures.Future[search_cache.InMemoryScheduleCache],
+    search_cache.ScheduleCache,
+    concurrent.futures.Future[search_cache.ScheduleCache],
 ]
 
 logger = logging.getLogger(__name__)
@@ -94,14 +96,14 @@ def _spec_coordinate_to_specs(
                 operand_shapes[-1].append(size)
                 subs_to_sizes[sub] = size
 
-    for (layouts, aligneds, tensor_banks,) in itertools.product(
+    for layouts, aligneds, tensor_banks in itertools.product(
         itertools.product(
             *[target.all_layouts_for_shape(shp) for shp in operand_shapes]
         ),
         itertools.product([True, False], repeat=operand_count),
         itertools.product(*[BANK_GROUPS[i] for i in coord[-operand_count - 1 : -1]]),
     ):
-        for (contiguous_abstractions, vec_kwargs) in itertools.product(
+        for contiguous_abstractions, vec_kwargs in itertools.product(
             itertools.product(*[l.all_contiguous_abs() for l in layouts]),
             itertools.product(
                 *[
@@ -194,21 +196,6 @@ async def _compute_dp_table_graph(
             )
 
 
-def redis_coord_key(
-    spec: specs.Spec, memory_limits: pruning.MemoryLimits
-) -> Optional[str]:
-    if isinstance(spec, specs.Compose):
-        return None
-
-    # TODO: Instead use the block somehow. Will need to have all grids to
-    #  dispatch between Spec types.
-    # TODO: Move the Spec type name prefix outside this class.
-    block_pt = _spec_to_spec_coordinate(spec)
-    block_part = ",".join(map(str, block_pt))
-    types_part = ",".join([str(o.dtype) for o in spec.operands])
-    return f"{type(spec).__name__}-{block_part}-{types_part}"
-
-
 # TODO: Can we design this so that we don't need to reproduce the logic of the
 #   top-down actions expansion? Hate having the logic in two places.
 def _compute_block(
@@ -242,9 +229,19 @@ def _compute_block(
         _tlocal.results_cache = None
         _tlocal.results_cache_graph_group = graph_group
     if _tlocal.results_cache is None:
+        # Construct a ChainCache where the Redis cache is *first*.
+        # The Redis cache will ignore very small Specs, and in these cases,
+        # we want to hit the backup local cache.
+        #
         # TODO: Assert block membership in lambda
-        _tlocal.results_cache = search_cache.RedisCache(
-            _tlocal.red, NAMESPACE, redis_coord_key, autoflush=False, updating=False
+        redis_cache = search_cache.ScheduleCache(
+            use_redis=(_tlocal.red, NAMESPACE),
+            min_dim=REDIS_MIN_DIM,
+            allowed_spec_types=(specs.Load, specs.Store, specs.Zero),
+        )
+        local_cache = search_cache.ScheduleCache(max_dim=REDIS_MIN_DIM)
+        _tlocal.results_cache = search_cache.ChainCache(
+            [redis_cache, local_cache], put_all=True
         )
     assert _tlocal.red is not None and _tlocal.results_cache is not None
 
@@ -257,11 +254,11 @@ def _compute_block(
                 _tlocal.results_cache, searcher, subproblems_to_run
             )
         _tlocal.loop.run_until_complete(_tlocal.results_cache.flush())
-        _tlocal.loop.run_until_complete(_tlocal.red.close(close_connection_pool=True))
+    _tlocal.loop.run_until_complete(_tlocal.red.close(close_connection_pool=True))
 
 
 def _step_compute_block(
-    results_cache: search_cache.RedisCache,
+    results_cache: search_cache.ScheduleCache,
     searcher: dp.Search,
     subproblems_to_run: Iterable[tuple[specs.Spec, pruning.StandardMemoryLimits]],
 ) -> list[tuple[specs.Spec, pruning.StandardMemoryLimits]]:
@@ -290,6 +287,25 @@ def _step_compute_block(
             )
         )
         assert len(subproblems_requested) == len(cache_results_flat)
+
+        # Check that we don't miss any Specs with coordinates below the current Spec
+        # in the data dependency grid.
+        # NOTE: This is checking Spec, not block, coordinates, so if we downscale, we
+        #       might raise for intra-block misses, which may or may not be expected!
+        if CHECK_CROSS_SPEC_MISSES:
+            for (target_spec, _), request, cache_result in zip(
+                subproblems_to_run, subproblems_requested, cache_results_flat
+            ):
+                if cache_result is None and _spec_to_spec_coordinate(
+                    target_spec
+                ) != _spec_to_spec_coordinate(request[0]):
+                    raise Exception(
+                        f"Unexpected, cross-task miss! While computing {target_spec} "
+                        f"at coordinate {_spec_to_spec_coordinate(target_spec)}, "
+                        f"missed {', '.join(map(str, request))} at coordinate "
+                        f"{_spec_to_spec_coordinate(request[0])}."
+                    )
+
         cache_results_grouped = {}
         taken = 0
         for k in needs:
@@ -446,41 +462,31 @@ def _grid_for_query_spec(spec: specs.Spec, downscale: int) -> geometry.Grid[spec
     )
 
 
-async def _compute_moves_subgraphs(
-    executor: concurrent.futures.Executor,
-    size: int,
-    dt: dtypes.Dtype,
-    serial_only: bool,
-    downscale: int,
-    max_rank: int,
-    *,
-    redis_url: str,
-    pb_offset: int = 0,
-) -> None:
-    if max_rank < 2:
-        raise ValueError("max_rank must be at least 2")
+async def _compute_dtype_graph(args, redis_url, target, executor, dt_idx, dt) -> None:
+    if args.moves_rank < 2:
+        raise ValueError("args.moves_rank must be at least 2")
 
     target = system_config.current_target()
 
-    for rank in range(1, max_rank + 1):
+    for rank in range(1, args.moves_rank + 1):
         load_spec = specs.Load(
-            source=target.tensor_spec((size,) * rank, dtype=dt),
-            destination=target.tensor_spec((size,) * rank, dtype=dt),
-            serial_only=serial_only,
+            source=target.tensor_spec((args.size,) * rank, dtype=dt),
+            destination=target.tensor_spec((args.size,) * rank, dtype=dt),
+            serial_only=args.serial_only,
         )
         store_spec = specs.Store(
-            source=target.tensor_spec((size,) * rank, dtype=dt),
-            destination=target.tensor_spec((size,) * rank, dtype=dt),
-            serial_only=serial_only,
+            source=target.tensor_spec((args.size,) * rank, dtype=dt),
+            destination=target.tensor_spec((args.size,) * rank, dtype=dt),
+            serial_only=args.serial_only,
         )
         zero_spec = specs.Zero(
-            destination=target.tensor_spec((size,) * rank, dtype=dt),
-            serial_only=serial_only,
+            destination=target.tensor_spec((args.size,) * rank, dtype=dt),
+            serial_only=args.serial_only,
         )
 
-        load_grid = _grid_for_query_spec(load_spec, downscale)
-        store_grid = _grid_for_query_spec(store_spec, downscale)
-        zero_grid = _grid_for_query_spec(zero_spec, downscale)
+        load_grid = _grid_for_query_spec(load_spec, args.downscale)
+        store_grid = _grid_for_query_spec(store_spec, args.downscale)
+        zero_grid = _grid_for_query_spec(zero_spec, args.downscale)
 
         # Load and Store have no deps. Zero depends on Store, so it goes last.
         load_fut = _compute_dp_table_graph(
@@ -488,32 +494,19 @@ async def _compute_moves_subgraphs(
             load_grid,
             redis_url=redis_url,
             desc=f"Load, rank {rank}, {dt}",
-            pb_position=pb_offset,
+            pb_position=(dt_idx * 2),
         )
         store_fut = _compute_dp_table_graph(
             executor,
             store_grid,
             redis_url=redis_url,
             desc=f"Store, rank {rank}, {dt}",
-            pb_position=pb_offset + 1,
+            pb_position=(dt_idx * 2) + 1,
         )
         await asyncio.gather(load_fut, store_fut)
         await _compute_dp_table_graph(
             executor, zero_grid, redis_url=redis_url, desc=f"Zero, rank {rank}, {dt}"
         )
-
-
-async def _compute_dtype_graph(args, redis_url, target, executor, dt_idx, dt) -> None:
-    await _compute_moves_subgraphs(
-        executor,
-        args.size,
-        dt,
-        args.serial_only,
-        args.downscale,
-        args.moves_rank,
-        redis_url=redis_url,
-        pb_offset=(dt_idx * 2),
-    )
 
     if not args.moves_only:
         for matmul_cls in (specs.MatmulAccum, specs.Matmul):
