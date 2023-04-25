@@ -606,6 +606,12 @@ class ChainCache(ScheduleCache):
     async def get_many(
         self, subproblems: Sequence[tuple[Spec, pruning.MemoryLimits]]
     ) -> Iterable[Optional[CachedScheduleSet]]:
+        """Return subproblem entries from any of the inner caches.
+
+        This method loops through the inner caches and collects the results from each
+        cache. If a result is found in a cache, it is removed from the remaining indices
+        to be searched.
+        """
         remaining_idxs: list[int] = list(range(len(subproblems)))
         results: list[Optional[CachedScheduleSet]] = [None] * len(remaining_idxs)
         for cache in self._inner_caches:
@@ -621,6 +627,11 @@ class ChainCache(ScheduleCache):
         return results
 
     async def put(self, *args, **kwargs) -> None:
+        """Save an entry to one or all of the inner caches.
+
+        If the put_all flag is set to True, the entry will be put in all the inner
+        caches. Otherwise, the entry will be put only in the first inner cache.
+        """
         if self.put_all:
             for cache in self._inner_caches:
                 await cache.put(*args, **kwargs)
