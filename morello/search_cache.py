@@ -599,37 +599,6 @@ class ScheduleCache:
             return imp
         return imp.replace_children((spec_to_hole(c.spec) for c in imp.children))
 
-    async def _despecify_impl(
-        self, imp: Impl, limits: pruning.StandardMemoryLimits, get_fn
-    ) -> Impl:
-        all_child_limits = limits.transition(imp)
-        assert (
-            all_child_limits is not None
-        ), f"Limits violated while transitioning from {limits} via {imp}"
-        assert len(all_child_limits) == len(imp.children)
-
-        new_children: list[Impl] = []
-        for spec_child, child_limits in zip(imp.children, all_child_limits):
-            assert not spec_child.is_scheduled
-            try:
-                child_results = await get_fn(spec_child.spec, child_limits)
-            except KeyError:
-                raise Exception(
-                    f"Unexpectedly got KeyError while reconstructing "
-                    f"({spec_child.spec}, {child_limits})"
-                )
-            assert len(
-                child_results.contents
-            ), f"Child Spec {spec_child.spec} was not present in cache"
-            if len(child_results.contents) > 1:
-                raise NotImplementedError(
-                    "Need to test proper reductions with top_k > 1. "
-                    f"Got {len(child_results.contents)} results for {spec_child.spec}."
-                )
-            new_children.append(child_results.contents[0][0])
-
-        return imp.replace_children(new_children)
-
 
 class _PendingEntry(Generic[T]):
     __slots__ = ("event", "result")
