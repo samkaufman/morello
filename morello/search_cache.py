@@ -1,8 +1,6 @@
-import asyncio
 import contextlib
 import contextvars
 import dataclasses
-import heapq
 import logging
 import pathlib
 import pickle
@@ -598,50 +596,6 @@ class ScheduleCache:
         if not len(imp.children):
             return imp
         return imp.replace_children((spec_to_hole(c.spec) for c in imp.children))
-
-
-class _PendingEntry(Generic[T]):
-    __slots__ = ("event", "result")
-
-    def __init__(self) -> None:
-        self.event = asyncio.Event()
-        self.result: Optional[T] = None
-
-    def set(self, result: T) -> None:
-        self.result = result
-        self.event.set()
-
-
-class _PriorityCache(Generic[T, U]):
-    """A cache which keeps the top-k entries according to an arbitrary priority."""
-
-    def __init__(self, max_size: int = 160):
-        self._data: dict[T, U] = {}
-        self._heap = []
-        self._index = 0
-        self.max_size = max_size
-
-    def _push(self, priority, item):
-        heapq.heappush(self._heap, (priority, self._index, item))
-        self._index += 1
-
-    def __getitem__(self, key: T) -> U:
-        return self._data[key]
-
-    def set(self, key: T, value: U, priority: Union[int, float]) -> None:
-        self._data[key] = value
-        self._push(priority, key)
-        if len(self._heap) > self.max_size:
-            v = heapq.heappop(self._heap)[-1]
-            del self._data[v]
-            assert len(self._heap) == len(self._data)
-            logger.debug(
-                f"Dropping {v} from cache. Top priorities are now: {self._heap[:5]}"
-            )
-        logger.debug("Cache size: %d", len(self._heap))
-
-    def __len__(self) -> int:
-        return len(self._heap)
 
 
 class ChainCache(ScheduleCache):
