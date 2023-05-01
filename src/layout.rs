@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{collections::HashSet, fmt::Display};
 
@@ -6,7 +7,7 @@ use crate::{
     target::Target,
 };
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
 pub enum Layout {
     Standard {
         dim_order: SmallVec<[u8; 5]>,
@@ -36,8 +37,8 @@ impl Layout {
 
     fn all_contiguous_abs(&self) -> impl Iterator<Item = Contig> {
         match &self {
-            Layout::Standard { dim_order } => (0u8..(dim_order.len() + 1).try_into().unwrap()),
-            Layout::Packed { dim_count, .. } => (0u8..(*dim_count + 2)),
+            Layout::Standard { dim_order } => 0u8..(dim_order.len() + 1).try_into().unwrap(),
+            Layout::Packed { dim_count, .. } => 0u8..(*dim_count + 2),
         }
     }
 
@@ -63,7 +64,7 @@ impl Layout {
     ) -> u32 {
         match &self {
             Layout::Standard { dim_order: _ } => {
-                let line_size = Tgt::LINE_SIZE;
+                let line_size = Tgt::line_size();
 
                 if contiguous {
                     divrem::DivCeil::div_ceil(
@@ -114,7 +115,10 @@ impl Layout {
         match &self {
             Layout::Standard { dim_order } => {
                 // Check if each of dim_order if is equal to its index.
-                dim_order.iter().enumerate().all(|(i, &d)| i == d.into())
+                dim_order
+                    .iter()
+                    .enumerate()
+                    .all(|(i, &d)| i == usize::from(d))
             }
             _ => false,
         }

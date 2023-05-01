@@ -1,7 +1,9 @@
 use crate::common::{Dtype, Problem};
 use crate::pprint::pprint;
+use crate::table::{NullDatabaseIOStore, SqliteIOStore};
 use crate::target::{Target, X86MemoryLevel, X86Target};
-use crate::tensorspec::TensorSpec;
+
+use clap::Parser;
 use smallvec::smallvec;
 
 mod alignment;
@@ -11,7 +13,6 @@ mod imp;
 mod layout;
 mod memorylimits;
 mod pprint;
-mod scheduling;
 mod search;
 mod spec;
 mod table;
@@ -20,27 +21,19 @@ mod tensorspec;
 mod tiling;
 mod utils;
 
+#[derive(clap::Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {}
+
 fn main() {
     env_logger::init();
 
-    let mut db = table::Database::<X86Target>::new();
-    let rm = layout::row_major(2);
+    let args = Args::parse();
 
-    let _load_spec = spec::Spec::Load::<X86Target> {
-        outer_tensor_spec: TensorSpec::new(
-            smallvec![128, 128],
-            Dtype::Uint32,
-            rm.contiguous_full(),
-            true,
-            X86MemoryLevel::GL,
-            rm.clone(),
-            None,
-        ),
-        inner_level: X86MemoryLevel::L1,
-        inner_layout: rm.clone(),
-        inner_vector_shape: None,
-        serial_only: true,
-    };
+    let mut db = table::Database::<X86Target, _>::new(SqliteIOStore::new(std::path::Path::new(
+        "db.sqlite3",
+    )));
+    let rm = layout::row_major(2);
 
     let matmul_spec = spec::Spec::Matmul::<X86Target> {
         accum: false,
@@ -72,5 +65,5 @@ fn main() {
         hits + misses
     );
 
-    pprint(&db, &problem);
+    pprint(&mut db, &problem);
 }

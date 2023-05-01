@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 
 use smallvec::SmallVec;
@@ -9,12 +10,12 @@ use crate::{
     utils::prev_power_of_two,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Deserialize, Serialize)]
 pub enum MemoryLimits {
     Standard(MemVec),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
 pub struct MemVec(SmallVec<[u64; MAX_LEVEL_COUNT]>);
 
 impl MemoryLimits {

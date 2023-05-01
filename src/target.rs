@@ -9,6 +9,8 @@ use crate::layout::{row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::spec::Spec;
 use log::warn;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
@@ -16,7 +18,6 @@ use std::fmt::{Debug, Display};
 pub const MAX_LEVEL_COUNT: usize = 4;
 
 pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug {
-    const LINE_SIZE: u32;
     type Level: MemoryLevel;
 
     fn line_size() -> u32;
@@ -32,7 +33,9 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug {
     fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = ImplNode<Self>>>;
 }
 
-pub trait MemoryLevel: PartialOrd + Eq + Display + Debug + std::hash::Hash + Copy {
+pub trait MemoryLevel:
+    PartialOrd + Eq + Display + Debug + std::hash::Hash + Copy + DeserializeOwned + Serialize
+{
     fn is_addressed(&self) -> bool;
     fn cache_hit_cost(&self) -> MainCost;
     fn vector_bytes(&self) -> u32;
@@ -41,12 +44,10 @@ pub trait MemoryLevel: PartialOrd + Eq + Display + Debug + std::hash::Hash + Cop
     }
 }
 
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, Serialize)]
 pub struct X86Target;
 
 impl Target for X86Target {
-    const LINE_SIZE: u32 = 32;
-
     type Level = X86MemoryLevel;
 
     fn line_size() -> u32 {
@@ -128,7 +129,7 @@ impl Target for X86Target {
     }
 }
 
-#[derive(Eq, PartialEq, Debug, Copy, Clone, Hash)]
+#[derive(Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize)]
 pub enum X86MemoryLevel {
     RF,
     VRF,

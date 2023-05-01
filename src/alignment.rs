@@ -3,6 +3,7 @@ use crate::layout::Layout;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::tiling::PartialTile;
+
 use log::warn;
 
 pub fn aligned_approx<Tgt: Target>(
@@ -60,7 +61,7 @@ fn aligned_approx_standard_simple<Tgt: Target>(
         if parent_shape[pd_idx_usize] == tile_shape[pd_idx_usize] {
             continue;
         }
-        if (step_values * u32::from(parent_dtype.size())) % Tgt::LINE_SIZE != 0 {
+        if (step_values * u32::from(parent_dtype.size())) % Tgt::line_size() != 0 {
             return false;
         }
     }

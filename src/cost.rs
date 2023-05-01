@@ -1,5 +1,3 @@
-use std::cmp;
-
 use crate::imp::{movelet_inner_tensorspec, ImplNode};
 use crate::memorylimits::MemVec;
 use crate::spec::Spec;
@@ -7,11 +5,14 @@ use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::utils::snap_availables_up_memvec;
 
+use serde::{Deserialize, Serialize};
+use std::cmp;
+
 const INST_COST: MainCost = 1000;
 const ASSIGN_INST_COST: MainCost = 10;
 const MAX_COST: MainCost = u64::MAX;
 
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Deserialize, Serialize)]
 pub struct Cost {
     pub main: MainCost,
     pub peaks: MemVec,

@@ -1,11 +1,11 @@
+use crate::table::DatabaseIOStore;
 use crate::{common::Problem, table::Database, target::Target};
-use prettytable::{
-    self,
-    format,
-    row
-};
+use prettytable::{self, format, row};
 
-pub fn pprint<Tgt: Target>(db: &Database<Tgt>, root: &Problem<Tgt>) {
+pub fn pprint<Tgt: Target, S: DatabaseIOStore<Tgt>>(
+    db: &mut Database<Tgt, S>,
+    root: &Problem<Tgt>,
+) {
     let mut table = prettytable::Table::new();
     table.set_titles(row!["Impl", "Spec", "Cost"]);
     pformat_visit(&mut table, db, root, 0);
@@ -24,9 +24,9 @@ pub fn pprint<Tgt: Target>(db: &Database<Tgt>, root: &Problem<Tgt>) {
     table.printstd()
 }
 
-fn pformat_visit<Tgt: Target>(
+fn pformat_visit<Tgt: Target, S: DatabaseIOStore<Tgt>>(
     table: &mut prettytable::Table,
-    db: &Database<Tgt>,
+    db: &mut Database<Tgt, S>,
     root: &Problem<Tgt>,
     depth: usize,
 ) {

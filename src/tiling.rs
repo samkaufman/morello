@@ -1,19 +1,20 @@
 use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Shape};
 use crate::spec::Spec;
+use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::fmt::Debug;
 
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub enum PartialTile {
     Simple(Shape),
     ConvImage(Shape, Shape),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Tile {
     pub partial: PartialTile,
     pub source_idx: u8,

@@ -1,10 +1,11 @@
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::layout::Layout;
 use crate::target::{MemoryLevel, Target};
 
-#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash, Deserialize, Serialize)]
 pub struct TensorSpec<Tgt: Target> {
     dim_sizes: Shape, // TODO: Rename to shape
     dtype: Dtype,

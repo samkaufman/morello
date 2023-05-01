@@ -1,7 +1,7 @@
 use crate::common::Problem;
 use crate::cost::Cost;
 use crate::imp::ImplNode;
-use crate::table::Database;
+use crate::table::{Database, DatabaseIOStore};
 use crate::target::Target;
 
 struct ImplReducer<Tgt: Target> {
@@ -11,8 +11,8 @@ struct ImplReducer<Tgt: Target> {
 
 // TODO: Would be better to return a reference to the database, not a clone.
 /// Computes an optimal Impl for `goal` and stores it in `db`.
-pub fn top_down<Tgt: Target>(
-    db: &mut Database<Tgt>,
+pub fn top_down<Tgt: Target, S: DatabaseIOStore<Tgt>>(
+    db: &mut Database<Tgt, S>,
     goal: &Problem<Tgt>,
     top_k: usize,
 ) -> (Vec<(ImplNode<Tgt>, Cost)>, u64, u64) {

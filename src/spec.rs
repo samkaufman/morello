@@ -6,15 +6,17 @@ use crate::target::MemoryLevel;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::tiling::PartialTile;
+
+use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec, ToSmallVec};
 use std::fmt::Display;
 use std::iter::Iterator;
 use std::iter::{self, once};
 
-use smallvec::{smallvec, SmallVec, ToSmallVec};
-
 const LIMIT_VECTORS_TO_ONE_DIM: bool = true;
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(bound = "")]
 pub enum Spec<Tgt: Target> {
     Matmul {
         accum: bool,

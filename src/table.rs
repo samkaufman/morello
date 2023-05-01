@@ -4,29 +4,72 @@ use crate::imp::ImplNode;
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::spec::Spec;
 use crate::target::Target;
-use std::collections::HashMap;
+use rusqlite::params_from_iter;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path;
 
-// An extremely simple cache, mapping Specs and memory bounds to implementations.
-pub struct Database<Tgt: Target> {
+const SQLITE_BATCH_SIZE: usize = 20_000;
+
+pub struct Database<Tgt: Target, S: DatabaseIOStore<Tgt>> {
     grouped_entries: HashMap<Spec<Tgt>, Entry<Tgt>>,
+    store: S,
 }
 
-#[derive(Debug)]
-struct Entry<Tgt: Target> {
+// TODO: Entry should not need to be public.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(bound = "")]
+pub struct Entry<Tgt: Target> {
     ranges: Vec<(MemVec, MemVec)>,
     values: Vec<Vec<(ImplNode<Tgt>, Cost)>>,
 }
 
-impl<Tgt: Target> Database<Tgt> {
-    pub fn new() -> Self {
+pub trait DatabaseIOStore<Tgt: Target> {
+    fn get(&mut self, spec: &Spec<Tgt>) -> Option<Entry<Tgt>>;
+    fn put_entry(
+        &mut self,
+        _spec: &Spec<Tgt>,
+        _entry: &Entry<Tgt>,
+        grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>,
+    );
+    fn flush(&mut self, grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>);
+}
+
+#[derive(Default)]
+pub struct NullDatabaseIOStore {}
+
+pub struct SqliteIOStore<Tgt: Target> {
+    conn: rusqlite::Connection,
+    queued_spec_inserts: HashSet<Spec<Tgt>>,
+}
+
+impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Database<Tgt, S> {
+    pub fn new(store: S) -> Self {
         Database {
             grouped_entries: HashMap::new(),
+            store: store,
         }
     }
 
-    pub fn get(&self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
-        match (self.grouped_entries.get(&query.0), &query.1) {
-            (Some(entry), MemoryLimits::Standard(query_lims)) => {
+    pub fn get(&mut self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
+        if !self.grouped_entries.contains_key(&query.0) {
+            if let Some(rr) = self.store.get(&query.0) {
+                self.grouped_entries.entry(query.0.clone()).or_insert(rr);
+            }
+        }
+        self.grouped_entries
+            .get(&query.0)
+            .map(|e| self.get_from_entry(&query.1, e))
+            .flatten()
+    }
+
+    fn get_from_entry<'a>(
+        &'a self,
+        mlims: &MemoryLimits,
+        entry: &'a Entry<Tgt>,
+    ) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
+        match mlims {
+            MemoryLimits::Standard(query_lims) => {
                 for (i, (lims, peaks)) in entry.ranges.iter().enumerate() {
                     if query_lims
                         .iter()
@@ -39,7 +82,6 @@ impl<Tgt: Target> Database<Tgt> {
                 }
                 None
             }
-            (None, _) => None,
         }
     }
 
@@ -69,29 +111,38 @@ impl<Tgt: Target> Database<Tgt> {
                 // }
 
                 assert!(impls.len() < 2);
-                let existing: &mut Entry<Tgt> = self.grouped_entries.entry(problem.0).or_default();
-                if impls.is_empty() {
-                    existing.ranges.push((lims, MemVec::zero::<Tgt>()));
-                } else {
-                    existing.ranges.push((lims, impls[0].1.peaks.clone()));
+
+                {
+                    let existing: &mut Entry<Tgt> =
+                        self.grouped_entries.entry(problem.0.clone()).or_default();
+                    if impls.is_empty() {
+                        existing.ranges.push((lims, MemVec::zero::<Tgt>()));
+                    } else {
+                        existing.ranges.push((lims, impls[0].1.peaks.clone()));
+                    }
+                    existing.values.push(impls);
                 }
-                existing.values.push(impls);
+
+                self.store.put_entry(
+                    &problem.0,
+                    self.grouped_entries.get(&problem.0).unwrap(),
+                    &self.grouped_entries,
+                );
             }
         }
 
-        debug_assert!(
-            self.get(&orig_problem).is_some(),
-            "Original problem {:?} was missing after put.  The Spec entry contained: {:?}",
-            orig_problem,
-            self.grouped_entries.get(&orig_problem.0)
-        );
         debug_assert_eq!(
             self.get(&orig_problem),
             Some(&orig_impls),
-            "Original problem {:?} was incorrect after put. The Spec entry contained: {:?}",
-            orig_problem,
-            self.grouped_entries.get(&orig_problem.0)
+            "Original problem {:?} was incorrect after put.",
+            orig_problem
         );
+    }
+}
+
+impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Drop for Database<Tgt, S> {
+    fn drop(&mut self) {
+        self.store.flush(&self.grouped_entries);
     }
 }
 
@@ -101,5 +152,93 @@ impl<Tgt: Target> Default for Entry<Tgt> {
             ranges: Default::default(),
             values: Default::default(),
         }
+    }
+}
+
+impl<Tgt: Target> DatabaseIOStore<Tgt> for NullDatabaseIOStore {
+    fn get(&mut self, _spec: &Spec<Tgt>) -> Option<Entry<Tgt>> {
+        None
+    }
+
+    fn put_entry(
+        &mut self,
+        _spec: &Spec<Tgt>,
+        _entry: &Entry<Tgt>,
+        _grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>,
+    ) {
+        // Do nothing.
+    }
+
+    fn flush(&mut self, _grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>) {}
+}
+
+impl<Tgt: Target> SqliteIOStore<Tgt> {
+    pub fn new(path: &path::Path) -> Self {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.pragma_update(None, "journal_mode", &"WAL").unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS impls (
+            spec  BLOB PRIMARY KEY,
+            entry BLOB
+        )",
+            (),
+        )
+        .unwrap();
+        SqliteIOStore {
+            conn,
+            queued_spec_inserts: HashSet::with_capacity(SQLITE_BATCH_SIZE),
+        }
+    }
+}
+
+impl<Tgt: Target> DatabaseIOStore<Tgt> for SqliteIOStore<Tgt> {
+    fn get(&mut self, spec: &Spec<Tgt>) -> Option<Entry<Tgt>> {
+        let spec_str = serde_json::to_string(&spec).unwrap();
+
+        let mut lookup_stmt = self
+            .conn
+            .prepare("SELECT entry FROM impls WHERE spec = ? LIMIT 1")
+            .unwrap();
+        let mut entry_rows = lookup_stmt.query(&[&spec_str]).unwrap();
+        match entry_rows.next().unwrap() {
+            Some(row) => {
+                let entry_str: String = row.get(0).unwrap();
+                Some(serde_json::from_str(&entry_str).unwrap())
+            }
+            None => None,
+        }
+    }
+
+    fn put_entry(
+        &mut self,
+        spec: &Spec<Tgt>,
+        _entry: &Entry<Tgt>,
+        grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>,
+    ) {
+        if self.queued_spec_inserts.len() < SQLITE_BATCH_SIZE {
+            self.queued_spec_inserts.insert(spec.clone());
+            return;
+        }
+        self.flush(&grouped_entries);
+    }
+
+    fn flush(&mut self, grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>) {
+        let post = vec!["(?, ?)"]
+            .repeat(self.queued_spec_inserts.len())
+            .join(", ");
+
+        self.conn
+            .execute(
+                &format!("INSERT OR REPLACE INTO impls (spec, entry) VALUES {}", post),
+                params_from_iter(self.queued_spec_inserts.iter().flat_map(|spec| {
+                    vec![
+                        serde_json::to_string(spec).unwrap(),
+                        serde_json::to_string(&grouped_entries.get(spec).unwrap()).unwrap(),
+                    ]
+                })),
+            )
+            .unwrap();
+
+        self.queued_spec_inserts.clear();
     }
 }

@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
 use smallvec::SmallVec;
@@ -19,7 +20,7 @@ use crate::tiling::Tile;
 /// computable from this node and its Spec.
 ///
 /// ImplNodes, given their outer Spec, can compute the Specs of their children.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum ImplNode<Tgt: Target> {
     Loop {
         subscripts: SmallVec<[u8; 2]>,
