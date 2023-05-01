@@ -22,11 +22,9 @@ impl<Tgt: Target> Problem<Tgt> {
     pub fn expansions(&self) -> impl Iterator<Item = (ImplNode<Tgt>, Vec<MemoryLimits>)> + '_ {
         let spec_expansions = self.0.expansions();
         spec_expansions.flat_map(|impl_node| {
-            if let Some(mem) = self.1.transition(&self.0, &impl_node) {
-                Some((impl_node, mem))
-            } else {
-                None
-            }
+            self.1
+                .transition(&self.0, &impl_node)
+                .map(|mem| (impl_node, mem))
         })
     }
 }

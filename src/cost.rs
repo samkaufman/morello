@@ -35,7 +35,7 @@ impl Cost {
         let main_cost: MainCost = compute_cost_node(spec, imp, &child_main_costs);
         // TODO: Handle other kinds of memory, not just standard/TinyMap peaks.
         let raised_peaks =
-            snap_availables_up_memvec(imp.peak_memory_from_child_peaks(&spec, &child_peaks), false);
+            snap_availables_up_memvec(imp.peak_memory_from_child_peaks(spec, &child_peaks), false);
         Cost {
             main: main_cost,
             peaks: raised_peaks,
@@ -55,7 +55,7 @@ pub fn move_cost<Tgt: Target>(
     let mut cost: MainCost = 10
         * src_hit_cost
         * MainCost::from(src.layout().estimate_cache_lines::<Tgt>(
-            &src.dim_sizes(),
+            src.dim_sizes(),
             src.dtype(),
             src.is_contiguous(),
         ));
@@ -72,7 +72,7 @@ pub fn move_cost<Tgt: Target>(
     }
 
     if !src.is_contiguous() || src.layout() != dest.layout() {
-        cost = 2 * cost;
+        cost *= 2;
     }
 
     cost

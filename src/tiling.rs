@@ -24,7 +24,7 @@ impl PartialTile {
     pub fn tile<Tgt: Target>(&self, source_idx: u8, source: &TensorSpec<Tgt>) -> Tile {
         match self {
             PartialTile::Simple(dim_sizes) => simple_tile(source, source_idx, dim_sizes),
-            PartialTile::ConvImage(dim_sizes, filter_shape) => todo!(),
+            PartialTile::ConvImage(_dim_sizes, _filter_shape) => todo!(),
         }
     }
 
@@ -78,7 +78,7 @@ pub fn simple_tile<Tgt: Target>(
     );
 
     let partial = PartialTile::Simple(Shape::from(new_dims));
-    let aligned = aligned_approx(&partial, new_dims, &source_spec);
+    let aligned = aligned_approx(&partial, new_dims, source_spec);
     Tile {
         partial,
         source_idx: operand_idx,
@@ -87,10 +87,10 @@ pub fn simple_tile<Tgt: Target>(
 }
 
 fn conv_image_tile<Tgt: Target>(
-    source: &TensorSpec<Tgt>,
-    operand_idx: u8,
-    tile_shape: Shape,
-    filter_shape: Shape,
+    _source: &TensorSpec<Tgt>,
+    _operand_idx: u8,
+    _tile_shape: Shape,
+    _filter_shape: Shape,
 ) {
     todo!()
 }

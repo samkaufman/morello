@@ -19,7 +19,7 @@ pub enum Layout {
 }
 
 impl Layout {
-    fn buffer_indexing_expr(&self, concrete_shape: Shape) -> f64 {
+    fn buffer_indexing_expr(&self, _concrete_shape: Shape) -> f64 {
         todo!()
     }
 
@@ -30,7 +30,7 @@ impl Layout {
         }
     }
 
-    fn contiguous_lub(&self, other_layout: &Layout, a: Contig, b: Contig) -> Contig {
+    fn contiguous_lub(&self, _other_layout: &Layout, _a: Contig, _b: Contig) -> Contig {
         todo!()
     }
 
@@ -41,16 +41,16 @@ impl Layout {
         }
     }
 
-    fn tile_is_contiguous(&self, contiguous_abs: Contig) -> bool {
+    fn tile_is_contiguous(&self, _contiguous_abs: Contig) -> bool {
         todo!()
     }
 
     // TODO: Rename; this actually returns a contiguousness abstraction.
     fn check_tile_contiguity(
         &self,
-        tile_shape: Shape,
-        parent_shape: Shape,
-        parent_contiguous: Contig,
+        _tile_shape: Shape,
+        _parent_shape: Shape,
+        _parent_contiguous: Contig,
     ) -> Contig {
         todo!()
     }
@@ -62,7 +62,7 @@ impl Layout {
         contiguous: bool,
     ) -> u32 {
         match &self {
-            Layout::Standard { dim_order } => {
+            Layout::Standard { dim_order: _ } => {
                 let line_size = Tgt::LINE_SIZE;
 
                 if contiguous {
@@ -71,7 +71,7 @@ impl Layout {
                         line_size,
                     )
                 } else {
-                    let lodims = self.layout_ordered_dims(&shape);
+                    let lodims = self.layout_ordered_dims(shape);
                     let mut real_dims: Vec<u32> = lodims.into_iter().filter(|&d| d > 1).collect();
                     if real_dims.is_empty() {
                         real_dims.push(1);
@@ -121,21 +121,21 @@ impl Layout {
     }
 
     // TODO: Do we really need callers to build a HashSet?
-    fn dim_drop(&self, dropped_dims: HashSet<usize>, contiguous_abs: usize) -> (Layout, Contig) {
+    fn dim_drop(&self, _dropped_dims: HashSet<usize>, _contiguous_abs: usize) -> (Layout, Contig) {
         todo!()
     }
 
     pub fn expand_shape(&self, shape: &[DimSize]) -> Shape {
         match self {
             Layout::Packed {
-                dim_count,
+                dim_count: _,
                 strip_dim,
                 strip_size,
             } => {
                 let mut new_shape = Shape::from_slice(shape);
-                if let Some(strip_dim_idx) = usize::try_from(*strip_dim).ok() {
+                if let Ok(strip_dim_idx) = usize::try_from(*strip_dim) {
                     if let Some(strip_dim_val) = new_shape.get_mut(strip_dim_idx) {
-                        *strip_dim_val = *strip_dim_val / *strip_size;
+                        *strip_dim_val /= *strip_size;
                     } else {
                         panic!("strip_dim index is out of bounds");
                     }
@@ -153,14 +153,14 @@ impl Layout {
         }
     }
 
-    fn transpose(&self, swap_dims: (usize, usize), contiguous_abs: usize) -> (Layout, usize) {
+    fn transpose(&self, _swap_dims: (usize, usize), _contiguous_abs: usize) -> (Layout, usize) {
         todo!()
     }
 
     fn flatten_inner_contiguous_dimensions(
         &self,
-        shape: Shape,
-        contiguous_abs: Contig,
+        _shape: Shape,
+        _contiguous_abs: Contig,
     ) -> Option<(Vec<usize>, HashSet<usize>, usize)> {
         // TODO: Do we really want to return an HashSet? Those are expensive!
         todo!()
@@ -202,9 +202,9 @@ impl Display for Layout {
                 }
             }
             Layout::Packed {
-                dim_count,
-                strip_dim,
-                strip_size,
+                dim_count: _,
+                strip_dim: _,
+                strip_size: _,
             } => todo!(),
         }
     }

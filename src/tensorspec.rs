@@ -1,7 +1,5 @@
 use std::fmt::Display;
 
-use smallvec::SmallVec;
-
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::layout::Layout;
 use crate::target::{MemoryLevel, Target};

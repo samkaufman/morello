@@ -1,5 +1,4 @@
 use std::fmt::Display;
-use std::rc::Rc;
 
 use smallvec::SmallVec;
 
@@ -45,12 +44,6 @@ pub enum ImplNode<Tgt: Target> {
     /* Zero Impls */
     MemsetZero,
     VectorZero,
-}
-
-#[derive(Clone, Debug)]
-pub struct Impl<Tgt: Target> {
-    node: ImplNode<Tgt>,
-    children: Vec<Rc<Impl<Tgt>>>,
 }
 
 /// A data structure containing a description of how much memory is allocated by
@@ -122,7 +115,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                 if movelet_gens_epilogue(destination_level, *source_idx, node_spec) {
                     epilogue = Some(Spec::Store {
                         outer_tensor_spec: operand.clone(),
-                        inner_level: new_mat_spec.level().clone(),
+                        inner_level: new_mat_spec.level(),
                         inner_layout: new_mat_spec.layout(),
                         inner_vector_shape: new_mat_spec.vector_shape().cloned(),
                         serial_only: node_spec.serial_only(),
@@ -276,7 +269,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     for (dim, &sub) in subs.iter().enumerate() {
                         if sub == subscript {
                             let osize = operands[source_usize].dim_sizes()[dim];
-                            return fn_(&tile, dim.try_into().unwrap(), osize);
+                            return fn_(tile, dim.try_into().unwrap(), osize);
                         }
                     }
                 }
@@ -291,8 +284,8 @@ impl<Tgt: Target> ImplNode<Tgt> {
             ImplNode::MoveLet {
                 source_idx,
                 destination_level,
-                destination_layout,
-                destination_vector_shape,
+                destination_layout: _,
+                destination_vector_shape: _,
                 prefetch,
             } => {
                 // We assume bytes_used will be the same for source and destination
@@ -349,7 +342,7 @@ impl<Tgt: Target> Display for ImplNode<Tgt> {
             ImplNode::Loop {
                 subscripts,
                 tiles,
-                parallel,
+                parallel: _,
             } => {
                 write!(
                     f,
@@ -361,7 +354,7 @@ impl<Tgt: Target> Display for ImplNode<Tgt> {
                         .join(", ")
                 )?;
                 for tile in tiles {
-                    write!(f, "{:?}, ", tile.partial);
+                    write!(f, "{:?}, ", tile.partial)?;
                 }
                 write!(f, "(")
             }
@@ -411,12 +404,6 @@ fn movelet_gens_epilogue<Tgt: Target>(
     destination_level.is_addressed() && is_output
 }
 
-impl<Tgt: Target> Impl<Tgt> {
-    pub fn from_node(node: ImplNode<Tgt>, children: Vec<Rc<Impl<Tgt>>>) -> Self {
-        Self { node, children }
-    }
-}
-
 pub fn mult_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
     operands
         .iter()
@@ -450,7 +437,7 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
         operand.dtype(),
         contiguous_abs,
         aligned,
-        destination_level.clone(),
+        *destination_level,
         destination_layout.clone(),
         destination_vector_shape.map(SmallVec::from),
     )

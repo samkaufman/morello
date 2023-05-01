@@ -26,7 +26,7 @@ fn main() {
     let mut db = table::Database::<X86Target>::new();
     let rm = layout::row_major(2);
 
-    let load_spec = spec::Spec::Load::<X86Target> {
+    let _load_spec = spec::Spec::Load::<X86Target> {
         outer_tensor_spec: TensorSpec::new(
             smallvec![128, 128],
             Dtype::Uint32,
@@ -55,7 +55,7 @@ fn main() {
         ],
         alignments: smallvec![true, true, true],
         levels: smallvec![X86MemoryLevel::GL, X86MemoryLevel::GL, X86MemoryLevel::GL],
-        layouts: smallvec![rm.clone(), rm.clone(), rm.clone()],
+        layouts: smallvec![rm.clone(), rm.clone(), rm],
         vector_shapes: smallvec![None, None, None],
         serial_only: true,
     };

@@ -124,7 +124,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 serial_only: _,
             } => {
                 let mut inner_tensor_spec = outer_tensor_spec.clone();
-                inner_tensor_spec.set_level(inner_level.clone(), inner_vector_shape.clone());
+                inner_tensor_spec.set_level(*inner_level, inner_vector_shape.clone());
                 inner_tensor_spec.set_layout(inner_layout.clone());
                 vec![outer_tensor_spec.clone(), inner_tensor_spec]
             }
@@ -172,7 +172,7 @@ impl<Tgt: Target> Spec<Tgt> {
     fn tile_out_expansions(&self) -> impl Iterator<Item = ImplNode<Tgt>> + '_ {
         let serial_only = self.serial_only();
         let output = self.output();
-        gen_tile_sizes::<Tgt>(&output.dim_sizes(), true)
+        gen_tile_sizes::<Tgt>(output.dim_sizes(), true)
             .flat_map(move |tile_shape| {
                 let mut ts = SmallVec::<[Option<ImplNode<Tgt>>; 2]>::new();
                 ts.push(self.tile_out(&tile_shape, false));
@@ -211,14 +211,10 @@ impl<Tgt: Target> Spec<Tgt> {
             return true;
         }
 
-        if new_k >= orig_k {
-            false
-        } else if !operands[0].is_valid_tile_shape(&[m, new_k]) {
-            false
-        } else if !operands[1].is_valid_tile_shape(&[new_k, n]) {
+        if new_k >= orig_k || !operands[0].is_valid_tile_shape(&[m, new_k]) {
             false
         } else {
-            true
+            operands[1].is_valid_tile_shape(&[new_k, n])
         }
     }
 
@@ -236,12 +232,12 @@ impl<Tgt: Target> Spec<Tgt> {
             // Yield actions for movement with register file destination, which
             // includes relayouts in registers and movements from level 1 to RF.
             let i = u8::try_from(i).unwrap();
-            for layout in Tgt::all_layouts_for_shape(&operand.dim_sizes()).collect::<Vec<_>>() {
+            for layout in Tgt::all_layouts_for_shape(operand.dim_sizes()).collect::<Vec<_>>() {
                 for level in Tgt::faster_destination_levels(operand.level()) {
                     let vector_bytes = level.vector_bytes();
                     if vector_bytes > 0 {
                         for vector_shape in gen_vector_shapes(
-                            Some(&operand.dim_sizes()),
+                            Some(operand.dim_sizes()),
                             operand.dtype(),
                             vector_bytes,
                             None,
@@ -272,13 +268,13 @@ impl<Tgt: Target> Spec<Tgt> {
         vector_shape: Option<&[DimSize]>,
         prefetch: bool,
     ) -> ImplNode<Tgt> {
-        return ImplNode::MoveLet {
+        ImplNode::MoveLet {
             source_idx: operand_idx,
             destination_level: dest_level,
             destination_layout: dest_layout,
             destination_vector_shape: vector_shape.map(SmallVec::from),
             prefetch,
-        };
+        }
     }
 
     /// Produces an ImplNode::Loop from this Spec.
@@ -286,7 +282,7 @@ impl<Tgt: Target> Spec<Tgt> {
     /// If the Spec cannot be tiled to that shape, returns None.
     pub fn tile_out(&self, output_shape: &[DimSize], parallel: bool) -> Option<ImplNode<Tgt>> {
         let current_output = self.output();
-        let current_out_shape: &Shape = &current_output.dim_sizes();
+        let current_out_shape: &Shape = current_output.dim_sizes();
 
         assert!(
             !(parallel && self.serial_only()),
@@ -305,7 +301,7 @@ impl<Tgt: Target> Spec<Tgt> {
             .all(|(dim, dim_size)| { *dim_size > 0 && *dim_size <= current_out_shape[dim] }));
         assert_ne!(&current_out_shape[..], output_shape);
 
-        if !current_output.is_valid_tile_shape(&output_shape) {
+        if !current_output.is_valid_tile_shape(output_shape) {
             return None;
         }
 
@@ -327,7 +323,7 @@ impl<Tgt: Target> Spec<Tgt> {
         {
             // Toss out partial tiles with the same TensorSpec as their source,
             // since these weren't affected by the output tiling.
-            if !original_input.is_valid_tile_shape(&updated_input.dim_sizes()) {
+            if !original_input.is_valid_tile_shape(updated_input.dim_sizes()) {
                 return None;
             }
             if original_input.dim_sizes() != updated_input.dim_sizes() {
@@ -359,8 +355,8 @@ impl<Tgt: Target> Spec<Tgt> {
         let rhs = &operands[1];
         assert!(size < lhs.dim_sizes()[1]);
 
-        let left_view = PartialTile::Simple(smallvec![lhs.dim_sizes()[0], size]).tile(0, &lhs);
-        let right_view = PartialTile::Simple(smallvec![size, rhs.dim_sizes()[1]]).tile(1, &rhs);
+        let left_view = PartialTile::Simple(smallvec![lhs.dim_sizes()[0], size]).tile(0, lhs);
+        let right_view = PartialTile::Simple(smallvec![size, rhs.dim_sizes()[1]]).tile(1, rhs);
 
         let split_subscript = *self.operands_dim_subscripts()[0].last().unwrap();
 
@@ -430,7 +426,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 *layouts = new_operands.iter().map(|o| o.layout()).collect();
                 *vector_shapes = new_operands
                     .iter()
-                    .map(|o| o.vector_shape().map(|vs| vs.clone()))
+                    .map(|o| o.vector_shape().cloned())
                     .collect();
             }
             Spec::Load {
@@ -502,37 +498,29 @@ fn gen_tile_sizes<Tgt: Target>(
 ) -> Box<dyn Iterator<Item = Shape>> {
     let tensor_shape = tensor_shape.to_vec();
 
-    if tensor_shape.len() == 0 {
+    if tensor_shape.is_empty() {
         Box::new(std::iter::empty())
     } else if tensor_shape.len() == 1 {
-        Box::new(
-            dim_range(tensor_shape[0], true)
-                .map(move |d| {
-                    if drop_given && d == tensor_shape[0] {
-                        return None;
-                    }
-                    Some(smallvec![d])
-                })
-                .flatten(),
-        )
+        Box::new(dim_range(tensor_shape[0], true).filter_map(move |d| {
+            if drop_given && d == tensor_shape[0] {
+                return None;
+            }
+            Some(smallvec![d])
+        }))
     } else {
         Box::new(
-            gen_tile_sizes::<Tgt>(&tensor_shape[1..], false)
-                .map(move |rest| {
-                    let tensor_shape = tensor_shape.clone();
-                    dim_range(tensor_shape[0], true)
-                        .map(move |d| {
-                            let mut new_shape = smallvec![d];
-                            new_shape.extend(rest.clone());
-                            if drop_given && tensor_shape == &new_shape[..] {
-                                None
-                            } else {
-                                Some(new_shape)
-                            }
-                        })
-                        .flatten()
+            gen_tile_sizes::<Tgt>(&tensor_shape[1..], false).flat_map(move |rest| {
+                let tensor_shape = tensor_shape.clone();
+                dim_range(tensor_shape[0], true).flat_map(move |d| {
+                    let mut new_shape = smallvec![d];
+                    new_shape.extend(rest.clone());
+                    if drop_given && tensor_shape == new_shape[..] {
+                        None
+                    } else {
+                        Some(new_shape)
+                    }
                 })
-                .flatten(),
+            }),
         )
     }
 }
@@ -578,7 +566,7 @@ pub fn gen_vector_shapes(
                 })
                 .map(move |i| {
                     let mut v = vec![1; rank.into()];
-                    v[i] = adjusted_vector_bytes.into();
+                    v[i] = adjusted_vector_bytes;
                     v
                 }),
         )

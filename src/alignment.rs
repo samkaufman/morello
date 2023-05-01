@@ -19,7 +19,7 @@ pub fn aligned_approx<Tgt: Target>(
             aligned_approx_standard_simple::<Tgt>(
                 tile_shape,
                 dim_order.as_slice(),
-                &parent.dim_sizes(),
+                parent.dim_sizes(),
                 &parent.dtype(),
             )
         }
@@ -30,7 +30,7 @@ pub fn aligned_approx<Tgt: Target>(
                 (0u8..tile_expanded.len().try_into().unwrap())
                     .collect::<Vec<_>>()
                     .as_slice(),
-                &parent.layout().expand_shape(&parent.dim_sizes()),
+                &parent.layout().expand_shape(parent.dim_sizes()),
                 &parent.dtype(),
             )
         }
@@ -42,14 +42,6 @@ pub fn aligned_approx<Tgt: Target>(
                 warn!("No alignment analysis for non-batch convolution");
                 false
             }
-        }
-        (_, _) => {
-            warn!(
-                "No alignment analysis for {:?} and {:?}; assuming unaligned",
-                partial_tile,
-                parent.layout()
-            );
-            false
         }
     }
 }

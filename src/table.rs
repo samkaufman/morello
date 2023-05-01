@@ -70,12 +70,10 @@ impl<Tgt: Target> Database<Tgt> {
 
                 assert!(impls.len() < 2);
                 let existing: &mut Entry<Tgt> = self.grouped_entries.entry(problem.0).or_default();
-                if impls.len() == 0 {
-                    existing.ranges.push((lims.clone(), MemVec::zero::<Tgt>()));
+                if impls.is_empty() {
+                    existing.ranges.push((lims, MemVec::zero::<Tgt>()));
                 } else {
-                    existing
-                        .ranges
-                        .push((lims.clone(), impls[0].1.peaks.clone()));
+                    existing.ranges.push((lims, impls[0].1.peaks.clone()));
                 }
                 existing.values.push(impls);
             }

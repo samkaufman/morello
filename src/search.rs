@@ -1,7 +1,6 @@
 use crate::common::Problem;
 use crate::cost::Cost;
 use crate::imp::ImplNode;
-use crate::spec::Spec;
 use crate::table::Database;
 use crate::target::Target;
 
@@ -10,44 +9,9 @@ struct ImplReducer<Tgt: Target> {
     top_k: usize,
 }
 
-#[derive(Clone)]
-struct ParentSummary<Tgt: Target> {
-    // Log Specs and operand indices and which level they moved to.
-    movements: Vec<(Spec<Tgt>, u8, Tgt::Level)>,
-}
-
-impl<Tgt: Target> ParentSummary<Tgt> {
-    fn update(
-        &self,
-        original: Option<&ParentSummary<Tgt>>,
-        spec: &Spec<Tgt>,
-        imp: &ImplNode<Tgt>,
-    ) -> ParentSummary<Tgt> {
-        let mut original: ParentSummary<Tgt> = match original {
-            Some(orig) => orig.clone(),
-            None => ParentSummary {
-                movements: Vec::new(),
-            },
-        };
-        match imp {
-            ImplNode::MoveLet {
-                source_idx,
-                destination_level,
-                ..
-            } => {
-                original
-                    .movements
-                    .push((spec.clone(), *source_idx, *destination_level));
-            }
-            _ => (),
-        };
-        original
-    }
-}
-
 // TODO: Would be better to return a reference to the database, not a clone.
 /// Computes an optimal Impl for `goal` and stores it in `db`.
-pub fn top_down<'a, Tgt: Target>(
+pub fn top_down<Tgt: Target>(
     db: &mut Database<Tgt>,
     goal: &Problem<Tgt>,
     top_k: usize,
