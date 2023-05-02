@@ -4,6 +4,8 @@ use crate::table::{NullDatabaseIOStore, SqliteIOStore};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 
 use clap::Parser;
+use common::DimSize;
+use log::info;
 use smallvec::smallvec;
 
 mod alignment;
@@ -23,7 +25,11 @@ mod utils;
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
-struct Args {}
+struct Args {
+    m: DimSize,
+    k: DimSize,
+    n: DimSize,
+}
 
 fn main() {
     env_logger::init();
@@ -37,9 +43,9 @@ fn main() {
 
     let matmul_spec = spec::Spec::Matmul::<X86Target> {
         accum: false,
-        m: 512,
-        k: 512,
-        n: 512,
+        m: args.m,
+        k: args.k,
+        n: args.n,
         dtype: Dtype::Uint32,
         contiguous_abstractions: smallvec![
             rm.contiguous_full(),
@@ -57,8 +63,8 @@ fn main() {
 
     let start_time = std::time::Instant::now();
     let (_, hits, misses) = search::top_down(&mut db, &problem, 1);
-    println!("top_down took {:?}", start_time.elapsed());
-    println!(
+    info!("top_down took {:?}", start_time.elapsed());
+    info!(
         "top_down missed {} times ({:.2}% of {})",
         misses,
         misses as f32 / (hits + misses) as f32,
