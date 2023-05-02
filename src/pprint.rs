@@ -1,23 +1,25 @@
 use crate::table::DatabaseIOStore;
 use crate::{common::Problem, table::Database, target::Target};
-use prettytable::{self, format, row};
+use prettytable::{self, format, row, Cell};
 
 pub fn pprint<Tgt: Target, S: DatabaseIOStore<Tgt>>(
     db: &mut Database<Tgt, S>,
     root: &Problem<Tgt>,
 ) {
     let mut table = prettytable::Table::new();
-    table.set_titles(row!["Impl", "Spec", "Cost"]);
+    let mut titles = row!["", "Spec", "Cost"];
+    for level in Tgt::levels() {
+        titles.add_cell(Cell::new(&level.to_string()));
+    }
+    table.set_titles(titles);
     pformat_visit(&mut table, db, root, 0);
 
     let format = format::FormatBuilder::new()
-        .column_separator('|')
-        .borders('|')
-        .separators(
-            &[format::LinePosition::Top, format::LinePosition::Bottom],
-            format::LineSeparator::new('-', '+', '+', '+'),
+        .separator(
+            format::LinePosition::Title,
+            format::LineSeparator::new('-', ' ', ' ', ' '),
         )
-        .padding(1, 1)
+        .column_separator(' ')
         .build();
     table.set_format(format);
 
@@ -33,11 +35,15 @@ fn pformat_visit<Tgt: Target, S: DatabaseIOStore<Tgt>>(
     let node = db.get(root).unwrap();
     assert!(!node.is_empty(), "Problem not in database: {:?}", root);
     assert_eq!(node.len(), 1);
-    table.add_row(row![
+    let mut r = row![
         format!("{}{}", " ".repeat(depth), node[0].0),
         format!("{}", root.0),
-        format!("{:?}", node[0].1)
-    ]);
+        format!("{:?}", node[0].1.main)
+    ];
+    for level_peak in node[0].1.peaks.iter() {
+        r.add_cell(Cell::new(&format!("{: >4}", level_peak)));
+    }
+    table.add_row(r);
 
     let child_memory_limits = root.1.transition(&root.0, &node[0].0).unwrap();
     for (subspec, mlims) in node[0]

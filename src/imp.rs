@@ -347,17 +347,18 @@ impl<Tgt: Target> Display for ImplNode<Tgt> {
             } => {
                 write!(
                     f,
-                    "Loop([{}]",
+                    "Loop([{}] {})",
                     subscripts
                         .iter()
                         .map(|s| s.to_string())
                         .collect::<Vec<_>>()
+                        .join(", "),
+                    tiles
+                        .iter()
+                        .map(|t| format!("{:?}", t.partial))
+                        .collect::<Vec<_>>()
                         .join(", ")
-                )?;
-                for tile in tiles {
-                    write!(f, "{:?}, ", tile.partial)?;
-                }
-                write!(f, "(")
+                )
             }
             ImplNode::MoveLet {
                 source_idx,
