@@ -223,6 +223,10 @@ impl<Tgt: Target> DatabaseIOStore<Tgt> for SqliteIOStore<Tgt> {
     }
 
     fn flush(&mut self, grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>) {
+        if self.queued_spec_inserts.is_empty() {
+            return;
+        }
+
         let post = vec!["(?, ?)"]
             .repeat(self.queued_spec_inserts.len())
             .join(", ");
