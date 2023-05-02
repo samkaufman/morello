@@ -25,7 +25,8 @@ class SearchCallbacks:
 @cython.dataclasses.dataclass(frozen=False)
 @cython.cclass
 class SearchStats:
-    expansions: int = 0
+    visits: int = 0
+    misses: int = 0
 
 
 # TODO: Just merge this into the cost model. Key and cost distinction is useless.

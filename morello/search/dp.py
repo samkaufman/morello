@@ -173,7 +173,7 @@ class Search:
         assert hole.depth == 1, f"Expected hole to have depth 1; had {hole.depth}"
 
         if stats is not None:
-            stats.expansions += 1
+            stats.visits += 1
 
         unique_specs_visited = 1
         reducer = _ImplReducer(self.top_k)
@@ -194,6 +194,9 @@ class Search:
             #  complete your cached Impls if that's what you want.
             #  This requires the caller to also provide costs for provided Impls.
             return SearchResult(cache_result.contents, cache_result.dependent_paths)
+
+        if stats is not None:
+            stats.misses += 1
 
         # Collect all the sub-problem dependencies for a batched query.
         viable_subproblems, deps = self._collect_subproblems(
