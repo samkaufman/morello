@@ -23,6 +23,6 @@ prune_nested_parallel_loops: contextvars.ContextVar[bool] = contextvars.ContextV
 enable_prefetching_moves: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "enable_prefetching_moves", default=False
 )
-PRUNE_RELAYOUT_CYCLES = True
+PRUNE_RELAYOUT_CYCLES = True  # This prevents recursion, but doesn't avoid expansions.
 BREAK_MOVE_SYMMETRIES = False  # TODO: Remove this code entirely
 BREAK_SEQUENTIAL_TILES = False

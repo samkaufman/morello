@@ -154,7 +154,7 @@ class _TableEntry:
 class ScheduleCache:
     def __init__(
         self,
-        use_redis: Optional[tuple[Any, str]] = None,
+        use_redis: Optional[Any] = None,
         max_dim: Optional[int] = None,
         min_dim: int = -1,
         allowed_spec_types: Optional[tuple[Type[Spec], ...]] = None,
@@ -163,7 +163,7 @@ class ScheduleCache:
         self._rects: dict[Spec, bcarray.BlockCompressedArray] = {}
         self._dirty_rects: set[Spec] = set()
         if use_redis and isinstance(use_redis[0], str):
-            use_redis = (redis.Redis.from_url(use_redis[0]),) + use_redis[1:]
+            use_redis = redis.Redis.from_url(use_redis[0])
         self._use_redis = use_redis
         self._shared_local_get_cache = {}
         self._max_dim = max_dim
@@ -416,7 +416,7 @@ class ScheduleCache:
 
             redis_param = None
             if self._use_redis:
-                redis_param = (self._use_redis[0], f"{self._use_redis[1]}-{spec}")
+                redis_param = (self._use_redis, str(spec))
 
             if not redis_param:
                 grid = bcarray.NumpyStore(

@@ -33,7 +33,6 @@ T = TypeVar("T")
 
 MERGE_DIAGONALS = True
 BANK_GROUPS = (("RF", "VRF"), ("L1",), ("GL",))
-NAMESPACE = "BOOP"  # TODO: Generate real namespaces.
 PING_TRIES = 720
 PING_WAIT_SECS = 5
 CONV_CHANNELS = 4
@@ -235,7 +234,7 @@ def _compute_block(
         #
         # TODO: Assert block membership in lambda
         redis_cache = search_cache.ScheduleCache(
-            use_redis=(_tlocal.red, NAMESPACE),
+            use_redis=_tlocal.red,
             min_dim=REDIS_MIN_DIM,
             allowed_spec_types=(specs.Load, specs.Store, specs.Zero),
         )
