@@ -8,12 +8,13 @@ use crate::imp::{
 use crate::layout::{row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::spec::Spec;
-use log::warn;
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
+use std::iter;
 
 pub const MAX_LEVEL_COUNT: usize = 4;
 
@@ -27,7 +28,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug {
     fn levels() -> Vec<Self::Level>;
     fn faster_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
 
-    fn all_layouts_for_shape(shape: &[DimSize]) -> Box<dyn Iterator<Item = Layout>>;
+    fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout>;
 
     /// Yield target-specific expansions of given Spec.
     fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = ImplNode<Self>>>;
@@ -84,9 +85,22 @@ impl Target for X86Target {
         }
     }
 
-    fn all_layouts_for_shape(shape: &[DimSize]) -> Box<dyn Iterator<Item = Layout>> {
-        warn!("Only row-major layout available in search. Others unimplemented.");
-        Box::new(std::iter::once(row_major(shape.len().try_into().unwrap())))
+    fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout> {
+        // warn!("NHWC and packed layouts are unimplemented.");
+
+        let rm_iter = iter::once(row_major(shape.len().try_into().unwrap()));
+        if shape.iter().all(|d| *d == 1) {
+            return rm_iter.collect();
+        }
+        match shape.len() {
+            2 => {
+                let col_major = Layout::Standard {
+                    dim_order: smallvec![1, 0],
+                };
+                rm_iter.chain(iter::once(col_major)).collect()
+            }
+            _ => rm_iter.collect(),
+        }
     }
 
     fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = ImplNode<Self>>> {
@@ -122,7 +136,6 @@ impl Target for X86Target {
                 if vectorzero_applies_to_operands(&spec.operands()) {
                     microkernels.push(ImplNode::VectorZero);
                 }
-                warn!("Some Zero microkernels missing!");
                 Box::new(microkernels.into_iter())
             }
         }

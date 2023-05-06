@@ -35,7 +35,7 @@ impl Layout {
         todo!()
     }
 
-    fn all_contiguous_abs(&self) -> impl Iterator<Item = Contig> {
+    pub fn all_contiguous_abs(&self) -> impl Iterator<Item = Contig> {
         match &self {
             Layout::Standard { dim_order } => 0u8..(dim_order.len() + 1).try_into().unwrap(),
             Layout::Packed { dim_count, .. } => 0u8..(*dim_count + 2),
@@ -79,7 +79,7 @@ impl Layout {
                     }
                     real_dims[..real_dims.len() - 1].iter().product::<DimSize>()
                         * divrem::DivCeil::div_ceil(
-                            real_dims[real_dims.len()] * DimSize::from(dtype.size()),
+                            real_dims.last().unwrap() * DimSize::from(dtype.size()),
                             line_size,
                         )
                 }
@@ -181,6 +181,14 @@ impl Layout {
                     .collect()
             }
             _ => unimplemented!(),
+        }
+    }
+
+    pub fn canonicalize_for_shape(&self, shape: &[DimSize]) -> Layout {
+        if shape.iter().all(|d| *d == 1) {
+            row_major(shape.len().try_into().unwrap())
+        } else {
+            self.clone()
         }
     }
 }

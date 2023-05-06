@@ -4,16 +4,19 @@ use crate::imp::ImplNode;
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::spec::Spec;
 use crate::target::Target;
+
+use log::warn;
 use rusqlite::params_from_iter;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::path;
 
-const SQLITE_BATCH_SIZE: usize = 20_000;
+use std::collections::{HashMap, HashSet};
+use std::path::{self, PathBuf};
+
+const SQLITE_BATCH_SIZE: usize = 8_000;
 
 pub struct Database<Tgt: Target, S: DatabaseIOStore<Tgt>> {
     grouped_entries: HashMap<Spec<Tgt>, Entry<Tgt>>,
-    store: S,
+    store: std::sync::RwLock<S>,
 }
 
 // TODO: Entry should not need to be public.
@@ -39,7 +42,8 @@ pub trait DatabaseIOStore<Tgt: Target> {
 pub struct NullDatabaseIOStore {}
 
 pub struct SqliteIOStore<Tgt: Target> {
-    conn: rusqlite::Connection,
+    path: PathBuf,
+    conn_local: thread_local::ThreadLocal<rusqlite::Connection>,
     queued_spec_inserts: HashSet<Spec<Tgt>>,
 }
 
@@ -47,20 +51,20 @@ impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Database<Tgt, S> {
     pub fn new(store: S) -> Self {
         Database {
             grouped_entries: HashMap::new(),
-            store: store,
+            store: std::sync::RwLock::new(store),
         }
     }
 
-    pub fn get(&mut self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
-        if !self.grouped_entries.contains_key(&query.0) {
-            if let Some(rr) = self.store.get(&query.0) {
-                self.grouped_entries.entry(query.0.clone()).or_insert(rr);
+    pub fn get(&self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
+        let gotten = self.grouped_entries.get(&query.0);
+        if gotten.is_none() {
+            if let Some(_rr) = self.store.write().unwrap().get(&query.0) {
+                warn!("Not saving entry loaded from SQLite");
+                // self.grouped_entries.entry(query.0.clone()).or_insert(rr);
+                // TODO: Return
             }
         }
-        self.grouped_entries
-            .get(&query.0)
-            .map(|e| self.get_from_entry(&query.1, e))
-            .flatten()
+        gotten.and_then(|e| self.get_from_entry(&query.1, e))
     }
 
     fn get_from_entry<'a>(
@@ -94,23 +98,7 @@ impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Database<Tgt, S> {
         // TODO: How to treat non-powers of two memory bounds?
         match problem.1 {
             MemoryLimits::Standard(lims) => {
-                // for intermediate_memory in lims
-                //     .iter()
-                //     .zip(&impls)
-                //     .map(|(l, p)| p.1.main..l + 1) // TODO: next power of two
-                //     .multi_cartesian_product()
-                // // TODO: Product of powers of two
-                // {
-                //     self.entries.insert(
-                //         Problem(
-                //             problem.0.clone(),
-                //             MemoryLimits::Standard(intermediate_memory.into()),
-                //         ),
-                //         impls.clone(),
-                //     );
-                // }
-
-                assert!(impls.len() < 2);
+                assert!(impls.len() <= 1);
 
                 {
                     let existing: &mut Entry<Tgt> =
@@ -123,7 +111,7 @@ impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Database<Tgt, S> {
                     existing.values.push(impls);
                 }
 
-                self.store.put_entry(
+                self.store.write().unwrap().put_entry(
                     &problem.0,
                     self.grouped_entries.get(&problem.0).unwrap(),
                     &self.grouped_entries,
@@ -142,7 +130,7 @@ impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Database<Tgt, S> {
 
 impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Drop for Database<Tgt, S> {
     fn drop(&mut self) {
-        self.store.flush(&self.grouped_entries);
+        self.store.write().unwrap().flush(&self.grouped_entries);
     }
 }
 
@@ -174,8 +162,10 @@ impl<Tgt: Target> DatabaseIOStore<Tgt> for NullDatabaseIOStore {
 
 impl<Tgt: Target> SqliteIOStore<Tgt> {
     pub fn new(path: &path::Path) -> Self {
+        // Set up the database, but then discard this connection. Connections
+        // will subsequently be created lazily, per thread.
         let conn = rusqlite::Connection::open(path).unwrap();
-        conn.pragma_update(None, "journal_mode", &"WAL").unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
         conn.execute(
             "CREATE TABLE IF NOT EXISTS impls (
             spec  BLOB PRIMARY KEY,
@@ -184,8 +174,10 @@ impl<Tgt: Target> SqliteIOStore<Tgt> {
             (),
         )
         .unwrap();
+
         SqliteIOStore {
-            conn,
+            path: path.to_owned(),
+            conn_local: thread_local::ThreadLocal::new(),
             queued_spec_inserts: HashSet::with_capacity(SQLITE_BATCH_SIZE),
         }
     }
@@ -193,13 +185,17 @@ impl<Tgt: Target> SqliteIOStore<Tgt> {
 
 impl<Tgt: Target> DatabaseIOStore<Tgt> for SqliteIOStore<Tgt> {
     fn get(&mut self, spec: &Spec<Tgt>) -> Option<Entry<Tgt>> {
+        let path = &self.path;
+        let conn = self
+            .conn_local
+            .get_or(|| rusqlite::Connection::open(path).unwrap());
+
         let spec_str = serde_json::to_string(&spec).unwrap();
 
-        let mut lookup_stmt = self
-            .conn
+        let mut lookup_stmt = conn
             .prepare("SELECT entry FROM impls WHERE spec = ? LIMIT 1")
             .unwrap();
-        let mut entry_rows = lookup_stmt.query(&[&spec_str]).unwrap();
+        let mut entry_rows = lookup_stmt.query([&spec_str]).unwrap();
         match entry_rows.next().unwrap() {
             Some(row) => {
                 let entry_str: String = row.get(0).unwrap();
@@ -215,11 +211,10 @@ impl<Tgt: Target> DatabaseIOStore<Tgt> for SqliteIOStore<Tgt> {
         _entry: &Entry<Tgt>,
         grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>,
     ) {
-        if self.queued_spec_inserts.len() < SQLITE_BATCH_SIZE {
-            self.queued_spec_inserts.insert(spec.clone());
-            return;
+        self.queued_spec_inserts.insert(spec.clone());
+        if self.queued_spec_inserts.len() >= SQLITE_BATCH_SIZE {
+            self.flush(grouped_entries);
         }
-        self.flush(&grouped_entries);
     }
 
     fn flush(&mut self, grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>) {
@@ -231,7 +226,9 @@ impl<Tgt: Target> DatabaseIOStore<Tgt> for SqliteIOStore<Tgt> {
             .repeat(self.queued_spec_inserts.len())
             .join(", ");
 
-        self.conn
+        self.conn_local
+            .get()
+            .unwrap()
             .execute(
                 &format!("INSERT OR REPLACE INTO impls (spec, entry) VALUES {}", post),
                 params_from_iter(self.queued_spec_inserts.iter().flat_map(|spec| {

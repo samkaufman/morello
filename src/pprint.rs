@@ -2,10 +2,7 @@ use crate::table::DatabaseIOStore;
 use crate::{common::Problem, table::Database, target::Target};
 use prettytable::{self, format, row, Cell};
 
-pub fn pprint<Tgt: Target, S: DatabaseIOStore<Tgt>>(
-    db: &mut Database<Tgt, S>,
-    root: &Problem<Tgt>,
-) {
+pub fn pprint<Tgt: Target, S: DatabaseIOStore<Tgt>>(db: &Database<Tgt, S>, root: &Problem<Tgt>) {
     let mut table = prettytable::Table::new();
     let mut titles = row!["", "Spec", "Cost"];
     for level in Tgt::levels() {
@@ -28,7 +25,7 @@ pub fn pprint<Tgt: Target, S: DatabaseIOStore<Tgt>>(
 
 fn pformat_visit<Tgt: Target, S: DatabaseIOStore<Tgt>>(
     table: &mut prettytable::Table,
-    db: &mut Database<Tgt, S>,
+    db: &Database<Tgt, S>,
     root: &Problem<Tgt>,
     depth: usize,
 ) {

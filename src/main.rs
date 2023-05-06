@@ -1,6 +1,8 @@
+use std::sync::RwLock;
+
 use crate::common::{Dtype, Problem};
 use crate::pprint::pprint;
-use crate::table::{NullDatabaseIOStore, SqliteIOStore};
+use crate::table::SqliteIOStore;
 use crate::target::{Target, X86MemoryLevel, X86Target};
 
 use clap::Parser;
@@ -11,6 +13,7 @@ use smallvec::smallvec;
 mod alignment;
 mod common;
 mod cost;
+mod geometry;
 mod imp;
 mod layout;
 mod memorylimits;
@@ -36,8 +39,8 @@ fn main() {
 
     let args = Args::parse();
 
-    let mut db = table::Database::<X86Target, _>::new(SqliteIOStore::new(std::path::Path::new(
-        "db.sqlite3",
+    let db = RwLock::new(table::Database::<X86Target, _>::new(SqliteIOStore::new(
+        std::path::Path::new("db.sqlite3"),
     )));
     let rm = layout::row_major(2);
 
@@ -62,7 +65,7 @@ fn main() {
     let problem = Problem(matmul_spec, X86Target::max_mem());
 
     let start_time = std::time::Instant::now();
-    let (_, hits, misses) = search::top_down(&mut db, &problem, 1);
+    let (_, hits, misses) = search::top_down(&db, &problem, 1);
     info!("top_down took {:?}", start_time.elapsed());
     info!(
         "top_down missed {} times ({:.2}% of {})",
@@ -71,5 +74,5 @@ fn main() {
         hits + misses
     );
 
-    pprint(&mut db, &problem);
+    pprint(&db.read().unwrap(), &problem);
 }

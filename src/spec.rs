@@ -88,7 +88,7 @@ impl<Tgt: Target> Spec<Tgt> {
                         contiguous_abstractions[0],
                         alignments[0],
                         levels[0],
-                        layouts[0].clone(),
+                        layouts[0].canonicalize_for_shape(&[*m, *k]),
                         vector_shapes[0].clone(),
                     ),
                     TensorSpec::new(
@@ -97,7 +97,7 @@ impl<Tgt: Target> Spec<Tgt> {
                         contiguous_abstractions[1],
                         alignments[1],
                         levels[1],
-                        layouts[1].clone(),
+                        layouts[1].canonicalize_for_shape(&[*k, *n]),
                         vector_shapes[1].clone(),
                     ),
                     TensorSpec::new(
@@ -106,7 +106,7 @@ impl<Tgt: Target> Spec<Tgt> {
                         contiguous_abstractions[2],
                         alignments[2],
                         levels[2],
-                        layouts[2].clone(),
+                        layouts[2].canonicalize_for_shape(&[*m, *n]),
                         vector_shapes[2].clone(),
                     ),
                 ]
@@ -234,7 +234,7 @@ impl<Tgt: Target> Spec<Tgt> {
             // Yield actions for movement with register file destination, which
             // includes relayouts in registers and movements from level 1 to RF.
             let i = u8::try_from(i).unwrap();
-            for layout in Tgt::all_layouts_for_shape(operand.dim_sizes()).collect::<Vec<_>>() {
+            for layout in Tgt::all_layouts_for_shape(operand.dim_sizes()) {
                 for level in Tgt::faster_destination_levels(operand.level()) {
                     let vector_bytes = level.vector_bytes();
                     if vector_bytes > 0 {

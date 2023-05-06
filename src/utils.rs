@@ -1,3 +1,4 @@
+use std::iter;
 use crate::memorylimits::MemVec;
 
 // If true, schedules will be saved as if they had memory limits, for all banks,
@@ -22,18 +23,26 @@ pub fn snap_availables_up_memvec(available: MemVec, always: bool) -> MemVec {
         .collect()
 }
 
-fn bit_length(n: u64) -> u32 {
-    let bits = u64::BITS - n.leading_zeros();
-    if n == 0 {
-        0
-    } else {
-        bits
-    }
+pub fn bit_length(n: u64) -> u32 {
+    u64::BITS - n.leading_zeros()
+}
+
+pub fn bit_length_u32(n: u32) -> u32 {
+    u32::BITS - n.leading_zeros()
 }
 
 pub const fn prev_power_of_two(n: u64) -> u64 {
     let highest_bit_set_idx = (u64::BITS - 1) - (n | 1).leading_zeros();
     (1 << highest_bit_set_idx) & n
+}
+
+pub fn iter_powers_of_two(
+    n: u64,
+    include_zero: bool,
+) -> impl Iterator<Item = u64> + DoubleEndedIterator + Clone {
+    let start = if include_zero { 0 } else { 1 };
+    let top_bits = bit_length(n);
+    (start..top_bits + 1).map(|b| if b == 0 { 0 } else { 2u64.pow(b - 1) })
 }
 
 /// Returns the factors of an integer, in ascending order.
@@ -51,4 +60,32 @@ pub fn factors(x: usize) -> Vec<usize> {
     }
     result.sort_unstable();
     result
+}
+
+pub fn sum_seqs(maxes: &[u32], total: u32) -> Box<dyn Iterator<Item = Vec<u32>>> {
+    let maxes = maxes.to_vec();
+    let len = maxes.len();
+    if len == 0 {
+        Box::new(iter::empty())
+    } else if len == 1 {
+        if maxes[0] >= total {
+            Box::new(iter::once(vec![total]))
+        } else {
+            Box::new(iter::empty())
+        }
+    } else {
+        let obligation = total.saturating_sub(maxes[1..].iter().sum::<u32>());
+        let min_value = u32::min(maxes[0], total);
+
+        let flat_map_iter = (obligation..=min_value).flat_map(move |v| {
+            let maxes_tail = &maxes[1..];
+            sum_seqs(maxes_tail, total - v).map(move |mut suffix| {
+                let mut prefix = vec![v];
+                prefix.append(&mut suffix);
+                prefix
+            })
+        });
+
+        Box::new(flat_map_iter)
+    }
 }

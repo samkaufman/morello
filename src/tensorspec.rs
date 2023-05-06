@@ -26,12 +26,10 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         layout: Layout,
         vector_shape: Option<Shape>,
     ) -> Self {
+        let layout = layout;
+
         if dim_sizes.is_empty() || dim_sizes.iter().any(|&d| d < 1) {
             panic!("Invalid shape: {:?}", dim_sizes);
-        }
-
-        if dim_sizes.iter().all(|&d| d == 1) && !layout.is_row_major() {
-            panic!("If all dimensions are 1, layout must be row-major")
         }
 
         if !layout.applies_to_shape(&dim_sizes) {
@@ -49,15 +47,11 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
         if let Some(vs) = &vector_shape {
             if vs.len() != dim_sizes.len() {
-                panic!("vector_shape must have same rank as dim_sizes")
+                panic!(
+                    "vector_shape must have same rank as dim_sizes, but vector_shape was {:?} and dim_sizes was {:?}",
+                    vs, dim_sizes
+                );
             }
-        }
-
-        if !layout.applies_to_shape(&dim_sizes) {
-            panic!(
-                "Layout {:?} does not apply to shape {:?} with dtype {:?}",
-                layout, dim_sizes, dtype
-            )
         }
 
         TensorSpec {
@@ -141,8 +135,11 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.vector_shape = vector_shape;
     }
 
-    pub fn set_dim_sizes(&mut self, dim_sizes: Shape) {
+    pub fn set_dim_sizes(&mut self, dim_sizes: Shape, canonicalize_layout: bool) {
         self.dim_sizes = dim_sizes;
+        if canonicalize_layout {
+            self.layout = self.layout.canonicalize_for_shape(&self.dim_sizes);
+        }
     }
 
     pub fn set_aligned(&mut self, aligned: bool) {

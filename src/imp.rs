@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 
 use crate::common::{DimSize, Shape};
 use crate::layout::Layout;
@@ -56,8 +56,20 @@ pub struct MemoryAllocation {
 
 impl<Tgt: Target> ImplNode<Tgt> {
     pub fn child_count(&self, node_spec: &Spec<Tgt>) -> usize {
-        // TODO: This is slow. Just special-case each.
-        self.child_specs(node_spec).len()
+        match self {
+            ImplNode::Loop { .. } => 1,
+            ImplNode::MatmulAccumBlock => 2,
+            ImplNode::Mult
+            | ImplNode::BroadcastVecMult
+            | ImplNode::ValueAssign
+            | ImplNode::VectorAssign
+            | ImplNode::MemsetZero
+            | ImplNode::VectorZero => 0,
+            _ => {
+                // This is slow. Ideally, all cases are implemented.
+                self.child_specs(node_spec).len()
+            }
+        }
     }
 
     pub fn child_specs(&self, node_spec: &Spec<Tgt>) -> Vec<Spec<Tgt>> {
@@ -73,7 +85,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     // TODO: This should probably be wrapped in a method so that
                     //       TensorSpec can enforce invariants if it wants.
                     let ref_op = &mut new_operands[usize::from(*source_idx)];
-                    ref_op.set_dim_sizes(partial.dim_sizes().clone());
+                    ref_op.set_dim_sizes(partial.dim_sizes().clone(), true);
                     ref_op.set_aligned(*aligned);
                 }
                 let mut inner_spec = node_spec.clone();
@@ -97,7 +109,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                 let new_mat_spec = movelet_inner_tensorspec(
                     operand,
                     destination_level,
-                    destination_layout,
+                    &destination_layout.canonicalize_for_shape(operand.dim_sizes()),
                     destination_vector_shape.as_ref().map(|v| v.as_slice()),
                 );
 
@@ -162,7 +174,11 @@ impl<Tgt: Target> ImplNode<Tgt> {
                             contiguous_abstractions: contiguous_abstractions.clone(),
                             alignments: alignments.clone(),
                             levels: levels.clone(),
-                            layouts: layouts.clone(),
+                            layouts: smallvec![
+                                layouts[0].canonicalize_for_shape(&[*m, *k]),
+                                layouts[1].canonicalize_for_shape(&[*k, *n]),
+                                layouts[2].canonicalize_for_shape(&[*m, *n])
+                            ],
                             vector_shapes: vector_shapes.clone(),
                             serial_only: *serial_only,
                         },

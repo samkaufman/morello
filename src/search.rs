@@ -1,3 +1,5 @@
+use std::sync::RwLock;
+
 use crate::common::Problem;
 use crate::cost::Cost;
 use crate::imp::ImplNode;
@@ -12,7 +14,7 @@ struct ImplReducer<Tgt: Target> {
 // TODO: Would be better to return a reference to the database, not a clone.
 /// Computes an optimal Impl for `goal` and stores it in `db`.
 pub fn top_down<Tgt: Target, S: DatabaseIOStore<Tgt>>(
-    db: &mut Database<Tgt, S>,
+    db: &RwLock<Database<Tgt, S>>,
     goal: &Problem<Tgt>,
     top_k: usize,
 ) -> (Vec<(ImplNode<Tgt>, Cost)>, u64, u64) {
@@ -21,7 +23,7 @@ pub fn top_down<Tgt: Target, S: DatabaseIOStore<Tgt>>(
     }
 
     // First, check if the problem is already in the database.
-    if let Some(stored) = db.get(goal) {
+    if let Some(stored) = db.read().unwrap().get(goal) {
         return (stored.clone(), 1, 0);
     }
 
@@ -65,7 +67,7 @@ pub fn top_down<Tgt: Target, S: DatabaseIOStore<Tgt>>(
 
     // Save to memo. table and return.
     let final_result = reducer.finalize();
-    db.put(goal.clone(), final_result.clone());
+    db.write().unwrap().put(goal.clone(), final_result.clone());
     (final_result, hits, misses)
 }
 
