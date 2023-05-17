@@ -10,7 +10,9 @@ import sympy
 
 from .. import impl, utils
 from ..dtypes import Dtype
+from ..system_config.cpu import X86Target, ArmTarget
 from ..tensor import Tensor
+from ..system_config.state import current_target
 from . import common, expr_utils
 from .common import OperandDetails
 from .ctensors import (
@@ -562,7 +564,13 @@ def generate_c(
     writer.writeline("#include <stdio.h>")
     writer.writeline("#include <string.h>")
     writer.writeline("#include <time.h>")
-    writer.writeline("#include <immintrin.h>")
+
+    cpu_target = current_target()
+    if isinstance(cpu_target, X86Target):
+        writer.writeline("#include <immintrin.h>")
+    elif isinstance(cpu_target, ArmTarget):
+        writer.writeline("#include <arm_neon.h>")
+
     writer.writeline("#define is_aligned(POINTER, BYTE_COUNT) \\")
     writer.writeline("  (((uintptr_t)(const void *)(POINTER)) % (BYTE_COUNT) == 0)")
 
