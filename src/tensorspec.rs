@@ -17,7 +17,29 @@ pub struct TensorSpec<Tgt: Target> {
 }
 
 impl<Tgt: Target> TensorSpec<Tgt> {
-    pub fn new(
+    pub fn new_canon(
+        dim_sizes: Shape,
+        dtype: Dtype,
+        contiguous_abs: Contig,
+        aligned: bool,
+        level: Tgt::Level,
+        layout: Layout,
+        vector_shape: Option<Shape>,
+    ) -> Self {
+        let mut r = Self::new_noncanon(
+            dim_sizes,
+            dtype,
+            contiguous_abs,
+            aligned,
+            level,
+            layout,
+            vector_shape,
+        );
+        r.canonicalize();
+        r
+    }
+
+    pub fn new_noncanon(
         dim_sizes: Shape,
         dtype: Dtype,
         contiguous_abs: Contig,
@@ -135,15 +157,37 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.vector_shape = vector_shape;
     }
 
-    pub fn set_dim_sizes(&mut self, dim_sizes: Shape, canonicalize_layout: bool) {
-        self.dim_sizes = dim_sizes;
-        if canonicalize_layout {
-            self.layout = self.layout.canonicalize_for_shape(&self.dim_sizes);
-        }
+    /// Returns a new TensorSpec with the given shape and alignment.
+    ///
+    /// The result's layout and contiguousness abstraction will have been
+    /// canoncialized for the given shape.
+    pub fn shrink(&mut self, dim_sizes: &Shape, aligned: bool) {
+        self.contiguous_abs =
+            self.layout()
+                .tile_contiguity(dim_sizes, &self.dim_sizes, self.contiguous_abs);
+        self.dim_sizes = dim_sizes.clone();
+        self.layout = self.layout.canonicalize_for_shape(&self.dim_sizes);
+        self.aligned = aligned;
     }
 
-    pub fn set_aligned(&mut self, aligned: bool) {
-        self.aligned = aligned;
+    pub fn canonicalize(&mut self) {
+        // Odd implementation, but concise! `shrink` will canonicalize, so we
+        // pass the same shape and alignment.
+        self.shrink(&self.dim_sizes.clone(), self.aligned);
+    }
+
+    // TODO: Shouldn't need this method. Should be implicit in Spec validity.
+    pub fn can_move_to(&self, dest_layout: &Layout, dest_level: &Tgt::Level) -> bool {
+        if &self.layout() != dest_layout && !dest_level.is_addressed() {
+            return false;
+        }
+        if dest_level.vector_bytes() > 0 {
+            let vol: DimSize = self.dim_sizes().iter().product();
+            if (vol * DimSize::from(self.dtype.size())) % dest_level.vector_bytes() != 0 {
+                return false;
+            }
+        }
+        true
     }
 }
 

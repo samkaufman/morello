@@ -85,8 +85,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     // TODO: This should probably be wrapped in a method so that
                     //       TensorSpec can enforce invariants if it wants.
                     let ref_op = &mut new_operands[usize::from(*source_idx)];
-                    ref_op.set_dim_sizes(partial.dim_sizes().clone(), true);
-                    ref_op.set_aligned(*aligned);
+                    ref_op.shrink(partial.dim_sizes(), *aligned);
                 }
                 let mut inner_spec = node_spec.clone();
                 inner_spec.replace_io(&new_operands);
@@ -450,7 +449,7 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
         destination_layout.contiguous_full()
     };
 
-    TensorSpec::<Tgt>::new(
+    TensorSpec::<Tgt>::new_canon(
         operand.dim_sizes().clone(),
         operand.dtype(),
         contiguous_abs,

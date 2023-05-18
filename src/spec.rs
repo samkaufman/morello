@@ -82,31 +82,31 @@ impl<Tgt: Target> Spec<Tgt> {
                 serial_only: _serial_only,
             } => {
                 vec![
-                    TensorSpec::new(
+                    TensorSpec::new_noncanon(
                         smallvec![*m, *k],
                         *dtype,
                         contiguous_abstractions[0],
                         alignments[0],
                         levels[0],
-                        layouts[0].canonicalize_for_shape(&[*m, *k]),
+                        layouts[0].clone(),
                         vector_shapes[0].clone(),
                     ),
-                    TensorSpec::new(
+                    TensorSpec::new_noncanon(
                         smallvec![*k, *n],
                         *dtype,
                         contiguous_abstractions[1],
                         alignments[1],
                         levels[1],
-                        layouts[1].canonicalize_for_shape(&[*k, *n]),
+                        layouts[1].clone(),
                         vector_shapes[1].clone(),
                     ),
-                    TensorSpec::new(
+                    TensorSpec::new_noncanon(
                         smallvec![*m, *n],
                         *dtype,
                         contiguous_abstractions[2],
                         alignments[2],
                         levels[2],
-                        layouts[2].canonicalize_for_shape(&[*m, *n]),
+                        layouts[2].clone(),
                         vector_shapes[2].clone(),
                     ),
                 ]
@@ -155,6 +155,77 @@ impl<Tgt: Target> Spec<Tgt> {
             Spec::Load { .. } | Spec::Store { .. } => 1,
             Spec::Zero { .. } => 0,
         }
+    }
+
+    pub fn canonicalize(&mut self) {
+        match self {
+            Spec::Matmul {
+                accum: _,
+                m,
+                k,
+                n,
+                dtype: _,
+                contiguous_abstractions,
+                alignments: _,
+                levels: _,
+                layouts,
+                vector_shapes: _,
+                serial_only: _,
+            } => {
+                contiguous_abstractions[0] =
+                    layouts[0].tile_contiguity(&[*m, *k], &[*m, *k], contiguous_abstractions[0]);
+                contiguous_abstractions[1] =
+                    layouts[1].tile_contiguity(&[*k, *n], &[*k, *n], contiguous_abstractions[1]);
+                contiguous_abstractions[2] =
+                    layouts[2].tile_contiguity(&[*m, *n], &[*m, *n], contiguous_abstractions[2]);
+                layouts[0] = layouts[0].canonicalize_for_shape(&[*m, *k]);
+                layouts[1] = layouts[1].canonicalize_for_shape(&[*k, *n]);
+                layouts[2] = layouts[2].canonicalize_for_shape(&[*m, *n]);
+            }
+            Spec::Load {
+                outer_tensor_spec,
+                inner_level: _,
+                inner_layout,
+                inner_vector_shape: _,
+                serial_only: _,
+            }
+            | Spec::Store {
+                outer_tensor_spec,
+                inner_level: _,
+                inner_layout,
+                inner_vector_shape: _,
+                serial_only: _,
+            } => {
+                outer_tensor_spec.canonicalize();
+                inner_layout.canonicalize_for_shape(outer_tensor_spec.dim_sizes());
+            }
+            Spec::Zero {
+                tensor_spec,
+                serial_only: _,
+            } => {
+                tensor_spec.canonicalize();
+            }
+        }
+
+        // TODO: What if you want to call `operands` on a non-canon Spec?
+        debug_assert_eq!(
+            self.operands(),
+            self.operands()
+                .iter()
+                .map(|o| {
+                    let mut o = o.clone();
+                    o.canonicalize();
+                    o
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    pub fn is_canonical(&self) -> bool {
+        // TODO: Slow.
+        let mut c = self.clone();
+        c.canonicalize();
+        self == &c
     }
 
     pub fn expansions(&self) -> Box<dyn Iterator<Item = ImplNode<Tgt>> + '_> {
@@ -221,9 +292,7 @@ impl<Tgt: Target> Spec<Tgt> {
     }
 
     fn move_expansions(&self) -> impl Iterator<Item = ImplNode<Tgt>> + '_ {
-        // TODO: Enable prefetching moves.
-
-        // TODO: Filter with `can_move_to`.
+        // TODO: Add prefetching moves.
 
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
         if matches!(self, Spec::Load { .. } | Spec::Store { .. }) {
@@ -236,6 +305,10 @@ impl<Tgt: Target> Spec<Tgt> {
             let i = u8::try_from(i).unwrap();
             for layout in Tgt::all_layouts_for_shape(operand.dim_sizes()) {
                 for level in Tgt::faster_destination_levels(operand.level()) {
+                    if !operand.can_move_to(&layout, &level) {
+                        continue;
+                    }
+
                     let vector_bytes = level.vector_bytes();
                     if vector_bytes > 0 {
                         for vector_shape in gen_vector_shapes(
@@ -250,10 +323,10 @@ impl<Tgt: Target> Spec<Tgt> {
                                 layout.clone(),
                                 Some(&vector_shape),
                                 false,
-                            ))
+                            ));
                         }
                     } else {
-                        results.push(self.move_arg(i, level, layout.clone(), None, false))
+                        results.push(self.move_arg(i, level, layout.clone(), None, false));
                     }
                 }
             }

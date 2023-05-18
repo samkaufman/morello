@@ -142,6 +142,7 @@ impl Target for X86Target {
     }
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize)]
 pub enum X86MemoryLevel {
     RF,
