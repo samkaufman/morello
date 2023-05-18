@@ -444,9 +444,9 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
     // Will the result be contiguous? If the move is into a cache, it might be.
     // If it's into memory bank with its own address space, then yes.
     let contiguous_abs = if destination_level.is_addressed() {
-        operand.contiguous_abs()
-    } else {
         destination_layout.contiguous_full()
+    } else {
+        operand.contiguous_abs()
     };
 
     TensorSpec::<Tgt>::new_canon(

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::{collections::HashSet, fmt::Display};
+use std::{cmp::min, collections::HashSet, fmt::Display};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
@@ -46,14 +46,59 @@ impl Layout {
         todo!()
     }
 
-    // TODO: Rename; this actually returns a contiguousness abstraction.
-    fn check_tile_contiguity(
+    // TODO: Rename and change docs; this actually returns a contiguousness abstraction.
+    pub fn tile_contiguity(
         &self,
-        _tile_shape: Shape,
-        _parent_shape: Shape,
-        _parent_contiguous: Contig,
+        tile_shape: &[DimSize],
+        parent_shape: &[DimSize],
+        parent_contiguous: Contig,
     ) -> Contig {
-        todo!()
+        match self {
+            Layout::Standard { .. } => {
+                if tile_shape.iter().all(|&d| d == 1) {
+                    return self.contiguous_full();
+                }
+
+                let mut cnt = 1; // Skip first.
+                self.inner_loop(&mut cnt, tile_shape, false, |x| {
+                    parent_shape[usize::try_from(x).unwrap()]
+                });
+                cnt = min(cnt, parent_contiguous);
+                self.inner_loop(&mut cnt, tile_shape, true, |_| 1);
+                cnt
+            }
+            Layout::Packed {
+                dim_count: _,
+                strip_dim: _,
+                strip_size: _,
+            } => todo!(),
+        }
+    }
+
+    // TODO: Rename
+    pub fn inner_loop(
+        &self,
+        cnt: &mut u8,
+        tile_shape: &[DimSize],
+        one_back: bool,
+        comp: impl Fn(u32) -> u32,
+    ) {
+        if let Layout::Standard { dim_order } = self {
+            while usize::from(*cnt) < tile_shape.len() {
+                let mut rev_dim_idx = usize::from(*cnt);
+                if one_back {
+                    rev_dim_idx += 1;
+                }
+
+                let phys_idx = usize::from(dim_order[dim_order.len() - rev_dim_idx]);
+                if tile_shape[phys_idx] != comp(phys_idx.try_into().unwrap()) {
+                    break;
+                }
+                *cnt += 1;
+            }
+        } else {
+            panic!("inner_loop is only applicable to Standard layout variant")
+        }
     }
 
     pub fn estimate_cache_lines<Tgt: Target>(
