@@ -8,6 +8,7 @@ pub type Shape = smallvec::SmallVec<[DimSize; 5]>;
 pub type Contig = u8;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
+#[serde(bound = "")]
 pub struct Problem<Tgt: Target>(pub Spec<Tgt>, pub MemoryLimits);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -27,6 +28,12 @@ impl<Tgt: Target> Problem<Tgt> {
                 .transition(&self.0, &impl_node)
                 .map(|mem| (impl_node, mem))
         })
+    }
+}
+
+impl<Tgt: Target> Display for Problem<Tgt> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {:?})", self.0, self.1)
     }
 }
 

@@ -1,8 +1,8 @@
-use crate::table::DatabaseIOStore;
-use crate::{common::Problem, table::Database, target::Target};
+use crate::table::Database;
+use crate::{common::Problem, target::Target};
 use prettytable::{self, format, row, Cell};
 
-pub fn pprint<Tgt: Target, S: DatabaseIOStore<Tgt>>(db: &Database<Tgt, S>, root: &Problem<Tgt>) {
+pub fn pprint<Tgt: Target, D: Database<Tgt>>(db: &D, root: &Problem<Tgt>) {
     let mut table = prettytable::Table::new();
     let mut titles = row!["", "Spec", "Cost"];
     for level in Tgt::levels() {
@@ -23,14 +23,14 @@ pub fn pprint<Tgt: Target, S: DatabaseIOStore<Tgt>>(db: &Database<Tgt, S>, root:
     table.printstd()
 }
 
-fn pformat_visit<Tgt: Target, S: DatabaseIOStore<Tgt>>(
+fn pformat_visit<Tgt: Target, D: Database<Tgt>>(
     table: &mut prettytable::Table,
-    db: &Database<Tgt, S>,
+    db: &D,
     root: &Problem<Tgt>,
     depth: usize,
 ) {
     let node = db.get(root).unwrap();
-    assert!(!node.is_empty(), "Problem not in database: {:?}", root);
+    assert!(!node.is_empty(), "Problem not in database: {}", root);
     assert_eq!(node.len(), 1);
     let mut r = row![
         format!("{}{}", " ".repeat(depth), node[0].0),

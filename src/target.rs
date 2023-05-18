@@ -18,7 +18,7 @@ use std::iter;
 
 pub const MAX_LEVEL_COUNT: usize = 4;
 
-pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug {
+pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug + 'static {
     type Level: MemoryLevel;
 
     fn line_size() -> u32;
@@ -35,7 +35,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug {
 }
 
 pub trait MemoryLevel:
-    PartialOrd + Eq + Display + Debug + std::hash::Hash + Copy + DeserializeOwned + Serialize
+    Send + PartialOrd + Eq + Display + Debug + std::hash::Hash + Copy + DeserializeOwned + Serialize
 {
     fn is_addressed(&self) -> bool;
     fn cache_hit_cost(&self) -> MainCost;

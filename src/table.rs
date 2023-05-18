@@ -5,66 +5,54 @@ use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::spec::Spec;
 use crate::target::Target;
 
-use log::warn;
 use rusqlite::params_from_iter;
 use serde::{Deserialize, Serialize};
 
-use std::collections::{HashMap, HashSet};
-use std::path::{self, PathBuf};
+use std::collections::HashMap;
+use std::mem;
+use std::path;
 
-const SQLITE_BATCH_SIZE: usize = 8_000;
+const SQLITE_BATCH_SIZE: usize = 1_000;
 
-pub struct Database<Tgt: Target, S: DatabaseIOStore<Tgt>> {
+pub trait Database<Tgt: Target> {
+    fn get(&self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>>;
+    // TODO: Drop get_spec, which exists solely for SqliteDatabaseWrapper.
+    fn get_spec(&self, spec: &Spec<Tgt>) -> Option<&Entry<Tgt>>;
+    fn put(&mut self, problem: Problem<Tgt>, impls: Vec<(ImplNode<Tgt>, Cost)>);
+    fn flush(&mut self);
+}
+
+pub struct InMemDatabase<Tgt: Target> {
     grouped_entries: HashMap<Spec<Tgt>, Entry<Tgt>>,
-    store: std::sync::RwLock<S>,
+}
+
+pub struct SqliteDatabaseWrapper<Tgt: Target, D: Database<Tgt>> {
+    inner: D,
+    tx: crossbeam_channel::Sender<SqliteDatabaseWrapperMsg<Tgt>>,
+    rx: crossbeam_channel::Receiver<()>,
+    bg_thread_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[allow(clippy::large_enum_variant)] // Because Flush and Stop are rare.
+enum SqliteDatabaseWrapperMsg<Tgt: Target> {
+    Put(Spec<Tgt>, Entry<Tgt>),
+    Flush { should_respond: bool },
+    Stop,
 }
 
 // TODO: Entry should not need to be public.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(bound = "")]
 pub struct Entry<Tgt: Target> {
     ranges: Vec<(MemVec, MemVec)>,
     values: Vec<Vec<(ImplNode<Tgt>, Cost)>>,
 }
 
-pub trait DatabaseIOStore<Tgt: Target> {
-    fn get(&mut self, spec: &Spec<Tgt>) -> Option<Entry<Tgt>>;
-    fn put_entry(
-        &mut self,
-        _spec: &Spec<Tgt>,
-        _entry: &Entry<Tgt>,
-        grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>,
-    );
-    fn flush(&mut self, grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>);
-}
-
-#[derive(Default)]
-pub struct NullDatabaseIOStore {}
-
-pub struct SqliteIOStore<Tgt: Target> {
-    path: PathBuf,
-    conn_local: thread_local::ThreadLocal<rusqlite::Connection>,
-    queued_spec_inserts: HashSet<Spec<Tgt>>,
-}
-
-impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Database<Tgt, S> {
-    pub fn new(store: S) -> Self {
-        Database {
+impl<Tgt: Target> InMemDatabase<Tgt> {
+    pub fn new() -> Self {
+        InMemDatabase {
             grouped_entries: HashMap::new(),
-            store: std::sync::RwLock::new(store),
         }
-    }
-
-    pub fn get(&self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
-        let gotten = self.grouped_entries.get(&query.0);
-        if gotten.is_none() {
-            if let Some(_rr) = self.store.write().unwrap().get(&query.0) {
-                warn!("Not saving entry loaded from SQLite");
-                // self.grouped_entries.entry(query.0.clone()).or_insert(rr);
-                // TODO: Return
-            }
-        }
-        gotten.and_then(|e| self.get_from_entry(&query.1, e))
     }
 
     fn get_from_entry<'a>(
@@ -88,8 +76,16 @@ impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Database<Tgt, S> {
             }
         }
     }
+}
 
-    pub fn put(&mut self, problem: Problem<Tgt>, impls: Vec<(ImplNode<Tgt>, Cost)>) {
+impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
+    fn get(&self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
+        self.grouped_entries
+            .get(&query.0)
+            .and_then(|e| self.get_from_entry(&query.1, e))
+    }
+
+    fn put(&mut self, problem: Problem<Tgt>, impls: Vec<(ImplNode<Tgt>, Cost)>) {
         // self.entries.insert(problem, impls);
 
         let orig_problem = problem.clone(); // Save for debug_assert_eq! postcondition.
@@ -99,7 +95,6 @@ impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Database<Tgt, S> {
         match problem.1 {
             MemoryLimits::Standard(lims) => {
                 assert!(impls.len() <= 1);
-
                 {
                     let existing: &mut Entry<Tgt> =
                         self.grouped_entries.entry(problem.0.clone()).or_default();
@@ -110,12 +105,6 @@ impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Database<Tgt, S> {
                     }
                     existing.values.push(impls);
                 }
-
-                self.store.write().unwrap().put_entry(
-                    &problem.0,
-                    self.grouped_entries.get(&problem.0).unwrap(),
-                    &self.grouped_entries,
-                );
             }
         }
 
@@ -126,11 +115,100 @@ impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Database<Tgt, S> {
             orig_problem
         );
     }
+
+    fn get_spec(&self, spec: &Spec<Tgt>) -> Option<&Entry<Tgt>> {
+        self.grouped_entries.get(spec)
+    }
+
+    fn flush(&mut self) {}
 }
 
-impl<Tgt: Target, S: DatabaseIOStore<Tgt>> Drop for Database<Tgt, S> {
+impl<Tgt: Target, D: Database<Tgt>> SqliteDatabaseWrapper<Tgt, D> {
+    pub fn new(inner: D, db_path: &path::Path) -> Self {
+        let db_path = db_path.to_owned();
+        let (request_tx, request_rx) = crossbeam_channel::bounded(1);
+        let (response_tx, response_rx) = crossbeam_channel::bounded(1);
+        SqliteDatabaseWrapper {
+            inner,
+            tx: request_tx,
+            rx: response_rx,
+            bg_thread_handle: Some(std::thread::spawn(move || {
+                let conn = rusqlite::Connection::open(db_path).unwrap();
+                conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS impls (
+                    spec  BLOB PRIMARY KEY,
+                    entry BLOB
+                )",
+                    (),
+                )
+                .unwrap();
+
+                let mut pending_puts = HashMap::with_capacity(SQLITE_BATCH_SIZE);
+                loop {
+                    match request_rx.recv().unwrap() {
+                        SqliteDatabaseWrapperMsg::Put(problem, impls) => {
+                            pending_puts.insert(problem, impls);
+                            if pending_puts.len() >= SQLITE_BATCH_SIZE {
+                                do_flush(&conn, &mut pending_puts);
+                            }
+                        }
+                        SqliteDatabaseWrapperMsg::Flush { should_respond } => {
+                            do_flush(&conn, &mut pending_puts);
+                            if should_respond {
+                                response_tx.send(()).unwrap();
+                            }
+                        }
+                        SqliteDatabaseWrapperMsg::Stop => {
+                            break;
+                        }
+                    }
+                }
+            })),
+        }
+    }
+
+    fn stop(&mut self) {
+        self.flush();
+        self.tx.send(SqliteDatabaseWrapperMsg::Stop).unwrap();
+        mem::take(&mut self.bg_thread_handle)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
+
+impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt, D> {
+    fn get(&self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
+        self.inner.get(query)
+    }
+
+    fn get_spec(&self, _spec: &Spec<Tgt>) -> Option<&Entry<Tgt>> {
+        unimplemented!()
+    }
+
+    fn put(&mut self, problem: Problem<Tgt>, impls: Vec<(ImplNode<Tgt>, Cost)>) {
+        self.inner.put(problem.clone(), impls);
+        let updated = self.inner.get_spec(&problem.0).unwrap();
+        self.tx
+            .send(SqliteDatabaseWrapperMsg::Put(problem.0, updated.clone()))
+            .unwrap();
+    }
+
+    fn flush(&mut self) {
+        self.inner.flush();
+        self.tx
+            .send(SqliteDatabaseWrapperMsg::Flush {
+                should_respond: true,
+            })
+            .unwrap();
+        self.rx.recv().unwrap();
+    }
+}
+
+impl<Tgt: Target, D: Database<Tgt>> Drop for SqliteDatabaseWrapper<Tgt, D> {
     fn drop(&mut self) {
-        self.store.write().unwrap().flush(&self.grouped_entries);
+        self.stop();
     }
 }
 
@@ -143,103 +221,22 @@ impl<Tgt: Target> Default for Entry<Tgt> {
     }
 }
 
-impl<Tgt: Target> DatabaseIOStore<Tgt> for NullDatabaseIOStore {
-    fn get(&mut self, _spec: &Spec<Tgt>) -> Option<Entry<Tgt>> {
-        None
-    }
+fn do_flush<Tgt: Target>(
+    conn: &rusqlite::Connection,
+    pending_puts: &mut HashMap<Spec<Tgt>, Entry<Tgt>>,
+) {
+    if !pending_puts.is_empty() {
+        let post = vec!["(?, ?)"].repeat(pending_puts.len()).join(", ");
 
-    fn put_entry(
-        &mut self,
-        _spec: &Spec<Tgt>,
-        _entry: &Entry<Tgt>,
-        _grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>,
-    ) {
-        // Do nothing.
-    }
-
-    fn flush(&mut self, _grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>) {}
-}
-
-impl<Tgt: Target> SqliteIOStore<Tgt> {
-    pub fn new(path: &path::Path) -> Self {
-        // Set up the database, but then discard this connection. Connections
-        // will subsequently be created lazily, per thread.
-        let conn = rusqlite::Connection::open(path).unwrap();
-        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS impls (
-            spec  BLOB PRIMARY KEY,
-            entry BLOB
-        )",
-            (),
+            &format!("INSERT OR REPLACE INTO impls (spec, entry) VALUES {}", post),
+            params_from_iter(pending_puts.drain().flat_map(|(s, entry)| {
+                vec![
+                    serde_json::to_string(&s).unwrap(),
+                    serde_json::to_string(&entry).unwrap(),
+                ]
+            })),
         )
         .unwrap();
-
-        SqliteIOStore {
-            path: path.to_owned(),
-            conn_local: thread_local::ThreadLocal::new(),
-            queued_spec_inserts: HashSet::with_capacity(SQLITE_BATCH_SIZE),
-        }
-    }
-}
-
-impl<Tgt: Target> DatabaseIOStore<Tgt> for SqliteIOStore<Tgt> {
-    fn get(&mut self, spec: &Spec<Tgt>) -> Option<Entry<Tgt>> {
-        let path = &self.path;
-        let conn = self
-            .conn_local
-            .get_or(|| rusqlite::Connection::open(path).unwrap());
-
-        let spec_str = serde_json::to_string(&spec).unwrap();
-
-        let mut lookup_stmt = conn
-            .prepare("SELECT entry FROM impls WHERE spec = ? LIMIT 1")
-            .unwrap();
-        let mut entry_rows = lookup_stmt.query([&spec_str]).unwrap();
-        match entry_rows.next().unwrap() {
-            Some(row) => {
-                let entry_str: String = row.get(0).unwrap();
-                Some(serde_json::from_str(&entry_str).unwrap())
-            }
-            None => None,
-        }
-    }
-
-    fn put_entry(
-        &mut self,
-        spec: &Spec<Tgt>,
-        _entry: &Entry<Tgt>,
-        grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>,
-    ) {
-        self.queued_spec_inserts.insert(spec.clone());
-        if self.queued_spec_inserts.len() >= SQLITE_BATCH_SIZE {
-            self.flush(grouped_entries);
-        }
-    }
-
-    fn flush(&mut self, grouped_entries: &HashMap<Spec<Tgt>, Entry<Tgt>>) {
-        if self.queued_spec_inserts.is_empty() {
-            return;
-        }
-
-        let post = vec!["(?, ?)"]
-            .repeat(self.queued_spec_inserts.len())
-            .join(", ");
-
-        self.conn_local
-            .get()
-            .unwrap()
-            .execute(
-                &format!("INSERT OR REPLACE INTO impls (spec, entry) VALUES {}", post),
-                params_from_iter(self.queued_spec_inserts.iter().flat_map(|spec| {
-                    vec![
-                        serde_json::to_string(spec).unwrap(),
-                        serde_json::to_string(&grouped_entries.get(spec).unwrap()).unwrap(),
-                    ]
-                })),
-            )
-            .unwrap();
-
-        self.queued_spec_inserts.clear();
     }
 }

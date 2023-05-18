@@ -469,6 +469,7 @@ name = "morello"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "crossbeam-channel",
  "divrem",
  "env_logger",
  "itertools",

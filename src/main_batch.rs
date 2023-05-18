@@ -28,7 +28,7 @@ use crate::common::{DimSize, Dtype, Problem};
 use crate::geometry::ToFromDependencyLatticeCoordinate;
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::spec::Spec;
-use crate::table::{Database, DatabaseIOStore, NullDatabaseIOStore, SqliteIOStore};
+use crate::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::utils::iter_powers_of_two;
 
@@ -52,17 +52,17 @@ fn main() {
     let args = Args::parse();
 
     if let Some(db_path) = args.db.as_ref() {
-        let db = Database::<X86Target, _>::new(SqliteIOStore::new(db_path));
+        let db = SqliteDatabaseWrapper::new(InMemDatabase::<X86Target>::new(), db_path);
         main_per_db(&args, db)
     } else {
-        let db = Database::<X86Target, _>::new(NullDatabaseIOStore::default());
+        let db = InMemDatabase::<X86Target>::new();
         main_per_db(&args, db)
     }
 }
 
-fn main_per_db<S>(args: &Args, db: Database<X86Target, S>)
+fn main_per_db<D>(args: &Args, db: D)
 where
-    S: DatabaseIOStore<X86Target> + Send + Sync,
+    D: Database<X86Target> + Send + Sync,
 {
     let MemoryLimits::Standard(top) = X86Target::max_mem();
 
@@ -88,6 +88,7 @@ where
                     }
                 }
             }
+            db.write().unwrap().flush();
         });
         info!("Stage {} took {:?}", stage_idx, stage_start.elapsed());
         if Some(stage_idx) == args.stages {
@@ -180,7 +181,9 @@ fn specs_to_compute_2(args: &Args) -> impl Iterator<Item = Vec<Vec<spec::Spec<X8
             let inner_keys = Spec::<X86Target>::inner_keys_for_grid_pt(&spec_key, &pt);
             for s in inner_keys {
                 let sp = Spec::<X86Target>::from_grid(&spec_key, &pt, &s);
-                task.push(sp);
+                if sp.is_canonical() {
+                    task.push(sp);
+                }
             }
             tasks.push(task);
         }

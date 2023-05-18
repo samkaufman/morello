@@ -2,7 +2,7 @@ use std::sync::RwLock;
 
 use crate::common::{Dtype, Problem};
 use crate::pprint::pprint;
-use crate::table::SqliteIOStore;
+use crate::table::{InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 
 use clap::Parser;
@@ -39,9 +39,10 @@ fn main() {
 
     let args = Args::parse();
 
-    let db = RwLock::new(table::Database::<X86Target, _>::new(SqliteIOStore::new(
+    let db = RwLock::new(SqliteDatabaseWrapper::new(
+        InMemDatabase::<X86Target>::new(),
         std::path::Path::new("db.sqlite3"),
-    )));
+    ));
     let rm = layout::row_major(2);
 
     let matmul_spec = spec::Spec::Matmul::<X86Target> {
@@ -74,5 +75,5 @@ fn main() {
         hits + misses
     );
 
-    pprint(&db.read().unwrap(), &problem);
+    pprint(&*db.read().unwrap(), &problem);
 }
