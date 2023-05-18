@@ -53,29 +53,27 @@ pub fn move_cost<Tgt: Target>(
     let src_hit_cost = src.level().cache_hit_cost();
     let dest_hit_cost = dest.level().cache_hit_cost();
 
-    let mut cost: MainCost = 10
-        * src_hit_cost
-        * MainCost::from(src.layout().estimate_cache_lines::<Tgt>(
-            src.dim_sizes(),
-            src.dtype(),
-            src.is_contiguous(),
-        ));
-    cost += 10
-        * dest_hit_cost
-        * MainCost::from(dest.layout().estimate_cache_lines::<Tgt>(
-            dest.dim_sizes(),
-            dest.dtype(),
-            dest.is_contiguous(),
-        ));
+    let src_cache_lines = MainCost::from(src.layout().estimate_cache_lines::<Tgt>(
+        src.dim_sizes(),
+        src.dtype(),
+        src.is_contiguous(),
+    ));
+    let dest_cache_lines = MainCost::from(dest.layout().estimate_cache_lines::<Tgt>(
+        dest.dim_sizes(),
+        dest.dtype(),
+        dest.is_contiguous(),
+    ));
 
+    let src_cost = 10 * (src_hit_cost * src_cache_lines);
+    let dest_cost = 10 * (dest_hit_cost * dest_cache_lines);
+
+    let mut cost: MainCost = src_cost + dest_cost;
     if prefetching {
         cost /= 2;
     }
-
     if !src.is_contiguous() || src.layout() != dest.layout() {
         cost *= 2;
     }
-
     cost
 }
 
