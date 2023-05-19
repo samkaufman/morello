@@ -61,7 +61,7 @@ impl MemVec {
     }
 
     pub fn zero<Tgt: Target>() -> Self {
-        (0..Tgt::levels().len()).map(|_| 0).collect()
+        MemVec(SmallVec::from_elem(0, Tgt::levels().len()))
     }
 
     pub fn len(&self) -> usize {

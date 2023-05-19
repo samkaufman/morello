@@ -322,11 +322,16 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     })
                     .collect();
 
-                let mut to_return = vec![mem];
-                if movelet_gens_prologue(destination_level, *source_idx, spec) {
-                    to_return.insert(0, MemVec::zero::<Tgt>());
+                let has_pro = movelet_gens_prologue(destination_level, *source_idx, spec);
+                let has_epi = movelet_gens_epilogue(destination_level, *source_idx, spec);
+
+                let to_return_len = 1 + has_pro as usize + has_epi as usize;
+                let mut to_return = Vec::with_capacity(to_return_len);
+                if has_pro {
+                    to_return.push(MemVec::zero::<Tgt>());
                 }
-                if movelet_gens_epilogue(destination_level, *source_idx, spec) {
+                to_return.push(mem);
+                if has_epi {
                     to_return.push(MemVec::zero::<Tgt>());
                 }
                 MemoryAllocation {
