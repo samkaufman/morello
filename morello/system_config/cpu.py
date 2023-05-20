@@ -6,7 +6,6 @@ import pathlib
 import re
 import shutil
 import tempfile
-import platform
 from pathlib import Path
 from typing import Iterable, Optional, Sequence, Union
 
@@ -255,8 +254,4 @@ def _parse_benchmark_output(output: str) -> float:
 def _clang_path() -> Path:
     if "CLANG" in os.environ:
         return Path(os.environ["CLANG"])
-    elif platform.system() == "Darwin":
-        return Path(
-            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
-        )
     raise Exception("Environment variable CLANG is not set")
