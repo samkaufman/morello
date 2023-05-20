@@ -241,7 +241,7 @@ class X86Target(_CpuTarget):
 
 class ArmTarget(_CpuTarget):
     def _clang_vec_flags(self) -> Sequence[str]:
-        return []
+        return ["-fopenmp"]
 
 
 def _parse_benchmark_output(output: str) -> float:
