@@ -1,12 +1,12 @@
 use std::sync::RwLock;
 
-use crate::common::{Dtype, Problem};
+use crate::common::{DimSize, Dtype, Problem};
 use crate::pprint::pprint;
+use crate::spec::SpecAux;
 use crate::table::{InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 
 use clap::Parser;
-use common::DimSize;
 use log::info;
 use smallvec::smallvec;
 
@@ -18,6 +18,7 @@ mod imp;
 mod layout;
 mod memorylimits;
 mod pprint;
+mod reinterpret;
 mod search;
 mod spec;
 mod table;
@@ -29,9 +30,15 @@ mod utils;
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    m: DimSize,
-    k: DimSize,
-    n: DimSize,
+    #[arg(long, short, default_value = "1")]
+    batch: DimSize,
+    #[arg(long, default_value = "4")]
+    channels: DimSize,
+    #[arg(long, default_value = "8")]
+    filters: DimSize,
+    #[arg(long, default_value = "3")]
+    filters_size: DimSize,
+    size: DimSize,
 }
 
 fn main() {
@@ -43,27 +50,30 @@ fn main() {
         InMemDatabase::<X86Target>::new(),
         std::path::Path::new("db.sqlite3"),
     ));
-    let rm = layout::row_major(2);
 
-    let matmul_spec = spec::Spec::Matmul::<X86Target> {
+    let rm = layout::row_major(4);
+    let a = SpecAux {
+        contig: rm.contiguous_full(),
+        aligned: true,
+        level: X86MemoryLevel::GL,
+        layout: rm,
+        vector_shape: None,
+    };
+    let conv_spec = spec::Spec::Conv {
         accum: false,
-        m: args.m,
-        k: args.k,
-        n: args.n,
-        dtype: Dtype::Uint32,
-        contiguous_abstractions: smallvec![
-            rm.contiguous_full(),
-            rm.contiguous_full(),
-            rm.contiguous_full()
+        image_shape: smallvec![args.batch, args.channels, args.size, args.size],
+        filters_shape: smallvec![
+            args.filters,
+            args.channels,
+            args.filters_size,
+            args.filters_size
         ],
-        alignments: smallvec![true, true, true],
-        levels: smallvec![X86MemoryLevel::GL, X86MemoryLevel::GL, X86MemoryLevel::GL],
-        layouts: smallvec![rm.clone(), rm.clone(), rm],
-        vector_shapes: smallvec![None, None, None],
+        dtype: Dtype::Uint32,
+        aux: [a.clone(), a.clone(), a],
         serial_only: true,
     };
 
-    let problem = Problem(matmul_spec, X86Target::max_mem());
+    let problem = Problem(conv_spec, X86Target::max_mem());
 
     let start_time = std::time::Instant::now();
     let (_, hits, misses) = search::top_down(&db, &problem, 1);

@@ -5,8 +5,10 @@ use std::{iter, path};
 use clap::Parser;
 use itertools::Itertools;
 use log::{debug, info};
+use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::smallvec;
+use tensorspec::TensorSpec;
 
 mod alignment;
 mod common;
@@ -16,6 +18,7 @@ mod imp;
 mod layout;
 mod memorylimits;
 mod pprint;
+mod reinterpret;
 mod search;
 mod spec;
 mod table;
@@ -27,7 +30,7 @@ mod utils;
 use crate::common::{DimSize, Dtype, Problem};
 use crate::geometry::ToFromDependencyLatticeCoordinate;
 use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::spec::Spec;
+use crate::spec::{Spec, SpecAux};
 use crate::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::utils::iter_powers_of_two;
@@ -41,9 +44,15 @@ struct Args {
     timeout: Option<u64>,
     #[arg(long)]
     db: Option<path::PathBuf>,
-    m: DimSize,
-    k: DimSize,
-    n: DimSize,
+    #[arg(long, short, default_value = "1")]
+    batch: DimSize,
+    #[arg(long, default_value = "4")]
+    channels: DimSize,
+    #[arg(long, default_value = "8")]
+    filters: DimSize,
+    #[arg(long, default_value = "3")]
+    filters_size: Vec<DimSize>,
+    size: DimSize,
 }
 
 fn main() {
@@ -60,6 +69,29 @@ fn main() {
     }
 }
 
+macro_rules! load_or_store {
+    ($move_name:ident, $size:expr, $rank:expr) => {
+        {
+            let layout = layout::row_major($rank);
+            spec::Spec::$move_name::<X86Target> {
+                outer_tensor_spec: TensorSpec::new_canon(
+                    smallvec![$size; $rank.into()],
+                    Dtype::Uint32,
+                    layout.contiguous_full(),
+                    true,
+                    X86MemoryLevel::GL,
+                    layout.clone(),
+                    None,
+                ),
+                inner_level: X86MemoryLevel::L1,
+                inner_layout: layout,
+                inner_vector_shape: None,
+                serial_only: true,
+            }
+        }
+    };
+}
+
 fn main_per_db<D>(args: &Args, db: D)
 where
     D: Database<X86Target> + Send + Sync,
@@ -67,18 +99,98 @@ where
     let MemoryLimits::Standard(top) = X86Target::max_mem();
 
     let db = RwLock::new(db);
-    for (stage_idx, stage) in specs_to_compute_2(args).enumerate() {
+
+    // TODO: Most of the following details aren't used in computing the bound.
+    // It could be simplified.
+    let mut bounds = vec![];
+    bounds.extend((1..5).flat_map(|rank| {
+        [
+            load_or_store!(Load, args.size, rank),
+            load_or_store!(Store, args.size, rank),
+        ]
+    }));
+    bounds.extend((1..5).map(|rank| {
+        let layout = layout::row_major(rank);
+        Spec::Zero {
+            tensor_spec: TensorSpec::new_canon(
+                smallvec![args.size; rank.into()],
+                Dtype::Uint32,
+                layout.contiguous_full(),
+                true,
+                X86MemoryLevel::GL,
+                layout,
+                None,
+            ),
+            serial_only: true,
+        }
+    }));
+    bounds.push({
+        let layout = layout::row_major(2);
+        let a = SpecAux {
+            contig: layout.contiguous_full(),
+            aligned: true,
+            level: X86MemoryLevel::GL,
+            layout,
+            vector_shape: None,
+        };
+        spec::Spec::Matmul::<X86Target> {
+            accum: false,
+            m: args.size,
+            k: args.size,
+            n: args.size,
+            dtype: Dtype::Uint32,
+            aux: [a.clone(), a.clone(), a],
+            serial_only: true,
+        }
+    });
+    bounds.extend({
+        let layout = layout::row_major(4);
+        let a = SpecAux {
+            contig: layout.contiguous_full(),
+            aligned: true,
+            level: X86MemoryLevel::GL,
+            layout,
+            vector_shape: None,
+        };
+        args.filters_size
+            .iter()
+            .map(|&fs| spec::Spec::Conv::<X86Target> {
+                accum: false,
+                image_shape: smallvec![args.batch, args.channels, args.size, args.size],
+                filters_shape: smallvec![args.filters, args.channels, fs, fs],
+                dtype: Dtype::Uint32,
+                aux: [a.clone(), a.clone(), a.clone()],
+                serial_only: true,
+            })
+            .collect::<Vec<_>>()
+    });
+
+    // TODO: Add loads into following
+    let mut rng = rand::thread_rng();
+    for (stage_idx, stage) in bounds.iter().flat_map(specs_to_compute).enumerate() {
         info!(
             "Beginning stage {}, which has peak parallelism of {}",
             stage_idx,
             stage.len()
         );
+
+        let nonempty_tasks = stage.iter().filter(|v| !v.is_empty()).collect::<Vec<_>>();
+        if let Some(example_spec) = nonempty_tasks
+            .choose(&mut rng)
+            .and_then(|v| v.choose(&mut rng))
+        {
+            info!("Example problem Spec: {}", example_spec);
+        }
+
         let stage_start = std::time::Instant::now();
-        let stage_iter = stage.into_par_iter();
+        let stage_iter = nonempty_tasks.into_par_iter().with_min_len(4);
         stage_iter.for_each(|task| {
-            for (_task_idx, spec) in task.into_iter().enumerate() {
+            let mut worklist = VecDeque::new();
+            // for (_task_idx, spec) in chunk.iter().flat_map(|e| *e).enumerate() {
+            for (_task_idx, spec) in task.iter().enumerate() {
                 let mut limits_iterator = problems_for_spec::<X86Target>();
-                let mut worklist = VecDeque::from([top.clone()]);
+                debug_assert!(worklist.is_empty());
+                worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
                     let problem = Problem(spec.clone(), MemoryLimits::Standard(job));
                     let MemoryLimits::Standard(job) = &problem.1;
@@ -141,34 +253,18 @@ impl MemoryLimitsIterator for SkippingLimitsIterator {
     }
 }
 
-fn specs_to_compute_2(args: &Args) -> impl Iterator<Item = Vec<Vec<spec::Spec<X86Target>>>> {
-    // Most of the following details aren't used in computing the bound. It
-    // could be simplified.
-    let rm = layout::row_major(2);
-    let bound = {
-        spec::Spec::Matmul::<X86Target> {
-            accum: false,
-            m: args.m,
-            k: args.k,
-            n: args.n,
-            dtype: Dtype::Uint32,
-            contiguous_abstractions: smallvec![
-                rm.contiguous_full(),
-                rm.contiguous_full(),
-                rm.contiguous_full()
-            ],
-            alignments: smallvec![true, true, true],
-            levels: smallvec![X86MemoryLevel::GL, X86MemoryLevel::GL, X86MemoryLevel::GL],
-            layouts: smallvec![rm.clone(), rm.clone(), rm],
-            vector_shapes: smallvec![None, None, None],
-            serial_only: true,
-        }
-    };
+fn specs_to_compute(
+    bound: &Spec<X86Target>,
+) -> impl Iterator<Item = Vec<Vec<spec::Spec<X86Target>>>> {
     let grid_map_result = bound.to_grid();
     if grid_map_result.is_none() {
         panic!("Could not map {:?} to grid", bound);
     }
-    let (spec_key, bound_pt, _) = grid_map_result.unwrap();
+    let (spec_key, bound_pt, inner_key) = grid_map_result.unwrap();
+    debug_assert_eq!(
+        bound,
+        &Spec::<X86Target>::from_grid(&spec_key, &bound_pt, &inner_key)
+    );
     debug!(
         "Grid shape is {:?}",
         bound_pt.iter().map(|d| d + 1).collect::<Vec<_>>()

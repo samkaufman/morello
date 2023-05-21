@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::{cmp::min, collections::HashSet, fmt::Display};
+use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
@@ -170,8 +170,85 @@ impl Layout {
     }
 
     // TODO: Do we really need callers to build a HashSet?
-    fn dim_drop(&self, _dropped_dims: HashSet<usize>, _contiguous_abs: usize) -> (Layout, Contig) {
-        todo!()
+    pub fn dim_drop(&self, dropped_dims: &HashSet<u8>, contiguous_abs: Contig) -> (Layout, Contig) {
+        if dropped_dims.is_empty() {
+            return (self.clone(), contiguous_abs);
+        }
+        match self {
+            Self::Standard { dim_order } => {
+                let mut new_dim_order = vec![];
+                for &logical_dim in dim_order {
+                    if !dropped_dims.contains(&logical_dim) {
+                        let offset: u8 = dropped_dims
+                            .iter()
+                            .filter(|&&d| d < logical_dim)
+                            .count()
+                            .try_into()
+                            .unwrap();
+                        new_dim_order.push(logical_dim - offset);
+                    }
+                }
+
+                let mut new_contiguous = contiguous_abs;
+                if contiguous_abs != 0 {
+                    for &logical_dim_inside_contig in
+                        &dim_order[dim_order.len() - usize::from(contiguous_abs)..]
+                    {
+                        if dropped_dims.contains(&logical_dim_inside_contig) {
+                            new_contiguous -= 1;
+                        }
+                    }
+                }
+
+                (
+                    Self::Standard {
+                        dim_order: SmallVec::from(new_dim_order),
+                    },
+                    new_contiguous,
+                )
+            }
+            Self::Packed {
+                dim_count,
+                strip_dim,
+                strip_size,
+            } => {
+                if dropped_dims.contains(strip_dim) {
+                    let rm_contig = contiguous_abs.saturating_sub(1);
+                    return row_major(*dim_count).dim_drop(dropped_dims, rm_contig);
+                }
+
+                let after_strip_dims = (strip_dim + 1..*dim_count).collect::<HashSet<_>>();
+                assert!(!after_strip_dims.is_empty(), "There must be dimensions after the strip dim., otherwise this is really a StandardLayout");
+
+                if dropped_dims.is_superset(&after_strip_dims) {
+                    return row_major(strip_dim + 1).dim_drop(
+                        &dropped_dims
+                            .difference(&after_strip_dims)
+                            .cloned()
+                            .collect(),
+                        (contiguous_abs - u8::try_from(after_strip_dims.len()).unwrap() - 1).max(0),
+                    );
+                }
+
+                let fifth_dim_contig = contiguous_abs.min(1);
+                let standard_contig = contiguous_abs.saturating_sub(1);
+                let contig_dropped: Contig = dropped_dims
+                    .iter()
+                    .filter(|&&d| (*dim_count - d) <= standard_contig)
+                    .count()
+                    .try_into()
+                    .unwrap();
+
+                (
+                    Self::Packed {
+                        dim_count: dim_count - u8::try_from(dropped_dims.len()).unwrap(),
+                        strip_dim: *strip_dim,
+                        strip_size: *strip_size,
+                    },
+                    fifth_dim_contig + standard_contig - contig_dropped,
+                )
+            }
+        }
     }
 
     pub fn expand_shape(&self, shape: &[DimSize]) -> Shape {

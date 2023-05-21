@@ -105,8 +105,8 @@ impl Target for X86Target {
 
     fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = ImplNode<Self>>> {
         match spec {
-            Spec::Matmul { accum, .. } => match &accum {
-                true => {
+            Spec::Matmul { accum, .. } => {
+                if *accum {
                     let mut microkernels = vec![];
                     if mult_applies_to_operands(&spec.operands()) {
                         microkernels.push(ImplNode::Mult);
@@ -115,9 +115,11 @@ impl Target for X86Target {
                         microkernels.push(ImplNode::BroadcastVecMult);
                     }
                     Box::new(microkernels.into_iter())
+                } else {
+                    Box::new(std::iter::empty())
                 }
-                false => Box::new(std::iter::empty()),
-            },
+            }
+            Spec::Conv {  .. } => Box::new(std::iter::empty()),
             Spec::Load { .. } | Spec::Store { .. } => {
                 let mut microkernels = vec![];
                 if valueassign_applies_to_operands(&spec.operands()) {

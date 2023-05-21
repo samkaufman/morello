@@ -61,7 +61,7 @@ pub fn top_down<Tgt: Target, D: Database<Tgt>>(
             continue;
         }
 
-        let cost = Cost::from_child_costs(&goal.0, &expanded_node, child_sub_costs);
+        let cost = Cost::from_child_costs(&goal.0, &expanded_node, &child_sub_costs);
         reducer.insert(expanded_node, cost);
     }
 

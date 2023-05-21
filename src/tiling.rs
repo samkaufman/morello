@@ -1,6 +1,7 @@
 use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Shape};
 use crate::spec::Spec;
+use divrem::DivCeil;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::fmt::Debug;
@@ -8,6 +9,7 @@ use std::fmt::Debug;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 
+// TODO: Rename to something like `Tiling`, as opposed to a tile.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub enum PartialTile {
     Simple(Shape),
@@ -22,10 +24,13 @@ pub struct Tile {
 }
 
 impl PartialTile {
-    pub fn tile<Tgt: Target>(&self, source_idx: u8, source: &TensorSpec<Tgt>) -> Tile {
+    // TODO: Rename to `apply_to_operand`.
+    pub fn tile<Tgt: Target>(&self, source_idx: u8, source_spec: &TensorSpec<Tgt>) -> Tile {
         match self {
-            PartialTile::Simple(dim_sizes) => simple_tile(source, source_idx, dim_sizes),
-            PartialTile::ConvImage(_dim_sizes, _filter_shape) => todo!(),
+            PartialTile::Simple(dim_sizes) => simple_tile(source_spec, source_idx, dim_sizes),
+            PartialTile::ConvImage(dim_sizes, filter_shape) => {
+                conv_image_tile(source_spec, source_idx, dim_sizes, filter_shape)
+            }
         }
     }
 
@@ -40,16 +45,46 @@ impl PartialTile {
             PartialTile::Simple(shape) => {
                 divrem::DivCeil::div_ceil(origin_size, shape[usize::from(dim)])
             }
-            PartialTile::ConvImage(_, _) => todo!(),
+            PartialTile::ConvImage(img_shape, filters_shape) => {
+                // Batch should be a normal tiling.
+                if dim == 0 {
+                    DivCeil::div_ceil(origin_size, self.dim_sizes()[usize::from(dim)])
+                } else {
+                    let inner = img_shape[usize::from(dim)];
+                    let f = filters_shape[usize::from(dim - 1)];
+                    DivCeil::div_ceil(_s(origin_size, f), _s(inner, f))
+                }
+            }
         }
     }
 
     pub fn boundary_size(&self, dim: u8, origin_size: DimSize) -> u32 {
         match &self {
             PartialTile::Simple(shape) => origin_size % shape[usize::from(dim)],
-            PartialTile::ConvImage(_, _) => todo!(),
+            PartialTile::ConvImage(dim_sizes, filter_shape) => {
+                // Non-spatial dimensions (batch) should be simple tilings.
+                if dim == 0 {
+                    origin_size % dim_sizes[usize::from(dim)]
+                } else {
+                    let filt = filter_shape[usize::from(dim) - 1];
+                    let total_filter_applications = 1 + origin_size - filt;
+                    let tile_filter_applications = 1 + dim_sizes[usize::from(dim)] - filt;
+                    let boundary_applications =
+                        total_filter_applications % tile_filter_applications;
+                    if boundary_applications == 0 {
+                        0
+                    } else {
+                        boundary_applications + filt - 1
+                    }
+                }
+            }
         }
     }
+}
+
+// TODO: Inline the following.
+fn _s(img_size: DimSize, filter_size: DimSize) -> DimSize {
+    1 + img_size - filter_size
 }
 
 /// Constructs a simple tile with alignment set correctly.
@@ -57,6 +92,26 @@ pub fn simple_tile<Tgt: Target>(
     source_spec: &TensorSpec<Tgt>,
     operand_idx: u8,
     new_dims: &[DimSize],
+) -> Tile {
+    make_tile_with_alignment(source_spec, operand_idx, new_dims, PartialTile::Simple)
+}
+
+fn conv_image_tile<Tgt: Target>(
+    source_spec: &TensorSpec<Tgt>,
+    operand_idx: u8,
+    new_dims: &[DimSize],
+    filter_shape: &[DimSize],
+) -> Tile {
+    make_tile_with_alignment(source_spec, operand_idx, new_dims, move |s| {
+        PartialTile::ConvImage(s, filter_shape.into())
+    })
+}
+
+fn make_tile_with_alignment<Tgt: Target>(
+    source_spec: &TensorSpec<Tgt>,
+    operand_idx: u8,
+    new_dims: &[DimSize],
+    tile_constructor: impl FnOnce(Shape) -> PartialTile,
 ) -> Tile {
     assert_eq!(
         new_dims.len(),
@@ -78,22 +133,13 @@ pub fn simple_tile<Tgt: Target>(
         source_spec.dim_sizes(),
     );
 
-    let partial = PartialTile::Simple(Shape::from(new_dims));
+    let partial = tile_constructor(Shape::from(new_dims));
     let aligned = aligned_approx(&partial, new_dims, source_spec);
     Tile {
         partial,
         source_idx: operand_idx,
         aligned,
     }
-}
-
-fn conv_image_tile<Tgt: Target>(
-    _source: &TensorSpec<Tgt>,
-    _operand_idx: u8,
-    _tile_shape: Shape,
-    _filter_shape: Shape,
-) {
-    todo!()
 }
 
 /// Map a Spec's type, input shapes, and output tile to PartialTiles for its inputs.

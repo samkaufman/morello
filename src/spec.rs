@@ -12,6 +12,7 @@ use smallvec::{smallvec, SmallVec, ToSmallVec};
 use std::fmt::Display;
 use std::iter::Iterator;
 use std::iter::{self, once};
+use std::{assert_eq, debug_assert_eq};
 
 const LIMIT_VECTORS_TO_ONE_DIM: bool = true;
 
@@ -24,11 +25,15 @@ pub enum Spec<Tgt: Target> {
         k: DimSize,
         n: DimSize,
         dtype: Dtype,
-        contiguous_abstractions: SmallVec<[Contig; 3]>,
-        alignments: SmallVec<[bool; 3]>,
-        levels: SmallVec<[Tgt::Level; 3]>,
-        layouts: SmallVec<[Layout; 3]>,
-        vector_shapes: SmallVec<[Option<Shape>; 3]>,
+        aux: [SpecAux<Tgt>; 3],
+        serial_only: bool,
+    },
+    Conv {
+        accum: bool,
+        image_shape: Shape,
+        filters_shape: Shape,
+        dtype: Dtype,
+        aux: [SpecAux<Tgt>; 3],
         serial_only: bool,
     },
     Load {
@@ -51,10 +56,22 @@ pub enum Spec<Tgt: Target> {
     },
 }
 
+// TODO: This probably shouldn't be public.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct SpecAux<Tgt: Target> {
+    pub contig: Contig,
+    pub aligned: bool,
+    pub level: Tgt::Level,
+    pub layout: Layout,
+    pub vector_shape: Option<Shape>,
+}
+
 impl<Tgt: Target> Spec<Tgt> {
     pub fn serial_only(&self) -> bool {
         match self {
             Spec::Matmul { serial_only, .. }
+            | Spec::Conv { serial_only, .. }
             | Spec::Load { serial_only, .. }
             | Spec::Store { serial_only, .. }
             | Spec::Zero { serial_only, .. } => *serial_only,
@@ -62,53 +79,41 @@ impl<Tgt: Target> Spec<Tgt> {
     }
 
     pub fn operand_count(&self) -> usize {
-        // TODO: This is slow.
+        // TODO: This is slow. Do it manually once we have unit tests.
         self.operands().len()
     }
 
     pub fn operands(&self) -> Vec<TensorSpec<Tgt>> {
-        match &self {
+        match self {
             Spec::Matmul {
                 accum: _,
                 m,
                 k,
                 n,
                 dtype,
-                contiguous_abstractions,
-                alignments,
-                levels,
-                layouts,
-                vector_shapes,
-                serial_only: _serial_only,
+                aux,
+                serial_only: _,
             } => {
+                // TODO: Document, why are the following non-canon?
                 vec![
-                    TensorSpec::new_noncanon(
-                        smallvec![*m, *k],
-                        *dtype,
-                        contiguous_abstractions[0],
-                        alignments[0],
-                        levels[0],
-                        layouts[0].clone(),
-                        vector_shapes[0].clone(),
-                    ),
-                    TensorSpec::new_noncanon(
-                        smallvec![*k, *n],
-                        *dtype,
-                        contiguous_abstractions[1],
-                        alignments[1],
-                        levels[1],
-                        layouts[1].clone(),
-                        vector_shapes[1].clone(),
-                    ),
-                    TensorSpec::new_noncanon(
-                        smallvec![*m, *n],
-                        *dtype,
-                        contiguous_abstractions[2],
-                        alignments[2],
-                        levels[2],
-                        layouts[2].clone(),
-                        vector_shapes[2].clone(),
-                    ),
+                    aux[0].make_tensorspec_noncanon(smallvec![*m, *k], *dtype),
+                    aux[1].make_tensorspec_noncanon(smallvec![*k, *n], *dtype),
+                    aux[2].make_tensorspec_noncanon(smallvec![*m, *n], *dtype),
+                ]
+            }
+            Spec::Conv {
+                accum: _,
+                image_shape,
+                filters_shape,
+                dtype,
+                aux,
+                serial_only: _,
+            } => {
+                let output_shape = conv_infer_output_shape(image_shape, filters_shape);
+                vec![
+                    aux[0].make_tensorspec_noncanon(image_shape.clone(), *dtype),
+                    aux[1].make_tensorspec_noncanon(filters_shape.clone(), *dtype),
+                    aux[2].make_tensorspec_noncanon(output_shape, *dtype),
                 ]
             }
             Spec::Load {
@@ -128,6 +133,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 let mut inner_tensor_spec = outer_tensor_spec.clone();
                 inner_tensor_spec.set_level(*inner_level, inner_vector_shape.clone());
                 inner_tensor_spec.set_layout(inner_layout.clone());
+                inner_tensor_spec.canonicalize();
                 vec![outer_tensor_spec.clone(), inner_tensor_spec]
             }
             Spec::Zero { tensor_spec, .. } => vec![tensor_spec.clone()],
@@ -136,7 +142,7 @@ impl<Tgt: Target> Spec<Tgt> {
 
     pub fn inputs(&self) -> Vec<TensorSpec<Tgt>> {
         match &self {
-            Spec::Matmul { .. } => self.operands()[..2].to_vec(),
+            Spec::Matmul { .. } | Spec::Conv { .. } => self.operands()[..2].to_vec(),
             Spec::Load { .. } | Spec::Store { .. } => {
                 // TODO: Just grab the item instead of calling operands
                 vec![self.operands()[0].clone()]
@@ -151,36 +157,28 @@ impl<Tgt: Target> Spec<Tgt> {
 
     fn output_idx(&self) -> usize {
         match &self {
-            Spec::Matmul { .. } => 2,
+            Spec::Matmul { .. } | Spec::Conv { .. } => 2,
             Spec::Load { .. } | Spec::Store { .. } => 1,
             Spec::Zero { .. } => 0,
         }
     }
 
     pub fn canonicalize(&mut self) {
+        // TODO: This is expensive. Make an operand_shapes() method instead.
+        let operands = self.operands();
+
         match self {
-            Spec::Matmul {
-                accum: _,
-                m,
-                k,
-                n,
-                dtype: _,
-                contiguous_abstractions,
-                alignments: _,
-                levels: _,
-                layouts,
-                vector_shapes: _,
-                serial_only: _,
-            } => {
-                contiguous_abstractions[0] =
-                    layouts[0].tile_contiguity(&[*m, *k], &[*m, *k], contiguous_abstractions[0]);
-                contiguous_abstractions[1] =
-                    layouts[1].tile_contiguity(&[*k, *n], &[*k, *n], contiguous_abstractions[1]);
-                contiguous_abstractions[2] =
-                    layouts[2].tile_contiguity(&[*m, *n], &[*m, *n], contiguous_abstractions[2]);
-                layouts[0] = layouts[0].canonicalize_for_shape(&[*m, *k]);
-                layouts[1] = layouts[1].canonicalize_for_shape(&[*k, *n]);
-                layouts[2] = layouts[2].canonicalize_for_shape(&[*m, *n]);
+            Spec::Matmul { aux, .. } | Spec::Conv { aux, .. } => {
+                for i in 0..aux.len() {
+                    aux[i].contig = aux[i].layout.tile_contiguity(
+                        operands[i].dim_sizes(),
+                        operands[i].dim_sizes(),
+                        aux[i].contig,
+                    );
+                    aux[i].layout = aux[i]
+                        .layout
+                        .canonicalize_for_shape(operands[i].dim_sizes());
+                }
             }
             Spec::Load {
                 outer_tensor_spec,
@@ -235,10 +233,45 @@ impl<Tgt: Target> Spec<Tgt> {
 
         match &self {
             Spec::Matmul { accum, .. } if !*accum => {
-                Box::new(iter.chain(iter::once(ImplNode::MatmulAccumBlock)))
+                Box::new(iter.chain(iter::once(ImplNode::AccumBlock)))
             }
             Spec::Matmul { accum, .. } if *accum => Box::new(iter.chain(self.split_expansions())),
+            Spec::Conv { accum, .. } => {
+                if *accum {
+                    if self.can_spatial_split() {
+                        Box::new(iter.chain(iter::once(ImplNode::SpatialSplit)))
+                    } else {
+                        Box::new(iter)
+                    }
+                } else {
+                    Box::new(iter.chain(iter::once(ImplNode::AccumBlock)))
+                }
+            }
             _ => Box::new(iter),
+        }
+    }
+
+    fn can_spatial_split(&self) -> bool {
+        if let Spec::Conv {
+            image_shape,
+            filters_shape,
+            aux,
+            ..
+        } = self
+        {
+            if image_shape[2..] != filters_shape[2..] {
+                return false;
+            }
+            for a in aux {
+                if let Some(vector_shape) = &a.vector_shape {
+                    if vector_shape[2..].iter().any(|&d| d != 1) {
+                        return false;
+                    }
+                }
+            }
+            true
+        } else {
+            panic!("can_spatial_split called on non-Conv spec");
         }
     }
 
@@ -452,18 +485,89 @@ impl<Tgt: Target> Spec<Tgt> {
                     PartialTile::Simple(smallvec![*k, n]),
                 ]
             }
+            (
+                Spec::Conv {
+                    image_shape,
+                    filters_shape,
+                    ..
+                },
+                PartialTile::Simple(ptile_shape),
+            )
+            | (
+                Spec::Conv {
+                    image_shape,
+                    filters_shape,
+                    ..
+                },
+                PartialTile::ConvImage(ptile_shape, _),
+            ) => {
+                let new_batch_size = ptile_shape[0];
+                let new_filter_cnt = ptile_shape[1];
+                let new_out_spatials = &ptile_shape[2..];
+                let channels = image_shape[1];
+                let orig_filter_spatials = &filters_shape[2..];
+
+                let new_image_spatials = new_out_spatials
+                    .iter()
+                    .zip(orig_filter_spatials.iter())
+                    .map(|(&o, &f)| o + f - 1);
+
+                // If the output is a convolution, ensure the input filter/window size
+                // is large enough to gather the inputs for the entire output window.
+                let new_filters_spatials: Shape = match smaller_output {
+                    PartialTile::ConvImage(_, new_filters_spatials) => new_filters_spatials[1..]
+                        .iter()
+                        .zip(orig_filter_spatials.iter())
+                        .map(|(&o, &i)| o + i - 1)
+                        .collect(),
+                    _ => orig_filter_spatials.iter().copied().collect(),
+                };
+
+                vec![
+                    PartialTile::ConvImage(
+                        [new_batch_size, channels]
+                            .into_iter()
+                            .chain(new_image_spatials)
+                            .collect(),
+                        [channels]
+                            .into_iter()
+                            .chain(new_filters_spatials.into_iter())
+                            .collect(),
+                    ),
+                    PartialTile::Simple(
+                        [new_filter_cnt, channels]
+                            .iter()
+                            .chain(orig_filter_spatials.iter())
+                            .copied()
+                            .collect(),
+                    ),
+                ]
+            }
             (Spec::Load { .. }, PartialTile::Simple(dim_sizes))
             | (Spec::Store { .. }, PartialTile::Simple(dim_sizes)) => {
                 vec![PartialTile::Simple(dim_sizes.clone())]
             }
             (Spec::Zero { .. }, _) => vec![],
-            _ => unimplemented!(),
+            _ => unimplemented!(
+                "partial_inputs_for_tile_out not implemented for {:?} and {:?}",
+                self,
+                smaller_output
+            ),
         }
     }
 
     pub fn operands_dim_subscripts(&self) -> Vec<SmallVec<[u8; 4]>> {
         match &self {
             Spec::Matmul { .. } => vec![smallvec![0, 2], smallvec![2, 1], smallvec![0, 1]],
+            Spec::Conv { .. } => {
+                // Only supports 2 spatial dimensions.
+                // TODO: Extend this to arbitrary number of spatial dimensions.
+                let (b, f, c, h, w, fh, fw) = (0, 1, 2, 3, 4, 5, 6);
+                let img = smallvec![b, c, h, w];
+                let filt = smallvec![f, c, fh, fw];
+                let out = smallvec![b, f, h, w];
+                vec![img, filt, out]
+            }
             Spec::Load { .. } | Spec::Store { .. } | Spec::Zero { .. } => {
                 // TODO: Calling self.operands() is slow. Don't do it.
                 self.operands()
@@ -476,6 +580,7 @@ impl<Tgt: Target> Spec<Tgt> {
     }
 
     pub fn replace_io(&mut self, new_operands: &[TensorSpec<Tgt>]) {
+        assert_eq!(new_operands.len(), self.operand_count());
         match self {
             Spec::Matmul {
                 accum: _,
@@ -483,26 +588,49 @@ impl<Tgt: Target> Spec<Tgt> {
                 k,
                 n,
                 dtype,
-                contiguous_abstractions,
-                alignments,
-                levels,
-                layouts,
-                vector_shapes,
+                aux,
                 serial_only: _,
             } => {
                 *m = new_operands[0].dim_sizes()[0];
                 *k = new_operands[0].dim_sizes()[1];
                 *n = new_operands[1].dim_sizes()[1];
                 *dtype = new_operands[0].dtype();
-                *contiguous_abstractions =
-                    new_operands.iter().map(|o| o.contiguous_abs()).collect();
-                *alignments = new_operands.iter().map(|o| o.aligned()).collect();
-                *levels = new_operands.iter().map(|o| o.level()).collect();
-                *layouts = new_operands.iter().map(|o| o.layout()).collect();
-                *vector_shapes = new_operands
-                    .iter()
-                    .map(|o| o.vector_shape().cloned())
-                    .collect();
+                for i in 0..aux.len() {
+                    let o = &new_operands[i];
+                    aux[i] = SpecAux {
+                        contig: o.contiguous_abs(),
+                        aligned: o.aligned(),
+                        level: o.level(),
+                        layout: o.layout(),
+                        vector_shape: o.vector_shape().cloned(),
+                    };
+                }
+            }
+            Spec::Conv {
+                accum: _,
+                image_shape,
+                filters_shape,
+                dtype,
+                aux,
+                serial_only: _,
+            } => {
+                assert_eq!(*dtype, new_operands[1].dtype());
+                *image_shape = new_operands[0].dim_sizes().clone();
+                *filters_shape = new_operands[1].dim_sizes().clone();
+                *dtype = new_operands[0].dtype();
+                assert_eq!(*dtype, new_operands[1].dtype());
+                assert_eq!(*dtype, new_operands[2].dtype());
+                // TODO: Assert output shape is expected.
+                for i in 0..aux.len() {
+                    let o = &new_operands[i];
+                    aux[i] = SpecAux {
+                        contig: o.contiguous_abs(),
+                        aligned: o.aligned(),
+                        level: o.level(),
+                        layout: o.layout(),
+                        vector_shape: o.vector_shape().cloned(),
+                    };
+                }
             }
             Spec::Load {
                 outer_tensor_spec,
@@ -542,6 +670,46 @@ impl<Tgt: Target> Spec<Tgt> {
             _ => false,
         }
     }
+
+    pub fn clone_as_accum(&self) -> Self {
+        match self {
+            Spec::Matmul {
+                accum: _,
+                m,
+                k,
+                n,
+                dtype,
+                aux,
+                serial_only,
+            } => Spec::Matmul {
+                accum: true,
+                m: *m,
+                k: *k,
+                n: *n,
+                dtype: *dtype,
+                aux: aux.clone(),
+                serial_only: *serial_only,
+            },
+            Spec::Conv {
+                accum: _,
+                image_shape,
+                filters_shape,
+                dtype,
+                aux,
+                serial_only,
+            } => Spec::Conv {
+                accum: true,
+                image_shape: image_shape.clone(),
+                filters_shape: filters_shape.clone(),
+                dtype: *dtype,
+                aux: aux.clone(),
+                serial_only: *serial_only,
+            },
+            Spec::Load { .. } | Spec::Store { .. } | Spec::Zero { .. } => {
+                panic!("clone_with_accum() called on Spec without accumulating variant")
+            }
+        }
+    }
 }
 
 impl<Tgt: Target> Display for Spec<Tgt> {
@@ -549,6 +717,8 @@ impl<Tgt: Target> Display for Spec<Tgt> {
         let header = match &self {
             Spec::Matmul { accum, .. } if *accum => "MatmulAccum",
             Spec::Matmul { .. } => "Matmul",
+            Spec::Conv { accum, .. } if *accum => "ConvAccum",
+            Spec::Conv { .. } => "Conv",
             Spec::Load { .. } => "Load",
             Spec::Store { .. } => "Store",
             Spec::Zero { .. } => "Zero",
@@ -563,6 +733,20 @@ impl<Tgt: Target> Display for Spec<Tgt> {
         let serial_str = if self.serial_only() { ", serial" } else { "" };
 
         write!(f, "{}({}{})", header, operand_str, serial_str)
+    }
+}
+
+impl<Tgt: Target> SpecAux<Tgt> {
+    fn make_tensorspec_noncanon(&self, dim_sizes: Shape, dtype: Dtype) -> TensorSpec<Tgt> {
+        TensorSpec::new_noncanon(
+            dim_sizes,
+            dtype,
+            self.contig,
+            self.aligned,
+            self.level,
+            self.layout.clone(),
+            self.vector_shape.clone(),
+        )
     }
 }
 
@@ -605,7 +789,7 @@ pub fn gen_vector_shapes(
     dtype: Dtype,
     vector_bytes: u32,
     rank: Option<u8>,
-) -> Box<dyn Iterator<Item = Vec<DimSize>>> {
+) -> Box<dyn Iterator<Item = Shape>> {
     assert_ne!(
         outer_shape.is_some(),
         rank.is_some(),
@@ -628,7 +812,7 @@ pub fn gen_vector_shapes(
 
     if LIMIT_VECTORS_TO_ONE_DIM {
         if adjusted_vector_bytes == 1 {
-            return Box::new(std::iter::once(vec![1; rank.into()]));
+            return Box::new(std::iter::once(smallvec![1; rank.into()]));
         }
         let outer_shape = outer_shape.map(Vec::from);
         Box::new(
@@ -640,7 +824,7 @@ pub fn gen_vector_shapes(
                         || outer_shape.as_ref().unwrap()[i] >= adjusted_vector_bytes
                 })
                 .map(move |i| {
-                    let mut v = vec![1; rank.into()];
+                    let mut v = smallvec![1; rank.into()];
                     v[i] = adjusted_vector_bytes;
                     v
                 }),
@@ -663,4 +847,30 @@ pub fn dim_range(dim: DimSize, include_end: bool) -> impl Iterator<Item = DimSiz
         })
         .flatten(),
     )
+}
+
+pub fn conv_infer_output_shape(image_shape: &[u32], filters_shape: &[u32]) -> Shape {
+    let batch_cnt = image_shape[0];
+    let channels = image_shape[1];
+    let filter_cnt = filters_shape[0];
+    // TODO: We don't need to store this dimension twice.
+    assert_eq!(
+        channels, filters_shape[1],
+        "Image had {} channels and filters had {}",
+        channels, filters_shape[1]
+    );
+    vec![batch_cnt, filter_cnt]
+        .into_iter()
+        .chain(image_shape[2..].iter().zip(filters_shape[2..].iter()).map(
+            |(&img_dim, &filt_dim)| {
+                assert!(
+                    img_dim >= filt_dim,
+                    "Image dimension {} was smaller than filter dimension {}",
+                    img_dim,
+                    filt_dim
+                );
+                img_dim - filt_dim + 1
+            },
+        ))
+        .collect()
 }

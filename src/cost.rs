@@ -6,6 +6,7 @@ use crate::tensorspec::TensorSpec;
 use crate::utils::snap_availables_up_memvec;
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::cmp;
 
 const INST_COST: MainCost = 1000;
@@ -25,13 +26,16 @@ impl Cost {
     pub fn from_child_costs<Tgt: Target>(
         spec: &Spec<Tgt>,
         imp: &ImplNode<Tgt>,
-        child_costs: Vec<Cost>,
+        child_costs: &[Cost],
     ) -> Cost {
-        let child_main_costs = child_costs.iter().map(|k| k.main).collect::<Vec<_>>();
+        let child_main_costs = child_costs
+            .iter()
+            .map(|k| k.main)
+            .collect::<SmallVec<[_; 3]>>();
         let child_peaks = child_costs
             .iter()
             .map(|k| k.peaks.clone())
-            .collect::<Vec<_>>();
+            .collect::<SmallVec<[_; 3]>>();
         debug_assert_eq!(child_main_costs.len(), imp.child_count(spec));
         let main_cost: MainCost = compute_cost_node(spec, imp, &child_main_costs);
         // TODO: Handle other kinds of memory, not just standard/TinyMap peaks.
@@ -83,7 +87,9 @@ fn compute_cost_node<Tgt: Target>(
     child_costs: &[MainCost],
 ) -> MainCost {
     match op {
-        ImplNode::Pipeline | ImplNode::MatmulAccumBlock => child_costs.iter().sum(),
+        ImplNode::Pipeline | ImplNode::AccumBlock | ImplNode::SpatialSplit => {
+            child_costs.iter().sum()
+        }
         ImplNode::Loop { parallel, .. } => {
             let factor = if *parallel {
                 let processors = Tgt::processors() as u32;

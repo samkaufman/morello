@@ -1,15 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-use smallvec::{smallvec, SmallVec};
+use smallvec::SmallVec;
 
+use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Shape};
 use crate::layout::Layout;
 use crate::memorylimits::MemVec;
-use crate::spec::Spec;
+use crate::reinterpret::squeeze_tile;
+use crate::spec::{Spec, SpecAux};
 use crate::target::{MemoryLevel, Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::TensorSpec;
-use crate::tiling::Tile;
+use crate::tiling::{PartialTile, Tile};
 
 /// A single node in an Impl.
 ///
@@ -34,8 +36,9 @@ pub enum ImplNode<Tgt: Target> {
         destination_vector_shape: Option<Shape>,
         prefetch: bool,
     },
-    MatmulAccumBlock,
+    AccumBlock,
     Pipeline,
+    SpatialSplit,
     /* Mult Impls */
     Mult,
     BroadcastVecMult,
@@ -58,7 +61,8 @@ impl<Tgt: Target> ImplNode<Tgt> {
     pub fn child_count(&self, node_spec: &Spec<Tgt>) -> usize {
         match self {
             ImplNode::Loop { .. } => 1,
-            ImplNode::MatmulAccumBlock => 2,
+            ImplNode::AccumBlock => 2,
+            ImplNode::SpatialSplit => 1,
             ImplNode::Mult
             | ImplNode::BroadcastVecMult
             | ImplNode::ValueAssign
@@ -92,6 +96,95 @@ impl<Tgt: Target> ImplNode<Tgt> {
                 vec![inner_spec]
             }
             ImplNode::Pipeline => todo!(),
+            ImplNode::SpatialSplit => match node_spec {
+                Spec::Conv {
+                    image_shape,
+                    filters_shape,
+                    dtype,
+                    serial_only,
+                    ..
+                } => {
+                    let operands = node_spec.operands();
+
+                    // We're going to introduce a Loop which traverses all the
+                    // pixels over all spatial dimensions, vectorizing across
+                    // the batch, channels, and filters dimmensions. This means
+                    // the loop body/the sub-Spec will have its spatial dims.
+                    // dropped, even though they are non-degenerate.
+
+                    let dropped_dims: Vec<u8> =
+                        (2..u8::try_from(operands[0].dim_sizes().len()).unwrap()).collect();
+                    let spatial_ones = Shape::from_elem(1, dropped_dims.len());
+
+                    let tiled_image_spec_shape = operands[0].dim_sizes()[..2]
+                        .iter()
+                        .chain(spatial_ones.iter())
+                        .copied()
+                        .collect::<Shape>();
+                    // TODO: The below `shrink` is messy because we, the caller, need to
+                    // compute alignment. Fix that.
+                    let mut tiled_image_spec = operands[0].clone();
+                    tiled_image_spec.shrink(
+                        &tiled_image_spec_shape,
+                        aligned_approx(
+                            &PartialTile::Simple(tiled_image_spec_shape.clone()),
+                            &tiled_image_spec_shape,
+                            &operands[0],
+                        ),
+                    );
+
+                    let tiled_filters_spec_shape = operands[1].dim_sizes()[..2]
+                        .iter()
+                        .chain(spatial_ones.iter())
+                        .copied()
+                        .collect::<Shape>();
+                    let mut tiled_filters_spec = operands[1].clone();
+                    tiled_filters_spec.shrink(
+                        &tiled_filters_spec_shape,
+                        aligned_approx(
+                            &PartialTile::Simple(tiled_filters_spec_shape.clone()),
+                            &tiled_filters_spec_shape,
+                            &operands[1],
+                        ),
+                    );
+
+                    let squeezed_image_spec = squeeze_tile(&tiled_image_spec, &dropped_dims);
+                    let squeezed_filters_spec = squeeze_tile(&tiled_filters_spec, &dropped_dims);
+                    let squeezed_output_spec = squeeze_tile(&operands[2], &dropped_dims);
+                    vec![Spec::Matmul {
+                        accum: true,
+                        m: image_shape[0],
+                        k: image_shape[1],
+                        n: filters_shape[0],
+                        dtype: *dtype,
+                        aux: [
+                            SpecAux {
+                                contig: squeezed_image_spec.contiguous_abs(),
+                                aligned: squeezed_image_spec.aligned(),
+                                level: squeezed_image_spec.level(),
+                                layout: squeezed_image_spec.layout(),
+                                vector_shape: squeezed_image_spec.vector_shape().cloned(),
+                            },
+                            SpecAux {
+                                contig: squeezed_filters_spec.contiguous_abs(),
+                                aligned: squeezed_filters_spec.aligned(),
+                                level: squeezed_filters_spec.level(),
+                                layout: squeezed_filters_spec.layout(),
+                                vector_shape: squeezed_filters_spec.vector_shape().cloned(),
+                            },
+                            SpecAux {
+                                contig: squeezed_output_spec.contiguous_abs(),
+                                aligned: squeezed_output_spec.aligned(),
+                                level: squeezed_output_spec.level(),
+                                layout: squeezed_output_spec.layout(),
+                                vector_shape: squeezed_output_spec.vector_shape().cloned(),
+                            },
+                        ],
+                        serial_only: *serial_only,
+                    }]
+                }
+                _ => unreachable!(),
+            },
             ImplNode::MoveLet {
                 source_idx,
                 destination_level,
@@ -145,46 +238,23 @@ impl<Tgt: Target> ImplNode<Tgt> {
 
                 result
             }
-            ImplNode::MatmulAccumBlock => match node_spec {
-                Spec::Matmul {
-                    accum,
-                    m,
-                    k,
-                    n,
-                    dtype,
-                    contiguous_abstractions,
-                    alignments,
-                    levels,
-                    layouts,
-                    vector_shapes,
-                    serial_only,
-                } if !*accum => {
-                    vec![
+            ImplNode::AccumBlock => match node_spec {
+                Spec::Matmul { accum, .. } | Spec::Conv { accum, .. } => {
+                    if *accum {
+                        panic!("Spec is already accumulating");
+                    }
+                    let mut result = vec![
                         Spec::Zero {
                             tensor_spec: node_spec.output(),
-                            serial_only: *serial_only,
+                            serial_only: node_spec.serial_only(),
                         },
-                        Spec::Matmul {
-                            accum: true,
-                            m: *m,
-                            k: *k,
-                            n: *n,
-                            dtype: *dtype,
-                            contiguous_abstractions: contiguous_abstractions.clone(),
-                            alignments: alignments.clone(),
-                            levels: levels.clone(),
-                            layouts: smallvec![
-                                layouts[0].canonicalize_for_shape(&[*m, *k]),
-                                layouts[1].canonicalize_for_shape(&[*k, *n]),
-                                layouts[2].canonicalize_for_shape(&[*m, *n])
-                            ],
-                            vector_shapes: vector_shapes.clone(),
-                            serial_only: *serial_only,
-                        },
-                    ]
+                        node_spec.clone_as_accum(),
+                    ];
+                    result.iter_mut().for_each(|s| s.canonicalize());
+                    result
                 }
                 _ => panic!(
-                    "MatmulAccumBlock node spec must be a Matmul with accum=false, but was {:?}",
+                    "AccumBlock node spec must be a Matmul with accum=false, but was {:?}",
                     node_spec
                 ),
             },
@@ -341,7 +411,8 @@ impl<Tgt: Target> ImplNode<Tgt> {
             }
             ImplNode::Pipeline => todo!(),
             ImplNode::Loop { .. }
-            | ImplNode::MatmulAccumBlock
+            | ImplNode::SpatialSplit
+            | ImplNode::AccumBlock
             | ImplNode::Mult
             | ImplNode::BroadcastVecMult
             | ImplNode::ValueAssign
