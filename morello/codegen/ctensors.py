@@ -26,10 +26,10 @@ _GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str, str, tuple[str, str]]] =
 }
 
 _ARM_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str, str, tuple[str, str]]] = {
-    (Uint32, 8): (32, "vui8", "uint32x4x2_t", ("vld1q_u32", "vst1q_u32")),
-    (Uint32, 4): (16, "vui4", "uint32x4_t", ("vld1_u32", "vst1_u32")),
-    (Uint8, 32): (32, "vub32", "uint32x4x2_t", ("vld1q_u32", "vst1q_u32")),
-    (Uint8, 16): (16, "vub16", "uint32x4_t", ("vld1_u32", "vst1_u32")),
+    (Uint32, 8): (32, "vui8", "uint32x4x2_t", ("vld2q_u32", "vst2q_u32")),
+    (Uint32, 4): (16, "vui4", "uint32x4_t", ("vld1q_u32", "vst1q_u32")),
+    (Uint8, 32): (32, "vub32", "uint8x16x2_t", ("vld2q_u8", "vst2q_u8")),
+    (Uint8, 16): (16, "vub16", "uint8x16_t", ("vld1q_u8", "vst1q_u8")),
 }
 
 ONES_FOR_NON_ZERO_INIT: contextvars.ContextVar[bool] = contextvars.ContextVar(
