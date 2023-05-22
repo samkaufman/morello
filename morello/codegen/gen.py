@@ -10,11 +10,13 @@ import sympy
 
 from .. import impl, utils
 from ..dtypes import Dtype
+from ..system_config.cpu import X86Target, ArmTarget
 from ..tensor import Tensor
+from ..system_config.state import current_target
 from . import common, expr_utils
 from .common import OperandDetails
 from .ctensors import (
-    GCC_VEC_TYPES,
+    vec_types,
     CHeapArray,
     CPtr,
     CStackArray,
@@ -287,7 +289,7 @@ def _inner_generate_c(
                     "  /* Mult (vec boundary) */"
                 )
         else:
-            vtype = GCC_VEC_TYPES[(imp.spec.operands[2].dtype, rhs_volume)][1]
+            vtype = vec_types()[(imp.spec.operands[2].dtype, rhs_volume)][1]
             writer.writeline(
                 f"*({vtype} *)({op_details[-1].c_tensor.c_index_ptr(o)}) "
                 "+= "
@@ -360,7 +362,7 @@ def _inner_generate_c(
             lhs_txt = op_details[0].c_tensor.c_index_ptr(l)
             rhs_txt = op_details[1].c_tensor.c_index_ptr(r)
             if all(t.aligned for t in imp.spec.operands):
-                vtype = GCC_VEC_TYPES[(imp.spec.operands[0].dtype, vol)][1]
+                vtype = vec_types()[(imp.spec.operands[0].dtype, vol)][1]
                 if not imp.is_store:
                     lhs_txt, rhs_txt = rhs_txt, lhs_txt
                 writer.writeline(
@@ -368,7 +370,7 @@ def _inner_generate_c(
                     f"(*({vtype} *)({rhs_txt}));  // VectorAssign"
                 )
             else:
-                itype, (load_inst, store_inst) = GCC_VEC_TYPES[
+                itype, (load_inst, store_inst) = vec_types()[
                     (imp.spec.operands[0].dtype, vol)
                 ][2:]
                 a, b = rhs_txt, lhs_txt
@@ -562,11 +564,17 @@ def generate_c(
     writer.writeline("#include <stdio.h>")
     writer.writeline("#include <string.h>")
     writer.writeline("#include <time.h>")
-    writer.writeline("#include <immintrin.h>")
+
+    cpu_target = current_target()
+    if isinstance(cpu_target, X86Target):
+        writer.writeline("#include <immintrin.h>")
+    elif isinstance(cpu_target, ArmTarget):
+        writer.writeline("#include <arm_neon.h>")
+
     writer.writeline("#define is_aligned(POINTER, BYTE_COUNT) \\")
     writer.writeline("  (((uintptr_t)(const void *)(POINTER)) % (BYTE_COUNT) == 0)")
 
-    for (dt, _), (vec_bytes, name, _, _) in GCC_VEC_TYPES.items():
+    for (dt, _), (vec_bytes, name, _, _) in vec_types().items():
         # Declare a vector of {vec_bytes} bytes, divided into {dt.c_type}
         # values. (vec_bytes must be a multiple of the c_type size.)
         writer.writeline(

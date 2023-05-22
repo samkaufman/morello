@@ -8,10 +8,12 @@ from typing import Iterable, Optional, Sequence, Union
 import sympy
 
 from ..dtypes import Dtype, Uint8, Uint32
+from ..system_config.cpu import X86Target, ArmTarget
+from ..system_config.state import current_target
 from . import common, expr_utils
 from .indexexpr import vsub
 
-GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str, str, tuple[str, str]]] = {
+_GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str, str, tuple[str, str]]] = {
     (Uint32, 8): (32, "vui8", "__m256i", ("_mm256_loadu_si256", "_mm256_storeu_si256")),
     (Uint32, 4): (16, "vui4", "__m128i", ("_mm_loadu_si128", "_mm_storeu_si128")),
     (Uint8, 32): (
@@ -23,9 +25,26 @@ GCC_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str, str, tuple[str, str]]] = 
     (Uint8, 16): (16, "vub16", "__m128i", ("_mm_loadu_si128", "_mm_storeu_si128")),
 }
 
+_ARM_VEC_TYPES: dict[tuple[Dtype, int], tuple[int, str, str, tuple[str, str]]] = {
+    (Uint32, 8): (32, "vui8", "uint32x4x2_t", ("vld2q_u32", "vst2q_u32")),
+    (Uint32, 4): (16, "vui4", "uint32x4_t", ("vld1q_u32", "vst1q_u32")),
+    (Uint8, 32): (32, "vub32", "uint8x16x2_t", ("vld2q_u8", "vst2q_u8")),
+    (Uint8, 16): (16, "vub16", "uint8x16_t", ("vld1q_u8", "vst1q_u8")),
+}
+
 ONES_FOR_NON_ZERO_INIT: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "ONES_FOR_NON_ZERO_INIT", default=False
 )
+
+
+def vec_types() -> dict[tuple[Dtype, int], tuple[int, str, str, tuple[str, str]]]:
+    cpu_target = current_target()
+    if isinstance(cpu_target, X86Target):
+        return _GCC_VEC_TYPES
+    elif isinstance(cpu_target, ArmTarget):
+        return _ARM_VEC_TYPES
+    else:
+        raise ValueError("Unknown target: " + str(cpu_target))
 
 
 def _expr_to_c(expr: Union[sympy.Expr, int]) -> str:
@@ -327,7 +346,7 @@ class CVecVars(CTensor):
 
     @property
     def declared_type(self) -> str:
-        return GCC_VEC_TYPES[(self.dtype, self._vector_size)][1]
+        return vec_types()[(self.dtype, self._vector_size)][1]
 
     def _range_vectors_single_dim(
         self, dim_idx: int
@@ -452,7 +471,7 @@ class _CSingleVecVar(CNameTensor):
 
     @property
     def declared_type(self) -> str:
-        return GCC_VEC_TYPES[(self.dtype, self.size)][1]
+        return vec_types()[(self.dtype, self.size)][1]
 
 
 @dataclasses.dataclass(frozen=True)

@@ -75,7 +75,7 @@ logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--ignore-environment", action="store_true")
-parser.add_argument("--target", type=str, default="cpu")
+parser.add_argument("--target", type=str, default="x86")
 parser.add_argument("--cache", type=pathlib.Path, default=None)
 parser.add_argument("--redis", type=str, default=None)
 parser.add_argument("--redis-namespace", type=str, default=None)
