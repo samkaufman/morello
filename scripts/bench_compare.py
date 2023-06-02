@@ -33,6 +33,7 @@ import jax
 import jax.lib
 import numpy as np
 import oauth2client.service_account
+import psutil
 import pydrive2
 import pydrive2.auth
 import pydrive2.drive
@@ -79,6 +80,8 @@ parser.add_argument("--target", type=str, default="x86")
 parser.add_argument("--cache", type=pathlib.Path, default=None)
 parser.add_argument("--redis", type=str, default=None)
 parser.add_argument("--redis-namespace", type=str, default=None)
+parser.add_argument("--load-sqlite-db", type=pathlib.Path, default=None)
+parser.add_argument("--sqlite-inmem-cache-kb", type=int, default=None)
 parser.add_argument(
     "--trials",
     type=int,
@@ -138,6 +141,10 @@ def _to_torch(arr: np.ndarray) -> torch.Tensor:
     if arr.dtype == np.uint32:
         arr = arr.astype("int32")
     return torch.from_numpy(arr)
+
+
+def _is_realtime():
+    return os.sched_getparam(os.getpid()).sched_priority > 0
 
 
 @contextlib.contextmanager
@@ -216,9 +223,10 @@ class Benchmark:
         cache: Union[str, pathlib.Path, None],
         save_cache: bool,
         red: Optional[tuple[str, str]],
+        sqlite_db: Optional[pathlib.Path],
+        sqlite_cache_kb: Optional[int],
         extras_dir: pathlib.Path,
     ) -> Iterable[tuple[str, Callable[[], "BenchmarkBackend"]]]:
-
         np_backend = lambda: self._numpy_backend(extras_dir / "numpy")
         torch_backend = lambda: self._torch_backend(extras_dir / "torch")
         torchscript_backend = lambda: TorchScriptBackend(
@@ -235,7 +243,13 @@ class Benchmark:
         yield "jax", lambda: self._jax_backend(extras_dir / "jax")
         yield "halide", lambda: self._halide_backend(extras_dir / "halide")
         yield "morello", lambda: MorelloBackend(
-            self, cache, save_cache, red, extras_dir / "morello"
+            self,
+            cache,
+            save_cache,
+            red,
+            sqlite_db,
+            sqlite_cache_kb,
+            extras_dir / "morello",
         )
 
     @property
@@ -268,7 +282,7 @@ class BenchmarkBackend:
         self.extras_dir = extras_dir
         extras_dir.mkdir(parents=True, exist_ok=True)
 
-    def run(self, trials: int) -> list[float]:
+    def run(self, trials: int) -> tuple[list[float], list[int], int, bool]:
         raise NotImplementedError()
 
 
@@ -278,7 +292,9 @@ class MorelloBackend(BenchmarkBackend):
         benchmark: Benchmark,
         cache: Union[str, pathlib.Path, None],
         save_cache: bool,
-        red: Optional[tuple[str, str]],
+        red,
+        sqlite_db,
+        sqlite_cache_kb,
         extras_dir: pathlib.Path,
     ):
         super().__init__(extras_dir)
@@ -286,14 +302,23 @@ class MorelloBackend(BenchmarkBackend):
         self.cache_path = cache
         self.save_cache = save_cache
         self.red = red
+        self.sqlite_db = sqlite_db
+        self.sqlite_cache_kb = sqlite_cache_kb
 
-    def run(self, trials: int) -> list[float]:
+    def run(self, trials: int) -> tuple[list[float], list[int], int, bool]:
         spec = self.benchmark.spec
         with search_cache.persistent_cache(
-            self.cache_path, self.red, save=self.save_cache
+            self.cache_path,
+            self.red,
+            self.sqlite_db,
+            self.sqlite_cache_kb,
+            save=self.save_cache,
         ) as cache:
             start = time.time()
-            impl = asyncio.run(search.schedule_search(spec, cache=cache))[0]
+            search_result = asyncio.run(search.schedule_search(spec, cache=cache))
+            if not search_result:
+                raise Exception(f"Failed to find a schedule for {spec}")
+            impl = search_result[0]
             logger.info("Completed synthesis. Took %.2fs", time.time() - start)
         assert impl
 
@@ -304,7 +329,9 @@ class MorelloBackend(BenchmarkBackend):
             fo.write(impl_str)
         with (self.extras_dir / "source.c").open("w") as fo:
             fo.write(source_code)
-        return runtime_samples
+
+        process = psutil.Process(os.getpid())
+        return runtime_samples, process.cpu_affinity(), process.nice(), _is_realtime()
 
     @property
     def short_name(self) -> str:
@@ -332,26 +359,30 @@ class LoopingBackend(BenchmarkBackend):
     def data_deps(self) -> Sequence[tuple[str, Any]]:
         raise NotImplementedError()
 
-    def run(self, trials: int) -> list[float]:
+    def run(self, trials: int) -> tuple[list[float], list[int], int, bool]:
         # TODO: Pull building out of the profiled loop
         self._run_with_profiler(
             1, lambda **k: _perf_events(self.extras_dir / "perf", **k)
         )
         return self._run_with_profiler(trials, lambda **_: contextlib.nullcontext())
 
-    def _run_with_profiler(self, *args, **kwargs) -> list[float]:
+    def _run_with_profiler(
+        self, *args, **kwargs
+    ) -> tuple[list[float], list[int], int, bool]:
         if self._use_subprocess:
             return self._run_with_profiler_process(*args, **kwargs)
         return self._run_with_profiler_thread(*args, **kwargs)
 
-    def _run_with_profiler_process(self, trials: int, perf_ctx) -> list[float]:
+    def _run_with_profiler_process(
+        self, trials: int, perf_ctx
+    ) -> tuple[list[float], list[int], int, bool]:
         mp_ctx = multiprocessing.get_context("fork")
         go_q, r_q = mp_ctx.Queue(), mp_ctx.Queue()
         child_process = mp_ctx.Process(
             target=self._subproc_wrapper, args=(go_q, r_q, None, trials), daemon=True
         )
         child_process.start()
-        r_q.get()  # Drop the returned thread ID.
+        _, cpu_affinity, nice, is_rt = r_q.get()  # Drop the returned thread ID only.
         with perf_ctx(pid=child_process.pid):
             go_q.put("go")
             success, result = r_q.get()
@@ -359,9 +390,11 @@ class LoopingBackend(BenchmarkBackend):
             if not success:
                 raise result
         assert result is not None
-        return result
+        return result, cpu_affinity, nice, is_rt
 
-    def _run_with_profiler_thread(self, trials: int, perf_ctx) -> list[float]:
+    def _run_with_profiler_thread(
+        self, trials: int, perf_ctx
+    ) -> tuple[list[float], list[int], int, bool]:
         go_q, r_q = queue.Queue(), queue.Queue()
 
         c = contextvars.copy_context()
@@ -372,7 +405,7 @@ class LoopingBackend(BenchmarkBackend):
             name=f"ProfTh{type(self).__name__}",
         )
         child_thread.start()
-        tid = r_q.get()
+        tid, cpu_affinity, nice, is_rt = r_q.get()
         with perf_ctx(tid=tid):
             go_q.put("go")
             success, result = r_q.get()
@@ -380,7 +413,7 @@ class LoopingBackend(BenchmarkBackend):
             if not success:
                 raise result
         assert result is not None
-        return result
+        return result, cpu_affinity, nice, is_rt
 
     def _subproc_wrapper(self, go_q, result_queue, *args, **kwargs):
         """Calls `_subproc_run`, controlled by and reporting to given queues.
@@ -391,7 +424,15 @@ class LoopingBackend(BenchmarkBackend):
         Meant to be called either in a subprocess or thread.
         """
         try:
-            result_queue.put(threading.get_native_id())
+            process = psutil.Process(os.getpid())
+            result_queue.put(
+                (
+                    threading.get_native_id(),
+                    process.cpu_affinity(),
+                    process.nice(),
+                    _is_realtime(),
+                )
+            )
             if self._should_run_rt:
                 # Set own priority to realtime (99)
                 max_param = os.sched_param(os.sched_get_priority_max(os.SCHED_FIFO))
@@ -455,7 +496,7 @@ class BaseJAXBackend(LoopingBackend):
     def set_inputs(self):
         raise NotImplementedError()
 
-    def run(self, trials: int) -> list[float]:
+    def run(self, trials: int) -> tuple[list[float], list[int], int, bool]:
         if not self.benchmark.serial_only:
             return super().run(trials)
         with _affinity_ctx(1):
@@ -540,7 +581,7 @@ class MatmulJAX(BaseJAXBackend):
         return jax_mm
 
     def set_inputs(self):
-        numpy_backend = MatmulNumpy(self.benchmark)
+        numpy_backend = MatmulNumpy(self.benchmark, self.extras_dir)
         self.lhs = jax.numpy.array(numpy_backend.lhs)
         self.rhs = jax.numpy.array(numpy_backend.rhs)
 
@@ -550,7 +591,7 @@ class MatmulJAX(BaseJAXBackend):
 
 
 class BaseTorchBackend(LoopingBackend):
-    def run(self, trials: int) -> list[float]:
+    def run(self, trials: int) -> tuple[list[float], list[int], int, bool]:
         # TODO: Save to file
         termcolor.cprint("PyTorch Configuration:", attrs=["bold"])
         print(torch.__config__.show())
@@ -572,7 +613,7 @@ class MatmulTorch(BaseTorchBackend):
     def __init__(self, benchmark: MatmulBenchmark, extras_dir) -> None:
         super().__init__(extras_dir)
         self.benchmark = benchmark
-        numpy_backend = MatmulNumpy(benchmark)
+        numpy_backend = MatmulNumpy(benchmark, extras_dir)
         self.lhs = _to_torch(numpy_backend.lhs)
         self.rhs = _to_torch(numpy_backend.rhs)
 
@@ -640,7 +681,7 @@ def jitted({', '.join([n for n, _ in self.torch_backend.data_deps])}):
     def codelet(self) -> str:
         return f"torch.jit.wait(torch.jit.fork(self.jitted_fn, {', '.join([n for n, _ in self.data_deps])}))"
 
-    def run(self, trials: int) -> list[float]:
+    def run(self, trials: int) -> tuple[list[float], list[int], int, bool]:
         result = super().run(trials)
         if self.print_graphs:
             print("")
@@ -650,9 +691,9 @@ def jitted({', '.join([n for n, _ in self.torch_backend.data_deps])}):
 
 
 class _RelayBase(LoopingBackend):
-    tvm_m: tvm.contrib.graph_executor.GraphModule
-    relay_mod: tvm.ir.module.IRModule
-    relay_params: dict[str, tvm.nd.NDArray]
+    tvm_m: "tvm.contrib.graph_executor.GraphModule"
+    relay_mod: "tvm.ir.module.IRModule"
+    relay_params: dict[str, "tvm.nd.NDArray"]
 
     def __init__(
         self, torchscript_backend: TorchScriptBackend, extras_dir: pathlib.Path
@@ -1273,7 +1314,7 @@ class BaseHalideBackend(LoopingBackend):
 
 class MatmulHalide(BaseHalideBackend):
     def _make_pipeline(self):
-        mmnp = MatmulNumpy(self.benchmark)
+        mmnp = MatmulNumpy(self.benchmark, self.extras_dir)
         lhs_hl, rhs_hl = (
             hl.Buffer(mmnp.lhs, name="lhs"),
             hl.Buffer(mmnp.rhs, name="rhs"),
@@ -1456,10 +1497,6 @@ def main():
 
     args = parser.parse_args()
 
-    red: Optional[tuple[str, str]] = None
-    if args.redis:
-        red = (args.redis, args.redis_namespace)
-
     if not args.ignore_environment:
         _check_environment()
 
@@ -1514,7 +1551,12 @@ def main():
                 )
                 work_dir_backend.mkdir(parents=True, exist_ok=False)
                 for short_name, backend_constructor in benchmark.backends(
-                    args.cache, args.save_cache, red, work_dir_backend
+                    args.cache,
+                    args.save_cache,
+                    args.redis,
+                    args.load_sqlite_db,
+                    args.sqlite_inmem_cache_kb,
+                    work_dir_backend,
                 ):
                     if args.backend and short_name not in args.backend:
                         print(f"Skipping backend named", short_name)
@@ -1522,11 +1564,14 @@ def main():
                     print(f"Running {short_name}")
                     try:
                         backend = backend_constructor()
-                        runtime_samples = backend.run(args.trials)
+                        runtime_samples, cpu_affinity, nice, is_rt = backend.run(
+                            args.trials
+                        )
                         assert isinstance(runtime_samples, list)
                         runtime_secs = min(runtime_samples)
                     except NotImplementedError:
                         print(f"No implementation for {short_name}. Skipping.")
+                        raise
                         continue
                     finally:
                         uploaded_url = ""
@@ -1550,6 +1595,9 @@ def main():
                                 ", ".join(f"{s:.8f}" for s in runtime_samples),
                                 uploaded_url,
                                 "blockdistributed",
+                                str(cpu_affinity),
+                                nice,
+                                str(is_rt),
                             ],
                             value_input_option="USER_ENTERED",
                         )
