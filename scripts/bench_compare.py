@@ -93,7 +93,7 @@ parser.add_argument(
     ),
 )
 parser.add_argument("--no-save-cache", action="store_false", dest="save_cache")
-parser.add_argument("--backend", type=str, nargs="+", default=None)
+parser.add_argument("--backend", type=str, action="append")
 parser.add_argument("--log-to-sheet", type=str, default=None)
 parser.add_argument("--save-to-gdrive", type=str, default=None)
 parser.add_argument(
@@ -652,8 +652,6 @@ class TorchScriptBackend(BaseTorchBackend):
         super().__init__(extras_dir)
         self.torch_backend = torch_backend
         self.print_graphs = print_graphs
-        self._jitted_fn = None
-
         self.jitted_fn = torch.compile(self._make_jittable())
 
     def _make_jittable(self):
