@@ -7,6 +7,7 @@ use crate::target::Target;
 
 use rusqlite::params_from_iter;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use std::collections::HashMap;
 use std::mem;
@@ -15,10 +16,10 @@ use std::path;
 const SQLITE_BATCH_SIZE: usize = 1_000;
 
 pub trait Database<Tgt: Target> {
-    fn get(&self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>>;
+    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(ImplNode<Tgt>, Cost); 1]>>;
     // TODO: Drop get_spec, which exists solely for SqliteDatabaseWrapper.
     fn get_spec(&self, spec: &Spec<Tgt>) -> Option<&Entry<Tgt>>;
-    fn put(&mut self, problem: Problem<Tgt>, impls: Vec<(ImplNode<Tgt>, Cost)>);
+    fn put(&mut self, problem: Problem<Tgt>, impls: SmallVec<[(ImplNode<Tgt>, Cost); 1]>);
     fn flush(&mut self);
 }
 
@@ -45,7 +46,7 @@ enum SqliteDatabaseWrapperMsg<Tgt: Target> {
 #[serde(bound = "")]
 pub struct Entry<Tgt: Target> {
     ranges: Vec<(MemVec, MemVec)>,
-    values: Vec<Vec<(ImplNode<Tgt>, Cost)>>,
+    values: Vec<SmallVec<[(ImplNode<Tgt>, Cost); 1]>>,
 }
 
 impl<Tgt: Target> InMemDatabase<Tgt> {
@@ -59,7 +60,7 @@ impl<Tgt: Target> InMemDatabase<Tgt> {
         &'a self,
         mlims: &MemoryLimits,
         entry: &'a Entry<Tgt>,
-    ) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
+    ) -> Option<&SmallVec<[(ImplNode<Tgt>, Cost); 1]>> {
         match mlims {
             MemoryLimits::Standard(query_lims) => {
                 for (i, (lims, peaks)) in entry.ranges.iter().enumerate() {
@@ -79,13 +80,13 @@ impl<Tgt: Target> InMemDatabase<Tgt> {
 }
 
 impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
-    fn get(&self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
+    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(ImplNode<Tgt>, Cost); 1]>> {
         self.grouped_entries
             .get(&query.0)
             .and_then(|e| self.get_from_entry(&query.1, e))
     }
 
-    fn put(&mut self, problem: Problem<Tgt>, impls: Vec<(ImplNode<Tgt>, Cost)>) {
+    fn put(&mut self, problem: Problem<Tgt>, impls: SmallVec<[(ImplNode<Tgt>, Cost); 1]>) {
         // self.entries.insert(problem, impls);
 
         let orig_problem = problem.clone(); // Save for debug_assert_eq! postcondition.
@@ -179,7 +180,7 @@ impl<Tgt: Target, D: Database<Tgt>> SqliteDatabaseWrapper<Tgt, D> {
 }
 
 impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt, D> {
-    fn get(&self, query: &Problem<Tgt>) -> Option<&Vec<(ImplNode<Tgt>, Cost)>> {
+    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(ImplNode<Tgt>, Cost); 1]>> {
         self.inner.get(query)
     }
 
@@ -187,7 +188,7 @@ impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt,
         unimplemented!()
     }
 
-    fn put(&mut self, problem: Problem<Tgt>, impls: Vec<(ImplNode<Tgt>, Cost)>) {
+    fn put(&mut self, problem: Problem<Tgt>, impls: SmallVec<[(ImplNode<Tgt>, Cost); 1]>) {
         self.inner.put(problem.clone(), impls);
         let updated = self.inner.get_spec(&problem.0).unwrap();
         self.tx

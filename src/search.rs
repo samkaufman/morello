@@ -1,5 +1,7 @@
 use std::sync::RwLock;
 
+use smallvec::SmallVec;
+
 use crate::common::Problem;
 use crate::cost::Cost;
 use crate::imp::ImplNode;
@@ -13,11 +15,11 @@ struct ImplReducer<Tgt: Target> {
 
 // TODO: Would be better to return a reference to the database, not a clone.
 /// Computes an optimal Impl for `goal` and stores it in `db`.
-pub fn top_down<Tgt: Target, D: Database<Tgt>>(
+pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
     db: &RwLock<D>,
     goal: &Problem<Tgt>,
     top_k: usize,
-) -> (Vec<(ImplNode<Tgt>, Cost)>, u64, u64) {
+) -> (SmallVec<[(ImplNode<Tgt>, Cost); 1]>, u64, u64) {
     if top_k > 1 {
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
@@ -83,12 +85,11 @@ impl<Tgt: Target> ImplReducer<Tgt> {
         self.results.push((new_impl, cost));
     }
 
-    fn finalize(&self) -> Vec<(ImplNode<Tgt>, Cost)> {
+    fn finalize(&self) -> SmallVec<[(ImplNode<Tgt>, Cost); 1]> {
         // Using sorted here for stability.
         let mut sorted_results = self.results.clone();
         sorted_results.sort_by_key(|x| x.1.clone());
         sorted_results.truncate(self.top_k);
-        sorted_results
-        // return heapq.nsmallest(top_k, results, key=lambda x: x[1])
+        sorted_results.into()
     }
 }
