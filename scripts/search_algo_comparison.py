@@ -154,7 +154,7 @@ async def main():
             if not all_results[idx].best_impl:
                 return
             async with semaphore:
-                t = await current_target().time_impl(all_results[idx].best_impl)
+                t = await current_target().time_impl(all_results[idx].best_impl, 10)
                 all_results[idx] = dataclasses.replace(
                     all_results[idx], execution_time=t
                 )
@@ -246,11 +246,13 @@ def dp_task(
     cache_context = search_cache.persistent_cache(cache_path(spec_name))
 
     with cache_context as cache:
-        search_result = asyncio.run(search.dp.schedule_search(
-            spec,
-            callbacks=cbs,
-            cache=cache,
-        ))[0]
+        search_result = asyncio.run(
+            search.dp.schedule_search(
+                spec,
+                callbacks=cbs,
+                cache=cache,
+            )
+        )[0]
     print(f"Applied {cbs.compose_visits} actions to Compose sub-problems")
     sys.stdout.flush()
 

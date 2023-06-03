@@ -8,9 +8,9 @@ import dataclasses
 import datetime
 import itertools
 import logging
+import math
 import mimetypes
 import multiprocessing
-import multiprocessing.pool
 import os
 import pathlib
 import queue
@@ -64,11 +64,12 @@ from morello import (
 )
 from morello.benchmarks.toy_cnn import halide as toyhl
 
-SAMPLE_CNT = 100
 DTYPE = dtypes.Uint32
 TORCH_DTYPE_NP = np.int32  # Signed version of DTYPE
 TORCH_DTYPE = torch.int32
 PERF_TERMINATE_TIMEOUT = 60.0  # 1 min.
+MIN_TRIAL_TIME_SECS = 2.5
+MIN_SAMPLES = 3
 
 RELAY_VERSION_RE = re.compile(r'^\s*#\[version = "[\d\.]+"\]\s*$')
 
@@ -155,29 +156,33 @@ def _perf_events(output_dir: pathlib.Path, pid=None, tid=None):
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    bin_path = shutil.which("perf")
+    bin_path = os.getenv("MORELLO_PERF")
     if not bin_path:
-        warnings.warn("perf not found in PATH; will not profile")
+        bin_path = shutil.which("perf")
+    if not bin_path:
+        warnings.warn("perf not found in PATH or MORELLO_PERF; will not profile")
         yield
         return
 
     data_path = output_dir / "perf.data"
     text_path = output_dir / "perf.txt"
 
-    if pid:
-        pid_tid_part = ["-p", str(pid)]
-    else:
-        pid_tid_part = ["-t", str(tid)]
-
-    perf_record_cmd = [
-        str(bin_path),
+    perf_record_cmd = [str(bin_path)]
+    if os.getenv("MORELLO_PERF_SYMFS"):
+        perf_record_cmd += ["--symfs", os.getenv("MORELLO_PERF_SYMFS")]
+    perf_record_cmd += [
         "stat",
         "--quiet",
         "-ddd",
         "record",
         "-o",
         str(data_path),
-    ] + pid_tid_part
+    ]
+    if pid:
+        perf_record_cmd += ["-p", str(pid)]
+    else:
+        perf_record_cmd += ["-t", str(tid)]
+
     with subprocess.Popen(
         perf_record_cmd,
         stdout=subprocess.PIPE,
@@ -208,7 +213,7 @@ def _perf_events(output_dir: pathlib.Path, pid=None, tid=None):
                 stdout=subprocess.PIPE,
             )
         except subprocess.CalledProcessError as e:
-            logger.error("perf stat report failed; continuing anyway")
+            logger.error("perf stat report failed; continuing anyway: %s", e)
             if e.stderr:
                 logger.error("stderr from perf script: %s", e.stderr.decode("utf8"))
 
@@ -361,10 +366,24 @@ class LoopingBackend(BenchmarkBackend):
 
     def run(self, trials: int) -> tuple[list[float], list[int], int, bool]:
         # TODO: Pull building out of the profiled loop
-        self._run_with_profiler(
-            1, lambda **k: _perf_events(self.extras_dir / "perf", **k)
+
+        rough_secs = self._run_with_profiler(
+            1, 1, lambda **_: contextlib.nullcontext()
+        )[0][0]
+        goal_samples = max(
+            MIN_SAMPLES, int(math.ceil(MIN_TRIAL_TIME_SECS / rough_secs))
         )
-        return self._run_with_profiler(trials, lambda **_: contextlib.nullcontext())
+        logger.info("Goal samples: %d", goal_samples)
+
+        self._run_with_profiler(
+            1,
+            goal_samples,
+            lambda **k: _perf_events(self.extras_dir / "perf", **k),
+        )
+
+        return self._run_with_profiler(
+            trials, goal_samples, lambda **_: contextlib.nullcontext()
+        )
 
     def _run_with_profiler(
         self, *args, **kwargs
@@ -374,12 +393,14 @@ class LoopingBackend(BenchmarkBackend):
         return self._run_with_profiler_thread(*args, **kwargs)
 
     def _run_with_profiler_process(
-        self, trials: int, perf_ctx
+        self, trials: int, samples: int, perf_ctx
     ) -> tuple[list[float], list[int], int, bool]:
         mp_ctx = multiprocessing.get_context("fork")
         go_q, r_q = mp_ctx.Queue(), mp_ctx.Queue()
         child_process = mp_ctx.Process(
-            target=self._subproc_wrapper, args=(go_q, r_q, None, trials), daemon=True
+            target=self._subproc_wrapper,
+            args=(go_q, r_q, None, trials, samples),
+            daemon=True,
         )
         child_process.start()
         _, cpu_affinity, nice, is_rt = r_q.get()  # Drop the returned thread ID only.
@@ -393,14 +414,14 @@ class LoopingBackend(BenchmarkBackend):
         return result, cpu_affinity, nice, is_rt
 
     def _run_with_profiler_thread(
-        self, trials: int, perf_ctx
+        self, trials: int, samples: int, perf_ctx
     ) -> tuple[list[float], list[int], int, bool]:
         go_q, r_q = queue.Queue(), queue.Queue()
 
         c = contextvars.copy_context()
         child_thread = threading.Thread(
             target=c.run,
-            args=(self._subproc_wrapper, go_q, r_q, trials),
+            args=(self._subproc_wrapper, go_q, r_q, trials, samples),
             daemon=True,
             name=f"ProfTh{type(self).__name__}",
         )
@@ -445,7 +466,7 @@ class LoopingBackend(BenchmarkBackend):
         else:
             result_queue.put((True, result))
 
-    def _subproc_run(self, trials) -> list[float]:
+    def _subproc_run(self, trials, sample_cnt: int) -> list[float]:
         benchmark_code = f"""
 global inner_benchmark
 
@@ -453,10 +474,10 @@ def inner_benchmark(self, {', '.join([n for n, _ in self.data_deps])}):
     {self.codelet}
 
     start = time.monotonic()
-    for _ in range(codegen.gen.BENCH_ITERS):
+    for _ in range({sample_cnt}):
         {self.codelet}
     end = time.monotonic()
-    return (end - start) / codegen.gen.BENCH_ITERS
+    return (end - start) / {sample_cnt}
         """
         exec(benchmark_code)
 
@@ -1357,13 +1378,21 @@ def _make_np_cnn_inputs(spec):
 
 def _benchmark(impl, trials: int):
     assert impl.is_scheduled
-
     loop = asyncio.new_event_loop()
-    artifact = loop.run_until_complete(system_config.current_target().build_impl(impl))
 
+    # Collect a single rough sample.
+    time_check_artifact = loop.run_until_complete(
+        system_config.current_target().build_impl(impl, benchmark_samples=1)
+    )
+    rough_secs = loop.run_until_complete(time_check_artifact.measure_time())
+    goal_samples = max(MIN_SAMPLES, int(math.ceil(MIN_TRIAL_TIME_SECS / rough_secs)))
+    logger.info("Goal samples: %d", goal_samples)
+
+    artifact = loop.run_until_complete(
+        system_config.current_target().build_impl(impl, benchmark_samples=goal_samples)
+    )
     assert hasattr(artifact, "source_code")
     source = artifact.source_code  # type: ignore
-
     runtime_samples = []
     for _ in range(trials):
         secs = loop.run_until_complete(artifact.measure_time())
@@ -1582,7 +1611,7 @@ def main():
                                 benchmark.cpus_used,
                                 ", ".join(f"{s:.8f}" for s in runtime_samples),
                                 uploaded_url,
-                                "blockdistributed",
+                                "amd-boost-off",
                                 str(cpu_affinity),
                                 nice,
                                 str(is_rt),

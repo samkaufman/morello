@@ -114,10 +114,11 @@ FROM base AS cpu-only
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y $(apt-cache depends linux-tools-generic | grep Depends | sed "s/.*ends:\ //" | tr '\n' ' ') && \
+    DEBIAN_FRONTEND=noninteractive \
     apt-get install -y --no-install-recommends \
       git curl lib32z1 libncurses5 lib32ncurses-dev numactl \
-      clang-14 lld libomp5-14 libomp-14-dev \
-      linux-tools-common linux-tools-generic && \
+      clang-14 lld libomp5-14 libomp-14-dev && \
     curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
     curl -LO http://mirrors.kernel.org/ubuntu/pool/main/libf/libffi/libffi6_3.2.1-8_amd64.deb && \
     dpkg -i libffi6_3.2.1-8_amd64.deb && \

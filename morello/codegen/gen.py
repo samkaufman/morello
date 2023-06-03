@@ -27,7 +27,6 @@ from .indexexpr import vsub
 from .loops import BOUNDARY_ANCESTORS, OperandDetailsLoopExt, emit_tile_out_loop_nest
 
 STACK_CUTOFF = 256
-BENCH_ITERS = 10
 
 
 def _emit_tensor_print(
@@ -544,6 +543,7 @@ def generate_c(
     out_fo,
     values=None,
     allow_holes: bool = False,
+    benchmark_samples: Optional[int] = None,
 ) -> None:
     imp = imp.to_applied()
 
@@ -679,7 +679,7 @@ def generate_c(
             writer.writeline("clock_gettime(CLOCK_MONOTONIC, &start);")
             writer.writeline("#pragma clang loop unroll(disable)")
             writer.writeline(
-                f"for (unsigned long benchiter = 0; benchiter < {BENCH_ITERS}; ++benchiter) {{"
+                f"for (unsigned long benchiter = 0; benchiter < {benchmark_samples}; ++benchiter) {{"
             )
 
             with writer.indent_block():

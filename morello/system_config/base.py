@@ -56,6 +56,7 @@ class Target:
         source_cb=None,
         values=None,
         extra_clang_args: Optional[Iterable[str]] = None,
+        benchmark_samples: Optional[int] = None,
     ) -> "BuiltArtifact":
         raise NotImplementedError()
 
@@ -71,7 +72,7 @@ class Target:
         raise NotImplementedError()
 
     async def time_impl(
-        self, impl, return_source: bool = False
+        self, impl, benchmark_samples: int, return_source: bool = False
     ) -> Union[float, tuple[float, str]]:
         """Executes and benchmarks an Impl.
 
@@ -95,6 +96,10 @@ class BuiltArtifact(abc.ABC):
 
     @abc.abstractmethod
     async def measure_time(self) -> float:
+        """Executes and benchmarks an Impl on the local machine.
+
+        Returns the mean of the times in seconds.
+        """
         pass
 
     @abc.abstractmethod

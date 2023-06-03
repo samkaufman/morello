@@ -284,7 +284,7 @@ async def main() -> None:
             op_pprint.pprint(sched)
             if parsed_args.print_code:
                 print("")
-                gen.generate_c("kernel_only", sched, sys.stdout)
+                gen.generate_c("benchmark", sched, sys.stdout, benchmark_samples=10)
             print("")
             print(f"Impl Runtime: {benchmarked_runtime:.4f}s")
 

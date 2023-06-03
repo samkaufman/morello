@@ -106,6 +106,7 @@ class _CpuTarget(Target):
         source_cb=None,
         values=None,
         extra_clang_args: Optional[Iterable[str]] = None,
+        benchmark_samples: Optional[int] = None,
     ) -> "CPUBuiltArtifact":
         dirname = pathlib.Path(tempfile.mkdtemp())
         source_path = dirname / "main.c"
@@ -115,7 +116,13 @@ class _CpuTarget(Target):
             if print_output:
                 gen.generate_c("print_output", impl, source_io, values=values)
             else:
-                gen.generate_c("benchmark", impl, source_io, values=values)
+                gen.generate_c(
+                    "benchmark",
+                    impl,
+                    source_io,
+                    values=values,
+                    benchmark_samples=benchmark_samples,
+                )
             source_code = source_io.getvalue()
         if source_cb:
             source_cb(source_code)
@@ -143,7 +150,7 @@ class _CpuTarget(Target):
         if clang_proc.returncode != 0:
             raise Exception(f"Clang exited with code {clang_proc.returncode}")
 
-        return CPUBuiltArtifact(binary_path, source_path, dirname)
+        return CPUBuiltArtifact(binary_path, source_path, dirname, benchmark_samples)
 
     async def run_impl(
         self,
@@ -164,14 +171,14 @@ class _CpuTarget(Target):
         return await artifact.run(check_flakiness=check_flakiness)
 
     async def time_impl(
-        self, impl, return_source=False
+        self, impl, benchmark_samples: int, return_source=False
     ) -> Union[float, tuple[float, str]]:
         """Executes and benchmarks an Impl on the local machine using Clang.
 
-        Returns the time in seconds. Measured by executing BENCH_ITERS times and
-        returning the mean.
+        Returns the time in seconds. Measured by executing `benchmark_samples`
+        times and returning the mean.
         """
-        artifact = await self.build_impl(impl)
+        artifact = await self.build_impl(impl, benchmark_samples=benchmark_samples)
         t = await artifact.measure_time()
         if return_source:
             return (t, artifact.source_code)
@@ -187,11 +194,13 @@ class CPUBuiltArtifact(BuiltArtifact):
         binary_path: pathlib.Path,
         source_path: pathlib.Path,
         whole_dir: pathlib.Path,
+        benchmark_samples: Optional[int] = None,
     ):
         self.binary_path = binary_path
         self.whole_dir = whole_dir
         with source_path.open(mode="r") as fo:
             self.source_code = fo.read()
+        self.benchmark_samples = benchmark_samples
 
     async def run(self, check_flakiness: int = 1) -> RunResult:
         # Run the compiled binary
@@ -224,11 +233,12 @@ class CPUBuiltArtifact(BuiltArtifact):
     async def measure_time(self) -> float:
         """Executes and benchmarks an Impl on the local machine using Clang.
 
-        Returns the time in seconds. Measured by executing BENCH_ITERS times and
-        returning the mean.
+        Returns the time in seconds. Measured by executing `self.bench_samples`
+        times and returning the mean.
         """
+        assert self.benchmark_samples
         r = await self.run()
-        return _parse_benchmark_output(r.stdout) / gen.BENCH_ITERS
+        return _parse_benchmark_output(r.stdout) / self.benchmark_samples
 
     def delete(self):
         shutil.rmtree(self.whole_dir)
