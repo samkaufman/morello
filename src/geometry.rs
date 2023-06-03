@@ -524,13 +524,13 @@ fn align_layout_contig_vector_shape_product<'s, Tgt: Target>(
             // - contig.
             let contigs = layouts
                 .iter()
-                // TODO: Make cloneable instead of collecting into Vec.
+                // TODO: Make iterator cloneable instead of collecting into Vec.
                 .map(|l| l.all_contiguous_abs().collect::<Vec<_>>())
                 .multi_cartesian_product();
             // - vector shape
             let vector_shapes = levels
                 .iter()
-                // TODO: Make cloneable instead of collecting into Vec.
+                // TODO: Make iterator cloneable instead of collecting into Vec.
                 .enumerate()
                 .map(|(idx, lvl)| {
                     //  TODO: Avoid this collection.
