@@ -627,20 +627,15 @@ class MatmulTorch(BaseTorchBackend):
 
 
 class TorchScriptBackend(BaseTorchBackend):
-    def __init__(
-        self, torch_backend: BenchmarkBackend, extras_dir, print_graphs=True, trace=True
-    ):
+    def __init__(self, torch_backend: BenchmarkBackend, extras_dir, print_graphs=True):
         super().__init__(extras_dir)
         self.torch_backend = torch_backend
         self.print_graphs = print_graphs
         self._jitted_fn = None
 
-        if trace:
-            self.jitted_fn = self._jit_with_trace()
-        else:
-            self.jitted_fn = self._jit_with_script()
+        self.jitted_fn = torch.compile(self._make_jittable())
 
-    def _jit_with_trace(self):
+    def _make_jittable(self):
         codelet = f"""
 import torch
 import torch.nn.functional as F
@@ -651,23 +646,7 @@ def jittable({', '.join([n for n, _ in self.torch_backend.data_deps])}):
     return {self.torch_backend.codelet}
         """
         exec(codelet)
-        return torch.jit.trace(jittable, tuple(v for _, v in self.data_deps))  # type: ignore
-
-    def _jit_with_script(self):
-        # We'll save the following to a file. TorchScript needs the actual .py
-        # to compile, th torch.jit.script, so we can't just exec it.
-        jitted_codelet = f"""
-import torch
-import torch.nn.functional as F
-
-@torch.jit.script
-def jitted({', '.join([n for n, _ in self.torch_backend.data_deps])}):
-    return {self.torch_backend.codelet}
-        """
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as fo:
-            fo.write(jitted_codelet)
-        ran = runpy.run_path(fo.name)
-        return ran["jitted"]
+        return jittable  # type: ignore
 
     @property
     def benchmark(self):
@@ -679,14 +658,23 @@ def jitted({', '.join([n for n, _ in self.torch_backend.data_deps])}):
 
     @property
     def codelet(self) -> str:
-        return f"torch.jit.wait(torch.jit.fork(self.jitted_fn, {', '.join([n for n, _ in self.data_deps])}))"
+        return f"self.jitted_fn({', '.join([n for n, _ in self.data_deps])})"
 
     def run(self, trials: int) -> tuple[list[float], list[int], int, bool]:
         result = super().run(trials)
         if self.print_graphs:
-            print("")
-            termcolor.cprint("Torch:", attrs=["bold"])
-            print(torch.jit.last_executed_optimized_graph())
+
+            def custom_backend(graph_module, example_inputs):
+                print("")
+                termcolor.cprint("Torch:", attrs=["bold"])
+                graph_module.graph.print_tabular()
+                return graph_module.forward
+
+            torch._dynamo.reset()
+            opt_model = torch.compile(self._make_jittable(), backend=custom_backend)
+            opt_model(*[t for _, t in self.data_deps])
+            torch._dynamo.reset()
+
         return result
 
 
