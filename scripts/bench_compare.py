@@ -1044,7 +1044,7 @@ class ConvJAX(BaseJAXBackend):
         return jax_conv
 
     def set_inputs(self):
-        numpy_backend = ConvNumpy(self.benchmark)
+        numpy_backend = ConvNumpy(self.benchmark, self.extras_dir / "jax")
         self.img = jax.numpy.array(numpy_backend.img)
         self.filters = jax.numpy.array(numpy_backend.filters)
 
