@@ -68,13 +68,7 @@ impl Target for X86Target {
     }
 
     fn levels() -> Vec<Self::Level> {
-        // TODO: Replace with a crate for getting all enum variants.
-        vec![
-            Self::Level::RF,
-            Self::Level::VRF,
-            Self::Level::L1,
-            Self::Level::GL,
-        ]
+        enum_iterator::all::<Self::Level>().collect()
     }
 
     fn faster_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
@@ -119,7 +113,7 @@ impl Target for X86Target {
                     Box::new(std::iter::empty())
                 }
             }
-            Spec::Conv {  .. } => Box::new(std::iter::empty()),
+            Spec::Conv { .. } => Box::new(std::iter::empty()),
             Spec::Load { .. } | Spec::Store { .. } => {
                 let mut microkernels = vec![];
                 if valueassign_applies_to_operands(&spec.operands()) {
@@ -145,7 +139,9 @@ impl Target for X86Target {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize)]
+#[derive(
+    Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize, enum_iterator::Sequence,
+)]
 pub enum X86MemoryLevel {
     RF,
     VRF,
