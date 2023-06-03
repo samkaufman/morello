@@ -239,7 +239,7 @@ def dp_task(
     print(f"Running DP search for {spec_name}")
     sys.stdout.flush()
 
-    start = time.monotonic()
+    start = time.perf_counter()
 
     cbs = ComposeCountingSearchCallbacks()
 
@@ -264,7 +264,7 @@ def dp_task(
     else:
         print("No schedule found by DP search")
 
-    runtime = time.monotonic() - start
+    runtime = time.perf_counter() - start
     print(f"DP search for {spec_name} took {runtime:.2} seconds")
     sys.stdout.flush()
 
@@ -334,7 +334,7 @@ def _beam_task_job(
     else:
         raise ValueError(f"Unexpected heuristic name: {heuristic_name}")
 
-    start = time.monotonic()
+    start = time.perf_counter()
 
     remaining_budget = budget
     overall_best_result = None
@@ -374,7 +374,7 @@ def _beam_task_job(
             f.write("==============================\n")
             f.write(trial_log)
 
-    runtime = time.monotonic() - start
+    runtime = time.perf_counter() - start
     print(f"Beam search for {spec_name} w/ {beam_width} took {runtime:.2} seconds")
     sys.stdout.flush()
 
@@ -410,7 +410,7 @@ def random_search(
     if parallel is None:
         parallel = os.cpu_count() or 1
 
-    start = time.monotonic()
+    start = time.perf_counter()
     original_budget = budget
 
     hole = morello.impl.base.spec_to_hole(spec)
@@ -468,7 +468,7 @@ def random_search(
             assert steps_taken == budget
         budget -= steps_taken
 
-    runtime = time.monotonic() - start
+    runtime = time.perf_counter() - start
     print(f"Random search took {runtime:.2}s")
     sys.stdout.flush()
     return ExperimentResult(

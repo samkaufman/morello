@@ -473,10 +473,10 @@ global inner_benchmark
 def inner_benchmark(self, {', '.join([n for n, _ in self.data_deps])}):
     {self.codelet}
 
-    start = time.monotonic()
+    start = time.perf_counter()
     for _ in range({sample_cnt}):
         {self.codelet}
-    end = time.monotonic()
+    end = time.perf_counter()
     return (end - start) / {sample_cnt}
         """
         exec(benchmark_code)
@@ -820,9 +820,9 @@ class TVMAutoschedulerBackend(_RelayBase):
             runner=auto_scheduler.LocalRunner(repeat=10, enable_cpu_cache_flush=True),
             measure_callbacks=[auto_scheduler.RecordToFile(log_file_path)],
         )
-        tune_start = time.monotonic()
+        tune_start = time.perf_counter()
         tuner.tune(tuning_options)
-        tune_end = time.monotonic()
+        tune_end = time.perf_counter()
         with (extras_dir / "runtime.txt").open("w") as f:
             print(f"Tuning took {tune_end - tune_start:.3f}s", file=f)
 

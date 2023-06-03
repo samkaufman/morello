@@ -85,12 +85,12 @@ async def _matmul_main(
     left = target.tensor(target.tensor_spec((m, k), dtype=DTYPE), name="left")
     right = target.tensor(target.tensor_spec((k, n), dtype=DTYPE), name="right")
     output = target.tensor(target.tensor_spec((m, n), dtype=DTYPE), name="output")
-    start = time.monotonic()
+    start = time.perf_counter()
     s = await dp.Search(top_k=top_k)(
         specs.Matmul(left.spec, right.spec, output.spec, serial_only=serial),
         cache=cache,
     )
-    return s, (time.monotonic() - start)
+    return s, (time.perf_counter() - start)
 
 
 async def _conv_main(
@@ -126,12 +126,12 @@ async def _conv_main(
         ),
         name="output",
     )
-    start = time.monotonic()
+    start = time.perf_counter()
     s = await dp.Search(top_k=top_k)(
         specs.Convolution(left.spec, right.spec, output.spec, serial_only=serial),
         cache=cache,
     )
-    return s, (time.monotonic() - start)
+    return s, (time.perf_counter() - start)
 
 
 async def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCache):
@@ -150,7 +150,7 @@ async def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCa
         target.tensor_spec((32, 32, d - 4, d - 4), dtype=DTYPE), name="output"
     )
 
-    start = time.monotonic()
+    start = time.perf_counter()
     s = await dp.Search(top_k=top_k)(
         specs.Compose(
             (specs.Convolution, specs.Convolution),
@@ -161,7 +161,7 @@ async def _convnet_main(serial: bool, top_k: int, cache: search_cache.ScheduleCa
         ),
         cache=cache,
     )
-    return s, (time.monotonic() - start)
+    return s, (time.perf_counter() - start)
 
 
 async def _gemm3_main(
@@ -179,9 +179,9 @@ async def _gemm3_main(
         intermediate_dtypes=(DTYPE,),
         serial_only=True,
     )
-    start = time.monotonic()
+    start = time.perf_counter()
     search_result = await dp.Search(top_k=top_k)(spec, cache=cache)
-    return search_result, (time.monotonic() - start)
+    return search_result, (time.perf_counter() - start)
 
 
 async def main() -> None:
