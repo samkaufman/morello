@@ -260,11 +260,12 @@ fn specs_to_compute(
     if grid_map_result.is_none() {
         panic!("Could not map {:?} to grid", bound);
     }
-    let (spec_key, bound_pt, inner_key) = grid_map_result.unwrap();
-    debug_assert_eq!(
-        bound,
-        &Spec::<X86Target>::from_grid(&spec_key, &bound_pt, &inner_key)
-    );
+    let (spec_key, bound_pt, _inner_key) = grid_map_result.unwrap();
+    // TODO: Reintroduce a check like the following.
+    // debug_assert_eq!(
+    //     bound,
+    //     &Spec::<X86Target>::from_grid(&spec_key, &bound_pt, &inner_key)
+    // );
     debug!(
         "Grid shape is {:?}",
         bound_pt.iter().map(|d| d + 1).collect::<Vec<_>>()
@@ -274,9 +275,7 @@ fn specs_to_compute(
         let mut tasks = vec![];
         for pt in utils::sum_seqs(&bound_pt, stage) {
             let mut task = vec![];
-            let inner_keys = Spec::<X86Target>::inner_keys_for_grid_pt(&spec_key, &pt);
-            for s in inner_keys {
-                let sp = Spec::<X86Target>::from_grid(&spec_key, &pt, &s);
+            for sp in Spec::<X86Target>::objects_in_grid_pt(&spec_key, &pt) {
                 if sp.is_canonical() {
                     task.push(sp);
                 }

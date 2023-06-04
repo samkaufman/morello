@@ -1,5 +1,5 @@
-use itertools::{iproduct, Itertools};
-use smallvec::{smallvec, SmallVec, ToSmallVec};
+use itertools::{iproduct, izip, Itertools};
+use smallvec::{smallvec, SmallVec};
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::layout::Layout;
@@ -12,14 +12,14 @@ use crate::X86MemoryLevel;
 use std::hash::Hash;
 use std::iter;
 
-pub trait ToFromDependencyLatticeCoordinate {
+pub trait ToFromDependencyLatticeCoordinate: Sized {
     type Key: Eq + Hash;
     type InnerKey: Eq + Hash;
 
     fn to_grid(&self) -> Option<(Self::Key, Vec<u32>, Self::InnerKey)>;
-    fn from_grid(key: &Self::Key, pt: &[u32], inner_key: &Self::InnerKey) -> Self;
+
     // TODO: Return an iterator instead.
-    fn inner_keys_for_grid_pt(key: &Self::Key, pt: &[u32]) -> Vec<Self::InnerKey>;
+    fn objects_in_grid_pt(key: &Self::Key, pt: &[u32]) -> Vec<Self>;
 }
 
 // TODO: Simplify code by making this the foundation of our Spec enum.
@@ -104,10 +104,6 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                 serial_only,
             } => {
                 let mut shape_vec = Vec::with_capacity(image_shape.len() + filters_shape.len() - 1);
-                println!(
-                    "Image shape: {:?}\tFilters shape: {:?}",
-                    image_shape, filters_shape
-                );
                 shape_vec.extend(
                     image_shape
                         .iter()
@@ -195,162 +191,10 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
         }
     }
 
-    fn from_grid(key: &SpecKey, pt: &[u32], inner_key: &SpecInnerKey) -> Self {
-        match (key, inner_key) {
-            (
-                SpecKey::Matmul { dtype },
-                SpecInnerKey::Matmul {
-                    contiguous_abstractions,
-                    alignments,
-                    layouts,
-                    vector_shapes,
-                },
-            ) => match pt[..] {
-                [accum, m, k, n, serial_only, _lvl0, _lvl1, _lvl2] => Spec::Matmul {
-                    accum: accum == 0,
-                    m: from_log2_dim_space(m),
-                    k: from_log2_dim_space(k),
-                    n: from_log2_dim_space(n),
-                    dtype: *dtype,
-                    aux: (0..3)
-                        .map(|i| SpecAux {
-                            contig: contiguous_abstractions[i],
-                            aligned: alignments[i],
-                            layout: layouts[i].clone(),
-                            vector_shape: vector_shapes[i].clone(),
-                            // TODO: Following is dangerous
-                            level: int_to_level(pt[5 + i]),
-                        })
-                        .collect::<Vec<_>>()
-                        .try_into()
-                        .unwrap(),
-                    serial_only: serial_only == 0,
-                },
-                _ => panic!("Grid point had unexpected length"),
-            },
-            (
-                SpecKey::Conv { dtype },
-                SpecInnerKey::Conv {
-                    contiguous_abstractions,
-                    alignments,
-                    layouts,
-                    vector_shapes,
-                },
-            ) => {
-                // TODO: Can we share any of the following code with
-                //  `inner_keys_for_grid_pt`?
-                let accum = pt[0] == 0;
-                let filters_shape = pt[5..9].iter().map(|&f| f + 1).collect::<Shape>();
-                let image_shape = pt[1..5]
-                    .iter()
-                    .zip(filters_shape.iter())
-                    .map(|(i, f)| i + f)
-                    .collect::<SmallVec<_>>();
-
-                let levels = &pt[9..12];
-                let serial_only = pt[12] == 0;
-                Spec::Conv {
-                    accum,
-                    image_shape,
-                    filters_shape,
-                    dtype: *dtype,
-                    aux: (0..3)
-                        .map(|i| SpecAux {
-                            contig: contiguous_abstractions[i],
-                            aligned: alignments[i],
-                            layout: layouts[i].clone(),
-                            level: int_to_level(levels[i]),
-                            vector_shape: vector_shapes[i].clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .try_into()
-                        .unwrap(),
-                    serial_only,
-                }
-            }
-            (
-                SpecKey::Move { is_load, dtype },
-                SpecInnerKey::Move {
-                    source_contiguous_abs,
-                    source_aligned,
-                    source_layout,
-                    source_vector_shape,
-                    destination_level,
-                    destination_layout,
-                    destination_vector_shape,
-                },
-            ) => {
-                let serial_only = pt[pt.len() - 1] == 0;
-                let source_level = int_to_level(pt[pt.len() - 2]);
-                let dim_sizes = pt[..pt.len() - 2]
-                    .iter()
-                    .map(|&d| from_log2_dim_space(d))
-                    .collect();
-                let outer_tensor_spec = TensorSpec::new_noncanon(
-                    dim_sizes,
-                    *dtype,
-                    *source_contiguous_abs,
-                    *source_aligned,
-                    source_level,
-                    source_layout.clone(),
-                    source_vector_shape.clone(),
-                );
-                // TODO: Loads and Stores should really just be combined in Spec.
-                if *is_load {
-                    Spec::Load {
-                        outer_tensor_spec,
-                        inner_level: *destination_level,
-                        inner_layout: destination_layout.clone(),
-                        inner_vector_shape: destination_vector_shape.clone(),
-                        serial_only,
-                    }
-                } else {
-                    Spec::Store {
-                        outer_tensor_spec,
-                        inner_level: *destination_level,
-                        inner_layout: destination_layout.clone(),
-                        inner_vector_shape: destination_vector_shape.clone(),
-                        serial_only,
-                    }
-                }
-            }
-            (
-                SpecKey::Zero { dtype },
-                SpecInnerKey::Zero {
-                    contiguous_abs,
-                    aligned,
-                    layout,
-                    vector_shape,
-                },
-            ) => {
-                let serial_only = pt[pt.len() - 1] == 0;
-                let level = int_to_level(pt[pt.len() - 2]);
-                let dim_sizes = pt[..pt.len() - 2]
-                    .iter()
-                    .map(|&d| from_log2_dim_space(d))
-                    .collect();
-                let tensor_spec = TensorSpec::new_noncanon(
-                    dim_sizes,
-                    *dtype,
-                    *contiguous_abs,
-                    *aligned,
-                    level,
-                    layout.clone(),
-                    vector_shape.clone(),
-                );
-                Spec::Zero {
-                    tensor_spec,
-                    serial_only,
-                }
-            }
-            _ => panic!("Mismatched key and inner key"),
-        }
-    }
-
-    fn inner_keys_for_grid_pt(key: &Self::Key, pt: &[u32]) -> Vec<Self::InnerKey> {
+    fn objects_in_grid_pt(key: &Self::Key, pt: &[u32]) -> Vec<Self> {
+        // TODO: Relying on indices in the below implementations is fragile. Fix that.
         match key {
             SpecKey::Matmul { dtype } => {
-                // TODO: Relying on indices below is fragile.
                 let m = pt[1] + 1;
                 let k = pt[2] + 1;
                 let n = pt[3] + 1;
@@ -361,19 +205,26 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
 
                 let shapes = [smallvec![m, k], smallvec![k, n], smallvec![m, n]];
 
-                // For each operand:
-                // - alignment
-                // - layout
                 align_layout_contig_vector_shape_product::<X86Target>(&shapes, *dtype, &levels)
                     .map(
-                        |(alignments, layouts, contigs, vector_shapes)| SpecInnerKey::Matmul {
-                            contiguous_abstractions: contigs.into_iter().collect(),
-                            alignments,
-                            layouts,
-                            vector_shapes: vector_shapes
-                                .into_iter()
-                                .map(|v| v.as_ref().map(|v| v.to_smallvec()))
-                                .collect(),
+                        |(alignments, layouts, contigs, vector_shapes)| Spec::Matmul {
+                            accum: pt[0] == 0,
+                            m,
+                            k,
+                            n,
+                            dtype: *dtype,
+                            aux: izip!(contigs, alignments, layouts, vector_shapes, &levels)
+                                .map(|(contig, aligned, layout, vector_shape, level)| SpecAux {
+                                    contig,
+                                    aligned,
+                                    layout,
+                                    vector_shape,
+                                    level: *level,
+                                })
+                                .collect::<Vec<_>>()
+                                .try_into()
+                                .unwrap(),
+                            serial_only: pt[4] == 0,
                         },
                     )
                     .collect()
@@ -395,25 +246,33 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                     .collect::<Vec<_>>();
 
                 align_layout_contig_vector_shape_product::<X86Target>(&shapes, *dtype, &levels)
-                    .map(
-                        |(alignments, layouts, contigs, vector_shapes)| SpecInnerKey::Conv {
-                            contiguous_abstractions: contigs.into_iter().collect(),
-                            alignments,
-                            layouts,
-                            vector_shapes: vector_shapes
-                                .into_iter()
-                                .map(|v| v.as_ref().map(|v| v.to_smallvec()))
-                                .collect(),
-                        },
-                    )
+                    .map(|(alignments, layouts, contigs, vector_shapes)| Spec::Conv {
+                        accum: pt[0] == 0,
+                        image_shape: shapes[0].clone(),
+                        filters_shape: shapes[1].clone(),
+                        dtype: *dtype,
+                        aux: izip!(contigs, alignments, layouts, vector_shapes, &levels)
+                            .map(|(contig, aligned, layout, vector_shape, level)| SpecAux {
+                                contig,
+                                aligned,
+                                layout,
+                                vector_shape,
+                                level: *level,
+                            })
+                            .collect::<Vec<_>>()
+                            .try_into()
+                            .unwrap(),
+                        serial_only: pt[9] == 0,
+                    })
                     .collect()
             }
-            SpecKey::Move { is_load: _, dtype } => {
+            SpecKey::Move { is_load, dtype } => {
                 let source_level = int_to_level(pt[pt.len() - 2]);
                 let dim_sizes = &pt[..pt.len() - 2]
                     .iter()
                     .map(|&d| from_log2_dim_space(d))
                     .collect::<Shape>();
+                let serial_only = pt[pt.len() - 1] == 0;
 
                 let alignments = [true, false];
                 let viable_layouts = X86Target::all_layouts_for_shape(dim_sizes);
@@ -452,17 +311,38 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                                         .map(
                                             move |vector_shape_pair| match &vector_shape_pair[..] {
                                                 [source_vector_shape, destination_vector_shape] => {
-                                                    SpecInnerKey::Move {
-                                                        source_contiguous_abs,
-                                                        source_aligned,
-                                                        source_layout: source_layout.clone(),
-                                                        source_vector_shape: source_vector_shape
-                                                            .clone(),
-                                                        destination_level,
-                                                        destination_layout: destination_layout
-                                                            .clone(),
-                                                        destination_vector_shape:
-                                                            destination_vector_shape.clone(),
+                                                    let outer_tensor_spec =
+                                                        TensorSpec::new_noncanon(
+                                                            dim_sizes.clone(),
+                                                            *dtype,
+                                                            source_contiguous_abs,
+                                                            source_aligned,
+                                                            source_level,
+                                                            source_layout.clone(),
+                                                            source_vector_shape.clone(),
+                                                        );
+
+                                                    // TODO: Loads and Stores should really just be combined in Spec.
+                                                    if *is_load {
+                                                        Spec::Load {
+                                                            outer_tensor_spec,
+                                                            inner_level: destination_level,
+                                                            inner_layout: destination_layout
+                                                                .clone(),
+                                                            inner_vector_shape:
+                                                                destination_vector_shape.clone(),
+                                                            serial_only,
+                                                        }
+                                                    } else {
+                                                        Spec::Store {
+                                                            outer_tensor_spec,
+                                                            inner_level: destination_level,
+                                                            inner_layout: destination_layout
+                                                                .clone(),
+                                                            inner_vector_shape:
+                                                                destination_vector_shape.clone(),
+                                                            serial_only,
+                                                        }
                                                     }
                                                 }
                                                 _ => unreachable!(),
@@ -474,24 +354,36 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                     .collect::<Vec<_>>()
             }
             SpecKey::Zero { dtype } => {
+                let serial_only = pt[pt.len() - 1] == 0;
                 let level = int_to_level(pt[pt.len() - 2]);
                 let dim_sizes = pt[..pt.len() - 2]
                     .iter()
                     .map(|&d| from_log2_dim_space(d))
                     .collect::<Shape>();
                 align_layout_contig_vector_shape_product::<X86Target>(
-                    &[dim_sizes],
+                    &[dim_sizes.clone()],
                     *dtype,
                     &[level],
                 )
-                .map(
-                    |(alignments, layouts, contigs, vector_shapes)| SpecInnerKey::Zero {
-                        contiguous_abs: contigs[0],
-                        aligned: alignments[0],
-                        layout: layouts[0].clone(),
-                        vector_shape: vector_shapes[0].clone(),
-                    },
-                )
+                .map(|(alignments, layouts, contigs, vector_shapes)| {
+                    debug_assert_eq!(alignments.len(), 1);
+                    debug_assert_eq!(layouts.len(), 1);
+                    debug_assert_eq!(contigs.len(), 1);
+                    debug_assert_eq!(vector_shapes.len(), 1);
+                    let tensor_spec = TensorSpec::new_noncanon(
+                        dim_sizes.clone(),
+                        *dtype,
+                        contigs[0],
+                        alignments[0],
+                        level,
+                        layouts[0].clone(),
+                        vector_shapes[0].clone(),
+                    );
+                    Spec::Zero {
+                        tensor_spec,
+                        serial_only,
+                    }
+                })
                 .collect()
             }
         }
