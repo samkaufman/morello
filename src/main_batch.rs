@@ -260,7 +260,7 @@ fn specs_to_compute(
     if grid_map_result.is_none() {
         panic!("Could not map {:?} to grid", bound);
     }
-    let (spec_key, bound_pt, _inner_key) = grid_map_result.unwrap();
+    let (spec_key, bound_pt) = grid_map_result.unwrap();
     // TODO: Reintroduce a check like the following.
     // debug_assert_eq!(
     //     bound,

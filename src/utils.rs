@@ -1,5 +1,5 @@
-use std::iter;
 use crate::memorylimits::MemVec;
+use std::iter;
 
 // If true, schedules will be saved as if they had memory limits, for all banks,
 // that are the next highest power of 2. This discretizes the cache a bit, even

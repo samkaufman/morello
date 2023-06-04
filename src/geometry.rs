@@ -14,9 +14,8 @@ use std::iter;
 
 pub trait ToFromDependencyLatticeCoordinate: Sized {
     type Key: Eq + Hash;
-    type InnerKey: Eq + Hash;
 
-    fn to_grid(&self) -> Option<(Self::Key, Vec<u32>, Self::InnerKey)>;
+    fn to_grid(&self) -> Option<(Self::Key, Vec<u32>)>;
 
     // TODO: Return an iterator instead.
     fn objects_in_grid_pt(key: &Self::Key, pt: &[u32]) -> Vec<Self>;
@@ -31,42 +30,10 @@ pub enum SpecKey {
     Zero { dtype: Dtype },
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub enum SpecInnerKey {
-    Matmul {
-        contiguous_abstractions: SmallVec<[Contig; 3]>,
-        alignments: SmallVec<[bool; 3]>,
-        layouts: SmallVec<[Layout; 3]>,
-        vector_shapes: SmallVec<[Option<Shape>; 3]>,
-    },
-    Conv {
-        contiguous_abstractions: SmallVec<[Contig; 3]>,
-        alignments: SmallVec<[bool; 3]>,
-        layouts: SmallVec<[Layout; 3]>,
-        vector_shapes: SmallVec<[Option<Shape>; 3]>,
-    },
-    Move {
-        source_contiguous_abs: Contig,
-        source_aligned: bool,
-        source_layout: Layout,
-        source_vector_shape: Option<Shape>,
-        destination_level: X86MemoryLevel,
-        destination_layout: Layout,
-        destination_vector_shape: Option<Shape>,
-    },
-    Zero {
-        contiguous_abs: Contig,
-        aligned: bool,
-        layout: Layout,
-        vector_shape: Option<Shape>,
-    },
-}
-
 impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
     type Key = SpecKey;
-    type InnerKey = SpecInnerKey;
 
-    fn to_grid(&self) -> Option<(SpecKey, Vec<u32>, SpecInnerKey)> {
+    fn to_grid(&self) -> Option<(SpecKey, Vec<u32>)> {
         match self {
             Spec::Matmul {
                 accum,
@@ -88,12 +55,6 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                 .into_iter()
                 .chain(aux.iter().map(|a| level_to_int(&a.level).into()))
                 .collect(),
-                SpecInnerKey::Matmul {
-                    contiguous_abstractions: aux.iter().map(|a| a.contig).collect(),
-                    alignments: aux.iter().map(|a| a.aligned).collect(),
-                    layouts: aux.iter().map(|a| a.layout.clone()).collect(),
-                    vector_shapes: aux.iter().map(|a| a.vector_shape.clone()).collect(),
-                },
             )),
             Spec::Conv {
                 accum,
@@ -124,26 +85,20 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                         .chain([if *serial_only { 0 } else { 1 }].into_iter())
                         .chain(aux.iter().map(|a| level_to_int(&a.level).into()))
                         .collect(),
-                    SpecInnerKey::Conv {
-                        contiguous_abstractions: aux.iter().map(|a| a.contig).collect(),
-                        alignments: aux.iter().map(|a| a.aligned).collect(),
-                        layouts: aux.iter().map(|a| a.layout.clone()).collect(),
-                        vector_shapes: aux.iter().map(|a| a.vector_shape.clone()).collect(),
-                    },
                 ))
             }
             Spec::Load {
                 outer_tensor_spec,
-                inner_level,
-                inner_layout,
-                inner_vector_shape,
+                inner_level: _,
+                inner_layout: _,
+                inner_vector_shape: _,
                 serial_only,
             }
             | Spec::Store {
                 outer_tensor_spec,
-                inner_level,
-                inner_layout,
-                inner_vector_shape,
+                inner_level: _,
+                inner_layout: _,
+                inner_vector_shape: _,
                 serial_only,
             } => Some((
                 SpecKey::Move {
@@ -157,15 +112,6 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                     .chain(iter::once(level_to_int(&outer_tensor_spec.level()).into()))
                     .chain(iter::once(if *serial_only { 0 } else { 1 }))
                     .collect(),
-                SpecInnerKey::Move {
-                    source_contiguous_abs: outer_tensor_spec.contiguous_abs(),
-                    source_aligned: outer_tensor_spec.aligned(),
-                    source_layout: outer_tensor_spec.layout(),
-                    source_vector_shape: outer_tensor_spec.vector_shape().cloned(),
-                    destination_level: *inner_level,
-                    destination_layout: inner_layout.clone(),
-                    destination_vector_shape: inner_vector_shape.clone(),
-                },
             )),
             Spec::Zero {
                 tensor_spec,
@@ -181,12 +127,6 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                     .chain(iter::once(level_to_int(&tensor_spec.level()).into()))
                     .chain(iter::once(if *serial_only { 0 } else { 1 }))
                     .collect(),
-                SpecInnerKey::Zero {
-                    contiguous_abs: tensor_spec.contiguous_abs(),
-                    aligned: tensor_spec.aligned(),
-                    layout: tensor_spec.layout(),
-                    vector_shape: tensor_spec.vector_shape().cloned(),
-                },
             )),
         }
     }
