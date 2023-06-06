@@ -27,9 +27,13 @@ impl Tiling {
     // TODO: Rename to `apply_to_operand`.
     pub fn tile<Tgt: Target>(&self, source_idx: u8, source_spec: &TensorSpec<Tgt>) -> Tile {
         match self {
-            Tiling::Simple(dim_sizes) => simple_tile(source_spec, source_idx, dim_sizes),
+            Tiling::Simple(dim_sizes) => {
+                make_tile_with_alignment(source_spec, source_idx, dim_sizes, Tiling::Simple)
+            }
             Tiling::ConvImage(dim_sizes, filter_shape) => {
-                conv_image_tile(source_spec, source_idx, dim_sizes, filter_shape)
+                make_tile_with_alignment(source_spec, source_idx, dim_sizes, move |s| {
+                    Tiling::ConvImage(s, filter_shape.to_owned())
+                })
             }
         }
     }
@@ -52,7 +56,7 @@ impl Tiling {
                 } else {
                     let inner = img_shape[usize::from(dim)];
                     let f = filters_shape[usize::from(dim - 1)];
-                    DivCeil::div_ceil(_s(origin_size, f), _s(inner, f))
+                    DivCeil::div_ceil(1 + origin_size - f, 1 + inner - f)
                 }
             }
         }
@@ -80,31 +84,6 @@ impl Tiling {
             }
         }
     }
-}
-
-// TODO: Inline the following.
-fn _s(img_size: DimSize, filter_size: DimSize) -> DimSize {
-    1 + img_size - filter_size
-}
-
-/// Constructs a simple tile with alignment set correctly.
-pub fn simple_tile<Tgt: Target>(
-    source_spec: &TensorSpec<Tgt>,
-    operand_idx: u8,
-    new_dims: &[DimSize],
-) -> Tile {
-    make_tile_with_alignment(source_spec, operand_idx, new_dims, Tiling::Simple)
-}
-
-fn conv_image_tile<Tgt: Target>(
-    source_spec: &TensorSpec<Tgt>,
-    operand_idx: u8,
-    new_dims: &[DimSize],
-    filter_shape: &[DimSize],
-) -> Tile {
-    make_tile_with_alignment(source_spec, operand_idx, new_dims, move |s| {
-        Tiling::ConvImage(s, filter_shape.into())
-    })
 }
 
 fn make_tile_with_alignment<Tgt: Target>(
