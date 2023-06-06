@@ -8,7 +8,7 @@ use log::{debug, info};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::smallvec;
-use tensorspec::TensorSpec;
+use tensorspec::{TensorSpec, SpecAux};
 
 mod alignment;
 mod common;
@@ -30,7 +30,7 @@ mod utils;
 use crate::common::{DimSize, Dtype, Problem};
 use crate::geometry::ToFromDependencyLatticeCoordinate;
 use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::spec::{Spec, SpecAux};
+use crate::spec::Spec;
 use crate::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::utils::iter_powers_of_two;

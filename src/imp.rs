@@ -8,9 +8,9 @@ use crate::common::{DimSize, Shape};
 use crate::layout::Layout;
 use crate::memorylimits::MemVec;
 use crate::reinterpret::squeeze_tile;
-use crate::spec::{Spec, SpecAux};
+use crate::spec::Spec;
 use crate::target::{MemoryLevel, Target, X86MemoryLevel, X86Target};
-use crate::tensorspec::TensorSpec;
+use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::{PartialTile, Tile};
 
 /// A single node in an Impl.
@@ -158,21 +158,21 @@ impl<Tgt: Target> ImplNode<Tgt> {
                         n: filters_shape[0],
                         dtype: *dtype,
                         aux: [
-                            SpecAux {
+                            TensorSpecAux {
                                 contig: squeezed_image_spec.contiguous_abs(),
                                 aligned: squeezed_image_spec.aligned(),
                                 level: squeezed_image_spec.level(),
                                 layout: squeezed_image_spec.layout(),
                                 vector_shape: squeezed_image_spec.vector_shape().cloned(),
                             },
-                            SpecAux {
+                            TensorSpecAux {
                                 contig: squeezed_filters_spec.contiguous_abs(),
                                 aligned: squeezed_filters_spec.aligned(),
                                 level: squeezed_filters_spec.level(),
                                 layout: squeezed_filters_spec.layout(),
                                 vector_shape: squeezed_filters_spec.vector_shape().cloned(),
                             },
-                            SpecAux {
+                            TensorSpecAux {
                                 contig: squeezed_output_spec.contiguous_abs(),
                                 aligned: squeezed_output_spec.aligned(),
                                 level: squeezed_output_spec.level(),

@@ -2,9 +2,9 @@ use std::sync::RwLock;
 
 use crate::common::{DimSize, Dtype, Problem};
 use crate::pprint::pprint;
-use crate::spec::SpecAux;
 use crate::table::{InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
+use crate::tensorspec::TensorSpecAux;
 
 use clap::Parser;
 use log::info;
@@ -52,7 +52,7 @@ fn main() {
     ));
 
     let rm = layout::row_major(4);
-    let a = SpecAux {
+    let a = TensorSpecAux {
         contig: rm.contiguous_full(),
         aligned: true,
         level: X86MemoryLevel::GL,

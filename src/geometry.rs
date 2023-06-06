@@ -3,9 +3,9 @@ use smallvec::{smallvec, SmallVec};
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::layout::Layout;
-use crate::spec::{conv_infer_output_shape, gen_vector_shapes, Spec, SpecAux};
+use crate::spec::{conv_infer_output_shape, gen_vector_shapes, Spec};
 use crate::target::{MemoryLevel, Target, X86Target};
-use crate::tensorspec::TensorSpec;
+use crate::tensorspec::{TensorSpec, TensorSpecAux};
 
 use crate::X86MemoryLevel;
 
@@ -154,12 +154,14 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                             n,
                             dtype: *dtype,
                             aux: izip!(contigs, alignments, layouts, vector_shapes, &levels)
-                                .map(|(contig, aligned, layout, vector_shape, level)| SpecAux {
-                                    contig,
-                                    aligned,
-                                    layout,
-                                    vector_shape,
-                                    level: *level,
+                                .map(|(contig, aligned, layout, vector_shape, level)| {
+                                    TensorSpecAux {
+                                        contig,
+                                        aligned,
+                                        layout,
+                                        vector_shape,
+                                        level: *level,
+                                    }
                                 })
                                 .collect::<Vec<_>>()
                                 .try_into()
@@ -192,13 +194,15 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                         filters_shape: shapes[1].clone(),
                         dtype: *dtype,
                         aux: izip!(contigs, alignments, layouts, vector_shapes, &levels)
-                            .map(|(contig, aligned, layout, vector_shape, level)| SpecAux {
-                                contig,
-                                aligned,
-                                layout,
-                                vector_shape,
-                                level: *level,
-                            })
+                            .map(
+                                |(contig, aligned, layout, vector_shape, level)| TensorSpecAux {
+                                    contig,
+                                    aligned,
+                                    layout,
+                                    vector_shape,
+                                    level: *level,
+                                },
+                            )
                             .collect::<Vec<_>>()
                             .try_into()
                             .unwrap(),

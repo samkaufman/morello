@@ -1,10 +1,10 @@
 use super::common::{DimSize, Shape};
-use crate::common::{Contig, Dtype};
+use crate::common::Dtype;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::target::MemoryLevel;
 use crate::target::Target;
-use crate::tensorspec::TensorSpec;
+use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::PartialTile;
 
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ pub enum Spec<Tgt: Target> {
         k: DimSize,
         n: DimSize,
         dtype: Dtype,
-        aux: [SpecAux<Tgt>; 3],
+        aux: [TensorSpecAux<Tgt>; 3],
         serial_only: bool,
     },
     Conv {
@@ -33,7 +33,7 @@ pub enum Spec<Tgt: Target> {
         image_shape: Shape,
         filters_shape: Shape,
         dtype: Dtype,
-        aux: [SpecAux<Tgt>; 3],
+        aux: [TensorSpecAux<Tgt>; 3],
         serial_only: bool,
     },
     Load {
@@ -54,17 +54,6 @@ pub enum Spec<Tgt: Target> {
         tensor_spec: TensorSpec<Tgt>,
         serial_only: bool,
     },
-}
-
-// TODO: This probably shouldn't be public.
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct SpecAux<Tgt: Target> {
-    pub contig: Contig,
-    pub aligned: bool,
-    pub level: Tgt::Level,
-    pub layout: Layout,
-    pub vector_shape: Option<Shape>,
 }
 
 impl<Tgt: Target> Spec<Tgt> {
@@ -96,9 +85,9 @@ impl<Tgt: Target> Spec<Tgt> {
             } => {
                 // TODO: Document, why are the following non-canon?
                 vec![
-                    aux[0].make_tensorspec_noncanon(smallvec![*m, *k], *dtype),
-                    aux[1].make_tensorspec_noncanon(smallvec![*k, *n], *dtype),
-                    aux[2].make_tensorspec_noncanon(smallvec![*m, *n], *dtype),
+                    TensorSpec::new_noncanon_with_aux(smallvec![*m, *k], *dtype, aux[0].clone()),
+                    TensorSpec::new_noncanon_with_aux(smallvec![*k, *n], *dtype, aux[1].clone()),
+                    TensorSpec::new_noncanon_with_aux(smallvec![*m, *n], *dtype, aux[2].clone()),
                 ]
             }
             Spec::Conv {
@@ -111,9 +100,13 @@ impl<Tgt: Target> Spec<Tgt> {
             } => {
                 let output_shape = conv_infer_output_shape(image_shape, filters_shape);
                 vec![
-                    aux[0].make_tensorspec_noncanon(image_shape.clone(), *dtype),
-                    aux[1].make_tensorspec_noncanon(filters_shape.clone(), *dtype),
-                    aux[2].make_tensorspec_noncanon(output_shape, *dtype),
+                    TensorSpec::new_noncanon_with_aux(image_shape.clone(), *dtype, aux[0].clone()),
+                    TensorSpec::new_noncanon_with_aux(
+                        filters_shape.clone(),
+                        *dtype,
+                        aux[1].clone(),
+                    ),
+                    TensorSpec::new_noncanon_with_aux(output_shape, *dtype, aux[2].clone()),
                 ]
             }
             Spec::Load {
@@ -597,7 +590,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 *dtype = new_operands[0].dtype();
                 for i in 0..aux.len() {
                     let o = &new_operands[i];
-                    aux[i] = SpecAux {
+                    aux[i] = TensorSpecAux {
                         contig: o.contiguous_abs(),
                         aligned: o.aligned(),
                         level: o.level(),
@@ -623,7 +616,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 // TODO: Assert output shape is expected.
                 for i in 0..aux.len() {
                     let o = &new_operands[i];
-                    aux[i] = SpecAux {
+                    aux[i] = TensorSpecAux {
                         contig: o.contiguous_abs(),
                         aligned: o.aligned(),
                         level: o.level(),
@@ -736,7 +729,7 @@ impl<Tgt: Target> Display for Spec<Tgt> {
     }
 }
 
-impl<Tgt: Target> SpecAux<Tgt> {
+impl<Tgt: Target> TensorSpecAux<Tgt> {
     fn make_tensorspec_noncanon(&self, dim_sizes: Shape, dtype: Dtype) -> TensorSpec<Tgt> {
         TensorSpec::new_noncanon(
             dim_sizes,

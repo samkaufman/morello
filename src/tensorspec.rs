@@ -6,14 +6,22 @@ use crate::layout::Layout;
 use crate::target::{MemoryLevel, Target};
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Deserialize, Serialize)]
+#[serde(bound = "")]
 pub struct TensorSpec<Tgt: Target> {
     dim_sizes: Shape, // TODO: Rename to shape
     dtype: Dtype,
-    contiguous_abs: Contig,
-    aligned: bool,
-    level: Tgt::Level,
-    layout: Layout,
-    vector_shape: Option<Shape>,
+    aux: TensorSpecAux<Tgt>,
+}
+
+// TODO: This probably shouldn't be public.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct TensorSpecAux<Tgt: Target> {
+    pub contig: Contig,
+    pub aligned: bool,
+    pub level: Tgt::Level,
+    pub layout: Layout,
+    pub vector_shape: Option<Shape>,
 }
 
 impl<Tgt: Target> TensorSpec<Tgt> {
@@ -48,26 +56,38 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         layout: Layout,
         vector_shape: Option<Shape>,
     ) -> Self {
-        let layout = layout;
+        Self::new_noncanon_with_aux(
+            dim_sizes,
+            dtype,
+            TensorSpecAux {
+                contig: contiguous_abs,
+                aligned,
+                level,
+                layout,
+                vector_shape,
+            },
+        )
+    }
 
+    pub fn new_noncanon_with_aux(dim_sizes: Shape, dtype: Dtype, aux: TensorSpecAux<Tgt>) -> Self {
         if dim_sizes.is_empty() || dim_sizes.iter().any(|&d| d < 1) {
             panic!("Invalid shape: {:?}", dim_sizes);
         }
 
-        if !layout.applies_to_shape(&dim_sizes) {
+        if !aux.layout.applies_to_shape(&dim_sizes) {
             panic!(
                 "Layout {:?} does not apply to shape {:?}",
-                layout, dim_sizes
+                aux.layout, dim_sizes
             );
         }
 
-        if vector_shape.is_some() != level.vector_rf() {
+        if aux.vector_shape.is_some() != aux.level.vector_rf() {
             panic!(
-                "vector_shape must be specified if and only if the bank ({:?}) is a vector register file", level
+                "vector_shape must be specified if and only if the bank ({:?}) is a vector register file", aux.level
             )
         }
 
-        if let Some(vs) = &vector_shape {
+        if let Some(vs) = &aux.vector_shape {
             if vs.len() != dim_sizes.len() {
                 panic!(
                     "vector_shape must have same rank as dim_sizes, but vector_shape was {:?} and dim_sizes was {:?}",
@@ -79,24 +99,20 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         TensorSpec {
             dim_sizes,
             dtype,
-            contiguous_abs,
-            aligned,
-            level,
-            layout,
-            vector_shape,
+            aux,
         }
     }
 
     pub fn layout(&self) -> Layout {
-        self.layout.clone()
+        self.aux.layout.clone()
     }
 
     pub fn set_layout(&mut self, new_layout: Layout) {
-        self.layout = new_layout;
+        self.aux.layout = new_layout;
     }
 
     pub fn is_contiguous(&self) -> bool {
-        self.contiguous_abs == self.layout.contiguous_full()
+        self.aux.contig == self.aux.layout.contiguous_full()
     }
 
     /// Returns true if this TensorSpec can be tiled to the given shape.
@@ -110,7 +126,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         }
 
         let all_ones = shape.iter().all(|d| *d == 1);
-        if !all_ones && !self.layout.applies_to_shape(shape) {
+        if !all_ones && !self.aux.layout.applies_to_shape(shape) {
             return false;
         }
 
@@ -130,19 +146,19 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub fn contiguous_abs(&self) -> Contig {
-        self.contiguous_abs
+        self.aux.contig
     }
 
     pub fn aligned(&self) -> bool {
-        self.aligned
+        self.aux.aligned
     }
 
     pub fn level(&self) -> <Tgt as Target>::Level {
-        self.level
+        self.aux.level
     }
 
     pub fn vector_shape(&self) -> Option<&Shape> {
-        self.vector_shape.as_ref()
+        self.aux.vector_shape.as_ref()
     }
 
     pub fn set_level(&mut self, level: Tgt::Level, vector_shape: Option<Shape>) {
@@ -153,8 +169,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             level,
             vector_shape
         );
-        self.level = level;
-        self.vector_shape = vector_shape;
+        self.aux.level = level;
+        self.aux.vector_shape = vector_shape;
     }
 
     /// Returns a new TensorSpec with the given shape and alignment.
@@ -162,18 +178,18 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     /// The result's layout and contiguousness abstraction will have been
     /// canoncialized for the given shape.
     pub fn shrink(&mut self, dim_sizes: &Shape, aligned: bool) {
-        self.contiguous_abs =
+        self.aux.contig =
             self.layout()
-                .tile_contiguity(dim_sizes, &self.dim_sizes, self.contiguous_abs);
+                .tile_contiguity(dim_sizes, &self.dim_sizes, self.aux.contig);
         self.dim_sizes = dim_sizes.clone();
-        self.layout = self.layout.canonicalize_for_shape(&self.dim_sizes);
-        self.aligned = aligned;
+        self.aux.layout = self.aux.layout.canonicalize_for_shape(&self.dim_sizes);
+        self.aux.aligned = aligned;
     }
 
     pub fn canonicalize(&mut self) {
         // Odd implementation, but concise! `shrink` will canonicalize, so we
         // pass the same shape and alignment.
-        self.shrink(&self.dim_sizes.clone(), self.aligned);
+        self.shrink(&self.dim_sizes.clone(), self.aux.aligned);
     }
 
     // TODO: Shouldn't need this method. Should be implicit in Spec validity.
@@ -199,23 +215,23 @@ impl<Tgt: Target> Display for TensorSpec<Tgt> {
         let mut a_epi = String::new();
         let mut v_epi = String::new();
 
-        if !self.layout.is_row_major() {
-            layout_epi = format!(", {}", self.layout);
+        if !self.aux.layout.is_row_major() {
+            layout_epi = format!(", {}", self.aux.layout);
         }
 
-        if Tgt::default_level() != self.level {
-            bank_epi = format!(", {}", self.level);
+        if Tgt::default_level() != self.aux.level {
+            bank_epi = format!(", {}", self.aux.level);
         }
 
-        if self.contiguous_abs != self.layout.contiguous_full() {
-            c_epi = format!(", c{}", self.contiguous_abs);
+        if self.aux.contig != self.aux.layout.contiguous_full() {
+            c_epi = format!(", c{}", self.aux.contig);
         }
 
-        if !self.aligned {
+        if !self.aux.aligned {
             a_epi = String::from(", ua");
         }
 
-        if let Some(shape) = &self.vector_shape {
+        if let Some(shape) = &self.aux.vector_shape {
             v_epi = format!(
                 ", {}",
                 shape
