@@ -11,7 +11,7 @@ use crate::reinterpret::squeeze_tile;
 use crate::spec::Spec;
 use crate::target::{MemoryLevel, Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
-use crate::tiling::{PartialTile, Tile};
+use crate::tiling::{Tile, Tiling};
 
 /// A single node in an Impl.
 ///
@@ -81,7 +81,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
             ImplNode::Loop { tiles, .. } => {
                 let mut new_operands = node_spec.operands();
                 for Tile {
-                    partial,
+                    tiling,
                     source_idx,
                     aligned,
                 } in tiles
@@ -89,7 +89,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     // TODO: This should probably be wrapped in a method so that
                     //       TensorSpec can enforce invariants if it wants.
                     let ref_op = &mut new_operands[usize::from(*source_idx)];
-                    ref_op.shrink(partial.dim_sizes(), *aligned);
+                    ref_op.shrink(tiling.dim_sizes(), *aligned);
                 }
                 let mut inner_spec = node_spec.clone();
                 inner_spec.replace_io(&new_operands);
@@ -127,7 +127,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     tiled_image_spec.shrink(
                         &tiled_image_spec_shape,
                         aligned_approx(
-                            &PartialTile::Simple(tiled_image_spec_shape.clone()),
+                            &Tiling::Simple(tiled_image_spec_shape.clone()),
                             &tiled_image_spec_shape,
                             &operands[0],
                         ),
@@ -142,7 +142,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     tiled_filters_spec.shrink(
                         &tiled_filters_spec_shape,
                         aligned_approx(
-                            &PartialTile::Simple(tiled_filters_spec_shape.clone()),
+                            &Tiling::Simple(tiled_filters_spec_shape.clone()),
                             &tiled_filters_spec_shape,
                             &operands[1],
                         ),
@@ -322,7 +322,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
         match &self {
             ImplNode::Loop { .. } => {
                 self.apply_to_subscript(spec, subscript, |t, dim, origin_size| {
-                    t.partial.steps_dim(dim, origin_size)
+                    t.tiling.steps_dim(dim, origin_size)
                 })
             }
             // Type specialization would avoid needing cases like this.
@@ -334,7 +334,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
         match &self {
             ImplNode::Loop { .. } => {
                 self.apply_to_subscript(spec, subscript, |t, dim, origin_size| {
-                    t.partial.boundary_size(dim, origin_size)
+                    t.tiling.boundary_size(dim, origin_size)
                 })
             }
             // Type specialization would avoid needing cases like this.
@@ -446,7 +446,7 @@ impl<Tgt: Target> Display for ImplNode<Tgt> {
                         .join(", "),
                     tiles
                         .iter()
-                        .map(|t| format!("{:?}", t.partial))
+                        .map(|t| format!("{:?}", t.tiling))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )

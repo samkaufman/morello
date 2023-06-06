@@ -2,12 +2,12 @@ use crate::common::{DimSize, Dtype};
 use crate::layout::Layout;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
-use crate::tiling::PartialTile;
+use crate::tiling::Tiling;
 
 use log::warn;
 
 pub fn aligned_approx<Tgt: Target>(
-    partial_tile: &PartialTile,
+    tiling: &Tiling,
     tile_shape: &[DimSize],
     parent: &TensorSpec<Tgt>,
 ) -> bool {
@@ -15,8 +15,8 @@ pub fn aligned_approx<Tgt: Target>(
         return false;
     }
 
-    match (parent.layout(), partial_tile) {
-        (Layout::Standard { dim_order }, PartialTile::Simple { .. }) => {
+    match (parent.layout(), tiling) {
+        (Layout::Standard { dim_order }, Tiling::Simple { .. }) => {
             aligned_approx_standard_simple::<Tgt>(
                 tile_shape,
                 dim_order.as_slice(),
@@ -24,7 +24,7 @@ pub fn aligned_approx<Tgt: Target>(
                 &parent.dtype(),
             )
         }
-        (Layout::Packed { .. }, PartialTile::Simple { .. }) => {
+        (Layout::Packed { .. }, Tiling::Simple { .. }) => {
             let tile_expanded = parent.layout().expand_shape(tile_shape);
             aligned_approx_standard_simple::<Tgt>(
                 &tile_expanded,
@@ -35,7 +35,7 @@ pub fn aligned_approx<Tgt: Target>(
                 &parent.dtype(),
             )
         }
-        (_, PartialTile::ConvImage { .. }) => {
+        (_, Tiling::ConvImage { .. }) => {
             if tile_shape[1..] == parent.dim_sizes()[1..] {
                 // parent.aligned_approx(TypeId::of::<SimpleTile>(), tile_shape, parent)
                 todo!()

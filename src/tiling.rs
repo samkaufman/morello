@@ -1,34 +1,34 @@
-use crate::alignment::aligned_approx;
-use crate::common::{DimSize, Shape};
-use crate::spec::Spec;
 use divrem::DivCeil;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::fmt::Debug;
 
+use crate::alignment::aligned_approx;
+use crate::common::{DimSize, Shape};
+use crate::spec::Spec;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 
 // TODO: Rename to something like `Tiling`, as opposed to a tile.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-pub enum PartialTile {
+pub enum Tiling {
     Simple(Shape),
     ConvImage(Shape, Shape),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Tile {
-    pub partial: PartialTile,
+    pub tiling: Tiling,
     pub source_idx: u8,
     pub aligned: bool,
 }
 
-impl PartialTile {
+impl Tiling {
     // TODO: Rename to `apply_to_operand`.
     pub fn tile<Tgt: Target>(&self, source_idx: u8, source_spec: &TensorSpec<Tgt>) -> Tile {
         match self {
-            PartialTile::Simple(dim_sizes) => simple_tile(source_spec, source_idx, dim_sizes),
-            PartialTile::ConvImage(dim_sizes, filter_shape) => {
+            Tiling::Simple(dim_sizes) => simple_tile(source_spec, source_idx, dim_sizes),
+            Tiling::ConvImage(dim_sizes, filter_shape) => {
                 conv_image_tile(source_spec, source_idx, dim_sizes, filter_shape)
             }
         }
@@ -36,16 +36,16 @@ impl PartialTile {
 
     pub fn dim_sizes(&self) -> &Shape {
         match &self {
-            PartialTile::Simple(shp) | PartialTile::ConvImage(shp, _) => shp,
+            Tiling::Simple(shp) | Tiling::ConvImage(shp, _) => shp,
         }
     }
 
     pub fn steps_dim(&self, dim: u8, origin_size: DimSize) -> u32 {
         match &self {
-            PartialTile::Simple(shape) => {
+            Tiling::Simple(shape) => {
                 divrem::DivCeil::div_ceil(origin_size, shape[usize::from(dim)])
             }
-            PartialTile::ConvImage(img_shape, filters_shape) => {
+            Tiling::ConvImage(img_shape, filters_shape) => {
                 // Batch should be a normal tiling.
                 if dim == 0 {
                     DivCeil::div_ceil(origin_size, self.dim_sizes()[usize::from(dim)])
@@ -60,8 +60,8 @@ impl PartialTile {
 
     pub fn boundary_size(&self, dim: u8, origin_size: DimSize) -> u32 {
         match &self {
-            PartialTile::Simple(shape) => origin_size % shape[usize::from(dim)],
-            PartialTile::ConvImage(dim_sizes, filter_shape) => {
+            Tiling::Simple(shape) => origin_size % shape[usize::from(dim)],
+            Tiling::ConvImage(dim_sizes, filter_shape) => {
                 // Non-spatial dimensions (batch) should be simple tilings.
                 if dim == 0 {
                     origin_size % dim_sizes[usize::from(dim)]
@@ -93,7 +93,7 @@ pub fn simple_tile<Tgt: Target>(
     operand_idx: u8,
     new_dims: &[DimSize],
 ) -> Tile {
-    make_tile_with_alignment(source_spec, operand_idx, new_dims, PartialTile::Simple)
+    make_tile_with_alignment(source_spec, operand_idx, new_dims, Tiling::Simple)
 }
 
 fn conv_image_tile<Tgt: Target>(
@@ -103,7 +103,7 @@ fn conv_image_tile<Tgt: Target>(
     filter_shape: &[DimSize],
 ) -> Tile {
     make_tile_with_alignment(source_spec, operand_idx, new_dims, move |s| {
-        PartialTile::ConvImage(s, filter_shape.into())
+        Tiling::ConvImage(s, filter_shape.into())
     })
 }
 
@@ -111,7 +111,7 @@ fn make_tile_with_alignment<Tgt: Target>(
     source_spec: &TensorSpec<Tgt>,
     operand_idx: u8,
     new_dims: &[DimSize],
-    tile_constructor: impl FnOnce(Shape) -> PartialTile,
+    tile_constructor: impl FnOnce(Shape) -> Tiling,
 ) -> Tile {
     assert_eq!(
         new_dims.len(),
@@ -133,19 +133,19 @@ fn make_tile_with_alignment<Tgt: Target>(
         source_spec.dim_sizes(),
     );
 
-    let partial = tile_constructor(Shape::from(new_dims));
-    let aligned = aligned_approx(&partial, new_dims, source_spec);
+    let tiling = tile_constructor(Shape::from(new_dims));
+    let aligned = aligned_approx(&tiling, new_dims, source_spec);
     Tile {
-        partial,
+        tiling,
         source_idx: operand_idx,
         aligned,
     }
 }
 
-/// Map a Spec's type, input shapes, and output tile to PartialTiles for its inputs.
+/// Infer data dependency-respecting Tilings for a Spec's inputs from a tiling.
 ///
-/// Note that input_shapes refers to original, untiled input shapes, while the
-/// spec_output describes the final, already-tiled output.
+/// This additionally requires the initial input shapes, which are used to
+/// determine dimensions unaffected by the tiling (tiled to the same size).
 ///
 /// Compose is not directly represented because tiling a Compose depends on its
 /// sub-Specs, which are members of the Compose object. As a result, the tile_out logic
@@ -154,21 +154,21 @@ pub fn tile_out<Tgt: Target>(
     // TODO: Rename function to `input_tile_deps` or something.
     spec: &Spec<Tgt>,
     input_shapes: &[Vec<DimSize>],
-    spec_output: &PartialTile,
-) -> Vec<PartialTile> {
+    spec_output: &Tiling,
+) -> Vec<Tiling> {
     match (spec, spec_output) {
-        (Spec::Matmul { .. }, PartialTile::Simple(dim_sizes)) => {
+        (Spec::Matmul { .. }, Tiling::Simple(dim_sizes)) => {
             let m = dim_sizes[0];
             let k = input_shapes[0][1];
             let n = dim_sizes[1];
             vec![
-                PartialTile::Simple(smallvec![m, k]),
-                PartialTile::Simple(smallvec![k, n]),
+                Tiling::Simple(smallvec![m, k]),
+                Tiling::Simple(smallvec![k, n]),
             ]
         }
-        (Spec::Load { .. }, PartialTile::Simple(dim_sizes))
-        | (Spec::Store { .. }, PartialTile::Simple(dim_sizes)) => {
-            vec![PartialTile::Simple(dim_sizes.clone())]
+        (Spec::Load { .. }, Tiling::Simple(dim_sizes))
+        | (Spec::Store { .. }, Tiling::Simple(dim_sizes)) => {
+            vec![Tiling::Simple(dim_sizes.clone())]
         }
         (Spec::Zero { .. }, _) => vec![],
         _ => unimplemented!(),

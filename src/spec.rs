@@ -5,7 +5,7 @@ use crate::layout::Layout;
 use crate::target::MemoryLevel;
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
-use crate::tiling::PartialTile;
+use crate::tiling::Tiling;
 
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec, ToSmallVec};
@@ -408,16 +408,14 @@ impl<Tgt: Target> Spec<Tgt> {
 
         // Tiling happens in three steps:
         // 1. Construct the simple tile corresponding to the new output shape.
-        let smaller_output = PartialTile::Simple(output_shape.into())
+        let smaller_output = Tiling::Simple(output_shape.into())
             .tile(self.output_idx().try_into().unwrap(), &current_output);
 
-        // 2. Construct the *partial* tiles which respect the data deps. of the
-        //    new output tile.
-        let updated_inputs = self.partial_inputs_for_tile_out(&smaller_output.partial);
+        // 2. Construct tilings which respect the data deps. of the new output tile.
+        let updated_inputs = self.tilings_for_tile_out(&smaller_output.tiling);
 
-        // 3. Reify the partial tiles into Tile objects we'll store with this
-        //    ImplNode. Tile objects basically just track the parameter index of
-        //    the tensor they tile.
+        // 3. Reify the tilings into Tiles we'll store with this ImplNode. Tile objects
+        //    basically just track the parameter index of the tensor they tile.
         let mut new_tiles = vec![];
         for (input_idx, (original_input, updated_input)) in
             self.inputs().iter().zip(&updated_inputs).enumerate()
@@ -456,8 +454,8 @@ impl<Tgt: Target> Spec<Tgt> {
         let rhs = &operands[1];
         assert!(size < lhs.dim_sizes()[1]);
 
-        let left_view = PartialTile::Simple(smallvec![lhs.dim_sizes()[0], size]).tile(0, lhs);
-        let right_view = PartialTile::Simple(smallvec![size, rhs.dim_sizes()[1]]).tile(1, rhs);
+        let left_view = Tiling::Simple(smallvec![lhs.dim_sizes()[0], size]).tile(0, lhs);
+        let right_view = Tiling::Simple(smallvec![size, rhs.dim_sizes()[1]]).tile(1, rhs);
 
         let split_subscript = *self.operands_dim_subscripts()[0].last().unwrap();
 
@@ -468,14 +466,14 @@ impl<Tgt: Target> Spec<Tgt> {
         }
     }
 
-    fn partial_inputs_for_tile_out(&self, smaller_output: &PartialTile) -> Vec<PartialTile> {
+    fn tilings_for_tile_out(&self, smaller_output: &Tiling) -> Vec<Tiling> {
         match (&self, smaller_output) {
-            (Spec::Matmul { k, .. }, PartialTile::Simple(dim_sizes)) => {
+            (Spec::Matmul { k, .. }, Tiling::Simple(dim_sizes)) => {
                 let m = dim_sizes[0];
                 let n = dim_sizes[1];
                 vec![
-                    PartialTile::Simple(smallvec![m, *k]),
-                    PartialTile::Simple(smallvec![*k, n]),
+                    Tiling::Simple(smallvec![m, *k]),
+                    Tiling::Simple(smallvec![*k, n]),
                 ]
             }
             (
@@ -484,7 +482,7 @@ impl<Tgt: Target> Spec<Tgt> {
                     filters_shape,
                     ..
                 },
-                PartialTile::Simple(ptile_shape),
+                Tiling::Simple(ptile_shape),
             )
             | (
                 Spec::Conv {
@@ -492,7 +490,7 @@ impl<Tgt: Target> Spec<Tgt> {
                     filters_shape,
                     ..
                 },
-                PartialTile::ConvImage(ptile_shape, _),
+                Tiling::ConvImage(ptile_shape, _),
             ) => {
                 let new_batch_size = ptile_shape[0];
                 let new_filter_cnt = ptile_shape[1];
@@ -508,7 +506,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 // If the output is a convolution, ensure the input filter/window size
                 // is large enough to gather the inputs for the entire output window.
                 let new_filters_spatials: Shape = match smaller_output {
-                    PartialTile::ConvImage(_, new_filters_spatials) => new_filters_spatials[1..]
+                    Tiling::ConvImage(_, new_filters_spatials) => new_filters_spatials[1..]
                         .iter()
                         .zip(orig_filter_spatials.iter())
                         .map(|(&o, &i)| o + i - 1)
@@ -517,7 +515,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 };
 
                 vec![
-                    PartialTile::ConvImage(
+                    Tiling::ConvImage(
                         [new_batch_size, channels]
                             .into_iter()
                             .chain(new_image_spatials)
@@ -527,7 +525,7 @@ impl<Tgt: Target> Spec<Tgt> {
                             .chain(new_filters_spatials.into_iter())
                             .collect(),
                     ),
-                    PartialTile::Simple(
+                    Tiling::Simple(
                         [new_filter_cnt, channels]
                             .iter()
                             .chain(orig_filter_spatials.iter())
@@ -536,13 +534,13 @@ impl<Tgt: Target> Spec<Tgt> {
                     ),
                 ]
             }
-            (Spec::Load { .. }, PartialTile::Simple(dim_sizes))
-            | (Spec::Store { .. }, PartialTile::Simple(dim_sizes)) => {
-                vec![PartialTile::Simple(dim_sizes.clone())]
+            (Spec::Load { .. }, Tiling::Simple(dim_sizes))
+            | (Spec::Store { .. }, Tiling::Simple(dim_sizes)) => {
+                vec![Tiling::Simple(dim_sizes.clone())]
             }
             (Spec::Zero { .. }, _) => vec![],
             _ => unimplemented!(
-                "partial_inputs_for_tile_out not implemented for {:?} and {:?}",
+                "tilings_for_tile_out not implemented for {:?} and {:?}",
                 self,
                 smaller_output
             ),
