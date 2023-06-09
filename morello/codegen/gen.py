@@ -10,7 +10,6 @@ import sympy
 
 from .. import impl, utils
 from ..dtypes import Dtype
-from ..system_config.cpu import X86Target, ArmTarget
 from ..tensor import Tensor
 from ..system_config.state import current_target
 from . import common, expr_utils
@@ -564,6 +563,9 @@ def generate_c(
     writer.writeline("#include <stdio.h>")
     writer.writeline("#include <string.h>")
     writer.writeline("#include <time.h>")
+
+    # Import inside the method to solve a circular dependency
+    from ..system_config.cpu import X86Target, ArmTarget
 
     cpu_target = current_target()
     if isinstance(cpu_target, X86Target):
