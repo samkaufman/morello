@@ -15,16 +15,14 @@ pub fn aligned_approx<Tgt: Target>(
         return false;
     }
 
-    match (parent.layout(), tiling) {
-        (Layout::Standard { dim_order }, Tiling::Simple { .. }) => {
-            aligned_approx_standard_simple::<Tgt>(
-                tile_shape,
-                dim_order.as_slice(),
-                parent.dim_sizes(),
-                &parent.dtype(),
-            )
-        }
-        (Layout::Packed { .. }, Tiling::Simple { .. }) => {
+    match (parent.layout(), tiling.is_simple()) {
+        (Layout::Standard { dim_order }, true) => aligned_approx_standard_simple::<Tgt>(
+            tile_shape,
+            dim_order.as_slice(),
+            parent.dim_sizes(),
+            &parent.dtype(),
+        ),
+        (Layout::Packed { .. }, true) => {
             let tile_expanded = parent.layout().expand_shape(tile_shape);
             aligned_approx_standard_simple::<Tgt>(
                 &tile_expanded,
@@ -35,7 +33,7 @@ pub fn aligned_approx<Tgt: Target>(
                 &parent.dtype(),
             )
         }
-        (_, Tiling::ConvImage { .. }) => {
+        (_, false) => {
             if tile_shape[1..] == parent.dim_sizes()[1..] {
                 // parent.aligned_approx(TypeId::of::<SimpleTile>(), tile_shape, parent)
                 todo!()

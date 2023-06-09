@@ -8,7 +8,7 @@ use log::{debug, info};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::smallvec;
-use tensorspec::{TensorSpec, SpecAux};
+use tensorspec::{TensorSpec, TensorSpecAux};
 
 mod alignment;
 mod common;
@@ -126,7 +126,7 @@ where
     }));
     bounds.push({
         let layout = layout::row_major(2);
-        let a = SpecAux {
+        let a = TensorSpecAux {
             contig: layout.contiguous_full(),
             aligned: true,
             level: X86MemoryLevel::GL,
@@ -145,7 +145,7 @@ where
     });
     bounds.extend({
         let layout = layout::row_major(4);
-        let a = SpecAux {
+        let a = TensorSpecAux {
             contig: layout.contiguous_full(),
             aligned: true,
             level: X86MemoryLevel::GL,

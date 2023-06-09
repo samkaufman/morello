@@ -7,6 +7,7 @@ use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 
+use core::panic;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec, ToSmallVec};
 use std::fmt::Display;
@@ -15,6 +16,15 @@ use std::iter::{self, once};
 use std::{assert_eq, debug_assert_eq};
 
 const LIMIT_VECTORS_TO_ONE_DIM: bool = true;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum PrimitiveSpecType {
+    Matmul,
+    Conv,
+    Load,
+    Store,
+    Zero,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -54,16 +64,60 @@ pub enum Spec<Tgt: Target> {
         tensor_spec: TensorSpec<Tgt>,
         serial_only: bool,
     },
+    Compose {
+        primitives: Vec<PrimitiveSpecType>,
+        operands: Vec<TensorSpec<Tgt>>,
+        serial_only: bool,
+    },
 }
 
 impl<Tgt: Target> Spec<Tgt> {
+    pub fn primitive_type(&self) -> PrimitiveSpecType {
+        match self {
+            Spec::Matmul { .. } => PrimitiveSpecType::Matmul,
+            Spec::Conv { .. } => PrimitiveSpecType::Conv,
+            Spec::Load { .. } => PrimitiveSpecType::Load,
+            Spec::Store { .. } => PrimitiveSpecType::Store,
+            Spec::Zero { .. } => PrimitiveSpecType::Zero,
+            Spec::Compose { .. } => panic!("Spec::Compose has no primitive type"),
+        }
+    }
+
     pub fn serial_only(&self) -> bool {
         match self {
             Spec::Matmul { serial_only, .. }
             | Spec::Conv { serial_only, .. }
             | Spec::Load { serial_only, .. }
             | Spec::Store { serial_only, .. }
-            | Spec::Zero { serial_only, .. } => *serial_only,
+            | Spec::Zero { serial_only, .. }
+            | Spec::Compose { serial_only, .. } => *serial_only,
+        }
+    }
+
+    pub fn spec_shape(&self) -> Shape {
+        match self {
+            Spec::Matmul { m, k, n, .. } => smallvec![*m, *k, *n],
+            Spec::Conv {
+                image_shape,
+                filters_shape,
+                ..
+            } => {
+                let [b, c, h, w] = image_shape[..] else {
+                    unreachable!("image_shape must have 4 dimensions");
+                };
+                let [f, _, fh, fw] = filters_shape[..] else {
+                    unreachable!("filters_shape must have 4 dimensions");
+                };
+                smallvec![b, f, c, h, w, fh, fw]
+            }
+            Spec::Load {
+                outer_tensor_spec, ..
+            }
+            | Spec::Store {
+                outer_tensor_spec, ..
+            } => outer_tensor_spec.dim_sizes().to_owned(),
+            Spec::Zero { tensor_spec, .. } => tensor_spec.dim_sizes().to_owned(),
+            Spec::Compose { .. } => todo!(),
         }
     }
 
@@ -130,6 +184,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 vec![outer_tensor_spec.clone(), inner_tensor_spec]
             }
             Spec::Zero { tensor_spec, .. } => vec![tensor_spec.clone()],
+            Spec::Compose { .. } => todo!(),
         }
     }
 
@@ -141,6 +196,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 vec![self.operands()[0].clone()]
             }
             Spec::Zero { .. } => vec![],
+            Spec::Compose { .. } => todo!(),
         }
     }
 
@@ -153,6 +209,7 @@ impl<Tgt: Target> Spec<Tgt> {
             Spec::Matmul { .. } | Spec::Conv { .. } => 2,
             Spec::Load { .. } | Spec::Store { .. } => 1,
             Spec::Zero { .. } => 0,
+            Spec::Compose { .. } => todo!(),
         }
     }
 
@@ -196,6 +253,7 @@ impl<Tgt: Target> Spec<Tgt> {
             } => {
                 tensor_spec.canonicalize();
             }
+            Spec::Compose { .. } => todo!(),
         }
 
         // TODO: What if you want to call `operands` on a non-canon Spec?
@@ -213,7 +271,7 @@ impl<Tgt: Target> Spec<Tgt> {
     }
 
     pub fn is_canonical(&self) -> bool {
-        // TODO: Slow.
+        // TODO: Probably slow.
         let mut c = self.clone();
         c.canonicalize();
         self == &c
@@ -408,26 +466,27 @@ impl<Tgt: Target> Spec<Tgt> {
 
         // Tiling happens in three steps:
         // 1. Construct the simple tile corresponding to the new output shape.
-        let smaller_output = Tiling::Simple(output_shape.into())
-            .tile(self.output_idx().try_into().unwrap(), &current_output);
+        let smaller_output = Tiling::new_simple(output_shape.into())
+            .into_operand_tile(self.output_idx().try_into().unwrap(), &current_output);
 
         // 2. Construct tilings which respect the data deps. of the new output tile.
-        let updated_inputs = self.tilings_for_tile_out(&smaller_output.tiling);
+        let updated_inputs = self.input_tilings_for_tile_out(&smaller_output.tiling);
 
-        // 3. Reify the tilings into Tiles we'll store with this ImplNode. Tile objects
-        //    basically just track the parameter index of the tensor they tile.
+        // 3. Reify the tilings into OperandTiles we'll store with this ImplNode.
+        //    OperandTile objects basically just track the parameter index of the tensor
+        //    they tile.
         let mut new_tiles = vec![];
         for (input_idx, (original_input, updated_input)) in
-            self.inputs().iter().zip(&updated_inputs).enumerate()
+            self.inputs().iter().zip(updated_inputs).enumerate()
         {
             // Toss out partial tiles with the same TensorSpec as their source,
             // since these weren't affected by the output tiling.
-            if !original_input.is_valid_tile_shape(updated_input.dim_sizes()) {
+            if !original_input.is_valid_tile_shape(updated_input.shape()) {
                 return None;
             }
-            if original_input.dim_sizes() != updated_input.dim_sizes() {
+            if original_input.dim_sizes() != updated_input.shape() {
                 let new_input_tile =
-                    updated_input.tile(input_idx.try_into().unwrap(), original_input);
+                    updated_input.into_operand_tile(input_idx.try_into().unwrap(), original_input);
                 new_tiles.push(new_input_tile);
             }
         }
@@ -446,6 +505,7 @@ impl<Tgt: Target> Spec<Tgt> {
     }
 
     fn split(&self, size: DimSize) -> ImplNode<Tgt> {
+        debug_assert!(matches!(self, Spec::Matmul { .. }));
         debug_assert_ne!(size, 0);
 
         // lhs, rhs = self.spec.inputs
@@ -454,8 +514,10 @@ impl<Tgt: Target> Spec<Tgt> {
         let rhs = &operands[1];
         assert!(size < lhs.dim_sizes()[1]);
 
-        let left_view = Tiling::Simple(smallvec![lhs.dim_sizes()[0], size]).tile(0, lhs);
-        let right_view = Tiling::Simple(smallvec![size, rhs.dim_sizes()[1]]).tile(1, rhs);
+        let left_view =
+            Tiling::new_simple(smallvec![lhs.dim_sizes()[0], size]).into_operand_tile(0, lhs);
+        let right_view =
+            Tiling::new_simple(smallvec![size, rhs.dim_sizes()[1]]).into_operand_tile(1, rhs);
 
         let split_subscript = *self.operands_dim_subscripts()[0].last().unwrap();
 
@@ -466,14 +528,15 @@ impl<Tgt: Target> Spec<Tgt> {
         }
     }
 
-    fn tilings_for_tile_out(&self, smaller_output: &Tiling) -> Vec<Tiling> {
-        match (&self, smaller_output) {
-            (Spec::Matmul { k, .. }, Tiling::Simple(dim_sizes)) => {
+    fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> Vec<Tiling> {
+        match (&self, smaller_output.is_simple()) {
+            (Spec::Matmul { k, .. }, true) => {
+                let dim_sizes = smaller_output.shape();
                 let m = dim_sizes[0];
                 let n = dim_sizes[1];
                 vec![
-                    Tiling::Simple(smallvec![m, *k]),
-                    Tiling::Simple(smallvec![*k, n]),
+                    Tiling::new_simple(smallvec![m, *k]),
+                    Tiling::new_simple(smallvec![*k, n]),
                 ]
             }
             (
@@ -482,73 +545,51 @@ impl<Tgt: Target> Spec<Tgt> {
                     filters_shape,
                     ..
                 },
-                Tiling::Simple(ptile_shape),
-            )
-            | (
-                Spec::Conv {
-                    image_shape,
-                    filters_shape,
-                    ..
-                },
-                Tiling::ConvImage(ptile_shape, _),
+                _,
             ) => {
-                let new_batch_size = ptile_shape[0];
-                let new_filter_cnt = ptile_shape[1];
-                let new_out_spatials = &ptile_shape[2..];
                 let channels = image_shape[1];
-                let orig_filter_spatials = &filters_shape[2..];
 
-                let new_image_spatials = new_out_spatials
-                    .iter()
-                    .zip(orig_filter_spatials.iter())
-                    .map(|(&o, &f)| o + f - 1);
+                // Compute the new input image Tiling.
+                let new_image_shape = [smaller_output.shape()[0], channels]
+                    .into_iter()
+                    .chain(
+                        smaller_output.shape()[2..]
+                            .iter()
+                            .zip(filters_shape[2..].iter())
+                            .map(|(&o, &f)| o + f - 1),
+                    )
+                    .collect();
+                let mut new_image_steps: Shape = smaller_output.step_sizes().into();
+                new_image_steps[1] = channels;
 
-                // If the output is a convolution, ensure the input filter/window size
-                // is large enough to gather the inputs for the entire output window.
-                let new_filters_spatials: Shape = match smaller_output {
-                    Tiling::ConvImage(_, new_filters_spatials) => new_filters_spatials[1..]
-                        .iter()
-                        .zip(orig_filter_spatials.iter())
-                        .map(|(&o, &i)| o + i - 1)
-                        .collect(),
-                    _ => orig_filter_spatials.iter().copied().collect(),
-                };
+                // Compute the new filters Tiling.
+                let new_filters_shape: Shape = [smaller_output.shape()[1], channels]
+                    .into_iter()
+                    .chain(filters_shape[2..].iter().copied())
+                    .collect();
+                let mut new_filters_steps = new_filters_shape.clone();
+                new_filters_steps[0] = smaller_output.step_sizes()[1];
 
                 vec![
-                    Tiling::ConvImage(
-                        [new_batch_size, channels]
-                            .into_iter()
-                            .chain(new_image_spatials)
-                            .collect(),
-                        [channels]
-                            .into_iter()
-                            .chain(new_filters_spatials.into_iter())
-                            .collect(),
-                    ),
-                    Tiling::Simple(
-                        [new_filter_cnt, channels]
-                            .iter()
-                            .chain(orig_filter_spatials.iter())
-                            .copied()
-                            .collect(),
-                    ),
+                    Tiling::new_sliding(new_image_shape, new_image_steps),
+                    Tiling::new_sliding(new_filters_shape, new_filters_steps),
                 ]
             }
-            (Spec::Load { .. }, Tiling::Simple(dim_sizes))
-            | (Spec::Store { .. }, Tiling::Simple(dim_sizes)) => {
-                vec![Tiling::Simple(dim_sizes.clone())]
+            (Spec::Load { .. }, true) | (Spec::Store { .. }, true) => {
+                vec![smaller_output.clone()]
             }
             (Spec::Zero { .. }, _) => vec![],
             _ => unimplemented!(
-                "tilings_for_tile_out not implemented for {:?} and {:?}",
+                "Output tiling not implemented for {:?} and {:?}",
                 self,
                 smaller_output
             ),
         }
     }
 
+    // TODO: Can we replace this entirely with Spec shapes?
     pub fn operands_dim_subscripts(&self) -> Vec<SmallVec<[u8; 4]>> {
-        match &self {
+        match self {
             Spec::Matmul { .. } => vec![smallvec![0, 2], smallvec![2, 1], smallvec![0, 1]],
             Spec::Conv { .. } => {
                 // Only supports 2 spatial dimensions.
@@ -567,6 +608,7 @@ impl<Tgt: Target> Spec<Tgt> {
                     .map(|rng| rng.collect())
                     .collect()
             }
+            Spec::Compose { .. } => todo!(),
         }
     }
 
@@ -652,6 +694,7 @@ impl<Tgt: Target> Spec<Tgt> {
             } => {
                 *tensor_spec = new_operands[0].clone();
             }
+            Spec::Compose { .. } => todo!(),
         }
     }
 
@@ -699,13 +742,19 @@ impl<Tgt: Target> Spec<Tgt> {
             Spec::Load { .. } | Spec::Store { .. } | Spec::Zero { .. } => {
                 panic!("clone_with_accum() called on Spec without accumulating variant")
             }
+            Spec::Compose { .. } => todo!("Compose can accumulate if head can."),
         }
     }
 }
 
 impl<Tgt: Target> Display for Spec<Tgt> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let header = match &self {
+        if let Spec::Compose { .. } = self {
+            // TODO: Implement Display for Compose.
+            return write!(f, "Compose");
+        }
+
+        let header = match self {
             Spec::Matmul { accum, .. } if *accum => "MatmulAccum",
             Spec::Matmul { .. } => "Matmul",
             Spec::Conv { accum, .. } if *accum => "ConvAccum",
@@ -713,6 +762,7 @@ impl<Tgt: Target> Display for Spec<Tgt> {
             Spec::Load { .. } => "Load",
             Spec::Store { .. } => "Store",
             Spec::Zero { .. } => "Zero",
+            Spec::Compose { .. } => unreachable!(),
         };
 
         let operand_str = self

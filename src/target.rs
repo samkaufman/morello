@@ -134,6 +134,7 @@ impl Target for X86Target {
                 }
                 Box::new(microkernels.into_iter())
             }
+            Spec::Compose { .. } => todo!(),
         }
     }
 }

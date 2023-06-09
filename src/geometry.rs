@@ -128,6 +128,7 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                     .chain(iter::once(if *serial_only { 0 } else { 1 }))
                     .collect(),
             )),
+            Spec::Compose { .. } => todo!(),
         }
     }
 

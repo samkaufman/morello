@@ -33,3 +33,6 @@ path = "src/main.rs"
 [[bin]]
 name = "morello_batch"
 path = "src/main_batch.rs"
+
+[dev-dependencies]
+proptest = "1.2.0"

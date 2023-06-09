@@ -11,7 +11,7 @@ use crate::reinterpret::squeeze_tile;
 use crate::spec::Spec;
 use crate::target::{MemoryLevel, Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
-use crate::tiling::{Tile, Tiling};
+use crate::tiling::{OperandTile, Tiling};
 
 /// A single node in an Impl.
 ///
@@ -26,7 +26,7 @@ use crate::tiling::{Tile, Tiling};
 pub enum ImplNode<Tgt: Target> {
     Loop {
         subscripts: SmallVec<[u8; 2]>,
-        tiles: Vec<Tile>,
+        tiles: Vec<OperandTile>,
         parallel: bool,
     },
     MoveLet {
@@ -80,7 +80,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
         match self {
             ImplNode::Loop { tiles, .. } => {
                 let mut new_operands = node_spec.operands();
-                for Tile {
+                for OperandTile {
                     tiling,
                     source_idx,
                     aligned,
@@ -89,7 +89,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     // TODO: This should probably be wrapped in a method so that
                     //       TensorSpec can enforce invariants if it wants.
                     let ref_op = &mut new_operands[usize::from(*source_idx)];
-                    ref_op.shrink(tiling.dim_sizes(), *aligned);
+                    ref_op.shrink(tiling.shape(), *aligned);
                 }
                 let mut inner_spec = node_spec.clone();
                 inner_spec.replace_io(&new_operands);
@@ -127,7 +127,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     tiled_image_spec.shrink(
                         &tiled_image_spec_shape,
                         aligned_approx(
-                            &Tiling::Simple(tiled_image_spec_shape.clone()),
+                            &Tiling::new_simple(tiled_image_spec_shape.clone()),
                             &tiled_image_spec_shape,
                             &operands[0],
                         ),
@@ -142,7 +142,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     tiled_filters_spec.shrink(
                         &tiled_filters_spec_shape,
                         aligned_approx(
-                            &Tiling::Simple(tiled_filters_spec_shape.clone()),
+                            &Tiling::new_simple(tiled_filters_spec_shape.clone()),
                             &tiled_filters_spec_shape,
                             &operands[1],
                         ),
@@ -344,7 +344,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
 
     fn apply_to_subscript<F>(&self, spec: &Spec<Tgt>, subscript: u8, mut fn_: F) -> u32
     where
-        F: FnMut(&Tile, u8, DimSize) -> u32,
+        F: FnMut(&OperandTile, u8, DimSize) -> u32,
     {
         match &self {
             ImplNode::Loop { tiles, .. } => {
