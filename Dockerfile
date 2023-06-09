@@ -89,7 +89,7 @@ FROM base as poetry
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    POETRY_VERSION=1.4.1 \
+    POETRY_VERSION=1.5.1 \
     POETRY_VENV=/opt/poetry-venv
 
 # Install poetry in its own venv
