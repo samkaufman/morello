@@ -7,7 +7,7 @@ use crate::imp::{
 };
 use crate::layout::{row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::spec::Spec;
+use crate::spec::{PrimitiveBasics, PrimitiveSpecType, Spec};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -99,41 +99,43 @@ impl Target for X86Target {
 
     fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = ImplNode<Self>>> {
         match spec {
-            Spec::Matmul { accum, .. } => {
-                if *accum {
-                    let mut microkernels = vec![];
-                    if mult_applies_to_operands(&spec.operands()) {
-                        microkernels.push(ImplNode::Mult);
+            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
+                PrimitiveSpecType::Matmul { accum } => {
+                    if *accum {
+                        let mut microkernels = vec![];
+                        if mult_applies_to_operands(&spec.operands()) {
+                            microkernels.push(ImplNode::Mult);
+                        }
+                        if broadcastvecmult_applies_to_operands(&spec.operands()) {
+                            microkernels.push(ImplNode::BroadcastVecMult);
+                        }
+                        Box::new(microkernels.into_iter())
+                    } else {
+                        Box::new(std::iter::empty())
                     }
-                    if broadcastvecmult_applies_to_operands(&spec.operands()) {
-                        microkernels.push(ImplNode::BroadcastVecMult);
+                }
+                PrimitiveSpecType::Conv { .. } => Box::new(std::iter::empty()),
+                PrimitiveSpecType::Load { .. } | PrimitiveSpecType::Store { .. } => {
+                    let mut microkernels = vec![];
+                    if valueassign_applies_to_operands(&spec.operands()) {
+                        microkernels.push(ImplNode::ValueAssign);
+                    }
+                    if vectorassign_applies_to_operands(&spec.operands()) {
+                        microkernels.push(ImplNode::VectorAssign);
                     }
                     Box::new(microkernels.into_iter())
-                } else {
-                    Box::new(std::iter::empty())
                 }
-            }
-            Spec::Conv { .. } => Box::new(std::iter::empty()),
-            Spec::Load { .. } | Spec::Store { .. } => {
-                let mut microkernels = vec![];
-                if valueassign_applies_to_operands(&spec.operands()) {
-                    microkernels.push(ImplNode::ValueAssign);
+                PrimitiveSpecType::Zero { .. } => {
+                    let mut microkernels = vec![];
+                    if memsetzero_applies_to_operands(&spec.operands()) {
+                        microkernels.push(ImplNode::MemsetZero);
+                    }
+                    if vectorzero_applies_to_operands(&spec.operands()) {
+                        microkernels.push(ImplNode::VectorZero);
+                    }
+                    Box::new(microkernels.into_iter())
                 }
-                if vectorassign_applies_to_operands(&spec.operands()) {
-                    microkernels.push(ImplNode::VectorAssign);
-                }
-                Box::new(microkernels.into_iter())
-            }
-            Spec::Zero { .. } => {
-                let mut microkernels = vec![];
-                if memsetzero_applies_to_operands(&spec.operands()) {
-                    microkernels.push(ImplNode::MemsetZero);
-                }
-                if vectorzero_applies_to_operands(&spec.operands()) {
-                    microkernels.push(ImplNode::VectorZero);
-                }
-                Box::new(microkernels.into_iter())
-            }
+            },
             Spec::Compose { .. } => todo!(),
         }
     }

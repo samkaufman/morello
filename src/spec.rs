@@ -17,10 +17,32 @@ use std::{assert_eq, debug_assert_eq};
 
 const LIMIT_VECTORS_TO_ONE_DIM: bool = true;
 
+// The following should probably just be Spec::Primitive and Spec::Compose variants once
+// there are good conversions to/from image/filter shapes for Conv.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub enum Spec<Tgt: Target> {
+    // TODO: Enforce `typ` and PrimitiveAux compatibility at the type level.
+    Primitive(PrimitiveBasics, PrimitiveAux<Tgt>, bool),
+    Compose {
+        // Components contain Spec shapes, which can be partially inferred, so
+        // the following stores a little bit of redundant information.
+        components: Vec<PrimitiveBasics>,
+        serial_only: bool,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct PrimitiveBasics {
+    pub typ: PrimitiveSpecType,
+    pub spec_shape: Shape,
+    pub dtype: Dtype,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum PrimitiveSpecType {
-    Matmul,
-    Conv,
+    Matmul { accum: bool },
+    Conv { accum: bool },
     Load,
     Store,
     Zero,
@@ -28,174 +50,261 @@ pub enum PrimitiveSpecType {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub enum Spec<Tgt: Target> {
-    Matmul {
-        accum: bool,
-        m: DimSize,
-        k: DimSize,
-        n: DimSize,
-        dtype: Dtype,
-        aux: [TensorSpecAux<Tgt>; 3],
-        serial_only: bool,
-    },
-    Conv {
-        accum: bool,
-        image_shape: Shape,
-        filters_shape: Shape,
-        dtype: Dtype,
-        aux: [TensorSpecAux<Tgt>; 3],
-        serial_only: bool,
-    },
-    Load {
-        outer_tensor_spec: TensorSpec<Tgt>,
+pub enum PrimitiveAux<Tgt: Target> {
+    Standard(Vec<TensorSpecAux<Tgt>>),
+    Move {
+        outer_aux: TensorSpecAux<Tgt>,
         inner_level: Tgt::Level,
         inner_layout: Layout,
         inner_vector_shape: Option<Shape>,
-        serial_only: bool,
-    },
-    Store {
-        outer_tensor_spec: TensorSpec<Tgt>,
-        inner_level: Tgt::Level,
-        inner_layout: Layout,
-        inner_vector_shape: Option<Shape>,
-        serial_only: bool,
-    },
-    Zero {
-        tensor_spec: TensorSpec<Tgt>,
-        serial_only: bool,
-    },
-    Compose {
-        primitives: Vec<PrimitiveSpecType>,
-        operands: Vec<TensorSpec<Tgt>>,
-        serial_only: bool,
     },
 }
 
+impl PrimitiveBasics {
+    fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> Vec<Tiling> {
+        match (self, smaller_output.is_simple()) {
+            (
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Matmul { .. },
+                    spec_shape,
+                    ..
+                },
+                true,
+            ) => vec![
+                Tiling::new_sliding(
+                    smallvec![smaller_output.shape()[0], spec_shape[1]],
+                    smallvec![smaller_output.step_sizes()[0], spec_shape[1]],
+                ),
+                Tiling::new_sliding(
+                    smallvec![spec_shape[1], smaller_output.shape()[1]],
+                    smallvec![spec_shape[1], smaller_output.step_sizes()[1]],
+                ),
+            ],
+            (
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Conv { .. },
+                    spec_shape,
+                    ..
+                },
+                true,
+            ) => {
+                let [_, _, channels, _, _, fh, fw] = spec_shape[..] else {
+                    unreachable!()
+                };
+
+                // Compute the new input image Tiling.
+                let new_image_shape = [smaller_output.shape()[0], channels]
+                    .into_iter()
+                    .chain(
+                        smaller_output.shape()[2..]
+                            .iter()
+                            .zip([fh, fw])
+                            .map(|(&o, f)| o + f - 1),
+                    )
+                    .collect();
+                let mut new_image_steps: Shape = smaller_output.step_sizes().into();
+                new_image_steps[1] = channels;
+
+                // Compute the new filters Tiling.
+                let new_filters_shape: Shape = [smaller_output.shape()[1], channels]
+                    .into_iter()
+                    .chain([fh, fw].into_iter())
+                    .collect();
+                let mut new_filters_steps = new_filters_shape.clone();
+                new_filters_steps[0] = smaller_output.step_sizes()[1];
+
+                vec![
+                    Tiling::new_sliding(new_image_shape, new_image_steps),
+                    Tiling::new_sliding(new_filters_shape, new_filters_steps),
+                ]
+            }
+            (
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Load,
+                    ..
+                },
+                true,
+            )
+            | (
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Store,
+                    ..
+                },
+                true,
+            ) => vec![smaller_output.clone()],
+            (
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Zero,
+                    ..
+                },
+                true,
+            ) => vec![],
+            _ => unimplemented!(
+                "Output tiling not implemented for {:?} and {:?}",
+                self,
+                smaller_output
+            ),
+        }
+    }
+}
+
+impl PrimitiveSpecType {
+    pub fn operand_count(&self) -> usize {
+        self.input_count() + 1
+    }
+
+    pub fn input_count(&self) -> usize {
+        match self {
+            PrimitiveSpecType::Matmul { .. } => 2,
+            PrimitiveSpecType::Conv { .. } => 2,
+            PrimitiveSpecType::Load => 1,
+            PrimitiveSpecType::Store => 1,
+            PrimitiveSpecType::Zero => 0,
+        }
+    }
+
+    // TODO: Wrap output in a TensorSpecBasics struct.
+    pub fn infer_output_basics(&self, inputs: &[(&[DimSize], Dtype)]) -> (Shape, Dtype) {
+        // TODO: Can this be rewritten as output inference + `from_io` call?
+        debug_assert_eq!(inputs.len(), self.operand_count());
+        match self {
+            PrimitiveSpecType::Matmul { .. } => {
+                let ([m, _k], [_, n]) = (inputs[0].0, inputs[1].0) else {
+                    panic!("Matmul inputs must have 2 dimensions each");
+                };
+                (smallvec![*m, *n], inputs[0].1)
+            }
+            PrimitiveSpecType::Conv { .. } => {
+                let ([b, _, h, w], [f, _, fh, fw]) = (inputs[0].0, inputs[1].0) else {
+                    panic!("Conv inputs must have 4 dimensions each");
+                };
+                debug_assert!(h >= fh && w >= fw);
+                (smallvec![*b, *f, 1 + h - fh, 1 + w - fw], inputs[0].1)
+            }
+            PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+                // The shape and dtype match for moves.
+                (inputs[0].0.to_smallvec(), inputs[0].1)
+            }
+            PrimitiveSpecType::Zero => todo!(),
+        }
+    }
+}
+
 impl<Tgt: Target> Spec<Tgt> {
+    // TODO: Do we really need this?
     pub fn primitive_type(&self) -> PrimitiveSpecType {
         match self {
-            Spec::Matmul { .. } => PrimitiveSpecType::Matmul,
-            Spec::Conv { .. } => PrimitiveSpecType::Conv,
-            Spec::Load { .. } => PrimitiveSpecType::Load,
-            Spec::Store { .. } => PrimitiveSpecType::Store,
-            Spec::Zero { .. } => PrimitiveSpecType::Zero,
+            Spec::Primitive(basics, _, _) => basics.typ,
             Spec::Compose { .. } => panic!("Spec::Compose has no primitive type"),
         }
     }
 
     pub fn serial_only(&self) -> bool {
         match self {
-            Spec::Matmul { serial_only, .. }
-            | Spec::Conv { serial_only, .. }
-            | Spec::Load { serial_only, .. }
-            | Spec::Store { serial_only, .. }
-            | Spec::Zero { serial_only, .. }
-            | Spec::Compose { serial_only, .. } => *serial_only,
-        }
-    }
-
-    pub fn spec_shape(&self) -> Shape {
-        match self {
-            Spec::Matmul { m, k, n, .. } => smallvec![*m, *k, *n],
-            Spec::Conv {
-                image_shape,
-                filters_shape,
-                ..
-            } => {
-                let [b, c, h, w] = image_shape[..] else {
-                    unreachable!("image_shape must have 4 dimensions");
-                };
-                let [f, _, fh, fw] = filters_shape[..] else {
-                    unreachable!("filters_shape must have 4 dimensions");
-                };
-                smallvec![b, f, c, h, w, fh, fw]
-            }
-            Spec::Load {
-                outer_tensor_spec, ..
-            }
-            | Spec::Store {
-                outer_tensor_spec, ..
-            } => outer_tensor_spec.dim_sizes().to_owned(),
-            Spec::Zero { tensor_spec, .. } => tensor_spec.dim_sizes().to_owned(),
-            Spec::Compose { .. } => todo!(),
+            Spec::Primitive(_, _, serial_only) => *serial_only,
+            Spec::Compose { serial_only, .. } => *serial_only,
         }
     }
 
     pub fn operand_count(&self) -> usize {
-        // TODO: This is slow. Do it manually once we have unit tests.
-        self.operands().len()
+        match self {
+            Spec::Compose { components, .. } => {
+                let (innermost_component, outer_components) = components.split_last().unwrap();
+                let mut cnt = innermost_component.typ.operand_count();
+                cnt += outer_components
+                    .iter()
+                    .map(|p| p.typ.operand_count() - 2)
+                    .sum::<usize>();
+                cnt
+            }
+            Spec::Primitive(basics, _, _) => basics.typ.operand_count(),
+        }
     }
 
     pub fn operands(&self) -> Vec<TensorSpec<Tgt>> {
         match self {
-            Spec::Matmul {
-                accum: _,
-                m,
-                k,
-                n,
-                dtype,
+            Spec::Primitive(
+                PrimitiveBasics {
+                    typ,
+                    spec_shape,
+                    dtype,
+                },
                 aux,
-                serial_only: _,
-            } => {
-                // TODO: Document, why are the following non-canon?
-                vec![
-                    TensorSpec::new_noncanon_with_aux(smallvec![*m, *k], *dtype, aux[0].clone()),
-                    TensorSpec::new_noncanon_with_aux(smallvec![*k, *n], *dtype, aux[1].clone()),
-                    TensorSpec::new_noncanon_with_aux(smallvec![*m, *n], *dtype, aux[2].clone()),
-                ]
-            }
-            Spec::Conv {
-                accum: _,
-                image_shape,
-                filters_shape,
-                dtype,
-                aux,
-                serial_only: _,
-            } => {
-                let output_shape = conv_infer_output_shape(image_shape, filters_shape);
-                vec![
-                    TensorSpec::new_noncanon_with_aux(image_shape.clone(), *dtype, aux[0].clone()),
-                    TensorSpec::new_noncanon_with_aux(
-                        filters_shape.clone(),
+                _,
+            ) => match typ {
+                PrimitiveSpecType::Matmul { accum: _ } => {
+                    let PrimitiveAux::Standard(taux) = aux else {
+                        unreachable!();
+                    };
+                    let [m, k, n] = spec_shape[..] else {
+                        unreachable!();
+                    };
+                    // TODO: Document, why are the following non-canon?
+                    vec![
+                        TensorSpec::new_noncanon_with_aux(smallvec![m, k], *dtype, taux[0].clone()),
+                        TensorSpec::new_noncanon_with_aux(smallvec![k, n], *dtype, taux[1].clone()),
+                        TensorSpec::new_noncanon_with_aux(smallvec![m, n], *dtype, taux[2].clone()),
+                    ]
+                }
+                PrimitiveSpecType::Conv { accum: _ } => {
+                    let PrimitiveAux::Standard(taux) = aux else {
+                        unreachable!();
+                    };
+                    let [b, f, c, h, w, fh, fw] = spec_shape[..] else {
+                        unreachable!()
+                    };
+                    debug_assert!(h >= fh && w >= fw);
+                    let img = smallvec![b, c, h, w];
+                    let filt = smallvec![f, c, fh, fw];
+                    let out = conv_infer_output_shape(&img, &filt);
+                    vec![
+                        TensorSpec::new_noncanon_with_aux(img, *dtype, taux[0].clone()),
+                        TensorSpec::new_noncanon_with_aux(filt, *dtype, taux[1].clone()),
+                        TensorSpec::new_noncanon_with_aux(out, *dtype, taux[2].clone()),
+                    ]
+                }
+                PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+                    let PrimitiveAux::Move { outer_aux, inner_level, inner_layout, inner_vector_shape } = aux else {
+                        unreachable!();
+                    };
+                    let outer_tensor_spec = TensorSpec::new_noncanon_with_aux(
+                        spec_shape.clone(),
                         *dtype,
-                        aux[1].clone(),
-                    ),
-                    TensorSpec::new_noncanon_with_aux(output_shape, *dtype, aux[2].clone()),
-                ]
-            }
-            Spec::Load {
-                outer_tensor_spec,
-                inner_level,
-                inner_layout,
-                inner_vector_shape,
-                serial_only: _,
-            }
-            | Spec::Store {
-                outer_tensor_spec,
-                inner_level,
-                inner_layout,
-                inner_vector_shape,
-                serial_only: _,
-            } => {
-                let mut inner_tensor_spec = outer_tensor_spec.clone();
-                inner_tensor_spec.set_level(*inner_level, inner_vector_shape.clone());
-                inner_tensor_spec.set_layout(inner_layout.clone());
-                inner_tensor_spec.canonicalize();
-                vec![outer_tensor_spec.clone(), inner_tensor_spec]
-            }
-            Spec::Zero { tensor_spec, .. } => vec![tensor_spec.clone()],
+                        outer_aux.clone(),
+                    );
+                    let mut inner_tensor_spec = outer_tensor_spec.clone();
+                    inner_tensor_spec.set_level(*inner_level, inner_vector_shape.to_owned());
+                    inner_tensor_spec.set_layout(inner_layout.to_owned());
+                    inner_tensor_spec.canonicalize();
+                    vec![outer_tensor_spec, inner_tensor_spec]
+                }
+                PrimitiveSpecType::Zero => {
+                    let PrimitiveAux::Standard(taux) = aux else {
+                        unreachable!();
+                    };
+                    vec![TensorSpec::new_noncanon_with_aux(
+                        spec_shape.clone(),
+                        *dtype,
+                        taux[0].clone(),
+                    )]
+                }
+            },
             Spec::Compose { .. } => todo!(),
         }
     }
 
     pub fn inputs(&self) -> Vec<TensorSpec<Tgt>> {
         match &self {
-            Spec::Matmul { .. } | Spec::Conv { .. } => self.operands()[..2].to_vec(),
-            Spec::Load { .. } | Spec::Store { .. } => {
-                // TODO: Just grab the item instead of calling operands
-                vec![self.operands()[0].clone()]
-            }
-            Spec::Zero { .. } => vec![],
+            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
+                PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => {
+                    self.operands()[..2].to_vec()
+                }
+                PrimitiveSpecType::Load { .. } | PrimitiveSpecType::Store { .. } => {
+                    // TODO: Just grab the item instead of calling operands
+                    vec![self.operands()[0].clone()]
+                }
+                PrimitiveSpecType::Zero { .. } => vec![],
+            },
             Spec::Compose { .. } => todo!(),
         }
     }
@@ -206,10 +315,12 @@ impl<Tgt: Target> Spec<Tgt> {
 
     fn output_idx(&self) -> usize {
         match &self {
-            Spec::Matmul { .. } | Spec::Conv { .. } => 2,
-            Spec::Load { .. } | Spec::Store { .. } => 1,
-            Spec::Zero { .. } => 0,
-            Spec::Compose { .. } => todo!(),
+            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
+                PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => 2,
+                PrimitiveSpecType::Load { .. } | PrimitiveSpecType::Store { .. } => 1,
+                PrimitiveSpecType::Zero { .. } => 0,
+            },
+            Spec::Compose { .. } => self.operand_count() - 1,
         }
     }
 
@@ -218,41 +329,50 @@ impl<Tgt: Target> Spec<Tgt> {
         let operands = self.operands();
 
         match self {
-            Spec::Matmul { aux, .. } | Spec::Conv { aux, .. } => {
-                for i in 0..aux.len() {
-                    aux[i].contig = aux[i].layout.tile_contiguity(
-                        operands[i].dim_sizes(),
-                        operands[i].dim_sizes(),
-                        aux[i].contig,
-                    );
-                    aux[i].layout = aux[i]
-                        .layout
-                        .canonicalize_for_shape(operands[i].dim_sizes());
+            Spec::Primitive(
+                PrimitiveBasics {
+                    typ,
+                    spec_shape,
+                    dtype: _,
+                },
+                primitive_aux,
+                _,
+            ) => match typ {
+                PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
+                    let PrimitiveAux::Standard(aux) = primitive_aux else {
+                        unreachable!();
+                    };
+                    for i in 0..aux.len() {
+                        aux[i].contig = aux[i].layout.tile_contiguity(
+                            operands[i].dim_sizes(),
+                            operands[i].dim_sizes(),
+                            aux[i].contig,
+                        );
+                        aux[i].layout = aux[i]
+                            .layout
+                            .canonicalize_for_shape(operands[i].dim_sizes());
+                    }
                 }
-            }
-            Spec::Load {
-                outer_tensor_spec,
-                inner_level: _,
-                inner_layout,
-                inner_vector_shape: _,
-                serial_only: _,
-            }
-            | Spec::Store {
-                outer_tensor_spec,
-                inner_level: _,
-                inner_layout,
-                inner_vector_shape: _,
-                serial_only: _,
-            } => {
-                outer_tensor_spec.canonicalize();
-                inner_layout.canonicalize_for_shape(outer_tensor_spec.dim_sizes());
-            }
-            Spec::Zero {
-                tensor_spec,
-                serial_only: _,
-            } => {
-                tensor_spec.canonicalize();
-            }
+                PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+                    let PrimitiveAux::Move {
+                        outer_aux,
+                        inner_level: _,
+                        inner_layout,
+                        inner_vector_shape: _,
+                    } = primitive_aux else {
+                        unreachable!();
+                    };
+                    outer_aux.canonicalize(spec_shape, outer_aux.aligned);
+                    inner_layout.canonicalize_for_shape(spec_shape);
+                }
+                PrimitiveSpecType::Zero => {
+                    let PrimitiveAux::Standard(aux) = primitive_aux else {
+                        unreachable!();
+                    };
+                    let aligned = aux[0].aligned;
+                    aux[0].canonicalize(spec_shape, aligned);
+                }
+            },
             Spec::Compose { .. } => todo!(),
         }
 
@@ -283,47 +403,64 @@ impl<Tgt: Target> Spec<Tgt> {
         let iter = iter.chain(Tgt::expansions(self));
 
         match &self {
-            Spec::Matmul { accum, .. } if !*accum => {
-                Box::new(iter.chain(iter::once(ImplNode::AccumBlock)))
-            }
-            Spec::Matmul { accum, .. } if *accum => Box::new(iter.chain(self.split_expansions())),
-            Spec::Conv { accum, .. } => {
-                if *accum {
-                    if self.can_spatial_split() {
-                        Box::new(iter.chain(iter::once(ImplNode::SpatialSplit)))
-                    } else {
-                        Box::new(iter)
-                    }
-                } else {
+            Spec::Primitive(
+                PrimitiveBasics {
+                    typ,
+                    spec_shape: _,
+                    dtype: _,
+                },
+                _primitive_aux,
+                _serial_only,
+            ) => match typ {
+                PrimitiveSpecType::Matmul { accum } if !*accum => {
                     Box::new(iter.chain(iter::once(ImplNode::AccumBlock)))
                 }
-            }
+                PrimitiveSpecType::Matmul { accum } if *accum => {
+                    Box::new(iter.chain(self.split_expansions()))
+                }
+                PrimitiveSpecType::Conv { accum } => {
+                    if *accum {
+                        if self.can_spatial_split() {
+                            Box::new(iter.chain(iter::once(ImplNode::SpatialSplit)))
+                        } else {
+                            Box::new(iter)
+                        }
+                    } else {
+                        Box::new(iter.chain(iter::once(ImplNode::AccumBlock)))
+                    }
+                }
+                _ => Box::new(iter),
+            },
             _ => Box::new(iter),
         }
     }
 
     fn can_spatial_split(&self) -> bool {
-        if let Spec::Conv {
-            image_shape,
-            filters_shape,
-            aux,
-            ..
-        } = self
-        {
-            if image_shape[2..] != filters_shape[2..] {
-                return false;
-            }
-            for a in aux {
-                if let Some(vector_shape) = &a.vector_shape {
-                    if vector_shape[2..].iter().any(|&d| d != 1) {
-                        return false;
-                    }
+        let Spec::Primitive(PrimitiveBasics { typ, .. }, primitive_aux, _) = self else {
+            panic!("can_spatial_split called on non-Primitive spec");
+        };
+        let PrimitiveSpecType::Conv { .. } = typ else {
+            panic!("can_spatial_split called on non-Conv spec");
+        };
+        let PrimitiveAux::Standard(aux) = primitive_aux else {
+            unreachable!();
+        };
+
+        let operands = self.operands();
+        let image_shape = operands[0].dim_sizes();
+        let filters_shape = operands[1].dim_sizes();
+
+        if image_shape[2..] != filters_shape[2..] {
+            return false;
+        }
+        for a in aux {
+            if let Some(vector_shape) = &a.vector_shape {
+                if vector_shape[2..].iter().any(|&d| d != 1) {
+                    return false;
                 }
             }
-            true
-        } else {
-            panic!("can_spatial_split called on non-Conv spec");
         }
+        true
     }
 
     fn tile_out_expansions(&self) -> impl Iterator<Item = ImplNode<Tgt>> + '_ {
@@ -342,22 +479,32 @@ impl<Tgt: Target> Spec<Tgt> {
     }
 
     fn split_expansions(&self) -> Box<dyn Iterator<Item = ImplNode<Tgt>> + '_> {
-        match &self {
-            Spec::Matmul { k, accum, .. } if *accum => Box::new(
-                dim_range(*k, false)
-                    .filter(|&new_k| self.split_valid(new_k))
-                    .map(|k| self.split(k)),
-            ),
-            _ => panic!("split_expansions called on non-accumulating Matmul"),
+        let Spec::Primitive(PrimitiveBasics { typ, spec_shape, .. }, _, _) = self else {
+            panic!("split_expansions called on non-primitive Spec");
+        };
+        let PrimitiveSpecType::Matmul { accum } = typ else {
+            panic!("split_expansions called on non-Matmul");
+        };
+        if !accum {
+            panic!("split_expansions called on non-accumulating Matmul");
         }
+        let k = spec_shape[1];
+        Box::new(
+            dim_range(k, false)
+                .filter(|&new_k| self.split_valid(new_k))
+                .map(|k| self.split(k)),
+        )
     }
 
     fn split_valid(&self, new_k: DimSize) -> bool {
-        debug_assert!(matches!(&self, Spec::Matmul { .. }));
-        let operands = self.operands();
-        let m = operands[0].dim_sizes()[0];
-        let orig_k = operands[0].dim_sizes()[1];
-        let n = operands[1].dim_sizes()[1];
+        let Spec::Primitive(PrimitiveBasics { typ, spec_shape, dtype: _ }, _, _) = self else {
+            panic!();
+        };
+        debug_assert!(matches!(typ, PrimitiveSpecType::Matmul { .. }));
+
+        let [m, orig_k, n] = spec_shape[..] else {
+            unreachable!();
+        };
 
         // Special-case for splitting to single-element tensors, which will be normalized
         // to row-major. This is necessary for splits in any other layout to be
@@ -368,6 +515,7 @@ impl<Tgt: Target> Spec<Tgt> {
             return true;
         }
 
+        let operands = self.operands();
         if new_k >= orig_k || !operands[0].is_valid_tile_shape(&[m, new_k]) {
             false
         } else {
@@ -379,7 +527,10 @@ impl<Tgt: Target> Spec<Tgt> {
         // TODO: Add prefetching moves.
 
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
-        if matches!(self, Spec::Load { .. } | Spec::Store { .. }) {
+        if matches!(
+            self.primitive_type(),
+            PrimitiveSpecType::Load | PrimitiveSpecType::Store
+        ) {
             return results.into_iter();
         }
 
@@ -505,245 +656,212 @@ impl<Tgt: Target> Spec<Tgt> {
     }
 
     fn split(&self, size: DimSize) -> ImplNode<Tgt> {
-        debug_assert!(matches!(self, Spec::Matmul { .. }));
         debug_assert_ne!(size, 0);
 
-        // lhs, rhs = self.spec.inputs
-        let operands = self.operands();
-        let lhs = &operands[0];
-        let rhs = &operands[1];
-        assert!(size < lhs.dim_sizes()[1]);
+        match self {
+            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
+                PrimitiveSpecType::Matmul { accum: _ } => {
+                    let operands = self.operands();
+                    let lhs = &operands[0];
+                    let rhs = &operands[1];
+                    assert!(size < lhs.dim_sizes()[1]);
 
-        let left_view =
-            Tiling::new_simple(smallvec![lhs.dim_sizes()[0], size]).into_operand_tile(0, lhs);
-        let right_view =
-            Tiling::new_simple(smallvec![size, rhs.dim_sizes()[1]]).into_operand_tile(1, rhs);
+                    let left_view = Tiling::new_simple(smallvec![lhs.dim_sizes()[0], size])
+                        .into_operand_tile(0, lhs);
+                    let right_view = Tiling::new_simple(smallvec![size, rhs.dim_sizes()[1]])
+                        .into_operand_tile(1, rhs);
 
-        let split_subscript = *self.operands_dim_subscripts()[0].last().unwrap();
+                    let split_subscript = *self.operands_dim_subscripts()[0].last().unwrap();
 
-        ImplNode::Loop {
-            subscripts: smallvec![split_subscript],
-            tiles: vec![left_view, right_view],
-            parallel: false,
+                    ImplNode::Loop {
+                        subscripts: smallvec![split_subscript],
+                        tiles: vec![left_view, right_view],
+                        parallel: false,
+                    }
+                }
+                _ => unimplemented!(),
+            },
+            Spec::Compose { .. } => todo!(),
         }
     }
 
     fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> Vec<Tiling> {
-        match (&self, smaller_output.is_simple()) {
-            (Spec::Matmul { k, .. }, true) => {
-                let dim_sizes = smaller_output.shape();
-                let m = dim_sizes[0];
-                let n = dim_sizes[1];
-                vec![
-                    Tiling::new_simple(smallvec![m, *k]),
-                    Tiling::new_simple(smallvec![*k, n]),
-                ]
+        match self {
+            Spec::Primitive(basics, _, _) => basics.input_tilings_for_tile_out(smaller_output),
+            Spec::Compose { components, .. } => {
+                let mut accumulated_input_tilings = Vec::with_capacity(self.operand_count() - 1);
+                let mut last_output_tiling = smaller_output.clone();
+                for (i, subspec) in components.iter().enumerate().rev() {
+                    let mut subspec_input_tilings =
+                        subspec.input_tilings_for_tile_out(&last_output_tiling);
+                    debug_assert!(
+                        !subspec_input_tilings.is_empty(),
+                        "Compose contains {:?}, which has no inputs",
+                        subspec
+                    );
+                    if i == 0 {
+                        accumulated_input_tilings.extend(subspec_input_tilings);
+                    } else {
+                        accumulated_input_tilings.extend(subspec_input_tilings.drain(1..));
+                        last_output_tiling = subspec_input_tilings.remove(0);
+                    }
+                }
+                accumulated_input_tilings
             }
-            (
-                Spec::Conv {
-                    image_shape,
-                    filters_shape,
-                    ..
-                },
-                _,
-            ) => {
-                let channels = image_shape[1];
-
-                // Compute the new input image Tiling.
-                let new_image_shape = [smaller_output.shape()[0], channels]
-                    .into_iter()
-                    .chain(
-                        smaller_output.shape()[2..]
-                            .iter()
-                            .zip(filters_shape[2..].iter())
-                            .map(|(&o, &f)| o + f - 1),
-                    )
-                    .collect();
-                let mut new_image_steps: Shape = smaller_output.step_sizes().into();
-                new_image_steps[1] = channels;
-
-                // Compute the new filters Tiling.
-                let new_filters_shape: Shape = [smaller_output.shape()[1], channels]
-                    .into_iter()
-                    .chain(filters_shape[2..].iter().copied())
-                    .collect();
-                let mut new_filters_steps = new_filters_shape.clone();
-                new_filters_steps[0] = smaller_output.step_sizes()[1];
-
-                vec![
-                    Tiling::new_sliding(new_image_shape, new_image_steps),
-                    Tiling::new_sliding(new_filters_shape, new_filters_steps),
-                ]
-            }
-            (Spec::Load { .. }, true) | (Spec::Store { .. }, true) => {
-                vec![smaller_output.clone()]
-            }
-            (Spec::Zero { .. }, _) => vec![],
-            _ => unimplemented!(
-                "Output tiling not implemented for {:?} and {:?}",
-                self,
-                smaller_output
-            ),
         }
     }
 
     // TODO: Can we replace this entirely with Spec shapes?
     pub fn operands_dim_subscripts(&self) -> Vec<SmallVec<[u8; 4]>> {
         match self {
-            Spec::Matmul { .. } => vec![smallvec![0, 2], smallvec![2, 1], smallvec![0, 1]],
-            Spec::Conv { .. } => {
-                // Only supports 2 spatial dimensions.
-                // TODO: Extend this to arbitrary number of spatial dimensions.
-                let (b, f, c, h, w, fh, fw) = (0, 1, 2, 3, 4, 5, 6);
-                let img = smallvec![b, c, h, w];
-                let filt = smallvec![f, c, fh, fw];
-                let out = smallvec![b, f, h, w];
-                vec![img, filt, out]
-            }
-            Spec::Load { .. } | Spec::Store { .. } | Spec::Zero { .. } => {
-                // TODO: Calling self.operands() is slow. Don't do it.
-                self.operands()
-                    .iter()
-                    .map(|o| (0..u8::try_from(o.dim_sizes().len()).unwrap()))
-                    .map(|rng| rng.collect())
-                    .collect()
-            }
+            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
+                PrimitiveSpecType::Matmul { .. } => {
+                    vec![smallvec![0, 2], smallvec![2, 1], smallvec![0, 1]]
+                }
+                PrimitiveSpecType::Conv { .. } => {
+                    // Only supports 2 spatial dimensions.
+                    // TODO: Extend this to arbitrary number of spatial dimensions.
+                    let (b, f, c, h, w, fh, fw) = (0, 1, 2, 3, 4, 5, 6);
+                    let img = smallvec![b, c, h, w];
+                    let filt = smallvec![f, c, fh, fw];
+                    let out = smallvec![b, f, h, w];
+                    vec![img, filt, out]
+                }
+                PrimitiveSpecType::Load { .. }
+                | PrimitiveSpecType::Store { .. }
+                | PrimitiveSpecType::Zero { .. } => {
+                    // TODO: Calling self.operands() is slow. Don't do it.
+                    self.operands()
+                        .iter()
+                        .map(|o| (0..u8::try_from(o.dim_sizes().len()).unwrap()))
+                        .map(|rng| rng.collect())
+                        .collect()
+                }
+            },
             Spec::Compose { .. } => todo!(),
         }
     }
 
+    // TODO: Should move new_operands in.
     pub fn replace_io(&mut self, new_operands: &[TensorSpec<Tgt>]) {
         assert_eq!(new_operands.len(), self.operand_count());
         match self {
-            Spec::Matmul {
-                accum: _,
-                m,
-                k,
-                n,
-                dtype,
-                aux,
-                serial_only: _,
-            } => {
-                *m = new_operands[0].dim_sizes()[0];
-                *k = new_operands[0].dim_sizes()[1];
-                *n = new_operands[1].dim_sizes()[1];
-                *dtype = new_operands[0].dtype();
-                for i in 0..aux.len() {
-                    let o = &new_operands[i];
-                    aux[i] = TensorSpecAux {
-                        contig: o.contiguous_abs(),
-                        aligned: o.aligned(),
-                        level: o.level(),
-                        layout: o.layout(),
-                        vector_shape: o.vector_shape().cloned(),
-                    };
-                }
-            }
-            Spec::Conv {
-                accum: _,
-                image_shape,
-                filters_shape,
-                dtype,
-                aux,
-                serial_only: _,
-            } => {
-                assert_eq!(*dtype, new_operands[1].dtype());
-                *image_shape = new_operands[0].dim_sizes().clone();
-                *filters_shape = new_operands[1].dim_sizes().clone();
-                *dtype = new_operands[0].dtype();
-                assert_eq!(*dtype, new_operands[1].dtype());
-                assert_eq!(*dtype, new_operands[2].dtype());
-                // TODO: Assert output shape is expected.
-                for i in 0..aux.len() {
-                    let o = &new_operands[i];
-                    aux[i] = TensorSpecAux {
-                        contig: o.contiguous_abs(),
-                        aligned: o.aligned(),
-                        level: o.level(),
-                        layout: o.layout(),
-                        vector_shape: o.vector_shape().cloned(),
-                    };
-                }
-            }
-            Spec::Load {
-                outer_tensor_spec,
-                inner_level,
-                inner_layout,
-                inner_vector_shape,
-                serial_only: _,
-            }
-            | Spec::Store {
-                outer_tensor_spec,
-                inner_level,
-                inner_layout,
-                inner_vector_shape,
-                serial_only: _,
-            } => {
-                assert_eq!(new_operands.len(), 2);
-                let src = &new_operands[0];
-                let dest = &new_operands[1];
-                // TODO: Assert that everything else is equal.
-                *outer_tensor_spec = src.clone();
-                *inner_level = dest.level();
-                *inner_layout = dest.layout();
-                *inner_vector_shape = dest.vector_shape().cloned();
-            }
-            Spec::Zero {
-                tensor_spec,
-                serial_only: _,
-            } => {
-                *tensor_spec = new_operands[0].clone();
-            }
             Spec::Compose { .. } => todo!(),
+            Spec::Primitive(
+                PrimitiveBasics {
+                    typ,
+                    spec_shape,
+                    dtype,
+                },
+                primitive_aux,
+                _,
+            ) => match typ {
+                PrimitiveSpecType::Matmul { accum: _ } => {
+                    debug_assert_eq!(new_operands.len(), 3);
+                    debug_assert_eq!(
+                        new_operands[0].dim_sizes()[0],
+                        new_operands[2].dim_sizes()[0]
+                    );
+                    debug_assert_eq!(
+                        new_operands[1].dim_sizes()[1],
+                        new_operands[2].dim_sizes()[1]
+                    );
+                    debug_assert_eq!(
+                        new_operands[0].dim_sizes()[1],
+                        new_operands[1].dim_sizes()[0]
+                    );
+                    let PrimitiveAux::Standard(aux) = primitive_aux else {
+                        unreachable!();
+                    };
+                    *spec_shape = smallvec![
+                        new_operands[0].dim_sizes()[0],
+                        new_operands[0].dim_sizes()[1],
+                        new_operands[1].dim_sizes()[1],
+                    ];
+                    *dtype = new_operands[0].dtype();
+                    for i in 0..aux.len() {
+                        let _o = &new_operands[i];
+                        aux[i] = new_operands[i].aux.clone();
+                    }
+                }
+                PrimitiveSpecType::Conv { accum: _ } => {
+                    let PrimitiveAux::Standard(aux) = primitive_aux else {
+                        unreachable!();
+                    };
+                    assert_eq!(*dtype, new_operands[1].dtype());
+                    let [b, c, h, w] = new_operands[0].dim_sizes()[..] else { panic!(); };
+                    let [f, alt_c, fh, fw] = new_operands[1].dim_sizes()[..] else { panic!() };
+                    assert_eq!(c, alt_c);
+                    *spec_shape = smallvec![b, f, c, h, w, fh, fw];
+                    *dtype = new_operands[0].dtype();
+                    assert_eq!(*dtype, new_operands[1].dtype());
+                    assert_eq!(*dtype, new_operands[2].dtype());
+                    // TODO: Assert output shape is expected.
+                    for i in 0..aux.len() {
+                        let o = &new_operands[i];
+                        aux[i] = TensorSpecAux {
+                            contig: o.contiguous_abs(),
+                            aligned: o.aligned(),
+                            level: o.level(),
+                            layout: o.layout(),
+                            vector_shape: o.vector_shape().cloned(),
+                        };
+                    }
+                }
+                PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+                    let PrimitiveAux::Move { outer_aux, inner_level, inner_layout, inner_vector_shape } = primitive_aux else {
+                        unreachable!();
+                    };
+                    let [src, dest] = new_operands else {
+                        panic!("Load/Store must have 2 operands");
+                    };
+
+                    assert_eq!(src.dim_sizes(), dest.dim_sizes());
+                    assert_eq!(src.dtype(), dest.dtype());
+                    *spec_shape = src.dim_sizes().clone();
+                    *dtype = src.dtype();
+                    *outer_aux = src.aux.clone();
+                    *inner_level = dest.level();
+                    *inner_layout = dest.layout();
+                    *inner_vector_shape = dest.vector_shape().cloned();
+                }
+                PrimitiveSpecType::Zero => {
+                    let PrimitiveAux::Standard(aux) = primitive_aux else {
+                        unreachable!();
+                    };
+                    let [o] = new_operands else {
+                        panic!();
+                    };
+                    *spec_shape = o.dim_sizes().clone();
+                    *dtype = o.dtype();
+                    aux[0] = o.aux.clone(); // TODO: Does this move!?
+                }
+            },
         }
     }
 
     pub fn output_is_read(&self) -> bool {
         match self {
-            Spec::Matmul { accum, .. } => *accum,
-            _ => false,
+            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
+                PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => *accum,
+                _ => false,
+            },
+            Spec::Compose { .. } => todo!(),
         }
     }
 
     pub fn clone_as_accum(&self) -> Self {
-        match self {
-            Spec::Matmul {
-                accum: _,
-                m,
-                k,
-                n,
-                dtype,
-                aux,
-                serial_only,
-            } => Spec::Matmul {
-                accum: true,
-                m: *m,
-                k: *k,
-                n: *n,
-                dtype: *dtype,
-                aux: aux.clone(),
-                serial_only: *serial_only,
+        let mut cloned = self.clone();
+        match &mut cloned {
+            Spec::Primitive(basics, _, _) => match &mut basics.typ {
+                PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => {
+                    *accum = true;
+                }
+                _ => panic!("Cannot clone_as_accum for {:?}", self),
             },
-            Spec::Conv {
-                accum: _,
-                image_shape,
-                filters_shape,
-                dtype,
-                aux,
-                serial_only,
-            } => Spec::Conv {
-                accum: true,
-                image_shape: image_shape.clone(),
-                filters_shape: filters_shape.clone(),
-                dtype: *dtype,
-                aux: aux.clone(),
-                serial_only: *serial_only,
-            },
-            Spec::Load { .. } | Spec::Store { .. } | Spec::Zero { .. } => {
-                panic!("clone_with_accum() called on Spec without accumulating variant")
-            }
             Spec::Compose { .. } => todo!("Compose can accumulate if head can."),
         }
+        cloned
     }
 }
 
@@ -755,13 +873,15 @@ impl<Tgt: Target> Display for Spec<Tgt> {
         }
 
         let header = match self {
-            Spec::Matmul { accum, .. } if *accum => "MatmulAccum",
-            Spec::Matmul { .. } => "Matmul",
-            Spec::Conv { accum, .. } if *accum => "ConvAccum",
-            Spec::Conv { .. } => "Conv",
-            Spec::Load { .. } => "Load",
-            Spec::Store { .. } => "Store",
-            Spec::Zero { .. } => "Zero",
+            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
+                PrimitiveSpecType::Matmul { accum, .. } if *accum => "MatmulAccum",
+                PrimitiveSpecType::Matmul { .. } => "Matmul",
+                PrimitiveSpecType::Conv { accum, .. } if *accum => "ConvAccum",
+                PrimitiveSpecType::Conv { .. } => "Conv",
+                PrimitiveSpecType::Load { .. } => "Load",
+                PrimitiveSpecType::Store { .. } => "Store",
+                PrimitiveSpecType::Zero { .. } => "Zero",
+            },
             Spec::Compose { .. } => unreachable!(),
         };
 
@@ -890,6 +1010,7 @@ pub fn dim_range(dim: DimSize, include_end: bool) -> impl Iterator<Item = DimSiz
     )
 }
 
+// TODO: Drop in favor of primary output shape inference.
 pub fn conv_infer_output_shape(image_shape: &[u32], filters_shape: &[u32]) -> Shape {
     let batch_cnt = image_shape[0];
     let channels = image_shape[1];

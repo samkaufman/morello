@@ -49,8 +49,13 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
             expanded_node
         );
         for (child, mlims) in child_specs.iter().zip(child_mem_bounds) {
-            let (child_result, subhits, submisses) =
-                top_down(db, &Problem(child.clone(), mlims), top_k);
+            let next_problem = Problem(child.clone(), mlims);
+            debug_assert_ne!(
+                &next_problem, goal,
+                "Immediate loop on sub-problem: {}. Expanded from node: {:?}",
+                goal, expanded_node
+            );
+            let (child_result, subhits, submisses) = top_down(db, &next_problem, top_k);
             hits += subhits;
             misses += submisses;
             if child_result.is_empty() {

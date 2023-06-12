@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use std::iter;
 
 use smallvec::SmallVec;
 
@@ -8,7 +9,7 @@ use crate::common::{DimSize, Shape};
 use crate::layout::Layout;
 use crate::memorylimits::MemVec;
 use crate::reinterpret::squeeze_tile;
-use crate::spec::Spec;
+use crate::spec::{PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::{OperandTile, Tiling};
@@ -86,8 +87,6 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     aligned,
                 } in tiles
                 {
-                    // TODO: This should probably be wrapped in a method so that
-                    //       TensorSpec can enforce invariants if it wants.
                     let ref_op = &mut new_operands[usize::from(*source_idx)];
                     ref_op.shrink(tiling.shape(), *aligned);
                 }
@@ -96,95 +95,93 @@ impl<Tgt: Target> ImplNode<Tgt> {
                 vec![inner_spec]
             }
             ImplNode::Pipeline => todo!(),
-            ImplNode::SpatialSplit => match node_spec {
-                Spec::Conv {
-                    image_shape,
-                    filters_shape,
-                    dtype,
-                    serial_only,
-                    ..
-                } => {
-                    let operands = node_spec.operands();
+            ImplNode::SpatialSplit => {
+                let Spec::Primitive(PrimitiveBasics { typ: PrimitiveSpecType::Conv { .. }, spec_shape: _, dtype }, _, serial_only) = node_spec else {
+                    panic!();
+                };
+                let operands = node_spec.operands();
 
-                    // We're going to introduce a Loop which traverses all the
-                    // pixels over all spatial dimensions, vectorizing across
-                    // the batch, channels, and filters dimmensions. This means
-                    // the loop body/the sub-Spec will have its spatial dims.
-                    // dropped, even though they are non-degenerate.
+                // We're going to introduce a Loop which traverses all the
+                // pixels over all spatial dimensions, vectorizing across
+                // the batch, channels, and filters dimmensions. This means
+                // the loop body/the sub-Spec will have its spatial dims.
+                // dropped, even though they are non-degenerate.
 
-                    let dropped_dims: Vec<u8> =
-                        (2..u8::try_from(operands[0].dim_sizes().len()).unwrap()).collect();
-                    let spatial_ones = Shape::from_elem(1, dropped_dims.len());
+                let dropped_dims: Vec<u8> =
+                    (2..u8::try_from(operands[0].dim_sizes().len()).unwrap()).collect();
+                let spatial_ones = Shape::from_elem(1, dropped_dims.len());
 
-                    let tiled_image_spec_shape = operands[0].dim_sizes()[..2]
-                        .iter()
-                        .chain(spatial_ones.iter())
-                        .copied()
-                        .collect::<Shape>();
-                    // TODO: The below `shrink` is messy because we, the caller, need to
-                    // compute alignment. Fix that.
-                    let mut tiled_image_spec = operands[0].clone();
-                    tiled_image_spec.shrink(
+                let tiled_image_spec_shape = operands[0].dim_sizes()[..2]
+                    .iter()
+                    .chain(spatial_ones.iter())
+                    .copied()
+                    .collect::<Shape>();
+                // TODO: The below `shrink` is messy because we, the caller, need to
+                // compute alignment. Fix that.
+                let mut tiled_image_spec = operands[0].clone();
+                tiled_image_spec.shrink(
+                    &tiled_image_spec_shape,
+                    aligned_approx(
+                        &Tiling::new_simple(tiled_image_spec_shape.clone()),
                         &tiled_image_spec_shape,
-                        aligned_approx(
-                            &Tiling::new_simple(tiled_image_spec_shape.clone()),
-                            &tiled_image_spec_shape,
-                            &operands[0],
-                        ),
-                    );
+                        &operands[0],
+                    ),
+                );
 
-                    let tiled_filters_spec_shape = operands[1].dim_sizes()[..2]
-                        .iter()
-                        .chain(spatial_ones.iter())
-                        .copied()
-                        .collect::<Shape>();
-                    let mut tiled_filters_spec = operands[1].clone();
-                    tiled_filters_spec.shrink(
+                let tiled_filters_spec_shape = operands[1].dim_sizes()[..2]
+                    .iter()
+                    .chain(spatial_ones.iter())
+                    .copied()
+                    .collect::<Shape>();
+                let mut tiled_filters_spec = operands[1].clone();
+                tiled_filters_spec.shrink(
+                    &tiled_filters_spec_shape,
+                    aligned_approx(
+                        &Tiling::new_simple(tiled_filters_spec_shape.clone()),
                         &tiled_filters_spec_shape,
-                        aligned_approx(
-                            &Tiling::new_simple(tiled_filters_spec_shape.clone()),
-                            &tiled_filters_spec_shape,
-                            &operands[1],
-                        ),
-                    );
+                        &operands[1],
+                    ),
+                );
 
-                    let squeezed_image_spec = squeeze_tile(&tiled_image_spec, &dropped_dims);
-                    let squeezed_filters_spec = squeeze_tile(&tiled_filters_spec, &dropped_dims);
-                    let squeezed_output_spec = squeeze_tile(&operands[2], &dropped_dims);
-                    vec![Spec::Matmul {
-                        accum: true,
-                        m: image_shape[0],
-                        k: image_shape[1],
-                        n: filters_shape[0],
+                let squeezed_image_spec = squeeze_tile(&tiled_image_spec, &dropped_dims);
+                let squeezed_filters_spec = squeeze_tile(&tiled_filters_spec, &dropped_dims);
+                let squeezed_output_spec = squeeze_tile(&operands[2], &dropped_dims);
+                vec![Spec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Matmul { accum: true },
+                        spec_shape: operands[0].dim_sizes()[..2]
+                            .iter()
+                            .copied()
+                            .chain(iter::once(operands[1].dim_sizes()[0]))
+                            .collect(),
                         dtype: *dtype,
-                        aux: [
-                            TensorSpecAux {
-                                contig: squeezed_image_spec.contiguous_abs(),
-                                aligned: squeezed_image_spec.aligned(),
-                                level: squeezed_image_spec.level(),
-                                layout: squeezed_image_spec.layout(),
-                                vector_shape: squeezed_image_spec.vector_shape().cloned(),
-                            },
-                            TensorSpecAux {
-                                contig: squeezed_filters_spec.contiguous_abs(),
-                                aligned: squeezed_filters_spec.aligned(),
-                                level: squeezed_filters_spec.level(),
-                                layout: squeezed_filters_spec.layout(),
-                                vector_shape: squeezed_filters_spec.vector_shape().cloned(),
-                            },
-                            TensorSpecAux {
-                                contig: squeezed_output_spec.contiguous_abs(),
-                                aligned: squeezed_output_spec.aligned(),
-                                level: squeezed_output_spec.level(),
-                                layout: squeezed_output_spec.layout(),
-                                vector_shape: squeezed_output_spec.vector_shape().cloned(),
-                            },
-                        ],
-                        serial_only: *serial_only,
-                    }]
-                }
-                _ => unreachable!(),
-            },
+                    },
+                    crate::spec::PrimitiveAux::Standard(vec![
+                        TensorSpecAux {
+                            contig: squeezed_image_spec.contiguous_abs(),
+                            aligned: squeezed_image_spec.aligned(),
+                            level: squeezed_image_spec.level(),
+                            layout: squeezed_image_spec.layout(),
+                            vector_shape: squeezed_image_spec.vector_shape().cloned(),
+                        },
+                        TensorSpecAux {
+                            contig: squeezed_filters_spec.contiguous_abs(),
+                            aligned: squeezed_filters_spec.aligned(),
+                            level: squeezed_filters_spec.level(),
+                            layout: squeezed_filters_spec.layout(),
+                            vector_shape: squeezed_filters_spec.vector_shape().cloned(),
+                        },
+                        TensorSpecAux {
+                            contig: squeezed_output_spec.contiguous_abs(),
+                            aligned: squeezed_output_spec.aligned(),
+                            level: squeezed_output_spec.level(),
+                            layout: squeezed_output_spec.layout(),
+                            vector_shape: squeezed_output_spec.vector_shape().cloned(),
+                        },
+                    ]),
+                    *serial_only,
+                )]
+            }
             ImplNode::MoveLet {
                 source_idx,
                 destination_level,
@@ -205,27 +202,28 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     destination_vector_shape.as_ref().map(|v| v.as_slice()),
                 );
 
-                let mut prologue = None;
-                if movelet_gens_prologue(destination_level, *source_idx, node_spec) {
-                    prologue = Some(Spec::Load {
-                        outer_tensor_spec: operand.clone(),
-                        inner_level: new_mat_spec.level(),
-                        inner_layout: new_mat_spec.layout(),
-                        inner_vector_shape: new_mat_spec.vector_shape().cloned(),
-                        serial_only: node_spec.serial_only(),
-                    })
-                }
-
-                let mut epilogue = None;
-                if movelet_gens_epilogue(destination_level, *source_idx, node_spec) {
-                    epilogue = Some(Spec::Store {
-                        outer_tensor_spec: operand.clone(),
-                        inner_level: new_mat_spec.level(),
-                        inner_layout: new_mat_spec.layout(),
-                        inner_vector_shape: new_mat_spec.vector_shape().cloned(),
-                        serial_only: node_spec.serial_only(),
-                    })
-                }
+                let make_logue = |typ, f: &dyn Fn(_, _, _) -> bool| {
+                    if f(destination_level, *source_idx, node_spec) {
+                        Some(Spec::Primitive(
+                            PrimitiveBasics {
+                                typ,
+                                spec_shape: operand.dim_sizes().clone(),
+                                dtype: operand.dtype(),
+                            },
+                            PrimitiveAux::Move {
+                                outer_aux: operand.aux.clone(),
+                                inner_level: new_mat_spec.level(),
+                                inner_layout: new_mat_spec.layout(),
+                                inner_vector_shape: new_mat_spec.vector_shape().cloned(),
+                            },
+                            node_spec.serial_only(),
+                        ))
+                    } else {
+                        None
+                    }
+                };
+                let prologue = make_logue(PrimitiveSpecType::Load, &movelet_gens_prologue);
+                let epilogue = make_logue(PrimitiveSpecType::Store, &movelet_gens_epilogue);
 
                 let mut result = vec![];
                 let mut new_operands = outer_operands.clone();
@@ -238,26 +236,36 @@ impl<Tgt: Target> ImplNode<Tgt> {
 
                 result
             }
-            ImplNode::AccumBlock => match node_spec {
-                Spec::Matmul { accum, .. } | Spec::Conv { accum, .. } => {
-                    if *accum {
-                        panic!("Spec is already accumulating");
-                    }
-                    let mut result = vec![
-                        Spec::Zero {
-                            tensor_spec: node_spec.output(),
-                            serial_only: node_spec.serial_only(),
-                        },
-                        node_spec.clone_as_accum(),
-                    ];
-                    result.iter_mut().for_each(|s| s.canonicalize());
-                    result
+            ImplNode::AccumBlock => {
+                let Spec::Primitive(PrimitiveBasics { typ, spec_shape: _, dtype: _ }, _, _) = node_spec else {
+                    panic!();
+                };
+                let (PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum }) = typ else {
+                    panic!();
+                };
+                if *accum {
+                    panic!("Spec is already accumulating");
                 }
-                _ => panic!(
-                    "AccumBlock node spec must be a Matmul with accum=false, but was {:?}",
-                    node_spec
-                ),
-            },
+                let TensorSpec {
+                    dim_sizes: output_dim_sizes,
+                    dtype: output_dtype,
+                    aux: output_aux,
+                } = node_spec.output();
+                let mut result = vec![
+                    Spec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::Zero,
+                            spec_shape: output_dim_sizes,
+                            dtype: output_dtype,
+                        },
+                        PrimitiveAux::Standard(vec![output_aux]),
+                        node_spec.serial_only(),
+                    ),
+                    node_spec.clone_as_accum(),
+                ];
+                result.iter_mut().for_each(|s| s.canonicalize());
+                result
+            }
             ImplNode::Mult
             | ImplNode::BroadcastVecMult
             | ImplNode::ValueAssign

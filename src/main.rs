@@ -2,6 +2,7 @@ use std::sync::RwLock;
 
 use crate::common::{DimSize, Dtype, Problem};
 use crate::pprint::pprint;
+use crate::spec::{PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::table::{InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::TensorSpecAux;
@@ -59,19 +60,23 @@ fn main() {
         layout: rm,
         vector_shape: None,
     };
-    let conv_spec = spec::Spec::Conv {
-        accum: false,
-        image_shape: smallvec![args.batch, args.channels, args.size, args.size],
-        filters_shape: smallvec![
-            args.filters,
-            args.channels,
-            args.filters_size,
-            args.filters_size
-        ],
-        dtype: Dtype::Uint32,
-        aux: [a.clone(), a.clone(), a],
-        serial_only: true,
-    };
+    let conv_spec = Spec::Primitive(
+        PrimitiveBasics {
+            typ: PrimitiveSpecType::Conv { accum: false },
+            spec_shape: smallvec![
+                args.batch,
+                args.filters,
+                args.channels,
+                args.size,
+                args.size,
+                args.filters_size,
+                args.filters_size
+            ],
+            dtype: Dtype::Uint32,
+        },
+        PrimitiveAux::Standard(vec![a.clone(), a.clone(), a]),
+        true,
+    );
 
     let problem = Problem(conv_spec, X86Target::max_mem());
 

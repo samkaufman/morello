@@ -8,7 +8,8 @@ use log::{debug, info};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::smallvec;
-use tensorspec::{TensorSpec, TensorSpecAux};
+use spec::{PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+use tensorspec::TensorSpecAux;
 
 mod alignment;
 mod common;
@@ -69,27 +70,28 @@ fn main() {
     }
 }
 
-macro_rules! load_or_store {
-    ($move_name:ident, $size:expr, $rank:expr) => {
-        {
-            let layout = layout::row_major($rank);
-            spec::Spec::$move_name::<X86Target> {
-                outer_tensor_spec: TensorSpec::new_canon(
-                    smallvec![$size; $rank.into()],
-                    Dtype::Uint32,
-                    layout.contiguous_full(),
-                    true,
-                    X86MemoryLevel::GL,
-                    layout.clone(),
-                    None,
-                ),
-                inner_level: X86MemoryLevel::L1,
-                inner_layout: layout,
-                inner_vector_shape: None,
-                serial_only: true,
-            }
-        }
-    };
+fn load_or_store(prim_type: PrimitiveSpecType, size: DimSize, rank: u8) -> Spec<X86Target> {
+    let layout = layout::row_major(rank);
+    spec::Spec::Primitive(
+        PrimitiveBasics {
+            typ: prim_type,
+            spec_shape: smallvec![size; rank.into()],
+            dtype: Dtype::Uint32,
+        },
+        spec::PrimitiveAux::Move {
+            outer_aux: TensorSpecAux {
+                contig: layout.contiguous_full(),
+                aligned: true,
+                level: X86MemoryLevel::GL,
+                layout: layout.clone(),
+                vector_shape: None,
+            },
+            inner_level: X86MemoryLevel::L1,
+            inner_layout: layout,
+            inner_vector_shape: None,
+        },
+        true,
+    )
 }
 
 fn main_per_db<D>(args: &Args, db: D)
@@ -105,24 +107,27 @@ where
     let mut bounds = vec![];
     bounds.extend((1..5).flat_map(|rank| {
         [
-            load_or_store!(Load, args.size, rank),
-            load_or_store!(Store, args.size, rank),
+            load_or_store(PrimitiveSpecType::Load, args.size, rank),
+            load_or_store(PrimitiveSpecType::Store, args.size, rank),
         ]
     }));
     bounds.extend((1..5).map(|rank| {
         let layout = layout::row_major(rank);
-        Spec::Zero {
-            tensor_spec: TensorSpec::new_canon(
-                smallvec![args.size; rank.into()],
-                Dtype::Uint32,
-                layout.contiguous_full(),
-                true,
-                X86MemoryLevel::GL,
+        Spec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Zero,
+                spec_shape: smallvec![args.size; rank.into()],
+                dtype: Dtype::Uint32,
+            },
+            spec::PrimitiveAux::Standard(vec![TensorSpecAux {
+                contig: layout.contiguous_full(),
+                aligned: true,
+                level: X86MemoryLevel::GL,
                 layout,
-                None,
-            ),
-            serial_only: true,
-        }
+                vector_shape: None,
+            }]),
+            true,
+        )
     }));
     bounds.push({
         let layout = layout::row_major(2);
@@ -133,15 +138,15 @@ where
             layout,
             vector_shape: None,
         };
-        spec::Spec::Matmul::<X86Target> {
-            accum: false,
-            m: args.size,
-            k: args.size,
-            n: args.size,
-            dtype: Dtype::Uint32,
-            aux: [a.clone(), a.clone(), a],
-            serial_only: true,
-        }
+        Spec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Matmul { accum: false },
+                spec_shape: smallvec![args.size, args.size, args.size],
+                dtype: Dtype::Uint32,
+            },
+            spec::PrimitiveAux::Standard(vec![a.clone(), a.clone(), a]),
+            true,
+        )
     });
     bounds.extend({
         let layout = layout::row_major(4);
@@ -154,13 +159,24 @@ where
         };
         args.filters_size
             .iter()
-            .map(|&fs| spec::Spec::Conv::<X86Target> {
-                accum: false,
-                image_shape: smallvec![args.batch, args.channels, args.size, args.size],
-                filters_shape: smallvec![args.filters, args.channels, fs, fs],
-                dtype: Dtype::Uint32,
-                aux: [a.clone(), a.clone(), a.clone()],
-                serial_only: true,
+            .map(|&fs| {
+                Spec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Conv { accum: false },
+                        spec_shape: smallvec![
+                            args.batch,
+                            args.filters,
+                            args.channels,
+                            args.size,
+                            args.size,
+                            fs,
+                            fs
+                        ],
+                        dtype: Dtype::Uint32,
+                    },
+                    PrimitiveAux::Standard(vec![a.clone(), a.clone(), a.clone()]),
+                    true,
+                )
             })
             .collect::<Vec<_>>()
     });

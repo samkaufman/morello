@@ -3,9 +3,12 @@ use smallvec::{smallvec, SmallVec};
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::layout::Layout;
-use crate::spec::{conv_infer_output_shape, gen_vector_shapes, Spec};
+use crate::spec::{
+    conv_infer_output_shape, gen_vector_shapes, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType,
+    Spec,
+};
 use crate::target::{MemoryLevel, Target, X86Target};
-use crate::tensorspec::{TensorSpec, TensorSpecAux};
+use crate::tensorspec::TensorSpecAux;
 
 use crate::X86MemoryLevel;
 
@@ -35,100 +38,84 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
 
     fn to_grid(&self) -> Option<(SpecKey, Vec<u32>)> {
         match self {
-            Spec::Matmul {
-                accum,
-                m,
-                k,
-                n,
-                dtype,
-                aux,
-                serial_only,
-            } => Some((
-                SpecKey::Matmul { dtype: *dtype },
-                [
-                    if *accum { 0 } else { 1 },
-                    to_log2_dim_space(*m)?,
-                    to_log2_dim_space(*k)?,
-                    to_log2_dim_space(*n)?,
-                    if *serial_only { 0 } else { 1 },
-                ]
-                .into_iter()
-                .chain(aux.iter().map(|a| level_to_int(&a.level).into()))
-                .collect(),
-            )),
-            Spec::Conv {
-                accum,
-                image_shape,
-                filters_shape,
-                dtype,
-                aux,
-                serial_only,
-            } => {
-                let mut shape_vec = Vec::with_capacity(image_shape.len() + filters_shape.len() - 1);
-                shape_vec.extend(
-                    image_shape
-                        .iter()
-                        .zip(filters_shape.iter())
-                        .map(|(&i, &f)| i - f),
-                );
-                for &d in filters_shape {
-                    shape_vec.push(d - 1);
-                }
-                // TODO: The image and filters have the same channel count, so there's a
-                // redundant dimension in the below.
-                debug_assert_eq!(shape_vec.len(), 8);
-                Some((
-                    SpecKey::Conv { dtype: *dtype },
-                    [if *accum { 0 } else { 1 }]
+            Spec::Primitive(basics, primitive_aux, serial_only) => match basics.typ {
+                PrimitiveSpecType::Matmul { accum } => {
+                    let PrimitiveAux::Standard(auxes) = primitive_aux else {
+                        unreachable!();
+                    };
+                    Some((
+                        SpecKey::Matmul {
+                            dtype: basics.dtype,
+                        },
+                        [
+                            if accum { 0 } else { 1 },
+                            to_log2_dim_space(basics.spec_shape[0])?,
+                            to_log2_dim_space(basics.spec_shape[1])?,
+                            to_log2_dim_space(basics.spec_shape[2])?,
+                            if *serial_only { 0 } else { 1 },
+                        ]
                         .into_iter()
-                        .chain(shape_vec.into_iter())
-                        .chain([if *serial_only { 0 } else { 1 }].into_iter())
-                        .chain(aux.iter().map(|a| level_to_int(&a.level).into()))
+                        .chain(auxes.iter().map(|a| level_to_int(&a.level).into()))
                         .collect(),
-                ))
-            }
-            Spec::Load {
-                outer_tensor_spec,
-                inner_level: _,
-                inner_layout: _,
-                inner_vector_shape: _,
-                serial_only,
-            }
-            | Spec::Store {
-                outer_tensor_spec,
-                inner_level: _,
-                inner_layout: _,
-                inner_vector_shape: _,
-                serial_only,
-            } => Some((
-                SpecKey::Move {
-                    is_load: matches!(self, Spec::Load { .. }),
-                    dtype: outer_tensor_spec.dtype(),
-                },
-                outer_tensor_spec
-                    .dim_sizes()
-                    .iter()
-                    .map(|d| to_log2_dim_space(*d).unwrap())
-                    .chain(iter::once(level_to_int(&outer_tensor_spec.level()).into()))
-                    .chain(iter::once(if *serial_only { 0 } else { 1 }))
-                    .collect(),
-            )),
-            Spec::Zero {
-                tensor_spec,
-                serial_only,
-            } => Some((
-                SpecKey::Zero {
-                    dtype: tensor_spec.dtype(),
-                },
-                tensor_spec
-                    .dim_sizes()
-                    .iter()
-                    .map(|d| to_log2_dim_space(*d).unwrap())
-                    .chain(iter::once(level_to_int(&tensor_spec.level()).into()))
-                    .chain(iter::once(if *serial_only { 0 } else { 1 }))
-                    .collect(),
-            )),
-            Spec::Compose { .. } => todo!(),
+                    ))
+                }
+                PrimitiveSpecType::Conv { accum } => {
+                    let PrimitiveAux::Standard(auxes) = primitive_aux else {
+                        unreachable!();
+                    };
+
+                    let [b, f, c, h, w, fh, fw] = basics.spec_shape[..] else {
+                        panic!("Convolution must have 7 Spec dimensions")
+                    };
+                    let _image_shape = [b, c, h, w];
+                    let _filters_shape = [f, c, fh, fw];
+
+                    let shape_vec = [b - 1, f - 1, c - 1, h - fh, w - fw, fh - 1, fw - 1];
+                    Some((
+                        SpecKey::Conv {
+                            dtype: basics.dtype,
+                        },
+                        iter::once(if accum { 0 } else { 1 })
+                            .chain(shape_vec.into_iter())
+                            .chain(iter::once(if *serial_only { 0 } else { 1 }))
+                            .chain(auxes.iter().map(|a| level_to_int(&a.level).into()))
+                            .collect(),
+                    ))
+                }
+                PrimitiveSpecType::Load | PrimitiveSpecType::Store | PrimitiveSpecType::Zero => {
+                    let mapping_level = match primitive_aux {
+                        PrimitiveAux::Standard(auxes) => &auxes[0].level,
+                        PrimitiveAux::Move {
+                            outer_aux: TensorSpecAux { level, .. },
+                            ..
+                        } => level,
+                    };
+                    Some((
+                        match basics.typ {
+                            PrimitiveSpecType::Load => SpecKey::Move {
+                                is_load: true,
+                                dtype: basics.dtype,
+                            },
+                            PrimitiveSpecType::Store => SpecKey::Move {
+                                is_load: false,
+                                dtype: basics.dtype,
+                            },
+                            PrimitiveSpecType::Zero => SpecKey::Zero {
+                                dtype: basics.dtype,
+                            },
+                            _ => unreachable!(),
+                        },
+                        basics
+                            .spec_shape
+                            .iter()
+                            .map(|d| to_log2_dim_space(*d).unwrap())
+                            .chain(iter::once(DimSize::from(level_to_int(mapping_level))))
+                            .chain(iter::once(if *serial_only { 0 } else { 1 }))
+                            .collect(),
+                    ))
+                }
+            },
+            Spec::Compose { .. } => None,
         }
     }
 
@@ -147,40 +134,58 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                 let shapes = [smallvec![m, k], smallvec![k, n], smallvec![m, n]];
 
                 align_layout_contig_vector_shape_product::<X86Target>(&shapes, *dtype, &levels)
-                    .map(
-                        |(alignments, layouts, contigs, vector_shapes)| Spec::Matmul {
-                            accum: pt[0] == 0,
-                            m,
-                            k,
-                            n,
-                            dtype: *dtype,
-                            aux: izip!(contigs, alignments, layouts, vector_shapes, &levels)
-                                .map(|(contig, aligned, layout, vector_shape, level)| {
-                                    TensorSpecAux {
-                                        contig,
-                                        aligned,
-                                        layout,
-                                        vector_shape,
-                                        level: *level,
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .try_into()
-                                .unwrap(),
-                            serial_only: pt[4] == 0,
-                        },
-                    )
+                    .map(|(alignments, layouts, contigs, vector_shapes)| {
+                        Spec::Primitive(
+                            PrimitiveBasics {
+                                typ: PrimitiveSpecType::Matmul { accum: pt[0] == 0 },
+                                spec_shape: smallvec![m, k, n],
+                                dtype: *dtype,
+                            },
+                            PrimitiveAux::Standard(
+                                izip!(contigs, alignments, layouts, vector_shapes, &levels)
+                                    .map(|(contig, aligned, layout, vector_shape, level)| {
+                                        TensorSpecAux {
+                                            contig,
+                                            aligned,
+                                            layout,
+                                            vector_shape,
+                                            level: *level,
+                                        }
+                                    })
+                                    .collect::<Vec<_>>(),
+                            ),
+                            pt[4] == 0,
+                        )
+                    })
                     .collect()
             }
             SpecKey::Conv { dtype } => {
-                // TODO: Relying on indices below is fragile.
-                let filters_shape = pt[5..9].iter().map(|&f| f + 1).collect::<Shape>();
-                let image_shape = pt[1..5]
-                    .iter()
-                    .zip(filters_shape.iter())
-                    .map(|(i, f)| i + f)
-                    .collect::<SmallVec<_>>();
+                let accum = pt[0] == 0;
+                let [pb, pf, pc, ph, pw, pfh, pfw] = pt[..] else {
+                    panic!();
+                };
+
+                let spec_shape = smallvec![
+                    pb + 1,
+                    pf + 1,
+                    pc + 1,
+                    ph + pfh + 1,
+                    pw + pfw + 1,
+                    pfh + 1,
+                    pfw + 1
+                ];
+
+                let image_shape =
+                    smallvec![spec_shape[0], spec_shape[2], spec_shape[3], spec_shape[4]];
+                let filters_shape =
+                    smallvec![spec_shape[1], spec_shape[2], spec_shape[5], spec_shape[6]];
                 let output_shape = conv_infer_output_shape(&image_shape, &filters_shape);
+                debug_assert_eq!(
+                    output_shape,
+                    PrimitiveSpecType::Conv { accum }
+                        .infer_output_basics(&[(&image_shape, *dtype), (&filters_shape, *dtype)])
+                        .0
+                );
                 let shapes = [image_shape, filters_shape, output_shape];
 
                 let levels = pt[9..12]
@@ -189,25 +194,28 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                     .collect::<Vec<_>>();
 
                 align_layout_contig_vector_shape_product::<X86Target>(&shapes, *dtype, &levels)
-                    .map(|(alignments, layouts, contigs, vector_shapes)| Spec::Conv {
-                        accum: pt[0] == 0,
-                        image_shape: shapes[0].clone(),
-                        filters_shape: shapes[1].clone(),
-                        dtype: *dtype,
-                        aux: izip!(contigs, alignments, layouts, vector_shapes, &levels)
-                            .map(
-                                |(contig, aligned, layout, vector_shape, level)| TensorSpecAux {
-                                    contig,
-                                    aligned,
-                                    layout,
-                                    vector_shape,
-                                    level: *level,
-                                },
-                            )
-                            .collect::<Vec<_>>()
-                            .try_into()
-                            .unwrap(),
-                        serial_only: pt[9] == 0,
+                    .map(|(alignments, layouts, contigs, vector_shapes)| {
+                        Spec::Primitive(
+                            PrimitiveBasics {
+                                typ: PrimitiveSpecType::Conv { accum },
+                                spec_shape: spec_shape.clone(),
+                                dtype: *dtype,
+                            },
+                            PrimitiveAux::Standard(
+                                izip!(contigs, alignments, layouts, vector_shapes, &levels)
+                                    .map(|(contig, aligned, layout, vector_shape, level)| {
+                                        TensorSpecAux {
+                                            contig,
+                                            aligned,
+                                            layout,
+                                            vector_shape,
+                                            level: *level,
+                                        }
+                                    })
+                                    .collect::<Vec<_>>(),
+                            ),
+                            pt[9] == 0,
+                        )
                     })
                     .collect()
             }
@@ -256,39 +264,33 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                                         .map(
                                             move |vector_shape_pair| match &vector_shape_pair[..] {
                                                 [source_vector_shape, destination_vector_shape] => {
-                                                    let outer_tensor_spec =
-                                                        TensorSpec::new_noncanon(
-                                                            dim_sizes.clone(),
-                                                            *dtype,
-                                                            source_contiguous_abs,
-                                                            source_aligned,
-                                                            source_level,
-                                                            source_layout.clone(),
-                                                            source_vector_shape.clone(),
-                                                        );
-
-                                                    // TODO: Loads and Stores should really just be combined in Spec.
-                                                    if *is_load {
-                                                        Spec::Load {
-                                                            outer_tensor_spec,
+                                                    Spec::Primitive(
+                                                        PrimitiveBasics {
+                                                            typ: if *is_load {
+                                                                PrimitiveSpecType::Load
+                                                            } else {
+                                                                PrimitiveSpecType::Store
+                                                            },
+                                                            spec_shape: dim_sizes.clone(),
+                                                            dtype: *dtype,
+                                                        },
+                                                        PrimitiveAux::Move {
+                                                            outer_aux: TensorSpecAux {
+                                                                contig: source_contiguous_abs,
+                                                                aligned: source_aligned,
+                                                                level: source_level,
+                                                                layout: source_layout.clone(),
+                                                                vector_shape: source_vector_shape
+                                                                    .clone(),
+                                                            },
                                                             inner_level: destination_level,
                                                             inner_layout: destination_layout
                                                                 .clone(),
                                                             inner_vector_shape:
                                                                 destination_vector_shape.clone(),
-                                                            serial_only,
-                                                        }
-                                                    } else {
-                                                        Spec::Store {
-                                                            outer_tensor_spec,
-                                                            inner_level: destination_level,
-                                                            inner_layout: destination_layout
-                                                                .clone(),
-                                                            inner_vector_shape:
-                                                                destination_vector_shape.clone(),
-                                                            serial_only,
-                                                        }
-                                                    }
+                                                        },
+                                                        serial_only,
+                                                    )
                                                 }
                                                 _ => unreachable!(),
                                             },
@@ -315,19 +317,21 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                     debug_assert_eq!(layouts.len(), 1);
                     debug_assert_eq!(contigs.len(), 1);
                     debug_assert_eq!(vector_shapes.len(), 1);
-                    let tensor_spec = TensorSpec::new_noncanon(
-                        dim_sizes.clone(),
-                        *dtype,
-                        contigs[0],
-                        alignments[0],
-                        level,
-                        layouts[0].clone(),
-                        vector_shapes[0].clone(),
-                    );
-                    Spec::Zero {
-                        tensor_spec,
+                    Spec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::Zero,
+                            spec_shape: dim_sizes.clone(),
+                            dtype: *dtype,
+                        },
+                        PrimitiveAux::Standard(vec![TensorSpecAux {
+                            contig: contigs[0],
+                            aligned: alignments[0],
+                            level,
+                            layout: layouts[0].clone(),
+                            vector_shape: vector_shapes[0].clone(),
+                        }]),
                         serial_only,
-                    }
+                    )
                 })
                 .collect()
             }

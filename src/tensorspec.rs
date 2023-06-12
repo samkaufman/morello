@@ -8,9 +8,9 @@ use crate::target::{MemoryLevel, Target};
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Deserialize, Serialize)]
 #[serde(bound = "")]
 pub struct TensorSpec<Tgt: Target> {
-    dim_sizes: Shape, // TODO: Rename to shape
-    dtype: Dtype,
-    aux: TensorSpecAux<Tgt>,
+    pub dim_sizes: Shape, // TODO: Rename to shape
+    pub dtype: Dtype,
+    pub aux: TensorSpecAux<Tgt>,
 }
 
 // TODO: This probably shouldn't be public.
@@ -178,6 +178,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     /// The result's layout and contiguousness abstraction will have been
     /// canoncialized for the given shape.
     pub fn shrink(&mut self, dim_sizes: &Shape, aligned: bool) {
+        // This implementation is similar to `canonicalize`, but the tile
+        // contiguousness is computed from both old and new shapes.
         self.aux.contig =
             self.layout()
                 .tile_contiguity(dim_sizes, &self.dim_sizes, self.aux.contig);
@@ -187,9 +189,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub fn canonicalize(&mut self) {
-        // Odd implementation, but concise! `shrink` will canonicalize, so we
-        // pass the same shape and alignment.
-        self.shrink(&self.dim_sizes.clone(), self.aux.aligned);
+        self.aux.canonicalize(&self.dim_sizes, self.aux.aligned);
     }
 
     // TODO: Shouldn't need this method. Should be implicit in Spec validity.
@@ -254,5 +254,15 @@ impl<Tgt: Target> Display for TensorSpec<Tgt> {
             "({}, {}{}{}{}{}{})",
             dims_part, self.dtype, bank_epi, layout_epi, c_epi, a_epi, v_epi
         )
+    }
+}
+
+impl<Tgt: Target> TensorSpecAux<Tgt> {
+    pub fn canonicalize(&mut self, dim_sizes: &Shape, aligned: bool) {
+        self.contig = self
+            .layout
+            .tile_contiguity(dim_sizes, dim_sizes, self.contig);
+        self.layout = self.layout.canonicalize_for_shape(dim_sizes);
+        self.aligned = aligned;
     }
 }
