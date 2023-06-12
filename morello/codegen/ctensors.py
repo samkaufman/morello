@@ -8,7 +8,6 @@ from typing import Iterable, Optional, Sequence, Union
 import sympy
 
 from ..dtypes import Dtype, Uint8, Uint32
-from ..system_config.cpu import X86Target, ArmTarget
 from ..system_config.state import current_target
 from . import common, expr_utils
 from .indexexpr import vsub
@@ -38,6 +37,9 @@ ONES_FOR_NON_ZERO_INIT: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 
 def vec_types() -> dict[tuple[Dtype, int], tuple[int, str, str, tuple[str, str]]]:
+    # Import inside the method to solve a circular dependency
+    from ..system_config.cpu import X86Target, ArmTarget
+
     cpu_target = current_target()
     if isinstance(cpu_target, X86Target):
         return _GCC_VEC_TYPES
