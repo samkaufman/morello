@@ -2,14 +2,18 @@ import abc
 import dataclasses
 import functools
 import logging
+import math
 import typing
-from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence
 
 if TYPE_CHECKING:
     from .. import dtypes
     from ..layouts import Layout
     from ..specs import TensorSpec
     from ..tensor import TensorBase
+
+MIN_SAMPLES = 3
+MIN_TRIAL_TIME_SECS = 2.5
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +22,14 @@ logger = logging.getLogger(__name__)
 class RunResult:
     stdout: str
     stderr: str
+
+
+@dataclasses.dataclass
+class RobustTimingResult:
+    result: float
+    outer_loop_samples: Sequence[float]
+    inner_loop_iterations: int
+    artifact: "BuiltArtifact"
 
 
 class Target:
@@ -42,7 +54,7 @@ class Target:
         raise NotImplementedError()
 
     def all_layouts_for_shape(self, shape: Sequence[int]) -> Iterable["Layout"]:
-        from ..layouts import NHWC, COL_MAJOR, row_major
+        from ..layouts import COL_MAJOR, NHWC, row_major
 
         possible_layouts = [row_major(len(shape)), COL_MAJOR, NHWC]
         for layout in possible_layouts:
@@ -71,22 +83,32 @@ class Target:
     ) -> RunResult:
         raise NotImplementedError()
 
-    async def time_impl(
-        self, impl, benchmark_samples: int, return_source: bool = False
-    ) -> Union[float, tuple[float, str]]:
-        """Executes and benchmarks an Impl.
-
-        Returns a measurement of time in arbitrary units.
-        """
-        raise NotImplementedError()
-
     @typing.final
-    async def time_impl_robustly(self, impl, repeat=10) -> float:
-        artifact = await self.build_impl(impl)
+    async def time_impl_robustly(self, impl, repeat=10) -> RobustTimingResult:
+        """Benchmark several times, returning the minimum of inner loop means.
+
+        This will first estimate a good number of inner loop iterations, then
+        build an executable which loops that number of times, returning the mean.
+        The final `result` computed is the minimum of the means after running
+        that executable `repeat` times.
+        """
+        # Collect a single rough sample.
+        time_check_artifact = await self.build_impl(impl, benchmark_samples=1)
+        rough_secs = await time_check_artifact.measure_time()
+
+        # Choose a good number of iterations for benchmarks' inner loop.
+        inner_iters = max(MIN_SAMPLES, int(math.ceil(MIN_TRIAL_TIME_SECS / rough_secs)))
+        logger.debug("Goal iterations: %d", inner_iters)
+
+        # Run main benchmark loop.
+        artifact = await self.build_impl(impl, benchmark_samples=inner_iters)
         means = []
         for _ in range(repeat):
-            means.append(await artifact.measure_time())
-        return min(means)
+            secs = await artifact.measure_time()
+            logger.debug(f"Sample runtime result {secs}s:")
+            means.append(secs)
+
+        return RobustTimingResult(min(means), means, inner_iters, artifact)
 
 
 class BuiltArtifact(abc.ABC):

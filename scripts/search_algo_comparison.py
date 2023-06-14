@@ -154,9 +154,11 @@ async def main():
             if not all_results[idx].best_impl:
                 return
             async with semaphore:
-                t = await current_target().time_impl(all_results[idx].best_impl, 10)
+                t = await current_target().time_impl_robustly(
+                    all_results[idx].best_impl
+                )
                 all_results[idx] = dataclasses.replace(
-                    all_results[idx], execution_time=t
+                    all_results[idx], execution_time=t.result
                 )
 
         await asyncio.gather(*(fill_result(i) for i in range(len(all_results))))

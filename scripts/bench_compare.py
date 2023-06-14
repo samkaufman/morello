@@ -68,8 +68,6 @@ DTYPE = dtypes.Uint32
 TORCH_DTYPE_NP = np.int32  # Signed version of DTYPE
 TORCH_DTYPE = torch.int32
 PERF_TERMINATE_TIMEOUT = 60.0  # 1 min.
-MIN_TRIAL_TIME_SECS = 2.5
-MIN_SAMPLES = 3
 
 RELAY_VERSION_RE = re.compile(r'^\s*#\[version = "[\d\.]+"\]\s*$')
 
@@ -371,7 +369,8 @@ class LoopingBackend(BenchmarkBackend):
             1, 1, lambda **_: contextlib.nullcontext()
         )[0][0]
         goal_samples = max(
-            MIN_SAMPLES, int(math.ceil(MIN_TRIAL_TIME_SECS / rough_secs))
+            system_config.base.MIN_SAMPLES,
+            int(math.ceil(system_config.base.MIN_TRIAL_TIME_SECS / rough_secs)),
         )
         logger.info("Goal samples: %d", goal_samples)
 
@@ -1378,25 +1377,13 @@ def _benchmark(impl, trials: int):
     assert impl.is_scheduled
     loop = asyncio.new_event_loop()
 
-    # Collect a single rough sample.
-    time_check_artifact = loop.run_until_complete(
-        system_config.current_target().build_impl(impl, benchmark_samples=1)
-    )
-    rough_secs = loop.run_until_complete(time_check_artifact.measure_time())
-    goal_samples = max(MIN_SAMPLES, int(math.ceil(MIN_TRIAL_TIME_SECS / rough_secs)))
-    logger.info("Goal samples: %d", goal_samples)
+    tgt = system_config.current_target()
+    timing_result = loop.run_until_complete(tgt.time_impl_robustly(impl, repeat=trials))
 
-    artifact = loop.run_until_complete(
-        system_config.current_target().build_impl(impl, benchmark_samples=goal_samples)
-    )
-    assert hasattr(artifact, "source_code")
-    source = artifact.source_code  # type: ignore
-    runtime_samples = []
-    for _ in range(trials):
-        secs = loop.run_until_complete(artifact.measure_time())
-        logger.info(f"Sample runtime result {secs}s:")
-        runtime_samples.append(secs)
     impl_str = op_pprint.pformat(impl, color=False)
+    runtime_samples = timing_result.outer_loop_samples
+    artifact = timing_result.artifact
+    source = artifact.source_code  # type: ignore
     return runtime_samples, impl_str, source  # type: ignore
 
 

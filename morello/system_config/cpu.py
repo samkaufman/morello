@@ -170,20 +170,6 @@ class _CpuTarget(Target):
         )
         return await artifact.run(check_flakiness=check_flakiness)
 
-    async def time_impl(
-        self, impl, benchmark_samples: int, return_source=False
-    ) -> Union[float, tuple[float, str]]:
-        """Executes and benchmarks an Impl on the local machine using Clang.
-
-        Returns the time in seconds. Measured by executing `benchmark_samples`
-        times and returning the mean.
-        """
-        artifact = await self.build_impl(impl, benchmark_samples=benchmark_samples)
-        t = await artifact.measure_time()
-        if return_source:
-            return (t, artifact.source_code)
-        return t
-
     def _clang_vec_flags(self) -> Sequence[str]:
         raise NotImplementedError()
 

@@ -545,6 +545,9 @@ def generate_c(
     allow_holes: bool = False,
     benchmark_samples: Optional[int] = None,
 ) -> None:
+    if mode == "benchmark" and benchmark_samples is None:
+        raise ValueError("If benchmarking, caller must provide benchmark_samples")
+
     imp = imp.to_applied()
 
     if values is None:
