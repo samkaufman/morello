@@ -183,8 +183,7 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                 debug_assert_eq!(
                     output_shape,
                     PrimitiveSpecType::Conv { accum }
-                        .infer_output_basics(&[(&image_shape, *dtype), (&filters_shape, *dtype)])
-                        .0
+                        .infer_output_shape(&[&image_shape, &filters_shape])
                 );
                 let shapes = [image_shape, filters_shape, output_shape];
 

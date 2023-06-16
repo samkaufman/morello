@@ -13,6 +13,7 @@ use smallvec::{smallvec, SmallVec, ToSmallVec};
 use std::fmt::Display;
 use std::iter::Iterator;
 use std::iter::{self, once};
+
 use std::{assert_eq, debug_assert_eq};
 
 const LIMIT_VECTORS_TO_ONE_DIM: bool = true;
@@ -28,6 +29,7 @@ pub enum Spec<Tgt: Target> {
         // Components contain Spec shapes, which can be partially inferred, so
         // the following stores a little bit of redundant information.
         components: Vec<PrimitiveBasics>,
+        operand_auxes: Vec<TensorSpecAux<Tgt>>,
         serial_only: bool,
     },
 }
@@ -61,7 +63,57 @@ pub enum PrimitiveAux<Tgt: Target> {
 }
 
 impl PrimitiveBasics {
-    fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> Vec<Tiling> {
+    pub fn aux_from_operand_auxes<'a, Tgt, I>(&self, operand_auxes: I) -> PrimitiveAux<Tgt>
+    where
+        Tgt: Target,
+        I: IntoIterator<Item = &'a TensorSpecAux<Tgt>> + 'a,
+    {
+        match self.typ {
+            PrimitiveSpecType::Matmul { .. }
+            | PrimitiveSpecType::Conv { .. }
+            | PrimitiveSpecType::Zero => {
+                PrimitiveAux::Standard(operand_auxes.into_iter().cloned().collect())
+            }
+            PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+                let mut operand_auxes_iter = operand_auxes.into_iter();
+                let first: &TensorSpecAux<_> = operand_auxes_iter.next().unwrap();
+                let second: &TensorSpecAux<_> = operand_auxes_iter.next().unwrap();
+                PrimitiveAux::Move {
+                    outer_aux: first.clone(),
+                    inner_level: second.level,
+                    inner_layout: second.layout.clone(),
+                    inner_vector_shape: second.vector_shape.clone(),
+                }
+            }
+        }
+    }
+
+    pub fn operand_shapes(&self) -> Vec<Shape> {
+        match self.typ {
+            PrimitiveSpecType::Matmul { .. } => {
+                let [m, k, n] = self.spec_shape[..] else {
+                    panic!("Matmul spec_shape must have length 3")
+                };
+                vec![smallvec![m, k], smallvec![k, n], smallvec![m, n]]
+            }
+            PrimitiveSpecType::Conv { .. } => {
+                let [b, f, c, h, w, fh, fw] = self.spec_shape[..] else {
+                    unreachable!()
+                };
+                debug_assert!(h >= fh && w >= fw);
+                let img = smallvec![b, c, h, w];
+                let filt = smallvec![f, c, fh, fw];
+                let out = conv_infer_output_shape(&img, &filt);
+                vec![img, filt, out]
+            }
+            PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+                vec![self.spec_shape.clone(), self.spec_shape.clone()]
+            }
+            PrimitiveSpecType::Zero => vec![self.spec_shape.clone()],
+        }
+    }
+
+    pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> Vec<Tiling> {
         match (self, smaller_output.is_simple()) {
             (
                 PrimitiveBasics {
@@ -86,14 +138,14 @@ impl PrimitiveBasics {
                     spec_shape,
                     ..
                 },
-                true,
+                _,
             ) => {
                 let [_, _, channels, _, _, fh, fw] = spec_shape[..] else {
                     unreachable!()
                 };
 
                 // Compute the new input image Tiling.
-                let new_image_shape = [smaller_output.shape()[0], channels]
+                let new_image_shape: Shape = [smaller_output.shape()[0], channels]
                     .into_iter()
                     .chain(
                         smaller_output.shape()[2..]
@@ -110,9 +162,8 @@ impl PrimitiveBasics {
                     .into_iter()
                     .chain([fh, fw].into_iter())
                     .collect();
-                let mut new_filters_steps = new_filters_shape.clone();
+                let mut new_filters_steps: Shape = new_filters_shape.clone();
                 new_filters_steps[0] = smaller_output.step_sizes()[1];
-
                 vec![
                     Tiling::new_sliding(new_image_shape, new_image_steps),
                     Tiling::new_sliding(new_filters_shape, new_filters_steps),
@@ -163,27 +214,42 @@ impl PrimitiveSpecType {
         }
     }
 
+    pub fn output_idx(&self) -> usize {
+        match self {
+            PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => 2,
+            PrimitiveSpecType::Load { .. } | PrimitiveSpecType::Store { .. } => 1,
+            PrimitiveSpecType::Zero { .. } => 0,
+        }
+    }
+
+    pub fn output_is_read(&self) -> bool {
+        match self {
+            PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => *accum,
+            _ => false,
+        }
+    }
+
     // TODO: Wrap output in a TensorSpecBasics struct.
-    pub fn infer_output_basics(&self, inputs: &[(&[DimSize], Dtype)]) -> (Shape, Dtype) {
+    pub fn infer_output_shape(&self, inputs: &[&[DimSize]]) -> Shape {
         // TODO: Can this be rewritten as output inference + `from_io` call?
         debug_assert_eq!(inputs.len(), self.operand_count());
         match self {
             PrimitiveSpecType::Matmul { .. } => {
-                let ([m, _k], [_, n]) = (inputs[0].0, inputs[1].0) else {
+                let ([m, _k], [_, n]) = (inputs[0], inputs[1]) else {
                     panic!("Matmul inputs must have 2 dimensions each");
                 };
-                (smallvec![*m, *n], inputs[0].1)
+                smallvec![*m, *n]
             }
             PrimitiveSpecType::Conv { .. } => {
-                let ([b, _, h, w], [f, _, fh, fw]) = (inputs[0].0, inputs[1].0) else {
+                let ([b, _, h, w], [f, _, fh, fw]) = (inputs[0], inputs[1]) else {
                     panic!("Conv inputs must have 4 dimensions each");
                 };
                 debug_assert!(h >= fh && w >= fw);
-                (smallvec![*b, *f, 1 + h - fh, 1 + w - fw], inputs[0].1)
+                smallvec![*b, *f, 1 + h - fh, 1 + w - fw]
             }
             PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
                 // The shape and dtype match for moves.
-                (inputs[0].0.to_smallvec(), inputs[0].1)
+                inputs[0].to_smallvec()
             }
             PrimitiveSpecType::Zero => todo!(),
         }
@@ -223,53 +289,25 @@ impl<Tgt: Target> Spec<Tgt> {
 
     pub fn operands(&self) -> Vec<TensorSpec<Tgt>> {
         match self {
-            Spec::Primitive(
-                PrimitiveBasics {
-                    typ,
-                    spec_shape,
-                    dtype,
-                },
-                aux,
-                _,
-            ) => match typ {
-                PrimitiveSpecType::Matmul { accum: _ } => {
+            Spec::Primitive(basics, aux, _) => match basics.typ {
+                PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => {
                     let PrimitiveAux::Standard(taux) = aux else {
                         unreachable!();
                     };
-                    let [m, k, n] = spec_shape[..] else {
-                        unreachable!();
-                    };
-                    // TODO: Document, why are the following non-canon?
-                    vec![
-                        TensorSpec::new_noncanon_with_aux(smallvec![m, k], *dtype, taux[0].clone()),
-                        TensorSpec::new_noncanon_with_aux(smallvec![k, n], *dtype, taux[1].clone()),
-                        TensorSpec::new_noncanon_with_aux(smallvec![m, n], *dtype, taux[2].clone()),
-                    ]
-                }
-                PrimitiveSpecType::Conv { accum: _ } => {
-                    let PrimitiveAux::Standard(taux) = aux else {
-                        unreachable!();
-                    };
-                    let [b, f, c, h, w, fh, fw] = spec_shape[..] else {
-                        unreachable!()
-                    };
-                    debug_assert!(h >= fh && w >= fw);
-                    let img = smallvec![b, c, h, w];
-                    let filt = smallvec![f, c, fh, fw];
-                    let out = conv_infer_output_shape(&img, &filt);
-                    vec![
-                        TensorSpec::new_noncanon_with_aux(img, *dtype, taux[0].clone()),
-                        TensorSpec::new_noncanon_with_aux(filt, *dtype, taux[1].clone()),
-                        TensorSpec::new_noncanon_with_aux(out, *dtype, taux[2].clone()),
-                    ]
+                    basics
+                        .operand_shapes()
+                        .into_iter()
+                        .zip(taux)
+                        .map(|(s, a)| TensorSpec::new_noncanon_with_aux(s, basics.dtype, a.clone()))
+                        .collect()
                 }
                 PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
                     let PrimitiveAux::Move { outer_aux, inner_level, inner_layout, inner_vector_shape } = aux else {
                         unreachable!();
                     };
                     let outer_tensor_spec = TensorSpec::new_noncanon_with_aux(
-                        spec_shape.clone(),
-                        *dtype,
+                        basics.spec_shape.clone(),
+                        basics.dtype,
                         outer_aux.clone(),
                     );
                     let mut inner_tensor_spec = outer_tensor_spec.clone();
@@ -283,17 +321,46 @@ impl<Tgt: Target> Spec<Tgt> {
                         unreachable!();
                     };
                     vec![TensorSpec::new_noncanon_with_aux(
-                        spec_shape.clone(),
-                        *dtype,
+                        basics.spec_shape.clone(),
+                        basics.dtype,
                         taux[0].clone(),
                     )]
                 }
             },
-            Spec::Compose { .. } => todo!(),
+            Spec::Compose {
+                components,
+                operand_auxes,
+                serial_only: _,
+            } => {
+                let mut result_basics = Vec::with_capacity(self.operand_count());
+                let mut last_seen_output = None;
+                for (i, c) in components.iter().rev().enumerate() {
+                    let mut operand_shapes = c
+                        .operand_shapes()
+                        .into_iter()
+                        .zip(iter::repeat(c.dtype))
+                        .collect::<Vec<_>>();
+                    last_seen_output = operand_shapes.pop();
+                    debug_assert!(last_seen_output.is_some());
+                    if i == 0 {
+                        result_basics.append(&mut operand_shapes);
+                    } else {
+                        result_basics.extend(operand_shapes.into_iter().skip(1));
+                    }
+                }
+                result_basics.push(last_seen_output.unwrap());
+                debug_assert_eq!(result_basics.len(), operand_auxes.len());
+                result_basics
+                    .into_iter()
+                    .zip(operand_auxes)
+                    .map(|((s, d), a)| TensorSpec::new_noncanon_with_aux(s, d, a.clone()))
+                    .collect()
+            }
         }
     }
 
     pub fn inputs(&self) -> Vec<TensorSpec<Tgt>> {
+        // TODO: Can this be unified across variants? Always drop last?
         match &self {
             Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
                 PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => {
@@ -305,7 +372,11 @@ impl<Tgt: Target> Spec<Tgt> {
                 }
                 PrimitiveSpecType::Zero { .. } => vec![],
             },
-            Spec::Compose { .. } => todo!(),
+            Spec::Compose { .. } => {
+                let mut ops = self.operands();
+                ops.pop();
+                ops
+            }
         }
     }
 
@@ -313,13 +384,9 @@ impl<Tgt: Target> Spec<Tgt> {
         self.operands()[self.output_idx()].clone()
     }
 
-    fn output_idx(&self) -> usize {
+    pub fn output_idx(&self) -> usize {
         match &self {
-            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
-                PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => 2,
-                PrimitiveSpecType::Load { .. } | PrimitiveSpecType::Store { .. } => 1,
-                PrimitiveSpecType::Zero { .. } => 0,
-            },
+            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_idx(),
             Spec::Compose { .. } => self.operand_count() - 1,
         }
     }
@@ -431,7 +498,14 @@ impl<Tgt: Target> Spec<Tgt> {
                 }
                 _ => Box::new(iter),
             },
-            _ => Box::new(iter),
+            Spec::Compose {
+                components: _,
+                operand_auxes: _,
+                serial_only: _,
+            } => {
+                // TODO: Add head reduce split expansions as well.
+                Box::new(iter.chain(self.peel_expansions()))
+            }
         }
     }
 
@@ -496,6 +570,39 @@ impl<Tgt: Target> Spec<Tgt> {
         )
     }
 
+    fn peel_expansions(&self) -> Box<dyn Iterator<Item = ImplNode<Tgt>> + '_> {
+        let Spec::Compose { components, operand_auxes: _, serial_only: _ } = self else {
+            panic!("peel_expansions called on non-Compose Spec");
+        };
+
+        let mut results = vec![];
+
+        let o = components[1].operand_shapes();
+        let intermediate_shape = &o[components[1].typ.output_idx()];
+
+        for layout in Tgt::all_layouts_for_shape(intermediate_shape) {
+            for level in Tgt::levels() {
+                // TODO: Need to implement `can_move_to`-style logic here.
+
+                let vector_bytes = level.vector_bytes();
+                if vector_bytes > 0 {
+                    for vector_shape in gen_vector_shapes(
+                        Some(intermediate_shape),
+                        components[1].dtype,
+                        vector_bytes,
+                        None,
+                    ) {
+                        results.push(self.peel(layout.clone(), level, Some(vector_shape)));
+                    }
+                } else {
+                    results.push(self.peel(layout.clone(), level, None));
+                }
+            }
+        }
+
+        Box::new(results.into_iter())
+    }
+
     fn split_valid(&self, new_k: DimSize) -> bool {
         let Spec::Primitive(PrimitiveBasics { typ, spec_shape, dtype: _ }, _, _) = self else {
             panic!();
@@ -527,10 +634,12 @@ impl<Tgt: Target> Spec<Tgt> {
         // TODO: Add prefetching moves.
 
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
-        if matches!(
-            self.primitive_type(),
-            PrimitiveSpecType::Load | PrimitiveSpecType::Store
-        ) {
+        if matches!(self, Spec::Primitive(_, _, _))
+            && matches!(
+                self.primitive_type(),
+                PrimitiveSpecType::Load | PrimitiveSpecType::Store
+            )
+        {
             return results.into_iter();
         }
 
@@ -552,39 +661,37 @@ impl<Tgt: Target> Spec<Tgt> {
                             vector_bytes,
                             None,
                         ) {
-                            results.push(self.move_arg(
-                                i,
-                                level,
-                                layout.clone(),
-                                Some(&vector_shape),
-                                false,
-                            ));
+                            results.push({
+                                let _this = self;
+                                let dest_layout = layout.clone();
+                                let vector_shape = Some(&vector_shape);
+                                ImplNode::MoveLet {
+                                    source_idx: i,
+                                    destination_level: level,
+                                    destination_layout: dest_layout,
+                                    destination_vector_shape: vector_shape.cloned(),
+                                    prefetch: false,
+                                }
+                            });
                         }
                     } else {
-                        results.push(self.move_arg(i, level, layout.clone(), None, false));
+                        results.push({
+                            let _this = self;
+                            let dest_layout = layout.clone();
+                            ImplNode::MoveLet {
+                                source_idx: i,
+                                destination_level: level,
+                                destination_layout: dest_layout,
+                                destination_vector_shape: None,
+                                prefetch: false,
+                            }
+                        });
                     }
                 }
             }
         }
 
         results.into_iter()
-    }
-
-    fn move_arg(
-        &self,
-        operand_idx: u8,
-        dest_level: Tgt::Level,
-        dest_layout: Layout,
-        vector_shape: Option<&[DimSize]>,
-        prefetch: bool,
-    ) -> ImplNode<Tgt> {
-        ImplNode::MoveLet {
-            source_idx: operand_idx,
-            destination_level: dest_level,
-            destination_layout: dest_layout,
-            destination_vector_shape: vector_shape.map(SmallVec::from),
-            prefetch,
-        }
     }
 
     /// Produces an ImplNode::Loop from this Spec.
@@ -685,6 +792,22 @@ impl<Tgt: Target> Spec<Tgt> {
         }
     }
 
+    fn peel(
+        &self,
+        layout: Layout,
+        level: Tgt::Level,
+        vector_shape: Option<Shape>,
+    ) -> ImplNode<Tgt> {
+        if !level.is_addressed() {
+            panic!("Cannot peel into non-addressed level {}", level);
+        }
+        ImplNode::Pipeline {
+            layout,
+            level,
+            vector_shape,
+        }
+    }
+
     fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> Vec<Tiling> {
         match self {
             Spec::Primitive(basics, _, _) => basics.input_tilings_for_tile_out(smaller_output),
@@ -746,7 +869,9 @@ impl<Tgt: Target> Spec<Tgt> {
     pub fn replace_io(&mut self, new_operands: &[TensorSpec<Tgt>]) {
         assert_eq!(new_operands.len(), self.operand_count());
         match self {
-            Spec::Compose { .. } => todo!(),
+            Spec::Compose { operand_auxes, .. } => {
+                *operand_auxes = new_operands.iter().map(|t| t.aux.clone()).collect();
+            }
             Spec::Primitive(
                 PrimitiveBasics {
                     typ,
@@ -842,11 +967,8 @@ impl<Tgt: Target> Spec<Tgt> {
 
     pub fn output_is_read(&self) -> bool {
         match self {
-            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
-                PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => *accum,
-                _ => false,
-            },
-            Spec::Compose { .. } => todo!(),
+            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_is_read(),
+            Spec::Compose { components, .. } => components[0].typ.output_is_read(),
         }
     }
 

@@ -1,8 +1,9 @@
 use std::sync::RwLock;
 
 use crate::common::{DimSize, Dtype, Problem};
+use crate::layout::row_major;
 use crate::pprint::pprint;
-use crate::spec::{PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::table::{InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::TensorSpecAux;
@@ -52,33 +53,50 @@ fn main() {
         std::path::Path::new("db.sqlite3"),
     ));
 
-    let rm = layout::row_major(4);
-    let a = TensorSpecAux {
-        contig: rm.contiguous_full(),
-        aligned: true,
-        level: X86MemoryLevel::GL,
-        layout: rm,
-        vector_shape: None,
+    let rm = row_major(4);
+    let cnn_spec = Spec::Compose {
+        components: vec![
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Conv { accum: false },
+                spec_shape: smallvec![
+                    args.batch,
+                    args.filters,
+                    args.filters,
+                    args.size - args.filters_size + 1,
+                    args.size - args.filters_size + 1,
+                    args.filters_size,
+                    args.filters_size
+                ],
+                dtype: Dtype::Uint32,
+            },
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Conv { accum: false },
+                spec_shape: smallvec![
+                    args.batch,
+                    args.filters,
+                    args.channels,
+                    args.size,
+                    args.size,
+                    args.filters_size,
+                    args.filters_size
+                ],
+                dtype: Dtype::Uint32,
+            },
+        ],
+        operand_auxes: vec![
+            TensorSpecAux {
+                contig: rm.contiguous_full(),
+                aligned: true,
+                level: X86MemoryLevel::GL,
+                layout: rm,
+                vector_shape: None,
+            };
+            4
+        ],
+        serial_only: true,
     };
-    let conv_spec = Spec::Primitive(
-        PrimitiveBasics {
-            typ: PrimitiveSpecType::Conv { accum: false },
-            spec_shape: smallvec![
-                args.batch,
-                args.filters,
-                args.channels,
-                args.size,
-                args.size,
-                args.filters_size,
-                args.filters_size
-            ],
-            dtype: Dtype::Uint32,
-        },
-        PrimitiveAux::Standard(vec![a.clone(), a.clone(), a]),
-        true,
-    );
 
-    let problem = Problem(conv_spec, X86Target::max_mem());
+    let problem = Problem(cnn_spec, X86Target::max_mem());
 
     let start_time = std::time::Instant::now();
     let (_, hits, misses) = search::top_down(&db, &problem, 1);

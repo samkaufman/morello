@@ -38,7 +38,11 @@ pub enum ImplNode<Tgt: Target> {
         prefetch: bool,
     },
     AccumBlock,
-    Pipeline,
+    Pipeline {
+        layout: Layout,
+        level: Tgt::Level,
+        vector_shape: Option<Shape>,
+    },
     SpatialSplit,
     /* Mult Impls */
     Mult,
@@ -51,8 +55,11 @@ pub enum ImplNode<Tgt: Target> {
     VectorZero,
 }
 
-/// A data structure containing a description of how much memory is allocated by
-/// an ImplNode.
+/// A description of how much memory is allocated by an ImplNode.
+///
+/// Memory consumed during the entire lifetime of an Impl is separated
+/// from the memory consumed during the lifetime of each child. This makes
+/// it possible to encode memory consumption by a leaf node with no children.
 pub struct MemoryAllocation {
     pub base: MemVec,
     pub during_children: Vec<MemVec>,
@@ -94,7 +101,74 @@ impl<Tgt: Target> ImplNode<Tgt> {
                 inner_spec.replace_io(&new_operands);
                 vec![inner_spec]
             }
-            ImplNode::Pipeline => todo!(),
+            ImplNode::Pipeline {
+                layout,
+                level,
+                vector_shape,
+            } => {
+                let Spec::Compose { components, operand_auxes, serial_only } = node_spec else {
+                    panic!();
+                };
+                debug_assert!(components.len() >= 2);
+
+                // Figure out the output shape of the next-to-outermost component Spec.
+                let next_to_outer_basics = &components[1];
+                let intermediate_tensor = TensorSpec::<Tgt>::new_canon(
+                    next_to_outer_basics
+                        .operand_shapes()
+                        .swap_remove(next_to_outer_basics.typ.output_idx()),
+                    next_to_outer_basics.dtype,
+                    layout.contiguous_full(),
+                    true,
+                    *level,
+                    layout.clone(),
+                    vector_shape.clone(),
+                );
+
+                // The head of a Compose is the final function evaluated. Build
+                // a full Spec so that it can be further scheduled independently.
+                let external_head_input_cnt = components[0].typ.input_count() - 1;
+                let head_spec = {
+                    // TODO: Simplfy this block.
+                    let head_operand_auxes = iter::once(&intermediate_tensor.aux)
+                        .chain(&operand_auxes[..external_head_input_cnt])
+                        .chain(iter::once(&operand_auxes[node_spec.output_idx()]));
+                    let head_basics = &components[0];
+                    Spec::Primitive(
+                        head_basics.clone(),
+                        head_basics.aux_from_operand_auxes(head_operand_auxes),
+                        *serial_only,
+                    )
+                };
+
+                let next_to_head_input_auxes = &operand_auxes[external_head_input_cnt
+                    ..external_head_input_cnt + next_to_outer_basics.typ.input_count()];
+                let remainder: Spec<Tgt> = if components.len() == 2 {
+                    Spec::Primitive(
+                        next_to_outer_basics.clone(),
+                        next_to_outer_basics.aux_from_operand_auxes(
+                            next_to_head_input_auxes
+                                .iter()
+                                .chain(iter::once(&intermediate_tensor.aux)),
+                        ),
+                        *serial_only,
+                    )
+                } else {
+                    let remainder_inputs = &node_spec.operands()
+                        [external_head_input_cnt..next_to_head_input_auxes.len() - 1];
+                    let remainder_operand_auxes = remainder_inputs
+                        .iter()
+                        .map(|t| t.aux.clone())
+                        .chain(iter::once(intermediate_tensor.aux))
+                        .collect::<Vec<_>>();
+                    Spec::Compose {
+                        components: components[1..].to_vec(),
+                        operand_auxes: remainder_operand_auxes,
+                        serial_only: *serial_only,
+                    }
+                };
+                vec![remainder, head_spec]
+            }
             ImplNode::SpatialSplit => {
                 let Spec::Primitive(PrimitiveBasics { typ: PrimitiveSpecType::Conv { .. }, spec_shape: _, dtype }, _, serial_only) = node_spec else {
                     panic!();
@@ -417,7 +491,39 @@ impl<Tgt: Target> ImplNode<Tgt> {
                     during_children: to_return,
                 }
             }
-            ImplNode::Pipeline => todo!(),
+            ImplNode::Pipeline {
+                layout: _,
+                level,
+                vector_shape: _,
+            } => {
+                // We only introduce Pipelines by peeling, so we know that the
+                // intermediate tensor is the first input to to final/head
+                // component.
+                let Spec::Compose { components, .. } = spec else {
+                    panic!();
+                };
+                let next_to_outer_basics = &components[1];
+                let output_shape =
+                    &next_to_outer_basics.operand_shapes()[next_to_outer_basics.typ.output_idx()];
+                let base = Tgt::levels()
+                    .iter()
+                    .map(|l| {
+                        if level == l {
+                            u64::from(next_to_outer_basics.dtype.size())
+                                * u64::from(output_shape.into_iter().product::<DimSize>())
+                        } else {
+                            0u64
+                        }
+                    })
+                    .collect();
+                let during_children = (0..self.child_count(spec))
+                    .map(|_| MemVec::zero::<Tgt>())
+                    .collect();
+                MemoryAllocation {
+                    base,
+                    during_children,
+                }
+            }
             ImplNode::Loop { .. }
             | ImplNode::SpatialSplit
             | ImplNode::AccumBlock

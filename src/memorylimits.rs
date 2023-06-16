@@ -1,3 +1,4 @@
+use log::warn;
 use serde::{Deserialize, Serialize};
 use std::ops::{Index, IndexMut};
 
@@ -29,6 +30,8 @@ impl MemoryLimits {
         node_spec: &Spec<Tgt>,
         node: &ImplNode<Tgt>,
     ) -> Option<Vec<MemoryLimits>> {
+        warn!("Not transitioning to pipeline MemoryLimits yet");
+
         let allocated = node.memory_allocated(node_spec);
         let mut result = Vec::with_capacity(allocated.during_children.len());
         match &self {

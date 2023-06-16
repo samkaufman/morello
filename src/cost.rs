@@ -87,7 +87,7 @@ fn compute_cost_node<Tgt: Target>(
     child_costs: &[MainCost],
 ) -> MainCost {
     match op {
-        ImplNode::Pipeline | ImplNode::AccumBlock | ImplNode::SpatialSplit => {
+        ImplNode::Pipeline { .. } | ImplNode::AccumBlock | ImplNode::SpatialSplit => {
             child_costs.iter().sum()
         }
         ImplNode::Loop { parallel, .. } => {
