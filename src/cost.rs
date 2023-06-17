@@ -1,6 +1,7 @@
+use crate::common::DimSize;
 use crate::imp::{movelet_inner_tensorspec, ImplNode};
 use crate::memorylimits::MemVec;
-use crate::spec::Spec;
+use crate::spec::{PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::utils::snap_availables_up_memvec;
@@ -87,8 +88,16 @@ fn compute_cost_node<Tgt: Target>(
     child_costs: &[MainCost],
 ) -> MainCost {
     match op {
-        ImplNode::Pipeline { .. } | ImplNode::AccumBlock | ImplNode::SpatialSplit => {
-            child_costs.iter().sum()
+        ImplNode::Pipeline { .. } | ImplNode::AccumBlock => child_costs.iter().sum(),
+        ImplNode::SpatialSplit => {
+            let Spec::Primitive(PrimitiveBasics{typ, ..}, _, _) = spec else {
+                panic!();
+            };
+            debug_assert!(matches!(typ, PrimitiveSpecType::Conv { .. }));
+            debug_assert_eq!(child_costs.len(), 1);
+            let operands = spec.operands();
+            let spatials = &operands[0].dim_sizes()[2..];
+            MainCost::from(spatials.iter().copied().product::<DimSize>()) * child_costs[0]
         }
         ImplNode::Loop { parallel, .. } => {
             let factor = if *parallel {

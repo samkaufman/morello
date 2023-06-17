@@ -181,7 +181,6 @@ where
             .collect::<Vec<_>>()
     });
 
-    // TODO: Add loads into following
     let mut rng = rand::thread_rng();
     for (stage_idx, stage) in bounds.iter().flat_map(specs_to_compute).enumerate() {
         info!(
