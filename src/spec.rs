@@ -6,10 +6,12 @@ use crate::target::MemoryLevel;
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
+use crate::utils::join_into_string;
 
 use core::panic;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec, ToSmallVec};
+use std::fmt;
 use std::fmt::Display;
 use std::iter::Iterator;
 use std::iter::{self, once};
@@ -199,6 +201,13 @@ impl PrimitiveBasics {
     }
 }
 
+impl Display for PrimitiveBasics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let shape_str = join_into_string(&self.spec_shape, "×");
+        write!(f, "{}({}, {})", self.typ, shape_str, self.dtype)
+    }
+}
+
 impl PrimitiveSpecType {
     pub fn operand_count(&self) -> usize {
         self.input_count() + 1
@@ -252,6 +261,20 @@ impl PrimitiveSpecType {
                 inputs[0].to_smallvec()
             }
             PrimitiveSpecType::Zero => todo!(),
+        }
+    }
+}
+
+impl Display for PrimitiveSpecType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PrimitiveSpecType::Matmul { accum, .. } if *accum => write!(f, "MatmulAccum"),
+            PrimitiveSpecType::Matmul { .. } => write!(f, "Matmul"),
+            PrimitiveSpecType::Conv { accum, .. } if *accum => write!(f, "ConvAccum"),
+            PrimitiveSpecType::Conv { .. } => write!(f, "Conv"),
+            PrimitiveSpecType::Load { .. } => write!(f, "Load"),
+            PrimitiveSpecType::Store { .. } => write!(f, "Store"),
+            PrimitiveSpecType::Zero { .. } => write!(f, "Zero"),
         }
     }
 }
@@ -335,19 +358,20 @@ impl<Tgt: Target> Spec<Tgt> {
                 let mut result_basics = Vec::with_capacity(self.operand_count());
                 let mut last_seen_output = None;
                 for (i, c) in components.iter().rev().enumerate() {
-                    let mut operand_shapes = c
+                    let mut operand_basics: Vec<(Shape, Dtype)> = c
                         .operand_shapes()
                         .into_iter()
                         .zip(iter::repeat(c.dtype))
                         .collect::<Vec<_>>();
-                    last_seen_output = operand_shapes.pop();
+                    last_seen_output = operand_basics.pop();
                     debug_assert!(last_seen_output.is_some());
-                    if i == 0 {
-                        result_basics.append(&mut operand_shapes);
-                    } else {
-                        result_basics.extend(operand_shapes.into_iter().skip(1));
+                    operand_basics.reverse();
+                    if i != 0 {
+                        operand_basics.pop();
                     }
+                    result_basics.append(&mut operand_basics);
                 }
+                result_basics.reverse();
                 result_basics.push(last_seen_output.unwrap());
                 debug_assert_eq!(result_basics.len(), operand_auxes.len());
                 result_basics
@@ -798,9 +822,6 @@ impl<Tgt: Target> Spec<Tgt> {
         level: Tgt::Level,
         vector_shape: Option<Shape>,
     ) -> ImplNode<Tgt> {
-        if !level.is_addressed() {
-            panic!("Cannot peel into non-addressed level {}", level);
-        }
         ImplNode::Pipeline {
             layout,
             level,
@@ -988,23 +1009,30 @@ impl<Tgt: Target> Spec<Tgt> {
 }
 
 impl<Tgt: Target> Display for Spec<Tgt> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Spec::Compose { .. } = self {
-            // TODO: Implement Display for Compose.
-            return write!(f, "Compose");
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Spec::Compose {
+            components,
+            operand_auxes: _,
+            serial_only,
+        } = self
+        {
+            let operands = self.operands();
+            let (output, external_inputs) = operands.split_last().unwrap();
+            debug_assert_eq!(self.output_idx(), external_inputs.len());
+            return write!(
+                f,
+                "Compose(({}), [{}, out={}], ({}){})",
+                join_into_string(components.iter().map(|c| c.typ), ", "),
+                join_into_string(external_inputs, ", "),
+                output.to_string(),
+                join_into_string(components.iter().map(|c| c.dtype), ", "),
+                if *serial_only { ", serial" } else { "" }
+            );
         }
 
         let header = match self {
-            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
-                PrimitiveSpecType::Matmul { accum, .. } if *accum => "MatmulAccum",
-                PrimitiveSpecType::Matmul { .. } => "Matmul",
-                PrimitiveSpecType::Conv { accum, .. } if *accum => "ConvAccum",
-                PrimitiveSpecType::Conv { .. } => "Conv",
-                PrimitiveSpecType::Load { .. } => "Load",
-                PrimitiveSpecType::Store { .. } => "Store",
-                PrimitiveSpecType::Zero { .. } => "Zero",
-            },
-            Spec::Compose { .. } => unreachable!(),
+            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => format!("{}", typ),
+            Spec::Compose { .. } => todo!(),
         };
 
         let operand_str = self

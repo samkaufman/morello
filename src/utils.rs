@@ -89,3 +89,10 @@ pub fn sum_seqs(maxes: &[u32], total: u32) -> Box<dyn Iterator<Item = Vec<u32>>>
         Box::new(flat_map_iter)
     }
 }
+
+pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &str) -> String {
+    c.into_iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
+        .join(separator)
+}

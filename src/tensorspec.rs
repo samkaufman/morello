@@ -4,6 +4,7 @@ use std::fmt::Display;
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::layout::Layout;
 use crate::target::{MemoryLevel, Target};
+use crate::utils::join_into_string;
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Deserialize, Serialize)]
 #[serde(bound = "")]
@@ -209,51 +210,20 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
 impl<Tgt: Target> Display for TensorSpec<Tgt> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut layout_epi = String::new();
-        let mut bank_epi = String::new();
-        let mut c_epi = String::new();
-        let mut a_epi = String::new();
-        let mut v_epi = String::new();
-
-        if !self.aux.layout.is_row_major() {
-            layout_epi = format!(", {}", self.aux.layout);
-        }
-
-        if Tgt::default_level() != self.aux.level {
-            bank_epi = format!(", {}", self.aux.level);
-        }
-
-        if self.aux.contig != self.aux.layout.contiguous_full() {
-            c_epi = format!(", c{}", self.aux.contig);
-        }
-
-        if !self.aux.aligned {
-            a_epi = String::from(", ua");
-        }
-
-        if let Some(shape) = &self.aux.vector_shape {
-            v_epi = format!(
-                ", {}",
-                shape
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-                    .join("×")
-            );
-        }
-
         let dims_part = self
             .dim_sizes
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>()
             .join("×");
+        let aux_part = tensorspec_aux_str(&self.aux);
 
-        write!(
-            f,
-            "({}, {}{}{}{}{}{})",
-            dims_part, self.dtype, bank_epi, layout_epi, c_epi, a_epi, v_epi
-        )
+        write!(f, "({}, {}", dims_part, self.dtype);
+        if aux_part.is_empty() {
+            write!(f, ")")
+        } else {
+            write!(f, ", {})", aux_part)
+        }
     }
 }
 
@@ -265,4 +235,47 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
         self.layout = self.layout.canonicalize_for_shape(dim_sizes);
         self.aligned = aligned;
     }
+}
+
+impl<Tgt: Target> Display for TensorSpecAux<Tgt> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let aux_part = tensorspec_aux_str(self);
+        if aux_part.is_empty() {
+            write!(f, "(_)")
+        } else {
+            write!(f, "({})", aux_part)
+        }
+    }
+}
+
+fn tensorspec_aux_str<Tgt: Target>(aux: &TensorSpecAux<Tgt>) -> String {
+    let mut parts = Vec::with_capacity(5);
+
+    if aux.level != Tgt::default_level() {
+        parts.push(aux.level.to_string());
+    }
+
+    if !aux.layout.is_row_major() {
+        parts.push(aux.layout.to_string());
+    }
+
+    if aux.contig != aux.layout.contiguous_full() {
+        parts.push(format!("c{}", aux.contig));
+    }
+
+    if !aux.aligned {
+        parts.push(String::from("ua"));
+    }
+
+    if let Some(shape) = &aux.vector_shape {
+        parts.push(
+            shape
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join("×"),
+        );
+    }
+
+    join_into_string(&parts, ", ")
 }
