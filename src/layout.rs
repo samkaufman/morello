@@ -349,3 +349,9 @@ pub fn row_major(rank: u8) -> Layout {
         dim_order: (0..rank).collect(),
     }
 }
+
+pub fn nhwc() -> Layout {
+    Layout::Standard {
+        dim_order: vec![0, 2, 3, 1].into(),
+    }
+}

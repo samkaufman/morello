@@ -5,7 +5,7 @@ use crate::imp::{
     valueassign_applies_to_operands, vectorassign_applies_to_operands,
     vectorzero_applies_to_operands, ImplNode,
 };
-use crate::layout::{row_major, Layout};
+use crate::layout::{nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::spec::{PrimitiveBasics, PrimitiveSpecType, Spec};
 
@@ -84,16 +84,17 @@ impl Target for X86Target {
 
         let rm_iter = iter::once(row_major(shape.len().try_into().unwrap()));
         if shape.iter().all(|d| *d == 1) {
-            return rm_iter.collect();
-        }
-        match shape.len() {
-            2 => {
-                let col_major = Layout::Standard {
+            rm_iter.collect()
+        } else if shape.len() == 2 {
+            rm_iter
+                .chain(iter::once(Layout::Standard {
                     dim_order: smallvec![1, 0],
-                };
-                rm_iter.chain(iter::once(col_major)).collect()
-            }
-            _ => rm_iter.collect(),
+                }))
+                .collect()
+        } else if shape.len() == 4 {
+            rm_iter.chain(iter::once(nhwc())).collect()
+        } else {
+            rm_iter.collect()
         }
     }
 

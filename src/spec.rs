@@ -1024,7 +1024,7 @@ impl<Tgt: Target> Display for Spec<Tgt> {
                 "Compose(({}), [{}, out={}], ({}){})",
                 join_into_string(components.iter().map(|c| c.typ), ", "),
                 join_into_string(external_inputs, ", "),
-                output.to_string(),
+                output,
                 join_into_string(components.iter().map(|c| c.dtype), ", "),
                 if *serial_only { ", serial" } else { "" }
             );
