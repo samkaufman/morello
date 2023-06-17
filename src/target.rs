@@ -111,10 +111,10 @@ impl Target for X86Target {
                         }
                         Box::new(microkernels.into_iter())
                     } else {
-                        Box::new(std::iter::empty())
+                        Box::new(iter::empty())
                     }
                 }
-                PrimitiveSpecType::Conv { .. } => Box::new(std::iter::empty()),
+                PrimitiveSpecType::Conv { .. } => Box::new(iter::empty()),
                 PrimitiveSpecType::Load { .. } | PrimitiveSpecType::Store { .. } => {
                     let mut microkernels = vec![];
                     if valueassign_applies_to_operands(&spec.operands()) {
@@ -136,7 +136,7 @@ impl Target for X86Target {
                     Box::new(microkernels.into_iter())
                 }
             },
-            Spec::Compose { .. } => Box::new(std::iter::empty()),
+            Spec::Compose { .. } => Box::new(iter::empty()),
         }
     }
 }

@@ -218,7 +218,7 @@ impl<Tgt: Target> Display for TensorSpec<Tgt> {
             .join("×");
         let aux_part = tensorspec_aux_str(&self.aux);
 
-        write!(f, "({}, {}", dims_part, self.dtype);
+        write!(f, "({}, {}", dims_part, self.dtype)?;
         if aux_part.is_empty() {
             write!(f, ")")
         } else {

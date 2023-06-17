@@ -230,7 +230,7 @@ impl<Tgt: Target> ImplNode<Tgt> {
                             .collect(),
                         dtype: *dtype,
                     },
-                    crate::spec::PrimitiveAux::Standard(vec![
+                    PrimitiveAux::Standard(vec![
                         TensorSpecAux {
                             contig: squeezed_image_spec.contiguous_abs(),
                             aligned: squeezed_image_spec.aligned(),

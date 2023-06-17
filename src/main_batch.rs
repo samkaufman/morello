@@ -72,13 +72,13 @@ fn main() {
 
 fn load_or_store(prim_type: PrimitiveSpecType, size: DimSize, rank: u8) -> Spec<X86Target> {
     let layout = layout::row_major(rank);
-    spec::Spec::Primitive(
+    Spec::Primitive(
         PrimitiveBasics {
             typ: prim_type,
             spec_shape: smallvec![size; rank.into()],
             dtype: Dtype::Uint32,
         },
-        spec::PrimitiveAux::Move {
+        PrimitiveAux::Move {
             outer_aux: TensorSpecAux {
                 contig: layout.contiguous_full(),
                 aligned: true,
@@ -119,7 +119,7 @@ where
                 spec_shape: smallvec![args.size; rank.into()],
                 dtype: Dtype::Uint32,
             },
-            spec::PrimitiveAux::Standard(vec![TensorSpecAux {
+            PrimitiveAux::Standard(vec![TensorSpecAux {
                 contig: layout.contiguous_full(),
                 aligned: true,
                 level: X86MemoryLevel::GL,
@@ -144,7 +144,7 @@ where
                 spec_shape: smallvec![args.size, args.size, args.size],
                 dtype: Dtype::Uint32,
             },
-            spec::PrimitiveAux::Standard(vec![a.clone(), a.clone(), a]),
+            PrimitiveAux::Standard(vec![a.clone(), a.clone(), a]),
             true,
         )
     });
@@ -269,9 +269,7 @@ impl MemoryLimitsIterator for SkippingLimitsIterator {
     }
 }
 
-fn specs_to_compute(
-    bound: &Spec<X86Target>,
-) -> impl Iterator<Item = Vec<Vec<spec::Spec<X86Target>>>> {
+fn specs_to_compute(bound: &Spec<X86Target>) -> impl Iterator<Item = Vec<Vec<Spec<X86Target>>>> {
     let grid_map_result = bound.to_grid();
     if grid_map_result.is_none() {
         panic!("Could not map {:?} to grid", bound);

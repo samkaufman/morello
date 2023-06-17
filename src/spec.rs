@@ -504,7 +504,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 _serial_only,
             ) => match typ {
                 PrimitiveSpecType::Matmul { accum } if !*accum => {
-                    Box::new(iter.chain(iter::once(ImplNode::AccumBlock)))
+                    Box::new(iter.chain(once(ImplNode::AccumBlock)))
                 }
                 PrimitiveSpecType::Matmul { accum } if *accum => {
                     Box::new(iter.chain(self.split_expansions()))
@@ -512,12 +512,12 @@ impl<Tgt: Target> Spec<Tgt> {
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
                         if self.can_spatial_split() {
-                            Box::new(iter.chain(iter::once(ImplNode::SpatialSplit)))
+                            Box::new(iter.chain(once(ImplNode::SpatialSplit)))
                         } else {
                             Box::new(iter)
                         }
                     } else {
-                        Box::new(iter.chain(iter::once(ImplNode::AccumBlock)))
+                        Box::new(iter.chain(once(ImplNode::AccumBlock)))
                     }
                 }
                 _ => Box::new(iter),
@@ -1069,7 +1069,7 @@ fn gen_tile_sizes<Tgt: Target>(
     let tensor_shape = tensor_shape.to_vec();
 
     if tensor_shape.is_empty() {
-        Box::new(std::iter::empty())
+        Box::new(iter::empty())
     } else if tensor_shape.len() == 1 {
         Box::new(dim_range(tensor_shape[0], true).filter_map(move |d| {
             if drop_given && d == tensor_shape[0] {
@@ -1123,7 +1123,7 @@ pub fn gen_vector_shapes(
 
     if LIMIT_VECTORS_TO_ONE_DIM {
         if adjusted_vector_bytes == 1 {
-            return Box::new(std::iter::once(smallvec![1; rank.into()]));
+            return Box::new(once(smallvec![1; rank.into()]));
         }
         let outer_shape = outer_shape.map(Vec::from);
         Box::new(
