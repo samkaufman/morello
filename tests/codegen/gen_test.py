@@ -28,7 +28,6 @@ strategies.register_default_strategies()
 
 @pytest.mark.asyncio
 async def test_codegen_completes_on_matmul_1x1x1():
-def test_codegen_completes_on_matmul_1x1x1():
     target = cpu.X86Target()
     with system_config.with_target(target):
         lhs = target.tensor_spec((1, 1), dtypes.Uint8, bank="GL")
