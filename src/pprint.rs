@@ -1,16 +1,96 @@
-use crate::table::Database;
-use crate::{common::Problem, target::Target};
-use prettytable::{self, format, row, Cell};
+use crate::table::DbImpl;
+use crate::target::Target;
+use crate::views::View;
+use crate::{imp::Impl, views::Param};
 
-pub fn pprint<Tgt: Target, D: Database<Tgt>>(db: &D, root: &Problem<Tgt>) {
+use by_address::ByThinAddress;
+use prettytable::{self, format, row, Cell};
+use std::collections::HashMap;
+
+static ASCII_LOWER: [char; 26] = [
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's',
+    't', 'u', 'v', 'w', 'x', 'y', 'z',
+];
+
+pub struct NameEnv<'t, Tgt: Target> {
+    names: HashMap<ByThinAddress<&'t dyn View<Tgt = Tgt>>, String>,
+}
+
+impl<'t, Tgt: Target> NameEnv<'t, Tgt> {
+    pub fn name(&mut self, view: &'t dyn View<Tgt = Tgt>) -> &str {
+        let view_by_address = ByThinAddress(view);
+        let cnt = self.names.len();
+        let name = self
+            .names
+            .entry(view_by_address)
+            .or_insert_with(|| String::from(ASCII_LOWER[cnt]));
+        name
+    }
+
+    pub fn get_name(&self, view: &'t dyn View<Tgt = Tgt>) -> Option<&str> {
+        let view_by_address = ByThinAddress(view);
+        self.names.get(&view_by_address).map(|s| s.as_str())
+    }
+
+    pub fn get_name_or_display(&self, view: &'t dyn View<Tgt = Tgt>) -> String {
+        if let Some(present_name) = self.get_name(view) {
+            present_name.to_owned()
+        } else if let Some(param) = view.to_param() {
+            param.to_string()
+        } else {
+            panic!("No name for non-Param view: {:?}", view);
+        }
+    }
+}
+
+pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>) {
+    let mut name_env = NameEnv {
+        names: HashMap::new(),
+    };
+
+    // Set up table
     let mut table = prettytable::Table::new();
-    let mut titles = row!["", "Spec", "Cost"];
+    let mut titles = row!["", "Logical Spec"];
     for level in Tgt::levels() {
         titles.add_cell(Cell::new(&level.to_string()));
     }
-    table.set_titles(titles);
-    pformat_visit(&mut table, db, root, 0);
+    titles.add_cell(Cell::new("Cost"));
 
+    table.set_titles(titles);
+
+    // Traverse the Impl.
+    let problem = &root.aux().as_ref().unwrap().0;
+    let args = problem
+        .0
+        .parameters()
+        .iter()
+        .enumerate()
+        .map(|(i, s)| Param(i.try_into().unwrap(), s.clone()))
+        .collect::<Vec<_>>();
+    let args_ptrs = args
+        .iter()
+        .map(|p| p as &dyn View<Tgt = Tgt>)
+        .collect::<Vec<_>>();
+    root.traverse(
+        &args_ptrs,
+        0,
+        &mut |imp, args: &[&(dyn View<Tgt = Tgt>)], depth| {
+            if let Some(line_top) = imp.line_strs(&mut name_env, args) {
+                let main_str = format!("{}{}", " ".repeat(depth), line_top);
+                let mut r = row![main_str, "", ""];
+                if let Some((problem, cost)) = imp.aux() {
+                    r = row![main_str, format!("{}", &problem.0),];
+                    for level_peak in cost.peaks.iter() {
+                        r.add_cell(Cell::new(&format!("{: >4}", level_peak)));
+                    }
+                    r.add_cell(Cell::new(&format!("{:?}", cost.main)));
+                }
+                table.add_row(r);
+            }
+        },
+    );
+
+    // Format and print the table.
     let format = format::FormatBuilder::new()
         .separator(
             format::LinePosition::Title,
@@ -19,36 +99,5 @@ pub fn pprint<Tgt: Target, D: Database<Tgt>>(db: &D, root: &Problem<Tgt>) {
         .column_separator(' ')
         .build();
     table.set_format(format);
-
     table.printstd()
-}
-
-fn pformat_visit<Tgt: Target, D: Database<Tgt>>(
-    table: &mut prettytable::Table,
-    db: &D,
-    root: &Problem<Tgt>,
-    depth: usize,
-) {
-    let node = db.get(root).unwrap();
-    assert!(!node.is_empty(), "Problem not in database: {}", root);
-    assert_eq!(node.len(), 1);
-    let mut r = row![
-        format!("{}{}", " ".repeat(depth), node[0].0),
-        format!("{}", root.0),
-        format!("{:?}", node[0].1.main)
-    ];
-    for level_peak in node[0].1.peaks.iter() {
-        r.add_cell(Cell::new(&format!("{: >4}", level_peak)));
-    }
-    table.add_row(r);
-
-    let child_memory_limits = root.1.transition(&root.0, &node[0].0).unwrap();
-    for (subspec, mlims) in node[0]
-        .0
-        .child_specs(&root.0)
-        .iter()
-        .zip(child_memory_limits)
-    {
-        pformat_visit(table, db, &Problem(subspec.clone(), mlims), depth + 1)
-    }
 }

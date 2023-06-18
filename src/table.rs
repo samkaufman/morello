@@ -1,26 +1,32 @@
 use crate::common::Problem;
 use crate::cost::Cost;
-use crate::imp::ImplNode;
+use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemVec, MemoryLimits};
+use crate::scheduling::SchedulingDecision;
 use crate::spec::Spec;
 use crate::target::Target;
 
 use rusqlite::params_from_iter;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-
 use std::collections::HashMap;
 use std::mem;
 use std::path;
 
 const SQLITE_BATCH_SIZE: usize = 1_000;
 
+pub type DbImpl<Tgt> = ImplNode<Tgt, Option<(Problem<Tgt>, Cost)>>;
+
 pub trait Database<Tgt: Target> {
-    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(ImplNode<Tgt>, Cost); 1]>>;
+    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>>;
     // TODO: Drop get_spec, which exists solely for SqliteDatabaseWrapper.
     fn get_spec(&self, spec: &Spec<Tgt>) -> Option<&Entry<Tgt>>;
-    fn put(&mut self, problem: Problem<Tgt>, impls: SmallVec<[(ImplNode<Tgt>, Cost); 1]>);
+    fn put(&mut self, problem: Problem<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>);
     fn flush(&mut self);
+}
+
+pub trait DatabaseExt<Tgt: Target> {
+    fn get_impl(&self, query: &Problem<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>;
 }
 
 pub struct InMemDatabase<Tgt: Target> {
@@ -46,7 +52,7 @@ enum SqliteDatabaseWrapperMsg<Tgt: Target> {
 #[serde(bound = "")]
 pub struct Entry<Tgt: Target> {
     ranges: Vec<(MemVec, MemVec)>,
-    values: Vec<SmallVec<[(ImplNode<Tgt>, Cost); 1]>>,
+    values: Vec<SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>>,
 }
 
 impl<Tgt: Target> InMemDatabase<Tgt> {
@@ -60,7 +66,7 @@ impl<Tgt: Target> InMemDatabase<Tgt> {
         &'a self,
         mlims: &MemoryLimits,
         entry: &'a Entry<Tgt>,
-    ) -> Option<&SmallVec<[(ImplNode<Tgt>, Cost); 1]>> {
+    ) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
         match mlims {
             MemoryLimits::Standard(query_lims) => {
                 for (i, (lims, peaks)) in entry.ranges.iter().enumerate() {
@@ -80,13 +86,21 @@ impl<Tgt: Target> InMemDatabase<Tgt> {
 }
 
 impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
-    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(ImplNode<Tgt>, Cost); 1]>> {
+    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
         self.grouped_entries
             .get(&query.0)
             .and_then(|e| self.get_from_entry(&query.1, e))
     }
 
-    fn put(&mut self, problem: Problem<Tgt>, impls: SmallVec<[(ImplNode<Tgt>, Cost); 1]>) {
+    fn get_spec(&self, spec: &Spec<Tgt>) -> Option<&Entry<Tgt>> {
+        self.grouped_entries.get(spec)
+    }
+
+    fn put(
+        &mut self,
+        problem: Problem<Tgt>,
+        impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>,
+    ) {
         // self.entries.insert(problem, impls);
 
         let orig_problem = problem.clone(); // Save for debug_assert_eq! postcondition.
@@ -96,16 +110,14 @@ impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
         match problem.1 {
             MemoryLimits::Standard(lims) => {
                 assert!(impls.len() <= 1);
-                {
-                    let existing: &mut Entry<Tgt> =
-                        self.grouped_entries.entry(problem.0.clone()).or_default();
-                    if impls.is_empty() {
-                        existing.ranges.push((lims, MemVec::zero::<Tgt>()));
-                    } else {
-                        existing.ranges.push((lims, impls[0].1.peaks.clone()));
-                    }
-                    existing.values.push(impls);
+                let existing: &mut Entry<Tgt> =
+                    self.grouped_entries.entry(problem.0.clone()).or_default();
+                if impls.is_empty() {
+                    existing.ranges.push((lims, MemVec::zero::<Tgt>()));
+                } else {
+                    existing.ranges.push((lims, impls[0].1.peaks.clone()));
                 }
+                existing.values.push(impls);
             }
         }
 
@@ -115,10 +127,6 @@ impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
             "Original problem {:?} was incorrect after put.",
             orig_problem
         );
-    }
-
-    fn get_spec(&self, spec: &Spec<Tgt>) -> Option<&Entry<Tgt>> {
-        self.grouped_entries.get(spec)
     }
 
     fn flush(&mut self) {}
@@ -180,7 +188,7 @@ impl<Tgt: Target, D: Database<Tgt>> SqliteDatabaseWrapper<Tgt, D> {
 }
 
 impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt, D> {
-    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(ImplNode<Tgt>, Cost); 1]>> {
+    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
         self.inner.get(query)
     }
 
@@ -188,7 +196,11 @@ impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt,
         unimplemented!()
     }
 
-    fn put(&mut self, problem: Problem<Tgt>, impls: SmallVec<[(ImplNode<Tgt>, Cost); 1]>) {
+    fn put(
+        &mut self,
+        problem: Problem<Tgt>,
+        impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>,
+    ) {
         self.inner.put(problem.clone(), impls);
         let updated = self.inner.get_spec(&problem.0).unwrap();
         self.tx
@@ -210,6 +222,31 @@ impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt,
 impl<Tgt: Target, D: Database<Tgt>> Drop for SqliteDatabaseWrapper<Tgt, D> {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+impl<Tgt: Target, T: Database<Tgt>> DatabaseExt<Tgt> for T {
+    fn get_impl(&self, query: &Problem<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>> {
+        let Some(root_results) = self.get(query) else {
+            return None;
+        };
+        Some(
+            root_results
+                .iter()
+                .map(|root_result| {
+                    let root = root_result
+                        .0
+                        .apply_with_aux(query, Some((query.clone(), root_result.1.clone())))
+                        .unwrap();
+                    let children = root.children();
+                    let new_children = children
+                        .iter()
+                        .map(|c| construct_impl(self, c))
+                        .collect::<Vec<_>>();
+                    root.replace_children(new_children.into_iter())
+                })
+                .collect::<SmallVec<_>>(),
+        )
     }
 }
 
@@ -239,5 +276,24 @@ fn do_flush<Tgt: Target>(
             })),
         )
         .unwrap();
+    }
+}
+
+fn construct_impl<Tgt: Target, D: Database<Tgt>>(db: &D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt> {
+    match imp {
+        ImplNode::ProblemApp(p) => db
+            .get_impl(&p.0)
+            .expect("Database should have the sub-problem entry")
+            .get(0)
+            .expect("Database sub-problem should be satisfiable")
+            .clone(),
+        _ => {
+            let new_children = imp
+                .children()
+                .iter()
+                .map(|c| construct_impl(db, c))
+                .collect::<Vec<_>>();
+            imp.replace_children(new_children.into_iter())
+        }
     }
 }

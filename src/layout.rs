@@ -279,8 +279,31 @@ impl Layout {
         }
     }
 
-    fn transpose(&self, _swap_dims: (usize, usize), _contiguous_abs: usize) -> (Layout, usize) {
-        todo!()
+    pub fn transpose(&self, swap_dims: (u8, u8), contiguous_abs: Contig) -> (Layout, Contig) {
+        match self {
+            Layout::Standard { dim_order } => {
+                let new_dim_order = dim_order
+                    .iter()
+                    .copied()
+                    .map(|orig_dim| {
+                        if orig_dim == swap_dims.0 {
+                            swap_dims.1
+                        } else if orig_dim == swap_dims.1 {
+                            swap_dims.0
+                        } else {
+                            orig_dim
+                        }
+                    })
+                    .collect();
+                (
+                    Layout::Standard {
+                        dim_order: new_dim_order,
+                    },
+                    contiguous_abs,
+                )
+            }
+            Layout::Packed { .. } => todo!(),
+        }
     }
 
     fn flatten_inner_contiguous_dimensions(

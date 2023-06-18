@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-use crate::{imp::ImplNode, memorylimits::MemoryLimits, spec::Spec, target::Target};
+use crate::{memorylimits::MemoryLimits, spec::Spec, target::Target};
 
 pub type DimSize = u32;
 pub type Shape = smallvec::SmallVec<[DimSize; 5]>;
@@ -15,20 +15,6 @@ pub struct Problem<Tgt: Target>(pub Spec<Tgt>, pub MemoryLimits);
 pub enum Dtype {
     Uint8,
     Uint32,
-}
-
-impl<Tgt: Target> Problem<Tgt> {
-    /// Expands a problem into a partial Impl and child memory limits.
-    ///
-    /// This is like Spec's `expansions` but tracks memory limits.
-    pub fn expansions(&self) -> impl Iterator<Item = (ImplNode<Tgt>, Vec<MemoryLimits>)> + '_ {
-        let spec_expansions = self.0.expansions();
-        spec_expansions.flat_map(|impl_node| {
-            self.1
-                .transition(&self.0, &impl_node)
-                .map(|mem| (impl_node, mem))
-        })
-    }
 }
 
 impl<Tgt: Target> Display for Problem<Tgt> {

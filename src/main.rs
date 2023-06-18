@@ -4,7 +4,7 @@ use crate::common::{DimSize, Dtype, Problem};
 use crate::layout::row_major;
 use crate::pprint::pprint;
 use crate::spec::{PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::table::{InMemDatabase, SqliteDatabaseWrapper};
+use crate::table::{DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::TensorSpecAux;
 
@@ -20,7 +20,7 @@ mod imp;
 mod layout;
 mod memorylimits;
 mod pprint;
-mod reinterpret;
+mod scheduling;
 mod search;
 mod spec;
 mod table;
@@ -28,6 +28,7 @@ mod target;
 mod tensorspec;
 mod tiling;
 mod utils;
+mod views;
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -53,50 +54,70 @@ fn main() {
         std::path::Path::new("db.sqlite3"),
     ));
 
-    let rm = row_major(4);
-    let cnn_spec = Spec::Compose {
-        components: vec![
-            PrimitiveBasics {
-                typ: PrimitiveSpecType::Conv { accum: false },
-                spec_shape: smallvec![
-                    args.batch,
-                    args.filters,
-                    args.filters,
-                    args.size - args.filters_size + 1,
-                    args.size - args.filters_size + 1,
-                    args.filters_size,
-                    args.filters_size
-                ],
-                dtype: Dtype::Uint32,
-            },
-            PrimitiveBasics {
-                typ: PrimitiveSpecType::Conv { accum: false },
-                spec_shape: smallvec![
-                    args.batch,
-                    args.filters,
-                    args.channels,
-                    args.size,
-                    args.size,
-                    args.filters_size,
-                    args.filters_size
-                ],
-                dtype: Dtype::Uint32,
-            },
-        ],
-        operand_auxes: vec![
+    let rm2 = row_major(2);
+    let matmul_spec = Spec::Primitive(
+        PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: smallvec![args.size, args.size, args.size],
+            dtype: Dtype::Uint32,
+        },
+        spec::PrimitiveAux::Standard(vec![
             TensorSpecAux {
-                contig: rm.contiguous_full(),
+                contig: rm2.contiguous_full(),
                 aligned: true,
                 level: X86MemoryLevel::GL,
-                layout: rm,
+                layout: rm2,
                 vector_shape: None,
             };
-            4
-        ],
-        serial_only: true,
-    };
+            3
+        ]),
+        true,
+    );
 
-    let problem = Problem(cnn_spec, X86Target::max_mem());
+    // let rm = row_major(4);
+    // let cnn_spec = Spec::Compose {
+    //     components: vec![
+    //         PrimitiveBasics {
+    //             typ: PrimitiveSpecType::Conv { accum: false },
+    //             spec_shape: smallvec![
+    //                 args.batch,
+    //                 args.filters,
+    //                 args.filters,
+    //                 args.size - args.filters_size + 1,
+    //                 args.size - args.filters_size + 1,
+    //                 args.filters_size,
+    //                 args.filters_size
+    //             ],
+    //             dtype: Dtype::Uint32,
+    //         },
+    //         PrimitiveBasics {
+    //             typ: PrimitiveSpecType::Conv { accum: false },
+    //             spec_shape: smallvec![
+    //                 args.batch,
+    //                 args.filters,
+    //                 args.channels,
+    //                 args.size,
+    //                 args.size,
+    //                 args.filters_size,
+    //                 args.filters_size
+    //             ],
+    //             dtype: Dtype::Uint32,
+    //         },
+    //     ],
+    //     operand_auxes: vec![
+    //         TensorSpecAux {
+    //             contig: rm.contiguous_full(),
+    //             aligned: true,
+    //             level: X86MemoryLevel::GL,
+    //             layout: rm,
+    //             vector_shape: None,
+    //         };
+    //         4
+    //     ],
+    //     serial_only: true,
+    // };
+
+    let problem = Problem(matmul_spec, X86Target::max_mem());
 
     let start_time = std::time::Instant::now();
     let (_, hits, misses) = search::top_down(&db, &problem, 1);
@@ -108,5 +129,9 @@ fn main() {
         hits + misses
     );
 
-    pprint(&*db.read().unwrap(), &problem);
+    let Some(results) = db.read().unwrap().get_impl(&problem) else {
+        panic!("No Impl found");
+    };
+    assert_eq!(results.len(), 1);
+    pprint(&results[0]);
 }

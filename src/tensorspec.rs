@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt::Display;
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
-use crate::layout::Layout;
+use crate::layout::{row_major, Layout};
 use crate::target::{MemoryLevel, Target};
 use crate::utils::join_into_string;
 
@@ -134,8 +135,14 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         true
     }
 
-    pub fn bytes_used(&self) -> u32 {
-        u32::from(self.dtype.size()) * self.dim_sizes.iter().product::<u32>()
+    pub fn bytes_used(&self) -> u64 {
+        u64::from(self.dtype.size())
+            * self
+                .dim_sizes
+                .iter()
+                .copied()
+                .map(u64::from)
+                .product::<u64>()
     }
 
     pub fn dim_sizes(&self) -> &Shape {
@@ -178,19 +185,76 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     ///
     /// The result's layout and contiguousness abstraction will have been
     /// canoncialized for the given shape.
-    pub fn shrink(&mut self, dim_sizes: &Shape, aligned: bool) {
+    pub fn shrink(&mut self, dim_sizes: &[DimSize], aligned: bool) {
         // This implementation is similar to `canonicalize`, but the tile
         // contiguousness is computed from both old and new shapes.
         self.aux.contig =
             self.layout()
                 .tile_contiguity(dim_sizes, &self.dim_sizes, self.aux.contig);
-        self.dim_sizes = dim_sizes.clone();
+        self.dim_sizes = Shape::from(dim_sizes);
         self.aux.layout = self.aux.layout.canonicalize_for_shape(&self.dim_sizes);
         self.aux.aligned = aligned;
     }
 
     pub fn canonicalize(&mut self) {
         self.aux.canonicalize(&self.dim_sizes, self.aux.aligned);
+    }
+
+    /// Returns a TensorSpec with given size-one dimensions dropped.
+    ///
+    /// The given dimension indices must be sorted in ascending order.
+    ///
+    /// The result will be canoncialized. If any given dimension index is not
+    /// size one, this method panics.
+    pub fn squeeze_dims(&self, dropped_dims: &[u8]) -> TensorSpec<Tgt> {
+        // Make sure dropped_dims is sorted.
+        debug_assert!(dropped_dims.windows(2).all(|w| w[0] < w[1]));
+
+        let mut new_dim_sizes = self.dim_sizes().clone();
+        for &dim in dropped_dims.iter().rev() {
+            assert_eq!(
+                new_dim_sizes[usize::from(dim)],
+                1,
+                "Cannot drop non-degenerate dimension {} of shape {:?}",
+                dim,
+                new_dim_sizes
+            );
+            new_dim_sizes.remove(dim.into());
+        }
+
+        let mut new_vector_shape = None;
+        if let Some(vector_shape) = self.vector_shape() {
+            new_vector_shape = Some(vector_shape.to_vec());
+            for &dim in dropped_dims.iter().rev() {
+                assert_eq!(
+                    vector_shape[usize::from(dim)],
+                    1,
+                    "Cannot drop dimension {} of vector shape {:?}",
+                    dim,
+                    vector_shape
+                );
+                new_vector_shape.as_mut().unwrap().remove(dim.into());
+            }
+        }
+
+        let (new_layout, new_contig) = if new_dim_sizes.iter().all(|&d| d == 1) {
+            let new_layout = row_major(new_dim_sizes.len().try_into().unwrap());
+            (new_layout.clone(), new_layout.contiguous_full())
+        } else {
+            let dropped_dims_set = dropped_dims.iter().copied().collect::<HashSet<_>>();
+            self.layout()
+                .dim_drop(&dropped_dims_set, self.contiguous_abs())
+        };
+
+        TensorSpec::new_canon(
+            new_dim_sizes,
+            self.dtype(),
+            new_contig,
+            self.aligned(),
+            self.level(),
+            new_layout,
+            new_vector_shape.map(|v| v.into()),
+        )
     }
 
     // TODO: Shouldn't need this method. Should be implicit in Spec validity.

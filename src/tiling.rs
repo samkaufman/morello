@@ -1,25 +1,12 @@
+use crate::common::{DimSize, Shape};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-
 use std::fmt::Debug;
-
-use crate::alignment::aligned_approx;
-use crate::common::{DimSize, Shape};
-
-use crate::target::Target;
-use crate::tensorspec::TensorSpec;
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Tiling {
     shape: Shape,
     step_sizes: SmallVec<[DimSize; 5]>,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-pub struct OperandTile {
-    pub tiling: Tiling,
-    pub source_idx: u8,
-    pub aligned: bool,
 }
 
 /// A tiling over either Spec or operand shapes.
@@ -51,41 +38,6 @@ impl Tiling {
             .all(|(s, t)| *s == *t)
     }
 
-    pub fn into_operand_tile<Tgt: Target>(
-        self,
-        source_idx: u8,
-        source_spec: &TensorSpec<Tgt>,
-    ) -> OperandTile {
-        let source_spec = source_spec;
-        let new_dims: &[DimSize] = &self.shape;
-        assert_eq!(
-            new_dims.len(),
-            source_spec.dim_sizes().len(),
-            "Cannot produce rank-{} tile of shape {:?} for rank-{} tensor of shape {:?}",
-            new_dims.len(),
-            new_dims,
-            source_spec.dim_sizes().len(),
-            source_spec.dim_sizes(),
-        );
-
-        assert!(
-            new_dims
-                .iter()
-                .zip(source_spec.dim_sizes().iter())
-                .all(|(td, rd)| td <= rd),
-            "Tile {:?} would be larger than tensor {:?}",
-            new_dims,
-            source_spec.dim_sizes(),
-        );
-
-        let aligned = aligned_approx(&self, new_dims, source_spec);
-        OperandTile {
-            tiling: self,
-            source_idx,
-            aligned,
-        }
-    }
-
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
@@ -94,7 +46,19 @@ impl Tiling {
         &self.step_sizes
     }
 
-    /// Returns the total number of steps taken by windows sliding over a size.
+    /// Returns the total number of steps for a given tensor shape.
+    ///
+    /// The result will include boundary steps.
+    pub fn steps(&self, origin_shape: &[DimSize]) -> u32 {
+        assert_eq!(self.shape.len(), origin_shape.len());
+        origin_shape
+            .iter()
+            .enumerate()
+            .map(|(d, &s)| self.steps_dim(u8::try_from(d).unwrap(), s))
+            .product()
+    }
+
+    /// Returns the number of steps taken by a window sliding over a dimension.
     ///
     /// The result will include boundary steps.
     pub fn steps_dim(&self, dim: u8, origin_size: DimSize) -> u32 {

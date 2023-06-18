@@ -1,12 +1,13 @@
 use crate::common::DimSize;
 use crate::cost::MainCost;
-use crate::imp::{
-    broadcastvecmult_applies_to_operands, memsetzero_applies_to_operands, mult_applies_to_operands,
-    valueassign_applies_to_operands, vectorassign_applies_to_operands,
-    vectorzero_applies_to_operands, ImplNode,
-};
+use crate::imp::kernels::KernelType;
 use crate::layout::{nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
+use crate::scheduling::{
+    broadcastvecmult_applies_to_operands, memsetzero_applies_to_operands, mult_applies_to_operands,
+    valueassign_applies_to_operands, vectorassign_applies_to_operands,
+    vectorzero_applies_to_operands, SchedulingDecision,
+};
 use crate::spec::{PrimitiveBasics, PrimitiveSpecType, Spec};
 
 use serde::de::DeserializeOwned;
@@ -31,7 +32,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug + 'static {
     fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout>;
 
     /// Yield target-specific expansions of given Spec.
-    fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = ImplNode<Self>>>;
+    fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = SchedulingDecision<Self>>>;
 }
 
 pub trait MemoryLevel:
@@ -98,17 +99,18 @@ impl Target for X86Target {
         }
     }
 
-    fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = ImplNode<Self>>> {
+    fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = SchedulingDecision<Self>>> {
         match spec {
             Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
                 PrimitiveSpecType::Matmul { accum } => {
                     if *accum {
                         let mut microkernels = vec![];
-                        if mult_applies_to_operands(&spec.operands()) {
-                            microkernels.push(ImplNode::Mult);
+                        if mult_applies_to_operands(&spec.parameters()) {
+                            microkernels.push(SchedulingDecision::Place(KernelType::Mult));
                         }
-                        if broadcastvecmult_applies_to_operands(&spec.operands()) {
-                            microkernels.push(ImplNode::BroadcastVecMult);
+                        if broadcastvecmult_applies_to_operands(&spec.parameters()) {
+                            microkernels
+                                .push(SchedulingDecision::Place(KernelType::BroadcastVecMult));
                         }
                         Box::new(microkernels.into_iter())
                     } else {
@@ -118,21 +120,21 @@ impl Target for X86Target {
                 PrimitiveSpecType::Conv { .. } => Box::new(iter::empty()),
                 PrimitiveSpecType::Load { .. } | PrimitiveSpecType::Store { .. } => {
                     let mut microkernels = vec![];
-                    if valueassign_applies_to_operands(&spec.operands()) {
-                        microkernels.push(ImplNode::ValueAssign);
+                    if valueassign_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(SchedulingDecision::Place(KernelType::ValueAssign));
                     }
-                    if vectorassign_applies_to_operands(&spec.operands()) {
-                        microkernels.push(ImplNode::VectorAssign);
+                    if vectorassign_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(SchedulingDecision::Place(KernelType::VectorAssign));
                     }
                     Box::new(microkernels.into_iter())
                 }
                 PrimitiveSpecType::Zero { .. } => {
                     let mut microkernels = vec![];
-                    if memsetzero_applies_to_operands(&spec.operands()) {
-                        microkernels.push(ImplNode::MemsetZero);
+                    if memsetzero_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(SchedulingDecision::Place(KernelType::MemsetZero));
                     }
-                    if vectorzero_applies_to_operands(&spec.operands()) {
-                        microkernels.push(ImplNode::VectorZero);
+                    if vectorzero_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(SchedulingDecision::Place(KernelType::VectorZero));
                     }
                     Box::new(microkernels.into_iter())
                 }

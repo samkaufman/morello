@@ -1,15 +1,16 @@
-use std::sync::RwLock;
-
 use smallvec::SmallVec;
+use std::sync::RwLock;
 
 use crate::common::Problem;
 use crate::cost::Cost;
-use crate::imp::ImplNode;
+use crate::imp::{visit_leaves, ImplNode};
+use crate::memorylimits::MemoryLimits;
+use crate::scheduling::SchedulingDecision;
 use crate::table::Database;
 use crate::target::Target;
 
 struct ImplReducer<Tgt: Target> {
-    results: Vec<(ImplNode<Tgt>, Cost)>,
+    results: Vec<(SchedulingDecision<Tgt>, Cost)>,
     top_k: usize,
 }
 
@@ -19,7 +20,7 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
     db: &RwLock<D>,
     goal: &Problem<Tgt>,
     top_k: usize,
-) -> (SmallVec<[(ImplNode<Tgt>, Cost); 1]>, u64, u64) {
+) -> (SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>, u64, u64) {
     if top_k > 1 {
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
@@ -34,42 +35,54 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
 
     // Enumerate expansions, computing their costs from their childrens' costs.
     let mut reducer = ImplReducer::new(top_k);
-    for (expanded_node, child_mem_bounds) in goal.expansions() {
-        let mut child_sub_costs = Vec::with_capacity(child_mem_bounds.len());
 
-        // Recurse into children.
+    for decision in goal.0.decisions() {
+        // TODO: Integrate transition logic into `apply`.
+        let Some(partial_impl) = decision.apply(goal) else {
+            continue;
+        };
+
+        // Compute all nested Specs, accumulating their costs into nested_problem_costs.
         let mut unsat = false;
-        let child_specs = expanded_node.child_specs(&goal.0);
-        debug_assert_eq!(
-            child_specs.len(),
-            child_mem_bounds.len(),
-            "Got {} child Specs but {} memory bounds for {:?}",
-            child_specs.len(),
-            child_mem_bounds.len(),
-            expanded_node
-        );
-        for (child, mlims) in child_specs.iter().zip(child_mem_bounds) {
-            let next_problem = Problem(child.clone(), mlims);
-            debug_assert_ne!(
-                &next_problem, goal,
-                "Immediate loop on sub-problem: {}. Expanded from node: {:?}",
-                goal, expanded_node
+        let mut nested_problem_costs = Vec::new();
+        visit_leaves(&partial_impl, &mut |leaf| {
+            let ImplNode::ProblemApp(problem_app) = leaf else {
+                return true;
+            };
+            let nested_problem = &problem_app.0;
+
+            assert_ne!(
+                goal, nested_problem,
+                "Immediate recursion on ({}, {:?}) after applying {:?}",
+                goal.0, goal.1, decision
             );
-            let (child_result, subhits, submisses) = top_down(db, &next_problem, top_k);
+
+            let (child_results, subhits, submisses) = top_down(db, nested_problem, top_k);
             hits += subhits;
             misses += submisses;
-            if child_result.is_empty() {
+            if child_results.is_empty() {
                 unsat = true;
-                break;
+                return false;
             }
-            child_sub_costs.push(child_result[0].1.clone()); // TODO: Should move
-        }
+            nested_problem_costs.push(child_results[0].1.clone()); // TODO: Should move
+            true
+        });
         if unsat {
             continue;
         }
 
-        let cost = Cost::from_child_costs(&goal.0, &expanded_node, &child_sub_costs);
-        reducer.insert(expanded_node, cost);
+        let cost = Cost::from_child_costs(&partial_impl, &nested_problem_costs);
+        if let MemoryLimits::Standard(g) = &goal.1 {
+            debug_assert!(
+                cost.peaks.iter().zip(g).all(|(a, b)| *a <= b),
+                "While synthesizing {:?}, scheduling decision yielded memory \
+                bound-violating {:?} with peak memory {:?}",
+                goal,
+                partial_impl,
+                cost.peaks
+            );
+        }
+        reducer.insert(decision, cost);
     }
 
     // Save to memo. table and return.
@@ -86,11 +99,11 @@ impl<Tgt: Target> ImplReducer<Tgt> {
         }
     }
 
-    fn insert(&mut self, new_impl: ImplNode<Tgt>, cost: Cost) {
+    fn insert(&mut self, new_impl: SchedulingDecision<Tgt>, cost: Cost) {
         self.results.push((new_impl, cost));
     }
 
-    fn finalize(&self) -> SmallVec<[(ImplNode<Tgt>, Cost); 1]> {
+    fn finalize(&self) -> SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]> {
         // Using sorted here for stability.
         let mut sorted_results = self.results.clone();
         sorted_results.sort_by_key(|x| x.1.clone());

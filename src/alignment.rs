@@ -6,14 +6,12 @@ use crate::tiling::Tiling;
 
 use log::warn;
 
-pub fn aligned_approx<Tgt: Target>(
-    tiling: &Tiling,
-    tile_shape: &[DimSize],
-    parent: &TensorSpec<Tgt>,
-) -> bool {
+pub fn aligned_approx<Tgt: Target>(tiling: &Tiling, parent: &TensorSpec<Tgt>) -> bool {
     if !parent.is_contiguous() || !parent.aligned() {
         return false;
     }
+
+    let tile_shape: &[DimSize] = tiling.shape().as_slice();
 
     match (parent.layout(), tiling.is_simple()) {
         (Layout::Standard { dim_order }, true) => aligned_approx_standard_simple::<Tgt>(
@@ -35,7 +33,6 @@ pub fn aligned_approx<Tgt: Target>(
         }
         (_, false) => {
             if tile_shape[1..] == parent.dim_sizes()[1..] {
-                // parent.aligned_approx(TypeId::of::<SimpleTile>(), tile_shape, parent)
                 todo!()
             } else {
                 warn!("No alignment analysis for non-batch convolution");

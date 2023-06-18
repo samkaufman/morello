@@ -19,7 +19,7 @@ mod imp;
 mod layout;
 mod memorylimits;
 mod pprint;
-mod reinterpret;
+mod scheduling;
 mod search;
 mod spec;
 mod table;
@@ -27,6 +27,7 @@ mod target;
 mod tensorspec;
 mod tiling;
 mod utils;
+mod views;
 
 use crate::common::{DimSize, Dtype, Problem};
 use crate::geometry::ToFromDependencyLatticeCoordinate;

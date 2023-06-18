@@ -1,59 +1,109 @@
 use log::warn;
 use serde::{Deserialize, Serialize};
-use std::ops::{Index, IndexMut};
-
 use smallvec::SmallVec;
 
+use std::{
+    iter,
+    ops::{Index, IndexMut, Sub},
+};
+
 use crate::{
-    imp::ImplNode,
-    spec::Spec,
     target::{Target, MAX_LEVEL_COUNT},
     utils::prev_power_of_two,
 };
 
+/// MemoryLimits are bounds on available memory for each level of a target.
+///
+/// There are two variants. `MemoryLimits::Standard` simply counts the number of bytes
+/// remaining at each level, and no Spec satisfying the MemoryLimits should have a peak
+/// exceeding those. `MemoryLimits::Pipeline` counts separately the memory used by
+/// intermediate tensors just before or after a stage. This expands the set of
+/// `ImplNode::Pipeline`s which might satisfy a Spec, because it is valid for
+/// that `Pipeline` to assume that those bytes have been freed after its own
+/// first and last stages complete.
+///
+/// By convention, MemoryLimits are always discretized to powers of two. It is
+/// responsibility of the constructor to call `discretize`.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Deserialize, Serialize)]
 pub enum MemoryLimits {
+    // TODO: Implement Pipeline as described above.
     Standard(MemVec),
+}
+
+pub enum MemoryAllocation {
+    Simple(MemVec),
+    Inner(Vec<MemVec>),
+    Pipeline {
+        intermediate_consumption: Vec<MemVec>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
 pub struct MemVec(SmallVec<[u64; MAX_LEVEL_COUNT]>);
 
 impl MemoryLimits {
-    /// Produce new MemoryLimits for each child of a node. Returns `None` if the
-    /// the memory allocation exceeds this limit.
+    /// Convert to a `MemoryLimits::Standard`.
+    ///
+    /// This is always safe, but conservative.
+    pub fn into_standard(self) -> Self {
+        match self {
+            MemoryLimits::Standard(_) => self,
+        }
+    }
+
+    pub fn discretize(&mut self) {
+        match self {
+            MemoryLimits::Standard(mem_vec) => {
+                for i in 0..mem_vec.len() {
+                    mem_vec[i] = prev_power_of_two(mem_vec[i]);
+                }
+            }
+        }
+    }
+
+    /// Produce new MemoryLimits for each child of a node after some allocation.
+    /// Returns `None` if the given memory allocation exceeds this limit.
     ///
     /// Not that this ignores base memory allocations at the leaves. It is intended to
     /// be used to prune expansions which consume too much memory without traversing.
     pub fn transition<Tgt: Target>(
         &self,
-        node_spec: &Spec<Tgt>,
-        node: &ImplNode<Tgt>,
+        allocated: &MemoryAllocation,
     ) -> Option<Vec<MemoryLimits>> {
         warn!("Not transitioning to pipeline MemoryLimits yet");
 
-        let allocated = node.memory_allocated(node_spec);
-        let mut result = Vec::with_capacity(allocated.during_children.len());
-        match &self {
-            MemoryLimits::Standard(cur_limit) => {
-                for child_allocation in allocated.during_children {
-                    assert_eq!(child_allocation.len(), cur_limit.len());
-                    let mut new_bound = cur_limit.clone();
-                    for idx in 0..new_bound.len() {
-                        if new_bound[idx] < child_allocation[idx] {
-                            return None;
-                        }
-                        new_bound[idx] -= child_allocation[idx];
-                        // Round down to power of two. This underapproximates
-                        // the amount of available memory.
-                        new_bound[idx] = prev_power_of_two(new_bound[idx]);
-                    }
+        let per_child_diffs: Box<dyn Iterator<Item = &MemVec>> = match allocated {
+            MemoryAllocation::Simple(v) => Box::new(iter::repeat(v)),
+            MemoryAllocation::Inner(during_children) => Box::new(during_children.iter()),
+            MemoryAllocation::Pipeline {
+                intermediate_consumption: _,
+            } => todo!(),
+        };
 
-                    result.push(MemoryLimits::Standard(new_bound));
+        match self {
+            MemoryLimits::Standard(cur_limit) => {
+                let mut result = Vec::with_capacity(cur_limit.len());
+                for child_allocation in per_child_diffs {
+                    debug_assert_eq!(child_allocation.len(), cur_limit.len());
+                    let Some(to_push) = cur_limit
+                        .clone()
+                        .checked_sub(child_allocation) else
+                    {
+                        return None;
+                    };
+                    let mut to_push = MemoryLimits::Standard(to_push);
+                    to_push.discretize();
+                    result.push(to_push);
                 }
+                Some(result)
             }
         }
-        Some(result)
+    }
+}
+
+impl MemoryAllocation {
+    pub fn none<Tgt: Target>() -> Self {
+        MemoryAllocation::Simple(MemVec::zero::<Tgt>())
     }
 }
 
@@ -71,8 +121,41 @@ impl MemVec {
         self.0.len()
     }
 
+    pub fn checked_sub(self, rhs: &MemVec) -> Option<MemVec> {
+        assert_eq!(self.len(), rhs.len());
+        let mut result = self;
+        for idx in 0..result.len() {
+            if result[idx] < rhs[idx] {
+                return None;
+            }
+            result[idx] -= rhs[idx];
+        }
+        Some(result)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &u64> {
         self.0.iter()
+    }
+}
+
+impl Sub for MemVec {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        assert_eq!(self.len(), rhs.len());
+        let mut result = self;
+        for idx in 0..result.len() {
+            result[idx] -= rhs[idx];
+        }
+        result
+    }
+}
+
+impl Sub<MemVec> for &MemVec {
+    type Output = MemVec;
+
+    fn sub(self, rhs: MemVec) -> Self::Output {
+        self.clone() - rhs
     }
 }
 
