@@ -15,6 +15,7 @@ use smallvec::smallvec;
 mod alignment;
 mod common;
 mod cost;
+mod expr;
 mod geometry;
 mod imp;
 mod layout;

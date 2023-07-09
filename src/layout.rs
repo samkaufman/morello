@@ -4,6 +4,7 @@ use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
+    expr::{AffineExpr, Term},
     target::Target,
 };
 
@@ -20,12 +21,22 @@ pub enum Layout {
 }
 
 impl Layout {
-    fn buffer_indexing_expr(&self, _concrete_shape: Shape) -> f64 {
-        todo!()
+    fn buffer_indexing_expr(&self, concrete_shape: &Shape) -> AffineExpr {
+        match self {
+            Layout::Standard { dim_order } => {
+                debug_assert_eq!(dim_order.len(), concrete_shape.len());
+                regular_index_expr(&dim_order, concrete_shape)
+            }
+            Layout::Packed {
+                dim_count,
+                strip_dim,
+                strip_size,
+            } => todo!(),
+        }
     }
 
     pub fn contiguous_full(&self) -> Contig {
-        match &self {
+        match self {
             Layout::Standard { dim_order } => dim_order.len().try_into().unwrap(),
             Layout::Packed { dim_count, .. } => dim_count + 1,
         }
@@ -36,7 +47,7 @@ impl Layout {
     }
 
     pub fn all_contiguous_abs(&self) -> impl Iterator<Item = Contig> {
-        match &self {
+        match self {
             Layout::Standard { dim_order } => 0u8..(dim_order.len() + 1).try_into().unwrap(),
             Layout::Packed { dim_count, .. } => 0u8..(*dim_count + 2),
         }
@@ -365,6 +376,22 @@ impl Display for Layout {
             } => todo!(),
         }
     }
+}
+
+fn regular_index_expr(logical_dims: &[u8], shape: &Shape) -> AffineExpr {
+    assert!(!logical_dims.is_empty());
+    let t = logical_dims.last().unwrap();
+    let remaining_dims = &logical_dims[..logical_dims.len() - 1];
+    let s = i32::try_from(shape[usize::from(t)]).unwrap();
+    let p = if s > 1 {
+        AffineExpr(vec![Term(1, format!("p{}", t))], 0)
+    } else {
+        AffineExpr(vec![], 0) // zero
+    };
+    if remaining_dims.is_empty() {
+        return p;
+    }
+    regular_index_expr(remaining_dims, shape) * s + p
 }
 
 pub fn row_major(rank: u8) -> Layout {
