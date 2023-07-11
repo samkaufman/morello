@@ -7,10 +7,18 @@ use by_address::ByThinAddress;
 use prettytable::{self, format, row, Cell};
 use std::collections::HashMap;
 
-static ASCII_LOWER: [char; 26] = [
-    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's',
-    't', 'u', 'v', 'w', 'x', 'y', 'z',
-];
+const fn ascii_lower() -> [char; 26] {
+    let mut result = ['a'; 26];
+
+    let mut c: u8 = 'a' as u8;
+    while c <= 'z' as u8 {
+        result[(c - 97) as usize] = c as char;
+        c += 1;
+    }
+
+    result
+}
+static ASCII_LOWER: [char; 26] = ascii_lower();
 
 pub struct NameEnv<'t, Tgt: Target> {
     names: HashMap<ByThinAddress<&'t dyn View<Tgt = Tgt>>, String>,
