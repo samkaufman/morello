@@ -1,7 +1,10 @@
-use crate::common::{DimSize, Shape};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::fmt::Debug;
+
+use crate::common::{DimSize, Shape};
+use crate::expr::AffineExpr;
+use crate::layout::BufferExprTerm;
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Tiling {

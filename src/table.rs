@@ -1,9 +1,9 @@
-use crate::common::Problem;
+use crate::common::Spec;
 use crate::cost::Cost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::SchedulingDecision;
-use crate::spec::Spec;
+use crate::spec::LogicalSpec;
 use crate::target::Target;
 
 use rusqlite::params_from_iter;
@@ -15,22 +15,22 @@ use std::path;
 
 const SQLITE_BATCH_SIZE: usize = 1_000;
 
-pub type DbImpl<Tgt> = ImplNode<Tgt, Option<(Problem<Tgt>, Cost)>>;
+pub type DbImpl<Tgt> = ImplNode<Tgt, Option<(Spec<Tgt>, Cost)>>;
 
 pub trait Database<Tgt: Target> {
-    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>>;
+    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>>;
     // TODO: Drop get_spec, which exists solely for SqliteDatabaseWrapper.
-    fn get_spec(&self, spec: &Spec<Tgt>) -> Option<&Entry<Tgt>>;
-    fn put(&mut self, problem: Problem<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>);
+    fn get_spec(&self, spec: &LogicalSpec<Tgt>) -> Option<&Entry<Tgt>>;
+    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>);
     fn flush(&mut self);
 }
 
 pub trait DatabaseExt<Tgt: Target> {
-    fn get_impl(&self, query: &Problem<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>;
+    fn get_impl(&self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>;
 }
 
 pub struct InMemDatabase<Tgt: Target> {
-    grouped_entries: HashMap<Spec<Tgt>, Entry<Tgt>>,
+    grouped_entries: HashMap<LogicalSpec<Tgt>, Entry<Tgt>>,
 }
 
 pub struct SqliteDatabaseWrapper<Tgt: Target, D: Database<Tgt>> {
@@ -42,7 +42,7 @@ pub struct SqliteDatabaseWrapper<Tgt: Target, D: Database<Tgt>> {
 
 #[allow(clippy::large_enum_variant)] // Because Flush and Stop are rare.
 enum SqliteDatabaseWrapperMsg<Tgt: Target> {
-    Put(Spec<Tgt>, Entry<Tgt>),
+    Put(LogicalSpec<Tgt>, Entry<Tgt>),
     Flush { should_respond: bool },
     Stop,
 }
@@ -86,21 +86,17 @@ impl<Tgt: Target> InMemDatabase<Tgt> {
 }
 
 impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
-    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
+    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
         self.grouped_entries
             .get(&query.0)
             .and_then(|e| self.get_from_entry(&query.1, e))
     }
 
-    fn get_spec(&self, spec: &Spec<Tgt>) -> Option<&Entry<Tgt>> {
+    fn get_spec(&self, spec: &LogicalSpec<Tgt>) -> Option<&Entry<Tgt>> {
         self.grouped_entries.get(spec)
     }
 
-    fn put(
-        &mut self,
-        problem: Problem<Tgt>,
-        impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>,
-    ) {
+    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>) {
         // self.entries.insert(problem, impls);
 
         let orig_problem = problem.clone(); // Save for debug_assert_eq! postcondition.
@@ -188,19 +184,15 @@ impl<Tgt: Target, D: Database<Tgt>> SqliteDatabaseWrapper<Tgt, D> {
 }
 
 impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt, D> {
-    fn get(&self, query: &Problem<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
+    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
         self.inner.get(query)
     }
 
-    fn get_spec(&self, _spec: &Spec<Tgt>) -> Option<&Entry<Tgt>> {
+    fn get_spec(&self, _spec: &LogicalSpec<Tgt>) -> Option<&Entry<Tgt>> {
         unimplemented!()
     }
 
-    fn put(
-        &mut self,
-        problem: Problem<Tgt>,
-        impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>,
-    ) {
+    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>) {
         self.inner.put(problem.clone(), impls);
         let updated = self.inner.get_spec(&problem.0).unwrap();
         self.tx
@@ -226,7 +218,7 @@ impl<Tgt: Target, D: Database<Tgt>> Drop for SqliteDatabaseWrapper<Tgt, D> {
 }
 
 impl<Tgt: Target, T: Database<Tgt>> DatabaseExt<Tgt> for T {
-    fn get_impl(&self, query: &Problem<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>> {
+    fn get_impl(&self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>> {
         let Some(root_results) = self.get(query) else {
             return None;
         };
@@ -261,7 +253,7 @@ impl<Tgt: Target> Default for Entry<Tgt> {
 
 fn do_flush<Tgt: Target>(
     conn: &rusqlite::Connection,
-    pending_puts: &mut HashMap<Spec<Tgt>, Entry<Tgt>>,
+    pending_puts: &mut HashMap<LogicalSpec<Tgt>, Entry<Tgt>>,
 ) {
     if !pending_puts.is_empty() {
         let post = vec!["(?, ?)"].repeat(pending_puts.len()).join(", ");

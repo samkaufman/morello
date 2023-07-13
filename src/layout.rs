@@ -5,6 +5,7 @@ use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
     expr::{AffineExpr, Term},
+    opaque_symbol::OpaqueSymbol,
     target::Target,
 };
 
@@ -20,17 +21,28 @@ pub enum Layout {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BufferExprTerm {
+    TileIdx(u8, OpaqueSymbol),
+    // TODO: Probably don't need the OpaqueSymbol for Pt
+    Pt(u8, OpaqueSymbol),
+}
+
 impl Layout {
-    fn buffer_indexing_expr(&self, concrete_shape: &Shape) -> AffineExpr {
+    pub fn buffer_indexing_expr(
+        &self,
+        expr_id: &OpaqueSymbol,
+        concrete_shape: &[DimSize],
+    ) -> AffineExpr<BufferExprTerm> {
         match self {
             Layout::Standard { dim_order } => {
                 debug_assert_eq!(dim_order.len(), concrete_shape.len());
-                regular_index_expr(&dim_order, concrete_shape)
+                regular_index_expr(expr_id, dim_order, concrete_shape)
             }
             Layout::Packed {
-                dim_count,
-                strip_dim,
-                strip_size,
+                dim_count: _,
+                strip_dim: _,
+                strip_size: _,
             } => todo!(),
         }
     }
@@ -378,20 +390,24 @@ impl Display for Layout {
     }
 }
 
-fn regular_index_expr(logical_dims: &[u8], shape: &Shape) -> AffineExpr {
+fn regular_index_expr(
+    expr_id: &OpaqueSymbol,
+    logical_dims: &[u8],
+    shape: &[DimSize],
+) -> AffineExpr<BufferExprTerm> {
     assert!(!logical_dims.is_empty());
-    let t = logical_dims.last().unwrap();
+    let t = *logical_dims.last().unwrap();
     let remaining_dims = &logical_dims[..logical_dims.len() - 1];
     let s = i32::try_from(shape[usize::from(t)]).unwrap();
     let p = if s > 1 {
-        AffineExpr(vec![Term(1, format!("p{}", t))], 0)
+        AffineExpr(vec![Term(1, BufferExprTerm::Pt(t, expr_id.clone()))], 0)
     } else {
         AffineExpr(vec![], 0) // zero
     };
     if remaining_dims.is_empty() {
         return p;
     }
-    regular_index_expr(remaining_dims, shape) * s + p
+    regular_index_expr(expr_id, remaining_dims, shape) * s + p
 }
 
 pub fn row_major(rank: u8) -> Layout {

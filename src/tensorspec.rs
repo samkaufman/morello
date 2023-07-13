@@ -259,6 +259,11 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     // TODO: Shouldn't need this method. Should be implicit in Spec validity.
     pub fn can_move_to(&self, dest_layout: &Layout, dest_level: &Tgt::Level) -> bool {
+        // TODO: Remove this filter.
+        if dest_level.vector_rf() {
+            return false;
+        }
+
         if &self.layout() != dest_layout && !dest_level.is_addressed() {
             return false;
         }

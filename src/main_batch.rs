@@ -12,6 +12,7 @@ use spec::{PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
 use tensorspec::TensorSpecAux;
 
 mod alignment;
+mod codegen;
 mod common;
 mod cost;
 mod expr;
@@ -19,6 +20,8 @@ mod geometry;
 mod imp;
 mod layout;
 mod memorylimits;
+mod nameenv;
+mod opaque_symbol;
 mod pprint;
 mod scheduling;
 mod search;
@@ -30,10 +33,10 @@ mod tiling;
 mod utils;
 mod views;
 
-use crate::common::{DimSize, Dtype, Problem};
+use crate::common::{DimSize, Dtype, Spec};
 use crate::geometry::ToFromDependencyLatticeCoordinate;
 use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::spec::Spec;
+use crate::spec::LogicalSpec;
 use crate::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::utils::iter_powers_of_two;
@@ -72,9 +75,9 @@ fn main() {
     }
 }
 
-fn load_or_store(prim_type: PrimitiveSpecType, size: DimSize, rank: u8) -> Spec<X86Target> {
+fn load_or_store(prim_type: PrimitiveSpecType, size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
     let layout = layout::row_major(rank);
-    Spec::Primitive(
+    LogicalSpec::Primitive(
         PrimitiveBasics {
             typ: prim_type,
             spec_shape: smallvec![size; rank.into()],
@@ -107,15 +110,11 @@ where
     // TODO: Most of the following details aren't used in computing the bound.
     // It could be simplified.
     let mut bounds = vec![];
-    bounds.extend((1..5).flat_map(|rank| {
-        [
-            load_or_store(PrimitiveSpecType::Load, args.size, rank),
-            load_or_store(PrimitiveSpecType::Store, args.size, rank),
-        ]
-    }));
+    bounds
+        .extend((1..5).flat_map(|rank| [load_or_store(PrimitiveSpecType::Move, args.size, rank)]));
     bounds.extend((1..5).map(|rank| {
         let layout = layout::row_major(rank);
-        Spec::Primitive(
+        LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Zero,
                 spec_shape: smallvec![args.size; rank.into()],
@@ -140,7 +139,7 @@ where
             layout,
             vector_shape: None,
         };
-        Spec::Primitive(
+        LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Matmul { accum: false },
                 spec_shape: smallvec![args.size, args.size, args.size],
@@ -162,7 +161,7 @@ where
         args.filters_size
             .iter()
             .map(|&fs| {
-                Spec::Primitive(
+                LogicalSpec::Primitive(
                     PrimitiveBasics {
                         typ: PrimitiveSpecType::Conv { accum: false },
                         spec_shape: smallvec![
@@ -209,7 +208,7 @@ where
                 debug_assert!(worklist.is_empty());
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
-                    let problem = Problem(spec.clone(), MemoryLimits::Standard(job));
+                    let problem = Spec(spec.clone(), MemoryLimits::Standard(job));
                     let MemoryLimits::Standard(job) = &problem.1;
                     let result = search::top_down(&db, &problem, 1);
                     if let [(_, only_result_cost)] = &result.0[..] {
@@ -270,7 +269,9 @@ impl MemoryLimitsIterator for SkippingLimitsIterator {
     }
 }
 
-fn specs_to_compute(bound: &Spec<X86Target>) -> impl Iterator<Item = Vec<Vec<Spec<X86Target>>>> {
+fn specs_to_compute(
+    bound: &LogicalSpec<X86Target>,
+) -> impl Iterator<Item = Vec<Vec<LogicalSpec<X86Target>>>> {
     let grid_map_result = bound.to_grid();
     if grid_map_result.is_none() {
         panic!("Could not map {:?} to grid", bound);
@@ -290,7 +291,7 @@ fn specs_to_compute(bound: &Spec<X86Target>) -> impl Iterator<Item = Vec<Vec<Spe
         let mut tasks = vec![];
         for pt in utils::sum_seqs(&bound_pt, stage) {
             let mut task = vec![];
-            for sp in Spec::<X86Target>::objects_in_grid_pt(&spec_key, &pt) {
+            for sp in LogicalSpec::<X86Target>::objects_in_grid_pt(&spec_key, &pt) {
                 if sp.is_canonical() {
                     task.push(sp);
                 }

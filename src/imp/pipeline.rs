@@ -1,10 +1,12 @@
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
-use crate::pprint::NameEnv;
+use crate::nameenv::NameEnv;
 use crate::target::Target;
-use crate::views::{Tensor, View};
+use crate::views::{Param, Tensor, View};
+use std::collections::HashMap;
 
+use crate::tensorspec::TensorSpec;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
@@ -15,6 +17,10 @@ pub struct Pipeline<Tgt: Target, Aux: Clone> {
 }
 
 impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
+    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
+        todo!()
+    }
+
     fn children(&self) -> &[ImplNode<Tgt, Aux>] {
         &self.stages
     }
@@ -28,8 +34,8 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
                     Tgt::levels()
                         .iter()
                         .map(|l| {
-                            if &t.0.level() == l {
-                                t.0.bytes_used()
+                            if &t.spec().level() == l {
+                                t.spec().bytes_used()
                             } else {
                                 0
                             }
@@ -44,9 +50,17 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
         child_costs.iter().sum()
     }
 
+    fn bind<'i, 'j: 'i>(
+        &'j self,
+        args: &[&'j dyn View<Tgt = Tgt>],
+        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
+    ) {
+        todo!("Implement bind for Pipeline");
+    }
+
     fn line_strs<'a>(
         &'a self,
-        _names: &mut NameEnv<'a, Tgt>,
+        _names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         _args: &[&dyn View<Tgt = Tgt>],
     ) -> Option<String> {
         let intermeds = self

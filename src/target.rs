@@ -8,7 +8,7 @@ use crate::scheduling::{
     valueassign_applies_to_operands, vectorassign_applies_to_operands,
     vectorzero_applies_to_operands, SchedulingDecision,
 };
-use crate::spec::{PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug + 'static {
     fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout>;
 
     /// Yield target-specific expansions of given Spec.
-    fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = SchedulingDecision<Self>>>;
+    fn expansions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = SchedulingDecision<Self>>>;
 }
 
 pub trait MemoryLevel:
@@ -99,9 +99,9 @@ impl Target for X86Target {
         }
     }
 
-    fn expansions(spec: &Spec<Self>) -> Box<dyn Iterator<Item = SchedulingDecision<Self>>> {
+    fn expansions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = SchedulingDecision<Self>>> {
         match spec {
-            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
                 PrimitiveSpecType::Matmul { accum } => {
                     if *accum {
                         let mut microkernels = vec![];
@@ -118,7 +118,7 @@ impl Target for X86Target {
                     }
                 }
                 PrimitiveSpecType::Conv { .. } => Box::new(iter::empty()),
-                PrimitiveSpecType::Load { .. } | PrimitiveSpecType::Store { .. } => {
+                PrimitiveSpecType::Move { .. } => {
                     let mut microkernels = vec![];
                     if valueassign_applies_to_operands(&spec.parameters()) {
                         microkernels.push(SchedulingDecision::Place(KernelType::ValueAssign));
@@ -139,7 +139,7 @@ impl Target for X86Target {
                     Box::new(microkernels.into_iter())
                 }
             },
-            Spec::Compose { .. } => Box::new(iter::empty()),
+            LogicalSpec::Compose { .. } => Box::new(iter::empty()),
         }
     }
 }

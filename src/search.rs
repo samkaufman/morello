@@ -1,7 +1,7 @@
 use smallvec::SmallVec;
 use std::sync::RwLock;
 
-use crate::common::Problem;
+use crate::common::Spec;
 use crate::cost::Cost;
 use crate::imp::{visit_leaves, ImplNode};
 use crate::memorylimits::MemoryLimits;
@@ -18,7 +18,7 @@ struct ImplReducer<Tgt: Target> {
 /// Computes an optimal Impl for `goal` and stores it in `db`.
 pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
     db: &RwLock<D>,
-    goal: &Problem<Tgt>,
+    goal: &Spec<Tgt>,
     top_k: usize,
 ) -> (SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>, u64, u64) {
     if top_k > 1 {

@@ -1,13 +1,16 @@
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
-use crate::pprint::NameEnv;
+use crate::nameenv::NameEnv;
 use crate::target::Target;
+use crate::tensorspec::TensorSpec;
 use crate::views::{Param, Tile, View};
 
 use itertools::Itertools;
 use smallvec::SmallVec;
-use std::{cmp, slice};
+use std::collections::HashMap;
+
+use std::{cmp, iter, slice};
 
 const MAX_COST: MainCost = u64::MAX;
 
@@ -46,6 +49,34 @@ pub struct LoopTile<Tgt: Target> {
 }
 
 impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
+    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
+        debug_assert!(
+            self.tiles
+                .iter()
+                .tuple_windows::<(_, _)>()
+                .all(|(a, b)| a.tile.view.0 < b.tile.view.0),
+            "tile weren't sorted"
+        );
+
+        // Return an iterator over paramters from loop tiles where they apply and the inner body
+        // elsewhere.
+        let mut next_tile_idx = 0;
+        let mut body_parameters = self.body.parameters().enumerate();
+        Box::new(iter::from_fn(move || match body_parameters.next() {
+            None => {
+                debug_assert_eq!(next_tile_idx, self.tiles.len());
+                None
+            }
+            Some((i, body_param)) => match self.tiles.get(next_tile_idx) {
+                Some(next_tile) if i == usize::from(next_tile.tile.view.0) => {
+                    next_tile_idx += 1;
+                    Some(next_tile.tile.spec())
+                }
+                _ => Some(body_param),
+            },
+        }))
+    }
+
     fn children(&self) -> &[ImplNode<Tgt, Aux>] {
         slice::from_ref(&self.body)
     }
@@ -66,9 +97,34 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
         cmp::min(child_costs[0] * MainCost::from(factor), MAX_COST)
     }
 
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
+        let mut new_children = new_children;
+        let new_loop = Loop {
+            tiles: self.tiles.clone(),
+            body: Box::new(new_children.next().unwrap()),
+            parallel: self.parallel,
+            aux: self.aux.clone(),
+        };
+        debug_assert!(new_children.next().is_none());
+        new_loop
+    }
+
+    fn bind<'i, 'j: 'i>(
+        &'j self,
+        args: &[&'j dyn View<Tgt = Tgt>],
+        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
+    ) {
+        let mut inner_args = args.to_vec();
+        for tile in &self.tiles {
+            tile.tile.bind(args, env);
+            inner_args[usize::from(tile.tile.view.0)] = &tile.tile;
+        }
+        self.body.bind(&inner_args, env);
+    }
+
     fn line_strs<'a>(
         &'a self,
-        names: &mut NameEnv<'a, Tgt>,
+        names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         args: &[&dyn View<Tgt = Tgt>],
     ) -> Option<String> {
         Some(format!(
@@ -94,18 +150,6 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
 
     fn aux(&self) -> &Aux {
         &self.aux
-    }
-
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
-        let mut new_children = new_children;
-        let new_loop = Loop {
-            tiles: self.tiles.clone(),
-            body: Box::new(new_children.next().unwrap()),
-            parallel: self.parallel,
-            aux: self.aux.clone(),
-        };
-        debug_assert!(new_children.next().is_none());
-        new_loop
     }
 }
 

@@ -1,36 +1,43 @@
-use itertools::Itertools;
-use std::iter;
 use std::ops::{Add, Mul};
 
-#[derive(Debug, PartialEq)]
-pub struct AffineExpr(pub Vec<Term>, pub i32);
+#[derive(Debug, PartialEq, Clone)]
+pub struct AffineExpr<T>(pub Vec<Term<T>>, pub i32);
 
-#[derive(Debug, PartialEq)]
-pub struct Term(pub i32, pub String);
+#[derive(Debug, PartialEq, Clone)]
+pub struct Term<T>(pub i32, pub T);
 
-impl AffineExpr {
-    pub fn c_expr(&self) -> String {
-        let mut buf = self
-            .0
-            .iter()
-            .map(|Term(coef, sym)| match &coef {
-                0 => panic!("AffineExpr contained zero term"),
-                1 => sym.to_string(),
-                _ => format!("{} * {}", coef, sym),
-            })
-            .join(" + ");
-        if self.1 != 0 {
-            if buf.is_empty() {
-                buf = self.1.to_string();
-            } else {
-                buf += &format!(" + {}", self.1);
+impl<T: PartialEq> AffineExpr<T> {
+    pub fn subs(mut self, symbol: &T, replacement: AffineExpr<T>) -> AffineExpr<T> {
+        match self.0.iter().position(|t| &t.1 == symbol) {
+            Some(idx) => {
+                let coef = self.0[idx].0;
+                self.0.swap_remove(idx);
+                self + (replacement * coef)
             }
+            None => self,
         }
-        buf
     }
 }
 
-impl Add<i32> for AffineExpr {
+impl<T: PartialEq> Add for AffineExpr<T> {
+    type Output = Self;
+
+    fn add(mut self, rhs: AffineExpr<T>) -> Self::Output {
+        // TODO: Keep the terms sorted for faster iteration.
+        let AffineExpr(terms, intercept) = &mut self;
+        *intercept += rhs.1;
+        for Term(c, s) in rhs.0 {
+            if let Some(Term(c2, _)) = terms.iter_mut().find(|Term(_, s2)| &s == s2) {
+                *c2 += c;
+            } else {
+                terms.push(Term(c, s));
+            }
+        }
+        self
+    }
+}
+
+impl<T> Add<i32> for AffineExpr<T> {
     type Output = Self;
 
     fn add(mut self, rhs: i32) -> Self::Output {
@@ -39,7 +46,7 @@ impl Add<i32> for AffineExpr {
     }
 }
 
-impl Mul<i32> for AffineExpr {
+impl<T> Mul<i32> for AffineExpr<T> {
     type Output = Self;
 
     fn mul(mut self, rhs: i32) -> Self::Output {
@@ -55,39 +62,35 @@ mod tests {
 
     #[test]
     fn test_intercept_scalar_addition() {
-        assert_eq!(AffineExpr(vec![], 1) + 2, AffineExpr(vec![], 3));
-        assert_eq!(AffineExpr(vec![], 1) + 0, AffineExpr(vec![], 1));
+        assert_eq!(AffineExpr::<()>(vec![], 1) + 2, AffineExpr::<()>(vec![], 3));
+        assert_eq!(AffineExpr::<()>(vec![], 1) + 0, AffineExpr::<()>(vec![], 1));
     }
 
     #[test]
     fn test_intercept_scalar_multiplication() {
-        assert_eq!(AffineExpr(vec![], 1) * 2, AffineExpr(vec![], 2));
-        assert_eq!(AffineExpr(vec![], 1) * 0, AffineExpr(vec![], 0));
+        assert_eq!(AffineExpr::<()>(vec![], 1) * 2, AffineExpr::<()>(vec![], 2));
+        assert_eq!(AffineExpr::<()>(vec![], 1) * 0, AffineExpr::<()>(vec![], 0));
     }
 
     #[test]
-    fn test_expr_zero_not_emitted() {
-        assert_eq!(AffineExpr(vec![], 0).c_expr(), "")
-    }
-
-    #[test]
-    fn test_intercept_zero_not_emitted() {
-        assert_eq!(
-            AffineExpr(vec![Term(2, "x".to_string())], 0).c_expr(),
-            "2 * x"
-        )
-    }
-
-    #[test]
-    fn test_lower_to_c_expr() {
-        assert_eq!(AffineExpr(vec![], 1).c_expr(), "1");
-        assert_eq!(
-            AffineExpr(vec![Term(1, "x".to_string())], 1).c_expr(),
-            "x + 1"
+    fn test_subs() {
+        let e = AffineExpr(
+            vec![Term(2, String::from("x")), Term(4, String::from("y"))],
+            1,
         );
-        assert_eq!(
-            AffineExpr(vec![Term(2, "y".to_string())], 3).c_expr(),
-            "2 * y + 3"
+        let replacement = AffineExpr(
+            vec![Term(1, String::from("y")), Term(2, String::from("z"))],
+            1,
         );
+        // let expected = todo!("Encode 2x + 4y + 8z + 5");
+        let expected = AffineExpr(
+            vec![
+                Term(2, String::from("x")),
+                Term(4, String::from("y")),
+                Term(8, String::from("z")),
+            ],
+            5,
+        );
+        assert_eq!(e.subs(&"y".to_string(), replacement), expected);
     }
 }
