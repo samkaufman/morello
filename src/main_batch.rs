@@ -26,6 +26,7 @@ mod pprint;
 mod scheduling;
 mod search;
 mod spec;
+mod syntax;
 mod table;
 mod target;
 mod tensorspec;
