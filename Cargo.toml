@@ -7,6 +7,7 @@ default-run = "morello"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+atty = "0.2"
 auto_impl = "1.1.0"
 by_address = "1.1.0"
 clap = { version = "4.2.5", features = ["derive"] }
@@ -16,6 +17,7 @@ enum-iterator = "1.4.1"
 enum_dispatch = "0.3.11"
 env_logger = "0.10.0"
 itertools = "0.11.0"
+lazy_static = "1.4.0"
 log = "0.4.0"
 prettytable-rs = "^0.10"
 rand = "0.8.5"
@@ -25,6 +27,7 @@ scc = "1.7.0"
 serde = { version = "1.0.160", features = ["derive"] }
 serde_json = "1.0.96"
 smallvec = {version = "1.10.0", features = ["serde"]}
+syntect = "5.0"
 thread_local = "1.1.7"
 
 [profile.release]

@@ -2,7 +2,7 @@ use std::sync::RwLock;
 
 use crate::common::{DimSize, Dtype, Problem};
 use crate::layout::row_major;
-use crate::pprint::pprint;
+use crate::pprint::{pprint, ColorMode};
 use crate::spec::{PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::table::{DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
@@ -30,18 +30,27 @@ mod tiling;
 mod utils;
 mod views;
 
-#[derive(clap::Parser)]
+#[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(long, short, default_value = "1")]
     batch: DimSize,
+
     #[arg(long, default_value = "4")]
     channels: DimSize,
+
     #[arg(long, default_value = "8")]
     filters: DimSize,
+
     #[arg(long, default_value = "3")]
     filters_size: DimSize,
+
+    /// The size of the square matrices
     size: DimSize,
+
+    /// Color mode
+    #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
+    color: ColorMode,
 }
 
 fn main() {
@@ -133,5 +142,5 @@ fn main() {
         panic!("No Impl found");
     };
     assert_eq!(results.len(), 1);
-    pprint(&results[0]);
+    pprint(&results[0], args.color);
 }

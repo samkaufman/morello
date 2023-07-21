@@ -4,8 +4,19 @@ use crate::views::View;
 use crate::{imp::Impl, views::Param};
 
 use by_address::ByThinAddress;
+use lazy_static::lazy_static;
 use prettytable::{self, format, row, Cell};
 use std::collections::HashMap;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Style, ThemeSet};
+use syntect::parsing::SyntaxSet;
+use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
+
+lazy_static! {
+    // Load these once at the start of your program
+    static ref SS: SyntaxSet = SyntaxSet::load_defaults_newlines();
+    static ref TS: ThemeSet = ThemeSet::load_defaults();
+}
 
 const fn ascii_lower() -> [char; 26] {
     let mut result = ['a'; 26];
@@ -15,7 +26,6 @@ const fn ascii_lower() -> [char; 26] {
         result[(c - 97) as usize] = c as char;
         c += 1;
     }
-
     result
 }
 static ASCII_LOWER: [char; 26] = ascii_lower();
@@ -51,7 +61,14 @@ impl<'t, Tgt: Target> NameEnv<'t, Tgt> {
     }
 }
 
-pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>) {
+#[derive(Clone, PartialEq, clap::ValueEnum)]
+pub enum ColorMode {
+    Never,
+    Auto,
+    Always,
+}
+
+pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, mut color: ColorMode) {
     let mut name_env = NameEnv {
         names: HashMap::new(),
     };
@@ -98,7 +115,7 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>) {
         },
     );
 
-    // Format and print the table.
+    // Format the table.
     let format = format::FormatBuilder::new()
         .separator(
             format::LinePosition::Title,
@@ -107,5 +124,25 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>) {
         .column_separator(' ')
         .build();
     table.set_format(format);
-    table.printstd()
+
+    // Decide whether to print in color.
+    if color == ColorMode::Auto && !atty::is(atty::Stream::Stdout) {
+        color = ColorMode::Never;
+    }
+
+    // Print the table without syntax highlighting.
+    if color == ColorMode::Never {
+        table.printstd();
+        return;
+    }
+
+    // Syntax highlight and print the table.
+    let syntax = SS.find_syntax_by_name("Python").unwrap();
+    let mut h = HighlightLines::new(syntax, &TS.themes["base16-ocean.dark"]);
+    let s = table.to_string();
+    for line in LinesWithEndings::from(&s) {
+        let ranges: Vec<(Style, &str)> = h.highlight_line(line, &SS).unwrap();
+        let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
+        print!("{}", escaped);
+    }
 }
