@@ -19,7 +19,7 @@ const fn ascii_lower() -> [char; 26] {
 
     result
 }
-pub static ASCII_LOWER: [char; 26] = ascii_lower();
+pub const ASCII_LOWER: [char; 26] = ascii_lower();
 
 pub struct ToWriteFmt<T>(pub T);
 
