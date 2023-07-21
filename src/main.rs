@@ -1,24 +1,31 @@
+use std::io;
 use std::sync::RwLock;
 
-use crate::common::{DimSize, Dtype, Problem};
+use crate::codegen::CodeGen;
+use crate::common::{DimSize, Dtype, Spec};
 use crate::layout::row_major;
 use crate::pprint::{pprint, ColorMode};
-use crate::spec::{PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::table::{DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::TensorSpecAux;
+use crate::utils::ToWriteFmt;
 
 use clap::Parser;
 use log::info;
 use smallvec::smallvec;
 
 mod alignment;
+mod codegen;
 mod common;
 mod cost;
+mod expr;
 mod geometry;
 mod imp;
 mod layout;
 mod memorylimits;
+mod nameenv;
+mod opaque_symbol;
 mod pprint;
 mod scheduling;
 mod search;
@@ -64,7 +71,7 @@ fn main() {
     ));
 
     let rm2 = row_major(2);
-    let matmul_spec = Spec::Primitive(
+    let matmul_spec = LogicalSpec::Primitive(
         PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
             spec_shape: smallvec![args.size, args.size, args.size],
@@ -126,7 +133,7 @@ fn main() {
     //     serial_only: true,
     // };
 
-    let problem = Problem(matmul_spec, X86Target::max_mem());
+    let problem = Spec(matmul_spec, X86Target::max_mem());
 
     let start_time = std::time::Instant::now();
     let (_, hits, misses) = search::top_down(&db, &problem, 1);
@@ -143,4 +150,7 @@ fn main() {
     };
     assert_eq!(results.len(), 1);
     pprint(&results[0], args.color);
+    results[0]
+        .emit_kernel(&mut ToWriteFmt(io::stdout()))
+        .unwrap();
 }

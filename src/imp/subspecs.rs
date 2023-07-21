@@ -1,13 +1,15 @@
-use crate::common::Problem;
+use crate::common::Spec;
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
-use crate::pprint::NameEnv;
+use crate::nameenv::NameEnv;
 use crate::target::Target;
+use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
 
 use smallvec::SmallVec;
 use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -22,23 +24,25 @@ pub struct ProblemApp<Tgt, P, Aux>(
 )
 where
     Tgt: Target,
-    P: Borrow<Problem<Tgt>> + Clone,
+    P: Borrow<Spec<Tgt>> + Clone,
     Aux: Clone;
 
 impl<Tgt, P, Aux> ProblemApp<Tgt, P, Aux>
 where
     Tgt: Target,
-    P: Borrow<Problem<Tgt>> + Clone,
+    P: Borrow<Spec<Tgt>> + Clone,
     Aux: Clone,
 {
-    pub fn new<ParamT: View<Tgt = Tgt> + 'static, I: IntoIterator<Item = ParamT>>(
-        problem: P,
-        args: I,
-    ) -> Self
+    pub fn new<ParamT, I>(problem: P, args: I) -> Self
     where
         Aux: Default,
+        ParamT: View<Tgt = Tgt> + 'static,
+        I: IntoIterator<Item = ParamT>,
     {
-        let cast_args: SmallVec<_> = args.into_iter().map(|v| Rc::new(v) as _).collect();
+        let cast_args = args
+            .into_iter()
+            .map(|v| Rc::new(v) as _)
+            .collect::<SmallVec<_>>();
         Self(problem, cast_args, Aux::default(), PhantomData)
     }
 }
@@ -46,7 +50,7 @@ where
 impl<Tgt, P, Aux> ProblemApp<Tgt, P, Aux>
 where
     Tgt: Target,
-    P: Borrow<Problem<Tgt>> + Clone,
+    P: Borrow<Spec<Tgt>> + Clone,
     Aux: Clone,
 {
     pub fn default_app(problem: P) -> Self
@@ -59,7 +63,7 @@ where
             .parameters()
             .into_iter()
             .enumerate()
-            .map(|(i, o)| Rc::new(Param(i.try_into().unwrap(), o)) as Rc<_>)
+            .map(|(i, o)| Rc::new(Param::new(i.try_into().unwrap(), o)) as Rc<_>)
             .collect();
         ProblemApp(problem, operands, Aux::default(), PhantomData)
     }
@@ -68,9 +72,13 @@ where
 impl<Tgt, P, Aux> Impl<Tgt, Aux> for ProblemApp<Tgt, P, Aux>
 where
     Tgt: Target,
-    P: Borrow<Problem<Tgt>> + Clone + Debug,
+    P: Borrow<Spec<Tgt>> + Clone + Debug,
     Aux: Clone,
 {
+    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
+        todo!()
+    }
+
     fn children(&self) -> &[ImplNode<Tgt, Aux>] {
         &[]
     }
@@ -83,20 +91,28 @@ where
         todo!("What cost should we have for Problem applications?")
     }
 
-    fn aux(&self) -> &Aux {
-        &self.2
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
+        debug_assert_eq!(new_children.count(), 0);
+        self.clone()
+    }
+
+    fn bind<'i, 'j: 'i>(
+        &'j self,
+        args: &[&'j dyn View<Tgt = Tgt>],
+        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
+    ) {
+        todo!()
     }
 
     fn line_strs<'a>(
         &'a self,
-        _names: &mut NameEnv<'a, Tgt>,
+        _names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         _args: &[&dyn View<Tgt = Tgt>],
     ) -> Option<String> {
         todo!()
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
-        debug_assert_eq!(new_children.count(), 0);
-        self.clone()
+    fn aux(&self) -> &Aux {
+        &self.2
     }
 }

@@ -1,15 +1,17 @@
 use blocks::Block;
 use enum_dispatch::enum_dispatch;
 use kernels::Kernel;
+use std::collections::HashMap;
 use std::fmt::Debug;
 
-use crate::views::View;
+use crate::tensorspec::TensorSpec;
+use crate::views::{Param, View};
 use crate::{
-    common::Problem,
+    common::Spec,
     cost::MainCost,
     imp::{loops::Loop, moves::MoveLet, pipeline::Pipeline, subspecs::ProblemApp},
     memorylimits::{MemVec, MemoryAllocation},
-    pprint::NameEnv,
+    nameenv::NameEnv,
     target::Target,
 };
 
@@ -22,6 +24,12 @@ pub mod subspecs;
 
 #[enum_dispatch]
 pub trait Impl<Tgt: Target, Aux: Clone> {
+    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_>;
+
+    fn parameter_count(&self) -> u8 {
+        self.parameters().count().try_into().unwrap()
+    }
+
     fn children(&self) -> &[ImplNode<Tgt, Aux>];
 
     fn memory_allocated(&self) -> MemoryAllocation;
@@ -31,9 +39,15 @@ pub trait Impl<Tgt: Target, Aux: Clone> {
     #[must_use]
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self;
 
+    fn bind<'i, 'j: 'i>(
+        &'j self,
+        args: &[&'j dyn View<Tgt = Tgt>],
+        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
+    );
+
     fn line_strs<'a>(
         &'a self,
-        names: &mut NameEnv<'a, Tgt>,
+        names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         args: &[&dyn View<Tgt = Tgt>],
     ) -> Option<String>;
 
@@ -59,8 +73,8 @@ pub enum ImplNode<Tgt: Target, Aux: Clone> {
     MoveLet(MoveLet<Tgt, Aux>),
     Block(Block<Tgt, Aux>),
     Pipeline(Pipeline<Tgt, Aux>),
-    Kernel(Kernel<Aux>),
-    ProblemApp(ProblemApp<Tgt, Problem<Tgt>, Aux>),
+    Kernel(Kernel<Tgt, Aux>),
+    ProblemApp(ProblemApp<Tgt, Spec<Tgt>, Aux>),
 }
 
 impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
@@ -134,14 +148,14 @@ impl<Tgt: Target, Aux: Clone> ImplNode<Tgt, Aux> {
             ImplNode::MoveLet(m) => {
                 let param_idx = usize::from(m.parameter_idx);
 
-                let moves_args = [args[param_idx], &m.introduced];
+                let moves_args = [args[param_idx], m.introduced.inner_fat_ptr()];
 
                 if let Some(p) = m.prologue() {
                     p.traverse(&moves_args, depth + 1, f);
                 }
 
                 let mut inner_args = args.to_vec();
-                inner_args[param_idx] = &m.introduced;
+                inner_args[param_idx] = m.introduced.inner_fat_ptr();
                 m.main_stage().traverse(&inner_args, depth + 1, f);
 
                 if let Some(e) = m.epilogue() {

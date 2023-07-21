@@ -27,7 +27,7 @@ const LIMIT_VECTORS_TO_ONE_DIM: bool = true;
 // there are good conversions to/from image/filter shapes for Conv.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub enum Spec<Tgt: Target> {
+pub enum LogicalSpec<Tgt: Target> {
     // TODO: Enforce `typ` and PrimitiveAux compatibility at the type level.
     Primitive(PrimitiveBasics, PrimitiveAux<Tgt>, bool),
     Compose {
@@ -50,8 +50,7 @@ pub struct PrimitiveBasics {
 pub enum PrimitiveSpecType {
     Matmul { accum: bool },
     Conv { accum: bool },
-    Load,
-    Store,
+    Move,
     Zero,
 }
 
@@ -104,9 +103,9 @@ impl PrimitiveBasics {
                 assert_eq!(self.dtype, new_operands[2].1);
                 // TODO: Assert output shape is expected.
             }
-            PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+            PrimitiveSpecType::Move => {
                 let [src, dest] = new_operands else {
-                    panic!("Load/Store must have 2 operands");
+                    panic!("Move must have 2 operands");
                 };
                 assert_eq!(src, dest);
                 self.spec_shape = src.0.clone();
@@ -131,7 +130,7 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::Zero => {
                 PrimitiveAux::Standard(operand_auxes.into_iter().cloned().collect())
             }
-            PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+            PrimitiveSpecType::Move => {
                 let mut operand_auxes_iter = operand_auxes.into_iter();
                 let first: &TensorSpecAux<_> = operand_auxes_iter.next().unwrap();
                 let second: &TensorSpecAux<_> = operand_auxes_iter.next().unwrap();
@@ -163,7 +162,7 @@ impl PrimitiveBasics {
                 let out = conv_infer_output_shape(&img, &filt);
                 vec![img, filt, out]
             }
-            PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+            PrimitiveSpecType::Move => {
                 vec![self.spec_shape.clone(), self.spec_shape.clone()]
             }
             PrimitiveSpecType::Zero => vec![self.spec_shape.clone()],
@@ -245,14 +244,7 @@ impl PrimitiveBasics {
             }
             (
                 PrimitiveBasics {
-                    typ: PrimitiveSpecType::Load,
-                    ..
-                },
-                true,
-            )
-            | (
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Store,
+                    typ: PrimitiveSpecType::Move,
                     ..
                 },
                 true,
@@ -291,9 +283,7 @@ impl PrimitiveBasics {
                 let out = smallvec![b, f, h, w];
                 vec![img, filt, out]
             }
-            PrimitiveSpecType::Load { .. }
-            | PrimitiveSpecType::Store { .. }
-            | PrimitiveSpecType::Zero { .. } => self
+            PrimitiveSpecType::Move { .. } | PrimitiveSpecType::Zero { .. } => self
                 .parameter_shapes()
                 .iter()
                 .map(|o| (0..u8::try_from(o.len()).unwrap()).collect())
@@ -318,8 +308,7 @@ impl PrimitiveSpecType {
         match self {
             PrimitiveSpecType::Matmul { .. } => 2,
             PrimitiveSpecType::Conv { .. } => 2,
-            PrimitiveSpecType::Load => 1,
-            PrimitiveSpecType::Store => 1,
+            PrimitiveSpecType::Move => 1,
             PrimitiveSpecType::Zero => 0,
         }
     }
@@ -327,7 +316,7 @@ impl PrimitiveSpecType {
     pub fn output_idx(&self) -> usize {
         match self {
             PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => 2,
-            PrimitiveSpecType::Load { .. } | PrimitiveSpecType::Store { .. } => 1,
+            PrimitiveSpecType::Move { .. } => 1,
             PrimitiveSpecType::Zero { .. } => 0,
         }
     }
@@ -356,7 +345,7 @@ impl PrimitiveSpecType {
                 debug_assert!(h >= fh && w >= fw);
                 smallvec![*b, *f, 1 + h - fh, 1 + w - fw]
             }
-            PrimitiveSpecType::Load | PrimitiveSpecType::Store | PrimitiveSpecType::Zero => {
+            PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
                 // The shape and dtype match for moves and zero.
                 inputs[0].to_smallvec()
             }
@@ -371,32 +360,31 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::Matmul { .. } => write!(f, "Matmul"),
             PrimitiveSpecType::Conv { accum, .. } if *accum => write!(f, "ConvAccum"),
             PrimitiveSpecType::Conv { .. } => write!(f, "Conv"),
-            PrimitiveSpecType::Load { .. } => write!(f, "Load"),
-            PrimitiveSpecType::Store { .. } => write!(f, "Store"),
+            PrimitiveSpecType::Move { .. } => write!(f, "Move"),
             PrimitiveSpecType::Zero { .. } => write!(f, "Zero"),
         }
     }
 }
 
-impl<Tgt: Target> Spec<Tgt> {
+impl<Tgt: Target> LogicalSpec<Tgt> {
     // TODO: Do we really need this?
     pub fn primitive_type(&self) -> PrimitiveSpecType {
         match self {
-            Spec::Primitive(basics, _, _) => basics.typ,
-            Spec::Compose { .. } => panic!("Spec::Compose has no primitive type"),
+            LogicalSpec::Primitive(basics, _, _) => basics.typ,
+            LogicalSpec::Compose { .. } => panic!("Spec::Compose has no primitive type"),
         }
     }
 
     pub fn serial_only(&self) -> bool {
         match self {
-            Spec::Primitive(_, _, serial_only) => *serial_only,
-            Spec::Compose { serial_only, .. } => *serial_only,
+            LogicalSpec::Primitive(_, _, serial_only) => *serial_only,
+            LogicalSpec::Compose { serial_only, .. } => *serial_only,
         }
     }
 
     pub fn operand_count(&self) -> usize {
         match self {
-            Spec::Compose { components, .. } => {
+            LogicalSpec::Compose { components, .. } => {
                 let (innermost_component, outer_components) = components.split_last().unwrap();
                 let mut cnt = innermost_component.typ.operand_count();
                 cnt += outer_components
@@ -405,13 +393,13 @@ impl<Tgt: Target> Spec<Tgt> {
                     .sum::<usize>();
                 cnt
             }
-            Spec::Primitive(basics, _, _) => basics.typ.operand_count(),
+            LogicalSpec::Primitive(basics, _, _) => basics.typ.operand_count(),
         }
     }
 
     pub fn parameters(&self) -> SmallVec<[TensorSpec<Tgt>; 3]> {
         match self {
-            Spec::Primitive(basics, aux, _) => match basics.typ {
+            LogicalSpec::Primitive(basics, aux, _) => match basics.typ {
                 PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => {
                     let PrimitiveAux::Standard(taux) = aux else {
                         unreachable!();
@@ -423,7 +411,7 @@ impl<Tgt: Target> Spec<Tgt> {
                         .map(|(s, a)| TensorSpec::new_noncanon_with_aux(s, basics.dtype, a.clone()))
                         .collect()
                 }
-                PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+                PrimitiveSpecType::Move => {
                     let PrimitiveAux::Move { outer_aux, inner_level, inner_layout, inner_vector_shape } = aux else {
                         unreachable!();
                     };
@@ -449,7 +437,7 @@ impl<Tgt: Target> Spec<Tgt> {
                     )]
                 }
             },
-            Spec::Compose {
+            LogicalSpec::Compose {
                 components,
                 operand_auxes,
                 serial_only: _,
@@ -494,8 +482,8 @@ impl<Tgt: Target> Spec<Tgt> {
 
     pub fn output_idx(&self) -> usize {
         match &self {
-            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_idx(),
-            Spec::Compose { .. } => self.operand_count() - 1,
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_idx(),
+            LogicalSpec::Compose { .. } => self.operand_count() - 1,
         }
     }
 
@@ -504,7 +492,7 @@ impl<Tgt: Target> Spec<Tgt> {
         let operands = self.parameters();
 
         match self {
-            Spec::Primitive(
+            LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ,
                     spec_shape,
@@ -528,7 +516,7 @@ impl<Tgt: Target> Spec<Tgt> {
                             .canonicalize_for_shape(operands[i].dim_sizes());
                     }
                 }
-                PrimitiveSpecType::Load | PrimitiveSpecType::Store => {
+                PrimitiveSpecType::Move => {
                     let PrimitiveAux::Move {
                         outer_aux,
                         inner_level: _,
@@ -548,7 +536,7 @@ impl<Tgt: Target> Spec<Tgt> {
                     aux[0].canonicalize(spec_shape, aligned);
                 }
             },
-            Spec::Compose { .. } => todo!(),
+            LogicalSpec::Compose { .. } => todo!(),
         }
 
         // TODO: What if you want to call `operands` on a non-canon Spec?
@@ -578,7 +566,7 @@ impl<Tgt: Target> Spec<Tgt> {
         let iter = iter.chain(Tgt::expansions(self));
 
         match &self {
-            Spec::Primitive(
+            LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ,
                     spec_shape: _,
@@ -606,7 +594,7 @@ impl<Tgt: Target> Spec<Tgt> {
                 }
                 _ => Box::new(iter),
             },
-            Spec::Compose {
+            LogicalSpec::Compose {
                 components: _,
                 operand_auxes: _,
                 serial_only: _,
@@ -621,7 +609,7 @@ impl<Tgt: Target> Spec<Tgt> {
         warn!("spatial split disabled");
         return false;
 
-        let Spec::Primitive(PrimitiveBasics { typ, .. }, primitive_aux, _) = self else {
+        let LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, primitive_aux, _) = self else {
             panic!("can_spatial_split called on non-Primitive spec");
         };
         let PrimitiveSpecType::Conv { accum } = typ else {
@@ -665,7 +653,7 @@ impl<Tgt: Target> Spec<Tgt> {
     }
 
     fn split_expansions(&self) -> Box<dyn Iterator<Item = SchedulingDecision<Tgt>> + '_> {
-        let Spec::Primitive(PrimitiveBasics { typ, spec_shape, .. }, _, _) = self else {
+        let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape, .. }, _, _) = self else {
             panic!("split_expansions called on non-primitive Spec");
         };
         let PrimitiveSpecType::Matmul { accum } = typ else {
@@ -683,7 +671,7 @@ impl<Tgt: Target> Spec<Tgt> {
     }
 
     fn peel_expansions(&self) -> Box<dyn Iterator<Item = SchedulingDecision<Tgt>> + '_> {
-        let Spec::Compose { components, operand_auxes: _, serial_only: _ } = self else {
+        let LogicalSpec::Compose { components, operand_auxes: _, serial_only: _ } = self else {
             panic!("peel_expansions called on non-Compose Spec");
         };
 
@@ -716,7 +704,7 @@ impl<Tgt: Target> Spec<Tgt> {
     }
 
     fn split_valid(&self, new_k: DimSize) -> bool {
-        let Spec::Primitive(PrimitiveBasics { typ, spec_shape, dtype: _ }, _, _) = self else {
+        let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape, dtype: _ }, _, _) = self else {
             panic!();
         };
         debug_assert!(matches!(typ, PrimitiveSpecType::Matmul { .. }));
@@ -746,11 +734,8 @@ impl<Tgt: Target> Spec<Tgt> {
         // TODO: Add prefetching moves.
 
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
-        if matches!(self, Spec::Primitive(_, _, _))
-            && matches!(
-                self.primitive_type(),
-                PrimitiveSpecType::Load | PrimitiveSpecType::Store
-            )
+        if matches!(self, LogicalSpec::Primitive(_, _, _))
+            && matches!(self.primitive_type(), PrimitiveSpecType::Move)
         {
             return results.into_iter();
         }
@@ -835,8 +820,10 @@ impl<Tgt: Target> Spec<Tgt> {
 
     pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> TilingInference {
         match self {
-            Spec::Primitive(basics, _, _) => basics.input_tilings_for_tile_out(smaller_output),
-            Spec::Compose { .. } => {
+            LogicalSpec::Primitive(basics, _, _) => {
+                basics.input_tilings_for_tile_out(smaller_output)
+            }
+            LogicalSpec::Compose { .. } => {
                 todo!("Resolve subscripts.");
                 // let mut accumulated_input_tilings = Vec::with_capacity(self.operand_count() - 1);
                 // let mut last_output_tiling = smaller_output.clone();
@@ -863,8 +850,8 @@ impl<Tgt: Target> Spec<Tgt> {
     // TODO: Can we replace this entirely with Spec shapes?
     pub fn operands_dim_subscripts(&self) -> Vec<SmallVec<[u8; 4]>> {
         match self {
-            Spec::Primitive(basics, _, _) => basics.parameter_dim_subscripts(),
-            Spec::Compose { components, .. } => {
+            LogicalSpec::Primitive(basics, _, _) => basics.parameter_dim_subscripts(),
+            LogicalSpec::Compose { components, .. } => {
                 let mut max_seen = 0;
                 let mut accum: Vec<SmallVec<[u8; 4]>> = Vec::new();
                 let mut last_out_subs: Option<SmallVec<[u8; 4]>> = None;
@@ -946,7 +933,7 @@ impl<Tgt: Target> Spec<Tgt> {
     pub fn replace_io(&mut self, new_operands: &[TensorSpec<Tgt>]) {
         assert_eq!(new_operands.len(), self.operand_count());
         match self {
-            Spec::Compose {
+            LogicalSpec::Compose {
                 components,
                 operand_auxes,
                 serial_only: _,
@@ -995,7 +982,7 @@ impl<Tgt: Target> Spec<Tgt> {
 
                 *operand_auxes = new_operands.iter().map(|t| t.aux.clone()).collect();
             }
-            Spec::Primitive(basics, primitive_aux, _) => {
+            LogicalSpec::Primitive(basics, primitive_aux, _) => {
                 basics.replace_io(
                     &new_operands
                         .iter()
@@ -1031,29 +1018,29 @@ impl<Tgt: Target> Spec<Tgt> {
 
     pub fn output_is_read(&self) -> bool {
         match self {
-            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_is_read(),
-            Spec::Compose { components, .. } => components[0].typ.output_is_read(),
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_is_read(),
+            LogicalSpec::Compose { components, .. } => components[0].typ.output_is_read(),
         }
     }
 
     pub fn clone_as_accum(&self) -> Self {
         let mut cloned = self.clone();
         match &mut cloned {
-            Spec::Primitive(basics, _, _) => match &mut basics.typ {
+            LogicalSpec::Primitive(basics, _, _) => match &mut basics.typ {
                 PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => {
                     *accum = true;
                 }
                 _ => panic!("Cannot clone_as_accum for {:?}", self),
             },
-            Spec::Compose { .. } => todo!("Compose can accumulate if head can."),
+            LogicalSpec::Compose { .. } => todo!("Compose can accumulate if head can."),
         }
         cloned
     }
 }
 
-impl<Tgt: Target> Display for Spec<Tgt> {
+impl<Tgt: Target> Display for LogicalSpec<Tgt> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Spec::Compose {
+        if let LogicalSpec::Compose {
             components,
             operand_auxes: _,
             serial_only,
@@ -1074,8 +1061,8 @@ impl<Tgt: Target> Display for Spec<Tgt> {
         }
 
         let header = match self {
-            Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => format!("{}", typ),
-            Spec::Compose { .. } => todo!(),
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => format!("{}", typ),
+            LogicalSpec::Compose { .. } => todo!(),
         };
 
         let operand_str = self

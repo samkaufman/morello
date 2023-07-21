@@ -4,8 +4,8 @@ use smallvec::{smallvec, SmallVec};
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::layout::Layout;
 use crate::spec::{
-    conv_infer_output_shape, gen_vector_shapes, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType,
-    Spec,
+    conv_infer_output_shape, gen_vector_shapes, LogicalSpec, PrimitiveAux, PrimitiveBasics,
+    PrimitiveSpecType,
 };
 use crate::target::{MemoryLevel, Target, X86Target};
 use crate::tensorspec::TensorSpecAux;
@@ -33,12 +33,12 @@ pub enum SpecKey {
     Zero { dtype: Dtype },
 }
 
-impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
+impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
     type Key = SpecKey;
 
     fn to_grid(&self) -> Option<(SpecKey, Vec<u32>)> {
         match self {
-            Spec::Primitive(basics, primitive_aux, serial_only) => match basics.typ {
+            LogicalSpec::Primitive(basics, primitive_aux, serial_only) => match basics.typ {
                 PrimitiveSpecType::Matmul { accum } => {
                     let PrimitiveAux::Standard(auxes) = primitive_aux else {
                         unreachable!();
@@ -82,7 +82,7 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                             .collect(),
                     ))
                 }
-                PrimitiveSpecType::Load | PrimitiveSpecType::Store | PrimitiveSpecType::Zero => {
+                PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
                     let mapping_level = match primitive_aux {
                         PrimitiveAux::Standard(auxes) => &auxes[0].level,
                         PrimitiveAux::Move {
@@ -92,12 +92,8 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                     };
                     Some((
                         match basics.typ {
-                            PrimitiveSpecType::Load => SpecKey::Move {
-                                is_load: true,
-                                dtype: basics.dtype,
-                            },
-                            PrimitiveSpecType::Store => SpecKey::Move {
-                                is_load: false,
+                            PrimitiveSpecType::Move => SpecKey::Move {
+                                is_load: { todo!("Derive is_load from operand levels") },
                                 dtype: basics.dtype,
                             },
                             PrimitiveSpecType::Zero => SpecKey::Zero {
@@ -115,7 +111,7 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                     ))
                 }
             },
-            Spec::Compose { .. } => None,
+            LogicalSpec::Compose { .. } => None,
         }
     }
 
@@ -135,7 +131,7 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
 
                 align_layout_contig_vector_shape_product::<X86Target>(&shapes, *dtype, &levels)
                     .map(|(alignments, layouts, contigs, vector_shapes)| {
-                        Spec::Primitive(
+                        LogicalSpec::Primitive(
                             PrimitiveBasics {
                                 typ: PrimitiveSpecType::Matmul { accum: pt[0] == 0 },
                                 spec_shape: smallvec![m, k, n],
@@ -194,7 +190,7 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
 
                 align_layout_contig_vector_shape_product::<X86Target>(&shapes, *dtype, &levels)
                     .map(|(alignments, layouts, contigs, vector_shapes)| {
-                        Spec::Primitive(
+                        LogicalSpec::Primitive(
                             PrimitiveBasics {
                                 typ: PrimitiveSpecType::Conv { accum },
                                 spec_shape: spec_shape.clone(),
@@ -263,13 +259,9 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                                         .map(
                                             move |vector_shape_pair| match &vector_shape_pair[..] {
                                                 [source_vector_shape, destination_vector_shape] => {
-                                                    Spec::Primitive(
+                                                    LogicalSpec::Primitive(
                                                         PrimitiveBasics {
-                                                            typ: if *is_load {
-                                                                PrimitiveSpecType::Load
-                                                            } else {
-                                                                PrimitiveSpecType::Store
-                                                            },
+                                                            typ: PrimitiveSpecType::Move,
                                                             spec_shape: dim_sizes.clone(),
                                                             dtype: *dtype,
                                                         },
@@ -316,7 +308,7 @@ impl ToFromDependencyLatticeCoordinate for Spec<X86Target> {
                     debug_assert_eq!(layouts.len(), 1);
                     debug_assert_eq!(contigs.len(), 1);
                     debug_assert_eq!(vector_shapes.len(), 1);
-                    Spec::Primitive(
+                    LogicalSpec::Primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Zero,
                             spec_shape: dim_sizes.clone(),

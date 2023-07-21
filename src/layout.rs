@@ -4,6 +4,8 @@ use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
+    expr::{AffineExpr, Term},
+    opaque_symbol::OpaqueSymbol,
     target::Target,
 };
 
@@ -19,13 +21,34 @@ pub enum Layout {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BufferExprTerm {
+    TileIdx(u8, OpaqueSymbol),
+    // TODO: Probably don't need the OpaqueSymbol for Pt
+    Pt(u8, OpaqueSymbol),
+}
+
 impl Layout {
-    fn buffer_indexing_expr(&self, _concrete_shape: Shape) -> f64 {
-        todo!()
+    pub fn buffer_indexing_expr(
+        &self,
+        expr_id: &OpaqueSymbol,
+        concrete_shape: &[DimSize],
+    ) -> AffineExpr<BufferExprTerm> {
+        match self {
+            Layout::Standard { dim_order } => {
+                debug_assert_eq!(dim_order.len(), concrete_shape.len());
+                regular_index_expr(expr_id, dim_order, concrete_shape)
+            }
+            Layout::Packed {
+                dim_count: _,
+                strip_dim: _,
+                strip_size: _,
+            } => todo!(),
+        }
     }
 
     pub fn contiguous_full(&self) -> Contig {
-        match &self {
+        match self {
             Layout::Standard { dim_order } => dim_order.len().try_into().unwrap(),
             Layout::Packed { dim_count, .. } => dim_count + 1,
         }
@@ -36,7 +59,7 @@ impl Layout {
     }
 
     pub fn all_contiguous_abs(&self) -> impl Iterator<Item = Contig> {
-        match &self {
+        match self {
             Layout::Standard { dim_order } => 0u8..(dim_order.len() + 1).try_into().unwrap(),
             Layout::Packed { dim_count, .. } => 0u8..(*dim_count + 2),
         }
@@ -365,6 +388,26 @@ impl Display for Layout {
             } => todo!(),
         }
     }
+}
+
+fn regular_index_expr(
+    expr_id: &OpaqueSymbol,
+    logical_dims: &[u8],
+    shape: &[DimSize],
+) -> AffineExpr<BufferExprTerm> {
+    assert!(!logical_dims.is_empty());
+    let t = *logical_dims.last().unwrap();
+    let remaining_dims = &logical_dims[..logical_dims.len() - 1];
+    let s = i32::try_from(shape[usize::from(t)]).unwrap();
+    let p = if s > 1 {
+        AffineExpr(vec![Term(1, BufferExprTerm::Pt(t, expr_id.clone()))], 0)
+    } else {
+        AffineExpr(vec![], 0) // zero
+    };
+    if remaining_dims.is_empty() {
+        return p;
+    }
+    regular_index_expr(expr_id, remaining_dims, shape) * s + p
 }
 
 pub fn row_major(rank: u8) -> Layout {

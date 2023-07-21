@@ -1,10 +1,36 @@
 use crate::memorylimits::MemVec;
+use std::fmt;
+use std::io;
 use std::iter;
 
 // If true, schedules will be saved as if they had memory limits, for all banks,
 // that are the next highest power of 2. This discretizes the cache a bit, even
 // though it
 const SNAP_CAP_TO_POWER_OF_TWO: bool = true;
+
+const fn ascii_lower() -> [char; 26] {
+    let mut result = ['a'; 26];
+
+    let mut c: u8 = b'a';
+    while c <= b'z' {
+        result[(c - 97) as usize] = c as char;
+        c += 1;
+    }
+
+    result
+}
+pub static ASCII_LOWER: [char; 26] = ascii_lower();
+
+pub struct ToWriteFmt<T>(pub T);
+
+impl<T> fmt::Write for ToWriteFmt<T>
+where
+    T: io::Write,
+{
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0.write_all(s.as_bytes()).map_err(|_| fmt::Error)
+    }
+}
 
 pub fn snap_availables_up_memvec(available: MemVec, always: bool) -> MemVec {
     if !SNAP_CAP_TO_POWER_OF_TWO && !always {

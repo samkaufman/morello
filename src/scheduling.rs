@@ -1,25 +1,25 @@
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::fmt::Display;
-use std::iter;
 use std::rc::Rc;
+use std::{iter, mem};
 
 use crate::alignment::aligned_approx;
-use crate::common::{DimSize, Problem, Shape};
+use crate::common::{DimSize, Shape, Spec};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::{Kernel, KernelType};
 use crate::imp::loops::{Loop, LoopTile};
-use crate::imp::moves::MoveLet;
+use crate::imp::moves::{MoveLet, TensorOrCacheView};
 use crate::imp::pipeline::Pipeline;
 use crate::imp::subspecs::ProblemApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::spec::{PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
-use crate::views::{Param, Tensor, Tile, View, ViewExt};
+use crate::views::{CacheView, Param, Tensor, Tile, View, ViewExt};
 
 /// A scheduling decision which can be applied to a Spec to produce an Impl.
 ///
@@ -65,18 +65,18 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
         }
     }
 
-    pub fn apply(&self, problem: &Problem<Tgt>) -> Option<ImplNode<Tgt, ()>> {
+    pub fn apply(&self, problem: &Spec<Tgt>) -> Option<ImplNode<Tgt, ()>> {
         self.apply_with_aux(problem, ())
     }
 
     pub fn apply_with_aux<A: Default + Clone>(
         &self,
-        problem: &Problem<Tgt>,
+        spec: &Spec<Tgt>,
         aux: A,
     ) -> Option<ImplNode<Tgt, A>> {
         // TODO: Ensure that Problem is snapped.
 
-        let node_spec = &problem.0; // TODO: Rename.
+        let node_spec = &spec.0; // TODO: Rename.
         let operands = node_spec.parameters();
 
         match self {
@@ -121,7 +121,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                                     .collect(),
                                 tile: Tile::new(
                                     Tiling::new_simple(output_shape.clone()),
-                                    Param(out_idx, current_output.clone()),
+                                    Param::new(out_idx, current_output.clone()),
                                 ),
                             };
 
@@ -178,7 +178,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                                         subscripts,
                                         tile: Tile::new(
                                             updated_input_tiling,
-                                            Param(
+                                            Param::new(
                                                 operand_idx.try_into().unwrap(),
                                                 original_input.clone(),
                                             ),
@@ -192,40 +192,42 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                         SchedulingDecision::Split { k } => {
                             debug_assert_ne!(*k, 0);
                             match node_spec {
-                                Spec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
-                                    PrimitiveSpecType::Matmul { accum: _ } => {
-                                        let [lhs, rhs] = &operands[..2] else {
+                                LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
+                                    match typ {
+                                        PrimitiveSpecType::Matmul { accum: _ } => {
+                                            let [lhs, rhs] = &operands[..2] else {
                                             panic!();
                                         };
-                                        assert!(*k < lhs.dim_sizes()[1]);
+                                            assert!(*k < lhs.dim_sizes()[1]);
 
-                                        let tiles = vec![
-                                            LoopTile {
-                                                subscripts: smallvec![0, 1],
-                                                tile: Tile::new(
-                                                    Tiling::new_simple(smallvec![
-                                                        lhs.dim_sizes()[0],
-                                                        *k
-                                                    ]),
-                                                    Param(0, lhs.clone()),
-                                                ),
-                                            },
-                                            LoopTile {
-                                                subscripts: smallvec![1, 2],
-                                                tile: Tile::new(
-                                                    Tiling::new_simple(smallvec![
-                                                        *k,
-                                                        rhs.dim_sizes()[1]
-                                                    ]),
-                                                    Param(1, rhs.clone()),
-                                                ),
-                                            },
-                                        ];
-                                        (tiles, false)
+                                            let tiles = vec![
+                                                LoopTile {
+                                                    subscripts: smallvec![0, 1],
+                                                    tile: Tile::new(
+                                                        Tiling::new_simple(smallvec![
+                                                            lhs.dim_sizes()[0],
+                                                            *k
+                                                        ]),
+                                                        Param::new(0, lhs.clone()),
+                                                    ),
+                                                },
+                                                LoopTile {
+                                                    subscripts: smallvec![1, 2],
+                                                    tile: Tile::new(
+                                                        Tiling::new_simple(smallvec![
+                                                            *k,
+                                                            rhs.dim_sizes()[1]
+                                                        ]),
+                                                        Param::new(1, rhs.clone()),
+                                                    ),
+                                                },
+                                            ];
+                                            (tiles, false)
+                                        }
+                                        _ => unimplemented!(),
                                     }
-                                    _ => unimplemented!(),
-                                },
-                                Spec::Compose { .. } => todo!(),
+                                }
+                                LogicalSpec::Compose { .. } => todo!(),
                             }
                         }
                         _ => unreachable!(),
@@ -242,7 +244,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     let mut inner_spec = node_spec.clone();
                     inner_spec.replace_io(&new_operands);
 
-                    Box::new(ProblemApp::default_app(Problem(inner_spec, problem.1.clone())).into())
+                    Box::new(ProblemApp::default_app(Spec(inner_spec, spec.1.clone())).into())
                 };
 
                 Some(ImplNode::Loop(Loop {
@@ -257,7 +259,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                 level,
                 vector_shape,
             } => {
-                let Spec::Compose { components, operand_auxes, serial_only } = node_spec else {
+                let LogicalSpec::Compose { components, operand_auxes, serial_only } = node_spec else {
                     panic!();
                 };
                 debug_assert!(components.len() >= 2);
@@ -276,7 +278,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     layout.clone(),
                     vector_shape.clone(),
                 );
-                let intermediate_tensor = Rc::new(Tensor(intermediate_tensorspec.clone()));
+                let intermediate_tensor = Rc::new(Tensor::new(intermediate_tensorspec.clone()));
 
                 // The head of a Compose is the final function evaluated. Build
                 // a full Spec so that it can be further scheduled independently.
@@ -286,7 +288,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                         .chain(&operand_auxes[..external_head_input_cnt])
                         .chain(iter::once(&operand_auxes[node_spec.output_idx()]));
                     let head_basics = &components[0];
-                    Spec::Primitive(
+                    LogicalSpec::Primitive(
                         head_basics.clone(),
                         head_basics.aux_from_operand_auxes(head_operand_auxes),
                         *serial_only,
@@ -298,8 +300,8 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                 // length of the Compose.
                 let next_to_head_input_auxes = &operand_auxes[external_head_input_cnt
                     ..external_head_input_cnt + next_to_outer_basics.typ.input_count()];
-                let remainder: Spec<Tgt> = if components.len() == 2 {
-                    Spec::Primitive(
+                let remainder: LogicalSpec<Tgt> = if components.len() == 2 {
+                    LogicalSpec::Primitive(
                         next_to_outer_basics.clone(),
                         next_to_outer_basics.aux_from_operand_auxes(
                             next_to_head_input_auxes
@@ -316,7 +318,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                         .map(|t| t.aux.clone())
                         .chain(iter::once(intermediate_tensorspec.aux))
                         .collect::<Vec<_>>();
-                    Spec::Compose {
+                    LogicalSpec::Compose {
                         components: components[1..].to_vec(),
                         operand_auxes: remainder_operand_auxes,
                         serial_only: *serial_only,
@@ -344,7 +346,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                         .collect();
 
                     // TODO: Use MemoryLimits::Pipeline where appropriate instead.
-                    let mut m = MemoryLimits::Standard(match &problem.1 {
+                    let mut m = MemoryLimits::Standard(match &spec.1 {
                         MemoryLimits::Standard(v) => {
                             let Some(r) = v.clone().checked_sub(&intermediate_mem_consumed_nondiscrete) else {
                                 return None;
@@ -358,26 +360,25 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
 
                 // Reify the new Specs and TensorSpecs into applications we can
                 // nest in the Pipeline body.
-                let remainder_problem_application =
-                    {
-                        let mut params: SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]> = smallvec![];
-                        // TODO: Fill in.
-                        params.extend(remainder.inputs().iter().enumerate().map(|(i, inp)| {
-                            Rc::new(Param(i.try_into().unwrap(), inp.clone())) as _
-                        }));
-                        params.push(Rc::new(intermediate_tensor.clone()) as _);
-                        ImplNode::ProblemApp(ProblemApp::new(
-                            Problem(remainder, new_limits.clone()),
-                            params,
-                        ))
-                    };
+                let remainder_problem_application = {
+                    let mut params: SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]> = smallvec![];
+                    // TODO: Fill in.
+                    params.extend(remainder.inputs().iter().enumerate().map(|(i, inp)| {
+                        Rc::new(Param::new(i.try_into().unwrap(), inp.clone())) as _
+                    }));
+                    params.push(Rc::new(intermediate_tensor.clone()) as _);
+                    ImplNode::ProblemApp(ProblemApp::new(
+                        Spec(remainder, new_limits.clone()),
+                        params,
+                    ))
+                };
                 let head_problem_application = {
                     let mut params: SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]> = smallvec![];
                     // TODO: Fill in.
                     params.extend(head_spec.parameters().iter().skip(1).map(|_operand| {
                         todo!();
                     }));
-                    ImplNode::ProblemApp(ProblemApp::new(Problem(head_spec, new_limits), params))
+                    ImplNode::ProblemApp(ProblemApp::new(Spec(head_spec, new_limits), params))
                 };
 
                 Some(ImplNode::Pipeline(Pipeline {
@@ -387,7 +388,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                 }))
             }
             SchedulingDecision::SpatialSplit => {
-                let Spec::Primitive(PrimitiveBasics { typ: PrimitiveSpecType::Conv { accum: conv_accum }, spec_shape: _, dtype }, _, serial_only) = node_spec else {
+                let LogicalSpec::Primitive(PrimitiveBasics { typ: PrimitiveSpecType::Conv { accum: conv_accum }, spec_shape: _, dtype }, _, serial_only) = node_spec else {
                     panic!();
                 };
                 if !*conv_accum {
@@ -413,7 +414,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     );
                     Tile::new(
                         tiling,
-                        Param(idx.try_into().unwrap(), operands[idx].clone()),
+                        Param::new(idx.try_into().unwrap(), operands[idx].clone()),
                     )
                 });
 
@@ -424,9 +425,9 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                 let inner_filters_tile =
                     outer_filters_tile.clone().squeeze_dims(2..rank).transpose();
 
-                let inner_output_view = Param(2, operands[2].clone()).squeeze_dims(2..rank);
+                let inner_output_view = Param::new(2, operands[2].clone()).squeeze_dims(2..rank);
 
-                let body_spec = Spec::Primitive(
+                let body_spec = LogicalSpec::Primitive(
                     PrimitiveBasics {
                         typ: PrimitiveSpecType::Matmul { accum: true },
                         spec_shape: operands[0].dim_sizes()[..2]
@@ -457,7 +458,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     ],
                     body: Box::new(
                         ProblemApp::new(
-                            Problem(body_spec, problem.1.clone()),
+                            Spec(body_spec, spec.1.clone()),
                             [
                                 Rc::new(inner_image_tile) as Rc<dyn View<Tgt = Tgt>>,
                                 Rc::new(inner_filters_tile) as Rc<dyn View<Tgt = Tgt>>,
@@ -482,13 +483,19 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                 }
 
                 let outer_moved_operand_spec = &operands[usize::from(*source_idx)];
-                let inner_moved_operand = Rc::new(Tensor(movelet_inner_tensorspec(
+                let new_spec = movelet_inner_tensorspec(
                     outer_moved_operand_spec,
                     destination_level,
                     &destination_layout
                         .canonicalize_for_shape(outer_moved_operand_spec.dim_sizes()),
                     destination_vector_shape.as_ref().map(|v| v.as_slice()),
-                )));
+                );
+                let inner_moved_operand = if new_spec.level().is_addressed() {
+                    TensorOrCacheView::Tensor(Rc::new(Tensor::new(new_spec)))
+                } else {
+                    let source = Param::new(*source_idx, outer_moved_operand_spec.clone());
+                    TensorOrCacheView::CacheView(Rc::new(CacheView::new(source, new_spec)))
+                };
 
                 let lower_limits: MemoryLimits = {
                     // We assume bytes_used will be the same for source and destination
@@ -498,7 +505,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                         additional *= 2;
                     }
 
-                    let mut l = match &problem.1 {
+                    let mut l = match &spec.1 {
                         MemoryLimits::Standard(base) => {
                             let updated_level_idx = Tgt::levels()
                                 .iter()
@@ -517,56 +524,59 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                 };
 
                 // Closure which makes a prologue or epilogue for this Spec.
-                let make_logue = |typ, f: &dyn Fn(_, _, _) -> bool| {
+                let make_logue = |flip, f: &dyn Fn(_, _, _) -> bool| {
                     if f(destination_level, *source_idx, node_spec) {
+                        let mut left_spec = outer_moved_operand_spec;
+                        let mut right_spec = inner_moved_operand.spec();
+                        let mut args: [Rc<dyn View<Tgt = Tgt>>; 2] = [
+                            Rc::new(Param::new(0, outer_moved_operand_spec.clone())) as _,
+                            inner_moved_operand.inner_rc(),
+                        ];
+                        if flip {
+                            mem::swap(&mut left_spec, &mut right_spec);
+                            args.swap(0, 1);
+                        }
                         Some(ProblemApp::new(
-                            Problem(
-                                Spec::Primitive(
+                            Spec(
+                                LogicalSpec::Primitive(
                                     PrimitiveBasics {
-                                        typ,
-                                        spec_shape: outer_moved_operand_spec.dim_sizes().clone(),
-                                        dtype: outer_moved_operand_spec.dtype(),
+                                        typ: PrimitiveSpecType::Move,
+                                        spec_shape: left_spec.dim_sizes().clone(),
+                                        dtype: left_spec.dtype(),
                                     },
                                     PrimitiveAux::Move {
-                                        outer_aux: outer_moved_operand_spec.aux.clone(),
-                                        inner_level: inner_moved_operand.0.level(),
-                                        inner_layout: inner_moved_operand.0.layout(),
-                                        inner_vector_shape: inner_moved_operand
-                                            .0
-                                            .vector_shape()
-                                            .cloned(),
+                                        outer_aux: left_spec.aux.clone(),
+                                        inner_level: right_spec.level(),
+                                        inner_layout: right_spec.layout(),
+                                        inner_vector_shape: right_spec.vector_shape().cloned(),
                                     },
                                     node_spec.serial_only(),
                                 ),
                                 lower_limits.clone(),
                             ),
-                            [
-                                Rc::new(Param(0, outer_moved_operand_spec.clone()))
-                                    as Rc<dyn View<Tgt = Tgt>>,
-                                inner_moved_operand.clone() as Rc<dyn View<Tgt = Tgt>>,
-                            ],
+                            args,
                         ))
                     } else {
                         None
                     }
                 };
-                let prologue = make_logue(PrimitiveSpecType::Load, &move_gens_prologue);
-                let epilogue = make_logue(PrimitiveSpecType::Store, &move_gens_epilogue);
+                let prologue = make_logue(false, &move_gens_prologue);
+                let epilogue = make_logue(true, &move_gens_epilogue);
 
                 let new_body_app = {
                     let mut new_operands = operands.clone();
-                    new_operands[usize::from(*source_idx)] = inner_moved_operand.0.clone();
+                    new_operands[usize::from(*source_idx)] = inner_moved_operand.spec().clone();
                     let new_inner_spec = {
                         let mut new_spec = node_spec.clone();
                         new_spec.replace_io(&new_operands);
                         new_spec
                     };
-                    let problem = Problem(new_inner_spec, lower_limits.clone());
+                    let problem = Spec(new_inner_spec, lower_limits.clone());
                     let inner_operands = new_operands.iter().enumerate().map(|(i, o)| {
                         if i == usize::from(*source_idx) {
-                            inner_moved_operand.clone()
+                            inner_moved_operand.inner_rc()
                         } else {
-                            Rc::new(Param(u8::try_from(i).unwrap(), o.clone()))
+                            Rc::new(Param::new(u8::try_from(i).unwrap(), o.clone()))
                                 as Rc<dyn View<Tgt = Tgt>>
                         }
                     });
@@ -585,7 +595,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                 )))
             }
             SchedulingDecision::ToAccum => {
-                let Spec::Primitive(PrimitiveBasics { typ, spec_shape: _, dtype: _ }, _, _) = node_spec else {
+                let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape: _, dtype: _ }, _, _) = node_spec else {
                     panic!();
                 };
                 let (PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum }) = typ else {
@@ -602,7 +612,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                 } = node_spec.output();
 
                 let zero_app = {
-                    let mut subspec = Spec::Primitive(
+                    let mut subspec = LogicalSpec::Primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Zero,
                             spec_shape: output_dim_sizes,
@@ -612,8 +622,8 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                         node_spec.serial_only(),
                     );
                     subspec.canonicalize();
-                    let problem = Problem(subspec, problem.1.clone());
-                    let app_arguments = [Param(
+                    let problem = Spec(subspec, spec.1.clone());
+                    let app_arguments = [Param::new(
                         node_spec.output_idx().try_into().unwrap(),
                         node_spec.output(),
                     )];
@@ -622,21 +632,32 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                 let accum_app = {
                     let mut subspec = node_spec.clone_as_accum();
                     subspec.canonicalize();
-                    let problem = Problem(subspec, problem.1.clone());
+                    let problem = Spec(subspec, spec.1.clone());
                     let app_arguments = operands
                         .iter()
                         .enumerate()
-                        .map(|(i, t)| Param(i.try_into().unwrap(), t.clone()));
+                        .map(|(i, t)| Param::new(i.try_into().unwrap(), t.clone()));
                     ProblemApp::new(problem, app_arguments).into()
                 };
 
                 Some(ImplNode::Block(Block {
                     stages: vec![zero_app, accum_app],
                     bindings: vec![smallvec![2], smallvec![0, 1, 2]],
+                    parameters: spec.0.parameters(),
                     aux,
                 }))
             }
-            SchedulingDecision::Place(k) => Some(ImplNode::Kernel(Kernel(*k, aux))),
+            SchedulingDecision::Place(k) => Some(ImplNode::Kernel(Kernel {
+                kernel_type: *k,
+                arguments: spec
+                    .0
+                    .parameters()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| Param::new(i.try_into().unwrap(), p.clone()))
+                    .collect(),
+                aux,
+            })),
         }
     }
 }
@@ -676,7 +697,7 @@ impl<Tgt: Target> Display for SchedulingDecision<Tgt> {
 fn move_gens_prologue<Tgt: Target>(
     destination_level: &Tgt::Level,
     source_idx: u8,
-    node_spec: &Spec<Tgt>,
+    node_spec: &LogicalSpec<Tgt>,
 ) -> bool {
     let operand_count = node_spec.operand_count();
     let is_output = usize::from(source_idx) == operand_count - 1;
@@ -686,7 +707,7 @@ fn move_gens_prologue<Tgt: Target>(
 fn move_gens_epilogue<Tgt: Target>(
     destination_level: &Tgt::Level,
     source_idx: u8,
-    node_spec: &Spec<Tgt>,
+    node_spec: &LogicalSpec<Tgt>,
 ) -> bool {
     let operand_count = node_spec.operand_count();
     let is_output = usize::from(source_idx) == operand_count - 1;
