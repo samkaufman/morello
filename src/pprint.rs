@@ -52,7 +52,7 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, color: ColorMode) {
         },
     );
 
-    // Format the table.
+    // Format and print the table.
     let format = format::FormatBuilder::new()
         .separator(
             format::LinePosition::Title,
@@ -61,7 +61,6 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, color: ColorMode) {
         .column_separator(' ')
         .build();
     table.set_format(format);
-
     if !highlight(&table.to_string(), color) {
         table.printstd();
     }
