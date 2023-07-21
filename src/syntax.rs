@@ -10,19 +10,18 @@ lazy_static! {
     static ref TS: ThemeSet = ThemeSet::load_defaults();
 }
 
-const SYNTAX: &str = "Python";
 const THEME: &str = "base16-ocean.dark";
 
-#[derive(Clone, PartialEq, clap::ValueEnum)]
+#[derive(Copy, Clone, PartialEq, clap::ValueEnum)]
 pub enum ColorMode {
     Never,
     Auto,
     Always,
 }
 
-/// Highlight and print the table.
+/// Highlight and print the string.
 /// Returns true if highlighting was performed, false otherwise.
-pub fn highlight(table: &str, mut color: ColorMode) -> bool {
+fn highlight(s: &str, syntax: &str, mut color: ColorMode) -> bool {
     // Decide whether to print in color.
     if color == ColorMode::Auto && !atty::is(atty::Stream::Stdout) {
         color = ColorMode::Never;
@@ -34,12 +33,22 @@ pub fn highlight(table: &str, mut color: ColorMode) -> bool {
     }
 
     // Syntax highlight and print the table.
-    let syntax = SS.find_syntax_by_name(SYNTAX).unwrap();
+    let syntax = SS.find_syntax_by_name(syntax).unwrap();
     let mut h = HighlightLines::new(syntax, &TS.themes[THEME]);
-    for line in LinesWithEndings::from(table) {
+    for line in LinesWithEndings::from(s) {
         let ranges: Vec<(Style, &str)> = h.highlight_line(line, &SS).unwrap();
         let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
         print!("{}", escaped);
     }
     true
+}
+
+/// Colorize Morello IR.
+pub fn morello(table: &str, color: ColorMode) -> bool {
+    highlight(table, "Python", color)
+}
+
+/// Colorize Generated C code.
+pub fn c(table: &str, color: ColorMode) -> bool {
+    highlight(table, "C", color)
 }

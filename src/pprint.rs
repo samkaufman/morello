@@ -1,5 +1,5 @@
 use crate::nameenv::NameEnv;
-use crate::syntax::{highlight, ColorMode};
+use crate::syntax::{self, ColorMode};
 use crate::table::DbImpl;
 use crate::target::Target;
 use crate::views::View;
@@ -61,7 +61,7 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, color: ColorMode) {
         .column_separator(' ')
         .build();
     table.set_format(format);
-    if !highlight(&table.to_string(), color) {
+    if !syntax::morello(&table.to_string(), color) {
         table.printstd();
     }
 }

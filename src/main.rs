@@ -153,6 +153,6 @@ fn main() {
     assert_eq!(results.len(), 1);
     pprint(&results[0], args.color);
     results[0]
-        .emit_kernel(&mut ToWriteFmt(io::stdout()))
+        .emit_kernel(&mut ToWriteFmt(io::stdout()), args.color)
         .unwrap();
 }

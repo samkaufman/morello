@@ -16,6 +16,8 @@ use crate::imp::loops::Loop;
 use crate::imp::moves::{MoveLet, TensorOrCacheView};
 use crate::imp::{Impl, ImplNode};
 use crate::layout::BufferExprTerm;
+use crate::syntax;
+use crate::syntax::ColorMode;
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::views::{Param, Tensor, View};
 
@@ -31,14 +33,14 @@ struct X86CodeGenerator<'a> {
 }
 
 impl<Aux: Clone + Debug> CodeGen<X86Target> for ImplNode<X86Target, Aux> {
-    fn emit_kernel<W: Write>(&self, out: &mut W) -> fmt::Result {
+    fn emit_kernel<W: Write>(&self, out: &mut W, color: ColorMode) -> fmt::Result {
         let top_arg_tensors = self
             .parameters()
             .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
             .collect::<Vec<_>>();
         let mut generator = X86CodeGenerator::default();
         generator.headers.emit_x86 = true;
-        generator.emit_kernel(self, &top_arg_tensors, out)?;
+        generator.emit_kernel(self, &top_arg_tensors, out, color)?;
         Ok(())
     }
 }
@@ -49,6 +51,7 @@ impl<'a> X86CodeGenerator<'a> {
         imp: &'a ImplNode<X86Target, Aux>,
         top_arg_tensors: &'a [Rc<Tensor<X86Target>>],
         out: &mut W,
+        color: ColorMode,
     ) -> fmt::Result {
         debug_assert_eq!(top_arg_tensors.len(), usize::from(imp.parameter_count()));
 
@@ -89,7 +92,9 @@ impl<'a> X86CodeGenerator<'a> {
         writeln!(main_body_str, "}}")?;
 
         self.headers.emit(out)?;
-        out.write_str(&main_body_str)?;
+        if !syntax::c(&main_body_str, color) {
+            out.write_str(&main_body_str)?;
+        }
         Ok(())
     }
 
