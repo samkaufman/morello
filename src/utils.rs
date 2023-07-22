@@ -16,7 +16,6 @@ const fn ascii_lower() -> [char; 26] {
         result[(c - 97) as usize] = c as char;
         c += 1;
     }
-
     result
 }
 pub static ASCII_LOWER: [char; 26] = ascii_lower();
