@@ -158,6 +158,7 @@ fn main() {
     };
     assert_eq!(results.len(), 1);
     pprint(&results[0], args.compact);
+    println!();
     results[0]
         .emit_kernel(&mut ToWriteFmt(io::stdout()))
         .unwrap();
