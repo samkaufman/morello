@@ -8,12 +8,15 @@ use crate::{imp::Impl, views::Param};
 use crate::color::do_color;
 use prettytable::{self, format, row, Cell};
 
-pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>) {
+pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, compact: bool) {
     let mut name_env: NameEnv<'_, dyn View<Tgt = Tgt>> = NameEnv::new();
 
     // Set up table
     let mut table = prettytable::Table::new();
-    let mut titles = row!["", "Logical Spec"];
+    let mut titles = row![""];
+    if !compact {
+        titles.add_cell(Cell::new("Logical Spec"));
+    }
     for level in Tgt::levels() {
         titles.add_cell(Cell::new(&level.to_string()));
     }
@@ -39,10 +42,15 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>) {
         0,
         &mut |imp, args: &[&(dyn View<Tgt = Tgt>)], depth| {
             if let Some(line_top) = imp.line_strs(&mut name_env, args) {
-                let main_str = format!("{}{}", " ".repeat(depth), line_top);
-                let mut r = row![main_str, "", ""];
+                let indent = " ".repeat(depth);
+                let morello_ir = format!("{indent}{line_top}");
+                let mut r = row![morello_ir, "", ""];
                 if let Some((problem, cost)) = imp.aux() {
-                    r = row![main_str, format!("{}", &problem.0),];
+                    if compact {
+                        r = row![format!("{indent}/* {} */\n{morello_ir}\n", &problem.0)];
+                    } else {
+                        r = row![morello_ir, format!("{}", &problem.0)];
+                    }
                     for level_peak in cost.peaks.iter() {
                         r.add_cell(Cell::new(&format!("{: >4}", level_peak)));
                     }

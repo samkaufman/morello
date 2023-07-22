@@ -28,7 +28,7 @@ fn highlight(s: &str, syntax: &str) -> bool {
 
 /// Colorize Morello IR.
 pub fn morello(table: &str) -> bool {
-    highlight(table, "Python")
+    highlight(table, "Rust")
 }
 
 /// Colorize Generated C code.

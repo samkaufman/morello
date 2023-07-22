@@ -61,6 +61,10 @@ struct Args {
     /// Color mode
     #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
     color: ColorMode,
+
+    /// Use compact output
+    #[arg(long)]
+    compact: bool,
 }
 
 fn main() {
@@ -153,7 +157,7 @@ fn main() {
         panic!("No Impl found");
     };
     assert_eq!(results.len(), 1);
-    pprint(&results[0]);
+    pprint(&results[0], args.compact);
     results[0]
         .emit_kernel(&mut ToWriteFmt(io::stdout()))
         .unwrap();
