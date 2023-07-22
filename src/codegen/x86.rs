@@ -174,8 +174,7 @@ impl<'a> X86CodeGenerator<'a> {
                 for (var_name, (_, steps)) in iter_var_names.values().zip(&axes_to_emit) {
                     writeln!(
                         w,
-                        "for (int {} = 0; {} < {}; {}++) {{",
-                        var_name, var_name, steps, var_name
+                        "for (int {var_name} = 0; {var_name} < {steps}; {var_name}++) {{"
                     )?;
                 }
 
@@ -283,8 +282,7 @@ impl<'a> X86CodeGenerator<'a> {
                         let arg_expr = self.c_index_ptr(buffer, &buffer_indexing_expr, None);
                         writeln!(
                             w,
-                            "memset((void *)({}), 0, {});",
-                            arg_expr,
+                            "memset((void *)({arg_expr}), 0, {});",
                             arguments[0].1.bytes_used()
                         )
                     }
@@ -320,7 +318,7 @@ impl<'a> X86CodeGenerator<'a> {
                     match &coef {
                         0 => panic!("AffineExpr contained zero term"),
                         1 => sym_str.clone(),
-                        _ => format!("{} * {}", coef, sym_str),
+                        _ => format!("{coef} * {sym_str}"),
                     }
                 })
                 .join(" + ");
@@ -350,19 +348,19 @@ impl<'a> X86CodeGenerator<'a> {
         match buffer {
             CBuffer::Ptr { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
-                None => format!("{}[{}]", name, self.expr_to_c(expr)),
+                None => format!("{name}[{}]", self.expr_to_c(expr)),
             },
             CBuffer::UnsizedHeapArray { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
-                None => format!("{}[{}]", name, self.expr_to_c(expr)),
+                None => format!("{name}[{}]", self.expr_to_c(expr)),
             },
             CBuffer::HeapArray { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
-                None => format!("{}[{}]", name, self.expr_to_c(expr)), // assuming expr.c_expr() is available in scope
+                None => format!("{name}[{}]", self.expr_to_c(expr)), // assuming expr.c_expr() is available in scope
             },
             CBuffer::StackArray { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
-                None => format!("{}[{}]", name, self.expr_to_c(expr)),
+                None => format!("{name}[{}]", self.expr_to_c(expr)),
             },
             CBuffer::ValueVar { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
@@ -398,7 +396,7 @@ impl<'a> X86CodeGenerator<'a> {
             | CBuffer::HeapArray { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
                 None => {
-                    format!("{} + {}", name, self.expr_to_c(expr))
+                    format!("{name} + {}", self.expr_to_c(expr))
                 }
             },
             CBuffer::StackArray { .. } => match reinterpret {

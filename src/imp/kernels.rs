@@ -89,7 +89,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
             .iter()
             .map(|&a| names.get_name_or_display(a))
             .join(", ");
-        Some(format!("{}({})", name, args_str))
+        Some(format!("{name}({args_str})"))
     }
 
     fn aux(&self) -> &Aux {

@@ -105,7 +105,7 @@ impl CBuffer {
         match self {
             CBuffer::Ptr { .. } => unimplemented!(),
             CBuffer::UnsizedHeapArray { name, .. } | CBuffer::HeapArray { name, .. } => {
-                writeln!(w, "free({});", name)?;
+                writeln!(w, "free({name});")?;
                 Ok(())
             }
             CBuffer::StackArray { .. } | CBuffer::ValueVar { .. } => Ok(()),

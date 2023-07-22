@@ -21,7 +21,7 @@ fn highlight(s: &str, syntax: &str) -> bool {
     for line in LinesWithEndings::from(s) {
         let ranges: Vec<(Style, &str)> = h.highlight_line(line, &SS).unwrap();
         let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-        print!("{}", escaped);
+        print!("{escaped}");
     }
     true
 }
