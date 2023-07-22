@@ -5,7 +5,7 @@ use crate::codegen::CodeGen;
 use crate::color::ColorMode;
 use crate::common::{DimSize, Dtype, Spec};
 use crate::layout::row_major;
-use crate::pprint::pprint;
+use crate::pprint::{pprint, PrintMode};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::table::{DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
@@ -62,9 +62,9 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
     color: ColorMode,
 
-    /// Use compact output
-    #[arg(long)]
-    compact: bool,
+    /// Print mode
+    #[arg(long, value_enum, default_value_t = PrintMode::Full)]
+    print: PrintMode,
 }
 
 fn main() {
@@ -157,7 +157,7 @@ fn main() {
         panic!("No Impl found");
     };
     assert_eq!(results.len(), 1);
-    pprint(&results[0], args.compact);
+    pprint(&results[0], args.print);
     println!();
     results[0]
         .emit_kernel(&mut ToWriteFmt(io::stdout()))
