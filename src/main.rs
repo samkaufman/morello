@@ -2,11 +2,11 @@ use std::io;
 use std::sync::RwLock;
 
 use crate::codegen::CodeGen;
+use crate::color::ColorMode;
 use crate::common::{DimSize, Dtype, Spec};
 use crate::layout::row_major;
 use crate::pprint::pprint;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use crate::syntax::ColorMode;
 use crate::table::{DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::TensorSpecAux;
@@ -18,10 +18,12 @@ use smallvec::smallvec;
 
 mod alignment;
 mod codegen;
+mod color;
 mod common;
 mod cost;
 mod expr;
 mod geometry;
+mod highlight;
 mod imp;
 mod layout;
 mod memorylimits;
@@ -31,7 +33,6 @@ mod pprint;
 mod scheduling;
 mod search;
 mod spec;
-mod syntax;
 mod table;
 mod target;
 mod tensorspec;
@@ -66,6 +67,7 @@ fn main() {
     env_logger::init();
 
     let args = Args::parse();
+    color::set_color_mode(args.color);
 
     let db = RwLock::new(SqliteDatabaseWrapper::new(
         InMemDatabase::<X86Target>::new(),
@@ -151,8 +153,8 @@ fn main() {
         panic!("No Impl found");
     };
     assert_eq!(results.len(), 1);
-    pprint(&results[0], args.color);
+    pprint(&results[0]);
     results[0]
-        .emit_kernel(&mut ToWriteFmt(io::stdout()), args.color)
+        .emit_kernel(&mut ToWriteFmt(io::stdout()))
         .unwrap();
 }

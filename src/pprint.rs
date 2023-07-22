@@ -1,13 +1,14 @@
+use crate::highlight;
 use crate::nameenv::NameEnv;
-use crate::syntax::{self, ColorMode};
 use crate::table::DbImpl;
 use crate::target::Target;
 use crate::views::View;
 use crate::{imp::Impl, views::Param};
 
+use crate::color::do_color;
 use prettytable::{self, format, row, Cell};
 
-pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, color: ColorMode) {
+pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>) {
     let mut name_env: NameEnv<'_, dyn View<Tgt = Tgt>> = NameEnv::new();
 
     // Set up table
@@ -61,7 +62,9 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, color: ColorMode) {
         .column_separator(' ')
         .build();
     table.set_format(format);
-    if !syntax::morello(&table.to_string(), color) {
+    if do_color() {
+        highlight::morello(&table.to_string());
+    } else {
         table.printstd();
     }
 }

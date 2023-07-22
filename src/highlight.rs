@@ -12,26 +12,9 @@ lazy_static! {
 
 const THEME: &str = "base16-ocean.dark";
 
-#[derive(Copy, Clone, PartialEq, clap::ValueEnum)]
-pub enum ColorMode {
-    Never,
-    Auto,
-    Always,
-}
-
 /// Highlight and print the string.
 /// Returns true if highlighting was performed, false otherwise.
-fn highlight(s: &str, syntax: &str, mut color: ColorMode) -> bool {
-    // Decide whether to print in color.
-    if color == ColorMode::Auto && !atty::is(atty::Stream::Stdout) {
-        color = ColorMode::Never;
-    }
-
-    // Print the table without syntax highlighting.
-    if color == ColorMode::Never {
-        return false;
-    }
-
+fn highlight(s: &str, syntax: &str) -> bool {
     // Syntax highlight and print the table.
     let syntax = SS.find_syntax_by_name(syntax).unwrap();
     let mut h = HighlightLines::new(syntax, &TS.themes[THEME]);
@@ -44,11 +27,11 @@ fn highlight(s: &str, syntax: &str, mut color: ColorMode) -> bool {
 }
 
 /// Colorize Morello IR.
-pub fn morello(table: &str, color: ColorMode) -> bool {
-    highlight(table, "Python", color)
+pub fn morello(table: &str) -> bool {
+    highlight(table, "Python")
 }
 
 /// Colorize Generated C code.
-pub fn c(table: &str, color: ColorMode) -> bool {
-    highlight(table, "C", color)
+pub fn c(table: &str) -> bool {
+    highlight(table, "C")
 }
