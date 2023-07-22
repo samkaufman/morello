@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::common::Dtype;
+use crate::utils::indent;
 
 // TODO: Remove Debug.
 #[derive(Debug, Clone)]
@@ -55,15 +56,16 @@ impl CBuffer {
         }
     }
 
-    pub fn emit<W: fmt::Write>(&self, w: &mut W, zero_init: bool) -> fmt::Result {
+    pub fn emit<W: fmt::Write>(&self, w: &mut W, zero_init: bool, depth: usize) -> fmt::Result {
         match self {
             CBuffer::Ptr { .. } => unimplemented!(),
             CBuffer::UnsizedHeapArray { .. } => unimplemented!(),
             CBuffer::HeapArray { name, size, dtype } => {
-                writeln!(w, "{} *restrict {};", c_type(*dtype), name)?;
+                writeln!(w, "{}{} *restrict {};", indent(depth), c_type(*dtype), name)?;
                 writeln!(
                     w,
-                    "posix_memalign((void **)&{}, 128, {}*sizeof({}));",
+                    "{}posix_memalign((void **)&{}, 128, {}*sizeof({}));",
+                    indent(depth),
                     name,
                     size,
                     c_type(*dtype)
@@ -72,7 +74,8 @@ impl CBuffer {
                 if zero_init {
                     writeln!(
                         w,
-                        "memset({}, 0, {}*sizeof({}));",
+                        "{}memset({}, 0, {}*sizeof({}));",
+                        indent(depth),
                         name,
                         size,
                         c_type(*dtype)
@@ -85,7 +88,8 @@ impl CBuffer {
                 let epi = if zero_init { " = {0}" } else { "" };
                 writeln!(
                     w,
-                    "{} {}[{}] __attribute__((aligned (128))){};",
+                    "{}{} {}[{}] __attribute__((aligned (128))){};",
+                    indent(depth),
                     c_type(*dtype),
                     name,
                     size,
@@ -95,17 +99,17 @@ impl CBuffer {
             }
             CBuffer::ValueVar { name, dtype } => {
                 let epi = if zero_init { " = {0}" } else { "" };
-                writeln!(w, "{} {}{};", c_type(*dtype), name, epi)?;
+                writeln!(w, "{}{} {}{};", indent(depth), c_type(*dtype), name, epi)?;
                 Ok(())
             }
         }
     }
 
-    pub fn emit_free<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
+    pub fn emit_free<W: fmt::Write>(&self, w: &mut W, depth: usize) -> fmt::Result {
         match self {
             CBuffer::Ptr { .. } => unimplemented!(),
             CBuffer::UnsizedHeapArray { name, .. } | CBuffer::HeapArray { name, .. } => {
-                writeln!(w, "free({name});")?;
+                writeln!(w, "{}free({name});", indent(depth))?;
                 Ok(())
             }
             CBuffer::StackArray { .. } | CBuffer::ValueVar { .. } => Ok(()),

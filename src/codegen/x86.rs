@@ -19,6 +19,7 @@ use crate::imp::moves::{MoveLet, TensorOrCacheView};
 use crate::imp::{Impl, ImplNode};
 use crate::layout::BufferExprTerm;
 use crate::target::{Target, X86MemoryLevel, X86Target};
+use crate::utils::indent;
 use crate::views::{Param, Tensor, View};
 
 const STACK_CUTOFF: u32 = 256;
@@ -55,6 +56,7 @@ impl<'a> X86CodeGenerator<'a> {
         debug_assert_eq!(top_arg_tensors.len(), usize::from(imp.parameter_count()));
 
         let mut main_body_str = String::new();
+        writeln!(main_body_str)?;
         writeln!(main_body_str, "__attribute__((noinline))\nvoid kernel(")?;
         for ((operand_idx, operand), tensor) in imp.parameters().enumerate().zip(top_arg_tensors) {
             let spec = tensor.spec();
@@ -72,7 +74,7 @@ impl<'a> X86CodeGenerator<'a> {
                 if operand_idx + 1 < imp.parameter_count().into() {
                     ", "
                 } else {
-                    ") {"
+                    "\n) {"
                 }
             )?;
             self.name_env.insert(Rc::clone(tensor), new_c_buffer);
@@ -86,7 +88,8 @@ impl<'a> X86CodeGenerator<'a> {
             .collect::<Vec<_>>();
 
         imp.bind(&tensors_as_trait_obj_ptrs, &mut self.param_bindings);
-        self.emit(&mut main_body_str, &imp)?;
+        let depth = 1_usize;
+        self.emit(&mut main_body_str, &imp, depth)?;
 
         writeln!(main_body_str, "}}")?;
 
@@ -131,6 +134,7 @@ impl<'a> X86CodeGenerator<'a> {
         &mut self,
         w: &mut W,
         imp: &ImplNode<X86Target, Aux>,
+        mut depth: usize,
     ) -> fmt::Result {
         match imp {
             ImplNode::Loop(l) => {
@@ -166,7 +170,8 @@ impl<'a> X86CodeGenerator<'a> {
                 if l.parallel {
                     writeln!(
                         w,
-                        "#pragma omp parallel for collapse({}) schedule(static)",
+                        "{}#pragma omp parallel for collapse({}) schedule(static)",
+                        indent(depth),
                         axes_to_emit.len()
                     )?;
                 }
@@ -174,15 +179,17 @@ impl<'a> X86CodeGenerator<'a> {
                 for (var_name, (_, steps)) in iter_var_names.values().zip(&axes_to_emit) {
                     writeln!(
                         w,
-                        "for (int {var_name} = 0; {var_name} < {steps}; {var_name}++) {{"
+                        "{}for (int {var_name} = 0; {var_name} < {steps}; {var_name}++) {{",
+                        indent(depth)
                     )?;
                 }
 
-                // TODO: Indent before recursing!
-                self.emit(w, &l.body)?;
+                depth += 1;
+                self.emit(w, &l.body, depth)?;
+                depth -= 1;
 
                 for _ in 0..axes_to_emit.len() {
-                    writeln!(w, "}}")?;
+                    writeln!(w, "{}}}", indent(depth))?;
                 }
                 Ok(())
             }
@@ -212,7 +219,7 @@ impl<'a> X86CodeGenerator<'a> {
                                     introduced_spec.dtype(),
                                     introduced_spec.level(),
                                 );
-                                dest_buffer.emit(w, false)?;
+                                dest_buffer.emit(w, false, depth)?;
 
                                 if self
                                     .name_env
@@ -225,11 +232,11 @@ impl<'a> X86CodeGenerator<'a> {
                             TensorOrCacheView::CacheView(_) => (),
                         };
                         if let Some(prologue) = move_let.prologue() {
-                            self.emit(w, prologue)?;
+                            self.emit(w, prologue, depth)?;
                         }
-                        self.emit(w, move_let.main_stage())?;
+                        self.emit(w, move_let.main_stage(), depth)?;
                         if let Some(epilogue) = move_let.epilogue() {
-                            self.emit(w, epilogue)?;
+                            self.emit(w, epilogue, depth)?;
                         }
                         Ok(())
                     }
@@ -242,13 +249,13 @@ impl<'a> X86CodeGenerator<'a> {
                 aux: _,
             }) => {
                 for stage in stages {
-                    self.emit(w, stage)?;
+                    self.emit(w, stage, depth)?;
                 }
                 Ok(())
             }
             ImplNode::Pipeline(_) => todo!("Emit code for Pipeline"),
             ImplNode::ProblemApp(p) => {
-                writeln!(w, "assert(false);  /* {:?} */", p)
+                writeln!(w, "{}assert(false);  /* {p:?} */", indent(depth))
             }
             ImplNode::Kernel(Kernel {
                 kernel_type,
@@ -260,14 +267,17 @@ impl<'a> X86CodeGenerator<'a> {
                         let exprs = self.param_args_to_c_indices(arguments);
                         writeln!(
                             w,
-                            "{} += {} * {};  /* Mult */",
-                            exprs[2], exprs[0], exprs[1]
+                            "{}{} += {} * {};  /* Mult */",
+                            indent(depth),
+                            exprs[2],
+                            exprs[0],
+                            exprs[1]
                         )
                     }
                     KernelType::BroadcastVecMult => todo!(),
                     KernelType::ValueAssign => {
                         let exprs = self.param_args_to_c_indices(arguments);
-                        writeln!(w, "{} = {};", exprs[1], exprs[0])
+                        writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0])
                     }
                     KernelType::VectorAssign => todo!(),
                     KernelType::MemsetZero => {
@@ -282,7 +292,8 @@ impl<'a> X86CodeGenerator<'a> {
                         let arg_expr = self.c_index_ptr(buffer, &buffer_indexing_expr, None);
                         writeln!(
                             w,
-                            "memset((void *)({arg_expr}), 0, {});",
+                            "{}memset((void *)({arg_expr}), 0, {});",
+                            indent(depth),
                             arguments[0].1.bytes_used()
                         )
                     }

@@ -122,3 +122,9 @@ pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &
         .collect::<Vec<_>>()
         .join(separator)
 }
+
+const INDENT_SIZE: usize = 2;
+
+pub fn indent(depth: usize) -> String {
+    " ".repeat(depth * INDENT_SIZE)
+}

@@ -3,6 +3,7 @@ use crate::highlight;
 use crate::nameenv::NameEnv;
 use crate::table::DbImpl;
 use crate::target::Target;
+use crate::utils::indent;
 use crate::views::View;
 use crate::{imp::Impl, views::Param};
 
@@ -51,7 +52,7 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, print_mode: PrintMode) {
         0,
         &mut |imp, args: &[&(dyn View<Tgt = Tgt>)], depth| {
             if let Some(line_top) = imp.line_strs(&mut name_env, args) {
-                let indent = " ".repeat(depth);
+                let indent = indent(depth);
                 let morello_ir = format!("{indent}{line_top}");
                 let mut r = row![morello_ir, "", ""];
                 if let Some((problem, cost)) = imp.aux() {
