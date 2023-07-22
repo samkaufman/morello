@@ -32,6 +32,6 @@ pub fn morello(table: &str) -> bool {
 }
 
 /// Colorize Generated C code.
-pub fn c(table: &str) -> bool {
-    highlight(table, "C")
+pub fn c(code: &str) -> bool {
+    highlight(code, "C")
 }
