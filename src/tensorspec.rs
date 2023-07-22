@@ -145,7 +145,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
                 .product::<u64>()
     }
 
-    pub fn dim_sizes(&self) -> &Shape {
+    pub fn dim_sizes(&self) -> &[DimSize] {
         &self.dim_sizes
     }
 
@@ -165,8 +165,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.aux.level
     }
 
-    pub fn vector_shape(&self) -> Option<&Shape> {
-        self.aux.vector_shape.as_ref()
+    pub fn vector_shape(&self) -> Option<&[DimSize]> {
+        self.aux.vector_shape.as_ref().map(|v| v.as_slice())
     }
 
     pub fn set_level(&mut self, level: Tgt::Level, vector_shape: Option<Shape>) {
@@ -210,7 +210,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         // Make sure dropped_dims is sorted.
         debug_assert!(dropped_dims.windows(2).all(|w| w[0] < w[1]));
 
-        let mut new_dim_sizes = self.dim_sizes().clone();
+        let mut new_dim_sizes = Shape::from(self.dim_sizes());
         for &dim in dropped_dims.iter().rev() {
             assert_eq!(
                 new_dim_sizes[usize::from(dim)],
@@ -259,11 +259,6 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     // TODO: Shouldn't need this method. Should be implicit in Spec validity.
     pub fn can_move_to(&self, dest_layout: &Layout, dest_level: &Tgt::Level) -> bool {
-        // TODO: Remove this filter.
-        if dest_level.vector_rf() {
-            return false;
-        }
-
         if &self.layout() != dest_layout && !dest_level.is_addressed() {
             return false;
         }

@@ -1,12 +1,13 @@
 use itertools::Itertools;
+
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Write};
 use std::rc::Rc;
 
-use super::c_utils::CBuffer;
+use super::c_utils::{CBuffer, VecType};
 use super::namegen::NameGenerator;
 use super::CodeGen;
-use crate::codegen::c_utils::c_type;
+use crate::codegen::c_utils::{c_type, VecVarsDerived, VecVarsMain};
 use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineExpr, Term};
@@ -20,6 +21,41 @@ use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::views::{Param, Tensor, View};
 
 const STACK_CUTOFF: u32 = 256;
+
+const X86_VEC_TYPES: [VecType; 4] = [
+    VecType {
+        dtype: Dtype::Uint32,
+        value_cnt: 8,
+        name: "vui8",
+        native_type_name: "__m256i",
+        load_fn: "_mm256_loadu_si256",
+        store_fn: "_mm256_storeu_si256",
+    },
+    VecType {
+        dtype: Dtype::Uint32,
+        value_cnt: 4,
+        name: "vui4",
+        native_type_name: "__m128i",
+        load_fn: "_mm_loadu_si128",
+        store_fn: "_mm_storeu_si128",
+    },
+    VecType {
+        dtype: Dtype::Uint8,
+        value_cnt: 32,
+        name: "vub32",
+        native_type_name: "__m256i",
+        load_fn: "_mm256_loadu_si256",
+        store_fn: "_mm256_storeu_si256",
+    },
+    VecType {
+        dtype: Dtype::Uint8,
+        value_cnt: 16,
+        name: "vub16",
+        native_type_name: "__m128i",
+        load_fn: "_mm_loadu_si128",
+        store_fn: "_mm_storeu_si128",
+    },
+];
 
 #[derive(Default)]
 struct X86CodeGenerator<'a> {
@@ -58,7 +94,7 @@ impl<'a> X86CodeGenerator<'a> {
             let spec = tensor.spec();
             let new_c_buffer = self.make_buffer(
                 spec.dim_sizes(),
-                spec.vector_shape().map(|v| &v[..]),
+                spec.vector_shape(),
                 spec.dtype(),
                 spec.level(),
             );
@@ -84,7 +120,7 @@ impl<'a> X86CodeGenerator<'a> {
             .collect::<Vec<_>>();
 
         imp.bind(&tensors_as_trait_obj_ptrs, &mut self.param_bindings);
-        self.emit(&mut main_body_str, &imp)?;
+        self.emit(&mut main_body_str, imp)?;
 
         writeln!(main_body_str, "}}")?;
 
@@ -96,14 +132,28 @@ impl<'a> X86CodeGenerator<'a> {
     fn make_buffer(
         &mut self,
         shape: &[DimSize],
-        _vector_shape: Option<&[DimSize]>,
+        vector_shape: Option<&[DimSize]>,
         dtype: Dtype,
         level: X86MemoryLevel,
     ) -> CBuffer {
+        debug_assert_eq!(vector_shape.is_some(), level == X86MemoryLevel::VRF);
+
         let name = self.namer.fresh_name();
         let size = shape.iter().product::<DimSize>();
         match level {
-            X86MemoryLevel::VRF => todo!("Add vector reg. support"),
+            X86MemoryLevel::VRF => {
+                let vector_shape = vector_shape.unwrap();
+                let vec_type = get_vector(dtype, vector_shape);
+                self.headers.vector_type_defs.insert(vec_type);
+                let main = VecVarsMain {
+                    name,
+                    vec_type,
+                    tensor_shape: shape.into(),
+                    vector_shape: vector_shape.into(),
+                };
+                let derived = VecVarsDerived::compute(&main, &mut self.namer);
+                CBuffer::VecVars(main, derived)
+            }
             X86MemoryLevel::RF => {
                 if size > 1 {
                     CBuffer::StackArray { name, size, dtype }
@@ -183,52 +233,48 @@ impl<'a> X86CodeGenerator<'a> {
             }
             ImplNode::MoveLet(
                 move_let @ MoveLet {
-                    parameter_idx,
-                    source_spec,
+                    parameter_idx: _,
+                    source_spec: _,
                     introduced,
                     has_prologue: _,
                     has_epilogue: _,
-                    children,
-                    prefetch,
+                    children: _,
+                    prefetch: _,
                     aux: _,
                 },
             ) => {
-                let introduced_spec = introduced.spec();
-                match introduced_spec.level() {
-                    X86MemoryLevel::VRF => todo!("Implement MoveLet for VRF"),
-                    X86MemoryLevel::RF | X86MemoryLevel::L1 | X86MemoryLevel::GL => {
-                        match introduced {
-                            TensorOrCacheView::Tensor(tensor) => {
-                                // Emit variable declaration(s) and store association between the
-                                // CBuffer and Tensor.
-                                let dest_buffer = self.make_buffer(
-                                    introduced_spec.dim_sizes(),
-                                    None,
-                                    introduced_spec.dtype(),
-                                    introduced_spec.level(),
-                                );
-                                dest_buffer.emit(w, false)?;
+                match introduced {
+                    TensorOrCacheView::Tensor(tensor) => {
+                        // Emit variable declaration(s) and store association between the
+                        // CBuffer and Tensor.
+                        let spec = introduced.spec();
+                        let dest_buffer = self.make_buffer(
+                            spec.dim_sizes(),
+                            spec.vector_shape(),
+                            spec.dtype(),
+                            spec.level(),
+                        );
+                        dest_buffer.emit(w, false)?;
 
-                                if self
-                                    .name_env
-                                    .insert(Rc::clone(tensor), dest_buffer)
-                                    .is_some()
-                                {
-                                    panic!("Duplicate name for buffer");
-                                }
-                            }
-                            TensorOrCacheView::CacheView(_) => (),
-                        };
-                        if let Some(prologue) = move_let.prologue() {
-                            self.emit(w, prologue)?;
+                        if self
+                            .name_env
+                            .insert(Rc::clone(tensor), dest_buffer)
+                            .is_some()
+                        {
+                            panic!("Duplicate name for buffer");
                         }
-                        self.emit(w, move_let.main_stage())?;
-                        if let Some(epilogue) = move_let.epilogue() {
-                            self.emit(w, epilogue)?;
-                        }
-                        Ok(())
                     }
+                    TensorOrCacheView::CacheView(_) => (),
+                };
+
+                if let Some(prologue) = move_let.prologue() {
+                    self.emit(w, prologue)?;
                 }
+                self.emit(w, move_let.main_stage())?;
+                if let Some(epilogue) = move_let.epilogue() {
+                    self.emit(w, epilogue)?;
+                }
+                Ok(())
             }
             ImplNode::Block(Block {
                 stages,
@@ -252,19 +298,21 @@ impl<'a> X86CodeGenerator<'a> {
             }) => {
                 match kernel_type {
                     KernelType::Mult => {
-                        let exprs = self.param_args_to_c_indices(arguments);
+                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
+                            self.c_index(a, b, None)
+                        });
                         writeln!(
                             w,
                             "{} += {} * {};  /* Mult */",
                             exprs[2], exprs[0], exprs[1]
                         )
                     }
-                    KernelType::BroadcastVecMult => todo!(),
                     KernelType::ValueAssign => {
-                        let exprs = self.param_args_to_c_indices(arguments);
+                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
+                            self.c_index(a, b, None)
+                        });
                         writeln!(w, "{} = {};", exprs[1], exprs[0])
                     }
-                    KernelType::VectorAssign => todo!(),
                     KernelType::MemsetZero => {
                         // TODO: Merge this duplicate `exprs` block. It's used also in the ValueAssign.
                         debug_assert_eq!(arguments.len(), 1);
@@ -282,22 +330,70 @@ impl<'a> X86CodeGenerator<'a> {
                             arguments[0].1.bytes_used()
                         )
                     }
-                    KernelType::VectorZero => todo!(),
+                    KernelType::VectorZero => {
+                        let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
+                            self.c_index_vec(a, b, None)
+                        });
+                        writeln!(w, "{} *= 0;  /* VectorZero */", exprs[0])
+                    }
+                    KernelType::VectorAssign => {
+                        let shape = arguments[0].shape();
+                        let dtype = arguments[0].spec().dtype();
+                        debug_assert_eq!(shape, arguments[1].shape());
+
+                        let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
+                            self.c_index_ptr(a, b, None)
+                        });
+                        let vtype = get_vector(dtype, shape);
+                        let itype = vtype.native_type_name;
+                        if arguments.iter().all(|a| a.1.aligned()) {
+                            writeln!(
+                                w,
+                                "*({} *)({}) = (*({} *)({}));  /* VectorAssign */",
+                                itype, exprs[1], itype, exprs[0]
+                            )
+                        } else {
+                            writeln!(
+                                w,
+                                "{}(({} *)({}), {}(({} *)({})));  /* VectorAssign */",
+                                vtype.store_fn, itype, exprs[1], vtype.load_fn, itype, exprs[0]
+                            )
+                        }
+                    }
+                    KernelType::BroadcastVecMult => {
+                        let shape = arguments[2].shape();
+                        let dtype = arguments[2].spec().dtype();
+                        let itype = get_vector(dtype, shape).native_type_name;
+                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                            0 => self.c_index(a, b, None),
+                            1 | 2 => self.c_index_ptr(a, b, None),
+                            _ => unreachable!(),
+                        });
+                        writeln!(
+                            w,
+                            "*({} *)({}) += {} * (*({} *)({})); /* BroadcastVecMult */",
+                            itype, exprs[2], exprs[0], itype, exprs[1]
+                        )
+                    }
                     KernelType::CacheAccess => Ok(()),
                 }
             }
         }
     }
 
-    fn param_args_to_c_indices(&self, arguments: &[Param<X86Target>]) -> Vec<String> {
+    fn param_args_to_c_indices<F>(&self, arguments: &[Param<X86Target>], f: F) -> Vec<String>
+    where
+        F: Fn(usize, &CBuffer, &AffineExpr<BufferExprTerm>) -> String,
+    {
         arguments
             .iter()
-            .map(|arg| {
+            .enumerate()
+            .map(|(idx, arg)| {
                 let backing_tensor = arg.backing_tensor(&self.param_bindings).unwrap();
                 let buffer = self.name_env.get(backing_tensor).unwrap();
                 let mut buffer_indexing_expr = arg.make_buffer_indexing_expr(&self.param_bindings);
                 zero_points(&mut buffer_indexing_expr);
-                self.c_index(buffer, &buffer_indexing_expr, None)
+                f(idx, buffer, &buffer_indexing_expr)
             })
             .collect()
     }
@@ -306,11 +402,7 @@ impl<'a> X86CodeGenerator<'a> {
         let mut buf =
             e.0.iter()
                 .map(|Term(coef, sym)| {
-                    // TODO: Remove expensive format!
-                    let sym_str = self.loop_iter_names.get(sym).expect(&format!(
-                        "BufferExprTerm {:?} should have had a name in the environment. Found this in {:?}",
-                        sym, e.0
-                    ));
+                    let sym_str = self.loop_iter_names.get(sym).unwrap();
                     match &coef {
                         0 => panic!("AffineExpr contained zero term"),
                         1 => sym_str.clone(),
@@ -362,21 +454,57 @@ impl<'a> X86CodeGenerator<'a> {
                 Some(_) => unimplemented!(),
                 None => name.clone(),
             },
+            CBuffer::SingleVecVar { name, .. } => {
+                if let Some(reinterpret) = reinterpret {
+                    debug_assert_eq!(expr, 0);
+                    format!("*({} *)(&{})", reinterpret, name)
+                } else {
+                    format!("{}[{}]", name, self.expr_to_c(expr))
+                }
+            }
+            CBuffer::VecVars(_, _) => {
+                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(expr);
+                self.c_index(
+                    inner_vec_buffer,
+                    &vec_offset.try_into().unwrap(),
+                    reinterpret,
+                )
+            }
         }
     }
 
     fn c_index_vec(
         &self,
         buffer: &CBuffer,
-        _expr: &AffineExpr<BufferExprTerm>,
-        _reinterpret: Option<String>,
+        expr: &AffineExpr<BufferExprTerm>,
+        reinterpret: Option<String>,
     ) -> String {
+        // self is essentially unused, but included for consistency with c_index.
+        #![allow(clippy::only_used_in_recursion)]
+
         match buffer {
             CBuffer::Ptr { .. }
             | CBuffer::UnsizedHeapArray { .. }
             | CBuffer::HeapArray { .. }
             | CBuffer::StackArray { .. }
             | CBuffer::ValueVar { .. } => unimplemented!(),
+            CBuffer::SingleVecVar { name, .. } => {
+                if expr != 0 {
+                    panic!("expr must be 0, but was: {:?}", expr);
+                }
+                if reinterpret.is_some() {
+                    unimplemented!();
+                }
+                name.clone()
+            }
+            CBuffer::VecVars(_, _) => {
+                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(expr);
+                self.c_index_vec(
+                    inner_vec_buffer,
+                    &vec_offset.try_into().unwrap(),
+                    reinterpret,
+                )
+            }
         }
     }
 
@@ -408,6 +536,24 @@ impl<'a> X86CodeGenerator<'a> {
                     ptr_str = ptr_str[..ptr_str.len() - 3].to_string();
                 }
                 ptr_str
+            }
+            CBuffer::SingleVecVar { name, .. } => {
+                if reinterpret.is_some() {
+                    unimplemented!();
+                };
+                if expr == 0 {
+                    format!("&{}", name)
+                } else {
+                    format!("&{}", self.c_index(buffer, expr, None))
+                }
+            }
+            CBuffer::VecVars(_, _) => {
+                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(expr);
+                self.c_index_ptr(
+                    inner_vec_buffer,
+                    &vec_offset.try_into().unwrap(),
+                    reinterpret,
+                )
             }
         }
     }
@@ -448,6 +594,17 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
     result
 }
 
+fn get_vector(dtype: Dtype, vector_shape: &[DimSize]) -> &'static VecType {
+    X86_VEC_TYPES
+        .iter()
+        .find(|vec_type| {
+            vec_type.dtype == dtype
+                && vec_type.value_cnt
+                    == u8::try_from(vector_shape.iter().product::<DimSize>()).unwrap()
+        })
+        .expect("VecType to match dtype and volume of vector_shape")
+}
+
 fn zero_points(expr: &mut AffineExpr<BufferExprTerm>) {
     expr.0.retain(|t| match t.1 {
         BufferExprTerm::Pt(_, _) => false,
@@ -463,9 +620,9 @@ mod tests {
     use crate::opaque_symbol::OpaqueSymbol;
 
     #[test]
-    fn test_expr_zero_not_emitted() {
+    fn test_expr_zero_emitted() {
         let gen = X86CodeGenerator::default();
-        assert_eq!(gen.expr_to_c(&AffineExpr(vec![], 0)), "");
+        assert_eq!(gen.expr_to_c(&AffineExpr(vec![], 0)), "0");
     }
 
     #[test]

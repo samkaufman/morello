@@ -148,7 +148,7 @@ impl<Tgt: Target, Aux: Clone> ImplNode<Tgt, Aux> {
             ImplNode::MoveLet(m) => {
                 let param_idx = usize::from(m.parameter_idx);
 
-                let moves_args = [args[param_idx], m.introduced.inner_fat_ptr()];
+                let mut moves_args = [args[param_idx], m.introduced.inner_fat_ptr()];
 
                 if let Some(p) = m.prologue() {
                     p.traverse(&moves_args, depth + 1, f);
@@ -159,6 +159,7 @@ impl<Tgt: Target, Aux: Clone> ImplNode<Tgt, Aux> {
                 m.main_stage().traverse(&inner_args, depth + 1, f);
 
                 if let Some(e) = m.epilogue() {
+                    moves_args.swap(0, 1);
                     e.traverse(&moves_args, depth + 1, f);
                 }
             }

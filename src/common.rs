@@ -26,9 +26,16 @@ impl<Tgt: Target> Display for Spec<Tgt> {
 impl Dtype {
     /// The bytes required to represent a value of this Dtype.
     pub fn size(&self) -> u8 {
-        match &self {
+        match self {
             Dtype::Uint8 => 1,
             Dtype::Uint32 => 4,
+        }
+    }
+
+    pub fn c_type(&self) -> &'static str {
+        match self {
+            Dtype::Uint8 => "uint8_t",
+            Dtype::Uint32 => "uint32_t",
         }
     }
 }

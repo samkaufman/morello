@@ -3,8 +3,6 @@ use smallvec::SmallVec;
 use std::fmt::Debug;
 
 use crate::common::{DimSize, Shape};
-use crate::expr::AffineExpr;
-use crate::layout::BufferExprTerm;
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Tiling {
@@ -66,6 +64,12 @@ impl Tiling {
     /// The result will include boundary steps.
     pub fn steps_dim(&self, dim: u8, origin_size: DimSize) -> u32 {
         let d = usize::from(dim);
+        debug_assert!(
+            origin_size >= self.shape[d],
+            "origin_size is {} and tile shape is {}",
+            origin_size,
+            self.shape[d]
+        );
         divrem::DivCeil::div_ceil(1 + origin_size - self.shape[d], self.step_sizes[d])
     }
 
@@ -101,15 +105,15 @@ impl Tiling {
 
 #[cfg(test)]
 mod tests {
-    use std::cmp::max;
-
     use super::*;
     use itertools::Itertools;
     use proptest::prelude::*;
     use proptest::proptest;
     use smallvec::smallvec;
+    use std::cmp::max;
 
     const ALLOW_ARBITRARY_SLIDES: bool = false;
+    const MAX_ORIGIN_SIZE: DimSize = 20;
 
     /// A Strategy for generating valid Shapes.
     fn shape_strategy(max_size: DimSize, max_dims: u8) -> impl Strategy<Value = Shape> {
@@ -132,9 +136,19 @@ mod tests {
             .prop_map(|(shape, steps)| Tiling::new_sliding(shape, steps.into()))
     }
 
+    /// A Strategy for generating Tilings along with larger shapes.
     fn tiling_and_origin_shape_strategy() -> impl Strategy<Value = (Tiling, Shape)> {
         tiling_strategy(2).prop_flat_map(|tiling| {
-            let origin_shape = prop::collection::vec(1u32..=4, tiling.shape.len()).prop_map_into();
+            // let origin_shape = prop::collection::vec(1u32..=4, tiling.shape.len()).prop_map_into();
+            let origin_shape = tiling
+                .shape()
+                .iter()
+                .map(|&tile_dim_size| {
+                    assert!(tile_dim_size <= MAX_ORIGIN_SIZE);
+                    tile_dim_size..=MAX_ORIGIN_SIZE
+                })
+                .collect::<Vec<_>>()
+                .prop_map_into();
             (Just(tiling), origin_shape)
         })
     }

@@ -93,7 +93,16 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     Some((
                         match basics.typ {
                             PrimitiveSpecType::Move => SpecKey::Move {
-                                is_load: { todo!("Derive is_load from operand levels") },
+                                is_load: {
+                                    // geometry breaks loads and stores into separate tables, which
+                                    // makes sense after combining the two into a single Move Spec.
+                                    // For now, we preserve this separation by determining whether
+                                    // or not this is a load or a store by comparing operands.
+                                    let PrimitiveAux::Move { inner_level, .. } = primitive_aux else {
+                                        unreachable!();
+                                    };
+                                    mapping_level < inner_level
+                                },
                                 dtype: basics.dtype,
                             },
                             PrimitiveSpecType::Zero => SpecKey::Zero {
@@ -214,7 +223,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     })
                     .collect()
             }
-            SpecKey::Move { is_load, dtype } => {
+            SpecKey::Move { is_load: _, dtype } => {
                 let source_level = int_to_level(pt[pt.len() - 2]);
                 let dim_sizes = &pt[..pt.len() - 2]
                     .iter()

@@ -78,7 +78,7 @@ pub enum PrimitiveAux<Tgt: Target> {
 pub struct TilingInference(pub Vec<(Tiling, SmallVec<[Option<u8>; 5]>)>);
 
 impl PrimitiveBasics {
-    pub fn replace_io(&mut self, new_operands: &[(Shape, Dtype)]) {
+    pub fn replace_io(&mut self, new_operands: &[(&[DimSize], Dtype)]) {
         match self.typ {
             PrimitiveSpecType::Matmul { accum: _ } => {
                 debug_assert_eq!(new_operands.len(), 3);
@@ -108,12 +108,12 @@ impl PrimitiveBasics {
                     panic!("Move must have 2 operands");
                 };
                 assert_eq!(src, dest);
-                self.spec_shape = src.0.clone();
+                self.spec_shape = src.0.into();
                 self.dtype = src.1;
             }
             PrimitiveSpecType::Zero => {
                 assert_eq!(new_operands.len(), 1);
-                self.spec_shape = new_operands[0].0.clone();
+                self.spec_shape = new_operands[0].0.into();
                 self.dtype = new_operands[0].1;
             }
         }
@@ -941,7 +941,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 let new_inputs = &new_operands[..new_operands.len() - 1];
                 let mut remaining_inputs = new_inputs
                     .iter()
-                    .map(|t| (t.dim_sizes().clone(), t.dtype()))
+                    .map(|t| (t.dim_sizes(), t.dtype()))
                     .collect::<Vec<_>>();
                 let mut component_inputs: Vec<(Shape, Dtype)> = vec![];
                 for (_i, component) in components.iter_mut().enumerate().rev() {
@@ -951,8 +951,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     eprintln!("component_inputs.len(): {}", component_inputs.len());
                     eprintln!("remaining_inputs.len(): {}", remaining_inputs.len());
                     eprintln!("needed: {}", needed);
-                    component_inputs
-                        .extend(remaining_inputs.drain(remaining_inputs.len() - needed..));
+                    component_inputs.extend(
+                        remaining_inputs
+                            .drain(remaining_inputs.len() - needed..)
+                            .map(|(shape, dtype)| (Shape::from(shape), dtype)),
+                    );
 
                     let new_output_shape = {
                         let inp_shapes = component_inputs
@@ -963,7 +966,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     };
                     let mut new_operands = component_inputs.clone();
                     new_operands.push((new_output_shape, component.dtype));
-                    component.replace_io(&new_operands);
+                    component.replace_io(
+                        new_operands
+                            .iter()
+                            .map(|(s, d)| (&s[..], *d))
+                            .collect::<Vec<_>>()
+                            .as_slice(),
+                    );
 
                     // Next loop iteration should have have the output as its own argument.
                     component_inputs.clear();
@@ -975,8 +984,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 // output has an invalid shape.
                 debug_assert_eq!(component_inputs.len(), 1);
                 debug_assert_eq!(
-                    &component_inputs[0].0,
-                    new_operands.last().unwrap().dim_sizes()
+                    new_operands.last().unwrap().dim_sizes(),
+                    &component_inputs[0].0[..]
                 );
                 debug_assert_eq!(component_inputs[0].1, new_operands.last().unwrap().dtype());
 
@@ -986,7 +995,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 basics.replace_io(
                     &new_operands
                         .iter()
-                        .map(|o| (o.dim_sizes().clone(), o.dtype))
+                        .map(|o| (o.dim_sizes(), o.dtype))
                         .collect::<Vec<_>>(),
                 );
 
@@ -1009,7 +1018,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         *outer_aux = src.aux.clone();
                         *inner_level = dest.level();
                         *inner_layout = dest.layout();
-                        *inner_vector_shape = dest.vector_shape().cloned();
+                        *inner_vector_shape = dest.vector_shape().map(|s| s.to_smallvec());
                     }
                 }
             }
