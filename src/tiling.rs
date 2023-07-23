@@ -12,10 +12,16 @@ pub struct Tiling {
 
 /// A tiling over either Spec or operand shapes.
 ///
+/// Tiles have arbitrary sizes and steps in each dimension. One tile
+/// will have its origin (0, ..) at the tiled view's origin. Not all
+/// tiles are necessarily complete; a tile exists if any of its points
+/// lies inside the tiled view, and the tile is otherwise truncated.
+/// (These are called 'boundary' tiles.)
+///
 /// This is the basis of shape and tiling logic inference. A tiling over a Spec
 /// can be converted into tilings over each operand and vice versa. As a result,
 /// tilings can be inferred across composed Specs by tiling any of its
-/// component Specs and then propogating tilings across tensors shared with
+/// component Specs and then propagating tilings across tensors shared with
 /// other component Specs.
 impl Tiling {
     pub fn new_simple(shape: Shape) -> Tiling {
@@ -49,7 +55,7 @@ impl Tiling {
 
     /// Returns the total number of steps for a given tensor shape.
     ///
-    /// The result will include boundary steps.
+    /// The result includes boundary steps.
     pub fn steps(&self, origin_shape: &[DimSize]) -> u32 {
         assert_eq!(self.shape.len(), origin_shape.len());
         origin_shape
@@ -61,16 +67,16 @@ impl Tiling {
 
     /// Returns the number of steps taken by a window sliding over a dimension.
     ///
-    /// The result will include boundary steps.
+    /// The result includes boundary steps.
     pub fn steps_dim(&self, dim: u8, origin_size: DimSize) -> u32 {
         let d = usize::from(dim);
         debug_assert!(
             origin_size >= self.shape[d],
-            "origin_size is {} and tile shape is {}",
+            "origin_size {} was smaller than tile dimension size {}",
             origin_size,
             self.shape[d]
         );
-        divrem::DivCeil::div_ceil(1 + origin_size - self.shape[d], self.step_sizes[d])
+        divrem::DivCeil::div_ceil(origin_size, self.step_sizes[d])
     }
 
     /// Counts the boundary elements in a given Spec dimension of `origin_size`.
@@ -155,11 +161,13 @@ mod tests {
 
     #[test]
     fn test_tiling_sliding() {
-        let t = Tiling::new_sliding(smallvec![1, 4, 3, 3], smallvec![1, 4, 1, 1]);
-        assert_eq!(t.steps_dim(0, 1), 1);
-        assert_eq!(t.steps_dim(1, 4), 1);
-        assert_eq!(t.steps_dim(2, 4), 2);
-        assert_eq!(t.steps_dim(3, 4), 2);
+        const OUTER_SHAPE: [DimSize; 5] = [1, 4, 2, 4, 4];
+        let t = Tiling::new_sliding(smallvec![1, 3, 1, 3, 3], smallvec![1, 3, 2, 1, 1]);
+        assert_eq!(t.steps_dim(0, OUTER_SHAPE[0]), 1);
+        assert_eq!(t.steps_dim(1, OUTER_SHAPE[1]), 2);
+        assert_eq!(t.steps_dim(2, OUTER_SHAPE[2]), 1);
+        assert_eq!(t.steps_dim(3, OUTER_SHAPE[3]), 4);
+        assert_eq!(t.steps_dim(4, OUTER_SHAPE[4]), 4);
     }
 
     proptest! {
