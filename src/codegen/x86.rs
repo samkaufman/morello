@@ -1,5 +1,4 @@
 use itertools::Itertools;
-
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Write};
 use std::rc::Rc;
@@ -14,7 +13,7 @@ use crate::expr::{AffineExpr, Term};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::{Kernel, KernelType};
 use crate::imp::loops::Loop;
-use crate::imp::moves::{MoveLet, TensorOrCacheView};
+use crate::imp::moves::TensorOrCacheView;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::BufferExprTerm;
 use crate::target::{Target, X86MemoryLevel, X86Target};
@@ -231,23 +230,12 @@ impl<'a> X86CodeGenerator<'a> {
                 }
                 Ok(())
             }
-            ImplNode::MoveLet(
-                move_let @ MoveLet {
-                    parameter_idx: _,
-                    source_spec: _,
-                    introduced,
-                    has_prologue: _,
-                    has_epilogue: _,
-                    children: _,
-                    prefetch: _,
-                    aux: _,
-                },
-            ) => {
-                match introduced {
+            ImplNode::MoveLet(move_let) => {
+                match &move_let.introduced {
                     TensorOrCacheView::Tensor(tensor) => {
                         // Emit variable declaration(s) and store association between the
                         // CBuffer and Tensor.
-                        let spec = introduced.spec();
+                        let spec = move_let.introduced.spec();
                         let dest_buffer = self.make_buffer(
                             spec.dim_sizes(),
                             spec.vector_shape(),
