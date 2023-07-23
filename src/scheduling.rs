@@ -23,11 +23,11 @@ use crate::views::{CacheView, Param, Tensor, Tile, View, ViewExt};
 
 /// A scheduling decision which can be applied to a Spec to produce an Impl.
 ///
-/// SchedulingDecisions contain the minimal amount of information needed to distinguish
-/// a scheduling decision, which makes it appropriate for storing in a database so that
-/// the corresponding Impl node can be computed given the Spec.
+/// [Action]s contain the minimal amount of information needed to distinguish a one scheduling
+/// decision from another, which makes it appropriate for storing in a database so that the
+/// corresponding Impl node can be computed given the Spec.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub enum SchedulingDecision<Tgt: Target> {
+pub enum Action<Tgt: Target> {
     TileOut {
         output_shape: Shape,
         parallel: bool,
@@ -52,16 +52,16 @@ pub enum SchedulingDecision<Tgt: Target> {
     Place(KernelType),
 }
 
-impl<Tgt: Target> SchedulingDecision<Tgt> {
+impl<Tgt: Target> Action<Tgt> {
     pub fn child_count(&self) -> usize {
         match self {
-            SchedulingDecision::TileOut { .. } => 1,
-            SchedulingDecision::Split { .. } => 1,
-            SchedulingDecision::ToAccum => 2,
-            SchedulingDecision::SpatialSplit => 1,
-            SchedulingDecision::Place(_) => 0,
-            SchedulingDecision::Move { .. } => unimplemented!(),
-            SchedulingDecision::Peel { .. } => 2,
+            Action::TileOut { .. } => 1,
+            Action::Split { .. } => 1,
+            Action::ToAccum => 2,
+            Action::SpatialSplit => 1,
+            Action::Place(_) => 0,
+            Action::Move { .. } => unimplemented!(),
+            Action::Peel { .. } => 2,
         }
     }
 
@@ -80,10 +80,10 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
         let operands = node_spec.parameters();
 
         match self {
-            SchedulingDecision::TileOut { .. } | SchedulingDecision::Split { .. } => {
+            Action::TileOut { .. } | Action::Split { .. } => {
                 let (tiles, parallel) = {
                     match self {
-                        SchedulingDecision::TileOut {
+                        Action::TileOut {
                             output_shape,
                             parallel,
                         } => {
@@ -129,9 +129,9 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                             let updated_input_tilings =
                                 node_spec.input_tilings_for_tile_out(&smaller_output.tile.tiling);
 
-                            // 3. Reify the tilings into Tiles we'll store with this scheduling
-                            //    decision. Tiles objects track the index and shape of the Impl
-                            //    parameter being tiled.
+                            // 3. Reify the tilings into Tiles we'll store with this action. Tiles
+                            //    objects track the index and shape of the Impl parameter being
+                            //    tiled.
                             let mut next_fresh_loop_dim = u8::try_from(output_shape.len()).unwrap();
                             let mut new_tiles: Vec<LoopTile<Tgt>> = vec![];
                             for (
@@ -189,7 +189,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                             new_tiles.push(smaller_output);
                             (new_tiles, *parallel)
                         }
-                        SchedulingDecision::Split { k } => {
+                        Action::Split { k } => {
                             debug_assert_ne!(*k, 0);
                             match node_spec {
                                 LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
@@ -254,7 +254,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     aux,
                 }))
             }
-            SchedulingDecision::Peel {
+            Action::Peel {
                 layout,
                 level,
                 vector_shape,
@@ -387,7 +387,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     aux,
                 }))
             }
-            SchedulingDecision::SpatialSplit => {
+            Action::SpatialSplit => {
                 let LogicalSpec::Primitive(PrimitiveBasics { typ: PrimitiveSpecType::Conv { accum: conv_accum }, spec_shape: _, dtype }, _, serial_only) = node_spec else {
                     panic!();
                 };
@@ -471,7 +471,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     aux,
                 }))
             }
-            SchedulingDecision::Move {
+            Action::Move {
                 source_idx,
                 destination_level,
                 destination_layout,
@@ -597,7 +597,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     aux,
                 )))
             }
-            SchedulingDecision::ToAccum => {
+            Action::ToAccum => {
                 let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape: _, dtype: _ }, _, _) = node_spec else {
                     panic!();
                 };
@@ -650,7 +650,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     aux,
                 }))
             }
-            SchedulingDecision::Place(k) => Some(ImplNode::Kernel(Kernel {
+            Action::Place(k) => Some(ImplNode::Kernel(Kernel {
                 kernel_type: *k,
                 arguments: spec
                     .0
@@ -666,10 +666,10 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
 }
 
 // TODO: Remove. Debug should be enough now that Impl exists.
-impl<Tgt: Target> Display for SchedulingDecision<Tgt> {
+impl<Tgt: Target> Display for Action<Tgt> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
-            SchedulingDecision::Move {
+            Action::Move {
                 source_idx,
                 destination_level,
                 destination_layout,
@@ -684,14 +684,14 @@ impl<Tgt: Target> Display for SchedulingDecision<Tgt> {
                 destination_vector_shape,
                 prefetch
             ),
-            SchedulingDecision::Place(KernelType::Mult) => write!(f, "Mult"),
-            SchedulingDecision::Place(KernelType::BroadcastVecMult) => {
+            Action::Place(KernelType::Mult) => write!(f, "Mult"),
+            Action::Place(KernelType::BroadcastVecMult) => {
                 write!(f, "BroadcastVecMult")
             }
-            SchedulingDecision::Place(KernelType::ValueAssign) => write!(f, "ValueAssign"),
-            SchedulingDecision::Place(KernelType::VectorAssign) => write!(f, "VectorAssign"),
-            SchedulingDecision::Place(KernelType::MemsetZero) => write!(f, "MemsetZero"),
-            SchedulingDecision::Place(KernelType::VectorZero) => write!(f, "VectorZero"),
+            Action::Place(KernelType::ValueAssign) => write!(f, "ValueAssign"),
+            Action::Place(KernelType::VectorAssign) => write!(f, "VectorAssign"),
+            Action::Place(KernelType::MemsetZero) => write!(f, "MemsetZero"),
+            Action::Place(KernelType::VectorZero) => write!(f, "VectorZero"),
             _ => write!(f, "{:?}", self),
         }
     }

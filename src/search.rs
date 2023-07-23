@@ -5,12 +5,12 @@ use crate::common::Spec;
 use crate::cost::Cost;
 use crate::imp::{visit_leaves, ImplNode};
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::SchedulingDecision;
+use crate::scheduling::Action;
 use crate::table::Database;
 use crate::target::Target;
 
 struct ImplReducer<Tgt: Target> {
-    results: Vec<(SchedulingDecision<Tgt>, Cost)>,
+    results: Vec<(Action<Tgt>, Cost)>,
     top_k: usize,
 }
 
@@ -20,7 +20,7 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
     db: &RwLock<D>,
     goal: &Spec<Tgt>,
     top_k: usize,
-) -> (SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>, u64, u64) {
+) -> (SmallVec<[(Action<Tgt>, Cost); 1]>, u64, u64) {
     if top_k > 1 {
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
@@ -36,9 +36,9 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
     // Enumerate expansions, computing their costs from their childrens' costs.
     let mut reducer = ImplReducer::new(top_k);
 
-    for decision in goal.0.decisions() {
+    for action in goal.0.actions() {
         // TODO: Integrate transition logic into `apply`.
-        let Some(partial_impl) = decision.apply(goal) else {
+        let Some(partial_impl) = action.apply(goal) else {
             continue;
         };
 
@@ -54,7 +54,7 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
             assert_ne!(
                 goal, nested_problem,
                 "Immediate recursion on ({}, {:?}) after applying {:?}",
-                goal.0, goal.1, decision
+                goal.0, goal.1, action
             );
 
             let (child_results, subhits, submisses) = top_down(db, nested_problem, top_k);
@@ -75,14 +75,14 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
         if let MemoryLimits::Standard(g) = &goal.1 {
             debug_assert!(
                 cost.peaks.iter().zip(g).all(|(a, b)| *a <= b),
-                "While synthesizing {:?}, scheduling decision yielded memory \
+                "While synthesizing {:?}, action yielded memory \
                 bound-violating {:?} with peak memory {:?}",
                 goal,
                 partial_impl,
                 cost.peaks
             );
         }
-        reducer.insert(decision, cost);
+        reducer.insert(action, cost);
     }
 
     // Save to memo. table and return.
@@ -99,11 +99,11 @@ impl<Tgt: Target> ImplReducer<Tgt> {
         }
     }
 
-    fn insert(&mut self, new_impl: SchedulingDecision<Tgt>, cost: Cost) {
+    fn insert(&mut self, new_impl: Action<Tgt>, cost: Cost) {
         self.results.push((new_impl, cost));
     }
 
-    fn finalize(&self) -> SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]> {
+    fn finalize(&self) -> SmallVec<[(Action<Tgt>, Cost); 1]> {
         // Using sorted here for stability.
         let mut sorted_results = self.results.clone();
         sorted_results.sort_by_key(|x| x.1.clone());

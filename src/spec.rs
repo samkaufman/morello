@@ -1,7 +1,7 @@
 use super::common::{DimSize, Shape};
 use crate::common::Dtype;
 use crate::layout::Layout;
-use crate::scheduling::SchedulingDecision;
+use crate::scheduling::Action;
 use crate::target::MemoryLevel;
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
@@ -560,7 +560,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         self == &c
     }
 
-    pub fn decisions(&self) -> Box<dyn Iterator<Item = SchedulingDecision<Tgt>> + '_> {
+    pub fn actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let iter = self.tile_out_expansions();
         let iter = iter.chain(self.move_expansions());
         let iter = iter.chain(Tgt::expansions(self));
@@ -576,7 +576,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 _serial_only,
             ) => match typ {
                 PrimitiveSpecType::Matmul { accum } if !*accum => {
-                    Box::new(iter.chain(once(SchedulingDecision::ToAccum)))
+                    Box::new(iter.chain(once(Action::ToAccum)))
                 }
                 PrimitiveSpecType::Matmul { accum } if *accum => {
                     Box::new(iter.chain(self.split_expansions()))
@@ -584,12 +584,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
                         if self.can_spatial_split() {
-                            Box::new(iter.chain(once(SchedulingDecision::SpatialSplit)))
+                            Box::new(iter.chain(once(Action::SpatialSplit)))
                         } else {
                             Box::new(iter)
                         }
                     } else {
-                        Box::new(iter.chain(once(SchedulingDecision::ToAccum)))
+                        Box::new(iter.chain(once(Action::ToAccum)))
                     }
                 }
                 _ => Box::new(iter),
@@ -639,11 +639,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         true
     }
 
-    fn tile_out_expansions(&self) -> impl Iterator<Item = SchedulingDecision<Tgt>> + '_ {
+    fn tile_out_expansions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         let serial_only = self.serial_only();
         let output = self.output();
         gen_tile_sizes::<Tgt>(output.dim_sizes(), true).flat_map(move |tile_shape| {
-            let mut ts = SmallVec::<[SchedulingDecision<Tgt>; 2]>::new();
+            let mut ts = SmallVec::<[Action<Tgt>; 2]>::new();
             ts.push(self.tile_out(&tile_shape, false));
             if !serial_only {
                 ts.push(self.tile_out(&tile_shape, true));
@@ -652,7 +652,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         })
     }
 
-    fn split_expansions(&self) -> Box<dyn Iterator<Item = SchedulingDecision<Tgt>> + '_> {
+    fn split_expansions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape, .. }, _, _) = self else {
             panic!("split_expansions called on non-primitive Spec");
         };
@@ -670,7 +670,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         )
     }
 
-    fn peel_expansions(&self) -> Box<dyn Iterator<Item = SchedulingDecision<Tgt>> + '_> {
+    fn peel_expansions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let LogicalSpec::Compose { components, operand_auxes: _, serial_only: _ } = self else {
             panic!("peel_expansions called on non-Compose Spec");
         };
@@ -730,7 +730,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    fn move_expansions(&self) -> impl Iterator<Item = SchedulingDecision<Tgt>> + '_ {
+    fn move_expansions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         // TODO: Add prefetching moves.
 
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
@@ -762,7 +762,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                                 let _this = self;
                                 let dest_layout = layout.clone();
                                 let vector_shape = Some(&vector_shape);
-                                SchedulingDecision::Move {
+                                Action::Move {
                                     source_idx: i,
                                     destination_level: level,
                                     destination_layout: dest_layout,
@@ -775,7 +775,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         results.push({
                             let _this = self;
                             let dest_layout = layout.clone();
-                            SchedulingDecision::Move {
+                            Action::Move {
                                 source_idx: i,
                                 destination_level: level,
                                 destination_layout: dest_layout,
@@ -794,24 +794,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     /// Produces a loop.
     ///
     /// If the Spec cannot be tiled to that shape, returns None.
-    pub fn tile_out(&self, output_shape: &[DimSize], parallel: bool) -> SchedulingDecision<Tgt> {
-        SchedulingDecision::TileOut {
+    pub fn tile_out(&self, output_shape: &[DimSize], parallel: bool) -> Action<Tgt> {
+        Action::TileOut {
             output_shape: Shape::from(output_shape),
             parallel,
         }
     }
 
-    fn split(&self, size: DimSize) -> SchedulingDecision<Tgt> {
-        SchedulingDecision::Split { k: size }
+    fn split(&self, size: DimSize) -> Action<Tgt> {
+        Action::Split { k: size }
     }
 
-    fn peel(
-        &self,
-        layout: Layout,
-        level: Tgt::Level,
-        vector_shape: Option<Shape>,
-    ) -> SchedulingDecision<Tgt> {
-        SchedulingDecision::Peel {
+    fn peel(&self, layout: Layout, level: Tgt::Level, vector_shape: Option<Shape>) -> Action<Tgt> {
+        Action::Peel {
             layout,
             level,
             vector_shape,

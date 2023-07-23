@@ -2,7 +2,7 @@ use crate::common::Spec;
 use crate::cost::Cost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::scheduling::SchedulingDecision;
+use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
 use crate::target::Target;
 
@@ -18,10 +18,10 @@ const SQLITE_BATCH_SIZE: usize = 1_000;
 pub type DbImpl<Tgt> = ImplNode<Tgt, Option<(Spec<Tgt>, Cost)>>;
 
 pub trait Database<Tgt: Target> {
-    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>>;
+    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(Action<Tgt>, Cost); 1]>>;
     // TODO: Drop get_spec, which exists solely for SqliteDatabaseWrapper.
     fn get_spec(&self, spec: &LogicalSpec<Tgt>) -> Option<&Entry<Tgt>>;
-    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>);
+    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>);
     fn flush(&mut self);
 }
 
@@ -52,7 +52,7 @@ enum SqliteDatabaseWrapperMsg<Tgt: Target> {
 #[serde(bound = "")]
 pub struct Entry<Tgt: Target> {
     ranges: Vec<(MemVec, MemVec)>,
-    values: Vec<SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>>,
+    values: Vec<SmallVec<[(Action<Tgt>, Cost); 1]>>,
 }
 
 impl<Tgt: Target> InMemDatabase<Tgt> {
@@ -66,7 +66,7 @@ impl<Tgt: Target> InMemDatabase<Tgt> {
         &'a self,
         mlims: &MemoryLimits,
         entry: &'a Entry<Tgt>,
-    ) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
+    ) -> Option<&SmallVec<[(Action<Tgt>, Cost); 1]>> {
         match mlims {
             MemoryLimits::Standard(query_lims) => {
                 for (i, (lims, peaks)) in entry.ranges.iter().enumerate() {
@@ -86,7 +86,7 @@ impl<Tgt: Target> InMemDatabase<Tgt> {
 }
 
 impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
-    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
+    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(Action<Tgt>, Cost); 1]>> {
         self.grouped_entries
             .get(&query.0)
             .and_then(|e| self.get_from_entry(&query.1, e))
@@ -96,7 +96,7 @@ impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
         self.grouped_entries.get(spec)
     }
 
-    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>) {
+    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) {
         // self.entries.insert(problem, impls);
 
         let orig_problem = problem.clone(); // Save for debug_assert_eq! postcondition.
@@ -184,7 +184,7 @@ impl<Tgt: Target, D: Database<Tgt>> SqliteDatabaseWrapper<Tgt, D> {
 }
 
 impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt, D> {
-    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
+    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(Action<Tgt>, Cost); 1]>> {
         self.inner.get(query)
     }
 
@@ -192,7 +192,7 @@ impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt,
         unimplemented!()
     }
 
-    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>) {
+    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) {
         self.inner.put(problem.clone(), impls);
         let updated = self.inner.get_spec(&problem.0).unwrap();
         self.tx
