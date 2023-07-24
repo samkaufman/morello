@@ -348,8 +348,8 @@ impl<'a> X86CodeGenerator<'a> {
                 let BufferExprTerm::TileIdx(dim, _) = &tt else {
                     unreachable!();
                 };
-                let subscript = loop_tile.subscripts[usize::from(*dim)];
-                if let Some(axis_loop_iter_name) = iter_var_names.get(&subscript) {
+                let axis = loop_tile.axes[usize::from(*dim)];
+                if let Some(axis_loop_iter_name) = iter_var_names.get(&axis) {
                     self.loop_iter_bindings
                         .insert(tt.clone(), Either::Left(axis_loop_iter_name.clone()));
                 }
@@ -412,8 +412,8 @@ impl<'a> X86CodeGenerator<'a> {
                     let BufferExprTerm::TileIdx(dim, _) = &tt else {
                         unreachable!();
                     };
-                    let subscript = loop_tile.subscripts[usize::from(*dim)];
-                    if let Some(axis_step) = axes_to_indices.get(&subscript) {
+                    let axis = loop_tile.axes[usize::from(*dim)];
+                    if let Some(axis_step) = axes_to_indices.get(&axis) {
                         self.loop_iter_bindings.insert(
                             tt.clone(),
                             Either::Right(i32::try_from(*axis_step).unwrap()),
@@ -632,22 +632,23 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
         .tiles
         .iter()
         .flat_map(|t| {
-            t.subscripts
+            t.axes
                 .iter()
                 .enumerate()
-                .filter_map(|(dim_idx, subscript)| {
+                .filter_map(|(dim_idx, axis)| {
                     let s = t.tile.steps_dim(dim_idx.try_into().unwrap());
                     debug_assert_ne!(s, 0);
                     if s == 1 {
                         None
                     } else {
-                        Some((*subscript, s))
+                        Some((*axis, s))
                     }
                 })
         })
         .unique();
 
-    // For debug builds, assert that `r` doesn't contain duplicate subscripts.
+    // Assert that `r` doesn't contain duplicate axes. This is expensive, so only do so in debug
+    // builds.
     #[cfg(debug_assertions)]
     {
         let mut seen = std::collections::HashSet::new();

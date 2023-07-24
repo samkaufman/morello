@@ -44,7 +44,7 @@ pub struct Loop<Tgt: Target, Aux: Clone> {
 
 #[derive(Debug, Clone)]
 pub struct LoopTile<Tgt: Target> {
-    pub subscripts: SmallVec<[u8; 5]>,
+    pub axes: SmallVec<[u8; 5]>,
     pub tile: Tile<Param<Tgt>>,
 }
 
@@ -140,7 +140,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
                         "{}: {} <-[{}]- {}",
                         left,
                         t.tile.spec(),
-                        t.subscripts.iter().map(|v| v.to_string()).join(", "),
+                        t.axes.iter().map(|v| v.to_string()).join(", "),
                         right
                     )
                 })
@@ -155,13 +155,13 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
 
 impl<Tgt: Target, Aux: Clone> Loop<Tgt, Aux> {
     pub fn steps(&self) -> u32 {
-        first_dim_per_subscript(self)
+        first_dim_per_axis(self)
             .map(|(loop_tile, dim_idx, _)| loop_tile.tile.steps_dim(dim_idx))
             .product()
     }
 
     pub fn full_steps(&self) -> u32 {
-        first_dim_per_subscript(self)
+        first_dim_per_axis(self)
             .map(|(loop_tile, dim_idx, _)| {
                 let s = loop_tile.tile.steps_dim(dim_idx);
                 match loop_tile.tile.boundary_size(dim_idx) {
@@ -173,19 +173,19 @@ impl<Tgt: Target, Aux: Clone> Loop<Tgt, Aux> {
     }
 }
 
-/// Yields the first tile and tile dimension seen for each unique subscript.
-fn first_dim_per_subscript<Tgt: Target, Aux: Clone>(
+/// Yields the first tile and tile dimension seen for each unique axis.
+fn first_dim_per_axis<Tgt: Target, Aux: Clone>(
     imp: &Loop<Tgt, Aux>,
 ) -> impl Iterator<Item = (&LoopTile<Tgt>, u8, u8)> {
     imp.tiles
         .iter()
         .flat_map(|loop_tile| {
             loop_tile
-                .subscripts
+                .axes
                 .iter()
                 .copied()
                 .enumerate()
                 .map(move |(i, s)| (loop_tile, u8::try_from(i).unwrap(), s))
         })
-        .unique_by(|(_, _, subscript)| *subscript)
+        .unique_by(|(_, _, axis)| *axis)
 }

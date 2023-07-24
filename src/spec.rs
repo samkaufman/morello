@@ -269,7 +269,7 @@ impl PrimitiveBasics {
         }
     }
 
-    pub fn parameter_dim_subscripts(&self) -> Vec<SmallVec<[u8; 4]>> {
+    pub fn parameter_dim_axes(&self) -> Vec<SmallVec<[u8; 4]>> {
         match self.typ {
             PrimitiveSpecType::Matmul { .. } => {
                 vec![smallvec![0, 2], smallvec![2, 1], smallvec![0, 1]]
@@ -818,7 +818,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 basics.input_tilings_for_tile_out(smaller_output)
             }
             LogicalSpec::Compose { .. } => {
-                todo!("Resolve subscripts.");
+                todo!("Resolve axes.");
                 // let mut accumulated_input_tilings = Vec::with_capacity(self.operand_count() - 1);
                 // let mut last_output_tiling = smaller_output.clone();
                 // for (i, subspec) in components.iter().enumerate().rev() {
@@ -842,44 +842,44 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     // TODO: Can we replace this entirely with Spec shapes?
-    pub fn operands_dim_subscripts(&self) -> Vec<SmallVec<[u8; 4]>> {
+    pub fn operands_dim_axes(&self) -> Vec<SmallVec<[u8; 4]>> {
         match self {
-            LogicalSpec::Primitive(basics, _, _) => basics.parameter_dim_subscripts(),
+            LogicalSpec::Primitive(basics, _, _) => basics.parameter_dim_axes(),
             LogicalSpec::Compose { components, .. } => {
                 let mut max_seen = 0;
                 let mut accum: Vec<SmallVec<[u8; 4]>> = Vec::new();
                 let mut last_out_subs: Option<SmallVec<[u8; 4]>> = None;
 
                 for compose_subspec in components.iter().rev() {
-                    let mut kls_subscripts = Self::increment_dims_subscripts(
-                        &compose_subspec.parameter_dim_subscripts(),
+                    let mut kls_axes = Self::increment_dims_axes(
+                        &compose_subspec.parameter_dim_axes(),
                         &mut max_seen,
                     );
                     if accum.is_empty() {
                         // Drop the output only
-                        accum.extend_from_slice(&kls_subscripts[..kls_subscripts.len() - 1]);
-                        last_out_subs = Some(kls_subscripts.last().unwrap().clone());
+                        accum.extend_from_slice(&kls_axes[..kls_axes.len() - 1]);
+                        last_out_subs = Some(kls_axes.last().unwrap().clone());
                     } else {
                         assert!(last_out_subs.is_some());
                         assert_eq!(
                             last_out_subs.as_ref().unwrap().len(),
-                            kls_subscripts[0].len()
+                            kls_axes[0].len()
                         );
-                        let substitution_dict = kls_subscripts
+                        let substitution_dict = kls_axes
                             .first()
                             .unwrap()
                             .iter()
                             .copied()
                             .zip(last_out_subs.unwrap())
                             .collect::<HashMap<_, _>>();
-                        kls_subscripts = Self::sub_subscript(&kls_subscripts, &substitution_dict);
-                        last_out_subs = Some(kls_subscripts.last().unwrap().clone());
-                        let mut new_accum = Vec::with_capacity(accum.len() + kls_subscripts.len());
-                        new_accum.extend_from_slice(&kls_subscripts[1..kls_subscripts.len() - 1]);
+                        kls_axes = Self::sub_axis(&kls_axes, &substitution_dict);
+                        last_out_subs = Some(kls_axes.last().unwrap().clone());
+                        let mut new_accum = Vec::with_capacity(accum.len() + kls_axes.len());
+                        new_accum.extend_from_slice(&kls_axes[1..kls_axes.len() - 1]);
                         new_accum.extend(accum.drain(..accum.len()));
                         mem::swap(&mut accum, &mut new_accum);
                     }
-                    max_seen = kls_subscripts.into_iter().flatten().max().unwrap();
+                    max_seen = kls_axes.into_iter().flatten().max().unwrap();
                 }
 
                 // Add the Compose' output
@@ -890,7 +890,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    fn increment_dims_subscripts(
+    fn increment_dims_axes(
         subs: &[SmallVec<[u8; 4]>],
         inc: &mut u8,
     ) -> Vec<SmallVec<[u8; 4]>> {
@@ -907,7 +907,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         result
     }
 
-    fn sub_subscript(
+    fn sub_axis(
         source: &[SmallVec<[u8; 4]>],
         substitutions: &HashMap<u8, u8>,
     ) -> Vec<SmallVec<[u8; 4]>> {

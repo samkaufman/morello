@@ -116,7 +116,7 @@ impl<Tgt: Target> Action<Tgt> {
                             // 1. Construct the simple tile corresponding to the new output shape.
                             let out_idx: u8 = node_spec.output_idx().try_into().unwrap();
                             let smaller_output = LoopTile {
-                                subscripts: (0..output_shape.len())
+                                axes: (0..output_shape.len())
                                     .map(|d| d.try_into().unwrap())
                                     .collect(),
                                 tile: Tile::new(
@@ -136,7 +136,7 @@ impl<Tgt: Target> Action<Tgt> {
                             let mut new_tiles: Vec<LoopTile<Tgt>> = vec![];
                             for (
                                 operand_idx,
-                                (original_input, (updated_input_tiling, updated_input_subscripts)),
+                                (original_input, (updated_input_tiling, updated_input_axes)),
                             ) in operands.iter().zip(updated_input_tilings.0).enumerate()
                             {
                                 if operand_idx == node_spec.output_idx() {
@@ -150,18 +150,17 @@ impl<Tgt: Target> Action<Tgt> {
                                     continue;
                                 }
 
-                                // Compute loop dimension names for the tile. Any subscript
-                                // which is None is given a fresh integer identifier,
-                                // otherwise is is given the identifier of the corresponding
-                                // dimension in the output.
-                                let subscripts = updated_input_subscripts
+                                // Compute loop dimension names for the tile. Any axis which is None
+                                // is given a fresh integer identifier, otherwise is is given the
+                                // identifier of the corresponding dimension in the output.
+                                let axes = updated_input_axes
                                     .iter()
                                     .map(|b| {
                                         match *b {
                                             Some(output_dim) => {
-                                                // It's correct to use the output dim. here
-                                                // because we earlier initialized the output
-                                                // subscripts to be simply their indices.
+                                                // It's correct to use the output dim. here because
+                                                // we earlier initialized the output axes to be
+                                                // simply their indices.
                                                 output_dim
                                             }
                                             None => {
@@ -175,7 +174,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                                 if original_input.dim_sizes() != &tiling_shape[..] {
                                     new_tiles.push(LoopTile {
-                                        subscripts,
+                                        axes,
                                         tile: Tile::new(
                                             updated_input_tiling,
                                             Param::new(
@@ -202,7 +201,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                                             let tiles = vec![
                                                 LoopTile {
-                                                    subscripts: smallvec![0, 1],
+                                                    axes: smallvec![0, 1],
                                                     tile: Tile::new(
                                                         Tiling::new_simple(smallvec![
                                                             lhs.dim_sizes()[0],
@@ -212,7 +211,7 @@ impl<Tgt: Target> Action<Tgt> {
                                                     ),
                                                 },
                                                 LoopTile {
-                                                    subscripts: smallvec![1, 2],
+                                                    axes: smallvec![1, 2],
                                                     tile: Tile::new(
                                                         Tiling::new_simple(smallvec![
                                                             *k,
@@ -448,11 +447,11 @@ impl<Tgt: Target> Action<Tgt> {
                 Some(ImplNode::Loop(Loop {
                     tiles: vec![
                         LoopTile {
-                            subscripts: smallvec![0, 1],
+                            axes: smallvec![0, 1],
                             tile: outer_image_tile,
                         },
                         LoopTile {
-                            subscripts: smallvec![1, 2],
+                            axes: smallvec![1, 2],
                             tile: outer_filters_tile,
                         },
                     ],
