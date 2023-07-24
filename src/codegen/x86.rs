@@ -212,13 +212,7 @@ impl<'a> X86CodeGenerator<'a> {
                         );
                         dest_buffer.emit(w, false, depth)?;
 
-                        if self
-                            .name_env
-                            .insert(Rc::clone(tensor), dest_buffer)
-                            .is_some()
-                        {
-                            panic!("Duplicate name for buffer");
-                        }
+                        self.name_env.insert(Rc::clone(tensor), dest_buffer);
                     }
                     TensorOrCacheView::CacheView(_) => (),
                 };
@@ -363,13 +357,8 @@ impl<'a> X86CodeGenerator<'a> {
                 };
                 let subscript = loop_tile.subscripts[usize::from(*dim)];
                 if let Some(axis_loop_iter_name) = iter_var_names.get(&subscript) {
-                    if self
-                        .loop_iter_bindings
-                        .insert(tt.clone(), Either::Left(axis_loop_iter_name.clone()))
-                        .is_some()
-                    {
-                        panic!("Symbol {:?} already assigned a loop iterator", tt);
-                    }
+                    self.loop_iter_bindings
+                        .insert(tt.clone(), Either::Left(axis_loop_iter_name.clone()));
                 }
             }
         }
