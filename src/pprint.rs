@@ -20,8 +20,8 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>) {
     table.set_titles(titles);
 
     // Traverse the Impl.
-    let problem = &root.aux().as_ref().unwrap().0;
-    let args = problem
+    let spec = &root.aux().as_ref().unwrap().0;
+    let args = spec
         .0
         .parameters()
         .iter()
@@ -39,8 +39,8 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>) {
             if let Some(line_top) = imp.line_strs(&mut name_env, args) {
                 let main_str = format!("{}{}", " ".repeat(depth), line_top);
                 let mut r = row![main_str, "", ""];
-                if let Some((problem, cost)) = imp.aux() {
-                    r = row![main_str, format!("{}", &problem.0),];
+                if let Some((spec, cost)) = imp.aux() {
+                    r = row![main_str, format!("{}", &spec.0),];
                     for level_peak in cost.peaks.iter() {
                         r.add_cell(Cell::new(&format!("{: >4}", level_peak)));
                     }

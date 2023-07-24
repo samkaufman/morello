@@ -235,7 +235,7 @@ impl<'a> X86CodeGenerator<'a> {
                 Ok(())
             }
             ImplNode::Pipeline(_) => todo!("Emit code for Pipeline"),
-            ImplNode::ProblemApp(p) => {
+            ImplNode::SpecApp(p) => {
                 writeln!(w, "assert(false);  /* {:?} */", p)
             }
             ImplNode::Kernel(Kernel {
@@ -632,18 +632,15 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
         .tiles
         .iter()
         .flat_map(|t| {
-            t.axes
-                .iter()
-                .enumerate()
-                .filter_map(|(dim_idx, axis)| {
-                    let s = t.tile.steps_dim(dim_idx.try_into().unwrap());
-                    debug_assert_ne!(s, 0);
-                    if s == 1 {
-                        None
-                    } else {
-                        Some((*axis, s))
-                    }
-                })
+            t.axes.iter().enumerate().filter_map(|(dim_idx, axis)| {
+                let s = t.tile.steps_dim(dim_idx.try_into().unwrap());
+                debug_assert_ne!(s, 0);
+                if s == 1 {
+                    None
+                } else {
+                    Some((*axis, s))
+                }
+            })
         })
         .unique();
 
