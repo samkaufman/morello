@@ -861,10 +861,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         last_out_subs = Some(kls_axes.last().unwrap().clone());
                     } else {
                         assert!(last_out_subs.is_some());
-                        assert_eq!(
-                            last_out_subs.as_ref().unwrap().len(),
-                            kls_axes[0].len()
-                        );
+                        assert_eq!(last_out_subs.as_ref().unwrap().len(), kls_axes[0].len());
                         let substitution_dict = kls_axes
                             .first()
                             .unwrap()
@@ -890,10 +887,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    fn increment_dims_axes(
-        subs: &[SmallVec<[u8; 4]>],
-        inc: &mut u8,
-    ) -> Vec<SmallVec<[u8; 4]>> {
+    fn increment_dims_axes(subs: &[SmallVec<[u8; 4]>], inc: &mut u8) -> Vec<SmallVec<[u8; 4]>> {
         let mut result = Vec::new();
         for dims in subs {
             let mut subresult = SmallVec::new();
