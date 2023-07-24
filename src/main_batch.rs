@@ -5,41 +5,19 @@ use std::{iter, path};
 use clap::Parser;
 use itertools::Itertools;
 use log::{debug, info};
+
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::smallvec;
-use spec::{PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
-use tensorspec::TensorSpecAux;
 
-mod alignment;
-mod codegen;
-mod common;
-mod cost;
-mod expr;
-mod geometry;
-mod imp;
-mod layout;
-mod memorylimits;
-mod nameenv;
-mod opaque_symbol;
-mod pprint;
-mod scheduling;
-mod search;
-mod spec;
-mod table;
-mod target;
-mod tensorspec;
-mod tiling;
-mod utils;
-mod views;
-
-use crate::common::{DimSize, Dtype, Spec};
-use crate::geometry::ToFromDependencyLatticeCoordinate;
-use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::spec::LogicalSpec;
-use crate::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
-use crate::target::{Target, X86MemoryLevel, X86Target};
-use crate::utils::iter_powers_of_two;
+use morello::common::{DimSize, Dtype, Spec};
+use morello::geometry::ToFromDependencyLatticeCoordinate;
+use morello::memorylimits::{MemVec, MemoryLimits};
+use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+use morello::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
+use morello::target::{Target, X86MemoryLevel, X86Target};
+use morello::tensorspec::TensorSpecAux;
+use morello::utils::iter_powers_of_two;
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -76,7 +54,7 @@ fn main() {
 }
 
 fn load_or_store(prim_type: PrimitiveSpecType, size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
-    let layout = layout::row_major(rank);
+    let layout = morello::layout::row_major(rank);
     LogicalSpec::Primitive(
         PrimitiveBasics {
             typ: prim_type,
@@ -113,7 +91,7 @@ where
     bounds
         .extend((1..5).flat_map(|rank| [load_or_store(PrimitiveSpecType::Move, args.size, rank)]));
     bounds.extend((1..5).map(|rank| {
-        let layout = layout::row_major(rank);
+        let layout = morello::layout::row_major(rank);
         LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Zero,
@@ -131,7 +109,7 @@ where
         )
     }));
     bounds.push({
-        let layout = layout::row_major(2);
+        let layout = morello::layout::row_major(2);
         let a = TensorSpecAux {
             contig: layout.contiguous_full(),
             aligned: true,
@@ -150,7 +128,7 @@ where
         )
     });
     bounds.extend({
-        let layout = layout::row_major(4);
+        let layout = morello::layout::row_major(4);
         let a = TensorSpecAux {
             contig: layout.contiguous_full(),
             aligned: true,
@@ -210,7 +188,7 @@ where
                 while let Some(job) = worklist.pop_front() {
                     let problem = Spec(spec.clone(), MemoryLimits::Standard(job));
                     let MemoryLimits::Standard(job) = &problem.1;
-                    let result = search::top_down(&db, &problem, 1);
+                    let result = morello::search::top_down(&db, &problem, 1);
                     if let [(_, only_result_cost)] = &result.0[..] {
                         worklist.extend(limits_iterator.next_vec(job, &only_result_cost.peaks));
                     }
@@ -289,7 +267,7 @@ fn specs_to_compute(
     let mut stage = 0u32;
     iter::from_fn(move || {
         let mut tasks = vec![];
-        for pt in utils::sum_seqs(&bound_pt, stage) {
+        for pt in morello::utils::sum_seqs(&bound_pt, stage) {
             let mut task = vec![];
             for sp in LogicalSpec::<X86Target>::objects_in_grid_pt(&spec_key, &pt) {
                 if sp.is_canonical() {

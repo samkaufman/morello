@@ -4,39 +4,16 @@ use smallvec::smallvec;
 use std::io;
 use std::path;
 use std::sync::RwLock;
-use table::Database;
 
-use crate::codegen::CodeGen;
-use crate::common::{DimSize, Dtype, Spec};
-use crate::layout::row_major;
-use crate::pprint::pprint;
-use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use crate::table::{DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
-use crate::target::{Target, X86MemoryLevel, X86Target};
-use crate::tensorspec::TensorSpecAux;
-use crate::utils::ToWriteFmt;
-
-mod alignment;
-mod codegen;
-mod common;
-mod cost;
-mod expr;
-mod geometry;
-mod imp;
-mod layout;
-mod memorylimits;
-mod nameenv;
-mod opaque_symbol;
-mod pprint;
-mod scheduling;
-mod search;
-mod spec;
-mod table;
-mod target;
-mod tensorspec;
-mod tiling;
-mod utils;
-mod views;
+use morello::codegen::CodeGen;
+use morello::common::{DimSize, Dtype, Spec};
+use morello::layout::row_major;
+use morello::pprint::pprint;
+use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
+use morello::target::{Target, X86MemoryLevel, X86Target};
+use morello::tensorspec::TensorSpecAux;
+use morello::utils::ToWriteFmt;
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -77,7 +54,7 @@ where
             spec_shape: smallvec![args.size, args.size, args.size],
             dtype: Dtype::Uint32,
         },
-        spec::PrimitiveAux::Standard(vec![
+        morello::spec::PrimitiveAux::Standard(vec![
             TensorSpecAux {
                 contig: rm2.contiguous_full(),
                 aligned: true,
@@ -137,7 +114,7 @@ where
 
     let start_time = std::time::Instant::now();
     let db_lock = RwLock::new(db);
-    let (_, hits, misses) = search::top_down(&db_lock, &problem, 1);
+    let (_, hits, misses) = morello::search::top_down(&db_lock, &problem, 1);
     info!("top_down took {:?}", start_time.elapsed());
     info!(
         "top_down missed {} times ({:.2}% of {})",
