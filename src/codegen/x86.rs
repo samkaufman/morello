@@ -89,7 +89,6 @@ impl<'a> X86CodeGenerator<'a> {
         debug_assert_eq!(top_arg_tensors.len(), usize::from(imp.parameter_count()));
 
         let mut main_body_str = String::new();
-        writeln!(main_body_str)?;
         writeln!(main_body_str, "__attribute__((noinline))\nvoid kernel(")?;
         for ((operand_idx, operand), tensor) in imp.parameters().enumerate().zip(top_arg_tensors) {
             let spec = tensor.spec();
@@ -287,7 +286,7 @@ impl<'a> X86CodeGenerator<'a> {
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_vec(a, b, None)
                         });
-                        writeln!(w, "{} *= 0;  /* VectorZero */", exprs[0])
+                        writeln!(w, "{}{} *= 0;  /* VectorZero */", indent(depth), exprs[0])
                     }
                     KernelType::VectorAssign => {
                         let shape = arguments[0].shape();
@@ -302,14 +301,24 @@ impl<'a> X86CodeGenerator<'a> {
                         if arguments.iter().all(|a| a.1.aligned()) {
                             writeln!(
                                 w,
-                                "*({} *)({}) = (*({} *)({}));  /* VectorAssign */",
-                                itype, exprs[1], itype, exprs[0]
+                                "{}*({} *)({}) = (*({} *)({}));  /* VectorAssign */",
+                                indent(depth),
+                                itype,
+                                exprs[1],
+                                itype,
+                                exprs[0]
                             )
                         } else {
                             writeln!(
                                 w,
-                                "{}(({} *)({}), {}(({} *)({})));  /* VectorAssign */",
-                                vtype.store_fn, itype, exprs[1], vtype.load_fn, itype, exprs[0]
+                                "{}{}(({} *)({}), {}(({} *)({})));  /* VectorAssign */",
+                                indent(depth),
+                                vtype.store_fn,
+                                itype,
+                                exprs[1],
+                                vtype.load_fn,
+                                itype,
+                                exprs[0]
                             )
                         }
                     }
@@ -324,8 +333,13 @@ impl<'a> X86CodeGenerator<'a> {
                         });
                         writeln!(
                             w,
-                            "*({} *)({}) += {} * (*({} *)({})); /* BroadcastVecMult */",
-                            itype, exprs[2], exprs[0], itype, exprs[1]
+                            "{}*({} *)({}) += {} * (*({} *)({})); /* BroadcastVecMult */",
+                            indent(depth),
+                            itype,
+                            exprs[2],
+                            exprs[0],
+                            itype,
+                            exprs[1]
                         )
                     }
                     KernelType::CacheAccess => Ok(()),
@@ -366,7 +380,8 @@ impl<'a> X86CodeGenerator<'a> {
         if l.parallel {
             writeln!(
                 w,
-                "#pragma omp parallel for collapse({}) schedule(static)",
+                "{}#pragma omp parallel for collapse({}) schedule(static)",
+                indent(depth),
                 axes_to_emit.len()
             )?;
         }
@@ -374,8 +389,12 @@ impl<'a> X86CodeGenerator<'a> {
         for (var_name, (_, steps)) in iter_var_names.values().zip(&axes_to_emit) {
             writeln!(
                 w,
-                "for (int {} = 0; {} < {}; {}++) {{",
-                var_name, var_name, steps, var_name
+                "{}for (int {} = 0; {} < {}; {}++) {{",
+                indent(depth),
+                var_name,
+                var_name,
+                steps,
+                var_name
             )?;
         }
 
@@ -384,7 +403,7 @@ impl<'a> X86CodeGenerator<'a> {
         depth -= 1;
 
         for _ in 0..axes_to_emit.len() {
-            writeln!(w, "}}")?;
+            writeln!(w, "{}}}", indent(depth))?;
         }
         Ok(())
     }

@@ -148,7 +148,7 @@ impl CBuffer {
             }
             CBuffer::SingleVecVar { name, vec_type } => {
                 let epi = if zero_init { " = {0}" } else { "" };
-                writeln!(w, "{} {}{};", vec_type.name, name, epi)
+                writeln!(w, "{}{} {}{};", indent(depth), vec_type.name, name, epi)
             }
             CBuffer::VecVars(_, VecVarsDerived { inner_vecs, .. }) => {
                 for inner_vec in inner_vecs {
