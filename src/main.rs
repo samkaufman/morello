@@ -1,5 +1,10 @@
+use clap::Parser;
+use log::info;
+use smallvec::smallvec;
 use std::io;
+use std::path;
 use std::sync::RwLock;
+use table::Database;
 
 use crate::codegen::CodeGen;
 use crate::color::ColorMode;
@@ -11,10 +16,6 @@ use crate::table::{DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::TensorSpecAux;
 use crate::utils::ToWriteFmt;
-
-use clap::Parser;
-use log::info;
-use smallvec::smallvec;
 
 mod alignment;
 mod codegen;
@@ -43,6 +44,8 @@ mod views;
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    #[arg(long, short)]
+    db: Option<path::PathBuf>,
     #[arg(long, short, default_value = "1")]
     batch: DimSize,
 
@@ -69,15 +72,21 @@ struct Args {
 
 fn main() {
     env_logger::init();
-
     let args = Args::parse();
     color::set_color_mode(args.color);
+    match &args.db {
+        Some(db_path) => main_per_db(
+            &args,
+            SqliteDatabaseWrapper::new(InMemDatabase::<X86Target>::new(), db_path),
+        ),
+        None => main_per_db(&args, InMemDatabase::<X86Target>::new()),
+    };
+}
 
-    let db = RwLock::new(SqliteDatabaseWrapper::new(
-        InMemDatabase::<X86Target>::new(),
-        std::path::Path::new("db.sqlite3"),
-    ));
-
+fn main_per_db<D>(args: &Args, db: D)
+where
+    D: Database<X86Target> + Send + Sync,
+{
     let rm2 = row_major(2);
     let matmul_spec = LogicalSpec::Primitive(
         PrimitiveBasics {
@@ -144,7 +153,8 @@ fn main() {
     let problem = Spec(matmul_spec, X86Target::max_mem());
 
     let start_time = std::time::Instant::now();
-    let (_, hits, misses) = search::top_down(&db, &problem, 1);
+    let db_lock = RwLock::new(db);
+    let (_, hits, misses) = search::top_down(&db_lock, &problem, 1);
     info!("top_down took {:?}", start_time.elapsed());
     info!(
         "top_down missed {} times ({:.2}% of {})",
@@ -153,7 +163,7 @@ fn main() {
         hits + misses
     );
 
-    let Some(results) = db.read().unwrap().get_impl(&problem) else {
+    let Some(results) = db_lock.read().unwrap().get_impl(&problem) else {
         panic!("No Impl found");
     };
     assert_eq!(results.len(), 1);

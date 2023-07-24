@@ -98,8 +98,8 @@ where
 
     fn bind<'i, 'j: 'i>(
         &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
-        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
+        _args: &[&'j dyn View<Tgt = Tgt>],
+        _env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
         todo!()
     }

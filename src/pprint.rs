@@ -10,7 +10,7 @@ use crate::{imp::Impl, views::Param};
 use clap::ValueEnum;
 use prettytable::{self, format, row, Cell};
 
-#[derive(Clone, PartialEq, ValueEnum)]
+#[derive(Copy, Clone, PartialEq, ValueEnum)]
 pub enum PrintMode {
     Full,
     Comfort,

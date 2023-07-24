@@ -23,11 +23,11 @@ use crate::views::{CacheView, Param, Tensor, Tile, View, ViewExt};
 
 /// A scheduling decision which can be applied to a Spec to produce an Impl.
 ///
-/// SchedulingDecisions contain the minimal amount of information needed to distinguish
-/// a scheduling decision, which makes it appropriate for storing in a database so that
-/// the corresponding Impl node can be computed given the Spec.
+/// [Action]s contain the minimal amount of information needed to distinguish a one scheduling
+/// decision from another, which makes it appropriate for storing in a database so that the
+/// corresponding Impl node can be computed given the Spec.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub enum SchedulingDecision<Tgt: Target> {
+pub enum Action<Tgt: Target> {
     TileOut {
         output_shape: Shape,
         parallel: bool,
@@ -52,16 +52,16 @@ pub enum SchedulingDecision<Tgt: Target> {
     Place(KernelType),
 }
 
-impl<Tgt: Target> SchedulingDecision<Tgt> {
+impl<Tgt: Target> Action<Tgt> {
     pub fn child_count(&self) -> usize {
         match self {
-            SchedulingDecision::TileOut { .. } => 1,
-            SchedulingDecision::Split { .. } => 1,
-            SchedulingDecision::ToAccum => 2,
-            SchedulingDecision::SpatialSplit => 1,
-            SchedulingDecision::Place(_) => 0,
-            SchedulingDecision::Move { .. } => unimplemented!(),
-            SchedulingDecision::Peel { .. } => 2,
+            Action::TileOut { .. } => 1,
+            Action::Split { .. } => 1,
+            Action::ToAccum => 2,
+            Action::SpatialSplit => 1,
+            Action::Place(_) => 0,
+            Action::Move { .. } => unimplemented!(),
+            Action::Peel { .. } => 2,
         }
     }
 
@@ -80,16 +80,16 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
         let operands = node_spec.parameters();
 
         match self {
-            SchedulingDecision::TileOut { .. } | SchedulingDecision::Split { .. } => {
+            Action::TileOut { .. } | Action::Split { .. } => {
                 let (tiles, parallel) = {
                     match self {
-                        SchedulingDecision::TileOut {
+                        Action::TileOut {
                             output_shape,
                             parallel,
                         } => {
                             let current_output = &operands[node_spec.output_idx()];
 
-                            let current_out_shape: &Shape = current_output.dim_sizes();
+                            let current_out_shape = current_output.dim_sizes();
                             assert!(
                                 !(*parallel && node_spec.serial_only()),
                                 "Serial-only Spec prevents parallel tiling"
@@ -104,7 +104,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                             assert!(output_shape.iter().enumerate().all(|(dim, dim_size)| {
                                 *dim_size > 0 && *dim_size <= current_out_shape[dim]
                             }));
-                            assert_ne!(current_out_shape, output_shape);
+                            assert_ne!(current_out_shape, &output_shape[..]);
 
                             // Abort if it's invalid to tile the original output tensor
                             // to the new shape (e.g., the new shape is larger).
@@ -129,9 +129,9 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                             let updated_input_tilings =
                                 node_spec.input_tilings_for_tile_out(&smaller_output.tile.tiling);
 
-                            // 3. Reify the tilings into Tiles we'll store with this scheduling
-                            //    decision. Tiles objects track the index and shape of the Impl
-                            //    parameter being tiled.
+                            // 3. Reify the tilings into Tiles we'll store with this action. Tiles
+                            //    objects track the index and shape of the Impl parameter being
+                            //    tiled.
                             let mut next_fresh_loop_dim = u8::try_from(output_shape.len()).unwrap();
                             let mut new_tiles: Vec<LoopTile<Tgt>> = vec![];
                             for (
@@ -173,7 +173,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                                     })
                                     .collect();
 
-                                if original_input.dim_sizes() != tiling_shape {
+                                if original_input.dim_sizes() != &tiling_shape[..] {
                                     new_tiles.push(LoopTile {
                                         subscripts,
                                         tile: Tile::new(
@@ -189,7 +189,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                             new_tiles.push(smaller_output);
                             (new_tiles, *parallel)
                         }
-                        SchedulingDecision::Split { k } => {
+                        Action::Split { k } => {
                             debug_assert_ne!(*k, 0);
                             match node_spec {
                                 LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
@@ -254,7 +254,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     aux,
                 }))
             }
-            SchedulingDecision::Peel {
+            Action::Peel {
                 layout,
                 level,
                 vector_shape,
@@ -387,7 +387,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     aux,
                 }))
             }
-            SchedulingDecision::SpatialSplit => {
+            Action::SpatialSplit => {
                 let LogicalSpec::Primitive(PrimitiveBasics { typ: PrimitiveSpecType::Conv { accum: conv_accum }, spec_shape: _, dtype }, _, serial_only) = node_spec else {
                     panic!();
                 };
@@ -471,7 +471,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     aux,
                 }))
             }
-            SchedulingDecision::Move {
+            Action::Move {
                 source_idx,
                 destination_level,
                 destination_layout,
@@ -528,8 +528,9 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     if f(destination_level, *source_idx, node_spec) {
                         let mut left_spec = outer_moved_operand_spec;
                         let mut right_spec = inner_moved_operand.spec();
+                        let param_idx = if flip { 1 } else { 0 };
                         let mut args: [Rc<dyn View<Tgt = Tgt>>; 2] = [
-                            Rc::new(Param::new(0, outer_moved_operand_spec.clone())) as _,
+                            Rc::new(Param::new(param_idx, outer_moved_operand_spec.clone())) as _,
                             inner_moved_operand.inner_rc(),
                         ];
                         if flip {
@@ -541,14 +542,16 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                                 LogicalSpec::Primitive(
                                     PrimitiveBasics {
                                         typ: PrimitiveSpecType::Move,
-                                        spec_shape: left_spec.dim_sizes().clone(),
+                                        spec_shape: left_spec.dim_sizes().into(),
                                         dtype: left_spec.dtype(),
                                     },
                                     PrimitiveAux::Move {
                                         outer_aux: left_spec.aux.clone(),
                                         inner_level: right_spec.level(),
                                         inner_layout: right_spec.layout(),
-                                        inner_vector_shape: right_spec.vector_shape().cloned(),
+                                        inner_vector_shape: right_spec
+                                            .vector_shape()
+                                            .map(Shape::from),
                                     },
                                     node_spec.serial_only(),
                                 ),
@@ -594,7 +597,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     aux,
                 )))
             }
-            SchedulingDecision::ToAccum => {
+            Action::ToAccum => {
                 let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape: _, dtype: _ }, _, _) = node_spec else {
                     panic!();
                 };
@@ -647,7 +650,7 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
                     aux,
                 }))
             }
-            SchedulingDecision::Place(k) => Some(ImplNode::Kernel(Kernel {
+            Action::Place(k) => Some(ImplNode::Kernel(Kernel {
                 kernel_type: *k,
                 arguments: spec
                     .0
@@ -663,10 +666,10 @@ impl<Tgt: Target> SchedulingDecision<Tgt> {
 }
 
 // TODO: Remove. Debug should be enough now that Impl exists.
-impl<Tgt: Target> Display for SchedulingDecision<Tgt> {
+impl<Tgt: Target> Display for Action<Tgt> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
-            SchedulingDecision::Move {
+            Action::Move {
                 source_idx,
                 destination_level,
                 destination_layout,
@@ -681,14 +684,14 @@ impl<Tgt: Target> Display for SchedulingDecision<Tgt> {
                 destination_vector_shape,
                 prefetch
             ),
-            SchedulingDecision::Place(KernelType::Mult) => write!(f, "Mult"),
-            SchedulingDecision::Place(KernelType::BroadcastVecMult) => {
+            Action::Place(KernelType::Mult) => write!(f, "Mult"),
+            Action::Place(KernelType::BroadcastVecMult) => {
                 write!(f, "BroadcastVecMult")
             }
-            SchedulingDecision::Place(KernelType::ValueAssign) => write!(f, "ValueAssign"),
-            SchedulingDecision::Place(KernelType::VectorAssign) => write!(f, "VectorAssign"),
-            SchedulingDecision::Place(KernelType::MemsetZero) => write!(f, "MemsetZero"),
-            SchedulingDecision::Place(KernelType::VectorZero) => write!(f, "VectorZero"),
+            Action::Place(KernelType::ValueAssign) => write!(f, "ValueAssign"),
+            Action::Place(KernelType::VectorAssign) => write!(f, "VectorAssign"),
+            Action::Place(KernelType::MemsetZero) => write!(f, "MemsetZero"),
+            Action::Place(KernelType::VectorZero) => write!(f, "VectorZero"),
             _ => write!(f, "{:?}", self),
         }
     }
@@ -743,7 +746,7 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
     };
 
     TensorSpec::<Tgt>::new_canon(
-        operand.dim_sizes().clone(),
+        operand.dim_sizes().into(),
         operand.dtype(),
         contiguous_abs,
         aligned,
@@ -761,7 +764,7 @@ pub fn broadcastvecmult_applies_to_operands(operands: &[TensorSpec<X86Target>]) 
         if operands[i].level() != X86MemoryLevel::VRF {
             return false;
         }
-        if &operands[i].dim_sizes() != operands[i].vector_shape().as_ref().unwrap() {
+        if operands[i].dim_sizes() != operands[i].vector_shape().unwrap() {
             return false;
         }
         if !operands[i].aligned() || !operands[i].is_contiguous() {

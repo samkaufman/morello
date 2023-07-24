@@ -12,7 +12,6 @@ use crate::{
 use auto_impl::auto_impl;
 use smallvec::{smallvec, SmallVec};
 use std::{
-    borrow::Borrow,
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
 };
@@ -213,7 +212,7 @@ impl<Tgt: Target> View for Tensor<Tgt> {
         &'a self,
         _env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
     ) -> Option<&'a Tensor<Self::Tgt>> {
-        Some(&self)
+        Some(self)
     }
 
     fn spec(&self) -> &TensorSpec<Self::Tgt> {
@@ -222,7 +221,7 @@ impl<Tgt: Target> View for Tensor<Tgt> {
 
     fn make_buffer_indexing_expr(
         &self,
-        env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+        _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
     ) -> AffineExpr<BufferExprTerm> {
         self.spec()
             .layout()
@@ -298,12 +297,12 @@ impl<V: View> Tile<V> {
     }
 
     pub fn steps_dim(&self, dim: u8) -> u32 {
-        let origin_size = self.view.borrow().shape()[usize::from(dim)];
+        let origin_size = self.view.shape()[usize::from(dim)];
         self.tiling.steps_dim(dim, origin_size)
     }
 
     pub fn boundary_size(&self, dim: u8) -> u32 {
-        let origin_size = self.view.borrow().shape()[usize::from(dim)];
+        let origin_size = self.view.shape()[usize::from(dim)];
         self.tiling.boundary_size(dim, origin_size)
     }
 }
@@ -339,7 +338,7 @@ impl<T: View> View for Tile<T> {
 
         let mut new_expr = expr.clone();
         for t in &expr.0 {
-            let BufferExprTerm::Pt(dim, term_id) = &t.1 else {
+            let BufferExprTerm::Pt(dim, _) = &t.1 else {
                 continue;
             };
 
@@ -385,7 +384,7 @@ impl<T: View> View for SqueezeDimsView<T> {
 
     fn make_buffer_indexing_expr(
         &self,
-        env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+        _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
     ) -> AffineExpr<BufferExprTerm> {
         todo!()
     }
@@ -415,7 +414,7 @@ impl<T: View> View for TransposeView<T> {
 
     fn make_buffer_indexing_expr(
         &self,
-        env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+        _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
     ) -> AffineExpr<BufferExprTerm> {
         todo!()
     }

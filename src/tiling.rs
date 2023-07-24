@@ -3,8 +3,6 @@ use smallvec::SmallVec;
 use std::fmt::Debug;
 
 use crate::common::{DimSize, Shape};
-use crate::expr::AffineExpr;
-use crate::layout::BufferExprTerm;
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Tiling {
@@ -14,10 +12,16 @@ pub struct Tiling {
 
 /// A tiling over either Spec or operand shapes.
 ///
+/// Tiles have arbitrary sizes and steps in each dimension. One tile
+/// will have its origin (0, ..) at the tiled view's origin. Not all
+/// tiles are necessarily complete; a tile exists if any of its points
+/// lies inside the tiled view, and the tile is otherwise truncated.
+/// (These are called 'boundary' tiles.)
+///
 /// This is the basis of shape and tiling logic inference. A tiling over a Spec
 /// can be converted into tilings over each operand and vice versa. As a result,
 /// tilings can be inferred across composed Specs by tiling any of its
-/// component Specs and then propogating tilings across tensors shared with
+/// component Specs and then propagating tilings across tensors shared with
 /// other component Specs.
 impl Tiling {
     pub fn new_simple(shape: Shape) -> Tiling {
@@ -51,7 +55,7 @@ impl Tiling {
 
     /// Returns the total number of steps for a given tensor shape.
     ///
-    /// The result will include boundary steps.
+    /// The result includes boundary steps.
     pub fn steps(&self, origin_shape: &[DimSize]) -> u32 {
         assert_eq!(self.shape.len(), origin_shape.len());
         origin_shape
@@ -63,10 +67,16 @@ impl Tiling {
 
     /// Returns the number of steps taken by a window sliding over a dimension.
     ///
-    /// The result will include boundary steps.
+    /// The result includes boundary steps.
     pub fn steps_dim(&self, dim: u8, origin_size: DimSize) -> u32 {
         let d = usize::from(dim);
-        divrem::DivCeil::div_ceil(1 + origin_size - self.shape[d], self.step_sizes[d])
+        debug_assert!(
+            origin_size >= self.shape[d],
+            "origin_size {} was smaller than tile dimension size {}",
+            origin_size,
+            self.shape[d]
+        );
+        divrem::DivCeil::div_ceil(origin_size, self.step_sizes[d])
     }
 
     /// Counts the boundary elements in a given Spec dimension of `origin_size`.
@@ -101,15 +111,15 @@ impl Tiling {
 
 #[cfg(test)]
 mod tests {
-    use std::cmp::max;
-
     use super::*;
     use itertools::Itertools;
     use proptest::prelude::*;
     use proptest::proptest;
     use smallvec::smallvec;
+    use std::cmp::max;
 
     const ALLOW_ARBITRARY_SLIDES: bool = false;
+    const MAX_ORIGIN_SIZE: DimSize = 20;
 
     /// A Strategy for generating valid Shapes.
     fn shape_strategy(max_size: DimSize, max_dims: u8) -> impl Strategy<Value = Shape> {
@@ -132,20 +142,32 @@ mod tests {
             .prop_map(|(shape, steps)| Tiling::new_sliding(shape, steps.into()))
     }
 
+    /// A Strategy for generating Tilings along with larger shapes.
     fn tiling_and_origin_shape_strategy() -> impl Strategy<Value = (Tiling, Shape)> {
         tiling_strategy(2).prop_flat_map(|tiling| {
-            let origin_shape = prop::collection::vec(1u32..=4, tiling.shape.len()).prop_map_into();
+            // let origin_shape = prop::collection::vec(1u32..=4, tiling.shape.len()).prop_map_into();
+            let origin_shape = tiling
+                .shape()
+                .iter()
+                .map(|&tile_dim_size| {
+                    assert!(tile_dim_size <= MAX_ORIGIN_SIZE);
+                    tile_dim_size..=MAX_ORIGIN_SIZE
+                })
+                .collect::<Vec<_>>()
+                .prop_map_into();
             (Just(tiling), origin_shape)
         })
     }
 
     #[test]
     fn test_tiling_sliding() {
-        let t = Tiling::new_sliding(smallvec![1, 4, 3, 3], smallvec![1, 4, 1, 1]);
-        assert_eq!(t.steps_dim(0, 1), 1);
-        assert_eq!(t.steps_dim(1, 4), 1);
-        assert_eq!(t.steps_dim(2, 4), 2);
-        assert_eq!(t.steps_dim(3, 4), 2);
+        const OUTER_SHAPE: [DimSize; 5] = [1, 4, 2, 4, 4];
+        let t = Tiling::new_sliding(smallvec![1, 3, 1, 3, 3], smallvec![1, 3, 2, 1, 1]);
+        assert_eq!(t.steps_dim(0, OUTER_SHAPE[0]), 1);
+        assert_eq!(t.steps_dim(1, OUTER_SHAPE[1]), 2);
+        assert_eq!(t.steps_dim(2, OUTER_SHAPE[2]), 1);
+        assert_eq!(t.steps_dim(3, OUTER_SHAPE[3]), 4);
+        assert_eq!(t.steps_dim(4, OUTER_SHAPE[4]), 4);
     }
 
     proptest! {

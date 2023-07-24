@@ -1,4 +1,7 @@
-use std::ops::{Add, Mul};
+use std::{
+    num::TryFromIntError,
+    ops::{Add, Mul, Sub},
+};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct AffineExpr<T>(pub Vec<Term<T>>, pub i32);
@@ -19,11 +22,17 @@ impl<T: PartialEq> AffineExpr<T> {
     }
 }
 
+impl<T> PartialEq<i32> for &AffineExpr<T> {
+    fn eq(&self, rhs: &i32) -> bool {
+        self.0.is_empty() && self.1 == *rhs
+    }
+}
+
 impl<T: PartialEq> Add for AffineExpr<T> {
     type Output = Self;
 
     fn add(mut self, rhs: AffineExpr<T>) -> Self::Output {
-        // TODO: Keep the terms sorted for faster iteration.
+        // TODO: Keep the terms sorted, then join by merging (popping smaller head).
         let AffineExpr(terms, intercept) = &mut self;
         *intercept += rhs.1;
         for Term(c, s) in rhs.0 {
@@ -37,11 +46,28 @@ impl<T: PartialEq> Add for AffineExpr<T> {
     }
 }
 
+impl<T: PartialEq> Add<Term<T>> for AffineExpr<T> {
+    type Output = Self;
+
+    fn add(self, rhs: Term<T>) -> Self::Output {
+        self + AffineExpr(vec![rhs], 0)
+    }
+}
+
 impl<T> Add<i32> for AffineExpr<T> {
     type Output = Self;
 
     fn add(mut self, rhs: i32) -> Self::Output {
         self.1 += rhs;
+        self
+    }
+}
+
+impl<T> Sub<i32> for AffineExpr<T> {
+    type Output = Self;
+
+    fn sub(mut self, rhs: i32) -> Self::Output {
+        self.1 -= rhs;
         self
     }
 }
@@ -56,6 +82,26 @@ impl<T> Mul<i32> for AffineExpr<T> {
     }
 }
 
+impl<T> From<Term<T>> for AffineExpr<T> {
+    fn from(t: Term<T>) -> Self {
+        AffineExpr(vec![t], 0)
+    }
+}
+
+impl<T> From<i32> for AffineExpr<T> {
+    fn from(i: i32) -> Self {
+        AffineExpr(vec![], i)
+    }
+}
+
+impl<T> TryFrom<usize> for AffineExpr<T> {
+    type Error = TryFromIntError;
+
+    fn try_from(i: usize) -> Result<Self, Self::Error> {
+        Ok(AffineExpr(vec![], i.try_into()?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AffineExpr, Term};
@@ -67,6 +113,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::erasing_op)]
     fn test_intercept_scalar_multiplication() {
         assert_eq!(AffineExpr::<()>(vec![], 1) * 2, AffineExpr::<()>(vec![], 2));
         assert_eq!(AffineExpr::<()>(vec![], 1) * 0, AffineExpr::<()>(vec![], 0));
@@ -82,7 +129,6 @@ mod tests {
             vec![Term(1, String::from("y")), Term(2, String::from("z"))],
             1,
         );
-        // let expected = todo!("Encode 2x + 4y + 8z + 5");
         let expected = AffineExpr(
             vec![
                 Term(2, String::from("x")),

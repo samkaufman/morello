@@ -57,6 +57,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Block<Tgt, Aux> {
         _names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         _args: &[&dyn View<Tgt = Tgt>],
     ) -> Option<String> {
+        // TODO: Add an option to pprint Blocks.
         None
     }
 

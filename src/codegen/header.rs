@@ -1,16 +1,12 @@
-use std::fmt;
+use std::{collections::HashSet, fmt};
+
+use super::c_utils::VecType;
 
 pub struct HeaderEmitter {
     pub emit_x86: bool,
     pub emit_arm: bool,
     pub emit_benchmarking: bool,
-    pub vector_type_defs: Vec<VectorDef>,
-}
-
-pub struct VectorDef {
-    pub c_type: String,
-    pub name: String,
-    pub vec_bytes: String,
+    pub vector_type_defs: HashSet<&'static VecType>,
 }
 
 impl HeaderEmitter {
@@ -19,7 +15,7 @@ impl HeaderEmitter {
             emit_x86: false,
             emit_arm: false,
             emit_benchmarking: false,
-            vector_type_defs: vec![],
+            vector_type_defs: HashSet::new(),
         }
     }
 
@@ -38,6 +34,22 @@ impl HeaderEmitter {
             out.write_str(include_str!("../codegen_partials/benchmarking.c"))?;
             out.write_char('\n')?;
         }
+
+        for vec_type in &self.vector_type_defs {
+            // Declare a vector of {vec_bytes} bytes, divided into {dt.c_type}
+            // values. (vec_bytes must be a multiple of the c_type size.)
+            out.write_str(&format!(
+                "typedef {} {} __attribute__ ((vector_size ({} * sizeof({}))));\n",
+                vec_type.dtype.c_type(),
+                vec_type.name,
+                vec_type.value_cnt,
+                vec_type.dtype.c_type()
+            ))?;
+        }
+        if !self.vector_type_defs.is_empty() {
+            out.write_char('\n')?;
+        }
+
         Ok(())
     }
 }

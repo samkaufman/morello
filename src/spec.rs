@@ -1,7 +1,7 @@
 use super::common::{DimSize, Shape};
 use crate::common::Dtype;
 use crate::layout::Layout;
-use crate::scheduling::SchedulingDecision;
+use crate::scheduling::Action;
 use crate::target::MemoryLevel;
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
@@ -78,7 +78,7 @@ pub enum PrimitiveAux<Tgt: Target> {
 pub struct TilingInference(pub Vec<(Tiling, SmallVec<[Option<u8>; 5]>)>);
 
 impl PrimitiveBasics {
-    pub fn replace_io(&mut self, new_operands: &[(Shape, Dtype)]) {
+    pub fn replace_io(&mut self, new_operands: &[(&[DimSize], Dtype)]) {
         match self.typ {
             PrimitiveSpecType::Matmul { accum: _ } => {
                 debug_assert_eq!(new_operands.len(), 3);
@@ -108,12 +108,12 @@ impl PrimitiveBasics {
                     panic!("Move must have 2 operands");
                 };
                 assert_eq!(src, dest);
-                self.spec_shape = src.0.clone();
+                self.spec_shape = src.0.into();
                 self.dtype = src.1;
             }
             PrimitiveSpecType::Zero => {
                 assert_eq!(new_operands.len(), 1);
-                self.spec_shape = new_operands[0].0.clone();
+                self.spec_shape = new_operands[0].0.into();
                 self.dtype = new_operands[0].1;
             }
         }
@@ -560,7 +560,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         self == &c
     }
 
-    pub fn decisions(&self) -> Box<dyn Iterator<Item = SchedulingDecision<Tgt>> + '_> {
+    pub fn actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let iter = self.tile_out_expansions();
         let iter = iter.chain(self.move_expansions());
         let iter = iter.chain(Tgt::expansions(self));
@@ -576,7 +576,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 _serial_only,
             ) => match typ {
                 PrimitiveSpecType::Matmul { accum } if !*accum => {
-                    Box::new(iter.chain(once(SchedulingDecision::ToAccum)))
+                    Box::new(iter.chain(once(Action::ToAccum)))
                 }
                 PrimitiveSpecType::Matmul { accum } if *accum => {
                     Box::new(iter.chain(self.split_expansions()))
@@ -584,12 +584,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
                         if self.can_spatial_split() {
-                            Box::new(iter.chain(once(SchedulingDecision::SpatialSplit)))
+                            Box::new(iter.chain(once(Action::SpatialSplit)))
                         } else {
                             Box::new(iter)
                         }
                     } else {
-                        Box::new(iter.chain(once(SchedulingDecision::ToAccum)))
+                        Box::new(iter.chain(once(Action::ToAccum)))
                     }
                 }
                 _ => Box::new(iter),
@@ -639,11 +639,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         true
     }
 
-    fn tile_out_expansions(&self) -> impl Iterator<Item = SchedulingDecision<Tgt>> + '_ {
+    fn tile_out_expansions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         let serial_only = self.serial_only();
         let output = self.output();
         gen_tile_sizes::<Tgt>(output.dim_sizes(), true).flat_map(move |tile_shape| {
-            let mut ts = SmallVec::<[SchedulingDecision<Tgt>; 2]>::new();
+            let mut ts = SmallVec::<[Action<Tgt>; 2]>::new();
             ts.push(self.tile_out(&tile_shape, false));
             if !serial_only {
                 ts.push(self.tile_out(&tile_shape, true));
@@ -652,7 +652,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         })
     }
 
-    fn split_expansions(&self) -> Box<dyn Iterator<Item = SchedulingDecision<Tgt>> + '_> {
+    fn split_expansions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape, .. }, _, _) = self else {
             panic!("split_expansions called on non-primitive Spec");
         };
@@ -670,7 +670,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         )
     }
 
-    fn peel_expansions(&self) -> Box<dyn Iterator<Item = SchedulingDecision<Tgt>> + '_> {
+    fn peel_expansions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let LogicalSpec::Compose { components, operand_auxes: _, serial_only: _ } = self else {
             panic!("peel_expansions called on non-Compose Spec");
         };
@@ -685,7 +685,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 // TODO: Need to implement `can_move_to`-style logic here.
 
                 let vector_bytes = level.vector_bytes();
-                if vector_bytes > 0 {
+                if !vector_bytes.is_empty() {
                     for vector_shape in gen_vector_shapes(
                         Some(intermediate_shape),
                         components[1].dtype,
@@ -730,7 +730,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    fn move_expansions(&self) -> impl Iterator<Item = SchedulingDecision<Tgt>> + '_ {
+    fn move_expansions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         // TODO: Add prefetching moves.
 
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
@@ -751,7 +751,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
 
                     let vector_bytes = level.vector_bytes();
-                    if vector_bytes > 0 {
+                    if !vector_bytes.is_empty() {
                         for vector_shape in gen_vector_shapes(
                             Some(operand.dim_sizes()),
                             operand.dtype(),
@@ -762,7 +762,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                                 let _this = self;
                                 let dest_layout = layout.clone();
                                 let vector_shape = Some(&vector_shape);
-                                SchedulingDecision::Move {
+                                Action::Move {
                                     source_idx: i,
                                     destination_level: level,
                                     destination_layout: dest_layout,
@@ -773,9 +773,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         }
                     } else {
                         results.push({
-                            let _this = self;
                             let dest_layout = layout.clone();
-                            SchedulingDecision::Move {
+                            Action::Move {
                                 source_idx: i,
                                 destination_level: level,
                                 destination_layout: dest_layout,
@@ -794,24 +793,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     /// Produces a loop.
     ///
     /// If the Spec cannot be tiled to that shape, returns None.
-    pub fn tile_out(&self, output_shape: &[DimSize], parallel: bool) -> SchedulingDecision<Tgt> {
-        SchedulingDecision::TileOut {
+    pub fn tile_out(&self, output_shape: &[DimSize], parallel: bool) -> Action<Tgt> {
+        Action::TileOut {
             output_shape: Shape::from(output_shape),
             parallel,
         }
     }
 
-    fn split(&self, size: DimSize) -> SchedulingDecision<Tgt> {
-        SchedulingDecision::Split { k: size }
+    fn split(&self, size: DimSize) -> Action<Tgt> {
+        Action::Split { k: size }
     }
 
-    fn peel(
-        &self,
-        layout: Layout,
-        level: Tgt::Level,
-        vector_shape: Option<Shape>,
-    ) -> SchedulingDecision<Tgt> {
-        SchedulingDecision::Peel {
+    fn peel(&self, layout: Layout, level: Tgt::Level, vector_shape: Option<Shape>) -> Action<Tgt> {
+        Action::Peel {
             layout,
             level,
             vector_shape,
@@ -941,7 +935,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 let new_inputs = &new_operands[..new_operands.len() - 1];
                 let mut remaining_inputs = new_inputs
                     .iter()
-                    .map(|t| (t.dim_sizes().clone(), t.dtype()))
+                    .map(|t| (t.dim_sizes(), t.dtype()))
                     .collect::<Vec<_>>();
                 let mut component_inputs: Vec<(Shape, Dtype)> = vec![];
                 for (_i, component) in components.iter_mut().enumerate().rev() {
@@ -951,8 +945,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     eprintln!("component_inputs.len(): {}", component_inputs.len());
                     eprintln!("remaining_inputs.len(): {}", remaining_inputs.len());
                     eprintln!("needed: {}", needed);
-                    component_inputs
-                        .extend(remaining_inputs.drain(remaining_inputs.len() - needed..));
+                    component_inputs.extend(
+                        remaining_inputs
+                            .drain(remaining_inputs.len() - needed..)
+                            .map(|(shape, dtype)| (Shape::from(shape), dtype)),
+                    );
 
                     let new_output_shape = {
                         let inp_shapes = component_inputs
@@ -963,7 +960,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     };
                     let mut new_operands = component_inputs.clone();
                     new_operands.push((new_output_shape, component.dtype));
-                    component.replace_io(&new_operands);
+                    component.replace_io(
+                        new_operands
+                            .iter()
+                            .map(|(s, d)| (&s[..], *d))
+                            .collect::<Vec<_>>()
+                            .as_slice(),
+                    );
 
                     // Next loop iteration should have have the output as its own argument.
                     component_inputs.clear();
@@ -975,8 +978,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 // output has an invalid shape.
                 debug_assert_eq!(component_inputs.len(), 1);
                 debug_assert_eq!(
-                    &component_inputs[0].0,
-                    new_operands.last().unwrap().dim_sizes()
+                    new_operands.last().unwrap().dim_sizes(),
+                    &component_inputs[0].0[..]
                 );
                 debug_assert_eq!(component_inputs[0].1, new_operands.last().unwrap().dtype());
 
@@ -986,7 +989,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 basics.replace_io(
                     &new_operands
                         .iter()
-                        .map(|o| (o.dim_sizes().clone(), o.dtype))
+                        .map(|o| (o.dim_sizes(), o.dtype))
                         .collect::<Vec<_>>(),
                 );
 
@@ -1009,7 +1012,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         *outer_aux = src.aux.clone();
                         *inner_level = dest.level();
                         *inner_layout = dest.layout();
-                        *inner_vector_shape = dest.vector_shape().cloned();
+                        *inner_vector_shape = dest.vector_shape().map(|s| s.to_smallvec());
                     }
                 }
             }
@@ -1125,51 +1128,60 @@ fn gen_tile_sizes<Tgt: Target>(
     }
 }
 
-pub fn gen_vector_shapes(
-    outer_shape: Option<&[DimSize]>,
+pub fn gen_vector_shapes<'a>(
+    outer_shape: Option<&'a [DimSize]>,
     dtype: Dtype,
-    vector_bytes: u32,
+    vector_bytes: &'a [u32],
     rank: Option<u8>,
-) -> Box<dyn Iterator<Item = Shape>> {
+) -> Box<dyn Iterator<Item = Shape> + 'a> {
     assert_ne!(
         outer_shape.is_some(),
         rank.is_some(),
         "Must specify either outer_shape or rank, but not both"
     );
     assert!(outer_shape.is_none() || outer_shape.unwrap().iter().all(|&d| d > 0));
-    assert_ne!(vector_bytes, 0, "vector_bytes must be greater than 0");
-    assert_eq!(
-        vector_bytes % u32::from(dtype.size()),
-        0,
+    assert!(!vector_bytes.is_empty());
+    assert!(
+        vector_bytes
+            .iter()
+            .all(|&vb| vb % u32::from(dtype.size()) == 0),
         "vector_bytes must be a multiple of dtype size"
     );
 
     let rank = rank.unwrap_or_else(|| outer_shape.unwrap().len().try_into().unwrap());
-    let mut adjusted_vector_bytes: u32 = vector_bytes;
-    if dtype.size() != 1 {
-        adjusted_vector_bytes /= u32::from(dtype.size());
-    }
-    debug_assert!(adjusted_vector_bytes > 0);
 
     if LIMIT_VECTORS_TO_ONE_DIM {
-        if adjusted_vector_bytes == 1 {
-            return Box::new(once(smallvec![1; rank.into()]));
-        }
-        let outer_shape = outer_shape.map(Vec::from);
-        Box::new(
-            (0..rank)
-                .rev()
-                .map(usize::from)
-                .filter(move |&i| {
-                    outer_shape.is_none()
-                        || outer_shape.as_ref().unwrap()[i] >= adjusted_vector_bytes
-                })
-                .map(move |i| {
-                    let mut v = smallvec![1; rank.into()];
-                    v[i] = adjusted_vector_bytes;
-                    v
-                }),
-        )
+        Box::new(vector_bytes.iter().flat_map(move |&vb| {
+            let adjusted_vector_bytes: u32 = vb / u32::from(dtype.size());
+            debug_assert!(adjusted_vector_bytes > 0);
+
+            let mut iter_a = None;
+            let mut iter_b = None;
+
+            if adjusted_vector_bytes == 1 {
+                iter_a = Some(once(smallvec![1; rank.into()]));
+            } else {
+                let outer_shape = outer_shape.map(Vec::from);
+                let inner_iter = (0..rank)
+                    .rev()
+                    .map(usize::from)
+                    .filter(move |&i| {
+                        outer_shape.is_none()
+                            || outer_shape.as_ref().unwrap()[i] >= adjusted_vector_bytes
+                    })
+                    .map(move |i| {
+                        let mut v = smallvec![1; rank.into()];
+                        v[i] = adjusted_vector_bytes;
+                        v
+                    });
+                iter_b = Some(inner_iter);
+            }
+
+            iter_a
+                .into_iter()
+                .flatten()
+                .chain(iter_b.into_iter().flatten())
+        }))
     } else {
         todo!()
     }

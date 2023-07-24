@@ -2,11 +2,11 @@ use crate::common::Spec;
 use crate::cost::Cost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::scheduling::SchedulingDecision;
+use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
 use crate::target::Target;
 
-use rusqlite::params_from_iter;
+use rusqlite::{params_from_iter, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -18,10 +18,10 @@ const SQLITE_BATCH_SIZE: usize = 1_000;
 pub type DbImpl<Tgt> = ImplNode<Tgt, Option<(Spec<Tgt>, Cost)>>;
 
 pub trait Database<Tgt: Target> {
-    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>>;
+    fn get(&self, query: &Spec<Tgt>) -> Option<SmallVec<[(Action<Tgt>, Cost); 1]>>;
     // TODO: Drop get_spec, which exists solely for SqliteDatabaseWrapper.
     fn get_spec(&self, spec: &LogicalSpec<Tgt>) -> Option<&Entry<Tgt>>;
-    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>);
+    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>);
     fn flush(&mut self);
 }
 
@@ -36,15 +36,21 @@ pub struct InMemDatabase<Tgt: Target> {
 pub struct SqliteDatabaseWrapper<Tgt: Target, D: Database<Tgt>> {
     inner: D,
     tx: crossbeam_channel::Sender<SqliteDatabaseWrapperMsg<Tgt>>,
-    rx: crossbeam_channel::Receiver<()>,
+    rx: crossbeam_channel::Receiver<SqliteDatabaseWrapperResponse<Tgt>>,
     bg_thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 #[allow(clippy::large_enum_variant)] // Because Flush and Stop are rare.
 enum SqliteDatabaseWrapperMsg<Tgt: Target> {
+    Get(Spec<Tgt>),
     Put(LogicalSpec<Tgt>, Entry<Tgt>),
     Flush { should_respond: bool },
     Stop,
+}
+
+enum SqliteDatabaseWrapperResponse<Tgt: Target> {
+    GetResponse(Option<SmallVec<[(Action<Tgt>, Cost); 1]>>),
+    FlushDone,
 }
 
 // TODO: Entry should not need to be public.
@@ -52,7 +58,7 @@ enum SqliteDatabaseWrapperMsg<Tgt: Target> {
 #[serde(bound = "")]
 pub struct Entry<Tgt: Target> {
     ranges: Vec<(MemVec, MemVec)>,
-    values: Vec<SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>>,
+    values: Vec<SmallVec<[(Action<Tgt>, Cost); 1]>>,
 }
 
 impl<Tgt: Target> InMemDatabase<Tgt> {
@@ -61,42 +67,20 @@ impl<Tgt: Target> InMemDatabase<Tgt> {
             grouped_entries: HashMap::new(),
         }
     }
-
-    fn get_from_entry<'a>(
-        &'a self,
-        mlims: &MemoryLimits,
-        entry: &'a Entry<Tgt>,
-    ) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
-        match mlims {
-            MemoryLimits::Standard(query_lims) => {
-                for (i, (lims, peaks)) in entry.ranges.iter().enumerate() {
-                    if query_lims
-                        .iter()
-                        .zip(lims)
-                        .zip(peaks)
-                        .all(|((q, l), p)| l >= *q && *q >= p)
-                    {
-                        return Some(&entry.values[i]);
-                    }
-                }
-                None
-            }
-        }
-    }
 }
 
 impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
-    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
+    fn get(&self, query: &Spec<Tgt>) -> Option<SmallVec<[(Action<Tgt>, Cost); 1]>> {
         self.grouped_entries
             .get(&query.0)
-            .and_then(|e| self.get_from_entry(&query.1, e))
+            .and_then(|e| get_from_entry(&query.1, e).cloned())
     }
 
     fn get_spec(&self, spec: &LogicalSpec<Tgt>) -> Option<&Entry<Tgt>> {
         self.grouped_entries.get(spec)
     }
 
-    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>) {
+    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) {
         // self.entries.insert(problem, impls);
 
         let orig_problem = problem.clone(); // Save for debug_assert_eq! postcondition.
@@ -119,7 +103,7 @@ impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
 
         debug_assert_eq!(
             self.get(&orig_problem),
-            Some(&orig_impls),
+            Some(orig_impls),
             "Original problem {:?} was incorrect after put.",
             orig_problem
         );
@@ -152,6 +136,26 @@ impl<Tgt: Target, D: Database<Tgt>> SqliteDatabaseWrapper<Tgt, D> {
                 let mut pending_puts = HashMap::with_capacity(SQLITE_BATCH_SIZE);
                 loop {
                     match request_rx.recv().unwrap() {
+                        SqliteDatabaseWrapperMsg::Get(spec) => {
+                            let db_result: Option<Entry<Tgt>> = conn
+                                .query_row(
+                                    "SELECT entry FROM impls WHERE spec = ?",
+                                    [serde_json::to_string(&spec.0).unwrap()],
+                                    |row| {
+                                        Ok(serde_json::from_str(&row.get::<_, String>(0).unwrap())
+                                            .unwrap())
+                                    },
+                                )
+                                .optional()
+                                .unwrap();
+                            let response = match db_result {
+                                Some(entry) => get_from_entry(&spec.1, &entry).cloned(),
+                                None => None,
+                            };
+                            response_tx
+                                .send(SqliteDatabaseWrapperResponse::GetResponse(response))
+                                .unwrap();
+                        }
                         SqliteDatabaseWrapperMsg::Put(problem, impls) => {
                             pending_puts.insert(problem, impls);
                             if pending_puts.len() >= SQLITE_BATCH_SIZE {
@@ -161,7 +165,9 @@ impl<Tgt: Target, D: Database<Tgt>> SqliteDatabaseWrapper<Tgt, D> {
                         SqliteDatabaseWrapperMsg::Flush { should_respond } => {
                             do_flush(&conn, &mut pending_puts);
                             if should_respond {
-                                response_tx.send(()).unwrap();
+                                response_tx
+                                    .send(SqliteDatabaseWrapperResponse::FlushDone)
+                                    .unwrap();
                             }
                         }
                         SqliteDatabaseWrapperMsg::Stop => {
@@ -184,15 +190,26 @@ impl<Tgt: Target, D: Database<Tgt>> SqliteDatabaseWrapper<Tgt, D> {
 }
 
 impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt, D> {
-    fn get(&self, query: &Spec<Tgt>) -> Option<&SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>> {
-        self.inner.get(query)
+    fn get(&self, query: &Spec<Tgt>) -> Option<SmallVec<[(Action<Tgt>, Cost); 1]>> {
+        if let Some(r) = self.inner.get(query) {
+            return Some(r);
+        };
+        self.tx
+            .send(SqliteDatabaseWrapperMsg::Get(query.clone()))
+            .unwrap();
+        match self.rx.recv().unwrap() {
+            SqliteDatabaseWrapperResponse::GetResponse(r) => r,
+            SqliteDatabaseWrapperResponse::FlushDone => {
+                panic!("Unexpected FlushDone response to Get from background thread")
+            }
+        }
     }
 
     fn get_spec(&self, _spec: &LogicalSpec<Tgt>) -> Option<&Entry<Tgt>> {
         unimplemented!()
     }
 
-    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(SchedulingDecision<Tgt>, Cost); 1]>) {
+    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) {
         self.inner.put(problem.clone(), impls);
         let updated = self.inner.get_spec(&problem.0).unwrap();
         self.tx
@@ -286,6 +303,27 @@ fn construct_impl<Tgt: Target, D: Database<Tgt>>(db: &D, imp: &DbImpl<Tgt>) -> D
                 .map(|c| construct_impl(db, c))
                 .collect::<Vec<_>>();
             imp.replace_children(new_children.into_iter())
+        }
+    }
+}
+
+fn get_from_entry<'a, Tgt: Target>(
+    mlims: &MemoryLimits,
+    entry: &'a Entry<Tgt>,
+) -> Option<&'a SmallVec<[(Action<Tgt>, Cost); 1]>> {
+    match mlims {
+        MemoryLimits::Standard(query_lims) => {
+            for (i, (lims, peaks)) in entry.ranges.iter().enumerate() {
+                if query_lims
+                    .iter()
+                    .zip(lims)
+                    .zip(peaks)
+                    .all(|((q, l), p)| l >= *q && *q >= p)
+                {
+                    return Some(&entry.values[i]);
+                }
+            }
+            None
         }
     }
 }

@@ -6,7 +6,7 @@ use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::{
     broadcastvecmult_applies_to_operands, memsetzero_applies_to_operands, mult_applies_to_operands,
     valueassign_applies_to_operands, vectorassign_applies_to_operands,
-    vectorzero_applies_to_operands, SchedulingDecision,
+    vectorzero_applies_to_operands, Action,
 };
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 
@@ -32,7 +32,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug + 'static {
     fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout>;
 
     /// Yield target-specific expansions of given Spec.
-    fn expansions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = SchedulingDecision<Self>>>;
+    fn expansions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
 }
 
 pub trait MemoryLevel:
@@ -40,9 +40,9 @@ pub trait MemoryLevel:
 {
     fn is_addressed(&self) -> bool;
     fn cache_hit_cost(&self) -> MainCost;
-    fn vector_bytes(&self) -> u32;
+    fn vector_bytes(&self) -> &'static [u32];
     fn vector_rf(&self) -> bool {
-        self.vector_bytes() > 0
+        !self.vector_bytes().is_empty()
     }
 }
 
@@ -99,18 +99,17 @@ impl Target for X86Target {
         }
     }
 
-    fn expansions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = SchedulingDecision<Self>>> {
+    fn expansions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>> {
         match spec {
             LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
                 PrimitiveSpecType::Matmul { accum } => {
                     if *accum {
                         let mut microkernels = vec![];
                         if mult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(SchedulingDecision::Place(KernelType::Mult));
+                            microkernels.push(Action::Place(KernelType::Mult));
                         }
                         if broadcastvecmult_applies_to_operands(&spec.parameters()) {
-                            microkernels
-                                .push(SchedulingDecision::Place(KernelType::BroadcastVecMult));
+                            microkernels.push(Action::Place(KernelType::BroadcastVecMult));
                         }
                         Box::new(microkernels.into_iter())
                     } else {
@@ -121,20 +120,20 @@ impl Target for X86Target {
                 PrimitiveSpecType::Move { .. } => {
                     let mut microkernels = vec![];
                     if valueassign_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(SchedulingDecision::Place(KernelType::ValueAssign));
+                        microkernels.push(Action::Place(KernelType::ValueAssign));
                     }
                     if vectorassign_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(SchedulingDecision::Place(KernelType::VectorAssign));
+                        microkernels.push(Action::Place(KernelType::VectorAssign));
                     }
                     Box::new(microkernels.into_iter())
                 }
                 PrimitiveSpecType::Zero { .. } => {
                     let mut microkernels = vec![];
                     if memsetzero_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(SchedulingDecision::Place(KernelType::MemsetZero));
+                        microkernels.push(Action::Place(KernelType::MemsetZero));
                     }
                     if vectorzero_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(SchedulingDecision::Place(KernelType::VectorZero));
+                        microkernels.push(Action::Place(KernelType::VectorZero));
                     }
                     Box::new(microkernels.into_iter())
                 }
@@ -174,10 +173,10 @@ impl MemoryLevel for X86MemoryLevel {
         }
     }
 
-    fn vector_bytes(&self) -> u32 {
+    fn vector_bytes(&self) -> &'static [u32] {
         match &self {
-            X86MemoryLevel::VRF => 16,
-            _ => 0,
+            X86MemoryLevel::VRF => &[16, 32],
+            _ => &[],
         }
     }
 }

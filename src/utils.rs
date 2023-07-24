@@ -8,17 +8,23 @@ use std::iter;
 // though it
 const SNAP_CAP_TO_POWER_OF_TWO: bool = true;
 
-const fn ascii_lower() -> [char; 26] {
-    let mut result = ['a'; 26];
+const fn ascii_pairs() -> [[char; 2]; 676] {
+    let mut result = [['a', 'a']; 676];
+    let mut idx = 0;
 
-    let mut c: u8 = b'a';
-    while c <= b'z' {
-        result[(c - 97) as usize] = c as char;
-        c += 1;
+    let mut c1: u8 = b'a';
+    while c1 <= b'z' {
+        let mut c2: u8 = b'a';
+        while c2 <= b'z' {
+            result[idx] = [c1 as char, c2 as char];
+            idx += 1;
+            c2 += 1;
+        }
+        c1 += 1;
     }
     result
 }
-pub static ASCII_LOWER: [char; 26] = ascii_lower();
+pub const ASCII_PAIRS: [[char; 2]; 676] = ascii_pairs();
 
 pub struct ToWriteFmt<T>(pub T);
 

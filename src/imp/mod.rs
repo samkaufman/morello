@@ -60,12 +60,10 @@ pub trait ImplExt<Tgt: Target, Aux: Clone>: Impl<Tgt, Aux> {
 
 /// A non-Spec node in an Impl program tree.
 ///
-/// These usually result from applying a
-/// [SchedulingDecision](crate::scheduling::SchedulingDecision).
+/// These usually result from applying an [Action](crate::scheduling::Action).
 ///
-/// Unlike [SchedulingDecision](crate::scheduling::SchedulingDecision)s, parameters may be bound to
-/// "concret" [Tensor]s and other [View]s and stored in [Rc]s (rather than an explicit environment
-/// structure).
+/// Unlike [Action](crate::scheduling::Action)s, parameters may be bound to "concrete" [Tensor]s and
+/// other [View]s and stored in [Rc]s (rather than an explicit environment structure).
 #[derive(Debug, Clone)]
 #[enum_dispatch(Impl<Tgt, Aux>)]
 pub enum ImplNode<Tgt: Target, Aux: Clone> {
@@ -148,7 +146,7 @@ impl<Tgt: Target, Aux: Clone> ImplNode<Tgt, Aux> {
             ImplNode::MoveLet(m) => {
                 let param_idx = usize::from(m.parameter_idx);
 
-                let moves_args = [args[param_idx], m.introduced.inner_fat_ptr()];
+                let mut moves_args = [args[param_idx], m.introduced.inner_fat_ptr()];
 
                 if let Some(p) = m.prologue() {
                     p.traverse(&moves_args, depth + 1, f);
@@ -159,6 +157,7 @@ impl<Tgt: Target, Aux: Clone> ImplNode<Tgt, Aux> {
                 m.main_stage().traverse(&inner_args, depth + 1, f);
 
                 if let Some(e) = m.epilogue() {
+                    moves_args.swap(0, 1);
                     e.traverse(&moves_args, depth + 1, f);
                 }
             }

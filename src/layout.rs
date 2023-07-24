@@ -126,7 +126,7 @@ impl Layout {
 
     pub fn estimate_cache_lines<Tgt: Target>(
         &self,
-        shape: &Shape,
+        shape: &[DimSize],
         dtype: Dtype,
         contiguous: bool,
     ) -> u32 {
@@ -136,7 +136,7 @@ impl Layout {
 
                 if contiguous {
                     divrem::DivCeil::div_ceil(
-                        shape.into_iter().product::<DimSize>() * DimSize::from(dtype.size()),
+                        shape.iter().product::<DimSize>() * DimSize::from(dtype.size()),
                         line_size,
                     )
                 } else {
@@ -339,7 +339,7 @@ impl Layout {
     }
 
     // Reorder the shape according to the physical order of the dimensions.
-    fn layout_ordered_dims(&self, dim_sizes: &Shape) -> Shape {
+    fn layout_ordered_dims(&self, dim_sizes: &[DimSize]) -> Shape {
         match &self {
             Layout::Standard { dim_order } => {
                 assert_eq!(dim_sizes.len(), dim_order.len());
