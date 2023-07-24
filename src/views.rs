@@ -116,7 +116,7 @@ pub struct Tensor<Tgt: Target>(pub TensorSpec<Tgt>, OpaqueSymbol);
 
 #[derive(Debug, Clone)]
 pub struct CacheView<V: View> {
-    source: V,
+    pub source: V,
     spec: TensorSpec<V::Tgt>,
 }
 
