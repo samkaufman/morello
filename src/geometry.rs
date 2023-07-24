@@ -7,10 +7,8 @@ use crate::spec::{
     conv_infer_output_shape, gen_vector_shapes, LogicalSpec, PrimitiveAux, PrimitiveBasics,
     PrimitiveSpecType,
 };
-use crate::target::{MemoryLevel, Target, X86Target};
+use crate::target::{MemoryLevel, Target, X86MemoryLevel, X86Target};
 use crate::tensorspec::TensorSpecAux;
-
-use crate::X86MemoryLevel;
 
 use std::hash::Hash;
 use std::iter;
