@@ -57,7 +57,7 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, print_mode: PrintMode) {
                     if print_mode == PrintMode::Full {
                         r = row![main_str, format!("{}", &spec.0)];
                     } else {
-                        r = row![format!("{indent}/* {} */\n{morello_ir}\n", &spec.0)];
+                        r = row![format!("{indent}/* {} */\n{main_str}\n", &spec.0)];
                     }
                     if print_mode != PrintMode::Compact {
                         for level_peak in cost.peaks.iter() {
