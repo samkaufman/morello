@@ -8,10 +8,8 @@ use super::namegen::NameGenerator;
 use super::CodeGen;
 use crate::codegen::c_utils::{c_type, VecVarsDerived, VecVarsMain};
 use crate::codegen::header::HeaderEmitter;
-use crate::color::do_color;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineExpr, Term};
-use crate::highlight;
 use crate::imp::blocks::Block;
 use crate::imp::kernels::{Kernel, KernelType};
 use crate::imp::loops::Loop;
@@ -129,12 +127,7 @@ impl<'a> X86CodeGenerator<'a> {
         writeln!(main_body_str, "}}")?;
 
         self.headers.emit(out)?;
-        if do_color() {
-            highlight::c(&main_body_str);
-        } else {
-            out.write_str(&main_body_str)?;
-        }
-        Ok(())
+        out.write_str(&main_body_str)
     }
 
     fn make_buffer(

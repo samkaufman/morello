@@ -1,5 +1,3 @@
-use crate::color::do_color;
-use crate::highlight;
 use crate::nameenv::NameEnv;
 use crate::table::DbImpl;
 use crate::target::Target;
@@ -83,9 +81,5 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, print_mode: PrintMode) {
         .column_separator(' ')
         .build();
     table.set_format(format);
-    if do_color() {
-        highlight::morello(&table.to_string());
-    } else {
-        table.printstd();
-    }
+    table.printstd();
 }

@@ -24,7 +24,6 @@ mod common;
 mod cost;
 mod expr;
 mod geometry;
-mod highlight;
 mod imp;
 mod layout;
 mod memorylimits;
