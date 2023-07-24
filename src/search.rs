@@ -25,7 +25,7 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
 
-    // First, check if the problem is already in the database.
+    // First, check if the Spec is already in the database.
     if let Some(stored) = db.read().unwrap().get(goal) {
         return (stored.clone(), 1, 0);
     }
@@ -42,36 +42,36 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
             continue;
         };
 
-        // Compute all nested Specs, accumulating their costs into nested_problem_costs.
+        // Compute all nested Specs, accumulating their costs into nested_spec_costs.
         let mut unsat = false;
-        let mut nested_problem_costs = Vec::new();
+        let mut nested_spec_costs = Vec::new();
         visit_leaves(&partial_impl, &mut |leaf| {
-            let ImplNode::ProblemApp(problem_app) = leaf else {
+            let ImplNode::SpecApp(spec_app) = leaf else {
                 return true;
             };
-            let nested_problem = &problem_app.0;
+            let nested_spec = &spec_app.0;
 
             assert_ne!(
-                goal, nested_problem,
+                goal, nested_spec,
                 "Immediate recursion on ({}, {:?}) after applying {:?}",
                 goal.0, goal.1, action
             );
 
-            let (child_results, subhits, submisses) = top_down(db, nested_problem, top_k);
+            let (child_results, subhits, submisses) = top_down(db, nested_spec, top_k);
             hits += subhits;
             misses += submisses;
             if child_results.is_empty() {
                 unsat = true;
                 return false;
             }
-            nested_problem_costs.push(child_results[0].1.clone()); // TODO: Should move
+            nested_spec_costs.push(child_results[0].1.clone()); // TODO: Should move
             true
         });
         if unsat {
             continue;
         }
 
-        let cost = Cost::from_child_costs(&partial_impl, &nested_problem_costs);
+        let cost = Cost::from_child_costs(&partial_impl, &nested_spec_costs);
         if let MemoryLimits::Standard(g) = &goal.1 {
             debug_assert!(
                 cost.peaks.iter().zip(g).all(|(a, b)| *a <= b),

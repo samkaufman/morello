@@ -14,9 +14,9 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-// TODO: Do we still want to be generic over the specific Problem?
+// TODO: Do we still want to be generic over the specific Spec?
 #[derive(Debug, Clone)]
-pub struct ProblemApp<Tgt, P, Aux>(
+pub struct SpecApp<Tgt, P, Aux>(
     pub P,
     pub SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]>,
     pub Aux,
@@ -27,13 +27,13 @@ where
     P: Borrow<Spec<Tgt>> + Clone,
     Aux: Clone;
 
-impl<Tgt, P, Aux> ProblemApp<Tgt, P, Aux>
+impl<Tgt, P, Aux> SpecApp<Tgt, P, Aux>
 where
     Tgt: Target,
     P: Borrow<Spec<Tgt>> + Clone,
     Aux: Clone,
 {
-    pub fn new<ParamT, I>(problem: P, args: I) -> Self
+    pub fn new<ParamT, I>(spec: P, args: I) -> Self
     where
         Aux: Default,
         ParamT: View<Tgt = Tgt> + 'static,
@@ -43,21 +43,21 @@ where
             .into_iter()
             .map(|v| Rc::new(v) as _)
             .collect::<SmallVec<_>>();
-        Self(problem, cast_args, Aux::default(), PhantomData)
+        Self(spec, cast_args, Aux::default(), PhantomData)
     }
 }
 
-impl<Tgt, P, Aux> ProblemApp<Tgt, P, Aux>
+impl<Tgt, P, Aux> SpecApp<Tgt, P, Aux>
 where
     Tgt: Target,
     P: Borrow<Spec<Tgt>> + Clone,
     Aux: Clone,
 {
-    pub fn default_app(problem: P) -> Self
+    pub fn default_app(spec: P) -> Self
     where
         Aux: Default,
     {
-        let operands = problem
+        let operands = spec
             .borrow()
             .0
             .parameters()
@@ -65,11 +65,11 @@ where
             .enumerate()
             .map(|(i, o)| Rc::new(Param::new(i.try_into().unwrap(), o)) as Rc<_>)
             .collect();
-        ProblemApp(problem, operands, Aux::default(), PhantomData)
+        SpecApp(spec, operands, Aux::default(), PhantomData)
     }
 }
 
-impl<Tgt, P, Aux> Impl<Tgt, Aux> for ProblemApp<Tgt, P, Aux>
+impl<Tgt, P, Aux> Impl<Tgt, Aux> for SpecApp<Tgt, P, Aux>
 where
     Tgt: Target,
     P: Borrow<Spec<Tgt>> + Clone + Debug,
@@ -88,7 +88,7 @@ where
     }
 
     fn compute_main_cost(&self, _child_costs: &[MainCost]) -> MainCost {
-        todo!("What cost should we have for Problem applications?")
+        todo!("What cost should we have for Spec applications?")
     }
 
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {

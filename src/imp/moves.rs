@@ -174,15 +174,20 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         _args: &[&dyn View<Tgt = Tgt>],
     ) -> Option<String> {
-        // TODO: Include parameter_idx?
-        // TODO: Include source_spec?
         let prefetch_str = if self.prefetch { "[p]" } else { "" };
-        let p = self.introduced.inner_fat_ptr();
+        let introduced_view = self.introduced.inner_fat_ptr();
+        let cache_view_suffix = match &self.introduced {
+            TensorOrCacheView::Tensor(_) => String::from(""),
+            TensorOrCacheView::CacheView(cache_view) => {
+                format!(" <- {}", names.get_name_or_display(&cache_view.source))
+            }
+        };
         let top = format!(
-            "alloc{} {}: {}",
+            "alloc{} {}: {}{}",
             prefetch_str,
-            names.name(p),
-            self.introduced.spec()
+            names.name(introduced_view),
+            self.introduced.spec(),
+            cache_view_suffix
         );
         Some(top)
     }

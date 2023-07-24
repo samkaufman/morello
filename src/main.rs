@@ -125,11 +125,11 @@ where
     //     serial_only: true,
     // };
 
-    let problem = Spec(matmul_spec, X86Target::max_mem());
+    let spec = Spec(matmul_spec, X86Target::max_mem());
 
     let start_time = std::time::Instant::now();
     let db_lock = RwLock::new(db);
-    let (_, hits, misses) = morello::search::top_down(&db_lock, &problem, 1);
+    let (_, hits, misses) = morello::search::top_down(&db_lock, &spec, 1);
     info!("top_down took {:?}", start_time.elapsed());
     info!(
         "top_down missed {} times ({:.2}% of {})",
@@ -138,7 +138,7 @@ where
         hits + misses
     );
 
-    let Some(results) = db_lock.read().unwrap().get_impl(&problem) else {
+    let Some(results) = db_lock.read().unwrap().get_impl(&spec) else {
         panic!("No Impl found");
     };
     assert_eq!(results.len(), 1);

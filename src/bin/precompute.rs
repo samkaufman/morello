@@ -182,13 +182,13 @@ where
             let mut worklist = VecDeque::new();
             // for (_task_idx, spec) in chunk.iter().flat_map(|e| *e).enumerate() {
             for (_task_idx, spec) in task.iter().enumerate() {
-                let mut limits_iterator = problems_for_spec::<X86Target>();
+                let mut limits_iterator = make_memory_limit_iter::<X86Target>();
                 debug_assert!(worklist.is_empty());
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
-                    let problem = Spec(spec.clone(), MemoryLimits::Standard(job));
-                    let MemoryLimits::Standard(job) = &problem.1;
-                    let result = morello::search::top_down(&db, &problem, 1);
+                    let spec = Spec(spec.clone(), MemoryLimits::Standard(job));
+                    let MemoryLimits::Standard(job) = &spec.1;
+                    let result = morello::search::top_down(&db, &spec, 1);
                     if let [(_, only_result_cost)] = &result.0[..] {
                         worklist.extend(limits_iterator.next_vec(job, &only_result_cost.peaks));
                     }
@@ -204,7 +204,7 @@ where
     }
 }
 
-fn problems_for_spec<T: Target>() -> impl Iterator<Item = MemVec> {
+fn make_memory_limit_iter<T: Target>() -> impl Iterator<Item = MemVec> {
     let MemoryLimits::Standard(top) = T::max_mem();
     top.into_iter()
         .map(|l| iter_powers_of_two(l, true).rev())

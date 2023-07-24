@@ -80,18 +80,18 @@ impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
         self.grouped_entries.get(spec)
     }
 
-    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) {
-        // self.entries.insert(problem, impls);
+    fn put(&mut self, spec: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) {
+        // self.entries.insert(spec, impls);
 
-        let orig_problem = problem.clone(); // Save for debug_assert_eq! postcondition.
+        let original_spec = spec.clone(); // Save for debug_assert_eq! postcondition.
         let orig_impls = impls.clone();
 
         // TODO: How to treat non-powers of two memory bounds?
-        match problem.1 {
+        match spec.1 {
             MemoryLimits::Standard(lims) => {
                 assert!(impls.len() <= 1);
                 let existing: &mut Entry<Tgt> =
-                    self.grouped_entries.entry(problem.0.clone()).or_default();
+                    self.grouped_entries.entry(spec.0.clone()).or_default();
                 if impls.is_empty() {
                     existing.ranges.push((lims, MemVec::zero::<Tgt>()));
                 } else {
@@ -102,10 +102,10 @@ impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
         }
 
         debug_assert_eq!(
-            self.get(&orig_problem),
+            self.get(&original_spec),
             Some(orig_impls),
-            "Original problem {:?} was incorrect after put.",
-            orig_problem
+            "Original Spec {:?} was incorrect after put.",
+            original_spec
         );
     }
 
@@ -156,8 +156,8 @@ impl<Tgt: Target, D: Database<Tgt>> SqliteDatabaseWrapper<Tgt, D> {
                                 .send(SqliteDatabaseWrapperResponse::GetResponse(response))
                                 .unwrap();
                         }
-                        SqliteDatabaseWrapperMsg::Put(problem, impls) => {
-                            pending_puts.insert(problem, impls);
+                        SqliteDatabaseWrapperMsg::Put(logical_spec, impls) => {
+                            pending_puts.insert(logical_spec, impls);
                             if pending_puts.len() >= SQLITE_BATCH_SIZE {
                                 do_flush(&conn, &mut pending_puts);
                             }
@@ -209,11 +209,11 @@ impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt,
         unimplemented!()
     }
 
-    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) {
-        self.inner.put(problem.clone(), impls);
-        let updated = self.inner.get_spec(&problem.0).unwrap();
+    fn put(&mut self, spec: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) {
+        self.inner.put(spec.clone(), impls);
+        let updated = self.inner.get_spec(&spec.0).unwrap();
         self.tx
-            .send(SqliteDatabaseWrapperMsg::Put(problem.0, updated.clone()))
+            .send(SqliteDatabaseWrapperMsg::Put(spec.0, updated.clone()))
             .unwrap();
     }
 
@@ -290,11 +290,11 @@ fn do_flush<Tgt: Target>(
 
 fn construct_impl<Tgt: Target, D: Database<Tgt>>(db: &D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt> {
     match imp {
-        ImplNode::ProblemApp(p) => db
+        ImplNode::SpecApp(p) => db
             .get_impl(&p.0)
-            .expect("Database should have the sub-problem entry")
+            .expect("Database should have the sub-Spec entry")
             .get(0)
-            .expect("Database sub-problem should be satisfiable")
+            .expect("Database sub-Spec should be satisfiable")
             .clone(),
         _ => {
             let new_children = imp

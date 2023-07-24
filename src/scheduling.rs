@@ -11,7 +11,7 @@ use crate::imp::kernels::{Kernel, KernelType};
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::moves::{MoveLet, TensorOrCacheView};
 use crate::imp::pipeline::Pipeline;
-use crate::imp::subspecs::ProblemApp;
+use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
@@ -65,8 +65,8 @@ impl<Tgt: Target> Action<Tgt> {
         }
     }
 
-    pub fn apply(&self, problem: &Spec<Tgt>) -> Option<ImplNode<Tgt, ()>> {
-        self.apply_with_aux(problem, ())
+    pub fn apply(&self, spec: &Spec<Tgt>) -> Option<ImplNode<Tgt, ()>> {
+        self.apply_with_aux(spec, ())
     }
 
     pub fn apply_with_aux<A: Default + Clone>(
@@ -74,7 +74,7 @@ impl<Tgt: Target> Action<Tgt> {
         spec: &Spec<Tgt>,
         aux: A,
     ) -> Option<ImplNode<Tgt, A>> {
-        // TODO: Ensure that Problem is snapped.
+        // TODO: Ensure that the Spec is snapped.
 
         let node_spec = &spec.0; // TODO: Rename.
         let operands = node_spec.parameters();
@@ -116,7 +116,7 @@ impl<Tgt: Target> Action<Tgt> {
                             // 1. Construct the simple tile corresponding to the new output shape.
                             let out_idx: u8 = node_spec.output_idx().try_into().unwrap();
                             let smaller_output = LoopTile {
-                                subscripts: (0..output_shape.len())
+                                axes: (0..output_shape.len())
                                     .map(|d| d.try_into().unwrap())
                                     .collect(),
                                 tile: Tile::new(
@@ -136,7 +136,7 @@ impl<Tgt: Target> Action<Tgt> {
                             let mut new_tiles: Vec<LoopTile<Tgt>> = vec![];
                             for (
                                 operand_idx,
-                                (original_input, (updated_input_tiling, updated_input_subscripts)),
+                                (original_input, (updated_input_tiling, updated_input_axes)),
                             ) in operands.iter().zip(updated_input_tilings.0).enumerate()
                             {
                                 if operand_idx == node_spec.output_idx() {
@@ -150,18 +150,17 @@ impl<Tgt: Target> Action<Tgt> {
                                     continue;
                                 }
 
-                                // Compute loop dimension names for the tile. Any subscript
-                                // which is None is given a fresh integer identifier,
-                                // otherwise is is given the identifier of the corresponding
-                                // dimension in the output.
-                                let subscripts = updated_input_subscripts
+                                // Compute loop dimension names for the tile. Any axis which is None
+                                // is given a fresh integer identifier, otherwise is is given the
+                                // identifier of the corresponding dimension in the output.
+                                let axes = updated_input_axes
                                     .iter()
                                     .map(|b| {
                                         match *b {
                                             Some(output_dim) => {
-                                                // It's correct to use the output dim. here
-                                                // because we earlier initialized the output
-                                                // subscripts to be simply their indices.
+                                                // It's correct to use the output dim. here because
+                                                // we earlier initialized the output axes to be
+                                                // simply their indices.
                                                 output_dim
                                             }
                                             None => {
@@ -175,7 +174,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                                 if original_input.dim_sizes() != &tiling_shape[..] {
                                     new_tiles.push(LoopTile {
-                                        subscripts,
+                                        axes,
                                         tile: Tile::new(
                                             updated_input_tiling,
                                             Param::new(
@@ -202,7 +201,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                                             let tiles = vec![
                                                 LoopTile {
-                                                    subscripts: smallvec![0, 1],
+                                                    axes: smallvec![0, 1],
                                                     tile: Tile::new(
                                                         Tiling::new_simple(smallvec![
                                                             lhs.dim_sizes()[0],
@@ -212,7 +211,7 @@ impl<Tgt: Target> Action<Tgt> {
                                                     ),
                                                 },
                                                 LoopTile {
-                                                    subscripts: smallvec![1, 2],
+                                                    axes: smallvec![1, 2],
                                                     tile: Tile::new(
                                                         Tiling::new_simple(smallvec![
                                                             *k,
@@ -244,7 +243,7 @@ impl<Tgt: Target> Action<Tgt> {
                     let mut inner_spec = node_spec.clone();
                     inner_spec.replace_io(&new_operands);
 
-                    Box::new(ProblemApp::default_app(Spec(inner_spec, spec.1.clone())).into())
+                    Box::new(SpecApp::default_app(Spec(inner_spec, spec.1.clone())).into())
                 };
 
                 Some(ImplNode::Loop(Loop {
@@ -360,30 +359,27 @@ impl<Tgt: Target> Action<Tgt> {
 
                 // Reify the new Specs and TensorSpecs into applications we can
                 // nest in the Pipeline body.
-                let remainder_problem_application = {
+                let remainder_spec_application = {
                     let mut params: SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]> = smallvec![];
                     // TODO: Fill in.
                     params.extend(remainder.inputs().iter().enumerate().map(|(i, inp)| {
                         Rc::new(Param::new(i.try_into().unwrap(), inp.clone())) as _
                     }));
                     params.push(Rc::new(intermediate_tensor.clone()) as _);
-                    ImplNode::ProblemApp(ProblemApp::new(
-                        Spec(remainder, new_limits.clone()),
-                        params,
-                    ))
+                    ImplNode::SpecApp(SpecApp::new(Spec(remainder, new_limits.clone()), params))
                 };
-                let head_problem_application = {
+                let head_spec_application = {
                     let mut params: SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]> = smallvec![];
                     // TODO: Fill in.
                     params.extend(head_spec.parameters().iter().skip(1).map(|_operand| {
                         todo!();
                     }));
-                    ImplNode::ProblemApp(ProblemApp::new(Spec(head_spec, new_limits), params))
+                    ImplNode::SpecApp(SpecApp::new(Spec(head_spec, new_limits), params))
                 };
 
                 Some(ImplNode::Pipeline(Pipeline {
                     intermediates: vec![intermediate_tensor],
-                    stages: vec![remainder_problem_application, head_problem_application],
+                    stages: vec![remainder_spec_application, head_spec_application],
                     aux,
                 }))
             }
@@ -448,16 +444,16 @@ impl<Tgt: Target> Action<Tgt> {
                 Some(ImplNode::Loop(Loop {
                     tiles: vec![
                         LoopTile {
-                            subscripts: smallvec![0, 1],
+                            axes: smallvec![0, 1],
                             tile: outer_image_tile,
                         },
                         LoopTile {
-                            subscripts: smallvec![1, 2],
+                            axes: smallvec![1, 2],
                             tile: outer_filters_tile,
                         },
                     ],
                     body: Box::new(
-                        ProblemApp::new(
+                        SpecApp::new(
                             Spec(body_spec, spec.1.clone()),
                             [
                                 Rc::new(inner_image_tile) as Rc<dyn View<Tgt = Tgt>>,
@@ -537,7 +533,7 @@ impl<Tgt: Target> Action<Tgt> {
                             mem::swap(&mut left_spec, &mut right_spec);
                             args.swap(0, 1);
                         }
-                        Some(ProblemApp::new(
+                        Some(SpecApp::new(
                             Spec(
                                 LogicalSpec::Primitive(
                                     PrimitiveBasics {
@@ -574,7 +570,7 @@ impl<Tgt: Target> Action<Tgt> {
                         new_spec.replace_io(&new_operands);
                         new_spec
                     };
-                    let problem = Spec(new_inner_spec, lower_limits.clone());
+                    let spec = Spec(new_inner_spec, lower_limits.clone());
                     let inner_operands = new_operands.iter().enumerate().map(|(i, o)| {
                         if i == usize::from(*source_idx) {
                             inner_moved_operand.inner_rc()
@@ -583,7 +579,7 @@ impl<Tgt: Target> Action<Tgt> {
                                 as Rc<dyn View<Tgt = Tgt>>
                         }
                     });
-                    ProblemApp::new(problem, inner_operands)
+                    SpecApp::new(spec, inner_operands)
                 };
 
                 Some(ImplNode::MoveLet(MoveLet::new(
@@ -625,22 +621,22 @@ impl<Tgt: Target> Action<Tgt> {
                         node_spec.serial_only(),
                     );
                     subspec.canonicalize();
-                    let problem = Spec(subspec, spec.1.clone());
+                    let spec = Spec(subspec, spec.1.clone());
                     let app_arguments = [Param::new(
                         node_spec.output_idx().try_into().unwrap(),
                         node_spec.output(),
                     )];
-                    ProblemApp::new(problem, app_arguments).into()
+                    SpecApp::new(spec, app_arguments).into()
                 };
                 let accum_app = {
                     let mut subspec = node_spec.clone_as_accum();
                     subspec.canonicalize();
-                    let problem = Spec(subspec, spec.1.clone());
+                    let spec = Spec(subspec, spec.1.clone());
                     let app_arguments = operands
                         .iter()
                         .enumerate()
                         .map(|(i, t)| Param::new(i.try_into().unwrap(), t.clone()));
-                    ProblemApp::new(problem, app_arguments).into()
+                    SpecApp::new(spec, app_arguments).into()
                 };
 
                 Some(ImplNode::Block(Block {

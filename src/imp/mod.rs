@@ -9,7 +9,7 @@ use crate::views::{Param, View};
 use crate::{
     common::Spec,
     cost::MainCost,
-    imp::{loops::Loop, moves::MoveLet, pipeline::Pipeline, subspecs::ProblemApp},
+    imp::{loops::Loop, moves::MoveLet, pipeline::Pipeline, subspecs::SpecApp},
     memorylimits::{MemVec, MemoryAllocation},
     nameenv::NameEnv,
     target::Target,
@@ -72,7 +72,7 @@ pub enum ImplNode<Tgt: Target, Aux: Clone> {
     Block(Block<Tgt, Aux>),
     Pipeline(Pipeline<Tgt, Aux>),
     Kernel(Kernel<Tgt, Aux>),
-    ProblemApp(ProblemApp<Tgt, Spec<Tgt>, Aux>),
+    SpecApp(SpecApp<Tgt, Spec<Tgt>, Aux>),
 }
 
 impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
@@ -162,7 +162,7 @@ impl<Tgt: Target, Aux: Clone> ImplNode<Tgt, Aux> {
                 }
             }
             ImplNode::Pipeline(_) => todo!(),
-            ImplNode::Kernel(_) | ImplNode::ProblemApp(_) => (),
+            ImplNode::Kernel(_) | ImplNode::SpecApp(_) => (),
         }
     }
 }
