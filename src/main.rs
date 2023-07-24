@@ -22,21 +22,6 @@ struct Args {
     #[arg(long, short)]
     db: Option<path::PathBuf>,
 
-    #[arg(long, short, default_value = "1")]
-    batch: DimSize,
-
-    #[arg(long, default_value = "4")]
-    channels: DimSize,
-
-    #[arg(long, default_value = "8")]
-    filters: DimSize,
-
-    #[arg(long, default_value = "3")]
-    filters_size: DimSize,
-
-    /// The size of the square matrices
-    size: DimSize,
-
     /// Color mode
     #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
     color: ColorMode,
