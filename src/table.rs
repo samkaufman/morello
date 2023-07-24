@@ -6,7 +6,7 @@ use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
 use crate::target::Target;
 
-use rusqlite::{params, params_from_iter, OptionalExtension};
+use rusqlite::{params_from_iter, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashMap;

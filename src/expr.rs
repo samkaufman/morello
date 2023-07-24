@@ -46,6 +46,14 @@ impl<T: PartialEq> Add for AffineExpr<T> {
     }
 }
 
+impl<T: PartialEq> Add<Term<T>> for AffineExpr<T> {
+    type Output = Self;
+
+    fn add(self, rhs: Term<T>) -> Self::Output {
+        self + AffineExpr(vec![rhs], 0)
+    }
+}
+
 impl<T> Add<i32> for AffineExpr<T> {
     type Output = Self;
 

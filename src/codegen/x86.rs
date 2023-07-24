@@ -1,9 +1,9 @@
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Write};
 use std::rc::Rc;
 
-use super::c_utils::{CBuffer, VecType};
+use super::c_utils::{CBuffer, CExprTerm, VecType};
 use super::namegen::NameGenerator;
 use super::CodeGen;
 use crate::codegen::c_utils::{c_type, VecVarsDerived, VecVarsMain};
@@ -58,9 +58,9 @@ const X86_VEC_TYPES: [VecType; 4] = [
 
 #[derive(Default)]
 struct X86CodeGenerator<'a> {
-    name_env: HashMap<Rc<Tensor<X86Target>>, CBuffer>,
     namer: NameGenerator,
-    loop_iter_names: HashMap<BufferExprTerm, String>,
+    name_env: HashMap<Rc<Tensor<X86Target>>, CBuffer>,
+    loop_iter_bindings: HashMap<BufferExprTerm, Either<String, i32>>,
     param_bindings: HashMap<Param<X86Target>, &'a dyn View<Tgt = X86Target>>,
     headers: HeaderEmitter,
 }
@@ -177,58 +177,23 @@ impl<'a> X86CodeGenerator<'a> {
     ) -> fmt::Result {
         match imp {
             ImplNode::Loop(l) => {
-                let axes_to_emit = axis_order_and_steps(l).collect::<Vec<_>>();
-
-                // Map non-degen. axis names to fresh loop iterator names.
-                let iter_var_names = axes_to_emit
-                    .iter()
-                    .map(|(axis, _)| (*axis, self.namer.fresh_name()))
-                    .collect::<HashMap<_, _>>();
-
-                // Associate each of the tile indices in each LoopTile with the correct
-                // name and store that association in the `self.loop_iter_names`.
-                for loop_tile in &l.tiles {
-                    let tile = &loop_tile.tile;
-                    for tt in tile.tile_dim_terms() {
-                        let BufferExprTerm::TileIdx(dim, _) = &tt else {
-                            unreachable!();
-                        };
-                        let subscript = loop_tile.subscripts[usize::from(*dim)];
-                        if let Some(axis_loop_iter_name) = iter_var_names.get(&subscript) {
-                            if self
-                                .loop_iter_names
-                                .insert(tt.clone(), axis_loop_iter_name.clone())
-                                .is_some()
-                            {
-                                panic!("Symbol {:?} already assigned a loop iterator", tt);
-                            }
-                        }
-                    }
+                // Emit a C loop nest or, if any tensor view is requires unrolling (i.e., vector
+                // tensors), unroll the loop, emitting the body repeatedly.
+                //
+                // It's not always necessary to unroll every emitted C loop because not all axes
+                // range over different vector registers. This is pretty rare though, so, for
+                // simplicity, every Impl loop is emitted as either as a C loop nest or fully
+                // unrolled.
+                if l.tiles.iter().any(|loop_tile| {
+                    self.name_env
+                        .get(loop_tile.tile.backing_tensor(&self.param_bindings).unwrap())
+                        .unwrap()
+                        .needs_unroll()
+                }) {
+                    self.emit_unrolled_loop(w, l)
+                } else {
+                    self.emit_rolled_loop(w, l)
                 }
-
-                if l.parallel {
-                    writeln!(
-                        w,
-                        "#pragma omp parallel for collapse({}) schedule(static)",
-                        axes_to_emit.len()
-                    )?;
-                }
-
-                for (var_name, (_, steps)) in iter_var_names.values().zip(&axes_to_emit) {
-                    writeln!(
-                        w,
-                        "for (int {} = 0; {} < {}; {}++) {{",
-                        var_name, var_name, steps, var_name
-                    )?;
-                }
-
-                // TODO: Indent before recursing!
-                self.emit(w, &l.body)?;
-
-                for _ in 0..axes_to_emit.len() {
-                    writeln!(w, "}}")?;
-                }
-                Ok(())
             }
             ImplNode::MoveLet(move_let) => {
                 match &move_let.introduced {
@@ -369,6 +334,111 @@ impl<'a> X86CodeGenerator<'a> {
         }
     }
 
+    fn emit_rolled_loop<Aux: Clone + Debug, W: Write>(
+        &mut self,
+        w: &mut W,
+        l: &Loop<X86Target, Aux>,
+    ) -> fmt::Result {
+        let axes_to_emit = axis_order_and_steps(l).collect::<Vec<_>>();
+
+        // Map non-degen. axis names to fresh loop iterator names.
+        let iter_var_names = axes_to_emit
+            .iter()
+            .map(|(axis, _)| (*axis, self.namer.fresh_name()))
+            .collect::<HashMap<_, _>>();
+
+        // Associate each of the tile indices in each LoopTile with the correct
+        // name and store that association in the `self.loop_iter_names`.
+        for loop_tile in &l.tiles {
+            for tt in loop_tile.tile.tile_dim_terms() {
+                let BufferExprTerm::TileIdx(dim, _) = &tt else {
+                    unreachable!();
+                };
+                let subscript = loop_tile.subscripts[usize::from(*dim)];
+                if let Some(axis_loop_iter_name) = iter_var_names.get(&subscript) {
+                    if self
+                        .loop_iter_bindings
+                        .insert(tt.clone(), Either::Left(axis_loop_iter_name.clone()))
+                        .is_some()
+                    {
+                        panic!("Symbol {:?} already assigned a loop iterator", tt);
+                    }
+                }
+            }
+        }
+
+        if l.parallel {
+            writeln!(
+                w,
+                "#pragma omp parallel for collapse({}) schedule(static)",
+                axes_to_emit.len()
+            )?;
+        }
+
+        for (var_name, (_, steps)) in iter_var_names.values().zip(&axes_to_emit) {
+            writeln!(
+                w,
+                "for (int {} = 0; {} < {}; {}++) {{",
+                var_name, var_name, steps, var_name
+            )?;
+        }
+
+        // TODO: Indent before recursing!
+        self.emit(w, &l.body)?;
+
+        for _ in 0..axes_to_emit.len() {
+            writeln!(w, "}}")?;
+        }
+        Ok(())
+    }
+
+    fn emit_unrolled_loop<Aux: Clone + Debug, W: Write>(
+        &mut self,
+        w: &mut W,
+        l: &Loop<X86Target, Aux>,
+    ) -> fmt::Result {
+        if l.parallel {
+            todo!("Support parallel, unrolled loops");
+        }
+
+        let axes_to_emit = axis_order_and_steps(l).collect::<Vec<_>>();
+
+        for pt in axes_to_emit
+            .iter()
+            .map(|&(_, steps)| 0..steps)
+            .multi_cartesian_product()
+        {
+            // Map the axes we'll emit to their index for a single step of the unrolled loop.
+            // TODO: Allocating a HashMap is overkill.
+            let axes_to_indices = axes_to_emit
+                .iter()
+                .zip(pt)
+                .map(|((axis, _), axis_step)| (*axis, axis_step))
+                .collect::<HashMap<_, _>>();
+
+            // Bind all in loop_iter_bindings. On subsequent loop iterations, this will
+            // overwrite.
+            for loop_tile in &l.tiles {
+                for tt in loop_tile.tile.tile_dim_terms() {
+                    let BufferExprTerm::TileIdx(dim, _) = &tt else {
+                        unreachable!();
+                    };
+                    let subscript = loop_tile.subscripts[usize::from(*dim)];
+                    if let Some(axis_step) = axes_to_indices.get(&subscript) {
+                        self.loop_iter_bindings.insert(
+                            tt.clone(),
+                            Either::Right(i32::try_from(*axis_step).unwrap()),
+                        );
+                    }
+                }
+            }
+
+            // Emit the body once for each step
+            self.emit(w, &l.body)?;
+        }
+        Ok(())
+    }
+
     fn param_args_to_c_indices<F>(&self, arguments: &[Param<X86Target>], f: F) -> Vec<String>
     where
         F: Fn(usize, &CBuffer, &AffineExpr<BufferExprTerm>) -> String,
@@ -386,29 +456,20 @@ impl<'a> X86CodeGenerator<'a> {
             .collect()
     }
 
-    fn expr_to_c(&self, e: &AffineExpr<BufferExprTerm>) -> String {
-        let mut buf =
-            e.0.iter()
-                .map(|Term(coef, sym)| {
-                    let sym_str = self.loop_iter_names.get(sym).unwrap();
-                    match &coef {
-                        0 => panic!("AffineExpr contained zero term"),
-                        1 => sym_str.clone(),
-                        _ => format!("{} * {}", coef, sym_str),
+    fn sub_expr_bindings(&self, unbound_expr: AffineExpr<BufferExprTerm>) -> AffineExpr<CExprTerm> {
+        let init = AffineExpr(vec![], unbound_expr.1);
+        unbound_expr
+            .0
+            .into_iter()
+            .fold(init, |base, Term(coef, sym)| {
+                match self.loop_iter_bindings.get(&sym) {
+                    Some(Either::Left(var_name)) => {
+                        base + Term(coef, CExprTerm::CName(var_name.clone()))
                     }
-                })
-                .join(" + ");
-        if e.1 != 0 {
-            if buf.is_empty() {
-                buf = e.1.to_string();
-            } else {
-                buf += &format!(" + {}", e.1);
-            }
-        }
-        if buf.is_empty() {
-            buf = String::from("0");
-        }
-        buf
+                    Some(Either::Right(bound_constant)) => base + (coef * bound_constant),
+                    None => base + Term(coef, CExprTerm::Buffer(sym)),
+                }
+            })
     }
 
     /// Returns a C expression referring to the value at a given expression.
@@ -424,19 +485,35 @@ impl<'a> X86CodeGenerator<'a> {
         match buffer {
             CBuffer::Ptr { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
-                None => format!("{}[{}]", name, self.expr_to_c(expr)),
+                None => format!(
+                    "{}[{}]",
+                    name,
+                    expr_to_c(&self.sub_expr_bindings(expr.clone()))
+                ),
             },
             CBuffer::UnsizedHeapArray { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
-                None => format!("{}[{}]", name, self.expr_to_c(expr)),
+                None => format!(
+                    "{}[{}]",
+                    name,
+                    expr_to_c(&self.sub_expr_bindings(expr.clone()))
+                ),
             },
             CBuffer::HeapArray { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
-                None => format!("{}[{}]", name, self.expr_to_c(expr)), // assuming expr.c_expr() is available in scope
+                None => format!(
+                    "{}[{}]",
+                    name,
+                    expr_to_c(&self.sub_expr_bindings(expr.clone()))
+                ), // assuming expr.c_expr() is available in scope
             },
             CBuffer::StackArray { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
-                None => format!("{}[{}]", name, self.expr_to_c(expr)),
+                None => format!(
+                    "{}[{}]",
+                    name,
+                    expr_to_c(&self.sub_expr_bindings(expr.clone()))
+                ),
             },
             CBuffer::ValueVar { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
@@ -447,11 +524,16 @@ impl<'a> X86CodeGenerator<'a> {
                     debug_assert_eq!(expr, 0);
                     format!("*({} *)(&{})", reinterpret, name)
                 } else {
-                    format!("{}[{}]", name, self.expr_to_c(expr))
+                    format!(
+                        "{}[{}]",
+                        name,
+                        expr_to_c(&self.sub_expr_bindings(expr.clone()))
+                    )
                 }
             }
             CBuffer::VecVars(_, _) => {
-                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(expr);
+                let subbed_expr = self.sub_expr_bindings(expr.clone());
+                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index(
                     inner_vec_buffer,
                     &vec_offset.try_into().unwrap(),
@@ -486,7 +568,8 @@ impl<'a> X86CodeGenerator<'a> {
                 name.clone()
             }
             CBuffer::VecVars(_, _) => {
-                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(expr);
+                let subbed_expr = self.sub_expr_bindings(expr.clone());
+                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index_vec(
                     inner_vec_buffer,
                     &vec_offset.try_into().unwrap(),
@@ -508,7 +591,11 @@ impl<'a> X86CodeGenerator<'a> {
             | CBuffer::HeapArray { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
                 None => {
-                    format!("{} + {}", name, self.expr_to_c(expr))
+                    format!(
+                        "{} + {}",
+                        name,
+                        expr_to_c(&self.sub_expr_bindings(expr.clone()))
+                    )
                 }
             },
             CBuffer::StackArray { .. } => match reinterpret {
@@ -536,7 +623,8 @@ impl<'a> X86CodeGenerator<'a> {
                 }
             }
             CBuffer::VecVars(_, _) => {
-                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(expr);
+                let subbed_expr = self.sub_expr_bindings(expr.clone());
+                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index_ptr(
                     inner_vec_buffer,
                     &vec_offset.try_into().unwrap(),
@@ -593,6 +681,36 @@ fn get_vector(dtype: Dtype, vector_shape: &[DimSize]) -> &'static VecType {
         .expect("VecType to match dtype and volume of vector_shape")
 }
 
+fn expr_to_c(e: &AffineExpr<CExprTerm>) -> String {
+    let mut buf =
+        e.0.iter()
+            .map(|Term(coef, sym)| match sym {
+                CExprTerm::CName(name) => {
+                    if *coef == 1 {
+                        name.clone()
+                    } else {
+                        format!("{} * {}", coef, name)
+                    }
+                }
+                CExprTerm::Buffer(_) => {
+                    // TODO: Guarantee all terms are C names at the type level.
+                    panic!("Expected all terms to be C names");
+                }
+            })
+            .join(" + ");
+    if e.1 != 0 {
+        if buf.is_empty() {
+            buf = e.1.to_string();
+        } else {
+            buf += &format!(" + {}", e.1);
+        }
+    }
+    if buf.is_empty() {
+        buf = String::from("0");
+    }
+    buf
+}
+
 fn zero_points(expr: &mut AffineExpr<BufferExprTerm>) {
     expr.0.retain(|t| match t.1 {
         BufferExprTerm::Pt(_, _) => false,
@@ -602,34 +720,27 @@ fn zero_points(expr: &mut AffineExpr<BufferExprTerm>) {
 
 #[cfg(test)]
 mod tests {
-    use super::X86CodeGenerator;
+    use super::{expr_to_c};
+    use crate::codegen::c_utils::CExprTerm;
     use crate::expr::{AffineExpr, Term};
-    use crate::layout::BufferExprTerm;
-    use crate::opaque_symbol::OpaqueSymbol;
 
     #[test]
     fn test_expr_zero_emitted() {
-        let gen = X86CodeGenerator::default();
-        assert_eq!(gen.expr_to_c(&AffineExpr(vec![], 0)), "0");
+        assert_eq!(expr_to_c(&AffineExpr(vec![], 0)), "0");
     }
 
     #[test]
     fn test_intercept_zero_not_emitted() {
-        let mut gen = X86CodeGenerator::default();
-        let x = BufferExprTerm::Pt(0, OpaqueSymbol::new());
-        gen.loop_iter_names.insert(x.clone(), String::from("x"));
-        assert_eq!(gen.expr_to_c(&AffineExpr(vec![Term(2, x)], 0)), "2 * x")
+        let x = CExprTerm::CName(String::from("x"));
+        assert_eq!(expr_to_c(&AffineExpr(vec![Term(2, x)], 0)), "2 * x")
     }
 
     #[test]
     fn test_lower_to_c_expr() {
-        let mut gen = X86CodeGenerator::default();
-        let x = BufferExprTerm::Pt(0, OpaqueSymbol::new());
-        gen.loop_iter_names.insert(x.clone(), String::from("x"));
-        let y = BufferExprTerm::Pt(0, OpaqueSymbol::new());
-        gen.loop_iter_names.insert(y.clone(), String::from("y"));
-        assert_eq!(gen.expr_to_c(&AffineExpr(vec![], 1)), "1");
-        assert_eq!(gen.expr_to_c(&AffineExpr(vec![Term(1, x)], 1)), "x + 1");
-        assert_eq!(gen.expr_to_c(&AffineExpr(vec![Term(2, y)], 3)), "2 * y + 3");
+        let x = CExprTerm::CName(String::from("x"));
+        let y = CExprTerm::CName(String::from("y"));
+        assert_eq!(expr_to_c(&AffineExpr(vec![], 1)), "1");
+        assert_eq!(expr_to_c(&AffineExpr(vec![Term(1, x)], 1)), "x + 1");
+        assert_eq!(expr_to_c(&AffineExpr(vec![Term(2, y)], 3)), "2 * y + 3");
     }
 }

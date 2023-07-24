@@ -66,6 +66,12 @@ pub struct VecType {
     pub store_fn: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CExprTerm {
+    Buffer(BufferExprTerm),
+    CName(String),
+}
+
 impl CBuffer {
     /// Returns the C identifier name if the receiver has just one (i.e., is not distributed).
     pub fn name(&self) -> Option<&str> {
@@ -93,6 +99,10 @@ impl CBuffer {
             CBuffer::SingleVecVar { vec_type, .. }
             | CBuffer::VecVars(VecVarsMain { vec_type, .. }, _) => vec_type.dtype,
         }
+    }
+
+    pub fn needs_unroll(&self) -> bool {
+        matches!(self, CBuffer::VecVars { .. })
     }
 
     pub fn emit<W: fmt::Write>(&self, w: &mut W, zero_init: bool) -> fmt::Result {
@@ -168,10 +178,7 @@ impl CBuffer {
         }
     }
 
-    pub(super) fn inner_vec_from_expr(
-        &self,
-        expr: &AffineExpr<BufferExprTerm>,
-    ) -> (&CBuffer, usize) {
+    pub(super) fn inner_vec_from_expr(&self, expr: &AffineExpr<CExprTerm>) -> (&CBuffer, usize) {
         let CBuffer::VecVars(VecVarsMain { tensor_shape, vector_shape, .. }, VecVarsDerived { tensor_step_sizes, vector_step_sizes, vectors_in_tensor_step_sizes,  inner_vecs, .. }) = self else {
             unreachable!();
         };
@@ -181,12 +188,7 @@ impl CBuffer {
         // tensor coordinate, then choose the vector (tile) into which the coordinate falls assuming
         // all symbols are zero (i.e. based on the constant alone), and finally apply a row-major
         // layout to the vector "tile" to determine the individual vector offset expression.
-        let AffineExpr(ref terms, expr_constant) = *expr;
-        debug_assert!(
-            terms.is_empty(),
-            "expr should have no terms, but had: {:?}",
-            expr
-        );
+        let AffineExpr(_, expr_constant) = *expr;
         let (tensor_coord, vector_coord) = {
             let mut remaining_offset = u32::try_from(expr_constant).unwrap();
             let mut tensor_coord = Vec::with_capacity(tensor_step_sizes.len());
