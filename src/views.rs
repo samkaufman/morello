@@ -12,7 +12,6 @@ use crate::{
 use auto_impl::auto_impl;
 use smallvec::{smallvec, SmallVec};
 use std::{
-    borrow::Borrow,
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
 };
@@ -298,12 +297,12 @@ impl<V: View> Tile<V> {
     }
 
     pub fn steps_dim(&self, dim: u8) -> u32 {
-        let origin_size = self.view.borrow().shape()[usize::from(dim)];
+        let origin_size = self.view.shape()[usize::from(dim)];
         self.tiling.steps_dim(dim, origin_size)
     }
 
     pub fn boundary_size(&self, dim: u8) -> u32 {
-        let origin_size = self.view.borrow().shape()[usize::from(dim)];
+        let origin_size = self.view.shape()[usize::from(dim)];
         self.tiling.boundary_size(dim, origin_size)
     }
 }

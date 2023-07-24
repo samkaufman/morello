@@ -720,7 +720,7 @@ fn zero_points(expr: &mut AffineExpr<BufferExprTerm>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{expr_to_c};
+    use super::expr_to_c;
     use crate::codegen::c_utils::CExprTerm;
     use crate::expr::{AffineExpr, Term};
 

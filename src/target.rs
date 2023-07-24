@@ -40,9 +40,9 @@ pub trait MemoryLevel:
 {
     fn is_addressed(&self) -> bool;
     fn cache_hit_cost(&self) -> MainCost;
-    fn vector_bytes(&self) -> u32;
+    fn vector_bytes(&self) -> &'static [u32];
     fn vector_rf(&self) -> bool {
-        self.vector_bytes() > 0
+        !self.vector_bytes().is_empty()
     }
 }
 
@@ -173,10 +173,10 @@ impl MemoryLevel for X86MemoryLevel {
         }
     }
 
-    fn vector_bytes(&self) -> u32 {
+    fn vector_bytes(&self) -> &'static [u32] {
         match &self {
-            X86MemoryLevel::VRF => 16,
-            _ => 0,
+            X86MemoryLevel::VRF => &[16, 32],
+            _ => &[],
         }
     }
 }

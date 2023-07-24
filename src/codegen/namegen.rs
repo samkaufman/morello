@@ -1,4 +1,4 @@
-use crate::utils::ASCII_LOWER;
+use crate::utils::ASCII_PAIRS;
 
 pub struct NameGenerator {
     names_generated: usize,
@@ -10,7 +10,7 @@ impl NameGenerator {
     }
 
     pub fn fresh_name(&mut self) -> String {
-        let new_name = ASCII_LOWER[self.names_generated].to_string();
+        let new_name = String::from_iter(ASCII_PAIRS[self.names_generated]);
         self.names_generated += 1;
         new_name
     }

@@ -1,7 +1,7 @@
 use by_address::ByThinAddress;
 use std::collections::HashMap;
 
-use crate::{target::Target, utils::ASCII_LOWER, views::View};
+use crate::{target::Target, utils::ASCII_PAIRS, views::View};
 
 pub struct NameEnv<'t, K: ?Sized> {
     names: HashMap<ByThinAddress<&'t K>, String>,
@@ -20,7 +20,7 @@ impl<'t, K: ?Sized> NameEnv<'t, K> {
         let name = self
             .names
             .entry(view_by_address)
-            .or_insert_with(|| String::from(ASCII_LOWER[cnt]));
+            .or_insert_with(|| String::from_iter(ASCII_PAIRS[cnt]));
         name
     }
 

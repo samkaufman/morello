@@ -685,7 +685,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 // TODO: Need to implement `can_move_to`-style logic here.
 
                 let vector_bytes = level.vector_bytes();
-                if vector_bytes > 0 {
+                if !vector_bytes.is_empty() {
                     for vector_shape in gen_vector_shapes(
                         Some(intermediate_shape),
                         components[1].dtype,
@@ -751,7 +751,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
 
                     let vector_bytes = level.vector_bytes();
-                    if vector_bytes > 0 {
+                    if !vector_bytes.is_empty() {
                         for vector_shape in gen_vector_shapes(
                             Some(operand.dim_sizes()),
                             operand.dtype(),
@@ -773,7 +773,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         }
                     } else {
                         results.push({
-                            let _this = self;
                             let dest_layout = layout.clone();
                             Action::Move {
                                 source_idx: i,
@@ -1129,51 +1128,60 @@ fn gen_tile_sizes<Tgt: Target>(
     }
 }
 
-pub fn gen_vector_shapes(
-    outer_shape: Option<&[DimSize]>,
+pub fn gen_vector_shapes<'a>(
+    outer_shape: Option<&'a [DimSize]>,
     dtype: Dtype,
-    vector_bytes: u32,
+    vector_bytes: &'a [u32],
     rank: Option<u8>,
-) -> Box<dyn Iterator<Item = Shape>> {
+) -> Box<dyn Iterator<Item = Shape> + 'a> {
     assert_ne!(
         outer_shape.is_some(),
         rank.is_some(),
         "Must specify either outer_shape or rank, but not both"
     );
     assert!(outer_shape.is_none() || outer_shape.unwrap().iter().all(|&d| d > 0));
-    assert_ne!(vector_bytes, 0, "vector_bytes must be greater than 0");
-    assert_eq!(
-        vector_bytes % u32::from(dtype.size()),
-        0,
+    assert!(!vector_bytes.is_empty());
+    assert!(
+        vector_bytes
+            .iter()
+            .all(|&vb| vb % u32::from(dtype.size()) == 0),
         "vector_bytes must be a multiple of dtype size"
     );
 
     let rank = rank.unwrap_or_else(|| outer_shape.unwrap().len().try_into().unwrap());
-    let mut adjusted_vector_bytes: u32 = vector_bytes;
-    if dtype.size() != 1 {
-        adjusted_vector_bytes /= u32::from(dtype.size());
-    }
-    debug_assert!(adjusted_vector_bytes > 0);
 
     if LIMIT_VECTORS_TO_ONE_DIM {
-        if adjusted_vector_bytes == 1 {
-            return Box::new(once(smallvec![1; rank.into()]));
-        }
-        let outer_shape = outer_shape.map(Vec::from);
-        Box::new(
-            (0..rank)
-                .rev()
-                .map(usize::from)
-                .filter(move |&i| {
-                    outer_shape.is_none()
-                        || outer_shape.as_ref().unwrap()[i] >= adjusted_vector_bytes
-                })
-                .map(move |i| {
-                    let mut v = smallvec![1; rank.into()];
-                    v[i] = adjusted_vector_bytes;
-                    v
-                }),
-        )
+        Box::new(vector_bytes.iter().flat_map(move |&vb| {
+            let adjusted_vector_bytes: u32 = vb / u32::from(dtype.size());
+            debug_assert!(adjusted_vector_bytes > 0);
+
+            let mut iter_a = None;
+            let mut iter_b = None;
+
+            if adjusted_vector_bytes == 1 {
+                iter_a = Some(once(smallvec![1; rank.into()]));
+            } else {
+                let outer_shape = outer_shape.map(Vec::from);
+                let inner_iter = (0..rank)
+                    .rev()
+                    .map(usize::from)
+                    .filter(move |&i| {
+                        outer_shape.is_none()
+                            || outer_shape.as_ref().unwrap()[i] >= adjusted_vector_bytes
+                    })
+                    .map(move |i| {
+                        let mut v = smallvec![1; rank.into()];
+                        v[i] = adjusted_vector_bytes;
+                        v
+                    });
+                iter_b = Some(inner_iter);
+            }
+
+            iter_a
+                .into_iter()
+                .flatten()
+                .chain(iter_b.into_iter().flatten())
+        }))
     } else {
         todo!()
     }

@@ -421,26 +421,6 @@ fn int_to_level(i: u32) -> X86MemoryLevel {
     }
 }
 
-fn iter_vector_shape_args<M: MemoryLevel>(
-    level: M,
-    outer_shape: &[usize],
-    dtype: Dtype,
-) -> Box<dyn Iterator<Item = Option<Shape>>> {
-    if level.vector_bytes() == 0 {
-        Box::new(iter::once(None))
-    } else {
-        Box::new(
-            gen_vector_shapes(
-                None,
-                dtype,
-                level.vector_bytes(),
-                Some(outer_shape.len().try_into().unwrap()),
-            )
-            .map(Some),
-        )
-    }
-}
-
 fn to_log2_dim_space(dim: DimSize) -> Option<u32> {
     assert!(dim > 0);
     Some(dim - 1)

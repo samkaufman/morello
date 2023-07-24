@@ -262,9 +262,11 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         if &self.layout() != dest_layout && !dest_level.is_addressed() {
             return false;
         }
-        if dest_level.vector_bytes() > 0 {
+        let vector_bytes = dest_level.vector_bytes();
+        if !vector_bytes.is_empty() {
             let vol: DimSize = self.dim_sizes().iter().product();
-            if (vol * DimSize::from(self.dtype.size())) % dest_level.vector_bytes() != 0 {
+            let bytes = vol * DimSize::from(self.dtype.size());
+            if vector_bytes.iter().all(|&vb| bytes % vb != 0) {
                 return false;
             }
         }
