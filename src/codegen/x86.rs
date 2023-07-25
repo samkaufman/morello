@@ -175,7 +175,7 @@ impl<'a> X86CodeGenerator<'a> {
         &mut self,
         w: &mut W,
         imp: &ImplNode<X86Target, Aux>,
-        mut depth: usize,
+        depth: usize,
     ) -> fmt::Result {
         match imp {
             ImplNode::Loop(l) => {
@@ -352,7 +352,7 @@ impl<'a> X86CodeGenerator<'a> {
         &mut self,
         w: &mut W,
         l: &Loop<X86Target, Aux>,
-        mut depth: usize,
+        depth: usize,
     ) -> fmt::Result {
         let axes_to_emit = axis_order_and_steps(l).collect::<Vec<_>>();
 
@@ -398,9 +398,7 @@ impl<'a> X86CodeGenerator<'a> {
             )?;
         }
 
-        depth += 1;
-        self.emit(w, &l.body, depth)?;
-        depth -= 1;
+        self.emit(w, &l.body, depth + 1)?;
 
         for _ in 0..axes_to_emit.len() {
             writeln!(w, "{}}}", indent(depth))?;
