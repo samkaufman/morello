@@ -11,7 +11,6 @@ use prettytable::{self, format, row, Cell};
 #[derive(Copy, Clone, PartialEq, ValueEnum)]
 pub enum PrintMode {
     Full,
-    Comfort,
     Compact,
 }
 
