@@ -130,7 +130,6 @@ pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &
 
 const INDENT_SIZE: usize = 2;
 
-#[inline]
 pub fn indent(depth: usize) -> String {
     " ".repeat(depth * INDENT_SIZE)
 }
