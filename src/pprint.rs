@@ -53,7 +53,7 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, print_mode: PrintMode) {
                 let indent = indent(depth);
                 let main_str = format!("{indent}{line_top}");
                 let mut r = row![main_str, "", ""];
-                if let Some((problem, cost)) = imp.aux() {
+                if let Some((spec, cost)) = imp.aux() {
                     if print_mode == PrintMode::Full {
                         r = row![main_str, format!("{}", &spec.0)];
                     } else {
