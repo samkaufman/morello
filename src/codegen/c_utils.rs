@@ -6,6 +6,7 @@ use crate::{
     common::{DimSize, Dtype, Shape},
     expr::AffineExpr,
     layout::BufferExprTerm,
+    utils::indent,
 };
 
 #[derive(Debug, Clone)]
@@ -105,15 +106,16 @@ impl CBuffer {
         matches!(self, CBuffer::VecVars { .. })
     }
 
-    pub fn emit<W: fmt::Write>(&self, w: &mut W, zero_init: bool) -> fmt::Result {
+    pub fn emit<W: fmt::Write>(&self, w: &mut W, zero_init: bool, depth: usize) -> fmt::Result {
         match self {
             CBuffer::Ptr { .. } => unimplemented!(),
             CBuffer::UnsizedHeapArray { .. } => unimplemented!(),
             CBuffer::HeapArray { name, size, dtype } => {
-                writeln!(w, "{} *restrict {};", c_type(*dtype), name)?;
+                writeln!(w, "{}{} *restrict {};", indent(depth), c_type(*dtype), name)?;
                 writeln!(
                     w,
-                    "posix_memalign((void **)&{}, 128, {}*sizeof({}));",
+                    "{}posix_memalign((void **)&{}, 128, {}*sizeof({}));",
+                    indent(depth),
                     name,
                     size,
                     c_type(*dtype)
@@ -122,7 +124,8 @@ impl CBuffer {
                 if zero_init {
                     writeln!(
                         w,
-                        "memset({}, 0, {}*sizeof({}));",
+                        "{}memset({}, 0, {}*sizeof({}));",
+                        indent(depth),
                         name,
                         size,
                         c_type(*dtype)
@@ -135,7 +138,8 @@ impl CBuffer {
                 let epi = if zero_init { " = {0}" } else { "" };
                 writeln!(
                     w,
-                    "{} {}[{}] __attribute__((aligned (128))){};",
+                    "{}{} {}[{}] __attribute__((aligned (128))){};",
+                    indent(depth),
                     c_type(*dtype),
                     name,
                     size,
@@ -144,26 +148,26 @@ impl CBuffer {
             }
             CBuffer::SingleVecVar { name, vec_type } => {
                 let epi = if zero_init { " = {0}" } else { "" };
-                writeln!(w, "{} {}{};", vec_type.name, name, epi)
+                writeln!(w, "{}{} {}{};", indent(depth), vec_type.name, name, epi)
             }
             CBuffer::VecVars(_, VecVarsDerived { inner_vecs, .. }) => {
                 for inner_vec in inner_vecs {
-                    inner_vec.emit(w, zero_init)?;
+                    inner_vec.emit(w, zero_init, depth)?;
                 }
                 Ok(())
             }
             CBuffer::ValueVar { name, dtype } => {
                 let epi = if zero_init { " = {0}" } else { "" };
-                writeln!(w, "{} {}{};", c_type(*dtype), name, epi)
+                writeln!(w, "{}{} {}{};", indent(depth), c_type(*dtype), name, epi)
             }
         }
     }
 
-    pub fn emit_free<W: fmt::Write>(&self, w: &mut W) -> fmt::Result {
+    pub fn emit_free<W: fmt::Write>(&self, w: &mut W, depth: usize) -> fmt::Result {
         match self {
             CBuffer::Ptr { .. } => unimplemented!(),
             CBuffer::UnsizedHeapArray { name, .. } | CBuffer::HeapArray { name, .. } => {
-                writeln!(w, "free({});", name)?;
+                writeln!(w, "{}free({name});", indent(depth))?;
                 Ok(())
             }
             CBuffer::StackArray { .. }
@@ -171,7 +175,7 @@ impl CBuffer {
             | CBuffer::SingleVecVar { .. } => Ok(()),
             CBuffer::VecVars(_, VecVarsDerived { inner_vecs, .. }) => {
                 for inner_vec in inner_vecs {
-                    inner_vec.emit_free(w)?;
+                    inner_vec.emit_free(w, depth)?;
                 }
                 Ok(())
             }

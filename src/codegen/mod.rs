@@ -1,6 +1,6 @@
-use std::fmt;
-
 use crate::target::Target;
+
+use std::fmt;
 
 mod c_utils;
 mod header;

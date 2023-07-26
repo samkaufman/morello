@@ -17,6 +17,7 @@ use crate::imp::moves::TensorOrCacheView;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::BufferExprTerm;
 use crate::target::{Target, X86MemoryLevel, X86Target};
+use crate::utils::indent;
 use crate::views::{Param, Tensor, View};
 
 const STACK_CUTOFF: u32 = 256;
@@ -105,7 +106,7 @@ impl<'a> X86CodeGenerator<'a> {
                 if operand_idx + 1 < imp.parameter_count().into() {
                     ", "
                 } else {
-                    ") {"
+                    "\n) {"
                 }
             )?;
             self.name_env.insert(Rc::clone(tensor), new_c_buffer);
@@ -119,13 +120,13 @@ impl<'a> X86CodeGenerator<'a> {
             .collect::<Vec<_>>();
 
         imp.bind(&tensors_as_trait_obj_ptrs, &mut self.param_bindings);
-        self.emit(&mut main_body_str, imp)?;
+        let depth = 1_usize;
+        self.emit(&mut main_body_str, imp, depth)?;
 
         writeln!(main_body_str, "}}")?;
 
         self.headers.emit(out)?;
-        out.write_str(&main_body_str)?;
-        Ok(())
+        out.write_str(&main_body_str)
     }
 
     fn make_buffer(
@@ -174,6 +175,7 @@ impl<'a> X86CodeGenerator<'a> {
         &mut self,
         w: &mut W,
         imp: &ImplNode<X86Target, Aux>,
+        depth: usize,
     ) -> fmt::Result {
         match imp {
             ImplNode::Loop(l) => {
@@ -190,9 +192,9 @@ impl<'a> X86CodeGenerator<'a> {
                         .unwrap()
                         .needs_unroll()
                 }) {
-                    self.emit_unrolled_loop(w, l)
+                    self.emit_unrolled_loop(w, l, depth)
                 } else {
-                    self.emit_rolled_loop(w, l)
+                    self.emit_rolled_loop(w, l, depth)
                 }
             }
             ImplNode::MoveLet(move_let) => {
@@ -207,7 +209,7 @@ impl<'a> X86CodeGenerator<'a> {
                             spec.dtype(),
                             spec.level(),
                         );
-                        dest_buffer.emit(w, false)?;
+                        dest_buffer.emit(w, false, depth)?;
 
                         self.name_env.insert(Rc::clone(tensor), dest_buffer);
                     }
@@ -215,11 +217,11 @@ impl<'a> X86CodeGenerator<'a> {
                 };
 
                 if let Some(prologue) = move_let.prologue() {
-                    self.emit(w, prologue)?;
+                    self.emit(w, prologue, depth)?;
                 }
-                self.emit(w, move_let.main_stage())?;
+                self.emit(w, move_let.main_stage(), depth)?;
                 if let Some(epilogue) = move_let.epilogue() {
-                    self.emit(w, epilogue)?;
+                    self.emit(w, epilogue, depth)?;
                 }
                 Ok(())
             }
@@ -230,13 +232,13 @@ impl<'a> X86CodeGenerator<'a> {
                 aux: _,
             }) => {
                 for stage in stages {
-                    self.emit(w, stage)?;
+                    self.emit(w, stage, depth)?;
                 }
                 Ok(())
             }
             ImplNode::Pipeline(_) => todo!("Emit code for Pipeline"),
             ImplNode::SpecApp(p) => {
-                writeln!(w, "assert(false);  /* {:?} */", p)
+                writeln!(w, "{}assert(false);  /* {p:?} */", indent(depth))
             }
             ImplNode::Kernel(Kernel {
                 kernel_type,
@@ -250,15 +252,18 @@ impl<'a> X86CodeGenerator<'a> {
                         });
                         writeln!(
                             w,
-                            "{} += {} * {};  /* Mult */",
-                            exprs[2], exprs[0], exprs[1]
+                            "{}{} += {} * {};  /* Mult */",
+                            indent(depth),
+                            exprs[2],
+                            exprs[0],
+                            exprs[1]
                         )
                     }
                     KernelType::ValueAssign => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
                         });
-                        writeln!(w, "{} = {};", exprs[1], exprs[0])
+                        writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0])
                     }
                     KernelType::MemsetZero => {
                         // TODO: Merge this duplicate `exprs` block. It's used also in the ValueAssign.
@@ -272,8 +277,8 @@ impl<'a> X86CodeGenerator<'a> {
                         let arg_expr = self.c_index_ptr(buffer, &buffer_indexing_expr, None);
                         writeln!(
                             w,
-                            "memset((void *)({}), 0, {});",
-                            arg_expr,
+                            "{}memset((void *)({arg_expr}), 0, {});",
+                            indent(depth),
                             arguments[0].1.bytes_used()
                         )
                     }
@@ -281,7 +286,7 @@ impl<'a> X86CodeGenerator<'a> {
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_vec(a, b, None)
                         });
-                        writeln!(w, "{} *= 0;  /* VectorZero */", exprs[0])
+                        writeln!(w, "{}{} *= 0;  /* VectorZero */", indent(depth), exprs[0])
                     }
                     KernelType::VectorAssign => {
                         let shape = arguments[0].shape();
@@ -296,14 +301,24 @@ impl<'a> X86CodeGenerator<'a> {
                         if arguments.iter().all(|a| a.1.aligned()) {
                             writeln!(
                                 w,
-                                "*({} *)({}) = (*({} *)({}));  /* VectorAssign */",
-                                itype, exprs[1], itype, exprs[0]
+                                "{}*({} *)({}) = (*({} *)({}));  /* VectorAssign */",
+                                indent(depth),
+                                itype,
+                                exprs[1],
+                                itype,
+                                exprs[0]
                             )
                         } else {
                             writeln!(
                                 w,
-                                "{}(({} *)({}), {}(({} *)({})));  /* VectorAssign */",
-                                vtype.store_fn, itype, exprs[1], vtype.load_fn, itype, exprs[0]
+                                "{}{}(({} *)({}), {}(({} *)({})));  /* VectorAssign */",
+                                indent(depth),
+                                vtype.store_fn,
+                                itype,
+                                exprs[1],
+                                vtype.load_fn,
+                                itype,
+                                exprs[0]
                             )
                         }
                     }
@@ -318,8 +333,13 @@ impl<'a> X86CodeGenerator<'a> {
                         });
                         writeln!(
                             w,
-                            "*({} *)({}) += {} * (*({} *)({})); /* BroadcastVecMult */",
-                            itype, exprs[2], exprs[0], itype, exprs[1]
+                            "{}*({} *)({}) += {} * (*({} *)({})); /* BroadcastVecMult */",
+                            indent(depth),
+                            itype,
+                            exprs[2],
+                            exprs[0],
+                            itype,
+                            exprs[1]
                         )
                     }
                     KernelType::CacheAccess => Ok(()),
@@ -332,6 +352,7 @@ impl<'a> X86CodeGenerator<'a> {
         &mut self,
         w: &mut W,
         l: &Loop<X86Target, Aux>,
+        depth: usize,
     ) -> fmt::Result {
         let axes_to_emit = axis_order_and_steps(l).collect::<Vec<_>>();
 
@@ -359,7 +380,8 @@ impl<'a> X86CodeGenerator<'a> {
         if l.parallel {
             writeln!(
                 w,
-                "#pragma omp parallel for collapse({}) schedule(static)",
+                "{}#pragma omp parallel for collapse({}) schedule(static)",
+                indent(depth),
                 axes_to_emit.len()
             )?;
         }
@@ -367,16 +389,19 @@ impl<'a> X86CodeGenerator<'a> {
         for (var_name, (_, steps)) in iter_var_names.values().zip(&axes_to_emit) {
             writeln!(
                 w,
-                "for (int {} = 0; {} < {}; {}++) {{",
-                var_name, var_name, steps, var_name
+                "{}for (int {} = 0; {} < {}; {}++) {{",
+                indent(depth),
+                var_name,
+                var_name,
+                steps,
+                var_name
             )?;
         }
 
-        // TODO: Indent before recursing!
-        self.emit(w, &l.body)?;
+        self.emit(w, &l.body, depth + 1)?;
 
         for _ in 0..axes_to_emit.len() {
-            writeln!(w, "}}")?;
+            writeln!(w, "{}}}", indent(depth))?;
         }
         Ok(())
     }
@@ -385,6 +410,7 @@ impl<'a> X86CodeGenerator<'a> {
         &mut self,
         w: &mut W,
         l: &Loop<X86Target, Aux>,
+        depth: usize,
     ) -> fmt::Result {
         if l.parallel {
             todo!("Support parallel, unrolled loops");
@@ -423,7 +449,7 @@ impl<'a> X86CodeGenerator<'a> {
             }
 
             // Emit the body once for each step
-            self.emit(w, &l.body)?;
+            self.emit(w, &l.body, depth)?;
         }
         Ok(())
     }

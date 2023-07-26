@@ -6,20 +6,30 @@ use std::path;
 use std::sync::RwLock;
 
 use morello::codegen::CodeGen;
+use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype, Spec};
 use morello::layout::row_major;
-use morello::pprint::pprint;
+use morello::pprint::{pprint, PrintMode};
 use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{Target, X86MemoryLevel, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
-#[derive(clap::Parser)]
+#[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(long, short)]
     db: Option<path::PathBuf>,
+
+    /// Color mode
+    #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
+    color: ColorMode,
+
+    /// Print mode
+    #[arg(long, value_enum, default_value_t = PrintMode::Full)]
+    print: PrintMode,
+
     #[command(subcommand)]
     query_spec: QuerySpec,
 }
@@ -45,6 +55,7 @@ enum QuerySpec {
 fn main() {
     env_logger::init();
     let args = Args::parse();
+    color::set_color_mode(args.color);
     match &args.db {
         Some(db_path) => main_per_db(
             &args,
@@ -134,7 +145,8 @@ where
         panic!("No Impl found");
     };
     assert_eq!(results.len(), 1);
-    pprint(&results[0]);
+    pprint(&results[0], args.print);
+    println!();
     results[0]
         .emit_kernel(&mut ToWriteFmt(io::stdout()))
         .unwrap();

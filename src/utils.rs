@@ -22,7 +22,6 @@ const fn ascii_pairs() -> [[char; 2]; 676] {
         }
         c1 += 1;
     }
-
     result
 }
 pub const ASCII_PAIRS: [[char; 2]; 676] = ascii_pairs();
@@ -127,4 +126,10 @@ pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &
         .map(|d| d.to_string())
         .collect::<Vec<_>>()
         .join(separator)
+}
+
+const INDENT_SIZE: usize = 2;
+
+pub fn indent(depth: usize) -> String {
+    " ".repeat(depth * INDENT_SIZE)
 }
