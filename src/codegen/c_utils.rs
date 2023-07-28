@@ -87,6 +87,13 @@ impl CBuffer {
         }
     }
 
+    pub fn size(&self) -> Option<u32> {
+        match self {
+            CBuffer::HeapArray { size, .. } | CBuffer::StackArray { size, .. } => Some(*size),
+            _ => None,
+        }
+    }
+
     pub fn dtype(&self) -> Dtype {
         match self {
             CBuffer::Ptr {

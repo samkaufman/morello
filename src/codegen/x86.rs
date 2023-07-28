@@ -125,6 +125,92 @@ impl<'a> X86CodeGenerator<'a> {
 
         writeln!(main_body_str, "}}")?;
 
+        // Emit main
+        let mut depth = 0_usize;
+        writeln!(main_body_str, "\nint main() {{")?;
+        depth += 1;
+        for i in 0..top_arg_tensors.len() {
+            let tensor = &top_arg_tensors[i];
+            let c_buffer = self.name_env.get(&*tensor).unwrap();
+            writeln!(
+                main_body_str,
+                "{}{} buf{}[{}] __attribute__((aligned (128)));",
+                indent(depth),
+                c_type(c_buffer.dtype()),
+                i, // we do not use c_buffer.name().unwrap()
+                c_buffer.size().unwrap(),
+            )?;
+        }
+        writeln!(main_body_str)?;
+
+        // Initialize the input tensors
+        writeln!(
+            main_body_str,
+            "{}// Initialize the input tensors",
+            indent(depth)
+        )?;
+        for i in 0..(top_arg_tensors.len() - 1) {
+            let tensor = &top_arg_tensors[i];
+            let c_buffer = self.name_env.get(&*tensor).unwrap();
+            writeln!(
+                main_body_str,
+                "{}for (int i = 0; i < {}; i++) {{",
+                indent(depth),
+                c_buffer.size().unwrap(),
+            )?;
+            depth += 1;
+            writeln!(
+                main_body_str,
+                "{}buf{}[i] = i;",
+                indent(depth),
+                i, // we do not use c_buffer.name().unwrap()
+            )?;
+            depth -= 1;
+            writeln!(main_body_str, "{}}}", indent(depth))?;
+        }
+        writeln!(main_body_str)?;
+
+        // Emit the kernel call
+        write!(main_body_str, "{}kernel(", indent(depth))?;
+        for i in 0..top_arg_tensors.len() {
+            let tensor = &top_arg_tensors[i];
+            let c_buffer = self.name_env.get(&*tensor).unwrap();
+            write!(
+                main_body_str,
+                "&buf{}[0]{}",
+                i, // we do not use c_buffer.name().unwrap()
+                if i < top_arg_tensors.len() - 1 {
+                    ", "
+                } else {
+                    ");\n"
+                },
+            )?;
+        }
+        writeln!(main_body_str)?;
+
+        // Print the output tensor
+        writeln!(main_body_str, "{}// Print the output.", indent(depth))?;
+        let tensor = &top_arg_tensors[top_arg_tensors.len() - 1];
+        let c_buffer = self.name_env.get(&*tensor).unwrap();
+        writeln!(
+            main_body_str,
+            "{}for (int i = 0; i < {}; i++) {{",
+            indent(depth),
+            c_buffer.size().unwrap(),
+        )?;
+        depth += 1;
+        writeln!(
+            main_body_str,
+            "{}printf(\"%d \", buf{}[i]);",
+            indent(depth),
+            top_arg_tensors.len() - 1, // we do not use c_buffer.name().unwrap()
+        )?;
+        depth -= 1;
+        writeln!(main_body_str, "{}}}", indent(depth))?;
+
+        writeln!(main_body_str, "\n{}return 0;", indent(depth))?;
+        writeln!(main_body_str, "}}")?;
+
         self.headers.emit(out)?;
         out.write_str(&main_body_str)
     }
