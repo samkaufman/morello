@@ -561,9 +561,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     pub fn actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
-        let iter = self.tile_out_expansions();
-        let iter = iter.chain(self.move_expansions());
-        let iter = iter.chain(Tgt::expansions(self));
+        let iter = self.tile_out_actions();
+        let iter = iter.chain(self.move_actions());
+        let iter = iter.chain(Tgt::actions(self));
 
         match &self {
             LogicalSpec::Primitive(
@@ -579,7 +579,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     Box::new(iter.chain(once(Action::ToAccum)))
                 }
                 PrimitiveSpecType::Matmul { accum } if *accum => {
-                    Box::new(iter.chain(self.split_expansions()))
+                    Box::new(iter.chain(self.split_actions()))
                 }
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
@@ -599,8 +599,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 operand_auxes: _,
                 serial_only: _,
             } => {
-                // TODO: Add head reduce split expansions as well.
-                Box::new(iter.chain(self.peel_expansions()))
+                // TODO: Add head reduce split actions as well.
+                Box::new(iter.chain(self.peel_actions()))
             }
         }
     }
@@ -639,7 +639,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         true
     }
 
-    fn tile_out_expansions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
+    fn tile_out_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         let serial_only = self.serial_only();
         let output = self.output();
         gen_tile_sizes::<Tgt>(output.dim_sizes(), true).flat_map(move |tile_shape| {
@@ -652,15 +652,15 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         })
     }
 
-    fn split_expansions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
+    fn split_actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape, .. }, _, _) = self else {
-            panic!("split_expansions called on non-primitive Spec");
+            panic!("split_actions called on non-primitive Spec");
         };
         let PrimitiveSpecType::Matmul { accum } = typ else {
-            panic!("split_expansions called on non-Matmul");
+            panic!("split_actions called on non-Matmul");
         };
         if !accum {
-            panic!("split_expansions called on non-accumulating Matmul");
+            panic!("split_actions called on non-accumulating Matmul");
         }
         let k = spec_shape[1];
         Box::new(
@@ -670,9 +670,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         )
     }
 
-    fn peel_expansions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
+    fn peel_actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let LogicalSpec::Compose { components, operand_auxes: _, serial_only: _ } = self else {
-            panic!("peel_expansions called on non-Compose Spec");
+            panic!("peel_actions called on non-Compose Spec");
         };
 
         let mut results = vec![];
@@ -730,7 +730,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    fn move_expansions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
+    fn move_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         // TODO: Add prefetching moves.
 
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.

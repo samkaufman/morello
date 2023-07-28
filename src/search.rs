@@ -33,7 +33,7 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
     let mut hits = 0u64;
     let mut misses = 1u64;
 
-    // Enumerate expansions, computing their costs from their childrens' costs.
+    // Enumerate action applications, computing their costs from their childrens' costs.
     let mut reducer = ImplReducer::new(top_k);
 
     for action in goal.0.actions() {

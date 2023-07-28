@@ -31,8 +31,8 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug + 'static {
 
     fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout>;
 
-    /// Yield target-specific expansions of given Spec.
-    fn expansions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
+    /// Yield target-specific actions which apply to a given [LogicalSpec].
+    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
 }
 
 pub trait MemoryLevel:
@@ -99,7 +99,7 @@ impl Target for X86Target {
         }
     }
 
-    fn expansions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>> {
+    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>> {
         match spec {
             LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
                 PrimitiveSpecType::Matmul { accum } => {
