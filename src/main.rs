@@ -9,6 +9,7 @@ use morello::codegen::CodeGen;
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype, Spec};
 use morello::layout::row_major;
+use morello::layout::Layout;
 use morello::pprint::{pprint, PrintMode};
 use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
@@ -36,6 +37,8 @@ struct Args {
 
 #[derive(clap::Subcommand)]
 enum QuerySpec {
+    #[command(about = "Synthesize a row- to column-major transpose")]
+    Transpose { size: DimSize },
     #[command(about = "Synthesize a matrix multiplication")]
     Matmul { size: DimSize },
     #[command(about = "Synthesize a convolution")]
@@ -70,6 +73,32 @@ where
     D: Database<X86Target> + Send + Sync,
 {
     let query_spec = match &args.query_spec {
+        QuerySpec::Transpose { size } => {
+            let rm2 = row_major(2);
+            let cm2 = Layout::Standard {
+                dim_order: smallvec![1, 0],
+            };
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Move,
+                    spec_shape: smallvec![*size, *size],
+                    dtype: Dtype::Uint32,
+                },
+                PrimitiveAux::Move {
+                    outer_aux: TensorSpecAux {
+                        contig: rm2.contiguous_full(),
+                        aligned: true,
+                        level: X86MemoryLevel::GL,
+                        layout: rm2,
+                        vector_shape: None,
+                    },
+                    inner_level: X86MemoryLevel::GL,
+                    inner_layout: cm2,
+                    inner_vector_shape: None,
+                },
+                true,
+            )
+        }
         QuerySpec::Matmul { size } => {
             let rm2 = row_major(2);
             LogicalSpec::Primitive(

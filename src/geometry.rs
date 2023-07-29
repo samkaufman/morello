@@ -238,9 +238,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     .cartesian_product(viable_layouts.iter().cloned())
                     .flat_map(
                         move |((source_aligned, source_layout), destination_layout)| {
-                            let allowed_destination_levels =
-                                X86Target::faster_destination_levels(source_level);
-                            allowed_destination_levels
+                            X86Target::possible_destination_levels(source_level)
                                 .into_iter()
                                 .cartesian_product(source_layout.all_contiguous_abs().collect_vec())
                                 .flat_map(move |(destination_level, source_contiguous_abs)| {

@@ -5,6 +5,7 @@ use crate::layout::{nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+use crate::tensorspec::TensorSpec;
 
 use crate::tensorspec::TensorSpec;
 use serde::de::DeserializeOwned;
@@ -24,7 +25,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug + 'static {
     fn processors() -> u8;
     fn default_level() -> Self::Level;
     fn levels() -> Vec<Self::Level>;
-    fn faster_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
+    fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
 
     fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout>;
 
@@ -69,11 +70,11 @@ impl Target for X86Target {
         enum_iterator::all::<Self::Level>().collect()
     }
 
-    fn faster_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
+    fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
         match slower {
-            X86MemoryLevel::RF | X86MemoryLevel::VRF => vec![],
-            X86MemoryLevel::L1 => vec![X86MemoryLevel::RF, X86MemoryLevel::VRF],
-            X86MemoryLevel::GL => vec![X86MemoryLevel::L1],
+            X86MemoryLevel::RF | X86MemoryLevel::VRF => vec![slower],
+            X86MemoryLevel::L1 => vec![slower, X86MemoryLevel::RF, X86MemoryLevel::VRF],
+            X86MemoryLevel::GL => vec![slower, X86MemoryLevel::L1],
         }
     }
 

@@ -731,10 +731,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         // TODO: Add prefetching moves.
 
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
-        if matches!(self, LogicalSpec::Primitive(_, _, _))
-            && matches!(self.primitive_type(), PrimitiveSpecType::Move)
+
+        // Move actions can only be applied when both from and to the same-level memory.
+        let mut is_move = false;
+        if let LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Move,
+                ..
+            },
+            aux,
+            _,
+        ) = self
         {
-            return results.into_iter();
+            is_move = true;
         }
 
         for (i, operand) in self.parameters().iter().enumerate() {
@@ -742,7 +751,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             // includes relayouts in registers and movements from level 1 to RF.
             let i = u8::try_from(i).unwrap();
             for layout in Tgt::all_layouts_for_shape(operand.dim_sizes()) {
-                for level in Tgt::faster_destination_levels(operand.level()) {
+                for level in Tgt::possible_destination_levels(operand.level()) {
+                    if is_move && level == operand.level() {
+                        continue;
+                    }
+
                     if !operand.can_move_to(&layout, &level) {
                         continue;
                     }
@@ -763,15 +776,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                             });
                         }
                     } else {
-                        results.push({
-                            let dest_layout = layout.clone();
-                            Action::Move {
-                                source_idx: i,
-                                destination_level: level,
-                                destination_layout: dest_layout,
-                                destination_vector_size: None,
-                                prefetch: false,
-                            }
+                        results.push(Action::Move {
+                            source_idx: i,
+                            destination_level: layout.clone(),
+                            destination_layout: layout.clone(),
+                            destination_vector_size: None,
+                            prefetch: false,
                         });
                     }
                 }
@@ -926,10 +936,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 for (_i, component) in components.iter_mut().enumerate().rev() {
                     // Any missing inputs? Gather them here.
                     let needed = component.typ.input_count() - component_inputs.len();
-                    eprintln!("input_count is {}", component.typ.input_count());
-                    eprintln!("component_inputs.len(): {}", component_inputs.len());
-                    eprintln!("remaining_inputs.len(): {}", remaining_inputs.len());
-                    eprintln!("needed: {}", needed);
                     component_inputs.extend(
                         remaining_inputs
                             .drain(remaining_inputs.len() - needed..)

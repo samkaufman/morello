@@ -17,7 +17,7 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target};
-use crate::tensorspec::TensorSpec;
+use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::views::{CacheView, Param, Tensor, Tile, View, ViewExt};
 
@@ -474,6 +474,50 @@ impl<Tgt: Target> Action<Tgt> {
                     unimplemented!()
                 }
 
+                // Moves can themselves be moved, but come with an additional restriction: the move
+                // must change something: the level, layout, or vector shape. Without this rule,
+                // moves introduce sub-Specs which are logically identical but have allocated some
+                // redundant memory and a no-op, pass-through move.
+                if let LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Move,
+                        ..
+                    },
+                    spec_aux,
+                    _,
+                ) = node_spec
+                {
+                    let PrimitiveAux::Move {
+                        outer_aux:
+                            TensorSpecAux {
+                                level: outer_level,
+                                layout: outer_layout,
+                                vector_shape: outer_vector_shape,
+                                ..
+                            },
+                        inner_level,
+                        inner_layout,
+                        inner_vector_shape,
+                    } = spec_aux else
+                    {
+                        unreachable!();
+                    };
+                    if *source_idx == 0
+                        && inner_level == destination_level
+                        && inner_layout == destination_layout
+                        && inner_vector_shape == destination_vector_shape
+                    {
+                        return None;
+                    }
+                    if *source_idx == 1
+                        && outer_level == destination_level
+                        && outer_layout == destination_layout
+                        && outer_vector_shape == destination_vector_shape
+                    {
+                        return None;
+                    }
+                }
+
                 let outer_moved_operand_spec = &operands[usize::from(*source_idx)];
                 let new_spec = movelet_inner_tensorspec(
                     outer_moved_operand_spec,
@@ -682,6 +726,7 @@ impl<Tgt: Target> Display for Action<Tgt> {
             Action::Place(KernelType::VectorAssign) => write!(f, "VectorAssign"),
             Action::Place(KernelType::MemsetZero) => write!(f, "MemsetZero"),
             Action::Place(KernelType::VectorZero) => write!(f, "VectorZero"),
+            Action::Place(KernelType::CacheAccess) => write!(f, "CacheAccess"),
             _ => write!(f, "{:?}", self),
         }
     }
