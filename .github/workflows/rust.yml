@@ -19,8 +19,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
+
+      - name: Install libomp
+        run: |
+          sudo apt update
+          sudo apt-get install -y libomp-dev
+
       - name: Run
-        run: cargo run matmul 4
+        run: cargo run -- --print-code matmul 4
+        env:
+          CLANG: clang
 
   format:
     runs-on: ubuntu-latest
