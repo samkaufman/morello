@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use tempfile::tempdir;
 
-pub const CLI_FLAGS: [&'static str; 3] = ["-std=gnu99", "-O3", "-o"];
+const CLI_FLAGS: [&'static str; 3] = ["-std=gnu99", "-O3", "-o"];
 
 pub trait Compiler<Tgt: Target, const N: usize>: CodeGen<Tgt> {
     const CLI_VEC_FLAGS: [&'static str; N];
