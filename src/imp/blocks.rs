@@ -55,7 +55,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Block<Tgt, Aux> {
     fn line_strs<'a>(
         &'a self,
         _names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
-        _args: &[&dyn View<Tgt = Tgt>],
+        _param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         // TODO: Add an option to pprint Blocks.
         None

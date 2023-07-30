@@ -125,7 +125,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
     fn line_strs<'a>(
         &'a self,
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
-        args: &[&dyn View<Tgt = Tgt>],
+        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         Some(format!(
             "tile{} ({})",
@@ -133,7 +133,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
             self.tiles
                 .iter()
                 .map(|t| {
-                    let source = args[usize::from(t.tile.view.0)];
+                    let source = param_bindings[&t.tile.view];
                     let left = names.name(&t.tile).to_owned();
                     let right = names.get_name_or_display(source);
                     format!(

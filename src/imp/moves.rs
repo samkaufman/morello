@@ -172,7 +172,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
     fn line_strs<'a>(
         &'a self,
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
-        _args: &[&dyn View<Tgt = Tgt>],
+        _param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         let prefetch_str = if self.prefetch { "[p]" } else { "" };
         let introduced_view = self.introduced.inner_fat_ptr();

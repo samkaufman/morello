@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::nameenv::NameEnv;
 use crate::table::DbImpl;
 use crate::target::Target;
@@ -31,7 +33,6 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, print_mode: PrintMode) {
     }
     table.set_titles(titles);
 
-    // Traverse the Impl.
     let spec = &root.aux().as_ref().unwrap().0;
     let args = spec
         .0
@@ -44,30 +45,16 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, print_mode: PrintMode) {
         .iter()
         .map(|p| p as &dyn View<Tgt = Tgt>)
         .collect::<Vec<_>>();
-    root.traverse(
-        &args_ptrs,
+
+    let mut param_bindings = HashMap::new();
+    root.bind(&args_ptrs, &mut param_bindings);
+    pprint_inner(
+        &mut table,
+        root,
+        &param_bindings,
+        &mut name_env,
         0,
-        &mut |imp, args: &[&(dyn View<Tgt = Tgt>)], depth| {
-            if let Some(line_top) = imp.line_strs(&mut name_env, args) {
-                let indent = indent(depth);
-                let main_str = format!("{indent}{line_top}");
-                let mut r = row![main_str, "", ""];
-                if let Some((spec, cost)) = imp.aux() {
-                    if print_mode == PrintMode::Full {
-                        r = row![main_str, format!("{}", &spec.0)];
-                    } else {
-                        r = row![format!("{indent}/* {} */\n{main_str}\n", &spec.0)];
-                    }
-                    if print_mode != PrintMode::Compact {
-                        for level_peak in cost.peaks.iter() {
-                            r.add_cell(Cell::new(&format!("{: >4}", level_peak)));
-                        }
-                        r.add_cell(Cell::new(&format!("{:?}", cost.main)));
-                    }
-                }
-                table.add_row(r);
-            }
-        },
+        print_mode,
     );
 
     // Format and print the table.
@@ -80,4 +67,45 @@ pub fn pprint<Tgt: Target>(root: &DbImpl<Tgt>, print_mode: PrintMode) {
         .build();
     table.set_format(format);
     table.printstd();
+}
+
+fn pprint_inner<'a, Tgt: Target>(
+    table: &mut prettytable::Table,
+    imp: &'a DbImpl<Tgt>,
+    param_bindings: &'a HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
+    name_env: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
+    depth: usize,
+    print_mode: PrintMode,
+) {
+    if let Some(line_top) = imp.line_strs(name_env, param_bindings) {
+        let indent_str = indent(depth);
+        let main_str = format!("{indent_str}{line_top}");
+        let mut r = row![main_str, "", ""];
+        if let Some((spec, cost)) = imp.aux() {
+            match print_mode {
+                PrintMode::Full => {
+                    r = row![main_str, format!("{}", &spec.0)];
+                    for level_peak in cost.peaks.iter() {
+                        r.add_cell(Cell::new(&format!("{: >4}", level_peak)));
+                    }
+                    r.add_cell(Cell::new(&format!("{:?}", cost.main)));
+                }
+                PrintMode::Compact => {
+                    r = row![format!("{indent_str}/* {} */\n{main_str}\n", &spec.0)];
+                }
+            }
+        }
+        table.add_row(r);
+    }
+
+    for child in imp.children() {
+        pprint_inner(
+            table,
+            child,
+            param_bindings,
+            name_env,
+            depth + 1,
+            print_mode,
+        );
+    }
 }

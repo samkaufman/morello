@@ -74,7 +74,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
     fn line_strs<'a>(
         &'a self,
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
-        args: &[&dyn View<Tgt = Tgt>],
+        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         let name = match self.kernel_type {
             KernelType::Mult => "Mult",
@@ -85,9 +85,10 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
             KernelType::VectorZero => "VectorZero",
             KernelType::CacheAccess => "CacheAccess",
         };
-        let args_str = args
+        let args_str = self
+            .arguments
             .iter()
-            .map(|&a| names.get_name_or_display(a))
+            .map(|a| names.get_name_or_display(param_bindings[a]))
             .join(", ");
         Some(format!("{}({})", name, args_str))
     }
