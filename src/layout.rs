@@ -421,3 +421,19 @@ pub fn nhwc() -> Layout {
         dim_order: vec![0, 2, 3, 1].into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Layout;
+    use smallvec::smallvec;
+
+    #[test]
+    fn test_col_major_slices_are_non_contiguous() {
+        let col_major = Layout::Standard {
+            dim_order: smallvec![1, 0],
+        };
+        let inner_contig =
+            col_major.tile_contiguity(&[1, 8], &[128, 128], col_major.contiguous_full());
+        assert_eq!(inner_contig, 1);
+    }
+}
