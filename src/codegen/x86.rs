@@ -386,7 +386,8 @@ impl<'a> X86CodeGenerator<'a> {
             )?;
         }
 
-        for (var_name, (_, steps)) in iter_var_names.values().zip(&axes_to_emit) {
+        for (axis, steps) in &axes_to_emit {
+            let var_name = iter_var_names.get(axis).unwrap();
             writeln!(
                 w,
                 "{}for (int {} = 0; {} < {}; {}++) {{",
