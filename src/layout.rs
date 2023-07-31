@@ -106,21 +106,22 @@ impl Layout {
         one_back: bool,
         comp: impl Fn(u32) -> u32,
     ) {
-        if let Layout::Standard { dim_order } = self {
-            while usize::from(*cnt) < tile_shape.len() {
-                let mut rev_dim_idx = usize::from(*cnt);
-                if one_back {
-                    rev_dim_idx += 1;
-                }
+        let Layout::Standard { dim_order } = self else {
+            unreachable!();
+        };
 
-                let phys_idx = usize::from(dim_order[dim_order.len() - rev_dim_idx]);
-                if tile_shape[phys_idx] != comp(phys_idx.try_into().unwrap()) {
-                    break;
-                }
-                *cnt += 1;
+        let tile_rank = u8::try_from(tile_shape.len()).unwrap();
+        while *cnt < tile_rank {
+            let mut rev_dim_idx = *cnt;
+            if one_back {
+                rev_dim_idx += 1;
             }
-        } else {
-            panic!("inner_loop is only applicable to Standard layout variant")
+
+            let phys_idx = usize::from(dim_order[dim_order.len() - usize::from(rev_dim_idx)]);
+            if tile_shape[phys_idx] != comp(phys_idx.try_into().unwrap()) {
+                break;
+            }
+            *cnt += 1;
         }
     }
 
