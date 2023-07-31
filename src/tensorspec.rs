@@ -23,7 +23,7 @@ pub struct TensorSpecAux<Tgt: Target> {
     pub aligned: bool,
     pub level: Tgt::Level,
     pub layout: Layout,
-    pub vector_shape: Option<Shape>,
+    pub vector_size: Option<DimSize>,
 }
 
 impl<Tgt: Target> TensorSpec<Tgt> {
@@ -34,7 +34,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         aligned: bool,
         level: Tgt::Level,
         layout: Layout,
-        vector_shape: Option<Shape>,
+        vector_size: Option<DimSize>,
     ) -> Self {
         let mut r = Self::new_noncanon(
             dim_sizes,
@@ -43,7 +43,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             aligned,
             level,
             layout,
-            vector_shape,
+            vector_size,
         );
         r.canonicalize();
         r
@@ -56,7 +56,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         aligned: bool,
         level: Tgt::Level,
         layout: Layout,
-        vector_shape: Option<Shape>,
+        vector_size: Option<DimSize>,
     ) -> Self {
         Self::new_noncanon_with_aux(
             dim_sizes,
@@ -66,7 +66,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
                 aligned,
                 level,
                 layout,
-                vector_shape,
+                vector_size,
             },
         )
     }
@@ -83,19 +83,10 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             );
         }
 
-        if aux.vector_shape.is_some() != aux.level.vector_rf() {
+        if aux.vector_size.is_some() != aux.level.vector_rf() {
             panic!(
-                "vector_shape must be specified if and only if the bank ({:?}) is a vector register file", aux.level
+                "vector_size must be specified if and only if the bank ({:?}) is a vector register file", aux.level
             )
-        }
-
-        if let Some(vs) = &aux.vector_shape {
-            if vs.len() != dim_sizes.len() {
-                panic!(
-                    "vector_shape must have same rank as dim_sizes, but vector_shape was {:?} and dim_sizes was {:?}",
-                    vs, dim_sizes
-                );
-            }
         }
 
         TensorSpec {
@@ -165,20 +156,20 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.aux.level
     }
 
-    pub fn vector_shape(&self) -> Option<&[DimSize]> {
-        self.aux.vector_shape.as_ref().map(|v| v.as_slice())
+    pub fn vector_size(&self) -> Option<DimSize> {
+        self.aux.vector_size
     }
 
-    pub fn set_level(&mut self, level: Tgt::Level, vector_shape: Option<Shape>) {
+    pub fn set_level(&mut self, level: Tgt::Level, vector_size: Option<DimSize>) {
         assert_eq!(
             level.vector_rf(),
-            vector_shape.is_some(),
+            vector_size.is_some(),
             "Cannot set level to {:?} with vector shape {:?}",
             level,
-            vector_shape
+            vector_size
         );
         self.aux.level = level;
-        self.aux.vector_shape = vector_shape;
+        self.aux.vector_size = vector_size;
     }
 
     /// Returns a new TensorSpec with the given shape and alignment.
@@ -222,21 +213,6 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             new_dim_sizes.remove(dim.into());
         }
 
-        let mut new_vector_shape = None;
-        if let Some(vector_shape) = self.vector_shape() {
-            new_vector_shape = Some(vector_shape.to_vec());
-            for &dim in dropped_dims.iter().rev() {
-                assert_eq!(
-                    vector_shape[usize::from(dim)],
-                    1,
-                    "Cannot drop dimension {} of vector shape {:?}",
-                    dim,
-                    vector_shape
-                );
-                new_vector_shape.as_mut().unwrap().remove(dim.into());
-            }
-        }
-
         let (new_layout, new_contig) = if new_dim_sizes.iter().all(|&d| d == 1) {
             let new_layout = row_major(new_dim_sizes.len().try_into().unwrap());
             (new_layout.clone(), new_layout.contiguous_full())
@@ -253,7 +229,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             self.aligned(),
             self.level(),
             new_layout,
-            new_vector_shape.map(|v| v.into()),
+            self.vector_size(),
         )
     }
 
@@ -333,14 +309,8 @@ fn tensorspec_aux_str<Tgt: Target>(aux: &TensorSpecAux<Tgt>) -> String {
         parts.push(String::from("ua"));
     }
 
-    if let Some(shape) = &aux.vector_shape {
-        parts.push(
-            shape
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-                .join("×"),
-        );
+    if let Some(vector_size) = aux.vector_size {
+        parts.push(vector_size.to_string());
     }
 
     join_into_string(&parts, ", ")

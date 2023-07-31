@@ -16,7 +16,7 @@ use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
-use crate::target::{MemoryLevel, Target, X86MemoryLevel, X86Target};
+use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
 use crate::views::{CacheView, Param, Tensor, Tile, View, ViewExt};
@@ -39,14 +39,14 @@ pub enum Action<Tgt: Target> {
         source_idx: u8,
         destination_level: Tgt::Level,
         destination_layout: Layout,
-        destination_vector_shape: Option<Shape>,
+        destination_vector_size: Option<DimSize>,
         prefetch: bool,
     },
     ToAccum,
     Peel {
         layout: Layout,
         level: Tgt::Level,
-        vector_shape: Option<Shape>,
+        vector_size: Option<DimSize>,
     },
     SpatialSplit,
     Place(KernelType),
@@ -115,19 +115,18 @@ impl<Tgt: Target> Action<Tgt> {
                             // Tiling happens in three steps:
                             // 1. Construct the simple tile corresponding to the new output shape.
                             let out_idx: u8 = node_spec.output_idx().try_into().unwrap();
+                            let smaller_output_tiling = Tiling::new_simple(output_shape.clone());
                             let smaller_output = LoopTile {
                                 axes: (0..output_shape.len())
                                     .map(|d| d.try_into().unwrap())
                                     .collect(),
-                                tile: Tile::new(
-                                    Tiling::new_simple(output_shape.clone()),
-                                    Param::new(out_idx, current_output.clone()),
-                                ),
+                                tile: smaller_output_tiling
+                                    .apply(Param::new(out_idx, current_output.clone())),
                             };
 
                             // 2. Construct tilings which respect the data deps. of the new output tile.
                             let updated_input_tilings =
-                                node_spec.input_tilings_for_tile_out(&smaller_output.tile.tiling);
+                                node_spec.input_tilings_for_tile_out(&smaller_output_tiling);
 
                             // 3. Reify the tilings into Tiles we'll store with this action. Tiles
                             //    objects track the index and shape of the Impl parameter being
@@ -175,13 +174,10 @@ impl<Tgt: Target> Action<Tgt> {
                                 if original_input.dim_sizes() != &tiling_shape[..] {
                                     new_tiles.push(LoopTile {
                                         axes,
-                                        tile: Tile::new(
-                                            updated_input_tiling,
-                                            Param::new(
-                                                operand_idx.try_into().unwrap(),
-                                                original_input.clone(),
-                                            ),
-                                        ),
+                                        tile: updated_input_tiling.apply(Param::new(
+                                            operand_idx.try_into().unwrap(),
+                                            original_input.clone(),
+                                        )),
                                     });
                                 }
                             }
@@ -203,20 +199,16 @@ impl<Tgt: Target> Action<Tgt> {
                                                 LoopTile {
                                                     axes: smallvec![0, 1],
                                                     tile: Tile::new(
-                                                        Tiling::new_simple(smallvec![
-                                                            lhs.dim_sizes()[0],
-                                                            *k
-                                                        ]),
+                                                        smallvec![lhs.dim_sizes()[0], *k],
+                                                        smallvec![lhs.dim_sizes()[0], *k],
                                                         Param::new(0, lhs.clone()),
                                                     ),
                                                 },
                                                 LoopTile {
                                                     axes: smallvec![1, 2],
                                                     tile: Tile::new(
-                                                        Tiling::new_simple(smallvec![
-                                                            *k,
-                                                            rhs.dim_sizes()[1]
-                                                        ]),
+                                                        smallvec![*k, rhs.dim_sizes()[1]],
+                                                        smallvec![*k, rhs.dim_sizes()[1]],
                                                         Param::new(1, rhs.clone()),
                                                     ),
                                                 },
@@ -237,7 +229,11 @@ impl<Tgt: Target> Action<Tgt> {
                     let mut new_operands = operands;
                     for loop_tile in &tiles {
                         let ref_op = &mut new_operands[usize::from(loop_tile.tile.view.0)];
-                        let aligned = aligned_approx(&loop_tile.tile.tiling, ref_op);
+                        let aligned = aligned_approx(
+                            loop_tile.tile.shape(),
+                            loop_tile.tile.step_sizes(),
+                            ref_op,
+                        );
                         ref_op.shrink(loop_tile.tile.shape(), aligned);
                     }
                     let mut inner_spec = node_spec.clone();
@@ -256,7 +252,7 @@ impl<Tgt: Target> Action<Tgt> {
             Action::Peel {
                 layout,
                 level,
-                vector_shape,
+                vector_size,
             } => {
                 let LogicalSpec::Compose { components, operand_auxes, serial_only } = node_spec else {
                     panic!();
@@ -275,7 +271,7 @@ impl<Tgt: Target> Action<Tgt> {
                     true,
                     *level,
                     layout.clone(),
-                    vector_shape.clone(),
+                    *vector_size,
                 );
                 let intermediate_tensor = Rc::new(Tensor::new(intermediate_tensorspec.clone()));
 
@@ -401,15 +397,15 @@ impl<Tgt: Target> Action<Tgt> {
                 // so this amounts to keeping the outer two dimensions of each (batch and channels,
                 // then filters count and channels, respectively) and replacing the rest with ones.
                 let [outer_image_tile, outer_filters_tile] = [0, 1].map(|idx| {
-                    let tiling = Tiling::new_simple(
-                        operands[idx].dim_sizes()[..2]
-                            .iter()
-                            .chain(iter::repeat(&1).take((rank - 2).into()))
-                            .copied()
-                            .collect(),
-                    );
+                    let shape = operands[idx].dim_sizes()[..2]
+                        .iter()
+                        .chain(iter::repeat(&1).take((rank - 2).into()))
+                        .copied()
+                        .collect::<Shape>();
+                    let step_sizes = shape.clone();
                     Tile::new(
-                        tiling,
+                        shape,
+                        step_sizes,
                         Param::new(idx.try_into().unwrap(), operands[idx].clone()),
                     )
                 });
@@ -471,7 +467,7 @@ impl<Tgt: Target> Action<Tgt> {
                 source_idx,
                 destination_level,
                 destination_layout,
-                destination_vector_shape,
+                destination_vector_size,
                 prefetch,
             } => {
                 if *prefetch {
@@ -484,7 +480,7 @@ impl<Tgt: Target> Action<Tgt> {
                     destination_level,
                     &destination_layout
                         .canonicalize_for_shape(outer_moved_operand_spec.dim_sizes()),
-                    destination_vector_shape.as_ref().map(|v| v.as_slice()),
+                    *destination_vector_size,
                 );
                 let inner_moved_operand = if new_spec.level().is_addressed() {
                     TensorOrCacheView::Tensor(Rc::new(Tensor::new(new_spec)))
@@ -545,9 +541,7 @@ impl<Tgt: Target> Action<Tgt> {
                                         outer_aux: left_spec.aux.clone(),
                                         inner_level: right_spec.level(),
                                         inner_layout: right_spec.layout(),
-                                        inner_vector_shape: right_spec
-                                            .vector_shape()
-                                            .map(Shape::from),
+                                        inner_vector_size: right_spec.vector_size(),
                                     },
                                     node_spec.serial_only(),
                                 ),
@@ -669,7 +663,7 @@ impl<Tgt: Target> Display for Action<Tgt> {
                 source_idx,
                 destination_level,
                 destination_layout,
-                destination_vector_shape,
+                destination_vector_size,
                 prefetch,
             } => write!(
                 f,
@@ -677,7 +671,7 @@ impl<Tgt: Target> Display for Action<Tgt> {
                 source_idx,
                 destination_level,
                 destination_layout,
-                destination_vector_shape,
+                destination_vector_size,
                 prefetch
             ),
             Action::Place(KernelType::Mult) => write!(f, "Mult"),
@@ -713,17 +707,11 @@ fn move_gens_epilogue<Tgt: Target>(
     destination_level.is_addressed() && is_output
 }
 
-pub fn mult_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
-    operands
-        .iter()
-        .all(|o| o.level() == X86MemoryLevel::RF && o.dim_sizes().iter().all(|&d| d == 1))
-}
-
 pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
     operand: &TensorSpec<Tgt>,
     destination_level: &Tgt::Level,
     destination_layout: &Layout,
-    destination_vector_shape: Option<&[DimSize]>,
+    destination_vector_size: Option<DimSize>,
 ) -> TensorSpec<Tgt> {
     // When moving into an addressed bank, we'll generate an aligned destination.
     // If it's into a cache level, alignment won't change.
@@ -748,115 +736,6 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
         aligned,
         *destination_level,
         destination_layout.clone(),
-        destination_vector_shape.map(SmallVec::from),
+        destination_vector_size,
     )
-}
-
-pub fn broadcastvecmult_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
-    if operands[0].level() != X86MemoryLevel::RF {
-        return false;
-    }
-    for i in 1..3 {
-        if operands[i].level() != X86MemoryLevel::VRF {
-            return false;
-        }
-        if operands[i].dim_sizes() != operands[i].vector_shape().unwrap() {
-            return false;
-        }
-        if !operands[i].aligned() || !operands[i].is_contiguous() {
-            return false;
-        }
-        if operands[0].dtype() != operands[i].dtype() {
-            return false;
-        }
-    }
-    if operands[0].dim_sizes().iter().any(|d| *d != 1) {
-        return false;
-    }
-    if operands[1].dim_sizes().len() != 2 || operands[1].dim_sizes()[0] != 1 {
-        return false;
-    }
-    if operands[2].dim_sizes().to_vec() != vec![1, operands[1].dim_sizes()[1]] {
-        return false;
-    }
-    true
-}
-
-pub fn valueassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>]) -> bool {
-    if operands[0].level() == operands[1].level() {
-        return false;
-    }
-    for o in operands {
-        for &d in o.dim_sizes() {
-            if d != 1 {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>]) -> bool {
-    if operands.iter().any(|o| !o.is_contiguous()) {
-        return false;
-    }
-    if operands[0].dtype() != operands[1].dtype() {
-        return false;
-    }
-    if operands[0].dim_sizes() != operands[1].dim_sizes() {
-        return false;
-    }
-    if operands[0].layout() != operands[1].layout() {
-        return false;
-    }
-
-    let mut has_vrf = false;
-    for o in operands {
-        if o.level().vector_rf() {
-            has_vrf = true;
-            match &o.vector_shape() {
-                Some(vshape) => {
-                    if vshape != &o.dim_sizes() {
-                        return false;
-                    }
-                }
-                None => {
-                    panic!("No vector_shape on operand in level {:?}", o.level());
-                }
-            }
-        }
-    }
-    if !has_vrf {
-        // Neither operand is in a vector RF.
-        return false;
-    }
-
-    true
-}
-
-pub fn memsetzero_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
-    if !operands[0].is_contiguous() {
-        return false;
-    }
-    if operands[0].level() != X86MemoryLevel::RF {
-        return false;
-    }
-    true
-}
-
-pub fn vectorzero_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
-    if !operands[0].is_contiguous() {
-        return false;
-    }
-    if operands[0].level() != X86MemoryLevel::VRF {
-        return false;
-    }
-    match operands[0].vector_shape() {
-        Some(vshape) if vshape != operands[0].dim_sizes() => {
-            return false;
-        }
-        None => return false,
-        _ => (),
-    };
-    true
 }

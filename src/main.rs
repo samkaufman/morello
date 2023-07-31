@@ -84,7 +84,7 @@ where
                         aligned: true,
                         level: X86MemoryLevel::GL,
                         layout: rm2,
-                        vector_shape: None,
+                        vector_size: None,
                     };
                     3
                 ]),
@@ -119,7 +119,7 @@ where
                         aligned: true,
                         level: X86MemoryLevel::GL,
                         layout: rm,
-                        vector_shape: None,
+                        vector_size: None,
                     };
                     3
                 ]),

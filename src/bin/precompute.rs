@@ -67,11 +67,11 @@ fn load_or_store(prim_type: PrimitiveSpecType, size: DimSize, rank: u8) -> Logic
                 aligned: true,
                 level: X86MemoryLevel::GL,
                 layout: layout.clone(),
-                vector_shape: None,
+                vector_size: None,
             },
             inner_level: X86MemoryLevel::L1,
             inner_layout: layout,
-            inner_vector_shape: None,
+            inner_vector_size: None,
         },
         true,
     )
@@ -103,7 +103,7 @@ where
                 aligned: true,
                 level: X86MemoryLevel::GL,
                 layout,
-                vector_shape: None,
+                vector_size: None,
             }]),
             true,
         )
@@ -115,7 +115,7 @@ where
             aligned: true,
             level: X86MemoryLevel::GL,
             layout,
-            vector_shape: None,
+            vector_size: None,
         };
         LogicalSpec::Primitive(
             PrimitiveBasics {
@@ -134,7 +134,7 @@ where
             aligned: true,
             level: X86MemoryLevel::GL,
             layout,
-            vector_shape: None,
+            vector_size: None,
         };
         args.filters_size
             .iter()

@@ -162,13 +162,7 @@ impl<Tgt: Target, Aux: Clone> Loop<Tgt, Aux> {
 
     pub fn full_steps(&self) -> u32 {
         first_dim_per_axis(self)
-            .map(|(loop_tile, dim_idx, _)| {
-                let s = loop_tile.tile.steps_dim(dim_idx);
-                match loop_tile.tile.boundary_size(dim_idx) {
-                    0 => s,
-                    _ => s - 1,
-                }
-            })
+            .map(|(loop_tile, dim_idx, _)| loop_tile.tile.steps_dim(dim_idx))
             .product()
     }
 }
