@@ -1,12 +1,12 @@
 use itertools::{Either, Itertools};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug, Write};
 use std::rc::Rc;
 
 use super::c_utils::{CBuffer, CExprTerm, VecType};
 use super::namegen::NameGenerator;
 use super::CodeGen;
-use crate::codegen::c_utils::{c_type, VecVarsDerived, VecVarsMain};
+use crate::codegen::c_utils::c_type;
 use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineExpr, Term};
@@ -94,7 +94,7 @@ impl<'a> X86CodeGenerator<'a> {
             let spec = tensor.spec();
             let new_c_buffer = self.make_buffer(
                 spec.dim_sizes(),
-                spec.vector_shape(),
+                spec.vector_size(),
                 spec.dtype(),
                 spec.level(),
             );
@@ -218,27 +218,29 @@ impl<'a> X86CodeGenerator<'a> {
     fn make_buffer(
         &mut self,
         shape: &[DimSize],
-        vector_shape: Option<&[DimSize]>,
+        vector_size: Option<DimSize>,
         dtype: Dtype,
         level: X86MemoryLevel,
     ) -> CBuffer {
-        debug_assert_eq!(vector_shape.is_some(), level == X86MemoryLevel::VRF);
+        debug_assert_eq!(vector_size.is_some(), level == X86MemoryLevel::VRF);
 
         let name = self.namer.fresh_name();
         let size = shape.iter().product::<DimSize>();
         match level {
             X86MemoryLevel::VRF => {
-                let vector_shape = vector_shape.unwrap();
-                let vec_type = get_vector(dtype, vector_shape);
+                let vector_size = vector_size.unwrap();
+                let vec_type = get_vector(dtype, vector_size);
                 self.headers.vector_type_defs.insert(vec_type);
-                let main = VecVarsMain {
-                    name,
-                    vec_type,
-                    tensor_shape: shape.into(),
-                    vector_shape: vector_shape.into(),
-                };
-                let derived = VecVarsDerived::compute(&main, &mut self.namer);
-                CBuffer::VecVars(main, derived)
+
+                debug_assert_eq!(size % vector_size, 0);
+                let inner_vecs = (0..(size / vector_size))
+                    .map(|_| CBuffer::SingleVecVar {
+                        name: self.namer.fresh_name(),
+                        vec_type,
+                    })
+                    .collect::<Vec<_>>();
+
+                CBuffer::VecVars { inner_vecs }
             }
             X86MemoryLevel::RF => {
                 if size > 1 {
@@ -291,7 +293,7 @@ impl<'a> X86CodeGenerator<'a> {
                         let spec = move_let.introduced.spec();
                         let dest_buffer = self.make_buffer(
                             spec.dim_sizes(),
-                            spec.vector_shape(),
+                            spec.vector_size(),
                             spec.dtype(),
                             spec.level(),
                         );
@@ -378,11 +380,12 @@ impl<'a> X86CodeGenerator<'a> {
                         let shape = arguments[0].shape();
                         let dtype = arguments[0].spec().dtype();
                         debug_assert_eq!(shape, arguments[1].shape());
+                        let volume = shape.iter().product::<DimSize>();
 
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_ptr(a, b, None)
                         });
-                        let vtype = get_vector(dtype, shape);
+                        let vtype = get_vector(dtype, volume);
                         let itype = vtype.native_type_name;
                         if arguments.iter().all(|a| a.1.aligned()) {
                             writeln!(
@@ -411,7 +414,8 @@ impl<'a> X86CodeGenerator<'a> {
                     KernelType::BroadcastVecMult => {
                         let shape = arguments[2].shape();
                         let dtype = arguments[2].spec().dtype();
-                        let itype = get_vector(dtype, shape).native_type_name;
+                        let volume = shape.iter().product::<DimSize>();
+                        let itype = get_vector(dtype, volume).native_type_name;
                         let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
                             0 => self.c_index(a, b, None),
                             1 | 2 => self.c_index_ptr(a, b, None),
@@ -452,10 +456,10 @@ impl<'a> X86CodeGenerator<'a> {
         // name and store that association in the `self.loop_iter_names`.
         for loop_tile in &l.tiles {
             for tt in loop_tile.tile.tile_dim_terms() {
-                let BufferExprTerm::TileIdx(dim, _) = &tt else {
+                let BufferExprTerm::TileIdx(dim, _) = tt else {
                     unreachable!();
                 };
-                let axis = loop_tile.axes[usize::from(*dim)];
+                let axis = loop_tile.axes[usize::from(dim)];
                 if let Some(axis_loop_iter_name) = iter_var_names.get(&axis) {
                     self.loop_iter_bindings
                         .insert(tt.clone(), Either::Left(axis_loop_iter_name.clone()));
@@ -472,7 +476,8 @@ impl<'a> X86CodeGenerator<'a> {
             )?;
         }
 
-        for (var_name, (_, steps)) in iter_var_names.values().zip(&axes_to_emit) {
+        for (axis, steps) in &axes_to_emit {
+            let var_name = iter_var_names.get(axis).unwrap();
             writeln!(
                 w,
                 "{}for (int {} = 0; {} < {}; {}++) {{",
@@ -584,22 +589,6 @@ impl<'a> X86CodeGenerator<'a> {
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
-            CBuffer::Ptr { name, .. } => match reinterpret {
-                Some(_) => unimplemented!(),
-                None => format!(
-                    "{}[{}]",
-                    name,
-                    expr_to_c(&self.sub_expr_bindings(expr.clone()))
-                ),
-            },
-            CBuffer::UnsizedHeapArray { name, .. } => match reinterpret {
-                Some(_) => unimplemented!(),
-                None => format!(
-                    "{}[{}]",
-                    name,
-                    expr_to_c(&self.sub_expr_bindings(expr.clone()))
-                ),
-            },
             CBuffer::HeapArray { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
                 None => format!(
@@ -632,7 +621,7 @@ impl<'a> X86CodeGenerator<'a> {
                     )
                 }
             }
-            CBuffer::VecVars(_, _) => {
+            CBuffer::VecVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index(
@@ -654,11 +643,9 @@ impl<'a> X86CodeGenerator<'a> {
         #![allow(clippy::only_used_in_recursion)]
 
         match buffer {
-            CBuffer::Ptr { .. }
-            | CBuffer::UnsizedHeapArray { .. }
-            | CBuffer::HeapArray { .. }
-            | CBuffer::StackArray { .. }
-            | CBuffer::ValueVar { .. } => unimplemented!(),
+            CBuffer::HeapArray { .. } | CBuffer::StackArray { .. } | CBuffer::ValueVar { .. } => {
+                unimplemented!()
+            }
             CBuffer::SingleVecVar { name, .. } => {
                 if expr != 0 {
                     panic!("expr must be 0, but was: {:?}", expr);
@@ -668,7 +655,7 @@ impl<'a> X86CodeGenerator<'a> {
                 }
                 name.clone()
             }
-            CBuffer::VecVars(_, _) => {
+            CBuffer::VecVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index_vec(
@@ -687,9 +674,7 @@ impl<'a> X86CodeGenerator<'a> {
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
-            CBuffer::Ptr { name, .. }
-            | CBuffer::UnsizedHeapArray { name, .. }
-            | CBuffer::HeapArray { name, .. } => match reinterpret {
+            CBuffer::HeapArray { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
                 None => {
                     format!(
@@ -723,7 +708,7 @@ impl<'a> X86CodeGenerator<'a> {
                     format!("&{}", self.c_index(buffer, expr, None))
                 }
             }
-            CBuffer::VecVars(_, _) => {
+            CBuffer::VecVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index_ptr(
@@ -745,12 +730,12 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
         .iter()
         .flat_map(|t| {
             t.axes.iter().enumerate().filter_map(|(dim_idx, axis)| {
-                let s = t.tile.steps_dim(dim_idx.try_into().unwrap());
-                debug_assert_ne!(s, 0);
-                if s == 1 {
+                let steps = t.tile.steps_dim(dim_idx.try_into().unwrap());
+                debug_assert_ne!(steps, 0);
+                if steps == 1 {
                     None
                 } else {
-                    Some((*axis, s))
+                    Some((*axis, steps))
                 }
             })
         })
@@ -760,24 +745,25 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
     // builds.
     #[cfg(debug_assertions)]
     {
-        let mut seen = std::collections::HashSet::new();
-        for (axis, _steps) in result.clone() {
-            assert!(seen.insert(axis));
+        let mut seen = HashSet::new();
+        let rv = result.clone().collect::<Vec<_>>();
+        for (axis, _) in rv.clone() {
+            if !seen.insert(axis) {
+                panic!("Duplicate axis in result: {}", axis);
+            }
         }
     }
 
     result
 }
 
-fn get_vector(dtype: Dtype, vector_shape: &[DimSize]) -> &'static VecType {
+fn get_vector(dtype: Dtype, vector_size: DimSize) -> &'static VecType {
     X86_VEC_TYPES
         .iter()
         .find(|vec_type| {
-            vec_type.dtype == dtype
-                && vec_type.value_cnt
-                    == u8::try_from(vector_shape.iter().product::<DimSize>()).unwrap()
+            vec_type.dtype == dtype && vec_type.value_cnt == u8::try_from(vector_size).unwrap()
         })
-        .expect("VecType to match dtype and volume of vector_shape")
+        .expect("VecType to match dtype and volume of vector_size")
 }
 
 fn expr_to_c(e: &AffineExpr<CExprTerm>) -> String {

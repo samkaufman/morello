@@ -58,7 +58,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
             "tile weren't sorted"
         );
 
-        // Return an iterator over paramters from loop tiles where they apply and the inner body
+        // Return an iterator over parameters from loop tiles where they apply and the inner body
         // elsewhere.
         let mut next_tile_idx = 0;
         let mut body_parameters = self.body.parameters().enumerate();
@@ -70,7 +70,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
             Some((i, body_param)) => match self.tiles.get(next_tile_idx) {
                 Some(next_tile) if i == usize::from(next_tile.tile.view.0) => {
                     next_tile_idx += 1;
-                    Some(next_tile.tile.spec())
+                    Some(next_tile.tile.view.spec())
                 }
                 _ => Some(body_param),
             },
@@ -125,7 +125,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
     fn line_strs<'a>(
         &'a self,
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
-        args: &[&dyn View<Tgt = Tgt>],
+        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         Some(format!(
             "tile{} ({})",
@@ -133,7 +133,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
             self.tiles
                 .iter()
                 .map(|t| {
-                    let source = args[usize::from(t.tile.view.0)];
+                    let source = param_bindings[&t.tile.view];
                     let left = names.name(&t.tile).to_owned();
                     let right = names.get_name_or_display(source);
                     format!(
@@ -162,13 +162,7 @@ impl<Tgt: Target, Aux: Clone> Loop<Tgt, Aux> {
 
     pub fn full_steps(&self) -> u32 {
         first_dim_per_axis(self)
-            .map(|(loop_tile, dim_idx, _)| {
-                let s = loop_tile.tile.steps_dim(dim_idx);
-                match loop_tile.tile.boundary_size(dim_idx) {
-                    0 => s,
-                    _ => s - 1,
-                }
-            })
+            .map(|(loop_tile, dim_idx, _)| loop_tile.tile.steps_dim(dim_idx))
             .product()
     }
 }

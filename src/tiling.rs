@@ -3,6 +3,7 @@ use smallvec::SmallVec;
 use std::fmt::Debug;
 
 use crate::common::{DimSize, Shape};
+use crate::views::{Tile, View};
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Tiling {
@@ -106,6 +107,12 @@ impl Tiling {
         } else {
             todo!("Arbitrary overlaps mean multiple boundary cases per dimension!");
         }
+    }
+
+    /// Construct a [Tile] over a given [View].
+    pub fn apply<V: View>(&self, view: V) -> Tile<V> {
+        // TODO: `apply` should also return boundary tiles.
+        Tile::new(self.shape.clone(), self.step_sizes.clone(), view)
     }
 }
 

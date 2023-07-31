@@ -1,12 +1,11 @@
 use crate::{
     alignment::aligned_approx,
-    common::DimSize,
+    common::{DimSize, Shape},
     expr::{AffineExpr, Term},
     layout::BufferExprTerm,
     opaque_symbol::OpaqueSymbol,
     target::Target,
     tensorspec::TensorSpec,
-    tiling::Tiling,
 };
 
 use auto_impl::auto_impl;
@@ -75,14 +74,6 @@ pub trait ViewExt: View {
             panic!("Cannot transpose a tensor with shape {:?}", self.shape());
         };
         let dim_sizes = smallvec![*w, *h];
-        let mut vector_shape = None;
-        if let Some(original_vector_shape) = self.spec().vector_shape() {
-            debug_assert_eq!(original_vector_shape.len(), 2);
-            vector_shape = Some(smallvec![
-                original_vector_shape[1],
-                original_vector_shape[0]
-            ]);
-        }
 
         let (transposed_layout, new_contig) = self
             .spec()
@@ -95,7 +86,7 @@ pub trait ViewExt: View {
             self.spec().aligned(),
             self.spec().level(),
             transposed_layout,
-            vector_shape,
+            self.spec().vector_size(),
         );
         TransposeView { inner: self, spec }
     }
@@ -126,9 +117,12 @@ impl<V: View> CacheView<V> {
     }
 }
 
+/// A tile with a fixed shape, resulting from applying a [Tiling] to a [View].
 #[derive(Debug, Clone)]
 pub struct Tile<V: View> {
-    pub tiling: Tiling,
+    // TODO: Since Tiles don't have boundaries, we shouldn't store Tiling.
+    shape: Shape,
+    step_sizes: SmallVec<[DimSize; 5]>,
     pub view: V,
     expr_term_id: OpaqueSymbol,
     spec: TensorSpec<V::Tgt>,
@@ -268,21 +262,26 @@ impl<V: View> View for CacheView<V> {
 
 impl<V: View> Tile<V> {
     // TODO: Drop this. Callers can build.
-    pub fn new(tiling: Tiling, view: V) -> Self {
+    pub fn new(shape: Shape, step_sizes: Shape, view: V) -> Self {
         let expr_term_id = OpaqueSymbol::new();
         let mut spec = view.spec().clone();
-        spec.shrink(tiling.shape(), aligned_approx(&tiling, view.spec()));
+        spec.shrink(&shape, aligned_approx(&shape, &step_sizes, view.spec()));
         Self {
-            tiling,
+            shape,
+            step_sizes,
             view,
             expr_term_id,
             spec,
         }
     }
 
+    pub fn step_sizes(&self) -> &[DimSize] {
+        &self.step_sizes
+    }
+
     /// Yields [`BufferExprTerm::TileIdx`] terms for each non-degenerate tiling dimension.
     pub fn tile_dim_terms(&self) -> impl Iterator<Item = BufferExprTerm> + '_ {
-        (0..self.tiling.shape().len()).filter_map(|dim| {
+        (0..self.shape.len()).filter_map(|dim| {
             let steps = self.steps_dim(dim.try_into().unwrap());
             debug_assert_ne!(steps, 0);
             if steps != 1 {
@@ -298,12 +297,7 @@ impl<V: View> Tile<V> {
 
     pub fn steps_dim(&self, dim: u8) -> u32 {
         let origin_size = self.view.shape()[usize::from(dim)];
-        self.tiling.steps_dim(dim, origin_size)
-    }
-
-    pub fn boundary_size(&self, dim: u8) -> u32 {
-        let origin_size = self.view.shape()[usize::from(dim)];
-        self.tiling.boundary_size(dim, origin_size)
+        divrem::DivCeil::div_ceil(origin_size, self.step_sizes[usize::from(dim)])
     }
 }
 
@@ -325,15 +319,14 @@ impl<T: View> View for Tile<T> {
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
     ) -> AffineExpr<BufferExprTerm> {
-        let tiling = &self.tiling;
         let expr = self.view.make_buffer_indexing_expr(env);
-        if tiling
+        if self
             .shape()
             .iter()
-            .zip(tiling.step_sizes())
+            .zip(&self.step_sizes)
             .any(|(a, b)| *a != *b)
         {
-            todo!("Implement support for sliding tilings. Surprisingly, got a sliding tiling with shape {:?} and step sizes {:?}", tiling.shape(), tiling.step_sizes());
+            todo!("Implement support for sliding tilings.");
         }
 
         let mut new_expr = expr.clone();
@@ -342,7 +335,7 @@ impl<T: View> View for Tile<T> {
                 continue;
             };
 
-            let size_in_dim = tiling.shape()[usize::from(*dim)];
+            let size_in_dim = self.shape()[usize::from(*dim)];
 
             let logical_substitution = {
                 let mut terms = vec![Term(1, BufferExprTerm::Pt(*dim, self.expr_term_id.clone()))];

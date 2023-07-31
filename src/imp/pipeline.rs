@@ -61,7 +61,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
     fn line_strs<'a>(
         &'a self,
         _names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
-        _args: &[&dyn View<Tgt = Tgt>],
+        _param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         let intermeds = self
             .intermediates

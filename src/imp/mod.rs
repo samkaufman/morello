@@ -48,7 +48,7 @@ pub trait Impl<Tgt: Target, Aux: Clone> {
     fn line_strs<'a>(
         &'a self,
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
-        args: &[&dyn View<Tgt = Tgt>],
+        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String>;
 
     fn aux(&self) -> &Aux;
@@ -114,56 +114,6 @@ impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
             }
         }
         peak
-    }
-}
-
-impl<Tgt: Target, Aux: Clone> ImplNode<Tgt, Aux> {
-    // TODO: enum_dispatch traverse to the Impl types. Challenge is we would need to move `self`.
-    /// Enumerate [`Impl`] nodes, along with their parameter bindings, depth-first.
-    pub fn traverse<'a, F>(&'a self, args: &[&dyn View<Tgt = Tgt>], depth: usize, f: &mut F)
-    where
-        F: FnMut(&'a ImplNode<Tgt, Aux>, &[&dyn View<Tgt = Tgt>], usize),
-    {
-        f(self, args, depth);
-        match self {
-            ImplNode::Loop(l) => {
-                let mut inner_args: Vec<&(dyn View<Tgt = Tgt>)> = args.to_vec();
-                for tile in &l.tiles {
-                    inner_args[usize::from(tile.tile.view.0)] = &tile.tile;
-                }
-                l.body.traverse(&inner_args, depth + 1, f);
-            }
-            ImplNode::Block(block) => {
-                debug_assert_eq!(block.stages.len(), block.bindings.len());
-                for (stage, stage_bindings) in block.stages.iter().zip(&block.bindings) {
-                    let inner_args = stage_bindings
-                        .iter()
-                        .map(|&b| args[usize::from(b)])
-                        .collect::<Vec<_>>();
-                    stage.traverse(&inner_args, depth + 1, f);
-                }
-            }
-            ImplNode::MoveLet(m) => {
-                let param_idx = usize::from(m.parameter_idx);
-
-                let mut moves_args = [args[param_idx], m.introduced.inner_fat_ptr()];
-
-                if let Some(p) = m.prologue() {
-                    p.traverse(&moves_args, depth + 1, f);
-                }
-
-                let mut inner_args = args.to_vec();
-                inner_args[param_idx] = m.introduced.inner_fat_ptr();
-                m.main_stage().traverse(&inner_args, depth + 1, f);
-
-                if let Some(e) = m.epilogue() {
-                    moves_args.swap(0, 1);
-                    e.traverse(&moves_args, depth + 1, f);
-                }
-            }
-            ImplNode::Pipeline(_) => todo!(),
-            ImplNode::Kernel(_) | ImplNode::SpecApp(_) => (),
-        }
     }
 }
 

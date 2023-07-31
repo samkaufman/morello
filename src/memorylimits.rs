@@ -65,7 +65,7 @@ impl MemoryLimits {
     /// Returns `None` if the given memory allocation exceeds this limit.
     ///
     /// Not that this ignores base memory allocations at the leaves. It is intended to
-    /// be used to prune expansions which consume too much memory without traversing.
+    /// be used to prune actions which consume too much memory without traversing.
     pub fn transition<Tgt: Target>(
         &self,
         allocated: &MemoryAllocation,

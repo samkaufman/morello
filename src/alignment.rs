@@ -2,18 +2,25 @@ use crate::common::{DimSize, Dtype};
 use crate::layout::Layout;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
-use crate::tiling::Tiling;
 
 use log::warn;
 
-pub fn aligned_approx<Tgt: Target>(tiling: &Tiling, parent: &TensorSpec<Tgt>) -> bool {
+pub fn aligned_approx<Tgt: Target>(
+    tile_shape: &[DimSize],
+    tile_step_sizes: &[DimSize],
+    parent: &TensorSpec<Tgt>,
+) -> bool {
+    debug_assert_eq!(tile_shape.len(), tile_step_sizes.len());
     if !parent.is_contiguous() || !parent.aligned() {
         return false;
     }
 
-    let tile_shape: &[DimSize] = tiling.shape().as_slice();
+    let is_simple = tile_shape
+        .iter()
+        .zip(tile_step_sizes.iter())
+        .all(|(s, t)| *s == *t);
 
-    match (parent.layout(), tiling.is_simple()) {
+    match (parent.layout(), is_simple) {
         (Layout::Standard { dim_order }, true) => aligned_approx_standard_simple::<Tgt>(
             tile_shape,
             dim_order.as_slice(),

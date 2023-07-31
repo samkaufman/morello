@@ -9,7 +9,6 @@ use crate::tiling::Tiling;
 use crate::utils::join_into_string;
 
 use core::panic;
-use log::warn;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec, ToSmallVec};
 use std::collections::HashMap;
@@ -19,9 +18,8 @@ use std::iter::Iterator;
 use std::iter::{self, once};
 use std::mem;
 
+use log::warn;
 use std::{assert_eq, debug_assert_eq};
-
-const LIMIT_VECTORS_TO_ONE_DIM: bool = true;
 
 // The following should probably just be Spec::Primitive and Spec::Compose variants once
 // there are good conversions to/from image/filter shapes for Conv.
@@ -62,7 +60,7 @@ pub enum PrimitiveAux<Tgt: Target> {
         outer_aux: TensorSpecAux<Tgt>,
         inner_level: Tgt::Level,
         inner_layout: Layout,
-        inner_vector_shape: Option<Shape>,
+        inner_vector_size: Option<DimSize>,
     },
 }
 
@@ -138,7 +136,7 @@ impl PrimitiveBasics {
                     outer_aux: first.clone(),
                     inner_level: second.level,
                     inner_layout: second.layout.clone(),
-                    inner_vector_shape: second.vector_shape.clone(),
+                    inner_vector_size: second.vector_size.clone(),
                 }
             }
         }
@@ -412,7 +410,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .collect()
                 }
                 PrimitiveSpecType::Move => {
-                    let PrimitiveAux::Move { outer_aux, inner_level, inner_layout, inner_vector_shape } = aux else {
+                    let PrimitiveAux::Move { outer_aux, inner_level, inner_layout, inner_vector_size } = aux else {
                         unreachable!();
                     };
                     let outer_tensor_spec = TensorSpec::new_noncanon_with_aux(
@@ -421,7 +419,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         outer_aux.clone(),
                     );
                     let mut inner_tensor_spec = outer_tensor_spec.clone();
-                    inner_tensor_spec.set_level(*inner_level, inner_vector_shape.to_owned());
+                    inner_tensor_spec.set_level(*inner_level, *inner_vector_size);
                     inner_tensor_spec.set_layout(inner_layout.to_owned());
                     inner_tensor_spec.canonicalize();
                     smallvec![outer_tensor_spec, inner_tensor_spec]
@@ -521,7 +519,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         outer_aux,
                         inner_level: _,
                         inner_layout,
-                        inner_vector_shape: _,
+                        inner_vector_size: _,
                     } = primitive_aux else {
                         unreachable!();
                     };
@@ -561,9 +559,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     pub fn actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
-        let iter = self.tile_out_expansions();
-        let iter = iter.chain(self.move_expansions());
-        let iter = iter.chain(Tgt::expansions(self));
+        let iter = self.tile_out_actions();
+        let iter = iter.chain(self.move_actions());
+        let iter = iter.chain(Tgt::actions(self));
 
         match &self {
             LogicalSpec::Primitive(
@@ -579,7 +577,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     Box::new(iter.chain(once(Action::ToAccum)))
                 }
                 PrimitiveSpecType::Matmul { accum } if *accum => {
-                    Box::new(iter.chain(self.split_expansions()))
+                    Box::new(iter.chain(self.split_actions()))
                 }
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
@@ -599,8 +597,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 operand_auxes: _,
                 serial_only: _,
             } => {
-                // TODO: Add head reduce split expansions as well.
-                Box::new(iter.chain(self.peel_expansions()))
+                // TODO: Add head reduce split actions as well.
+                Box::new(iter.chain(self.peel_actions()))
             }
         }
     }
@@ -630,8 +628,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             return false;
         }
         for a in aux {
-            if let Some(vector_shape) = &a.vector_shape {
-                if vector_shape[2..].iter().any(|&d| d != 1) {
+            if let Some(vector_size) = a.vector_size {
+                if vector_size != 1 {
                     return false;
                 }
             }
@@ -639,7 +637,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         true
     }
 
-    fn tile_out_expansions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
+    fn tile_out_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         let serial_only = self.serial_only();
         let output = self.output();
         gen_tile_sizes::<Tgt>(output.dim_sizes(), true).flat_map(move |tile_shape| {
@@ -652,15 +650,15 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         })
     }
 
-    fn split_expansions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
+    fn split_actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape, .. }, _, _) = self else {
-            panic!("split_expansions called on non-primitive Spec");
+            panic!("split_actions called on non-primitive Spec");
         };
         let PrimitiveSpecType::Matmul { accum } = typ else {
-            panic!("split_expansions called on non-Matmul");
+            panic!("split_actions called on non-Matmul");
         };
         if !accum {
-            panic!("split_expansions called on non-accumulating Matmul");
+            panic!("split_actions called on non-accumulating Matmul");
         }
         let k = spec_shape[1];
         Box::new(
@@ -670,9 +668,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         )
     }
 
-    fn peel_expansions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
+    fn peel_actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let LogicalSpec::Compose { components, operand_auxes: _, serial_only: _ } = self else {
-            panic!("peel_expansions called on non-Compose Spec");
+            panic!("peel_actions called on non-Compose Spec");
         };
 
         let mut results = vec![];
@@ -686,13 +684,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
                 let vector_bytes = level.vector_bytes();
                 if !vector_bytes.is_empty() {
-                    for vector_shape in gen_vector_shapes(
+                    for vector_size in gen_vector_sizes(
                         Some(intermediate_shape),
                         components[1].dtype,
                         vector_bytes,
-                        None,
                     ) {
-                        results.push(self.peel(layout.clone(), level, Some(vector_shape)));
+                        results.push(self.peel(layout.clone(), level, Some(vector_size)));
                     }
                 } else {
                     results.push(self.peel(layout.clone(), level, None));
@@ -730,7 +727,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    fn move_expansions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
+    fn move_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         // TODO: Add prefetching moves.
 
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
@@ -752,23 +749,17 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
                     let vector_bytes = level.vector_bytes();
                     if !vector_bytes.is_empty() {
-                        for vector_shape in gen_vector_shapes(
+                        for vector_size in gen_vector_sizes(
                             Some(operand.dim_sizes()),
                             operand.dtype(),
                             vector_bytes,
-                            None,
                         ) {
-                            results.push({
-                                let _this = self;
-                                let dest_layout = layout.clone();
-                                let vector_shape = Some(&vector_shape);
-                                Action::Move {
-                                    source_idx: i,
-                                    destination_level: level,
-                                    destination_layout: dest_layout,
-                                    destination_vector_shape: vector_shape.cloned(),
-                                    prefetch: false,
-                                }
+                            results.push(Action::Move {
+                                source_idx: i,
+                                destination_level: level,
+                                destination_layout: layout.clone(),
+                                destination_vector_size: Some(vector_size),
+                                prefetch: false,
                             });
                         }
                     } else {
@@ -778,7 +769,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                                 source_idx: i,
                                 destination_level: level,
                                 destination_layout: dest_layout,
-                                destination_vector_shape: None,
+                                destination_vector_size: None,
                                 prefetch: false,
                             }
                         });
@@ -804,11 +795,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         Action::Split { k: size }
     }
 
-    fn peel(&self, layout: Layout, level: Tgt::Level, vector_shape: Option<Shape>) -> Action<Tgt> {
+    fn peel(&self, layout: Layout, level: Tgt::Level, vector_size: Option<DimSize>) -> Action<Tgt> {
         Action::Peel {
             layout,
             level,
-            vector_shape,
+            vector_size,
         }
     }
 
@@ -998,7 +989,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         outer_aux,
                         inner_level,
                         inner_layout,
-                        inner_vector_shape,
+                        inner_vector_size,
                     } => {
                         let [src, dest] = new_operands else {
                             panic!("Moves must have 2 operands");
@@ -1006,7 +997,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         *outer_aux = src.aux.clone();
                         *inner_level = dest.level();
                         *inner_layout = dest.layout();
-                        *inner_vector_shape = dest.vector_shape().map(|s| s.to_smallvec());
+                        *inner_vector_size = dest.vector_size();
                     }
                 }
             }
@@ -1083,7 +1074,7 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
             self.aligned,
             self.level,
             self.layout.clone(),
-            self.vector_shape.clone(),
+            self.vector_size.clone(),
         )
     }
 }
@@ -1122,17 +1113,11 @@ fn gen_tile_sizes<Tgt: Target>(
     }
 }
 
-pub fn gen_vector_shapes<'a>(
+pub fn gen_vector_sizes<'a>(
     outer_shape: Option<&'a [DimSize]>,
     dtype: Dtype,
     vector_bytes: &'a [u32],
-    rank: Option<u8>,
-) -> Box<dyn Iterator<Item = Shape> + 'a> {
-    assert_ne!(
-        outer_shape.is_some(),
-        rank.is_some(),
-        "Must specify either outer_shape or rank, but not both"
-    );
+) -> impl Iterator<Item = DimSize> + 'a {
     assert!(outer_shape.is_none() || outer_shape.unwrap().iter().all(|&d| d > 0));
     assert!(!vector_bytes.is_empty());
     assert!(
@@ -1141,44 +1126,11 @@ pub fn gen_vector_shapes<'a>(
             .all(|&vb| vb % u32::from(dtype.size()) == 0),
         "vector_bytes must be a multiple of dtype size"
     );
-
-    let rank = rank.unwrap_or_else(|| outer_shape.unwrap().len().try_into().unwrap());
-
-    if LIMIT_VECTORS_TO_ONE_DIM {
-        Box::new(vector_bytes.iter().flat_map(move |&vb| {
-            let adjusted_vector_bytes: u32 = vb / u32::from(dtype.size());
-            debug_assert!(adjusted_vector_bytes > 0);
-
-            let mut iter_a = None;
-            let mut iter_b = None;
-
-            if adjusted_vector_bytes == 1 {
-                iter_a = Some(once(smallvec![1; rank.into()]));
-            } else {
-                let outer_shape = outer_shape.map(Vec::from);
-                let inner_iter = (0..rank)
-                    .rev()
-                    .map(usize::from)
-                    .filter(move |&i| {
-                        outer_shape.is_none()
-                            || outer_shape.as_ref().unwrap()[i] >= adjusted_vector_bytes
-                    })
-                    .map(move |i| {
-                        let mut v = smallvec![1; rank.into()];
-                        v[i] = adjusted_vector_bytes;
-                        v
-                    });
-                iter_b = Some(inner_iter);
-            }
-
-            iter_a
-                .into_iter()
-                .flatten()
-                .chain(iter_b.into_iter().flatten())
-        }))
-    } else {
-        todo!()
-    }
+    vector_bytes.iter().map(move |&vb| {
+        let value_cnt = vb / DimSize::from(dtype.size());
+        debug_assert!(value_cnt > 0);
+        value_cnt
+    })
 }
 
 pub fn dim_range(dim: DimSize, include_end: bool) -> impl Iterator<Item = DimSize> {

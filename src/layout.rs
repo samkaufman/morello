@@ -106,21 +106,22 @@ impl Layout {
         one_back: bool,
         comp: impl Fn(u32) -> u32,
     ) {
-        if let Layout::Standard { dim_order } = self {
-            while usize::from(*cnt) < tile_shape.len() {
-                let mut rev_dim_idx = usize::from(*cnt);
-                if one_back {
-                    rev_dim_idx += 1;
-                }
+        let Layout::Standard { dim_order } = self else {
+            unreachable!();
+        };
 
-                let phys_idx = usize::from(dim_order[dim_order.len() - rev_dim_idx]);
-                if tile_shape[phys_idx] != comp(phys_idx.try_into().unwrap()) {
-                    break;
-                }
-                *cnt += 1;
+        let tile_rank = u8::try_from(tile_shape.len()).unwrap();
+        while *cnt < tile_rank {
+            let mut rev_dim_idx = *cnt;
+            if one_back {
+                rev_dim_idx += 1;
             }
-        } else {
-            panic!("inner_loop is only applicable to Standard layout variant")
+
+            let phys_idx = usize::from(dim_order[dim_order.len() - usize::from(rev_dim_idx)]);
+            if tile_shape[phys_idx] != comp(phys_idx.try_into().unwrap()) {
+                break;
+            }
+            *cnt += 1;
         }
     }
 
@@ -419,5 +420,21 @@ pub fn row_major(rank: u8) -> Layout {
 pub fn nhwc() -> Layout {
     Layout::Standard {
         dim_order: vec![0, 2, 3, 1].into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Layout;
+    use smallvec::smallvec;
+
+    #[test]
+    fn test_col_major_slices_are_non_contiguous() {
+        let col_major = Layout::Standard {
+            dim_order: smallvec![1, 0],
+        };
+        let inner_contig =
+            col_major.tile_contiguity(&[1, 8], &[128, 128], col_major.contiguous_full());
+        assert_eq!(inner_contig, 1);
     }
 }

@@ -4,7 +4,7 @@ use smallvec::{smallvec, SmallVec};
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::layout::Layout;
 use crate::spec::{
-    conv_infer_output_shape, gen_vector_shapes, LogicalSpec, PrimitiveAux, PrimitiveBasics,
+    conv_infer_output_shape, gen_vector_sizes, LogicalSpec, PrimitiveAux, PrimitiveBasics,
     PrimitiveSpecType,
 };
 use crate::target::{MemoryLevel, Target, X86MemoryLevel, X86Target};
@@ -136,8 +136,8 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
 
                 let shapes = [smallvec![m, k], smallvec![k, n], smallvec![m, n]];
 
-                align_layout_contig_vector_shape_product::<X86Target>(&shapes, *dtype, &levels)
-                    .map(|(alignments, layouts, contigs, vector_shapes)| {
+                align_layout_contig_vector_size_product::<X86Target>(&shapes, *dtype, &levels)
+                    .map(|(alignments, layouts, contigs, vector_sizes)| {
                         LogicalSpec::Primitive(
                             PrimitiveBasics {
                                 typ: PrimitiveSpecType::Matmul { accum: pt[0] == 0 },
@@ -145,13 +145,13 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                 dtype: *dtype,
                             },
                             PrimitiveAux::Standard(
-                                izip!(contigs, alignments, layouts, vector_shapes, &levels)
-                                    .map(|(contig, aligned, layout, vector_shape, level)| {
+                                izip!(contigs, alignments, layouts, vector_sizes, &levels)
+                                    .map(|(contig, aligned, layout, vector_size, level)| {
                                         TensorSpecAux {
                                             contig,
                                             aligned,
                                             layout,
-                                            vector_shape,
+                                            vector_size,
                                             level: *level,
                                         }
                                     })
@@ -195,8 +195,8 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     .map(|&i| int_to_level(i))
                     .collect::<Vec<_>>();
 
-                align_layout_contig_vector_shape_product::<X86Target>(&shapes, *dtype, &levels)
-                    .map(|(alignments, layouts, contigs, vector_shapes)| {
+                align_layout_contig_vector_size_product::<X86Target>(&shapes, *dtype, &levels)
+                    .map(|(alignments, layouts, contigs, vector_sizes)| {
                         LogicalSpec::Primitive(
                             PrimitiveBasics {
                                 typ: PrimitiveSpecType::Conv { accum },
@@ -204,13 +204,13 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                 dtype: *dtype,
                             },
                             PrimitiveAux::Standard(
-                                izip!(contigs, alignments, layouts, vector_shapes, &levels)
-                                    .map(|(contig, aligned, layout, vector_shape, level)| {
+                                izip!(contigs, alignments, layouts, vector_sizes, &levels)
+                                    .map(|(contig, aligned, layout, vector_size, level)| {
                                         TensorSpecAux {
                                             contig,
                                             aligned,
                                             layout,
-                                            vector_shape,
+                                            vector_size,
                                             level: *level,
                                         }
                                     })
@@ -249,11 +249,10 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                     [source_level, destination_level]
                                         .map(|lvl| {
                                             if lvl.vector_rf() {
-                                                gen_vector_shapes(
+                                                gen_vector_sizes(
                                                     Some(dim_sizes),
                                                     *dtype,
                                                     lvl.vector_bytes(),
-                                                    None,
                                                 )
                                                 .map(Some)
                                                 .collect::<Vec<_>>()
@@ -263,36 +262,32 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                         })
                                         .into_iter()
                                         .multi_cartesian_product()
-                                        .map(
-                                            move |vector_shape_pair| match &vector_shape_pair[..] {
-                                                [source_vector_shape, destination_vector_shape] => {
-                                                    LogicalSpec::Primitive(
-                                                        PrimitiveBasics {
-                                                            typ: PrimitiveSpecType::Move,
-                                                            spec_shape: dim_sizes.clone(),
-                                                            dtype: *dtype,
+                                        .map(move |vector_size_pair| match &vector_size_pair[..] {
+                                            [source_vector_size, destination_vector_size] => {
+                                                LogicalSpec::Primitive(
+                                                    PrimitiveBasics {
+                                                        typ: PrimitiveSpecType::Move,
+                                                        spec_shape: dim_sizes.clone(),
+                                                        dtype: *dtype,
+                                                    },
+                                                    PrimitiveAux::Move {
+                                                        outer_aux: TensorSpecAux {
+                                                            contig: source_contiguous_abs,
+                                                            aligned: source_aligned,
+                                                            level: source_level,
+                                                            layout: source_layout.clone(),
+                                                            vector_size: source_vector_size.clone(),
                                                         },
-                                                        PrimitiveAux::Move {
-                                                            outer_aux: TensorSpecAux {
-                                                                contig: source_contiguous_abs,
-                                                                aligned: source_aligned,
-                                                                level: source_level,
-                                                                layout: source_layout.clone(),
-                                                                vector_shape: source_vector_shape
-                                                                    .clone(),
-                                                            },
-                                                            inner_level: destination_level,
-                                                            inner_layout: destination_layout
-                                                                .clone(),
-                                                            inner_vector_shape:
-                                                                destination_vector_shape.clone(),
-                                                        },
-                                                        serial_only,
-                                                    )
-                                                }
-                                                _ => unreachable!(),
-                                            },
-                                        )
+                                                        inner_level: destination_level,
+                                                        inner_layout: destination_layout.clone(),
+                                                        inner_vector_size: destination_vector_size
+                                                            .clone(),
+                                                    },
+                                                    serial_only,
+                                                )
+                                            }
+                                            _ => unreachable!(),
+                                        })
                                 })
                         },
                     )
@@ -305,16 +300,16 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     .iter()
                     .map(|&d| from_log2_dim_space(d))
                     .collect::<Shape>();
-                align_layout_contig_vector_shape_product::<X86Target>(
+                align_layout_contig_vector_size_product::<X86Target>(
                     &[dim_sizes.clone()],
                     *dtype,
                     &[level],
                 )
-                .map(|(alignments, layouts, contigs, vector_shapes)| {
+                .map(|(alignments, layouts, contigs, vector_sizes)| {
                     debug_assert_eq!(alignments.len(), 1);
                     debug_assert_eq!(layouts.len(), 1);
                     debug_assert_eq!(contigs.len(), 1);
-                    debug_assert_eq!(vector_shapes.len(), 1);
+                    debug_assert_eq!(vector_sizes.len(), 1);
                     LogicalSpec::Primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Zero,
@@ -326,7 +321,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                             aligned: alignments[0],
                             level,
                             layout: layouts[0].clone(),
-                            vector_shape: vector_shapes[0].clone(),
+                            vector_size: vector_sizes[0].clone(),
                         }]),
                         serial_only,
                     )
@@ -337,7 +332,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
     }
 }
 
-fn align_layout_contig_vector_shape_product<'s, Tgt: Target>(
+fn align_layout_contig_vector_size_product<'s, Tgt: Target>(
     shapes: &'s [Shape],
     dtype: Dtype,
     levels: &'s [Tgt::Level],
@@ -346,7 +341,7 @@ fn align_layout_contig_vector_shape_product<'s, Tgt: Target>(
         SmallVec<[bool; 3]>,
         SmallVec<[Layout; 3]>,
         SmallVec<[Contig; 3]>,
-        SmallVec<[Option<Shape>; 3]>,
+        SmallVec<[Option<DimSize>; 3]>,
     ),
 > + 's {
     assert_eq!(shapes.len(), levels.len());
@@ -360,21 +355,19 @@ fn align_layout_contig_vector_shape_product<'s, Tgt: Target>(
     align_prod
         .cartesian_product(layout_prod)
         .flat_map(move |(alignments, layouts)| {
-            // - contig.
             let contigs = layouts
                 .iter()
                 // TODO: Make iterator cloneable instead of collecting into Vec.
                 .map(|l| l.all_contiguous_abs().collect::<Vec<_>>())
                 .multi_cartesian_product();
-            // - vector shape
-            let vector_shapes = levels
+            let vector_sizes = levels
                 .iter()
                 // TODO: Make iterator cloneable instead of collecting into Vec.
                 .enumerate()
                 .map(|(idx, lvl)| {
                     //  TODO: Avoid this collection.
                     if lvl.vector_rf() {
-                        gen_vector_shapes(Some(&shapes[idx]), dtype, lvl.vector_bytes(), None)
+                        gen_vector_sizes(Some(&shapes[idx]), dtype, lvl.vector_bytes())
                             .map(Some)
                             .collect::<SmallVec<[_; 3]>>()
                     } else {
@@ -386,16 +379,16 @@ fn align_layout_contig_vector_shape_product<'s, Tgt: Target>(
                 iter::once(alignments),
                 iter::once(layouts),
                 contigs,
-                vector_shapes
+                vector_sizes
             )
         })
-        .map(|(alignments, layouts, contigs, vector_shapes)| {
+        .map(|(alignments, layouts, contigs, vector_sizes)| {
             // TODO: Collect into SmallVecs immediately instead of converting.
             (
                 SmallVec::<[_; 3]>::from(alignments),
                 SmallVec::<[_; 3]>::from(layouts),
                 SmallVec::<[_; 3]>::from(contigs),
-                SmallVec::<[_; 3]>::from(vector_shapes),
+                SmallVec::<[_; 3]>::from(vector_sizes),
             )
         })
 }

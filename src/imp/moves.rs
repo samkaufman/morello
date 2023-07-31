@@ -172,14 +172,17 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
     fn line_strs<'a>(
         &'a self,
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
-        _args: &[&dyn View<Tgt = Tgt>],
+        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         let prefetch_str = if self.prefetch { "[p]" } else { "" };
         let introduced_view = self.introduced.inner_fat_ptr();
         let cache_view_suffix = match &self.introduced {
             TensorOrCacheView::Tensor(_) => String::from(""),
             TensorOrCacheView::CacheView(cache_view) => {
-                format!(" <- {}", names.get_name_or_display(&cache_view.source))
+                format!(
+                    " <- {}",
+                    names.get_name_or_display(param_bindings[&cache_view.source])
+                )
             }
         };
         let top = format!(
