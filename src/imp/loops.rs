@@ -58,7 +58,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
             "tile weren't sorted"
         );
 
-        // Return an iterator over paramters from loop tiles where they apply and the inner body
+        // Return an iterator over parameters from loop tiles where they apply and the inner body
         // elsewhere.
         let mut next_tile_idx = 0;
         let mut body_parameters = self.body.parameters().enumerate();
@@ -70,7 +70,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
             Some((i, body_param)) => match self.tiles.get(next_tile_idx) {
                 Some(next_tile) if i == usize::from(next_tile.tile.view.0) => {
                     next_tile_idx += 1;
-                    Some(next_tile.tile.spec())
+                    Some(next_tile.tile.view.spec())
                 }
                 _ => Some(body_param),
             },
