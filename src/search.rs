@@ -50,6 +50,8 @@ fn top_down_inner<'d, Tgt: Target, D: Database<Tgt> + 'd>(
         return (stored.clone(), 1, 0);
     }
 
+    println!("{}", goal);
+
     let mut hits = 0u64;
     let mut misses = 1u64;
 

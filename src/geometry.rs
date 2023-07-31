@@ -38,9 +38,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
         match self {
             LogicalSpec::Primitive(basics, primitive_aux, serial_only) => match basics.typ {
                 PrimitiveSpecType::Matmul { accum } => {
-                    let PrimitiveAux::Standard(auxes) = primitive_aux else {
-                        unreachable!();
-                    };
+                    let PrimitiveAux(auxes) = primitive_aux;
                     Some((
                         SpecKey::Matmul {
                             dtype: basics.dtype,
@@ -58,10 +56,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     ))
                 }
                 PrimitiveSpecType::Conv { accum } => {
-                    let PrimitiveAux::Standard(auxes) = primitive_aux else {
-                        unreachable!();
-                    };
-
+                    let PrimitiveAux(auxes) = primitive_aux;
                     let [b, f, c, h, w, fh, fw] = basics.spec_shape[..] else {
                         panic!("Convolution must have 7 Spec dimensions")
                     };
@@ -81,13 +76,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     ))
                 }
                 PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
-                    let mapping_level = match primitive_aux {
-                        PrimitiveAux::Standard(auxes) => &auxes[0].level,
-                        PrimitiveAux::Move {
-                            outer_aux: TensorSpecAux { level, .. },
-                            ..
-                        } => level,
-                    };
+                    let mapping_level = &primitive_aux.0[0].level;
                     Some((
                         match basics.typ {
                             PrimitiveSpecType::Move => SpecKey::Move {
@@ -96,10 +85,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                     // makes sense after combining the two into a single Move Spec.
                                     // For now, we preserve this separation by determining whether
                                     // or not this is a load or a store by comparing operands.
-                                    let PrimitiveAux::Move { inner_level, .. } = primitive_aux else {
-                                        unreachable!();
-                                    };
-                                    mapping_level < inner_level
+                                    mapping_level < &primitive_aux.0[0].level
                                 },
                                 dtype: basics.dtype,
                             },
@@ -144,7 +130,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                 spec_shape: smallvec![m, k, n],
                                 dtype: *dtype,
                             },
-                            PrimitiveAux::Standard(
+                            PrimitiveAux(
                                 izip!(contigs, alignments, layouts, vector_sizes, &levels)
                                     .map(|(contig, aligned, layout, vector_size, level)| {
                                         TensorSpecAux {
@@ -203,7 +189,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                 spec_shape: spec_shape.clone(),
                                 dtype: *dtype,
                             },
-                            PrimitiveAux::Standard(
+                            PrimitiveAux(
                                 izip!(contigs, alignments, layouts, vector_sizes, &levels)
                                     .map(|(contig, aligned, layout, vector_size, level)| {
                                         TensorSpecAux {
@@ -234,17 +220,24 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
 
                 alignments
                     .into_iter()
+                    .cartesian_product(alignments)
                     .cartesian_product(viable_layouts.iter().cloned())
                     .cartesian_product(viable_layouts.iter().cloned())
                     .flat_map(
-                        move |((source_aligned, source_layout), destination_layout)| {
+                        move |(
+                            ((source_aligned, dest_aligned), source_layout),
+                            destination_layout,
+                        )| {
                             X86Target::possible_destination_levels(source_level)
                                 .into_iter()
                                 .cartesian_product(source_layout.all_contiguous_abs().collect_vec())
-                                .flat_map(move |(destination_level, source_contiguous_abs)| {
+                                .cartesian_product(
+                                    destination_layout.all_contiguous_abs().collect_vec(),
+                                )
+                                .flat_map(move |((dest_level, source_contig), dest_contig)| {
                                     let source_layout = source_layout.clone();
                                     let destination_layout = destination_layout.clone();
-                                    [source_level, destination_level]
+                                    [source_level, dest_level]
                                         .map(|lvl| {
                                             if lvl.vector_rf() {
                                                 gen_vector_sizes(
@@ -268,19 +261,23 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                                         spec_shape: dim_sizes.clone(),
                                                         dtype: *dtype,
                                                     },
-                                                    PrimitiveAux::Move {
-                                                        outer_aux: TensorSpecAux {
-                                                            contig: source_contiguous_abs,
+                                                    PrimitiveAux(vec![
+                                                        TensorSpecAux {
+                                                            contig: source_contig,
                                                             aligned: source_aligned,
                                                             level: source_level,
                                                             layout: source_layout.clone(),
                                                             vector_size: source_vector_size.clone(),
                                                         },
-                                                        inner_level: destination_level,
-                                                        inner_layout: destination_layout.clone(),
-                                                        inner_vector_size: destination_vector_size
-                                                            .clone(),
-                                                    },
+                                                        TensorSpecAux {
+                                                            contig: dest_contig,
+                                                            aligned: dest_aligned,
+                                                            level: dest_level,
+                                                            layout: destination_layout.clone(),
+                                                            vector_size: destination_vector_size
+                                                                .clone(),
+                                                        },
+                                                    ]),
                                                     serial_only,
                                                 )
                                             }
@@ -314,7 +311,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                             spec_shape: dim_sizes.clone(),
                             dtype: *dtype,
                         },
-                        PrimitiveAux::Standard(vec![TensorSpecAux {
+                        PrimitiveAux(vec![TensorSpecAux {
                             contig: contigs[0],
                             aligned: alignments[0],
                             level,

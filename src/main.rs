@@ -84,18 +84,22 @@ where
                     spec_shape: smallvec![*size, *size],
                     dtype: Dtype::Uint32,
                 },
-                PrimitiveAux::Move {
-                    outer_aux: TensorSpecAux {
+                PrimitiveAux(vec![
+                    TensorSpecAux {
                         contig: rm2.contiguous_full(),
                         aligned: true,
                         level: X86MemoryLevel::GL,
                         layout: rm2,
-                        vector_shape: None,
+                        vector_size: None,
                     },
-                    inner_level: X86MemoryLevel::GL,
-                    inner_layout: cm2,
-                    inner_vector_shape: None,
-                },
+                    TensorSpecAux {
+                        contig: cm2.contiguous_full(),
+                        aligned: true,
+                        level: X86MemoryLevel::GL,
+                        layout: cm2,
+                        vector_size: None,
+                    },
+                ]),
                 true,
             )
         }
@@ -107,7 +111,7 @@ where
                     spec_shape: smallvec![*size, *size, *size],
                     dtype: Dtype::Uint32,
                 },
-                PrimitiveAux::Standard(vec![
+                PrimitiveAux(vec![
                     TensorSpecAux {
                         contig: rm2.contiguous_full(),
                         aligned: true,
@@ -142,7 +146,7 @@ where
                     ],
                     dtype: Dtype::Uint32,
                 },
-                PrimitiveAux::Standard(vec![
+                PrimitiveAux(vec![
                     TensorSpecAux {
                         contig: rm.contiguous_full(),
                         aligned: true,

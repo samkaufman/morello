@@ -104,6 +104,10 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.aux.layout = new_layout;
     }
 
+    pub fn set_contiguous_abs(&mut self, contiguous_abs: Contig) {
+        self.aux.contig = contiguous_abs;
+    }
+
     pub fn is_contiguous(&self) -> bool {
         self.aux.contig == self.aux.layout.contiguous_full()
     }

@@ -61,18 +61,22 @@ fn load_or_store(prim_type: PrimitiveSpecType, size: DimSize, rank: u8) -> Logic
             spec_shape: smallvec![size; rank.into()],
             dtype: Dtype::Uint32,
         },
-        PrimitiveAux::Move {
-            outer_aux: TensorSpecAux {
+        PrimitiveAux(vec![
+            TensorSpecAux {
                 contig: layout.contiguous_full(),
                 aligned: true,
                 level: X86MemoryLevel::GL,
                 layout: layout.clone(),
                 vector_size: None,
             },
-            inner_level: X86MemoryLevel::L1,
-            inner_layout: layout,
-            inner_vector_size: None,
-        },
+            TensorSpecAux {
+                contig: layout.contiguous_full(),
+                aligned: true,
+                level: X86MemoryLevel::L1,
+                layout,
+                vector_size: None,
+            },
+        ]),
         true,
     )
 }
@@ -98,7 +102,7 @@ where
                 spec_shape: smallvec![args.size; rank.into()],
                 dtype: Dtype::Uint32,
             },
-            PrimitiveAux::Standard(vec![TensorSpecAux {
+            PrimitiveAux(vec![TensorSpecAux {
                 contig: layout.contiguous_full(),
                 aligned: true,
                 level: X86MemoryLevel::GL,
@@ -123,7 +127,7 @@ where
                 spec_shape: smallvec![args.size, args.size, args.size],
                 dtype: Dtype::Uint32,
             },
-            PrimitiveAux::Standard(vec![a.clone(), a.clone(), a]),
+            PrimitiveAux(vec![a.clone(), a.clone(), a]),
             true,
         )
     });
@@ -153,7 +157,7 @@ where
                         ],
                         dtype: Dtype::Uint32,
                     },
-                    PrimitiveAux::Standard(vec![a.clone(), a.clone(), a.clone()]),
+                    PrimitiveAux(vec![a.clone(), a.clone(), a.clone()]),
                     true,
                 )
             })

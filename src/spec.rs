@@ -9,6 +9,8 @@ use crate::tiling::Tiling;
 use crate::utils::join_into_string;
 
 use core::panic;
+use itertools::Itertools;
+use log::warn;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec, ToSmallVec};
 use std::collections::HashMap;
@@ -17,8 +19,6 @@ use std::fmt::Display;
 use std::iter::Iterator;
 use std::iter::{self, once};
 use std::mem;
-
-use log::warn;
 use std::{assert_eq, debug_assert_eq};
 
 // The following should probably just be Spec::Primitive and Spec::Compose variants once
@@ -54,15 +54,7 @@ pub enum PrimitiveSpecType {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub enum PrimitiveAux<Tgt: Target> {
-    Standard(Vec<TensorSpecAux<Tgt>>),
-    Move {
-        outer_aux: TensorSpecAux<Tgt>,
-        inner_level: Tgt::Level,
-        inner_layout: Layout,
-        inner_vector_size: Option<DimSize>,
-    },
-}
+pub struct PrimitiveAux<Tgt: Target>(pub Vec<TensorSpecAux<Tgt>>);
 
 /// Tilings and dimension bindings for a particular output tiling.
 ///
@@ -122,24 +114,7 @@ impl PrimitiveBasics {
         Tgt: Target,
         I: IntoIterator<Item = &'a TensorSpecAux<Tgt>> + 'a,
     {
-        match self.typ {
-            PrimitiveSpecType::Matmul { .. }
-            | PrimitiveSpecType::Conv { .. }
-            | PrimitiveSpecType::Zero => {
-                PrimitiveAux::Standard(operand_auxes.into_iter().cloned().collect())
-            }
-            PrimitiveSpecType::Move => {
-                let mut operand_auxes_iter = operand_auxes.into_iter();
-                let first: &TensorSpecAux<_> = operand_auxes_iter.next().unwrap();
-                let second: &TensorSpecAux<_> = operand_auxes_iter.next().unwrap();
-                PrimitiveAux::Move {
-                    outer_aux: first.clone(),
-                    inner_level: second.level,
-                    inner_layout: second.layout.clone(),
-                    inner_vector_size: second.vector_size.clone(),
-                }
-            }
-        }
+        PrimitiveAux(operand_auxes.into_iter().cloned().collect())
     }
 
     pub fn parameter_shapes(&self) -> Vec<Shape> {
@@ -399,9 +374,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         match self {
             LogicalSpec::Primitive(basics, aux, _) => match basics.typ {
                 PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => {
-                    let PrimitiveAux::Standard(taux) = aux else {
-                        unreachable!();
-                    };
+                    let PrimitiveAux(taux) = aux;
                     basics
                         .parameter_shapes()
                         .into_iter()
@@ -409,25 +382,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .map(|(s, a)| TensorSpec::new_noncanon_with_aux(s, basics.dtype, a.clone()))
                         .collect()
                 }
-                PrimitiveSpecType::Move => {
-                    let PrimitiveAux::Move { outer_aux, inner_level, inner_layout, inner_vector_size } = aux else {
-                        unreachable!();
-                    };
-                    let outer_tensor_spec = TensorSpec::new_noncanon_with_aux(
-                        basics.spec_shape.clone(),
-                        basics.dtype,
-                        outer_aux.clone(),
-                    );
-                    let mut inner_tensor_spec = outer_tensor_spec.clone();
-                    inner_tensor_spec.set_level(*inner_level, *inner_vector_size);
-                    inner_tensor_spec.set_layout(inner_layout.to_owned());
-                    inner_tensor_spec.canonicalize();
-                    smallvec![outer_tensor_spec, inner_tensor_spec]
-                }
+                PrimitiveSpecType::Move => aux
+                    .0
+                    .iter()
+                    .map(|a| {
+                        TensorSpec::new_noncanon_with_aux(
+                            basics.spec_shape.clone(),
+                            basics.dtype,
+                            a.clone(),
+                        )
+                    })
+                    .collect(),
                 PrimitiveSpecType::Zero => {
-                    let PrimitiveAux::Standard(taux) = aux else {
-                        unreachable!();
-                    };
+                    let PrimitiveAux(taux) = aux;
                     smallvec![TensorSpec::new_noncanon_with_aux(
                         basics.spec_shape.clone(),
                         basics.dtype,
@@ -500,9 +467,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 _,
             ) => match typ {
                 PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
-                    let PrimitiveAux::Standard(aux) = primitive_aux else {
-                        unreachable!();
-                    };
+                    let PrimitiveAux(aux) = primitive_aux;
                     for i in 0..aux.len() {
                         aux[i].contig = aux[i].layout.tile_contiguity(
                             operands[i].dim_sizes(),
@@ -515,21 +480,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
                 }
                 PrimitiveSpecType::Move => {
-                    let PrimitiveAux::Move {
-                        outer_aux,
-                        inner_level: _,
-                        inner_layout,
-                        inner_vector_size: _,
-                    } = primitive_aux else {
+                    let [outer_aux, inner_aux] = &mut primitive_aux.0[..] else {
                         unreachable!();
                     };
                     outer_aux.canonicalize(spec_shape, outer_aux.aligned);
-                    inner_layout.canonicalize_for_shape(spec_shape);
+                    inner_aux.contig = inner_aux.layout.tile_contiguity(
+                        operands[1].dim_sizes(),
+                        operands[1].dim_sizes(),
+                        inner_aux.contig,
+                    );
+                    inner_aux.layout.canonicalize_for_shape(spec_shape);
                 }
                 PrimitiveSpecType::Zero => {
-                    let PrimitiveAux::Standard(aux) = primitive_aux else {
-                        unreachable!();
-                    };
+                    let PrimitiveAux(aux) = primitive_aux;
                     let aligned = aux[0].aligned;
                     aux[0].canonicalize(spec_shape, aligned);
                 }
@@ -616,9 +579,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         if !*accum {
             panic!("can_spatial_split called on non-accum Conv spec");
         };
-        let PrimitiveAux::Standard(aux) = primitive_aux else {
-            unreachable!();
-        };
+        let PrimitiveAux(aux) = primitive_aux;
 
         let operands = self.parameters();
         let image_shape = operands[0].dim_sizes();
@@ -778,7 +739,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     } else {
                         results.push(Action::Move {
                             source_idx: i,
-                            destination_level: layout.clone(),
+                            destination_level: level.clone(),
                             destination_layout: layout.clone(),
                             destination_vector_size: None,
                             prefetch: false,
@@ -921,7 +882,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     // TODO: Should move new_operands in.
     pub fn replace_io(&mut self, new_operands: &[TensorSpec<Tgt>]) {
         assert_eq!(new_operands.len(), self.operand_count());
-        match self {
+        let replaced = match self {
             LogicalSpec::Compose {
                 components,
                 operand_auxes,
@@ -984,30 +945,23 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .collect::<Vec<_>>(),
                 );
 
-                match primitive_aux {
-                    PrimitiveAux::Standard(aux) => {
-                        debug_assert_eq!(aux.len(), new_operands.len());
-                        for i in 0..aux.len() {
-                            aux[i] = new_operands[i].aux.clone();
-                        }
-                    }
-                    PrimitiveAux::Move {
-                        outer_aux,
-                        inner_level,
-                        inner_layout,
-                        inner_vector_size,
-                    } => {
-                        let [src, dest] = new_operands else {
-                            panic!("Moves must have 2 operands");
-                        };
-                        *outer_aux = src.aux.clone();
-                        *inner_level = dest.level();
-                        *inner_layout = dest.layout();
-                        *inner_vector_size = dest.vector_size();
-                    }
+                let PrimitiveAux(aux) = primitive_aux;
+                debug_assert_eq!(aux.len(), new_operands.len());
+                for i in 0..aux.len() {
+                    aux[i] = new_operands[i].aux.clone();
                 }
             }
-        }
+        };
+        debug_assert!(
+            self.parameters()
+                .iter()
+                .zip(new_operands)
+                .all(|(a, b)| { a == b }),
+            "Parameter mismatch after replace_io; Spec is {} after replacing with [{}]",
+            self,
+            new_operands.iter().map(|o| o.to_string()).join(", "),
+        );
+        replaced
     }
 
     pub fn output_is_read(&self) -> bool {

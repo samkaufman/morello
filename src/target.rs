@@ -7,7 +7,6 @@ use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::tensorspec::TensorSpec;
 
-use crate::tensorspec::TensorSpec;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;

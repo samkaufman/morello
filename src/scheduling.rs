@@ -1,10 +1,10 @@
-use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
 use std::fmt::Display;
 use std::rc::Rc;
 use std::{iter, mem};
 
-use crate::alignment::aligned_approx;
+use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec};
+
 use crate::common::{DimSize, Shape, Spec};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::{Kernel, KernelType};
@@ -191,8 +191,8 @@ impl<Tgt: Target> Action<Tgt> {
                                     match typ {
                                         PrimitiveSpecType::Matmul { accum: _ } => {
                                             let [lhs, rhs] = &operands[..2] else {
-                                            panic!();
-                                        };
+                                                panic!();
+                                            };
                                             assert!(*k < lhs.dim_sizes()[1]);
 
                                             let tiles = vec![
@@ -228,13 +228,8 @@ impl<Tgt: Target> Action<Tgt> {
                 let body = {
                     let mut new_operands = operands;
                     for loop_tile in &tiles {
-                        let ref_op = &mut new_operands[usize::from(loop_tile.tile.view.0)];
-                        let aligned = aligned_approx(
-                            loop_tile.tile.shape(),
-                            loop_tile.tile.step_sizes(),
-                            ref_op,
-                        );
-                        ref_op.shrink(loop_tile.tile.shape(), aligned);
+                        let param_idx = usize::from(loop_tile.tile.view.0);
+                        new_operands[param_idx] = loop_tile.tile.spec().clone();
                     }
                     let mut inner_spec = node_spec.clone();
                     inner_spec.replace_io(&new_operands);
@@ -429,7 +424,7 @@ impl<Tgt: Target> Action<Tgt> {
                             .collect(),
                         dtype: *dtype,
                     },
-                    PrimitiveAux::Standard(vec![
+                    PrimitiveAux(vec![
                         inner_image_tile.spec().aux.clone(),
                         inner_filters_tile.spec().aux.clone(),
                         inner_output_view.spec().aux.clone(),
@@ -487,32 +482,20 @@ impl<Tgt: Target> Action<Tgt> {
                     _,
                 ) = node_spec
                 {
-                    let PrimitiveAux::Move {
-                        outer_aux:
-                            TensorSpecAux {
-                                level: outer_level,
-                                layout: outer_layout,
-                                vector_shape: outer_vector_shape,
-                                ..
-                            },
-                        inner_level,
-                        inner_layout,
-                        inner_vector_shape,
-                    } = spec_aux else
-                    {
+                    let [outer_aux, inner_aux] = &spec_aux.0[..] else {
                         unreachable!();
                     };
                     if *source_idx == 0
-                        && inner_level == destination_level
-                        && inner_layout == destination_layout
-                        && inner_vector_shape == destination_vector_shape
+                        && &inner_aux.level == destination_level
+                        && &inner_aux.layout == destination_layout
+                        && &inner_aux.vector_size == destination_vector_size
                     {
                         return None;
                     }
                     if *source_idx == 1
-                        && outer_level == destination_level
-                        && outer_layout == destination_layout
-                        && outer_vector_shape == destination_vector_shape
+                        && &outer_aux.level == destination_level
+                        && &outer_aux.layout == destination_layout
+                        && &outer_aux.vector_size == destination_vector_size
                     {
                         return None;
                     }
@@ -581,12 +564,10 @@ impl<Tgt: Target> Action<Tgt> {
                                         spec_shape: left_spec.dim_sizes().into(),
                                         dtype: left_spec.dtype(),
                                     },
-                                    PrimitiveAux::Move {
-                                        outer_aux: left_spec.aux.clone(),
-                                        inner_level: right_spec.level(),
-                                        inner_layout: right_spec.layout(),
-                                        inner_vector_size: right_spec.vector_size(),
-                                    },
+                                    PrimitiveAux(vec![
+                                        left_spec.aux.clone(),
+                                        right_spec.aux.clone(),
+                                    ]),
                                     node_spec.serial_only(),
                                 ),
                                 lower_limits.clone(),
@@ -655,7 +636,7 @@ impl<Tgt: Target> Action<Tgt> {
                             spec_shape: output_dim_sizes,
                             dtype: output_dtype,
                         },
-                        PrimitiveAux::Standard(vec![output_aux]),
+                        PrimitiveAux(vec![output_aux]),
                         node_spec.serial_only(),
                     );
                     subspec.canonicalize();
