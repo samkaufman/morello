@@ -5,11 +5,10 @@ use std::fmt::{self, Debug, Write};
 use std::rc::Rc;
 
 use super::c_utils::{CBuffer, CExprTerm, VecType};
-use super::namegen::NameGenerator;
 use super::CodeGen;
 use crate::codegen::c_utils::c_type;
 use crate::codegen::clang;
-use crate::codegen::header::HeaderEmitter;
+use crate::codegen::cpu::CpuCodeGenerator;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineExpr, Term};
 use crate::imp::blocks::Block;
@@ -18,7 +17,7 @@ use crate::imp::loops::Loop;
 use crate::imp::moves::TensorOrCacheView;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::BufferExprTerm;
-use crate::target::{ArmTarget, Target, Targets, X86MemoryLevel, X86Target};
+use crate::target::{Target, X86MemoryLevel, X86Target};
 use crate::utils::indent;
 use crate::views::{Param, Tensor, View};
 
@@ -58,33 +57,6 @@ const X86_VEC_TYPES: [VecType; 4] = [
         store_fn: "_mm_storeu_si128",
     },
 ];
-
-#[derive(Default)]
-struct CpuCodeGenerator<'a, Tgt: Target> {
-    namer: NameGenerator,
-    name_env: HashMap<Rc<Tensor<Tgt>>, CBuffer>,
-    loop_iter_bindings: HashMap<BufferExprTerm, Either<String, i32>>,
-    param_bindings: HashMap<Param<Tgt>, &'a dyn View<Tgt = Tgt>>,
-    headers: HeaderEmitter,
-}
-
-impl<'a> CpuCodeGenerator<'a, X86Target> {
-    pub fn new() -> Self {
-        Self {
-            headers: HeaderEmitter::new(Targets::X86),
-            ..Self::default()
-        }
-    }
-}
-
-impl<'a> CpuCodeGenerator<'a, ArmTarget> {
-    pub fn new() -> Self {
-        Self {
-            headers: HeaderEmitter::new(Targets::Arm),
-            ..Self::default()
-        }
-    }
-}
 
 const NUM_VEC_FLAGS: usize = 2;
 

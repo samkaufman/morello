@@ -1,5 +1,6 @@
 mod c_utils;
 mod clang;
+mod cpu;
 mod header;
 mod namegen;
 mod x86;
