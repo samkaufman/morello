@@ -1,5 +1,7 @@
+mod arm;
 mod x86;
 
+pub use arm::ArmTarget;
 pub use x86::{X86MemoryLevel, X86Target};
 
 use crate::common::DimSize;
