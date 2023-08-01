@@ -1,4 +1,5 @@
-use smallvec::SmallVec;
+use itertools::Itertools;
+use smallvec::{smallvec, SmallVec};
 use std::sync::RwLock;
 
 use crate::common::Spec;
@@ -10,7 +11,7 @@ use crate::table::Database;
 use crate::target::Target;
 
 struct ImplReducer<Tgt: Target> {
-    results: Vec<(Action<Tgt>, Cost)>,
+    results: SmallVec<[(Action<Tgt>, Cost); 1]>,
     top_k: usize,
 }
 
@@ -94,20 +95,27 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
 impl<Tgt: Target> ImplReducer<Tgt> {
     fn new(top_k: usize) -> Self {
         ImplReducer {
-            results: vec![],
+            results: smallvec![],
             top_k,
         }
     }
 
     fn insert(&mut self, new_impl: Action<Tgt>, cost: Cost) {
-        self.results.push((new_impl, cost));
+        match self.results.binary_search_by_key(&&cost, |imp| &imp.1) {
+            Ok(idx) | Err(idx) => {
+                if idx < self.top_k {
+                    if self.results.len() == self.top_k {
+                        self.results.pop();
+                    }
+                    self.results.insert(idx, (new_impl, cost));
+                }
+            }
+        }
+        debug_assert!(self.results.iter().tuple_windows().all(|(a, b)| a.1 < b.1));
+        debug_assert!(self.results.len() <= self.top_k);
     }
 
-    fn finalize(&self) -> SmallVec<[(Action<Tgt>, Cost); 1]> {
-        // Using sorted here for stability.
-        let mut sorted_results = self.results.clone();
-        sorted_results.sort_by_key(|x| x.1.clone());
-        sorted_results.truncate(self.top_k);
-        sorted_results.into()
+    fn finalize(self) -> SmallVec<[(Action<Tgt>, Cost); 1]> {
+        self.results
     }
 }
