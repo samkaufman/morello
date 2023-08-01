@@ -9,7 +9,6 @@ use crate::utils::ToWriteFmt;
 
 use anyhow::{bail, Result};
 use std::fmt;
-use std::fmt::Debug;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Output};

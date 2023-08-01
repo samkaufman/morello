@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use std::fmt::Debug;
 
 pub fn get_path() -> Result<String> {
     match std::env::var("CLANG") {
