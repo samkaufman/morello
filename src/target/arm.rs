@@ -9,7 +9,7 @@ use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target, X86MemoryLevel};
 use crate::tensorspec::TensorSpec;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use smallvec::smallvec;
 use std::fmt::{Debug, Display};
 use std::iter;
