@@ -60,11 +60,11 @@ const X86_VEC_TYPES: [VecType; 4] = [
 ];
 
 #[derive(Default)]
-struct X86CodeGenerator<'a> {
+struct CpuCodeGenerator<'a, Tgt: Target> {
     namer: NameGenerator,
-    name_env: HashMap<Rc<Tensor<X86Target>>, CBuffer>,
+    name_env: HashMap<Rc<Tensor<Tgt>>, CBuffer>,
     loop_iter_bindings: HashMap<BufferExprTerm, Either<String, i32>>,
-    param_bindings: HashMap<Param<X86Target>, &'a dyn View<Tgt = X86Target>>,
+    param_bindings: HashMap<Param<Tgt>, &'a dyn View<Tgt = Tgt>>,
     headers: HeaderEmitter,
 }
 
@@ -82,8 +82,7 @@ impl<Aux: Clone + Debug> CodeGen<X86Target, NUM_VEC_FLAGS> for ImplNode<X86Targe
             .parameters()
             .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
             .collect::<Vec<_>>();
-        let mut generator = X86CodeGenerator::default();
-        generator.headers.emit_x86 = true;
+        let mut generator = CpuCodeGenerator::<X86Target>::default();
         generator.emit_kernel(self, &top_arg_tensors, out)?;
         out.write_str("\n")?;
         generator.emit_main(&top_arg_tensors, out)?;
@@ -91,7 +90,7 @@ impl<Aux: Clone + Debug> CodeGen<X86Target, NUM_VEC_FLAGS> for ImplNode<X86Targe
     }
 }
 
-impl<'a> X86CodeGenerator<'a> {
+impl<'a> CpuCodeGenerator<'a, X86Target> {
     fn emit_kernel<W: Write, Aux: Clone + Debug>(
         &mut self,
         imp: &'a ImplNode<X86Target, Aux>,

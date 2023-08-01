@@ -16,7 +16,7 @@ use std::iter;
 
 pub const MAX_LEVEL_COUNT: usize = 4;
 
-pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug + 'static {
+pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Level: MemoryLevel;
 
     fn line_size() -> u32;
@@ -43,7 +43,28 @@ pub trait MemoryLevel:
     }
 }
 
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, Serialize)]
+pub enum Targets {
+    X86,
+    Arm,
+}
+
+impl Targets {
+    pub fn new_x86() -> Self {
+        Targets::X86
+    }
+
+    pub fn new_arm() -> Self {
+        Targets::Arm
+    }
+}
+
+impl From<X86Target> for Targets {
+    fn from(_: X86Target) -> Self {
+        Targets::X86
+    }
+}
+
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Default, Debug, Serialize)]
 pub struct X86Target;
 
 impl Target for X86Target {
