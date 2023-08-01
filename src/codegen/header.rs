@@ -19,20 +19,20 @@ impl HeaderEmitter {
     }
 
     pub fn emit<W: fmt::Write>(&self, out: &mut W) -> Result<(), fmt::Error> {
-        out.write_str(include_str!("../codegen_partials/std.c"))?;
+        out.write_str(include_str!("../codegen/partials/std.c"))?;
         out.write_char('\n')?;
         match self.emit_target {
             Targets::X86 => {
-                out.write_str(include_str!("../codegen_partials/x86.c"))?;
+                out.write_str(include_str!("../codegen/partials/x86.c"))?;
                 out.write_char('\n')?;
             }
             Targets::Arm => {
-                out.write_str(include_str!("../codegen_partials/arm.c"))?;
+                out.write_str(include_str!("../codegen/partials/arm.c"))?;
                 out.write_char('\n')?;
             }
         }
         if self.emit_benchmarking {
-            out.write_str(include_str!("../codegen_partials/benchmarking.c"))?;
+            out.write_str(include_str!("../codegen/partials/benchmarking.c"))?;
             out.write_char('\n')?;
         }
 
