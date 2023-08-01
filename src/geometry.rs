@@ -276,12 +276,11 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                                             aligned: source_aligned,
                                                             level: source_level,
                                                             layout: source_layout.clone(),
-                                                            vector_size: source_vector_size.clone(),
+                                                            vector_size: *source_vector_size,
                                                         },
                                                         inner_level: destination_level,
                                                         inner_layout: destination_layout.clone(),
-                                                        inner_vector_size: destination_vector_size
-                                                            .clone(),
+                                                        inner_vector_size: *destination_vector_size,
                                                     },
                                                     serial_only,
                                                 )
@@ -321,7 +320,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                             aligned: alignments[0],
                             level,
                             layout: layouts[0].clone(),
-                            vector_size: vector_sizes[0].clone(),
+                            vector_size: vector_sizes[0],
                         }]),
                         serial_only,
                     )

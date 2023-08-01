@@ -54,19 +54,11 @@ impl Layout {
         }
     }
 
-    fn contiguous_lub(&self, _other_layout: &Layout, _a: Contig, _b: Contig) -> Contig {
-        todo!()
-    }
-
     pub fn all_contiguous_abs(&self) -> impl Iterator<Item = Contig> {
         match self {
             Layout::Standard { dim_order } => 0u8..(dim_order.len() + 1).try_into().unwrap(),
             Layout::Packed { dim_count, .. } => 0u8..(*dim_count + 2),
         }
-    }
-
-    fn tile_is_contiguous(&self, _contiguous_abs: Contig) -> bool {
-        todo!()
     }
 
     // TODO: Rename and change docs; this actually returns a contiguousness abstraction.
@@ -328,15 +320,6 @@ impl Layout {
             }
             Layout::Packed { .. } => todo!(),
         }
-    }
-
-    fn flatten_inner_contiguous_dimensions(
-        &self,
-        _shape: Shape,
-        _contiguous_abs: Contig,
-    ) -> Option<(Vec<usize>, HashSet<usize>, usize)> {
-        // TODO: Do we really want to return an HashSet? Those are expensive!
-        todo!()
     }
 
     // Reorder the shape according to the physical order of the dimensions.

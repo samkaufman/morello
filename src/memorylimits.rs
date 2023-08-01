@@ -121,6 +121,10 @@ impl MemVec {
         self.0.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn checked_sub(self, rhs: &MemVec) -> Option<MemVec> {
         assert_eq!(self.len(), rhs.len());
         let mut result = self;

@@ -73,16 +73,15 @@ pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
         }
 
         let cost = Cost::from_child_costs(&partial_impl, &nested_spec_costs);
-        if let MemoryLimits::Standard(g) = &goal.1 {
-            debug_assert!(
-                cost.peaks.iter().zip(g).all(|(a, b)| *a <= b),
-                "While synthesizing {:?}, action yielded memory \
-                bound-violating {:?} with peak memory {:?}",
-                goal,
-                partial_impl,
-                cost.peaks
-            );
-        }
+        let MemoryLimits::Standard(goal_vec) = &goal.1;
+        debug_assert!(
+            cost.peaks.iter().zip(goal_vec).all(|(a, b)| *a <= b),
+            "While synthesizing {:?}, action yielded memory \
+            bound-violating {:?} with peak memory {:?}",
+            goal,
+            partial_impl,
+            cost.peaks
+        );
         reducer.insert(action, cost);
     }
 
