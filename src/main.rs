@@ -5,12 +5,12 @@ use smallvec::smallvec;
 use std::path;
 use std::sync::RwLock;
 
+use morello::codegen::CodeGen;
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype, Spec};
 use morello::layout::row_major;
 use morello::pprint::{pprint, PrintMode};
 use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
-use morello::sysdep::compiler::Compiler;
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{Target, X86MemoryLevel, X86Target};
 use morello::tensorspec::TensorSpecAux;

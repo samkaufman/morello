@@ -1,3 +1,4 @@
+use anyhow::Result;
 use itertools::{Either, Itertools};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug, Write};
@@ -7,6 +8,7 @@ use super::c_utils::{CBuffer, CExprTerm, VecType};
 use super::namegen::NameGenerator;
 use super::CodeGen;
 use crate::codegen::c_utils::c_type;
+use crate::codegen::clang;
 use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineExpr, Term};
@@ -66,8 +68,16 @@ struct X86CodeGenerator<'a> {
     headers: HeaderEmitter,
 }
 
-impl<Aux: Clone + Debug> CodeGen<X86Target> for ImplNode<X86Target, Aux> {
-    fn emit_kernel<W: Write>(&self, out: &mut W) -> fmt::Result {
+const NUM_VEC_FLAGS: usize = 2;
+
+impl<Aux: Clone + Debug> CodeGen<X86Target, NUM_VEC_FLAGS> for ImplNode<X86Target, Aux> {
+    const CLI_VEC_FLAGS: [&'static str; NUM_VEC_FLAGS] = ["-fopenmp", "-mavx2"];
+
+    fn get_compiler_path() -> Result<String> {
+        clang::get_path()
+    }
+
+    fn emit<W: Write>(&self, out: &mut W) -> fmt::Result {
         let top_arg_tensors = self
             .parameters()
             .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
@@ -75,6 +85,8 @@ impl<Aux: Clone + Debug> CodeGen<X86Target> for ImplNode<X86Target, Aux> {
         let mut generator = X86CodeGenerator::default();
         generator.headers.emit_x86 = true;
         generator.emit_kernel(self, &top_arg_tensors, out)?;
+        out.write_str("\n")?;
+        generator.emit_main(&top_arg_tensors, out)?;
         Ok(())
     }
 }
@@ -125,9 +137,19 @@ impl<'a> X86CodeGenerator<'a> {
 
         writeln!(main_body_str, "}}")?;
 
-        // Emit main
+        self.headers.emit(out)?;
+        out.write_str(&main_body_str)
+    }
+
+    fn emit_main<W: Write>(
+        &mut self,
+        top_arg_tensors: &'a [Rc<Tensor<X86Target>>],
+        out: &mut W,
+    ) -> fmt::Result {
+        let mut main_body_str = String::new();
         let mut depth = 0_usize;
-        writeln!(main_body_str, "\nint main() {{")?;
+
+        writeln!(main_body_str, "int main() {{")?;
         depth += 1;
         for i in 0..top_arg_tensors.len() {
             let tensor = &top_arg_tensors[i];
@@ -146,7 +168,7 @@ impl<'a> X86CodeGenerator<'a> {
         // Initialize the input tensors
         writeln!(
             main_body_str,
-            "{}// Initialize the input tensors",
+            "{}// Initialize the input tensors.",
             indent(depth)
         )?;
         for i in 0..(top_arg_tensors.len() - 1) {
@@ -211,7 +233,6 @@ impl<'a> X86CodeGenerator<'a> {
         writeln!(main_body_str, "\n{}return 0;", indent(depth))?;
         writeln!(main_body_str, "}}")?;
 
-        self.headers.emit(out)?;
         out.write_str(&main_body_str)
     }
 

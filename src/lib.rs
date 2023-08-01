@@ -14,7 +14,6 @@ pub mod pprint;
 pub mod scheduling;
 pub mod search;
 pub mod spec;
-pub mod sysdep;
 pub mod table;
 pub mod target;
 pub mod tensorspec;
