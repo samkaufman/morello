@@ -10,9 +10,9 @@ pub struct HeaderEmitter {
 }
 
 impl HeaderEmitter {
-    pub fn new() -> Self {
+    pub fn new(emit_target: Targets) -> Self {
         Self {
-            emit_target: Targets::X86,
+            emit_target,
             emit_benchmarking: false,
             vector_type_defs: HashSet::new(),
         }
@@ -57,6 +57,6 @@ impl HeaderEmitter {
 
 impl Default for HeaderEmitter {
     fn default() -> Self {
-        HeaderEmitter::new()
+        HeaderEmitter::new(Targets::X86)
     }
 }

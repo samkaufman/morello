@@ -18,7 +18,7 @@ use crate::imp::loops::Loop;
 use crate::imp::moves::TensorOrCacheView;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::BufferExprTerm;
-use crate::target::{Target, X86MemoryLevel, X86Target};
+use crate::target::{ArmTarget, Target, Targets, X86MemoryLevel, X86Target};
 use crate::utils::indent;
 use crate::views::{Param, Tensor, View};
 
@@ -68,6 +68,24 @@ struct CpuCodeGenerator<'a, Tgt: Target> {
     headers: HeaderEmitter,
 }
 
+impl<'a> CpuCodeGenerator<'a, X86Target> {
+    pub fn new() -> Self {
+        Self {
+            headers: HeaderEmitter::new(Targets::X86),
+            ..Self::default()
+        }
+    }
+}
+
+impl<'a> CpuCodeGenerator<'a, ArmTarget> {
+    pub fn new() -> Self {
+        Self {
+            headers: HeaderEmitter::new(Targets::Arm),
+            ..Self::default()
+        }
+    }
+}
+
 const NUM_VEC_FLAGS: usize = 2;
 
 impl<Aux: Clone + Debug> CodeGen<X86Target, NUM_VEC_FLAGS> for ImplNode<X86Target, Aux> {
@@ -82,7 +100,7 @@ impl<Aux: Clone + Debug> CodeGen<X86Target, NUM_VEC_FLAGS> for ImplNode<X86Targe
             .parameters()
             .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
             .collect::<Vec<_>>();
-        let mut generator = CpuCodeGenerator::<X86Target>::default();
+        let mut generator = CpuCodeGenerator::<X86Target>::new();
         generator.emit_kernel(self, &top_arg_tensors, out)?;
         out.write_str("\n")?;
         generator.emit_main(&top_arg_tensors, out)?;
