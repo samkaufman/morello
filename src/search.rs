@@ -77,8 +77,11 @@ fn top_down_inner<'d, Tgt: Target, D: Database<Tgt> + 'd>(
                 goal.0, goal.1, action
             );
 
-            let summary_to_forward = match parent_summary.transition(&action, nested_spec) {
-                ParentSummaryTransitionResult::PruneAction => return false,
+            let summary_to_forward = match parent_summary.transition(nested_spec) {
+                ParentSummaryTransitionResult::PruneAction => {
+                    unsat = true;
+                    return false;
+                }
                 ParentSummaryTransitionResult::NewSummary(new_summary) => new_summary,
             };
             let (child_results, subhits, submisses) =

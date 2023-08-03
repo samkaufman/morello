@@ -16,9 +16,10 @@ pub struct Cost {
 pub type MainCost = u64;
 
 impl Cost {
-    pub fn from_child_costs<Tgt, Aux: Clone, I>(imp: &I, child_costs: &[Cost]) -> Cost
+    pub fn from_child_costs<Tgt, Aux, I>(imp: &I, child_costs: &[Cost]) -> Cost
     where
         Tgt: Target,
+        Aux: Clone,
         I: Impl<Tgt, Aux>,
     {
         let child_main_costs = child_costs
