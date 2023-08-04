@@ -629,15 +629,13 @@ impl<Tgt: Target> Action<Tgt> {
                 Some(ImplNode::Block(Block {
                     stages: vec![zero_app, accum_app],
                     bindings: vec![smallvec![2], smallvec![0, 1, 2]],
-                    parameters: spec.0.parameters(),
+                    parameters: operands,
                     aux,
                 }))
             }
             Action::Place(k) => Some(ImplNode::Kernel(Kernel {
                 kernel_type: *k,
-                arguments: spec
-                    .0
-                    .parameters()
+                arguments: operands
                     .iter()
                     .enumerate()
                     .map(|(i, p)| Param::new(i.try_into().unwrap(), p.clone()))

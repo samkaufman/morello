@@ -382,7 +382,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .map(|(s, a)| TensorSpec::new_noncanon_with_aux(s, basics.dtype, a.clone()))
                         .collect()
                 }
-                PrimitiveSpecType::Move => aux
+                PrimitiveSpecType::Move | PrimitiveSpecType::Zero => aux
                     .0
                     .iter()
                     .map(|a| {
@@ -393,14 +393,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         )
                     })
                     .collect(),
-                PrimitiveSpecType::Zero => {
-                    let PrimitiveAux(taux) = aux;
-                    smallvec![TensorSpec::new_noncanon_with_aux(
-                        basics.spec_shape.clone(),
-                        basics.dtype,
-                        taux[0].clone(),
-                    )]
-                }
             },
             LogicalSpec::Compose {
                 components,
