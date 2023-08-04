@@ -239,9 +239,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     // TODO: Shouldn't need this method. Should be implicit in Spec validity.
     pub fn can_move_to(&self, dest_layout: &Layout, dest_level: &Tgt::Level) -> bool {
-        if &self.layout() != dest_layout && !dest_level.is_addressed() {
-            return false;
-        }
+        // If the destination is in VRF, then the operand volume must be a multiple of at least one
+        // of the vector sizes.
         let vector_bytes = dest_level.vector_bytes();
         if !vector_bytes.is_empty() {
             let vol: DimSize = self.dim_sizes().iter().product();

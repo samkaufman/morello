@@ -6,6 +6,7 @@ use crate::cost::Cost;
 use crate::imp::{visit_leaves, Impl, ImplNode};
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
+use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::table::Database;
 use crate::target::Target;
 
@@ -14,9 +15,10 @@ struct ImplReducer<Tgt: Target> {
     top_k: usize,
 }
 
+/// A summary of a sequence of Specs to determine whether a sub-Spec should be pruned during search.
 #[derive(Clone)]
 struct ParentSummary<'a, Tgt: Target> {
-    seen: &'a Spec<Tgt>,
+    seen: &'a LogicalSpec<Tgt>,
     tail: Option<&'a ParentSummary<'a, Tgt>>,
 }
 
@@ -122,28 +124,51 @@ fn top_down_inner<'d, Tgt: Target, D: Database<Tgt> + 'd>(
 impl<'a, Tgt: Target> ParentSummary<'a, Tgt> {
     fn new(initial_spec: &'a Spec<Tgt>) -> Self {
         ParentSummary {
-            seen: initial_spec,
+            seen: &initial_spec.0,
             tail: None,
         }
     }
 
-    fn transition(
-        &'a self,
-        _via_action: &Action<Tgt>,
-        nested_spec: &'a Spec<Tgt>,
-    ) -> ParentSummaryTransitionResult<'a, Tgt> {
-        let mut cur_option = Some(self);
-        while let Some(cur) = cur_option {
-            if nested_spec == cur.seen {
-                return ParentSummaryTransitionResult::PruneAction;
-            }
-            cur_option = cur.tail;
-        }
+    /// Determine whether the given sub-Spec should be pruned during search.
+    ///
+    /// If this method returns [ParentSummaryTransitionResult::PruneAction], the caller should
+    /// prune the given sub-Spec. If [ParentSummaryTransitionResult::NewSummary] is returned,
+    /// the wrapped [ParentSummary] should be used for nested children.
+    fn transition(&'a self, nested_spec: &'a Spec<Tgt>) -> ParentSummaryTransitionResult<'a, Tgt> {
+        // Prune two cases: (a) cycles of Moves, and (b) recursion into the same LogicalSpec.
+        match &nested_spec.0 {
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Move,
+                    ..
+                },
+                ..,
+            ) => {
+                let mut cur_option = Some(self);
+                while let Some(cur) = cur_option {
+                    if cur.seen == &nested_spec.0 {
+                        return ParentSummaryTransitionResult::PruneAction;
+                    }
+                    cur_option = cur.tail;
+                }
 
-        ParentSummaryTransitionResult::NewSummary(ParentSummary {
-            seen: nested_spec,
-            tail: Some(self),
-        })
+                ParentSummaryTransitionResult::NewSummary(ParentSummary {
+                    seen: &nested_spec.0,
+                    tail: Some(self),
+                })
+            }
+            _ => {
+                debug_assert_ne!(
+                    self.seen, &nested_spec.0,
+                    "Single-step Spec cycle seen: {:?}",
+                    self.seen
+                );
+                ParentSummaryTransitionResult::NewSummary(ParentSummary {
+                    seen: &nested_spec.0,
+                    tail: None,
+                })
+            }
+        }
     }
 }
 
@@ -165,5 +190,121 @@ impl<Tgt: Target> ImplReducer<Tgt> {
         sorted_results.sort_by_key(|x| x.1.clone());
         sorted_results.truncate(self.top_k);
         sorted_results.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::Dtype;
+    use crate::layout::{row_major, Layout};
+    use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+    use crate::target::{X86MemoryLevel, X86Target};
+    use crate::tensorspec::TensorSpecAux;
+    use smallvec::smallvec;
+
+    #[test]
+    fn test_parentsummary_doesnt_prune_rm_to_cm_relayout() {
+        let cm = Layout::Standard {
+            dim_order: smallvec![1, 0],
+        };
+        let spec1 = example_zero_spec(X86MemoryLevel::GL, row_major(2));
+        let spec2 = example_zero_spec(X86MemoryLevel::GL, cm);
+        let s1 = ParentSummary::new(&spec1);
+        assert!(matches!(
+            s1.transition(&spec2),
+            ParentSummaryTransitionResult::NewSummary(_)
+        ));
+    }
+
+    #[test]
+    fn test_parentsummary_prunes_immediate_move_cycles() {
+        let cm = Layout::Standard {
+            dim_order: smallvec![1, 0],
+        };
+        let initial_spec =
+            example_move_spec(X86MemoryLevel::GL, row_major(2), X86MemoryLevel::GL, cm);
+        let s1 = ParentSummary::new(&initial_spec);
+        assert!(matches!(
+            s1.transition(&initial_spec),
+            ParentSummaryTransitionResult::PruneAction
+        ));
+    }
+
+    #[test]
+    fn test_parentsummary_prunes_one_step_cycle() {
+        let cm = Layout::Standard {
+            dim_order: smallvec![1, 0],
+        };
+        let spec1 = example_move_spec(
+            X86MemoryLevel::GL,
+            row_major(2),
+            X86MemoryLevel::GL,
+            cm.clone(),
+        );
+        let spec2 = example_move_spec(X86MemoryLevel::GL, cm, X86MemoryLevel::GL, row_major(2));
+        let s1 = ParentSummary::new(&spec1);
+        let ParentSummaryTransitionResult::NewSummary(s2) = s1.transition(&spec2) else {
+            panic!();
+        };
+        assert!(matches!(
+            s2.transition(&spec1),
+            ParentSummaryTransitionResult::PruneAction
+        ));
+    }
+    fn example_move_spec(
+        from_level: X86MemoryLevel,
+        from_layout: Layout,
+        to_level: X86MemoryLevel,
+        to_layout: Layout,
+    ) -> Spec<X86Target> {
+        Spec(
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Move,
+                    spec_shape: smallvec![4, 4],
+                    dtype: Dtype::Uint8,
+                },
+                PrimitiveAux(vec![
+                    TensorSpecAux {
+                        contig: from_layout.contiguous_full(),
+                        aligned: false,
+                        level: from_level,
+                        layout: from_layout,
+                        vector_size: None,
+                    },
+                    TensorSpecAux {
+                        contig: to_layout.contiguous_full(),
+                        aligned: false,
+                        level: to_level,
+                        layout: to_layout,
+                        vector_size: None,
+                    },
+                ]),
+                false,
+            ),
+            X86Target::max_mem(),
+        )
+    }
+
+    fn example_zero_spec(level: X86MemoryLevel, layout: Layout) -> Spec<X86Target> {
+        Spec(
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Zero,
+                    spec_shape: smallvec![4, 4],
+                    dtype: Dtype::Uint8,
+                },
+                PrimitiveAux(vec![TensorSpecAux {
+                    contig: layout.contiguous_full(),
+                    aligned: false,
+                    level,
+                    layout,
+                    vector_size: None,
+                }]),
+                false,
+            ),
+            X86Target::max_mem(),
+        )
     }
 }

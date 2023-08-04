@@ -469,38 +469,6 @@ impl<Tgt: Target> Action<Tgt> {
                     unimplemented!()
                 }
 
-                // Moves can themselves be moved, but come with an additional restriction: the move
-                // must change something: the level, layout, or vector shape. Without this rule,
-                // moves introduce sub-Specs which are logically identical but have allocated some
-                // redundant memory and a no-op, pass-through move.
-                if let LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::Move,
-                        ..
-                    },
-                    spec_aux,
-                    _,
-                ) = node_spec
-                {
-                    let [outer_aux, inner_aux] = &spec_aux.0[..] else {
-                        unreachable!();
-                    };
-                    if *source_idx == 0
-                        && &inner_aux.level == destination_level
-                        && &inner_aux.layout == destination_layout
-                        && &inner_aux.vector_size == destination_vector_size
-                    {
-                        return None;
-                    }
-                    if *source_idx == 1
-                        && &outer_aux.level == destination_level
-                        && &outer_aux.layout == destination_layout
-                        && &outer_aux.vector_size == destination_vector_size
-                    {
-                        return None;
-                    }
-                }
-
                 let outer_moved_operand_spec = &operands[usize::from(*source_idx)];
                 let new_spec = movelet_inner_tensorspec(
                     outer_moved_operand_spec,

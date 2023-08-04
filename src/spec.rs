@@ -694,7 +694,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
 
         // Move actions can only be applied when both from and to the same-level memory.
-        let mut is_move = false;
+        let mut applying_to_move_spec = false;
         if let LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Move,
@@ -704,7 +704,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             _,
         ) = self
         {
-            is_move = true;
+            applying_to_move_spec = true;
         }
 
         for (i, operand) in self.parameters().iter().enumerate() {
@@ -713,7 +713,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             let i = u8::try_from(i).unwrap();
             for layout in Tgt::all_layouts_for_shape(operand.dim_sizes()) {
                 for level in Tgt::possible_destination_levels(operand.level()) {
-                    if is_move && level == operand.level() {
+                    // TODO: Use this filter?
+                    if applying_to_move_spec && level == operand.level() {
                         continue;
                     }
 
@@ -722,26 +723,22 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
 
                     let vector_bytes = level.vector_bytes();
-                    if !vector_bytes.is_empty() {
-                        for vector_size in gen_vector_sizes(
-                            Some(operand.dim_sizes()),
-                            operand.dtype(),
-                            vector_bytes,
-                        ) {
-                            results.push(Action::Move {
-                                source_idx: i,
-                                destination_level: level,
-                                destination_layout: layout.clone(),
-                                destination_vector_size: Some(vector_size),
-                                prefetch: false,
-                            });
+                    for vector_size in gen_vector_sizes_opt(
+                        Some(operand.dim_sizes()),
+                        operand.dtype(),
+                        vector_bytes,
+                    ) {
+                        if operand.layout() == layout
+                            && operand.level() == level
+                            && operand.vector_size() == vector_size
+                        {
+                            continue;
                         }
-                    } else {
                         results.push(Action::Move {
                             source_idx: i,
-                            destination_level: level.clone(),
+                            destination_level: level,
                             destination_layout: layout.clone(),
-                            destination_vector_size: None,
+                            destination_vector_size: vector_size,
                             prefetch: false,
                         });
                     }
@@ -1091,6 +1088,24 @@ pub fn gen_vector_sizes<'a>(
         debug_assert!(value_cnt > 0);
         value_cnt
     })
+}
+
+pub fn gen_vector_sizes_opt<'a>(
+    outer_shape: Option<&'a [DimSize]>,
+    dtype: Dtype,
+    vector_bytes: &'a [u32],
+) -> impl Iterator<Item = Option<DimSize>> + 'a {
+    let mut iter_a = None;
+    let mut iter_b = None;
+    if vector_bytes.is_empty() {
+        iter_a = Some(iter::once(None));
+    } else {
+        iter_b = Some(gen_vector_sizes(outer_shape, dtype, vector_bytes).map(Some));
+    }
+    iter_a
+        .into_iter()
+        .flatten()
+        .chain(iter_b.into_iter().flatten())
 }
 
 pub fn dim_range(dim: DimSize, include_end: bool) -> impl Iterator<Item = DimSize> {
