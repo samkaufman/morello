@@ -705,11 +705,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             let i = u8::try_from(i).unwrap();
             for layout in Tgt::all_layouts_for_shape(operand.dim_sizes()) {
                 for level in Tgt::possible_destination_levels(operand.level()) {
-                    // TODO: Use this filter?
-                    if applying_to_move_spec && level == operand.level() {
-                        continue;
-                    }
-
                     if !operand.can_move_to(&layout, &level) {
                         continue;
                     }
