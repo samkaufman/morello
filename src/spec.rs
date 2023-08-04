@@ -21,6 +21,9 @@ use std::iter::{self, once};
 use std::mem;
 use std::{assert_eq, debug_assert_eq};
 
+/// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
+const MOVE_RESULTS_CAPACITY: usize = 12;
+
 // The following should probably just be Spec::Primitive and Spec::Compose variants once
 // there are good conversions to/from image/filter shapes for Conv.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -683,7 +686,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     fn move_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         // TODO: Add prefetching moves.
 
-        let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
+        // TODO: Don't accumulate. Return an iterator.
+        let mut results = Vec::with_capacity(MOVE_RESULTS_CAPACITY);
 
         // Move actions can only be applied when both from and to the same-level memory.
         let mut applying_to_move_spec = false;
@@ -709,28 +713,31 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         continue;
                     }
 
-                    let vector_bytes = level.vector_bytes();
-                    for vector_size in gen_vector_sizes_opt(
-                        Some(operand.dim_sizes()),
-                        operand.dtype(),
-                        vector_bytes,
-                    ) {
-                        // Don't yield moves which don't change anything. If yielded, it would be
-                        // pruned immediately, but this is a bit quicker.
-                        if operand.layout() == layout
-                            && operand.level() == level
-                            && operand.vector_size() == vector_size
-                        {
-                            continue;
-                        }
-                        results.push(Action::Move {
-                            source_idx: i,
-                            destination_level: level,
-                            destination_layout: layout.clone(),
-                            destination_vector_size: vector_size,
-                            prefetch: false,
-                        });
-                    }
+                    results.extend(
+                        gen_vector_sizes_opt(
+                            Some(operand.dim_sizes()),
+                            operand.dtype(),
+                            level.vector_bytes(),
+                        )
+                        .filter_map(|vector_size| {
+                            // Don't yield moves which don't change anything. If yielded, it would be
+                            // pruned immediately, but this is a bit quicker.
+                            if operand.layout() == layout
+                                && operand.level() == level
+                                && operand.vector_size() == vector_size
+                            {
+                                None
+                            } else {
+                                Some(Action::Move {
+                                    source_idx: i,
+                                    destination_level: level,
+                                    destination_layout: layout.clone(),
+                                    destination_vector_size: vector_size,
+                                    prefetch: false,
+                                })
+                            }
+                        }),
+                    )
                 }
             }
         }
