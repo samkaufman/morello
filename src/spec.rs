@@ -594,12 +594,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let serial_only = self.serial_only();
         let output = self.output();
         gen_tile_sizes::<Tgt>(output.dim_sizes(), true).flat_map(move |tile_shape| {
-            let mut ts = SmallVec::<[Action<Tgt>; 2]>::new();
-            ts.push(self.tile_out(&tile_shape, false));
+            let left = once(self.tile_out(&tile_shape, false));
+            let mut right = None;
             if !serial_only {
-                ts.push(self.tile_out(&tile_shape, true));
+                right = Some(self.tile_out(&tile_shape, true));
             }
-            ts
+            left.into_iter().chain(right.into_iter())
         })
     }
 
