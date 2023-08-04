@@ -715,6 +715,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         operand.dtype(),
                         vector_bytes,
                     ) {
+                        // Don't yield moves which don't change anything. If yielded, it would be
+                        // pruned immediately, but this is a bit quicker.
                         if operand.layout() == layout
                             && operand.level() == level
                             && operand.vector_size() == vector_size

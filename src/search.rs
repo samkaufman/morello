@@ -135,40 +135,20 @@ impl<'a, Tgt: Target> ParentSummary<'a, Tgt> {
     /// prune the given sub-Spec. If [ParentSummaryTransitionResult::NewSummary] is returned,
     /// the wrapped [ParentSummary] should be used for nested children.
     fn transition(&'a self, nested_spec: &'a Spec<Tgt>) -> ParentSummaryTransitionResult<'a, Tgt> {
-        // Prune two cases: (a) cycles of Moves, and (b) recursion into the same LogicalSpec.
-        match &nested_spec.0 {
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Move,
-                    ..
-                },
-                ..,
-            ) => {
-                let mut cur_option = Some(self);
-                while let Some(cur) = cur_option {
-                    if cur.seen == &nested_spec.0 {
-                        return ParentSummaryTransitionResult::PruneAction;
-                    }
-                    cur_option = cur.tail;
-                }
-
-                ParentSummaryTransitionResult::NewSummary(ParentSummary {
-                    seen: &nested_spec.0,
-                    tail: Some(self),
-                })
+        // Prune any cycles. These can result from within-level cycles between layouts, not just in
+        // terms of introduced Move Specs, but the non-Move/moved "body" Specs as well.
+        let mut cur_option = Some(self);
+        while let Some(cur) = cur_option {
+            if cur.seen == &nested_spec.0 {
+                return ParentSummaryTransitionResult::PruneAction;
             }
-            _ => {
-                debug_assert_ne!(
-                    self.seen, &nested_spec.0,
-                    "Single-step Spec cycle seen: {:?}",
-                    self.seen
-                );
-                ParentSummaryTransitionResult::NewSummary(ParentSummary {
-                    seen: &nested_spec.0,
-                    tail: None,
-                })
-            }
+            cur_option = cur.tail;
         }
+
+        ParentSummaryTransitionResult::NewSummary(ParentSummary {
+            seen: &nested_spec.0,
+            tail: Some(self),
+        })
     }
 }
 
