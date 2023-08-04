@@ -34,8 +34,15 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Block<Tgt, Aux> {
         child_costs.iter().sum()
     }
 
-    fn aux(&self) -> &Aux {
-        &self.aux
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
+        // TODO: Check that parameters are unchanged after children are replaced.
+        // TODO: Flatten nested Blocks as well.
+        Self {
+            stages: new_children.collect(),
+            bindings: self.bindings.clone(),
+            parameters: self.parameters.clone(),
+            aux: self.aux.clone(),
+        }
     }
 
     fn bind<'i, 'j: 'i>(
@@ -61,14 +68,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Block<Tgt, Aux> {
         None
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
-        // TODO: Check that parameters are unchanged after children are replaced.
-        // TODO: Flatten nested Blocks as well.
-        Self {
-            stages: new_children.collect(),
-            bindings: self.bindings.clone(),
-            parameters: self.parameters.clone(),
-            aux: self.aux.clone(),
-        }
+    fn aux(&self) -> &Aux {
+        &self.aux
     }
 }

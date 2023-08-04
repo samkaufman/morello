@@ -1,11 +1,6 @@
 use std::fmt;
 
-use crate::{
-    common::{DimSize, Dtype, Shape},
-    expr::AffineExpr,
-    layout::BufferExprTerm,
-    utils::indent,
-};
+use crate::{common::Dtype, expr::AffineExpr, layout::BufferExprTerm, utils::indent};
 
 #[derive(Debug, Clone)]
 pub enum CBuffer {
@@ -57,21 +52,6 @@ impl CBuffer {
             | CBuffer::ValueVar { name, .. }
             | CBuffer::SingleVecVar { name, .. } => Some(name),
             CBuffer::VecVars { .. } => None,
-        }
-    }
-
-    pub fn dtype(&self) -> Dtype {
-        match self {
-            CBuffer::HeapArray { dtype, .. }
-            | CBuffer::StackArray { dtype, .. }
-            | CBuffer::ValueVar { dtype, .. } => *dtype,
-            CBuffer::SingleVecVar { vec_type, .. } => vec_type.dtype,
-            CBuffer::VecVars { inner_vecs, .. } => {
-                let CBuffer::SingleVecVar { vec_type, .. } = inner_vecs[0] else {
-                    unreachable!();
-                };
-                vec_type.dtype
-            }
         }
     }
 
@@ -174,20 +154,4 @@ pub fn c_type(dtype: Dtype) -> &'static str {
         Dtype::Uint8 => "uint8_t",
         Dtype::Uint32 => "uint32_t",
     }
-}
-
-fn dot_product<T>(lhs: &[T], rhs: &[T]) -> T
-where
-    T: std::iter::Sum<<T as std::ops::Mul<T>>::Output> + std::ops::Mul<T> + Copy,
-{
-    debug_assert_eq!(lhs.len(), rhs.len());
-    lhs.iter().zip(rhs).map(|(&a, &b)| a * b).sum()
-}
-
-/// Compute, for each dimension, the volume of all later dimensions.
-fn compute_step_sizes(shape: &[DimSize]) -> Shape {
-    // TODO: Do this in one pass over shape.
-    (0..shape.len())
-        .map(|dim| shape[dim + 1..].iter().product())
-        .collect()
 }

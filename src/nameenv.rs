@@ -41,3 +41,9 @@ impl<'t, Tgt: Target> NameEnv<'t, dyn View<Tgt = Tgt>> {
         }
     }
 }
+
+impl<K> Default for NameEnv<'_, K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}

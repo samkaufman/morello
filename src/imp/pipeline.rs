@@ -50,6 +50,14 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
         child_costs.iter().sum()
     }
 
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
+        Pipeline {
+            intermediates: self.intermediates.clone(),
+            stages: new_children.collect(),
+            aux: self.aux.clone(),
+        }
+    }
+
     fn bind<'i, 'j: 'i>(
         &'j self,
         _args: &[&'j dyn View<Tgt = Tgt>],
@@ -75,13 +83,5 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
 
     fn aux(&self) -> &Aux {
         &self.aux
-    }
-
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
-        Pipeline {
-            intermediates: self.intermediates.clone(),
-            stages: new_children.collect(),
-            aux: self.aux.clone(),
-        }
     }
 }

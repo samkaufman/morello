@@ -1022,20 +1022,6 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
     }
 }
 
-impl<Tgt: Target> TensorSpecAux<Tgt> {
-    fn make_tensorspec_noncanon(&self, dim_sizes: Shape, dtype: Dtype) -> TensorSpec<Tgt> {
-        TensorSpec::new_noncanon(
-            dim_sizes,
-            dtype,
-            self.contig,
-            self.aligned,
-            self.level,
-            self.layout.clone(),
-            self.vector_size.clone(),
-        )
-    }
-}
-
 // TODO: Modify to return an `impl Iterator` of some kind instead of a `Box`.
 fn gen_tile_sizes<Tgt: Target>(
     tensor_shape: &[DimSize],

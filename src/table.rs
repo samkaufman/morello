@@ -63,8 +63,14 @@ pub struct Entry<Tgt: Target> {
 
 impl<Tgt: Target> InMemDatabase<Tgt> {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<Tgt: Target> Default for InMemDatabase<Tgt> {
+    fn default() -> Self {
         InMemDatabase {
-            grouped_entries: HashMap::new(),
+            grouped_entries: Default::default(),
         }
     }
 }
