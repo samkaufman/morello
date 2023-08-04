@@ -37,5 +37,9 @@ iai-callgrind = "0.4.0"
 proptest = "1.2.0"
 
 [[bench]]
+name = "iter_actions"
+harness = false
+
+[[bench]]
 name = "synth"
 harness = false
