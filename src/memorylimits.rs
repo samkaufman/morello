@@ -1,7 +1,6 @@
 use log::warn;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-
 use std::{
     iter,
     ops::{Index, IndexMut, Sub},
@@ -191,10 +190,10 @@ impl IntoIterator for MemVec {
 impl<'a> IntoIterator for &'a MemVec {
     type Item = u64;
 
-    type IntoIter = smallvec::IntoIter<[u64; MAX_LEVEL_COUNT]>;
+    type IntoIter = iter::Cloned<std::slice::Iter<'a, u64>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.clone().into_iter()
+        self.0.iter().cloned()
     }
 }
 

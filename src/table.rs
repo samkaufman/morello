@@ -321,10 +321,10 @@ fn get_from_entry<'a, Tgt: Target>(
         MemoryLimits::Standard(query_lims) => {
             for (i, (lims, peaks)) in entry.ranges.iter().enumerate() {
                 if query_lims
-                    .iter()
+                    .into_iter()
                     .zip(lims)
                     .zip(peaks)
-                    .all(|((q, l), p)| l >= *q && *q >= p)
+                    .all(|((q, l), p)| l >= q && q >= p)
                 {
                     return Some(&entry.values[i]);
                 }
