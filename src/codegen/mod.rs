@@ -6,7 +6,7 @@ mod header;
 mod namegen;
 mod x86;
 
-use crate::target::Target;
+use crate::target::{Target, Targets};
 use crate::utils::ToWriteFmt;
 
 use anyhow::{bail, Result};
@@ -18,11 +18,15 @@ use tempfile::tempdir;
 
 const CLI_FLAGS: [&'static str; 3] = ["-std=gnu99", "-O3", "-o"];
 
-pub trait CodeGen<Tgt: Target, const N: usize> {
-    const CLI_VEC_FLAGS: [&'static str; N];
-
+pub trait CodeGen<Tgt: Target> {
     fn get_compiler_path() -> Result<String> {
         clang::get_path() // Clang by default
+    }
+    fn get_cli_vec_flags() -> &'static [&'static str] {
+        match Tgt::by_enum() {
+            Targets::X86 => &x86::CLI_VEC_FLAGS,
+            Targets::Arm => &arm::CLI_VEC_FLAGS,
+        }
     }
 
     fn emit<W: fmt::Write>(&self, out: &mut W) -> fmt::Result;
@@ -41,7 +45,7 @@ pub trait CodeGen<Tgt: Target, const N: usize> {
         // println!("Source file: {}", source_path.to_string_lossy());
 
         let clang_proc = Command::new(Self::get_compiler_path()?)
-            .args(Self::CLI_VEC_FLAGS)
+            .args(Self::get_cli_vec_flags())
             .args(CLI_FLAGS)
             .arg(binary_path.to_string_lossy().to_string())
             .arg(source_path.to_string_lossy().to_string())

@@ -9,11 +9,9 @@ use crate::imp::ImplNode;
 use crate::target::ArmTarget;
 use crate::views::Tensor;
 
-const NUM_VEC_FLAGS: usize = 1;
+pub(crate) const CLI_VEC_FLAGS: [&'static str; 1] = ["-fopenmp"];
 
-impl<Aux: Clone + Debug> CodeGen<ArmTarget, NUM_VEC_FLAGS> for ImplNode<ArmTarget, Aux> {
-    const CLI_VEC_FLAGS: [&'static str; NUM_VEC_FLAGS] = ["-fopenmp"];
-
+impl<Aux: Clone + Debug> CodeGen<ArmTarget> for ImplNode<ArmTarget, Aux> {
     fn emit<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
         let top_arg_tensors = self
             .parameters()
