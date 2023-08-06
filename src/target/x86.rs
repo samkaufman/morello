@@ -1,18 +1,54 @@
-use crate::common::DimSize;
+use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::imp::kernels::KernelType;
 use crate::layout::{nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use crate::target::{MemoryLevel, Target};
+use crate::target::{MemoryLevel, Target, Targets};
 use crate::tensorspec::TensorSpec;
 
+use crate::codegen::c_utils::VecType;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter;
+
+const X86_VEC_TYPES: [VecType; 4] = [
+    VecType {
+        dtype: Dtype::Uint32,
+        value_cnt: 8,
+        name: "vui8",
+        native_type_name: "__m256i",
+        load_fn: "_mm256_loadu_si256",
+        store_fn: "_mm256_storeu_si256",
+    },
+    VecType {
+        dtype: Dtype::Uint32,
+        value_cnt: 4,
+        name: "vui4",
+        native_type_name: "__m128i",
+        load_fn: "_mm_loadu_si128",
+        store_fn: "_mm_storeu_si128",
+    },
+    VecType {
+        dtype: Dtype::Uint8,
+        value_cnt: 32,
+        name: "vub32",
+        native_type_name: "__m256i",
+        load_fn: "_mm256_loadu_si256",
+        store_fn: "_mm256_storeu_si256",
+    },
+    VecType {
+        dtype: Dtype::Uint8,
+        value_cnt: 16,
+        name: "vub16",
+        native_type_name: "__m128i",
+        load_fn: "_mm_loadu_si128",
+        store_fn: "_mm_storeu_si128",
+    },
+];
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Default, Debug, Serialize)]
 pub struct X86Target;
@@ -108,6 +144,14 @@ impl Target for X86Target {
             },
             LogicalSpec::Compose { .. } => Box::new(iter::empty()),
         }
+    }
+
+    fn by_enum() -> Targets {
+        Targets::X86
+    }
+
+    fn get_vec_types() -> &'static [VecType; 4] {
+        &X86_VEC_TYPES
     }
 }
 

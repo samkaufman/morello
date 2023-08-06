@@ -1,5 +1,5 @@
 mod arm;
-mod c_utils;
+pub mod c_utils;
 mod clang;
 mod cpu;
 mod header;

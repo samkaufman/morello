@@ -11,6 +11,7 @@ use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
 
+use crate::codegen::c_utils::VecType;
 use clap::ValueEnum;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -32,6 +33,12 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
 
     /// Yield target-specific actions which apply to a given [LogicalSpec].
     fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
+
+    /// Get corresponding [Targets] enum
+    fn by_enum() -> Targets;
+
+    /// Get corresponding vector types
+    fn get_vec_types() -> &'static [VecType; 4];
 }
 
 pub trait MemoryLevel:
