@@ -21,7 +21,9 @@ const CLI_FLAGS: [&'static str; 3] = ["-std=gnu99", "-O3", "-o"];
 pub trait CodeGen<Tgt: Target, const N: usize> {
     const CLI_VEC_FLAGS: [&'static str; N];
 
-    fn get_compiler_path() -> Result<String>;
+    fn get_compiler_path() -> Result<String> {
+        clang::get_path() // Clang by default
+    }
 
     fn emit<W: fmt::Write>(&self, out: &mut W) -> fmt::Result;
 

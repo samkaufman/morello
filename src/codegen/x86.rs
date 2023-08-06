@@ -1,10 +1,8 @@
-use anyhow::Result;
 use std::fmt;
 use std::fmt::Debug;
 use std::rc::Rc;
 
 use super::CodeGen;
-use crate::codegen::clang;
 use crate::codegen::cpu::CpuCodeGenerator;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
@@ -15,10 +13,6 @@ const NUM_VEC_FLAGS: usize = 2;
 
 impl<Aux: Clone + Debug> CodeGen<X86Target, NUM_VEC_FLAGS> for ImplNode<X86Target, Aux> {
     const CLI_VEC_FLAGS: [&'static str; NUM_VEC_FLAGS] = ["-fopenmp", "-mavx2"];
-
-    fn get_compiler_path() -> Result<String> {
-        clang::get_path()
-    }
 
     fn emit<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
         let top_arg_tensors = self
