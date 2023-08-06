@@ -136,7 +136,7 @@ impl PrimitiveBasics {
                     outer_aux: first.clone(),
                     inner_level: second.level,
                     inner_layout: second.layout.clone(),
-                    inner_vector_size: second.vector_size.clone(),
+                    inner_vector_size: second.vector_size,
                 }
             }
         }
@@ -1062,20 +1062,6 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
         let serial_str = if self.serial_only() { ", serial" } else { "" };
 
         write!(f, "{}({}{})", header, operand_str, serial_str)
-    }
-}
-
-impl<Tgt: Target> TensorSpecAux<Tgt> {
-    fn make_tensorspec_noncanon(&self, dim_sizes: Shape, dtype: Dtype) -> TensorSpec<Tgt> {
-        TensorSpec::new_noncanon(
-            dim_sizes,
-            dtype,
-            self.contig,
-            self.aligned,
-            self.level,
-            self.layout.clone(),
-            self.vector_size.clone(),
-        )
     }
 }
 

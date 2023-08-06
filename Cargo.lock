@@ -503,6 +503,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
 
 [[package]]
+name = "iai-callgrind"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ff41e0063f618f5896ad48d6f9cc6c03552f7c2b65abfcf6fbfaa48e8a80c9f"
+
+[[package]]
 name = "instant"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -632,6 +638,7 @@ dependencies = [
  "enum-iterator",
  "enum_dispatch",
  "env_logger",
+ "iai-callgrind",
  "itertools",
  "lazy_static",
  "log",
