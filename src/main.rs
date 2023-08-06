@@ -3,7 +3,6 @@ use clap::Parser;
 use log::info;
 use smallvec::smallvec;
 use std::path;
-use std::path::PathBuf;
 use std::sync::RwLock;
 
 use morello::codegen::CodeGen;
