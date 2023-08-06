@@ -6,10 +6,10 @@ use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 // TODO: Use X86MemoryLevel for now for simplicity,
 //       but this should be changed to ArmMemoryLevel eventually.
+use crate::codegen::c_utils::VecType;
 use crate::target::{MemoryLevel, Target, Targets, X86MemoryLevel};
 use crate::tensorspec::TensorSpec;
 
-use crate::codegen::c_utils::VecType;
 use serde::Serialize;
 use smallvec::smallvec;
 use std::fmt::Debug;

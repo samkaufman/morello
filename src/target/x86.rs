@@ -1,3 +1,4 @@
+use crate::codegen::c_utils::VecType;
 use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::imp::kernels::KernelType;
@@ -8,7 +9,6 @@ use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target, Targets};
 use crate::tensorspec::TensorSpec;
 
-use crate::codegen::c_utils::VecType;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::cmp::Ordering;

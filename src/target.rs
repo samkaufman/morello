@@ -4,6 +4,7 @@ mod x86;
 pub use arm::ArmTarget;
 pub use x86::{X86MemoryLevel, X86Target};
 
+use crate::codegen::c_utils::VecType;
 use crate::common::DimSize;
 use crate::cost::MainCost;
 use crate::layout::Layout;
@@ -11,7 +12,6 @@ use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
 
-use crate::codegen::c_utils::VecType;
 use clap::ValueEnum;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
