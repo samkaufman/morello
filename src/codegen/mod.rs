@@ -1,22 +1,29 @@
-mod arm;
 pub mod c_utils;
 mod clang;
 mod cpu;
 mod header;
 mod namegen;
-mod x86;
 
-use crate::target::{Target, Targets};
+use crate::codegen::cpu::CpuCodeGenerator;
+use crate::imp::Impl;
+use crate::imp::ImplNode;
+use crate::target::{Target, Targets, X86MemoryLevel};
 use crate::utils::ToWriteFmt;
+use crate::views::Tensor;
 
 use anyhow::{bail, Result};
 use std::fmt;
+use std::fmt::Debug;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::rc::Rc;
 use tempfile::tempdir;
 
 const CLI_FLAGS: [&'static str; 3] = ["-std=gnu99", "-O3", "-o"];
+
+const X86_CLI_VEC_FLAGS: [&'static str; 2] = ["-fopenmp", "-mavx2"];
+const ARM_CLI_VEC_FLAGS: [&'static str; 1] = ["-fopenmp"];
 
 pub trait CodeGen<Tgt: Target> {
     fn get_compiler_path() -> Result<String> {
@@ -24,8 +31,8 @@ pub trait CodeGen<Tgt: Target> {
     }
     fn get_cli_vec_flags() -> &'static [&'static str] {
         match Tgt::by_enum() {
-            Targets::X86 => &x86::CLI_VEC_FLAGS,
-            Targets::Arm => &arm::CLI_VEC_FLAGS,
+            Targets::X86 => &X86_CLI_VEC_FLAGS,
+            Targets::Arm => &ARM_CLI_VEC_FLAGS,
         }
     }
 
@@ -60,6 +67,20 @@ pub trait CodeGen<Tgt: Target> {
         }
 
         Ok(BuildArtifact::new(binary_path, source_path, dirname, None))
+    }
+}
+
+impl<Tgt: Target<Level = X86MemoryLevel>, Aux: Clone + Debug> CodeGen<Tgt> for ImplNode<Tgt, Aux> {
+    fn emit<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
+        let top_arg_tensors = self
+            .parameters()
+            .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
+            .collect::<Vec<_>>();
+        let mut generator = CpuCodeGenerator::<Tgt>::new();
+        generator.emit_kernel(self, &top_arg_tensors, out)?;
+        out.write_str("\n")?;
+        generator.emit_main(&top_arg_tensors, out)?;
+        Ok(())
     }
 }
 
