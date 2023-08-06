@@ -20,10 +20,10 @@ use std::process::{Command, Output};
 use std::rc::Rc;
 use tempfile::tempdir;
 
-const CLI_FLAGS: [&'static str; 3] = ["-std=gnu99", "-O3", "-o"];
+const CLI_FLAGS: [&str; 3] = ["-std=gnu99", "-O3", "-o"];
 
-const X86_CLI_VEC_FLAGS: [&'static str; 2] = ["-fopenmp", "-mavx2"];
-const ARM_CLI_VEC_FLAGS: [&'static str; 1] = ["-fopenmp"];
+const X86_CLI_VEC_FLAGS: [&str; 2] = ["-fopenmp", "-mavx2"];
+const ARM_CLI_VEC_FLAGS: [&str; 1] = ["-fopenmp"];
 
 pub trait CodeGen<Tgt: Target> {
     fn get_compiler_path() -> Result<String> {

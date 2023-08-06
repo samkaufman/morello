@@ -97,9 +97,8 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
         writeln!(main_body_str, "int main() {{")?;
         depth += 1;
-        for i in 0..top_arg_tensors.len() {
-            let tensor = &top_arg_tensors[i];
-            let c_buffer = self.name_env.get(&*tensor).unwrap();
+        for (i, tensor) in top_arg_tensors.iter().enumerate() {
+            let c_buffer = self.name_env.get(tensor).unwrap();
             writeln!(
                 main_body_str,
                 "{}{} buf{}[{}] __attribute__((aligned (128)));",
@@ -117,9 +116,12 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             "{}// Initialize the input tensors.",
             indent(depth)
         )?;
-        for i in 0..(top_arg_tensors.len() - 1) {
-            let tensor = &top_arg_tensors[i];
-            let c_buffer = self.name_env.get(&*tensor).unwrap();
+        for (i, tensor) in top_arg_tensors
+            .iter()
+            .enumerate()
+            .take(top_arg_tensors.len() - 1)
+        {
+            let c_buffer = self.name_env.get(tensor).unwrap();
             writeln!(
                 main_body_str,
                 "{}for (int i = 0; i < {}; i++) {{",
@@ -141,8 +143,6 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         // Emit the kernel call
         write!(main_body_str, "{}kernel(", indent(depth))?;
         for i in 0..top_arg_tensors.len() {
-            let tensor = &top_arg_tensors[i];
-            let c_buffer = self.name_env.get(&*tensor).unwrap();
             write!(
                 main_body_str,
                 "&buf{}[0]{}",
@@ -159,7 +159,7 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         // Print the output tensor
         writeln!(main_body_str, "{}// Print the output.", indent(depth))?;
         let tensor = &top_arg_tensors[top_arg_tensors.len() - 1];
-        let c_buffer = self.name_env.get(&*tensor).unwrap();
+        let c_buffer = self.name_env.get(tensor).unwrap();
         writeln!(
             main_body_str,
             "{}for (int i = 0; i < {}; i++) {{",
