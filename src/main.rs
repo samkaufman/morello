@@ -3,6 +3,7 @@ use clap::Parser;
 use log::info;
 use smallvec::smallvec;
 use std::path;
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 use morello::codegen::CodeGen;
@@ -63,17 +64,21 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     color::set_color_mode(args.color);
-    match (&args.db, &args.target) {
-        (Some(db_path), Targets::X86) => main_per_db(
-            &args,
-            SqliteDatabaseWrapper::new(InMemDatabase::<X86Target>::new(), db_path),
-        ),
-        (None, Targets::X86) => main_per_db(&args, InMemDatabase::<X86Target>::new()),
-        (Some(db_path), Targets::Arm) => main_per_db(
-            &args,
-            SqliteDatabaseWrapper::new(InMemDatabase::<ArmTarget>::new(), db_path),
-        ),
-        (None, Targets::Arm) => main_per_db(&args, InMemDatabase::<ArmTarget>::new()),
+    match &args.target {
+        Targets::X86 => {
+            let db = InMemDatabase::<X86Target>::new();
+            match &args.db {
+                Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
+                None => main_per_db(&args, db),
+            }
+        }
+        Targets::Arm => {
+            let db = InMemDatabase::<ArmTarget>::new();
+            match &args.db {
+                Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
+                None => main_per_db(&args, db),
+            }
+        }
     }
 }
 
