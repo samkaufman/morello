@@ -40,17 +40,14 @@ where
 
     // Set up table
     let mut table = prettytable::Table::new();
-    let mut titles = row![""];
-    if print_mode == PrintMode::Full {
-        for col_name in root.aux().extra_column_titles() {
-            titles.add_cell(Cell::new(&col_name));
+    let mut titles = row!["Impl"];
+    match print_mode {
+        PrintMode::Full => {
+            for col_name in root.aux().extra_column_titles() {
+                titles.add_cell(Cell::new(&col_name));
+            }
         }
-    }
-    if print_mode != PrintMode::Compact {
-        for level in Tgt::levels() {
-            titles.add_cell(Cell::new(&level.to_string()));
-        }
-        titles.add_cell(Cell::new("Cost"));
+        PrintMode::Compact => {}
     }
     table.set_titles(titles);
 
@@ -134,7 +131,6 @@ mod test {
     use super::*;
     use crate::common::{Dtype, Spec};
     use crate::imp::subspecs::SpecApp;
-    use crate::imp::ImplNode;
     use crate::layout::row_major;
     use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{X86MemoryLevel, X86Target};

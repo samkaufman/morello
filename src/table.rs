@@ -11,8 +11,8 @@ use rusqlite::{params_from_iter, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use std::mem;
 use std::path;
+use std::{iter, mem};
 
 const SQLITE_BATCH_SIZE: usize = 1_000;
 
@@ -23,14 +23,20 @@ pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
 
 impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
     fn extra_column_titles(&self) -> Vec<String> {
-        vec![String::from("Logical Spec"), String::from("Cost")]
+        iter::once("Logical Spec".to_owned())
+            .chain(Tgt::levels().iter().map(|lvl| lvl.to_string()))
+            .chain(iter::once("Cost".to_owned()))
+            .collect()
     }
 
     fn extra_column_values(&self) -> Vec<String> {
         if let Some((spec, cost)) = &self.0 {
-            vec![spec.0.to_string(), cost.main.to_string()]
+            iter::once(spec.0.to_string())
+                .chain(cost.peaks.iter().map(|p| p.to_string()))
+                .chain(iter::once(cost.main.to_string()))
+                .collect()
         } else {
-            vec![String::from(""); 2]
+            vec![String::from(""); Tgt::levels().len() + 2]
         }
     }
 }

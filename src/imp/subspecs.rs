@@ -7,6 +7,7 @@ use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
 
+use itertools::Itertools;
 use smallvec::SmallVec;
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -111,13 +112,14 @@ where
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
-        let name = "SPEC_NAME";
-        // let args_str = self
-        //     .1
-        //     .iter()
-        //     .map(|a| names.get_name_or_display(param_bindings[a]))
-        //     .join(", ");
-        Some(format!("{}({:?})", name, &self.1))
+        let args_str = self
+            .1
+            .iter()
+            .map(|a| {
+                names.get_name_or_display(a.to_param().map(|p| param_bindings[p]).unwrap_or(a))
+            })
+            .join(", ");
+        Some(format!("{}({})", self.0.borrow(), args_str))
     }
 
     fn aux(&self) -> &Aux {
