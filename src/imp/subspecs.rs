@@ -76,7 +76,7 @@ where
     Aux: Clone,
 {
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
-        todo!()
+        Box::new(self.1.iter().map(|p| p.spec()))
     }
 
     fn children(&self) -> &[ImplNode<Tgt, Aux>] {
@@ -98,18 +98,26 @@ where
 
     fn bind<'i, 'j: 'i>(
         &'j self,
-        _args: &[&'j dyn View<Tgt = Tgt>],
-        _env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
+        args: &[&'j dyn View<Tgt = Tgt>],
+        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
-        todo!()
+        for a in &self.1 {
+            a.bind(args, env)
+        }
     }
 
     fn line_strs<'a>(
         &'a self,
-        _names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
-        _param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
+        names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
+        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
-        todo!()
+        let name = "SPEC_NAME";
+        // let args_str = self
+        //     .1
+        //     .iter()
+        //     .map(|a| names.get_name_or_display(param_bindings[a]))
+        //     .join(", ");
+        Some(format!("{}({:?})", name, &self.1))
     }
 
     fn aux(&self) -> &Aux {

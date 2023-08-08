@@ -2,6 +2,7 @@ use crate::common::Spec;
 use crate::cost::Cost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemVec, MemoryLimits};
+use crate::pprint::PrintableAux;
 use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
 use crate::target::Target;
@@ -15,7 +16,30 @@ use std::path;
 
 const SQLITE_BATCH_SIZE: usize = 1_000;
 
-pub type DbImpl<Tgt> = ImplNode<Tgt, Option<(Spec<Tgt>, Cost)>>;
+pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
+
+#[derive(Clone, Debug)]
+pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
+
+impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
+    fn extra_column_titles(&self) -> Vec<String> {
+        vec![String::from("Logical Spec"), String::from("Cost")]
+    }
+
+    fn extra_column_values(&self) -> Vec<String> {
+        if let Some((spec, cost)) = &self.0 {
+            vec![spec.0.to_string(), cost.main.to_string()]
+        } else {
+            vec![String::from(""); 2]
+        }
+    }
+}
+
+impl<Tgt: Target> Default for DbImplAux<Tgt> {
+    fn default() -> Self {
+        DbImplAux(None)
+    }
+}
 
 pub trait Database<Tgt: Target> {
     fn get(&self, query: &Spec<Tgt>) -> Option<SmallVec<[(Action<Tgt>, Cost); 1]>>;
@@ -251,7 +275,10 @@ impl<Tgt: Target, T: Database<Tgt>> DatabaseExt<Tgt> for T {
                 .map(|root_result| {
                     let root = root_result
                         .0
-                        .apply_with_aux(query, Some((query.clone(), root_result.1.clone())))
+                        .apply_with_aux(
+                            query,
+                            DbImplAux(Some((query.clone(), root_result.1.clone()))),
+                        )
                         .unwrap();
                     let children = root.children();
                     let new_children = children
