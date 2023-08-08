@@ -107,7 +107,7 @@ where
         }
     }
 
-    fn line_strs<'a>(
+    fn pprint_line<'a>(
         &'a self,
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,

@@ -95,7 +95,7 @@ fn pprint_inner<'a, Tgt, Aux>(
     Tgt: Target,
     Aux: PrintableAux,
 {
-    if let Some(line_top) = imp.line_strs(name_env, param_bindings) {
+    if let Some(line_top) = imp.pprint_line(name_env, param_bindings) {
         let indent_str = indent(depth);
         let main_str = format!("{indent_str}{line_top}");
         let mut r;
