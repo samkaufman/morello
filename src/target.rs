@@ -61,7 +61,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
 
     /// Get corresponding [Targets] enum
-    fn by_enum() -> Targets;
+    fn target_id() -> Targets;
 
     /// Get corresponding vector types
     fn vec_types() -> &'static [VecType; 4];

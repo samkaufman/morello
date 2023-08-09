@@ -117,7 +117,7 @@ impl Target for ArmTarget {
         }
     }
 
-    fn by_enum() -> Targets {
+    fn target_id() -> Targets {
         Targets::Arm
     }
 

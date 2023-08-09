@@ -33,7 +33,7 @@ pub struct CpuCodeGenerator<'a, Tgt: Target> {
 impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     pub fn new() -> Self {
         Self {
-            headers: HeaderEmitter::new(Tgt::by_enum()),
+            headers: HeaderEmitter::new(Tgt::target_id()),
             ..Self::default()
         }
     }

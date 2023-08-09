@@ -117,7 +117,7 @@ impl Target for X86Target {
         }
     }
 
-    fn by_enum() -> Targets {
+    fn target_id() -> Targets {
         Targets::X86
     }
 

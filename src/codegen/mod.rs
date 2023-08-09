@@ -32,7 +32,7 @@ pub trait CodeGen<Tgt: Target> {
         clang_path() // Clang by default
     }
     fn cli_vec_flags() -> &'static [&'static str] {
-        match Tgt::by_enum() {
+        match Tgt::target_id() {
             Targets::X86 => &X86_CLI_VEC_FLAGS,
             Targets::Arm => &ARM_CLI_VEC_FLAGS,
         }
