@@ -2,7 +2,7 @@ mod arm;
 mod x86;
 
 pub use arm::ArmTarget;
-pub use x86::{CpuMemoryLevel, X86Target};
+pub use x86::X86Target;
 
 use crate::codegen::c_utils::VecType;
 use crate::common::DimSize;
@@ -15,8 +15,9 @@ use crate::tensorspec::TensorSpec;
 
 use clap::ValueEnum;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
+use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter;
 
@@ -82,6 +83,80 @@ pub trait MemoryLevel:
 pub enum TargetId {
     X86,
     Arm,
+}
+
+#[allow(clippy::upper_case_acronyms)]
+#[derive(
+    Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize, enum_iterator::Sequence,
+)]
+pub enum CpuMemoryLevel {
+    RF,
+    VRF,
+    L1,
+    GL,
+}
+
+impl MemoryLevel for CpuMemoryLevel {
+    fn is_addressed(&self) -> bool {
+        match &self {
+            CpuMemoryLevel::RF => true,
+            CpuMemoryLevel::VRF => true,
+            CpuMemoryLevel::L1 => false,
+            CpuMemoryLevel::GL => true,
+        }
+    }
+
+    fn cache_hit_cost(&self) -> MainCost {
+        match &self {
+            CpuMemoryLevel::RF => 0,
+            CpuMemoryLevel::VRF => 0,
+            CpuMemoryLevel::L1 => 10,
+            CpuMemoryLevel::GL => 100,
+        }
+    }
+
+    fn vector_bytes(&self) -> &'static [u32] {
+        match &self {
+            CpuMemoryLevel::VRF => &[16, 32],
+            _ => &[],
+        }
+    }
+}
+
+impl PartialOrd for CpuMemoryLevel {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self == other {
+            return Some(Ordering::Equal);
+        }
+
+        match (self, other) {
+            (CpuMemoryLevel::RF, CpuMemoryLevel::VRF) => None,
+            (CpuMemoryLevel::VRF, CpuMemoryLevel::RF) => None,
+            (CpuMemoryLevel::RF, _) => Some(Ordering::Less),
+            (CpuMemoryLevel::VRF, _) => Some(Ordering::Less),
+            (_, CpuMemoryLevel::RF) => Some(Ordering::Greater),
+            (_, CpuMemoryLevel::VRF) => Some(Ordering::Greater),
+            (CpuMemoryLevel::L1, CpuMemoryLevel::GL) => Some(Ordering::Less),
+            (CpuMemoryLevel::GL, CpuMemoryLevel::L1) => Some(Ordering::Greater),
+            (CpuMemoryLevel::L1, CpuMemoryLevel::L1) => unreachable!(),
+            (CpuMemoryLevel::GL, CpuMemoryLevel::GL) => unreachable!(),
+        }
+    }
+}
+
+impl Display for CpuMemoryLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match &self {
+                CpuMemoryLevel::RF => "RF",
+                CpuMemoryLevel::VRF => "VRF",
+                CpuMemoryLevel::L1 => "L1",
+                CpuMemoryLevel::GL => "GL",
+            }
+        )
+    }
 }
 
 pub fn valueassign_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(

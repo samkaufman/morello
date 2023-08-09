@@ -1,18 +1,16 @@
 use crate::codegen::c_utils::VecType;
 use crate::common::Dtype;
-use crate::cost::MainCost;
 use crate::target::{
     broadcastvecmult_applies_to_operands, memsetzero_applies_to_operands, mult_applies_to_operands,
     valueassign_applies_to_operands, vectorassign_applies_to_operands,
-    vectorzero_applies_to_operands, MemoryLevel, Target, TargetId,
+    vectorzero_applies_to_operands, CpuMemoryLevel, Target, TargetId,
 };
 
 use crate::imp::kernels::KernelType;
 use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
-use std::fmt::{Debug, Display};
+use serde::Serialize;
+use std::fmt::Debug;
 use std::iter;
 
 const X86_VEC_TYPES: [VecType; 4] = [
@@ -121,79 +119,5 @@ impl Target for X86Target {
 
     fn vec_types() -> &'static [VecType; 4] {
         &X86_VEC_TYPES
-    }
-}
-
-#[allow(clippy::upper_case_acronyms)]
-#[derive(
-    Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize, enum_iterator::Sequence,
-)]
-pub enum CpuMemoryLevel {
-    RF,
-    VRF,
-    L1,
-    GL,
-}
-
-impl MemoryLevel for CpuMemoryLevel {
-    fn is_addressed(&self) -> bool {
-        match &self {
-            CpuMemoryLevel::RF => true,
-            CpuMemoryLevel::VRF => true,
-            CpuMemoryLevel::L1 => false,
-            CpuMemoryLevel::GL => true,
-        }
-    }
-
-    fn cache_hit_cost(&self) -> MainCost {
-        match &self {
-            CpuMemoryLevel::RF => 0,
-            CpuMemoryLevel::VRF => 0,
-            CpuMemoryLevel::L1 => 10,
-            CpuMemoryLevel::GL => 100,
-        }
-    }
-
-    fn vector_bytes(&self) -> &'static [u32] {
-        match &self {
-            CpuMemoryLevel::VRF => &[16, 32],
-            _ => &[],
-        }
-    }
-}
-
-impl PartialOrd for CpuMemoryLevel {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self == other {
-            return Some(Ordering::Equal);
-        }
-
-        match (self, other) {
-            (CpuMemoryLevel::RF, CpuMemoryLevel::VRF) => None,
-            (CpuMemoryLevel::VRF, CpuMemoryLevel::RF) => None,
-            (CpuMemoryLevel::RF, _) => Some(Ordering::Less),
-            (CpuMemoryLevel::VRF, _) => Some(Ordering::Less),
-            (_, CpuMemoryLevel::RF) => Some(Ordering::Greater),
-            (_, CpuMemoryLevel::VRF) => Some(Ordering::Greater),
-            (CpuMemoryLevel::L1, CpuMemoryLevel::GL) => Some(Ordering::Less),
-            (CpuMemoryLevel::GL, CpuMemoryLevel::L1) => Some(Ordering::Greater),
-            (CpuMemoryLevel::L1, CpuMemoryLevel::L1) => unreachable!(),
-            (CpuMemoryLevel::GL, CpuMemoryLevel::GL) => unreachable!(),
-        }
-    }
-}
-
-impl Display for CpuMemoryLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match &self {
-                CpuMemoryLevel::RF => "RF",
-                CpuMemoryLevel::VRF => "VRF",
-                CpuMemoryLevel::L1 => "L1",
-                CpuMemoryLevel::GL => "GL",
-            }
-        )
     }
 }
