@@ -52,7 +52,6 @@ pub trait CodeGen<Tgt: Target> {
             self.emit(&mut ToWriteFmt(io::stdout()))?;
             println!();
         }
-        // println!("Source file: {}", source_path.to_string_lossy());
 
         let mut clang_cmd = Command::new(Self::compiler_path()?);
         if do_color() {
