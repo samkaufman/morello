@@ -97,56 +97,26 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
         writeln!(main_body_str, "int main() {{")?;
         depth += 1;
-        for (i, tensor) in top_arg_tensors.iter().enumerate() {
-            let c_buffer = self.name_env.get(tensor).unwrap();
-            writeln!(
-                main_body_str,
-                "{}{} buf{}[{}] __attribute__((aligned (128)));",
-                indent(depth),
-                c_type(c_buffer.dtype()),
-                i, // we do not use c_buffer.name().unwrap()
-                c_buffer.size().unwrap(),
-            )?;
+        // Allocate a buffer for each Impl parameter.
+        let mut buffers = Vec::with_capacity(top_arg_tensors.len());
+        for kernel_argument in top_arg_tensors {
+            let spec = kernel_argument.spec();
+            let buf = self.make_buffer(
+                spec.dim_sizes(),
+                spec.vector_size(),
+                spec.dtype(),
+                spec.level(),
+            );
+            buf.emit(&mut main_body_str, true, depth)?;
+            buffers.push(buf);
         }
-        writeln!(main_body_str)?;
-
-        // Initialize the input tensors
-        writeln!(
-            main_body_str,
-            "{}// Initialize the input tensors.",
-            indent(depth)
-        )?;
-        for (i, tensor) in top_arg_tensors
-            .iter()
-            .enumerate()
-            .take(top_arg_tensors.len() - 1)
-        {
-            let c_buffer = self.name_env.get(tensor).unwrap();
-            writeln!(
-                main_body_str,
-                "{}for (int i = 0; i < {}; i++) {{",
-                indent(depth),
-                c_buffer.size().unwrap(),
-            )?;
-            depth += 1;
-            writeln!(
-                main_body_str,
-                "{}buf{}[i] = i;",
-                indent(depth),
-                i, // we do not use c_buffer.name().unwrap()
-            )?;
-            depth -= 1;
-            writeln!(main_body_str, "{}}}", indent(depth))?;
-        }
-        writeln!(main_body_str)?;
-
-        // Emit the kernel call
-        write!(main_body_str, "{}kernel(", indent(depth))?;
-        for i in 0..top_arg_tensors.len() {
+        // Emit the kernel call, passing pointers to the Impl function.
+        write!(main_body_str, "\n{}kernel(", indent(depth))?;
+        for (i, a) in buffers.iter().enumerate() {
             write!(
                 main_body_str,
-                "&buf{}[0]{}",
-                i, // we do not use c_buffer.name().unwrap()
+                "{}{}",
+                self.c_index_ptr(a, &0i32.into(), None),
                 if i < top_arg_tensors.len() - 1 {
                     ", "
                 } else {
@@ -169,12 +139,18 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         depth += 1;
         writeln!(
             main_body_str,
-            "{}printf(\"%d \", buf{}[i]);",
+            "{}printf(\"%d \", {}[i]);",
             indent(depth),
-            top_arg_tensors.len() - 1, // we do not use c_buffer.name().unwrap()
+            buffers.last().unwrap().name().unwrap(),
         )?;
         depth -= 1;
         writeln!(main_body_str, "{}}}", indent(depth))?;
+
+        // Free the buffers.
+        writeln!(main_body_str, "\n{}// Free the buffers.", indent(depth))?;
+        for buf in buffers {
+            buf.emit_free(&mut main_body_str, depth)?;
+        }
 
         writeln!(main_body_str, "\n{}return 0;", indent(depth))?;
         writeln!(main_body_str, "}}")?;
