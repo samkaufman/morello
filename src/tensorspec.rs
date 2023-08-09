@@ -10,7 +10,7 @@ use crate::utils::join_into_string;
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Deserialize, Serialize)]
 #[serde(bound = "")]
 pub struct TensorSpec<Tgt: Target> {
-    pub dim_sizes: Shape, // TODO: Rename to shape
+    pub shape: Shape, // TODO: Rename to shape
     pub dtype: Dtype,
     pub aux: TensorSpecAux<Tgt>,
 }
@@ -28,7 +28,7 @@ pub struct TensorSpecAux<Tgt: Target> {
 
 impl<Tgt: Target> TensorSpec<Tgt> {
     pub fn new_canon(
-        dim_sizes: Shape,
+        shape: Shape,
         dtype: Dtype,
         contiguous_abs: Contig,
         aligned: bool,
@@ -37,7 +37,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         vector_size: Option<DimSize>,
     ) -> Self {
         let mut r = Self::new_noncanon(
-            dim_sizes,
+            shape,
             dtype,
             contiguous_abs,
             aligned,
@@ -50,7 +50,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub fn new_noncanon(
-        dim_sizes: Shape,
+        shape: Shape,
         dtype: Dtype,
         contiguous_abs: Contig,
         aligned: bool,
@@ -59,7 +59,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         vector_size: Option<DimSize>,
     ) -> Self {
         Self::new_noncanon_with_aux(
-            dim_sizes,
+            shape,
             dtype,
             TensorSpecAux {
                 contig: contiguous_abs,
@@ -71,15 +71,15 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         )
     }
 
-    pub fn new_noncanon_with_aux(dim_sizes: Shape, dtype: Dtype, aux: TensorSpecAux<Tgt>) -> Self {
-        if dim_sizes.is_empty() || dim_sizes.iter().any(|&d| d < 1) {
-            panic!("Invalid shape: {:?}", dim_sizes);
+    pub fn new_noncanon_with_aux(shape: Shape, dtype: Dtype, aux: TensorSpecAux<Tgt>) -> Self {
+        if shape.is_empty() || shape.iter().any(|&d| d < 1) {
+            panic!("Invalid shape: {:?}", shape);
         }
 
-        if !aux.layout.applies_to_shape(&dim_sizes) {
+        if !aux.layout.applies_to_shape(&shape) {
             panic!(
                 "Layout {:?} does not apply to shape {:?}",
-                aux.layout, dim_sizes
+                aux.layout, shape
             );
         }
 
@@ -89,11 +89,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             )
         }
 
-        TensorSpec {
-            dim_sizes,
-            dtype,
-            aux,
-        }
+        TensorSpec { shape, dtype, aux }
     }
 
     pub fn layout(&self) -> Layout {
@@ -110,11 +106,11 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     /// Returns true if this TensorSpec can be tiled to the given shape.
     pub fn is_valid_tile_shape(&self, shape: &[DimSize]) -> bool {
-        if shape.len() != self.dim_sizes.len() {
+        if shape.len() != self.shape.len() {
             return false;
         }
 
-        if !shape.iter().zip(self.dim_sizes.iter()).all(|(i, o)| i <= o) {
+        if !shape.iter().zip(self.shape.iter()).all(|(i, o)| i <= o) {
             return false;
         }
 
@@ -127,17 +123,11 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub fn bytes_used(&self) -> u64 {
-        u64::from(self.dtype.size())
-            * self
-                .dim_sizes
-                .iter()
-                .copied()
-                .map(u64::from)
-                .product::<u64>()
+        u64::from(self.dtype.size()) * self.shape.iter().copied().map(u64::from).product::<u64>()
     }
 
-    pub fn dim_sizes(&self) -> &[DimSize] {
-        &self.dim_sizes
+    pub fn shape(&self) -> &[DimSize] {
+        &self.shape
     }
 
     pub fn dtype(&self) -> Dtype {
@@ -176,19 +166,19 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     ///
     /// The result's layout and contiguousness abstraction will have been
     /// canoncialized for the given shape.
-    pub fn shrink(&mut self, dim_sizes: &[DimSize], aligned: bool) {
+    pub fn shrink(&mut self, shape: &[DimSize], aligned: bool) {
         // This implementation is similar to `canonicalize`, but the tile
         // contiguousness is computed from both old and new shapes.
-        self.aux.contig =
-            self.layout()
-                .tile_contiguity(dim_sizes, &self.dim_sizes, self.aux.contig);
-        self.dim_sizes = Shape::from(dim_sizes);
-        self.aux.layout = self.aux.layout.canonicalize_for_shape(&self.dim_sizes);
+        self.aux.contig = self
+            .layout()
+            .tile_contiguity(shape, &self.shape, self.aux.contig);
+        self.shape = Shape::from(shape);
+        self.aux.layout = self.aux.layout.canonicalize_for_shape(&self.shape);
         self.aux.aligned = aligned;
     }
 
     pub fn canonicalize(&mut self) {
-        self.aux.canonicalize(&self.dim_sizes, self.aux.aligned);
+        self.aux.canonicalize(&self.shape, self.aux.aligned);
     }
 
     /// Returns a TensorSpec with given size-one dimensions dropped.
@@ -201,20 +191,20 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         // Make sure dropped_dims is sorted.
         debug_assert!(dropped_dims.windows(2).all(|w| w[0] < w[1]));
 
-        let mut new_dim_sizes = Shape::from(self.dim_sizes());
+        let mut new_shape = Shape::from(self.shape());
         for &dim in dropped_dims.iter().rev() {
             assert_eq!(
-                new_dim_sizes[usize::from(dim)],
+                new_shape[usize::from(dim)],
                 1,
                 "Cannot drop non-degenerate dimension {} of shape {:?}",
                 dim,
-                new_dim_sizes
+                new_shape
             );
-            new_dim_sizes.remove(dim.into());
+            new_shape.remove(dim.into());
         }
 
-        let (new_layout, new_contig) = if new_dim_sizes.iter().all(|&d| d == 1) {
-            let new_layout = row_major(new_dim_sizes.len().try_into().unwrap());
+        let (new_layout, new_contig) = if new_shape.iter().all(|&d| d == 1) {
+            let new_layout = row_major(new_shape.len().try_into().unwrap());
             (new_layout.clone(), new_layout.contiguous_full())
         } else {
             let dropped_dims_set = dropped_dims.iter().copied().collect::<HashSet<_>>();
@@ -223,7 +213,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         };
 
         TensorSpec::new_canon(
-            new_dim_sizes,
+            new_shape,
             self.dtype(),
             new_contig,
             self.aligned(),
@@ -240,7 +230,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         }
         let vector_bytes = dest_level.vector_bytes();
         if !vector_bytes.is_empty() {
-            let vol: DimSize = self.dim_sizes().iter().product();
+            let vol: DimSize = self.shape().iter().product();
             let bytes = vol * DimSize::from(self.dtype.size());
             if vector_bytes.iter().all(|&vb| bytes % vb != 0) {
                 return false;
@@ -253,7 +243,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 impl<Tgt: Target> Display for TensorSpec<Tgt> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let dims_part = self
-            .dim_sizes
+            .shape
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>()
@@ -270,11 +260,9 @@ impl<Tgt: Target> Display for TensorSpec<Tgt> {
 }
 
 impl<Tgt: Target> TensorSpecAux<Tgt> {
-    pub fn canonicalize(&mut self, dim_sizes: &Shape, aligned: bool) {
-        self.contig = self
-            .layout
-            .tile_contiguity(dim_sizes, dim_sizes, self.contig);
-        self.layout = self.layout.canonicalize_for_shape(dim_sizes);
+    pub fn canonicalize(&mut self, shape: &Shape, aligned: bool) {
+        self.contig = self.layout.tile_contiguity(shape, shape, self.contig);
+        self.layout = self.layout.canonicalize_for_shape(shape);
         self.aligned = aligned;
     }
 }

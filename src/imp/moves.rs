@@ -219,12 +219,12 @@ pub fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tgt>) -> 
     let dest_hit_cost = dest.level().cache_hit_cost();
 
     let src_cache_lines = MainCost::from(src.layout().estimate_cache_lines::<Tgt>(
-        src.dim_sizes(),
+        src.shape(),
         src.dtype(),
         src.is_contiguous(),
     ));
     let dest_cache_lines = MainCost::from(dest.layout().estimate_cache_lines::<Tgt>(
-        dest.dim_sizes(),
+        dest.shape(),
         dest.dtype(),
         dest.is_contiguous(),
     ));

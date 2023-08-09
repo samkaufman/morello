@@ -92,12 +92,8 @@ impl<'a> X86CodeGenerator<'a> {
         writeln!(main_body_str, "__attribute__((noinline))\nvoid kernel(")?;
         for ((operand_idx, operand), tensor) in imp.parameters().enumerate().zip(top_arg_tensors) {
             let spec = tensor.spec();
-            let new_c_buffer = self.make_buffer(
-                spec.dim_sizes(),
-                spec.vector_size(),
-                spec.dtype(),
-                spec.level(),
-            );
+            let new_c_buffer =
+                self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
             writeln!(
                 main_body_str,
                 "  {} *restrict {}{}",
@@ -206,7 +202,7 @@ impl<'a> X86CodeGenerator<'a> {
                         // CBuffer and Tensor.
                         let spec = move_let.introduced.spec();
                         let dest_buffer = self.make_buffer(
-                            spec.dim_sizes(),
+                            spec.shape(),
                             spec.vector_size(),
                             spec.dtype(),
                             spec.level(),

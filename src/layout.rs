@@ -323,14 +323,11 @@ impl Layout {
     }
 
     // Reorder the shape according to the physical order of the dimensions.
-    fn layout_ordered_dims(&self, dim_sizes: &[DimSize]) -> Shape {
+    fn layout_ordered_dims(&self, shape: &[DimSize]) -> Shape {
         match &self {
             Layout::Standard { dim_order } => {
-                assert_eq!(dim_sizes.len(), dim_order.len());
-                dim_order
-                    .iter()
-                    .map(|&d| dim_sizes[usize::from(d)])
-                    .collect()
+                assert_eq!(shape.len(), dim_order.len());
+                dim_order.iter().map(|&d| shape[usize::from(d)]).collect()
             }
             _ => unimplemented!(),
         }
