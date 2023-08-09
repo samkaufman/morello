@@ -24,13 +24,12 @@ impl HeaderEmitter {
         match self.emit_target {
             TargetId::X86 => {
                 out.write_str(include_str!("../codegen/partials/x86.c"))?;
-                out.write_char('\n')?;
             }
             TargetId::Arm => {
                 out.write_str(include_str!("../codegen/partials/arm.c"))?;
-                out.write_char('\n')?;
             }
         }
+        out.write_char('\n')?;
         if self.emit_benchmarking {
             out.write_str(include_str!("../codegen/partials/benchmarking.c"))?;
             out.write_char('\n')?;
