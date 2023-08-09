@@ -728,8 +728,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     fn move_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
-        // TODO: Add prefetching moves.
-
         let mut results = vec![]; // TODO: Don't accumulate. Return an iterator.
         if matches!(self, LogicalSpec::Primitive(_, _, _))
             && matches!(self.primitive_type(), PrimitiveSpecType::Move)
@@ -759,7 +757,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                                 destination_level: level,
                                 destination_layout: layout.clone(),
                                 destination_vector_size: Some(vector_size),
-                                prefetch: false,
                             });
                         }
                     } else {
@@ -770,7 +767,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                                 destination_level: level,
                                 destination_layout: dest_layout,
                                 destination_vector_size: None,
-                                prefetch: false,
                             }
                         });
                     }

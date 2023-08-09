@@ -40,7 +40,6 @@ pub enum Action<Tgt: Target> {
         destination_level: Tgt::Level,
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
-        prefetch: bool,
     },
     ToAccum,
     Peel {
@@ -468,12 +467,7 @@ impl<Tgt: Target> Action<Tgt> {
                 destination_level,
                 destination_layout,
                 destination_vector_size,
-                prefetch,
             } => {
-                if *prefetch {
-                    unimplemented!()
-                }
-
                 let outer_moved_operand_spec = &operands[usize::from(*source_idx)];
                 let new_spec = movelet_inner_tensorspec(
                     outer_moved_operand_spec,
@@ -493,10 +487,6 @@ impl<Tgt: Target> Action<Tgt> {
                     // We assume bytes_used will be the same for source and destination
                     // tensors.
                     let mut additional = operands[usize::from(*source_idx)].bytes_used();
-                    if *prefetch {
-                        additional *= 2;
-                    }
-
                     let mut l = match &spec.1 {
                         MemoryLimits::Standard(base) => {
                             let updated_level_idx = Tgt::levels()
@@ -583,7 +573,6 @@ impl<Tgt: Target> Action<Tgt> {
                     prologue.map(|i| i.into()),
                     new_body_app.into(),
                     epilogue.map(|i| i.into()),
-                    *prefetch,
                     aux,
                 )))
             }
@@ -664,15 +653,10 @@ impl<Tgt: Target> Display for Action<Tgt> {
                 destination_level,
                 destination_layout,
                 destination_vector_size,
-                prefetch,
             } => write!(
                 f,
-                "Move({}, {}, {}, {:?}, {:?})",
-                source_idx,
-                destination_level,
-                destination_layout,
-                destination_vector_size,
-                prefetch
+                "Move({}, {}, {}, {:?})",
+                source_idx, destination_level, destination_layout, destination_vector_size
             ),
             Action::Place(KernelType::Mult) => write!(f, "Mult"),
             Action::Place(KernelType::BroadcastVecMult) => {
