@@ -29,7 +29,7 @@ const ARM_CLI_VEC_FLAGS: [&str; 1] = ["-fopenmp"];
 
 pub trait CodeGen<Tgt: Target> {
     fn compiler_path() -> Result<String> {
-        clang_path() // Clang by default
+        clang_path()
     }
 
     fn cli_vec_flags() -> &'static [&'static str] {
