@@ -9,7 +9,7 @@ use crate::codegen::cpu::CpuCodeGenerator;
 use crate::color::do_color;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
-use crate::target::{Target, Targets, X86MemoryLevel};
+use crate::target::{Target, TargetId, X86MemoryLevel};
 use crate::utils::ToWriteFmt;
 use crate::views::Tensor;
 
@@ -33,8 +33,8 @@ pub trait CodeGen<Tgt: Target> {
     }
     fn cli_vec_flags() -> &'static [&'static str] {
         match Tgt::target_id() {
-            Targets::X86 => &X86_CLI_VEC_FLAGS,
-            Targets::Arm => &ARM_CLI_VEC_FLAGS,
+            TargetId::X86 => &X86_CLI_VEC_FLAGS,
+            TargetId::Arm => &ARM_CLI_VEC_FLAGS,
         }
     }
 

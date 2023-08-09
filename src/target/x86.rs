@@ -4,7 +4,7 @@ use crate::cost::MainCost;
 use crate::target::{
     broadcastvecmult_applies_to_operands, memsetzero_applies_to_operands, mult_applies_to_operands,
     valueassign_applies_to_operands, vectorassign_applies_to_operands,
-    vectorzero_applies_to_operands, MemoryLevel, Target, Targets,
+    vectorzero_applies_to_operands, MemoryLevel, Target, TargetId,
 };
 
 use crate::imp::kernels::KernelType;
@@ -117,8 +117,8 @@ impl Target for X86Target {
         }
     }
 
-    fn target_id() -> Targets {
-        Targets::X86
+    fn target_id() -> TargetId {
+        TargetId::X86
     }
 
     fn vec_types() -> &'static [VecType; 4] {

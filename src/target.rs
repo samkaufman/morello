@@ -60,8 +60,8 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     /// Yield target-specific actions which apply to a given [LogicalSpec].
     fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
 
-    /// Get corresponding [Targets] enum
-    fn target_id() -> Targets;
+    /// Get corresponding [TargetId] enum
+    fn target_id() -> TargetId;
 
     /// Get corresponding vector types
     fn vec_types() -> &'static [VecType; 4];
@@ -79,7 +79,7 @@ pub trait MemoryLevel:
 }
 
 #[derive(Clone, ValueEnum)]
-pub enum Targets {
+pub enum TargetId {
     X86,
     Arm,
 }

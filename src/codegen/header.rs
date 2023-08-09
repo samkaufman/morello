@@ -1,16 +1,16 @@
-use crate::target::Targets;
+use crate::target::TargetId;
 use std::{collections::HashSet, fmt};
 
 use super::c_utils::VecType;
 
 pub struct HeaderEmitter {
-    pub emit_target: Targets,
+    pub emit_target: TargetId,
     pub emit_benchmarking: bool,
     pub vector_type_defs: HashSet<&'static VecType>,
 }
 
 impl HeaderEmitter {
-    pub fn new(emit_target: Targets) -> Self {
+    pub fn new(emit_target: TargetId) -> Self {
         Self {
             emit_target,
             emit_benchmarking: false,
@@ -22,11 +22,11 @@ impl HeaderEmitter {
         out.write_str(include_str!("../codegen/partials/std.c"))?;
         out.write_char('\n')?;
         match self.emit_target {
-            Targets::X86 => {
+            TargetId::X86 => {
                 out.write_str(include_str!("../codegen/partials/x86.c"))?;
                 out.write_char('\n')?;
             }
-            Targets::Arm => {
+            TargetId::Arm => {
                 out.write_str(include_str!("../codegen/partials/arm.c"))?;
                 out.write_char('\n')?;
             }
@@ -57,6 +57,6 @@ impl HeaderEmitter {
 
 impl Default for HeaderEmitter {
     fn default() -> Self {
-        HeaderEmitter::new(Targets::X86)
+        HeaderEmitter::new(TargetId::X86)
     }
 }

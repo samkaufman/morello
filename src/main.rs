@@ -12,7 +12,7 @@ use morello::layout::row_major;
 use morello::pprint::{pprint, PrintMode};
 use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
-use morello::target::{ArmTarget, Target, Targets, X86MemoryLevel, X86Target};
+use morello::target::{ArmTarget, Target, TargetId, X86MemoryLevel, X86Target};
 use morello::tensorspec::TensorSpecAux;
 
 #[derive(Parser)]
@@ -30,8 +30,8 @@ struct Args {
     print: PrintMode,
 
     /// Target architecture
-    #[arg(long, value_enum, default_value_t = Targets::X86)]
-    target: Targets,
+    #[arg(long, value_enum, default_value_t = TargetId::X86)]
+    target: TargetId,
 
     /// Print the generated code
     #[arg(long)]
@@ -64,14 +64,14 @@ fn main() -> Result<()> {
     let args = Args::parse();
     color::set_color_mode(args.color);
     match &args.target {
-        Targets::X86 => {
+        TargetId::X86 => {
             let db = InMemDatabase::<X86Target>::new();
             match &args.db {
                 Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
                 None => main_per_db(&args, db),
             }
         }
-        Targets::Arm => {
+        TargetId::Arm => {
             let db = InMemDatabase::<ArmTarget>::new();
             match &args.db {
                 Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),

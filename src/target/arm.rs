@@ -3,7 +3,7 @@ use crate::common::Dtype;
 use crate::target::{
     broadcastvecmult_applies_to_operands, memsetzero_applies_to_operands, mult_applies_to_operands,
     valueassign_applies_to_operands, vectorassign_applies_to_operands,
-    vectorzero_applies_to_operands, Target, Targets, X86MemoryLevel,
+    vectorzero_applies_to_operands, Target, TargetId, X86MemoryLevel,
 };
 
 use crate::imp::kernels::KernelType;
@@ -117,8 +117,8 @@ impl Target for ArmTarget {
         }
     }
 
-    fn target_id() -> Targets {
-        Targets::Arm
+    fn target_id() -> TargetId {
+        TargetId::Arm
     }
 
     fn vec_types() -> &'static [VecType; 4] {
