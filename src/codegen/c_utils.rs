@@ -62,21 +62,6 @@ impl CBuffer {
         }
     }
 
-    pub fn dtype(&self) -> Dtype {
-        match self {
-            CBuffer::HeapArray { dtype, .. }
-            | CBuffer::StackArray { dtype, .. }
-            | CBuffer::ValueVar { dtype, .. } => *dtype,
-            CBuffer::SingleVecVar { vec_type, .. } => vec_type.dtype,
-            CBuffer::VecVars { inner_vecs, .. } => {
-                let CBuffer::SingleVecVar { vec_type, .. } = inner_vecs[0] else {
-                    unreachable!();
-                };
-                vec_type.dtype
-            }
-        }
-    }
-
     pub fn needs_unroll(&self) -> bool {
         matches!(self, CBuffer::VecVars { .. })
     }
