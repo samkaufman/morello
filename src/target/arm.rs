@@ -150,7 +150,7 @@ impl Target for ArmTarget {
         Targets::Arm
     }
 
-    fn get_vec_types() -> &'static [VecType; 4] {
+    fn vec_types() -> &'static [VecType; 4] {
         &ARM_VEC_TYPES
     }
 }

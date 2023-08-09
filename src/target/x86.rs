@@ -150,7 +150,7 @@ impl Target for X86Target {
         Targets::X86
     }
 
-    fn get_vec_types() -> &'static [VecType; 4] {
+    fn vec_types() -> &'static [VecType; 4] {
         &X86_VEC_TYPES
     }
 }

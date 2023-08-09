@@ -196,7 +196,7 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         match level {
             X86MemoryLevel::VRF => {
                 let vector_size = vector_size.unwrap();
-                let vec_type = get_vector(Tgt::get_vec_types(), dtype, vector_size);
+                let vec_type = get_vector(Tgt::vec_types(), dtype, vector_size);
                 self.headers.vector_type_defs.insert(vec_type);
 
                 debug_assert_eq!(size % vector_size, 0);
@@ -352,7 +352,7 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_ptr(a, b, None)
                         });
-                        let vtype = get_vector(Tgt::get_vec_types(), dtype, volume);
+                        let vtype = get_vector(Tgt::vec_types(), dtype, volume);
                         let itype = vtype.native_type_name;
                         if arguments.iter().all(|a| a.1.aligned()) {
                             writeln!(
@@ -382,8 +382,7 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         let shape = arguments[2].shape();
                         let dtype = arguments[2].spec().dtype();
                         let volume = shape.iter().product::<DimSize>();
-                        let itype =
-                            get_vector(Tgt::get_vec_types(), dtype, volume).native_type_name;
+                        let itype = get_vector(Tgt::vec_types(), dtype, volume).native_type_name;
                         let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
                             0 => self.c_index(a, b, None),
                             1 | 2 => self.c_index_ptr(a, b, None),

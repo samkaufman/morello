@@ -38,7 +38,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn by_enum() -> Targets;
 
     /// Get corresponding vector types
-    fn get_vec_types() -> &'static [VecType; 4];
+    fn vec_types() -> &'static [VecType; 4];
 }
 
 pub trait MemoryLevel:
