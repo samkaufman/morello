@@ -27,7 +27,7 @@ const X86_CLI_VEC_FLAGS: [&str; 2] = ["-fopenmp", "-mavx2"];
 const ARM_CLI_VEC_FLAGS: [&str; 1] = ["-fopenmp"];
 
 pub trait CodeGen<Tgt: Target> {
-    fn get_compiler_path() -> Result<String> {
+    fn compiler_path() -> Result<String> {
         clang_path() // Clang by default
     }
     fn cli_vec_flags() -> &'static [&'static str] {
@@ -52,7 +52,7 @@ pub trait CodeGen<Tgt: Target> {
         }
         // println!("Source file: {}", source_path.to_string_lossy());
 
-        let clang_proc = Command::new(Self::get_compiler_path()?)
+        let clang_proc = Command::new(Self::compiler_path()?)
             .args(Self::cli_vec_flags())
             .args(CLI_FLAGS)
             .arg(binary_path.to_string_lossy().to_string())
