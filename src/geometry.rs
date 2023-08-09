@@ -209,14 +209,14 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
             }
             SpecKey::Move { is_load: _, dtype } => {
                 let source_level = int_to_level(pt[pt.len() - 2]);
-                let dim_sizes = &pt[..pt.len() - 2]
+                let shape = &pt[..pt.len() - 2]
                     .iter()
                     .map(|&d| from_log2_dim_space(d))
                     .collect::<Shape>();
                 let serial_only = pt[pt.len() - 1] == 0;
 
                 let alignments = [true, false];
-                let viable_layouts = X86Target::all_layouts_for_shape(dim_sizes);
+                let viable_layouts = X86Target::all_layouts_for_shape(shape);
 
                 alignments
                     .into_iter()
@@ -241,7 +241,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                         .map(|lvl| {
                                             if lvl.vector_rf() {
                                                 gen_vector_sizes(
-                                                    Some(dim_sizes),
+                                                    Some(shape),
                                                     *dtype,
                                                     lvl.vector_bytes(),
                                                 )
@@ -258,7 +258,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                                 LogicalSpec::Primitive(
                                                     PrimitiveBasics {
                                                         typ: PrimitiveSpecType::Move,
-                                                        spec_shape: dim_sizes.clone(),
+                                                        spec_shape: shape.clone(),
                                                         dtype: *dtype,
                                                     },
                                                     PrimitiveAux(vec![
@@ -291,12 +291,12 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
             SpecKey::Zero { dtype } => {
                 let serial_only = pt[pt.len() - 1] == 0;
                 let level = int_to_level(pt[pt.len() - 2]);
-                let dim_sizes = pt[..pt.len() - 2]
+                let shape = pt[..pt.len() - 2]
                     .iter()
                     .map(|&d| from_log2_dim_space(d))
                     .collect::<Shape>();
                 align_layout_contig_vector_size_product::<X86Target>(
-                    &[dim_sizes.clone()],
+                    &[shape.clone()],
                     *dtype,
                     &[level],
                 )
@@ -308,7 +308,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     LogicalSpec::Primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Zero,
-                            spec_shape: dim_sizes.clone(),
+                            spec_shape: shape.clone(),
                             dtype: *dtype,
                         },
                         PrimitiveAux(vec![TensorSpecAux {

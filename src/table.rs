@@ -2,6 +2,7 @@ use crate::common::Spec;
 use crate::cost::Cost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemVec, MemoryLimits};
+use crate::pprint::PrintableAux;
 use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
 use crate::target::Target;
@@ -10,12 +11,41 @@ use rusqlite::{params_from_iter, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use std::mem;
 use std::path;
+use std::{iter, mem};
 
 const SQLITE_BATCH_SIZE: usize = 1_000;
 
-pub type DbImpl<Tgt> = ImplNode<Tgt, Option<(Spec<Tgt>, Cost)>>;
+pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
+
+#[derive(Clone, Debug)]
+pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
+
+impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
+    fn extra_column_titles(&self) -> Vec<String> {
+        iter::once("Logical Spec".to_owned())
+            .chain(Tgt::levels().iter().map(|lvl| lvl.to_string()))
+            .chain(iter::once("Cost".to_owned()))
+            .collect()
+    }
+
+    fn extra_column_values(&self) -> Vec<String> {
+        if let Some((spec, cost)) = &self.0 {
+            iter::once(spec.0.to_string())
+                .chain(cost.peaks.iter().map(|p| p.to_string()))
+                .chain(iter::once(cost.main.to_string()))
+                .collect()
+        } else {
+            vec![String::from(""); Tgt::levels().len() + 2]
+        }
+    }
+}
+
+impl<Tgt: Target> Default for DbImplAux<Tgt> {
+    fn default() -> Self {
+        DbImplAux(None)
+    }
+}
 
 pub trait Database<Tgt: Target> {
     fn get(&self, query: &Spec<Tgt>) -> Option<SmallVec<[(Action<Tgt>, Cost); 1]>>;
@@ -251,7 +281,10 @@ impl<Tgt: Target, T: Database<Tgt>> DatabaseExt<Tgt> for T {
                 .map(|root_result| {
                     let root = root_result
                         .0
-                        .apply_with_aux(query, Some((query.clone(), root_result.1.clone())))
+                        .apply_with_aux(
+                            query,
+                            DbImplAux(Some((query.clone(), root_result.1.clone()))),
+                        )
                         .unwrap();
                     let children = root.children();
                     let new_children = children

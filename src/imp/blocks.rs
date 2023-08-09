@@ -59,7 +59,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Block<Tgt, Aux> {
         }
     }
 
-    fn line_strs<'a>(
+    fn pprint_line<'a>(
         &'a self,
         _names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         _param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,

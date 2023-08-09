@@ -465,13 +465,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let PrimitiveAux(aux) = primitive_aux;
                     for i in 0..aux.len() {
                         aux[i].contig = aux[i].layout.tile_contiguity(
-                            operands[i].dim_sizes(),
-                            operands[i].dim_sizes(),
+                            operands[i].shape(),
+                            operands[i].shape(),
                             aux[i].contig,
                         );
-                        aux[i].layout = aux[i]
-                            .layout
-                            .canonicalize_for_shape(operands[i].dim_sizes());
+                        aux[i].layout = aux[i].layout.canonicalize_for_shape(operands[i].shape());
                     }
                 }
                 PrimitiveSpecType::Move => {
@@ -480,8 +478,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     };
                     outer_aux.canonicalize(spec_shape, outer_aux.aligned);
                     inner_aux.contig = inner_aux.layout.tile_contiguity(
-                        operands[1].dim_sizes(),
-                        operands[1].dim_sizes(),
+                        operands[1].shape(),
+                        operands[1].shape(),
                         inner_aux.contig,
                     );
                     inner_aux.layout.canonicalize_for_shape(spec_shape);
@@ -577,8 +575,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let PrimitiveAux(aux) = primitive_aux;
 
         let operands = self.parameters();
-        let image_shape = operands[0].dim_sizes();
-        let filters_shape = operands[1].dim_sizes();
+        let image_shape = operands[0].shape();
+        let filters_shape = operands[1].shape();
 
         if image_shape[2..] != filters_shape[2..] {
             return false;
@@ -596,7 +594,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     fn tile_out_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         let serial_only = self.serial_only();
         let output = self.output();
-        gen_tile_sizes::<Tgt>(output.dim_sizes(), true).flat_map(move |tile_shape| {
+        gen_tile_sizes::<Tgt>(output.shape(), true).flat_map(move |tile_shape| {
             let left = once(self.tile_out(&tile_shape, false));
             let mut right = None;
             if !serial_only {
@@ -684,8 +682,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     fn move_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
-        // TODO: Add prefetching moves.
-
         // TODO: Don't accumulate. Return an iterator.
         let mut results = Vec::with_capacity(MOVE_RESULTS_CAPACITY);
 
@@ -696,8 +692,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 typ: PrimitiveSpecType::Move,
                 ..
             },
-            aux,
-            _,
+            ..,
         ) = self
         {
             applying_to_move_spec = true;
@@ -707,7 +702,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             // Yield actions for movement with register file destination, which
             // includes relayouts in registers and movements from level 1 to RF.
             let i = u8::try_from(i).unwrap();
-            for layout in Tgt::all_layouts_for_shape(operand.dim_sizes()) {
+            for layout in Tgt::all_layouts_for_shape(operand.shape()) {
                 for level in Tgt::possible_destination_levels(operand.level()) {
                     if !operand.can_move_to(&layout, &level) {
                         continue;
@@ -715,7 +710,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
                     results.extend(
                         gen_vector_sizes_opt(
-                            Some(operand.dim_sizes()),
+                            Some(operand.shape()),
                             operand.dtype(),
                             level.vector_bytes(),
                         )
@@ -733,7 +728,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                                     destination_level: level,
                                     destination_layout: layout.clone(),
                                     destination_vector_size: vector_size,
-                                    prefetch: false,
                                 })
                             }
                         }),
@@ -884,7 +878,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 let new_inputs = &new_operands[..new_operands.len() - 1];
                 let mut remaining_inputs = new_inputs
                     .iter()
-                    .map(|t| (t.dim_sizes(), t.dtype()))
+                    .map(|t| (t.shape(), t.dtype()))
                     .collect::<Vec<_>>();
                 let mut component_inputs: Vec<(Shape, Dtype)> = vec![];
                 for (_i, component) in components.iter_mut().enumerate().rev() {
@@ -923,7 +917,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 // output has an invalid shape.
                 debug_assert_eq!(component_inputs.len(), 1);
                 debug_assert_eq!(
-                    new_operands.last().unwrap().dim_sizes(),
+                    new_operands.last().unwrap().shape(),
                     &component_inputs[0].0[..]
                 );
                 debug_assert_eq!(component_inputs[0].1, new_operands.last().unwrap().dtype());
@@ -934,7 +928,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 basics.replace_io(
                     &new_operands
                         .iter()
-                        .map(|o| (o.dim_sizes(), o.dtype))
+                        .map(|o| (o.shape(), o.dtype))
                         .collect::<Vec<_>>(),
                 );
 
