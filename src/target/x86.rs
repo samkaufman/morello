@@ -54,10 +54,10 @@ const X86_VEC_TYPES: [VecType; 4] = [
 pub struct X86Target;
 
 impl Target for X86Target {
-    type Level = X86MemoryLevel;
+    type Level = CpuMemoryLevel;
 
-    fn default_level() -> X86MemoryLevel {
-        X86MemoryLevel::GL
+    fn default_level() -> CpuMemoryLevel {
+        CpuMemoryLevel::GL
     }
 
     fn levels() -> Vec<Self::Level> {
@@ -66,9 +66,9 @@ impl Target for X86Target {
 
     fn faster_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
         match slower {
-            X86MemoryLevel::RF | X86MemoryLevel::VRF => vec![],
-            X86MemoryLevel::L1 => vec![X86MemoryLevel::RF, X86MemoryLevel::VRF],
-            X86MemoryLevel::GL => vec![X86MemoryLevel::L1],
+            CpuMemoryLevel::RF | CpuMemoryLevel::VRF => vec![],
+            CpuMemoryLevel::L1 => vec![CpuMemoryLevel::RF, CpuMemoryLevel::VRF],
+            CpuMemoryLevel::GL => vec![CpuMemoryLevel::L1],
         }
     }
 
@@ -128,71 +128,71 @@ impl Target for X86Target {
 #[derive(
     Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize, enum_iterator::Sequence,
 )]
-pub enum X86MemoryLevel {
+pub enum CpuMemoryLevel {
     RF,
     VRF,
     L1,
     GL,
 }
 
-impl MemoryLevel for X86MemoryLevel {
+impl MemoryLevel for CpuMemoryLevel {
     fn is_addressed(&self) -> bool {
         match &self {
-            X86MemoryLevel::RF => true,
-            X86MemoryLevel::VRF => true,
-            X86MemoryLevel::L1 => false,
-            X86MemoryLevel::GL => true,
+            CpuMemoryLevel::RF => true,
+            CpuMemoryLevel::VRF => true,
+            CpuMemoryLevel::L1 => false,
+            CpuMemoryLevel::GL => true,
         }
     }
 
     fn cache_hit_cost(&self) -> MainCost {
         match &self {
-            X86MemoryLevel::RF => 0,
-            X86MemoryLevel::VRF => 0,
-            X86MemoryLevel::L1 => 10,
-            X86MemoryLevel::GL => 100,
+            CpuMemoryLevel::RF => 0,
+            CpuMemoryLevel::VRF => 0,
+            CpuMemoryLevel::L1 => 10,
+            CpuMemoryLevel::GL => 100,
         }
     }
 
     fn vector_bytes(&self) -> &'static [u32] {
         match &self {
-            X86MemoryLevel::VRF => &[16, 32],
+            CpuMemoryLevel::VRF => &[16, 32],
             _ => &[],
         }
     }
 }
 
-impl PartialOrd for X86MemoryLevel {
+impl PartialOrd for CpuMemoryLevel {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         if self == other {
             return Some(Ordering::Equal);
         }
 
         match (self, other) {
-            (X86MemoryLevel::RF, X86MemoryLevel::VRF) => None,
-            (X86MemoryLevel::VRF, X86MemoryLevel::RF) => None,
-            (X86MemoryLevel::RF, _) => Some(Ordering::Less),
-            (X86MemoryLevel::VRF, _) => Some(Ordering::Less),
-            (_, X86MemoryLevel::RF) => Some(Ordering::Greater),
-            (_, X86MemoryLevel::VRF) => Some(Ordering::Greater),
-            (X86MemoryLevel::L1, X86MemoryLevel::GL) => Some(Ordering::Less),
-            (X86MemoryLevel::GL, X86MemoryLevel::L1) => Some(Ordering::Greater),
-            (X86MemoryLevel::L1, X86MemoryLevel::L1) => unreachable!(),
-            (X86MemoryLevel::GL, X86MemoryLevel::GL) => unreachable!(),
+            (CpuMemoryLevel::RF, CpuMemoryLevel::VRF) => None,
+            (CpuMemoryLevel::VRF, CpuMemoryLevel::RF) => None,
+            (CpuMemoryLevel::RF, _) => Some(Ordering::Less),
+            (CpuMemoryLevel::VRF, _) => Some(Ordering::Less),
+            (_, CpuMemoryLevel::RF) => Some(Ordering::Greater),
+            (_, CpuMemoryLevel::VRF) => Some(Ordering::Greater),
+            (CpuMemoryLevel::L1, CpuMemoryLevel::GL) => Some(Ordering::Less),
+            (CpuMemoryLevel::GL, CpuMemoryLevel::L1) => Some(Ordering::Greater),
+            (CpuMemoryLevel::L1, CpuMemoryLevel::L1) => unreachable!(),
+            (CpuMemoryLevel::GL, CpuMemoryLevel::GL) => unreachable!(),
         }
     }
 }
 
-impl Display for X86MemoryLevel {
+impl Display for CpuMemoryLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{}",
             match &self {
-                X86MemoryLevel::RF => "RF",
-                X86MemoryLevel::VRF => "VRF",
-                X86MemoryLevel::L1 => "L1",
-                X86MemoryLevel::GL => "GL",
+                CpuMemoryLevel::RF => "RF",
+                CpuMemoryLevel::VRF => "VRF",
+                CpuMemoryLevel::L1 => "L1",
+                CpuMemoryLevel::GL => "GL",
             }
         )
     }

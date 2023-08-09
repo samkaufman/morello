@@ -9,7 +9,7 @@ use crate::codegen::cpu::CpuCodeGenerator;
 use crate::color::do_color;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
-use crate::target::{Target, TargetId, X86MemoryLevel};
+use crate::target::{CpuMemoryLevel, Target, TargetId};
 use crate::utils::ToWriteFmt;
 use crate::views::Tensor;
 
@@ -79,7 +79,7 @@ pub trait CodeGen<Tgt: Target> {
     }
 }
 
-impl<Tgt: Target<Level = X86MemoryLevel>, Aux: Clone + Debug> CodeGen<Tgt> for ImplNode<Tgt, Aux> {
+impl<Tgt: Target<Level = CpuMemoryLevel>, Aux: Clone + Debug> CodeGen<Tgt> for ImplNode<Tgt, Aux> {
     fn emit<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
         let top_arg_tensors = self
             .parameters()

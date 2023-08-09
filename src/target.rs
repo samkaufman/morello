@@ -2,7 +2,7 @@ mod arm;
 mod x86;
 
 pub use arm::ArmTarget;
-pub use x86::{X86MemoryLevel, X86Target};
+pub use x86::{CpuMemoryLevel, X86Target};
 
 use crate::codegen::c_utils::VecType;
 use crate::common::DimSize;
@@ -84,7 +84,7 @@ pub enum TargetId {
     Arm,
 }
 
-pub fn valueassign_applies_to_operands<Tgt: Target<Level = X86MemoryLevel>>(
+pub fn valueassign_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
     debug_assert_eq!(operands.len(), 2);
@@ -99,10 +99,10 @@ pub fn valueassign_applies_to_operands<Tgt: Target<Level = X86MemoryLevel>>(
         }
     }
 
-    operands.iter().any(|o| o.level() == X86MemoryLevel::RF)
+    operands.iter().any(|o| o.level() == CpuMemoryLevel::RF)
         && operands
             .iter()
-            .all(|o| o.level() == X86MemoryLevel::RF || o.level() == X86MemoryLevel::L1)
+            .all(|o| o.level() == CpuMemoryLevel::RF || o.level() == CpuMemoryLevel::L1)
 }
 
 pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>]) -> bool {
@@ -160,25 +160,25 @@ pub fn cacheaccess_applies_to_operands<Tgt: Target>(_operands: &[TensorSpec<Tgt>
     // true
 }
 
-pub fn memsetzero_applies_to_operands<Tgt: Target<Level = X86MemoryLevel>>(
+pub fn memsetzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
     if !operands[0].is_contiguous() {
         return false;
     }
-    if operands[0].level() != X86MemoryLevel::RF {
+    if operands[0].level() != CpuMemoryLevel::RF {
         return false;
     }
     true
 }
 
-pub fn vectorzero_applies_to_operands<Tgt: Target<Level = X86MemoryLevel>>(
+pub fn vectorzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
     if !operands[0].is_contiguous() {
         return false;
     }
-    if operands[0].level() != X86MemoryLevel::VRF {
+    if operands[0].level() != CpuMemoryLevel::VRF {
         return false;
     }
     let volume = operands[0].dim_sizes().iter().product::<DimSize>();
@@ -192,14 +192,14 @@ pub fn vectorzero_applies_to_operands<Tgt: Target<Level = X86MemoryLevel>>(
     true
 }
 
-pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = X86MemoryLevel>>(
+pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
-    if operands[0].level() != X86MemoryLevel::RF {
+    if operands[0].level() != CpuMemoryLevel::RF {
         return false;
     }
     for i in 1..3 {
-        if operands[i].level() != X86MemoryLevel::VRF {
+        if operands[i].level() != CpuMemoryLevel::VRF {
             return false;
         }
         let volume = operands[i].dim_sizes().iter().product::<DimSize>();
@@ -225,10 +225,10 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = X86MemoryLevel>>
     true
 }
 
-pub fn mult_applies_to_operands<Tgt: Target<Level = X86MemoryLevel>>(
+pub fn mult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
     operands
         .iter()
-        .all(|o| o.level() == X86MemoryLevel::RF && o.dim_sizes().iter().all(|&d| d == 1))
+        .all(|o| o.level() == CpuMemoryLevel::RF && o.dim_sizes().iter().all(|&d| d == 1))
 }

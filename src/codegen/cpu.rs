@@ -15,7 +15,7 @@ use crate::imp::moves::TensorOrCacheView;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferExprTerm;
-use crate::target::{Target, X86MemoryLevel};
+use crate::target::{CpuMemoryLevel, Target};
 use crate::utils::indent;
 use crate::views::{Param, Tensor, View};
 
@@ -30,7 +30,7 @@ pub struct CpuCodeGenerator<'a, Tgt: Target> {
     pub headers: HeaderEmitter,
 }
 
-impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
+impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     pub fn new() -> Self {
         Self {
             headers: HeaderEmitter::new(Tgt::target_id()),
@@ -163,14 +163,14 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         shape: &[DimSize],
         vector_size: Option<DimSize>,
         dtype: Dtype,
-        level: X86MemoryLevel,
+        level: CpuMemoryLevel,
     ) -> CBuffer {
-        debug_assert_eq!(vector_size.is_some(), level == X86MemoryLevel::VRF);
+        debug_assert_eq!(vector_size.is_some(), level == CpuMemoryLevel::VRF);
 
         let name = self.namer.fresh_name();
         let size = shape.iter().product::<DimSize>();
         match level {
-            X86MemoryLevel::VRF => {
+            CpuMemoryLevel::VRF => {
                 let vector_size = vector_size.unwrap();
                 let vec_type = get_vector(Tgt::vec_types(), dtype, vector_size);
                 self.headers.vector_type_defs.insert(vec_type);
@@ -185,14 +185,14 @@ impl<'a, Tgt: Target<Level = X86MemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
                 CBuffer::VecVars { inner_vecs }
             }
-            X86MemoryLevel::RF => {
+            CpuMemoryLevel::RF => {
                 if size > 1 {
                     CBuffer::StackArray { name, size, dtype }
                 } else {
                     CBuffer::ValueVar { name, dtype }
                 }
             }
-            X86MemoryLevel::L1 | X86MemoryLevel::GL => {
+            CpuMemoryLevel::L1 | CpuMemoryLevel::GL => {
                 if size * u32::from(dtype.size()) < STACK_CUTOFF {
                     CBuffer::HeapArray { name, size, dtype }
                 } else {

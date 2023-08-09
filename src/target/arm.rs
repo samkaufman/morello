@@ -3,7 +3,7 @@ use crate::common::Dtype;
 use crate::target::{
     broadcastvecmult_applies_to_operands, memsetzero_applies_to_operands, mult_applies_to_operands,
     valueassign_applies_to_operands, vectorassign_applies_to_operands,
-    vectorzero_applies_to_operands, Target, TargetId, X86MemoryLevel,
+    vectorzero_applies_to_operands, CpuMemoryLevel, Target, TargetId,
 };
 
 use crate::imp::kernels::KernelType;
@@ -54,10 +54,10 @@ pub struct ArmTarget;
 impl Target for ArmTarget {
     // TODO: Use X86MemoryLevel for now for simplicity,
     //       but this should be changed to ArmMemoryLevel eventually.
-    type Level = X86MemoryLevel;
+    type Level = CpuMemoryLevel;
 
-    fn default_level() -> X86MemoryLevel {
-        X86MemoryLevel::GL
+    fn default_level() -> CpuMemoryLevel {
+        CpuMemoryLevel::GL
     }
 
     fn levels() -> Vec<Self::Level> {
@@ -66,9 +66,9 @@ impl Target for ArmTarget {
 
     fn faster_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
         match slower {
-            X86MemoryLevel::RF | X86MemoryLevel::VRF => vec![],
-            X86MemoryLevel::L1 => vec![X86MemoryLevel::RF, X86MemoryLevel::VRF],
-            X86MemoryLevel::GL => vec![X86MemoryLevel::L1],
+            CpuMemoryLevel::RF | CpuMemoryLevel::VRF => vec![],
+            CpuMemoryLevel::L1 => vec![CpuMemoryLevel::RF, CpuMemoryLevel::VRF],
+            CpuMemoryLevel::GL => vec![CpuMemoryLevel::L1],
         }
     }
 

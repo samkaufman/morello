@@ -12,7 +12,7 @@ use morello::layout::row_major;
 use morello::pprint::{pprint, PrintMode};
 use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
-use morello::target::{ArmTarget, Target, TargetId, X86MemoryLevel, X86Target};
+use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
 
 #[derive(Parser)]
@@ -84,7 +84,7 @@ fn main() -> Result<()> {
 fn main_per_db<D, Tgt>(args: &Args, db: D) -> Result<()>
 where
     D: Database<Tgt> + Send + Sync,
-    Tgt: Target<Level = X86MemoryLevel>,
+    Tgt: Target<Level = CpuMemoryLevel>,
 {
     let query_spec = match &args.query_spec {
         QuerySpec::Matmul { size } => {
@@ -99,7 +99,7 @@ where
                     TensorSpecAux {
                         contig: rm2.contiguous_full(),
                         aligned: true,
-                        level: X86MemoryLevel::GL,
+                        level: CpuMemoryLevel::GL,
                         layout: rm2,
                         vector_size: None,
                     };
@@ -134,7 +134,7 @@ where
                     TensorSpecAux {
                         contig: rm.contiguous_full(),
                         aligned: true,
-                        level: X86MemoryLevel::GL,
+                        level: CpuMemoryLevel::GL,
                         layout: rm,
                         vector_size: None,
                     };
