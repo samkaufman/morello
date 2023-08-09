@@ -30,7 +30,7 @@ pub trait CodeGen<Tgt: Target> {
     fn get_compiler_path() -> Result<String> {
         clang_path() // Clang by default
     }
-    fn get_cli_vec_flags() -> &'static [&'static str] {
+    fn cli_vec_flags() -> &'static [&'static str] {
         match Tgt::by_enum() {
             Targets::X86 => &X86_CLI_VEC_FLAGS,
             Targets::Arm => &ARM_CLI_VEC_FLAGS,
@@ -53,7 +53,7 @@ pub trait CodeGen<Tgt: Target> {
         // println!("Source file: {}", source_path.to_string_lossy());
 
         let clang_proc = Command::new(Self::get_compiler_path()?)
-            .args(Self::get_cli_vec_flags())
+            .args(Self::cli_vec_flags())
             .args(CLI_FLAGS)
             .arg(binary_path.to_string_lossy().to_string())
             .arg(source_path.to_string_lossy().to_string())
