@@ -6,6 +6,7 @@ mod namegen;
 
 use crate::codegen::clang::clang_path;
 use crate::codegen::cpu::CpuCodeGenerator;
+use crate::color::do_color;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::target::{Target, Targets, X86MemoryLevel};
@@ -52,7 +53,11 @@ pub trait CodeGen<Tgt: Target> {
         }
         // println!("Source file: {}", source_path.to_string_lossy());
 
-        let clang_proc = Command::new(Self::compiler_path()?)
+        let mut clang_cmd = Command::new(Self::compiler_path()?);
+        if do_color() {
+            clang_cmd.arg("-fcolor-diagnostics");
+        }
+        let clang_proc = clang_cmd
             .args(Self::cli_vec_flags())
             .args(CLI_FLAGS)
             .arg(binary_path.to_string_lossy().to_string())
@@ -65,6 +70,9 @@ pub trait CodeGen<Tgt: Target> {
                 clang_proc.status,
                 String::from_utf8_lossy(&clang_proc.stderr).into_owned()
             );
+        } else {
+            // We still want to see warnings.
+            eprintln!("{}", String::from_utf8_lossy(&clang_proc.stderr));
         }
 
         Ok(BuildArtifact::new(binary_path, source_path, dirname, None))
