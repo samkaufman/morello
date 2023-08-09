@@ -73,47 +73,45 @@ impl Target for ArmTarget {
     }
 
     fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>> {
-        {
-            match spec {
-                LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
-                    PrimitiveSpecType::Matmul { accum } => {
-                        if *accum {
-                            let mut microkernels = vec![];
-                            if mult_applies_to_operands(&spec.parameters()) {
-                                microkernels.push(Action::Place(KernelType::Mult));
-                            }
-                            if broadcastvecmult_applies_to_operands(&spec.parameters()) {
-                                microkernels.push(Action::Place(KernelType::BroadcastVecMult));
-                            }
-                            Box::new(microkernels.into_iter())
-                        } else {
-                            Box::new(iter::empty())
-                        }
-                    }
-                    PrimitiveSpecType::Conv { .. } => Box::new(iter::empty()),
-                    PrimitiveSpecType::Move { .. } => {
+        match spec {
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
+                PrimitiveSpecType::Matmul { accum } => {
+                    if *accum {
                         let mut microkernels = vec![];
-                        if valueassign_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::ValueAssign));
+                        if mult_applies_to_operands(&spec.parameters()) {
+                            microkernels.push(Action::Place(KernelType::Mult));
                         }
-                        if vectorassign_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::VectorAssign));
+                        if broadcastvecmult_applies_to_operands(&spec.parameters()) {
+                            microkernels.push(Action::Place(KernelType::BroadcastVecMult));
                         }
                         Box::new(microkernels.into_iter())
+                    } else {
+                        Box::new(iter::empty())
                     }
-                    PrimitiveSpecType::Zero { .. } => {
-                        let mut microkernels = vec![];
-                        if memsetzero_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::MemsetZero));
-                        }
-                        if vectorzero_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::VectorZero));
-                        }
-                        Box::new(microkernels.into_iter())
+                }
+                PrimitiveSpecType::Conv { .. } => Box::new(iter::empty()),
+                PrimitiveSpecType::Move { .. } => {
+                    let mut microkernels = vec![];
+                    if valueassign_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(Action::Place(KernelType::ValueAssign));
                     }
-                },
-                LogicalSpec::Compose { .. } => Box::new(iter::empty()),
-            }
+                    if vectorassign_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(Action::Place(KernelType::VectorAssign));
+                    }
+                    Box::new(microkernels.into_iter())
+                }
+                PrimitiveSpecType::Zero { .. } => {
+                    let mut microkernels = vec![];
+                    if memsetzero_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(Action::Place(KernelType::MemsetZero));
+                    }
+                    if vectorzero_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(Action::Place(KernelType::VectorZero));
+                    }
+                    Box::new(microkernels.into_iter())
+                }
+            },
+            LogicalSpec::Compose { .. } => Box::new(iter::empty()),
         }
     }
 
