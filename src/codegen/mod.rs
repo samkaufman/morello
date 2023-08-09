@@ -31,6 +31,7 @@ pub trait CodeGen<Tgt: Target> {
     fn compiler_path() -> Result<String> {
         clang_path() // Clang by default
     }
+
     fn cli_vec_flags() -> &'static [&'static str] {
         match Tgt::target_id() {
             TargetId::X86 => &X86_CLI_VEC_FLAGS,
