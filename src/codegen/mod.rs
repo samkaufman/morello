@@ -4,6 +4,7 @@ mod cpu;
 mod header;
 mod namegen;
 
+use crate::codegen::clang::clang_path;
 use crate::codegen::cpu::CpuCodeGenerator;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
@@ -27,7 +28,7 @@ const ARM_CLI_VEC_FLAGS: [&str; 1] = ["-fopenmp"];
 
 pub trait CodeGen<Tgt: Target> {
     fn get_compiler_path() -> Result<String> {
-        clang::get_path() // Clang by default
+        clang_path() // Clang by default
     }
     fn get_cli_vec_flags() -> &'static [&'static str] {
         match Tgt::by_enum() {
