@@ -140,7 +140,7 @@ pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>
 }
 
 pub fn cacheaccess_applies_to_operands<Tgt: Target>(_operands: &[TensorSpec<Tgt>]) -> bool {
-    return false;
+    false
 
     // if operands.iter().all(|o| o.level().is_addressed()) {
     //     return false;
