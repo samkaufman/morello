@@ -79,7 +79,7 @@ pub trait MemoryLevel:
     }
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum)]
 pub enum TargetId {
     X86,
     Arm,

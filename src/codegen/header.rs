@@ -16,10 +16,10 @@ impl HeaderEmitter {
         }
     }
 
-    pub fn emit<Tgt: Target, W: fmt::Write>(&self, out: &mut W) -> Result<(), fmt::Error> {
+    pub fn emit<W: fmt::Write>(&self, target: TargetId, out: &mut W) -> Result<(), fmt::Error> {
         out.write_str(include_str!("../codegen/partials/std.c"))?;
         out.write_char('\n')?;
-        match Tgt::target_id() {
+        match target {
             TargetId::X86 => {
                 out.write_str(include_str!("../codegen/partials/x86.c"))?;
             }
