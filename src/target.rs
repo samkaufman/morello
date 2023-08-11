@@ -164,7 +164,7 @@ pub fn valueassign_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
 ) -> bool {
     debug_assert_eq!(operands.len(), 2);
 
-    if operands.iter().flat_map(|o| o.dim_sizes()).any(|&d| d != 1) {
+    if operands.iter().flat_map(|o| o.shape()).any(|&d| d != 1) {
         return false;
     }
 
@@ -187,7 +187,7 @@ pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>
     if operands[0].dtype() != operands[1].dtype() {
         return false;
     }
-    if operands[0].dim_sizes() != operands[1].dim_sizes() {
+    if operands[0].shape() != operands[1].shape() {
         return false;
     }
     if operands[0].layout() != operands[1].layout() {
@@ -200,7 +200,7 @@ pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>
             has_vrf = true;
             match o.vector_size() {
                 Some(vector_size) => {
-                    let volume = o.dim_sizes().iter().product::<DimSize>();
+                    let volume = o.shape().iter().product::<DimSize>();
                     if vector_size != volume {
                         return false;
                     }
@@ -226,7 +226,7 @@ pub fn cacheaccess_applies_to_operands<Tgt: Target>(_operands: &[TensorSpec<Tgt>
     // if operands[0].dtype() != operands[1].dtype() {
     //     return false;
     // }
-    // if operands[0].dim_sizes() != operands[1].dim_sizes() {
+    // if operands[0].shape() != operands[1].shape() {
     //     return false;
     // }
     // if operands[0].layout() != operands[1].layout() {
@@ -256,7 +256,7 @@ pub fn vectorzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     if operands[0].level() != CpuMemoryLevel::VRF {
         return false;
     }
-    let volume = operands[0].dim_sizes().iter().product::<DimSize>();
+    let volume = operands[0].shape().iter().product::<DimSize>();
     match operands[0].vector_size() {
         Some(vector_size) if vector_size != volume => {
             return false;
@@ -277,7 +277,7 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
         if operands[i].level() != CpuMemoryLevel::VRF {
             return false;
         }
-        let volume = operands[i].dim_sizes().iter().product::<DimSize>();
+        let volume = operands[i].shape().iter().product::<DimSize>();
         if volume != operands[i].vector_size().unwrap() {
             return false;
         }
@@ -288,13 +288,13 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
             return false;
         }
     }
-    if operands[0].dim_sizes().iter().any(|d| *d != 1) {
+    if operands[0].shape().iter().any(|d| *d != 1) {
         return false;
     }
-    if operands[1].dim_sizes().len() != 2 || operands[1].dim_sizes()[0] != 1 {
+    if operands[1].shape().len() != 2 || operands[1].shape()[0] != 1 {
         return false;
     }
-    if operands[2].dim_sizes().to_vec() != vec![1, operands[1].dim_sizes()[1]] {
+    if operands[2].shape().to_vec() != vec![1, operands[1].shape()[1]] {
         return false;
     }
     true
@@ -305,5 +305,5 @@ pub fn mult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
 ) -> bool {
     operands
         .iter()
-        .all(|o| o.level() == CpuMemoryLevel::RF && o.dim_sizes().iter().all(|&d| d == 1))
+        .all(|o| o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == 1))
 }

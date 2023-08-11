@@ -40,7 +40,6 @@ pub enum Action<Tgt: Target> {
         destination_level: Tgt::Level,
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
-        prefetch: bool,
     },
     ToAccum,
     Peel {
@@ -89,7 +88,7 @@ impl<Tgt: Target> Action<Tgt> {
                         } => {
                             let current_output = &operands[node_spec.output_idx()];
 
-                            let current_out_shape = current_output.dim_sizes();
+                            let current_out_shape = current_output.shape();
                             assert!(
                                 !(*parallel && node_spec.serial_only()),
                                 "Serial-only Spec prevents parallel tiling"
@@ -171,7 +170,7 @@ impl<Tgt: Target> Action<Tgt> {
                                     })
                                     .collect();
 
-                                if original_input.dim_sizes() != &tiling_shape[..] {
+                                if original_input.shape() != &tiling_shape[..] {
                                     new_tiles.push(LoopTile {
                                         axes,
                                         tile: updated_input_tiling.apply(Param::new(
@@ -193,22 +192,22 @@ impl<Tgt: Target> Action<Tgt> {
                                             let [lhs, rhs] = &operands[..2] else {
                                             panic!();
                                         };
-                                            assert!(*k < lhs.dim_sizes()[1]);
+                                            assert!(*k < lhs.shape()[1]);
 
                                             let tiles = vec![
                                                 LoopTile {
                                                     axes: smallvec![0, 1],
                                                     tile: Tile::new(
-                                                        smallvec![lhs.dim_sizes()[0], *k],
-                                                        smallvec![lhs.dim_sizes()[0], *k],
+                                                        smallvec![lhs.shape()[0], *k],
+                                                        smallvec![lhs.shape()[0], *k],
                                                         Param::new(0, lhs.clone()),
                                                     ),
                                                 },
                                                 LoopTile {
                                                     axes: smallvec![1, 2],
                                                     tile: Tile::new(
-                                                        smallvec![*k, rhs.dim_sizes()[1]],
-                                                        smallvec![*k, rhs.dim_sizes()[1]],
+                                                        smallvec![*k, rhs.shape()[1]],
+                                                        smallvec![*k, rhs.shape()[1]],
                                                         Param::new(1, rhs.clone()),
                                                     ),
                                                 },
@@ -386,7 +385,7 @@ impl<Tgt: Target> Action<Tgt> {
                 if !*conv_accum {
                     panic!("Can only spatially split accumulating convolutions");
                 }
-                let rank: u8 = operands[0].dim_sizes.len().try_into().unwrap();
+                let rank: u8 = operands[0].shape.len().try_into().unwrap();
 
                 // We're going to introduce a Loop which traverses all the pixels over all spatial
                 // dimensions, vectorizing across the batch, channels, and filters dimmensions. This
@@ -397,7 +396,7 @@ impl<Tgt: Target> Action<Tgt> {
                 // so this amounts to keeping the outer two dimensions of each (batch and channels,
                 // then filters count and channels, respectively) and replacing the rest with ones.
                 let [outer_image_tile, outer_filters_tile] = [0, 1].map(|idx| {
-                    let shape = operands[idx].dim_sizes()[..2]
+                    let shape = operands[idx].shape()[..2]
                         .iter()
                         .chain(iter::repeat(&1).take((rank - 2).into()))
                         .copied()
@@ -422,10 +421,10 @@ impl<Tgt: Target> Action<Tgt> {
                 let body_spec = LogicalSpec::Primitive(
                     PrimitiveBasics {
                         typ: PrimitiveSpecType::Matmul { accum: true },
-                        spec_shape: operands[0].dim_sizes()[..2]
+                        spec_shape: operands[0].shape()[..2]
                             .iter()
                             .copied()
-                            .chain(iter::once(operands[1].dim_sizes()[0]))
+                            .chain(iter::once(operands[1].shape()[0]))
                             .collect(),
                         dtype: *dtype,
                     },
@@ -468,18 +467,12 @@ impl<Tgt: Target> Action<Tgt> {
                 destination_level,
                 destination_layout,
                 destination_vector_size,
-                prefetch,
             } => {
-                if *prefetch {
-                    unimplemented!()
-                }
-
                 let outer_moved_operand_spec = &operands[usize::from(*source_idx)];
                 let new_spec = movelet_inner_tensorspec(
                     outer_moved_operand_spec,
                     destination_level,
-                    &destination_layout
-                        .canonicalize_for_shape(outer_moved_operand_spec.dim_sizes()),
+                    &destination_layout.canonicalize_for_shape(outer_moved_operand_spec.shape()),
                     *destination_vector_size,
                 );
                 let inner_moved_operand = if new_spec.level().is_addressed() {
@@ -493,10 +486,6 @@ impl<Tgt: Target> Action<Tgt> {
                     // We assume bytes_used will be the same for source and destination
                     // tensors.
                     let mut additional = operands[usize::from(*source_idx)].bytes_used();
-                    if *prefetch {
-                        additional *= 2;
-                    }
-
                     let mut l = match &spec.1 {
                         MemoryLimits::Standard(base) => {
                             let updated_level_idx = Tgt::levels()
@@ -534,7 +523,7 @@ impl<Tgt: Target> Action<Tgt> {
                                 LogicalSpec::Primitive(
                                     PrimitiveBasics {
                                         typ: PrimitiveSpecType::Move,
-                                        spec_shape: left_spec.dim_sizes().into(),
+                                        spec_shape: left_spec.shape().into(),
                                         dtype: left_spec.dtype(),
                                     },
                                     PrimitiveAux::Move {
@@ -583,7 +572,6 @@ impl<Tgt: Target> Action<Tgt> {
                     prologue.map(|i| i.into()),
                     new_body_app.into(),
                     epilogue.map(|i| i.into()),
-                    *prefetch,
                     aux,
                 )))
             }
@@ -599,7 +587,7 @@ impl<Tgt: Target> Action<Tgt> {
                 }
 
                 let TensorSpec {
-                    dim_sizes: output_dim_sizes,
+                    shape: output_shape,
                     dtype: output_dtype,
                     aux: output_aux,
                 } = node_spec.output();
@@ -608,7 +596,7 @@ impl<Tgt: Target> Action<Tgt> {
                     let mut subspec = LogicalSpec::Primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Zero,
-                            spec_shape: output_dim_sizes,
+                            spec_shape: output_shape,
                             dtype: output_dtype,
                         },
                         PrimitiveAux::Standard(vec![output_aux]),
@@ -664,15 +652,10 @@ impl<Tgt: Target> Display for Action<Tgt> {
                 destination_level,
                 destination_layout,
                 destination_vector_size,
-                prefetch,
             } => write!(
                 f,
-                "Move({}, {}, {}, {:?}, {:?})",
-                source_idx,
-                destination_level,
-                destination_layout,
-                destination_vector_size,
-                prefetch
+                "Move({}, {}, {}, {:?})",
+                source_idx, destination_level, destination_layout, destination_vector_size
             ),
             Action::Place(KernelType::Mult) => write!(f, "Mult"),
             Action::Place(KernelType::BroadcastVecMult) => {
@@ -730,7 +713,7 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
     };
 
     TensorSpec::<Tgt>::new_canon(
-        operand.dim_sizes().into(),
+        operand.shape().into(),
         operand.dtype(),
         contiguous_abs,
         aligned,

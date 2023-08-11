@@ -19,7 +19,6 @@ pub struct MoveLet<Tgt: Target, Aux: Clone> {
     pub has_prologue: bool,
     pub has_epilogue: bool,
     pub children: Vec<ImplNode<Tgt, Aux>>,
-    pub prefetch: bool,
     pub aux: Aux,
 }
 
@@ -38,7 +37,6 @@ impl<Tgt: Target, Aux: Clone> MoveLet<Tgt, Aux> {
         prologue: Option<ImplNode<Tgt, Aux>>,
         main_stage: ImplNode<Tgt, Aux>,
         epilogue: Option<ImplNode<Tgt, Aux>>,
-        prefetch: bool,
         aux: Aux,
     ) -> Self {
         let has_prologue = prologue.is_some();
@@ -55,7 +53,6 @@ impl<Tgt: Target, Aux: Clone> MoveLet<Tgt, Aux> {
             has_prologue,
             has_epilogue,
             children,
-            prefetch,
             aux,
         }
     }
@@ -108,9 +105,6 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
     fn memory_allocated(&self) -> MemoryAllocation {
         let introduced_spec = self.introduced.spec();
         let mut bytes_consumed = introduced_spec.bytes_used();
-        if self.prefetch {
-            bytes_consumed *= 2;
-        }
         MemoryAllocation::Simple(
             Tgt::levels()
                 .iter()
@@ -126,7 +120,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        let cost = move_cost(&self.source_spec, self.introduced.spec(), self.prefetch);
+        let cost = move_cost(&self.source_spec, self.introduced.spec());
         child_costs.iter().sum::<MainCost>() + cost
     }
 
@@ -140,7 +134,6 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
             has_prologue: self.has_prologue,
             has_epilogue: self.has_epilogue,
             children: new_children,
-            prefetch: self.prefetch,
             aux: self.aux.clone(),
         }
     }
@@ -169,12 +162,11 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
         }
     }
 
-    fn line_strs<'a>(
+    fn pprint_line<'a>(
         &'a self,
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
-        let prefetch_str = if self.prefetch { "[p]" } else { "" };
         let introduced_view = self.introduced.inner_fat_ptr();
         let cache_view_suffix = match &self.introduced {
             TensorOrCacheView::Tensor(_) => String::from(""),
@@ -186,8 +178,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
             }
         };
         let top = format!(
-            "alloc{} {}: {}{}",
-            prefetch_str,
+            "alloc {}: {}{}",
             names.name(introduced_view),
             self.introduced.spec(),
             cache_view_suffix
@@ -223,21 +214,17 @@ impl<V: View + 'static> TensorOrCacheView<V> {
     }
 }
 
-pub fn move_cost<Tgt: Target>(
-    src: &TensorSpec<Tgt>,
-    dest: &TensorSpec<Tgt>,
-    prefetching: bool,
-) -> MainCost {
+pub fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tgt>) -> MainCost {
     let src_hit_cost = src.level().cache_hit_cost();
     let dest_hit_cost = dest.level().cache_hit_cost();
 
     let src_cache_lines = MainCost::from(src.layout().estimate_cache_lines::<Tgt>(
-        src.dim_sizes(),
+        src.shape(),
         src.dtype(),
         src.is_contiguous(),
     ));
     let dest_cache_lines = MainCost::from(dest.layout().estimate_cache_lines::<Tgt>(
-        dest.dim_sizes(),
+        dest.shape(),
         dest.dtype(),
         dest.is_contiguous(),
     ));
@@ -246,9 +233,6 @@ pub fn move_cost<Tgt: Target>(
     let dest_cost = 10 * (dest_hit_cost * dest_cache_lines);
 
     let mut cost: MainCost = src_cost + dest_cost;
-    if prefetching {
-        cost /= 2;
-    }
     if !src.is_contiguous() || src.layout() != dest.layout() {
         cost *= 2;
     }

@@ -24,7 +24,7 @@ pub fn aligned_approx<Tgt: Target>(
         (Layout::Standard { dim_order }, true) => aligned_approx_standard_simple::<Tgt>(
             tile_shape,
             dim_order.as_slice(),
-            parent.dim_sizes(),
+            parent.shape(),
             &parent.dtype(),
         ),
         (Layout::Packed { .. }, true) => {
@@ -34,12 +34,12 @@ pub fn aligned_approx<Tgt: Target>(
                 (0u8..tile_expanded.len().try_into().unwrap())
                     .collect::<Vec<_>>()
                     .as_slice(),
-                &parent.layout().expand_shape(parent.dim_sizes()),
+                &parent.layout().expand_shape(parent.shape()),
                 &parent.dtype(),
             )
         }
         (_, false) => {
-            if tile_shape[1..] == parent.dim_sizes()[1..] {
+            if tile_shape[1..] == parent.shape()[1..] {
                 todo!()
             } else {
                 warn!("No alignment analysis for non-batch convolution");

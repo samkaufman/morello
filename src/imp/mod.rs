@@ -45,7 +45,7 @@ pub trait Impl<Tgt: Target, Aux: Clone> {
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     );
 
-    fn line_strs<'a>(
+    fn pprint_line<'a>(
         &'a self,
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,

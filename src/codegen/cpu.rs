@@ -48,6 +48,8 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         for ((operand_idx, operand), tensor) in imp.parameters().enumerate().zip(top_arg_tensors) {
             let spec = tensor.spec();
             let parameter_name = self.namer.fresh_name();
+            let new_c_buffer =
+                self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
             writeln!(
                 main_body_str,
                 "  {} *restrict {}{}",
@@ -100,12 +102,8 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         // local-scope buffer. It will have been previously bound by emit_kernel to a CBuffer::Ptr.
         for kernel_argument in top_arg_tensors {
             let spec = kernel_argument.spec();
-            let buf = self.make_buffer(
-                spec.dim_sizes(),
-                spec.vector_size(),
-                spec.dtype(),
-                spec.level(),
-            );
+            let buf =
+                self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
             buf.emit(&mut main_body_str, true, depth)?;
             self.name_env.insert(Rc::clone(kernel_argument), buf);
         }
@@ -265,7 +263,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         // CBuffer and Tensor.
                         let spec = move_let.introduced.spec();
                         let dest_buffer = self.make_buffer(
-                            spec.dim_sizes(),
+                            spec.shape(),
                             spec.vector_size(),
                             spec.dtype(),
                             spec.level(),

@@ -122,7 +122,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
         self.body.bind(&inner_args, env);
     }
 
-    fn line_strs<'a>(
+    fn pprint_line<'a>(
         &'a self,
         names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
         param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,

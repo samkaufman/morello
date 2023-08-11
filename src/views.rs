@@ -27,7 +27,7 @@ pub trait View: Debug {
     fn spec(&self) -> &TensorSpec<Self::Tgt>;
 
     fn shape(&self) -> &[DimSize] {
-        self.spec().dim_sizes()
+        self.spec().shape()
     }
 
     fn make_buffer_indexing_expr(
@@ -69,14 +69,14 @@ pub trait ViewExt: View {
         let [h, w] = self.shape() else {
             panic!("Cannot transpose a tensor with shape {:?}", self.shape());
         };
-        let dim_sizes = smallvec![*w, *h];
+        let shape = smallvec![*w, *h];
 
         let (transposed_layout, new_contig) = self
             .spec()
             .layout()
             .transpose((0, 1), self.spec().contiguous_abs());
         let spec = TensorSpec::new_canon(
-            dim_sizes,
+            shape,
             self.spec().dtype(),
             new_contig,
             self.spec().aligned(),
