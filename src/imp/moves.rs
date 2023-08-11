@@ -104,7 +104,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
 
     fn memory_allocated(&self) -> MemoryAllocation {
         let introduced_spec = self.introduced.spec();
-        let mut bytes_consumed = introduced_spec.bytes_used();
+        let bytes_consumed = introduced_spec.bytes_used();
         MemoryAllocation::Simple(
             Tgt::levels()
                 .iter()

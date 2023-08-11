@@ -3,10 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug, Write};
 use std::rc::Rc;
 
-use super::c_utils::{CBuffer, CExprTerm, VecType};
 use super::namegen::NameGenerator;
-use super::CodeGen;
-use crate::codegen::c_utils::c_type;
+use crate::codegen::c_utils::{c_type, CBuffer, CExprTerm, VecType};
 use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineExpr, Term};
@@ -14,76 +12,33 @@ use crate::imp::blocks::Block;
 use crate::imp::kernels::{Kernel, KernelType};
 use crate::imp::loops::Loop;
 use crate::imp::moves::TensorOrCacheView;
-use crate::imp::{Impl, ImplNode};
+use crate::imp::Impl;
+use crate::imp::ImplNode;
 use crate::layout::BufferExprTerm;
-use crate::target::{Target, X86MemoryLevel, X86Target};
-use crate::utils::indent;
+use crate::target::{CpuMemoryLevel, Target};
+use crate::utils::{indent, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
 
 const STACK_CUTOFF: u32 = 256;
 
-const X86_VEC_TYPES: [VecType; 4] = [
-    VecType {
-        dtype: Dtype::Uint32,
-        value_cnt: 8,
-        name: "vui8",
-        native_type_name: "__m256i",
-        load_fn: "_mm256_loadu_si256",
-        store_fn: "_mm256_storeu_si256",
-    },
-    VecType {
-        dtype: Dtype::Uint32,
-        value_cnt: 4,
-        name: "vui4",
-        native_type_name: "__m128i",
-        load_fn: "_mm_loadu_si128",
-        store_fn: "_mm_storeu_si128",
-    },
-    VecType {
-        dtype: Dtype::Uint8,
-        value_cnt: 32,
-        name: "vub32",
-        native_type_name: "__m256i",
-        load_fn: "_mm256_loadu_si256",
-        store_fn: "_mm256_storeu_si256",
-    },
-    VecType {
-        dtype: Dtype::Uint8,
-        value_cnt: 16,
-        name: "vub16",
-        native_type_name: "__m128i",
-        load_fn: "_mm_loadu_si128",
-        store_fn: "_mm_storeu_si128",
-    },
-];
-
 #[derive(Default)]
-struct X86CodeGenerator<'a> {
-    namer: NameGenerator,
-    name_env: HashMap<Rc<Tensor<X86Target>>, CBuffer>,
-    loop_iter_bindings: HashMap<BufferExprTerm, Either<String, i32>>,
-    param_bindings: HashMap<Param<X86Target>, &'a dyn View<Tgt = X86Target>>,
-    headers: HeaderEmitter,
+pub struct CpuCodeGenerator<'a, Tgt: Target> {
+    pub namer: NameGenerator,
+    pub name_env: HashMap<Rc<Tensor<Tgt>>, CBuffer>,
+    pub loop_iter_bindings: HashMap<BufferExprTerm, Either<String, i32>>,
+    pub param_bindings: HashMap<Param<Tgt>, &'a dyn View<Tgt = Tgt>>,
+    pub headers: HeaderEmitter,
 }
 
-impl<Aux: Clone + Debug> CodeGen<X86Target> for ImplNode<X86Target, Aux> {
-    fn emit_kernel<W: Write>(&self, out: &mut W) -> fmt::Result {
-        let top_arg_tensors = self
-            .parameters()
-            .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
-            .collect::<Vec<_>>();
-        let mut generator = X86CodeGenerator::default();
-        generator.headers.emit_x86 = true;
-        generator.emit_kernel(self, &top_arg_tensors, out)?;
-        Ok(())
+impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
+    pub fn new() -> Self {
+        Self::default()
     }
-}
 
-impl<'a> X86CodeGenerator<'a> {
-    fn emit_kernel<W: Write, Aux: Clone + Debug>(
+    pub fn emit_kernel<W: Write, Aux: Clone + Debug>(
         &mut self,
-        imp: &'a ImplNode<X86Target, Aux>,
-        top_arg_tensors: &'a [Rc<Tensor<X86Target>>],
+        imp: &'a ImplNode<Tgt, Aux>,
+        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
         out: &mut W,
     ) -> fmt::Result {
         debug_assert_eq!(top_arg_tensors.len(), usize::from(imp.parameter_count()));
@@ -92,27 +47,32 @@ impl<'a> X86CodeGenerator<'a> {
         writeln!(main_body_str, "__attribute__((noinline))\nvoid kernel(")?;
         for ((operand_idx, operand), tensor) in imp.parameters().enumerate().zip(top_arg_tensors) {
             let spec = tensor.spec();
-            let new_c_buffer =
-                self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
+            let parameter_name = self.namer.fresh_name();
             writeln!(
                 main_body_str,
                 "  {} *restrict {}{}",
                 c_type(operand.dtype),
-                new_c_buffer.name().unwrap(),
+                parameter_name,
                 if operand_idx + 1 < imp.parameter_count().into() {
                     ", "
                 } else {
                     "\n) {"
                 }
             )?;
-            self.name_env.insert(Rc::clone(tensor), new_c_buffer);
+            self.name_env.insert(
+                Rc::clone(tensor),
+                CBuffer::Ptr {
+                    name: parameter_name,
+                    dtype: spec.dtype(),
+                },
+            );
         }
 
         // Put the tensor->c_buffer binding into `self.name_env`. (And fill
         // tensors_as_trait_obj_ptrs.)
         let tensors_as_trait_obj_ptrs = top_arg_tensors
             .iter()
-            .map(|tensor| tensor.as_ref() as &dyn View<Tgt = X86Target>)
+            .map(|tensor| tensor.as_ref() as &dyn View<Tgt = Tgt>)
             .collect::<Vec<_>>();
 
         imp.bind(&tensors_as_trait_obj_ptrs, &mut self.param_bindings);
@@ -121,8 +81,107 @@ impl<'a> X86CodeGenerator<'a> {
 
         writeln!(main_body_str, "}}")?;
 
-        self.headers.emit(out)?;
+        self.headers.emit(Tgt::target_id(), out)?;
         out.write_str(&main_body_str)
+    }
+
+    pub fn emit_main<W: Write>(
+        &mut self,
+        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+        out: &mut W,
+    ) -> fmt::Result {
+        let mut main_body_str = String::new();
+        let mut depth = 0_usize;
+
+        writeln!(main_body_str, "int main() {{")?;
+        depth += 1;
+
+        // Allocate a buffer for each Impl parameter and re-bind to a CBuffer corresponding to the
+        // local-scope buffer. It will have been previously bound by emit_kernel to a CBuffer::Ptr.
+        for kernel_argument in top_arg_tensors {
+            let spec = kernel_argument.spec();
+            let buf =
+                self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
+            buf.emit(&mut main_body_str, true, depth)?;
+            self.name_env.insert(Rc::clone(kernel_argument), buf);
+        }
+
+        // Emit the kernel call, passing pointers to the Impl function.
+        write!(main_body_str, "\n{}kernel(", indent(depth))?;
+        for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
+            let a = self.name_env.get(kernel_argument).unwrap();
+            write!(
+                main_body_str,
+                "{}{}",
+                self.c_index_ptr(a, &0i32.into(), None),
+                if i < top_arg_tensors.len() - 1 {
+                    ", "
+                } else {
+                    ");\n"
+                },
+            )?;
+        }
+        writeln!(main_body_str)?;
+
+        // Print the output tensor
+        self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
+
+        // Free the buffers.
+        for kernel_argument in top_arg_tensors {
+            let buf = self.name_env.get(kernel_argument).unwrap();
+            buf.emit_free(&mut main_body_str, depth)?;
+        }
+
+        writeln!(main_body_str, "\n{}return 0;", indent(depth))?;
+        writeln!(main_body_str, "}}")?;
+
+        out.write_str(&main_body_str)
+    }
+
+    fn emit_print_tensor<W: Write>(
+        &mut self,
+        tensor: &Tensor<Tgt>,
+        mut depth: usize,
+        out: &mut W,
+    ) -> Result<(), fmt::Error> {
+        let rank = tensor.shape().len();
+
+        let shape_str = tensor.shape().iter().map(ToString::to_string).join("x");
+        writeln!(out, "{}printf(\"{}\\n\");", indent(depth), shape_str)?;
+
+        // TODO: Generate unique names. ASCII_CHARS could lead to conflicts in the future.
+        for (dim, (d, n)) in tensor.shape().iter().copied().zip(ASCII_CHARS).enumerate() {
+            writeln!(
+                out,
+                "{}for (int {n} = 0; {n} < {d}; {n}++) {{",
+                indent(depth)
+            )?;
+            self.loop_iter_bindings.insert(
+                BufferExprTerm::Pt(dim.try_into().unwrap(), tensor.identifier()),
+                Either::Left(n.to_string()),
+            );
+        }
+
+        depth += 1;
+
+        debug_assert_eq!(tensor, tensor.backing_tensor(&self.param_bindings).unwrap());
+        let buffer = self.name_env.get(tensor).unwrap();
+        let buffer_indexing_expr = tensor.make_buffer_indexing_expr(&self.param_bindings);
+        writeln!(
+            out,
+            "{}printf(\"%\" {} \" \", {});",
+            indent(depth),
+            tensor.spec().dtype().int_fmt_macro(),
+            self.c_index(buffer, &buffer_indexing_expr, None),
+        )?;
+        depth -= 1;
+
+        writeln!(out, "{}}}", indent(depth))?;
+        for _ in 0..rank - 1 {
+            writeln!(out, "{}printf(\"\\n\");", indent(depth))?;
+            writeln!(out, "{}}}", indent(depth))?;
+        }
+        Ok(())
     }
 
     fn make_buffer(
@@ -130,16 +189,16 @@ impl<'a> X86CodeGenerator<'a> {
         shape: &[DimSize],
         vector_size: Option<DimSize>,
         dtype: Dtype,
-        level: X86MemoryLevel,
+        level: CpuMemoryLevel,
     ) -> CBuffer {
-        debug_assert_eq!(vector_size.is_some(), level == X86MemoryLevel::VRF);
+        debug_assert_eq!(vector_size.is_some(), level == CpuMemoryLevel::VRF);
 
         let name = self.namer.fresh_name();
         let size = shape.iter().product::<DimSize>();
         match level {
-            X86MemoryLevel::VRF => {
+            CpuMemoryLevel::VRF => {
                 let vector_size = vector_size.unwrap();
-                let vec_type = get_vector(dtype, vector_size);
+                let vec_type = get_vector(Tgt::vec_types(), dtype, vector_size);
                 self.headers.vector_type_defs.insert(vec_type);
 
                 debug_assert_eq!(size % vector_size, 0);
@@ -152,14 +211,14 @@ impl<'a> X86CodeGenerator<'a> {
 
                 CBuffer::VecVars { inner_vecs }
             }
-            X86MemoryLevel::RF => {
+            CpuMemoryLevel::RF => {
                 if size > 1 {
                     CBuffer::StackArray { name, size, dtype }
                 } else {
                     CBuffer::ValueVar { name, dtype }
                 }
             }
-            X86MemoryLevel::L1 | X86MemoryLevel::GL => {
+            CpuMemoryLevel::L1 | CpuMemoryLevel::GL => {
                 if size * u32::from(dtype.size()) < STACK_CUTOFF {
                     CBuffer::HeapArray { name, size, dtype }
                 } else {
@@ -172,7 +231,7 @@ impl<'a> X86CodeGenerator<'a> {
     fn emit<Aux: Clone + Debug, W: Write>(
         &mut self,
         w: &mut W,
-        imp: &ImplNode<X86Target, Aux>,
+        imp: &ImplNode<Tgt, Aux>,
         depth: usize,
     ) -> fmt::Result {
         match imp {
@@ -295,7 +354,7 @@ impl<'a> X86CodeGenerator<'a> {
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_ptr(a, b, None)
                         });
-                        let vtype = get_vector(dtype, volume);
+                        let vtype = get_vector(Tgt::vec_types(), dtype, volume);
                         let itype = vtype.native_type_name;
                         if arguments.iter().all(|a| a.1.aligned()) {
                             writeln!(
@@ -325,7 +384,7 @@ impl<'a> X86CodeGenerator<'a> {
                         let shape = arguments[2].shape();
                         let dtype = arguments[2].spec().dtype();
                         let volume = shape.iter().product::<DimSize>();
-                        let itype = get_vector(dtype, volume).native_type_name;
+                        let itype = get_vector(Tgt::vec_types(), dtype, volume).native_type_name;
                         let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
                             0 => self.c_index(a, b, None),
                             1 | 2 => self.c_index_ptr(a, b, None),
@@ -351,7 +410,7 @@ impl<'a> X86CodeGenerator<'a> {
     fn emit_rolled_loop<Aux: Clone + Debug, W: Write>(
         &mut self,
         w: &mut W,
-        l: &Loop<X86Target, Aux>,
+        l: &Loop<Tgt, Aux>,
         depth: usize,
     ) -> fmt::Result {
         let axes_to_emit = axis_order_and_steps(l).collect::<Vec<_>>();
@@ -410,7 +469,7 @@ impl<'a> X86CodeGenerator<'a> {
     fn emit_unrolled_loop<Aux: Clone + Debug, W: Write>(
         &mut self,
         w: &mut W,
-        l: &Loop<X86Target, Aux>,
+        l: &Loop<Tgt, Aux>,
         depth: usize,
     ) -> fmt::Result {
         if l.parallel {
@@ -455,7 +514,7 @@ impl<'a> X86CodeGenerator<'a> {
         Ok(())
     }
 
-    fn param_args_to_c_indices<F>(&self, arguments: &[Param<X86Target>], f: F) -> Vec<String>
+    fn param_args_to_c_indices<F>(&self, arguments: &[Param<Tgt>], f: F) -> Vec<String>
     where
         F: Fn(usize, &CBuffer, &AffineExpr<BufferExprTerm>) -> String,
     {
@@ -473,19 +532,11 @@ impl<'a> X86CodeGenerator<'a> {
     }
 
     fn sub_expr_bindings(&self, unbound_expr: AffineExpr<BufferExprTerm>) -> AffineExpr<CExprTerm> {
-        let init = AffineExpr(vec![], unbound_expr.1);
-        unbound_expr
-            .0
-            .into_iter()
-            .fold(init, |base, Term(coef, sym)| {
-                match self.loop_iter_bindings.get(&sym) {
-                    Some(Either::Left(var_name)) => {
-                        base + Term(coef, CExprTerm::CName(var_name.clone()))
-                    }
-                    Some(Either::Right(bound_constant)) => base + (coef * bound_constant),
-                    None => base + Term(coef, CExprTerm::Buffer(sym)),
-                }
-            })
+        unbound_expr.map_terms(|sym| match self.loop_iter_bindings.get(&sym) {
+            Some(Either::Left(var_name)) => Either::Left(CExprTerm::CName(var_name.clone())),
+            Some(Either::Right(bound_constant)) => Either::Right(*bound_constant),
+            None => Either::Left(CExprTerm::Buffer(sym)),
+        })
     }
 
     /// Returns a C expression referring to the value at a given expression.
@@ -499,15 +550,9 @@ impl<'a> X86CodeGenerator<'a> {
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
-            CBuffer::HeapArray { name, .. } => match reinterpret {
-                Some(_) => unimplemented!(),
-                None => format!(
-                    "{}[{}]",
-                    name,
-                    expr_to_c(&self.sub_expr_bindings(expr.clone()))
-                ), // assuming expr.c_expr() is available in scope
-            },
-            CBuffer::StackArray { name, .. } => match reinterpret {
+            CBuffer::HeapArray { name, .. }
+            | CBuffer::StackArray { name, .. }
+            | CBuffer::Ptr { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
                 None => format!(
                     "{}[{}]",
@@ -553,7 +598,10 @@ impl<'a> X86CodeGenerator<'a> {
         #![allow(clippy::only_used_in_recursion)]
 
         match buffer {
-            CBuffer::HeapArray { .. } | CBuffer::StackArray { .. } | CBuffer::ValueVar { .. } => {
+            CBuffer::HeapArray { .. }
+            | CBuffer::StackArray { .. }
+            | CBuffer::ValueVar { .. }
+            | CBuffer::Ptr { .. } => {
                 unimplemented!()
             }
             CBuffer::SingleVecVar { name, .. } => {
@@ -584,7 +632,7 @@ impl<'a> X86CodeGenerator<'a> {
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
-            CBuffer::HeapArray { name, .. } => match reinterpret {
+            CBuffer::HeapArray { name, .. } | CBuffer::Ptr { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
                 None => {
                     format!(
@@ -667,8 +715,12 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
     result
 }
 
-fn get_vector(dtype: Dtype, vector_size: DimSize) -> &'static VecType {
-    X86_VEC_TYPES
+fn get_vector(
+    vec_types: &'static [VecType; 4],
+    dtype: Dtype,
+    vector_size: DimSize,
+) -> &'static VecType {
+    vec_types
         .iter()
         .find(|vec_type| {
             vec_type.dtype == dtype && vec_type.value_cnt == u8::try_from(vector_size).unwrap()

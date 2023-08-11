@@ -38,6 +38,13 @@ impl Dtype {
             Dtype::Uint32 => "uint32_t",
         }
     }
+
+    pub fn int_fmt_macro(&self) -> &'static str {
+        match self {
+            Dtype::Uint8 => "PRIu8",
+            Dtype::Uint32 => "PRIu32",
+        }
+    }
 }
 
 impl Display for Dtype {

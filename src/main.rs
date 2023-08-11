@@ -1,7 +1,7 @@
+use anyhow::Result;
 use clap::Parser;
 use log::info;
 use smallvec::smallvec;
-use std::io;
 use std::path;
 use std::sync::RwLock;
 
@@ -12,9 +12,8 @@ use morello::layout::row_major;
 use morello::pprint::{pprint, PrintMode};
 use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
-use morello::target::{Target, X86MemoryLevel, X86Target};
+use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
-use morello::utils::ToWriteFmt;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -29,6 +28,14 @@ struct Args {
     /// Print mode
     #[arg(long, value_enum, default_value_t = PrintMode::Full)]
     print: PrintMode,
+
+    /// Target architecture
+    #[arg(long, value_enum, default_value_t = TargetId::X86)]
+    target: TargetId,
+
+    /// Print the generated code
+    #[arg(long)]
+    print_code: bool,
 
     #[command(subcommand)]
     query_spec: QuerySpec,
@@ -52,22 +59,32 @@ enum QuerySpec {
     },
 }
 
-fn main() {
+fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     color::set_color_mode(args.color);
-    match &args.db {
-        Some(db_path) => main_per_db(
-            &args,
-            SqliteDatabaseWrapper::new(InMemDatabase::<X86Target>::new(), db_path),
-        ),
-        None => main_per_db(&args, InMemDatabase::<X86Target>::new()),
-    };
+    match &args.target {
+        TargetId::X86 => {
+            let db = InMemDatabase::<X86Target>::new();
+            match &args.db {
+                Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
+                None => main_per_db(&args, db),
+            }
+        }
+        TargetId::Arm => {
+            let db = InMemDatabase::<ArmTarget>::new();
+            match &args.db {
+                Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
+                None => main_per_db(&args, db),
+            }
+        }
+    }
 }
 
-fn main_per_db<D>(args: &Args, db: D)
+fn main_per_db<D, Tgt>(args: &Args, db: D) -> Result<()>
 where
-    D: Database<X86Target> + Send + Sync,
+    D: Database<Tgt> + Send + Sync,
+    Tgt: Target<Level = CpuMemoryLevel>,
 {
     let query_spec = match &args.query_spec {
         QuerySpec::Matmul { size } => {
@@ -82,7 +99,7 @@ where
                     TensorSpecAux {
                         contig: rm2.contiguous_full(),
                         aligned: true,
-                        level: X86MemoryLevel::GL,
+                        level: CpuMemoryLevel::GL,
                         layout: rm2,
                         vector_size: None,
                     };
@@ -117,7 +134,7 @@ where
                     TensorSpecAux {
                         contig: rm.contiguous_full(),
                         aligned: true,
-                        level: X86MemoryLevel::GL,
+                        level: CpuMemoryLevel::GL,
                         layout: rm,
                         vector_size: None,
                     };
@@ -128,7 +145,7 @@ where
         }
     };
 
-    let spec = Spec(query_spec, X86Target::max_mem());
+    let spec = Spec(query_spec, Tgt::max_mem());
 
     let start_time = std::time::Instant::now();
     let db_lock = RwLock::new(db);
@@ -147,7 +164,7 @@ where
     assert_eq!(results.len(), 1);
     pprint(&results[0], args.print);
     println!();
-    results[0]
-        .emit_kernel(&mut ToWriteFmt(io::stdout()))
-        .unwrap();
+    let output = results[0].build(args.print_code)?.run()?;
+    println!("Output: {}", String::from_utf8_lossy(&output.stdout));
+    Ok(())
 }
