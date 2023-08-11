@@ -485,7 +485,7 @@ impl<Tgt: Target> Action<Tgt> {
                 let lower_limits: MemoryLimits = {
                     // We assume bytes_used will be the same for source and destination
                     // tensors.
-                    let mut additional = operands[usize::from(*source_idx)].bytes_used();
+                    let additional = operands[usize::from(*source_idx)].bytes_used();
                     let mut l = match &spec.1 {
                         MemoryLimits::Standard(base) => {
                             let updated_level_idx = Tgt::levels()

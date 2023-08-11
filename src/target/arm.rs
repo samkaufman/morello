@@ -52,8 +52,6 @@ const ARM_VEC_TYPES: [VecType; 4] = [
 pub struct ArmTarget;
 
 impl Target for ArmTarget {
-    // TODO: Use X86MemoryLevel for now for simplicity,
-    //       but this should be changed to ArmMemoryLevel eventually.
     type Level = CpuMemoryLevel;
 
     fn default_level() -> CpuMemoryLevel {

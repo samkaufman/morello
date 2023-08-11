@@ -1,5 +1,5 @@
 use super::c_utils::VecType;
-use crate::target::{Target, TargetId};
+use crate::target::TargetId;
 
 use std::{collections::HashSet, fmt};
 

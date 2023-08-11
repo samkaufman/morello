@@ -48,8 +48,6 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         for ((operand_idx, operand), tensor) in imp.parameters().enumerate().zip(top_arg_tensors) {
             let spec = tensor.spec();
             let parameter_name = self.namer.fresh_name();
-            let new_c_buffer =
-                self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
             writeln!(
                 main_body_str,
                 "  {} *restrict {}{}",
