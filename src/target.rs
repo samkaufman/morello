@@ -40,8 +40,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
 
     fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout> {
-        // warn!("NHWC and packed layouts are unimplemented.");
-
+        // TODO: Yield (after implementing) NHWC and packed layouts as well.
         let rm_iter = iter::once(row_major(shape.len().try_into().unwrap()));
         if shape.iter().all(|d| *d == 1) {
             rm_iter.collect()

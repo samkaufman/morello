@@ -29,7 +29,6 @@ const MOVE_RESULTS_CAPACITY: usize = 12;
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub enum LogicalSpec<Tgt: Target> {
-    // TODO: Enforce `typ` and PrimitiveAux compatibility at the type level.
     Primitive(PrimitiveBasics, PrimitiveAux<Tgt>, bool),
     Compose {
         // Components contain Spec shapes, which can be partially inferred, so
@@ -343,14 +342,6 @@ impl Display for PrimitiveSpecType {
 }
 
 impl<Tgt: Target> LogicalSpec<Tgt> {
-    // TODO: Do we really need this?
-    pub fn primitive_type(&self) -> PrimitiveSpecType {
-        match self {
-            LogicalSpec::Primitive(basics, _, _) => basics.typ,
-            LogicalSpec::Compose { .. } => panic!("Spec::Compose has no primitive type"),
-        }
-    }
-
     pub fn serial_only(&self) -> bool {
         match self {
             LogicalSpec::Primitive(_, _, serial_only) => *serial_only,

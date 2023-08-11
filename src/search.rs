@@ -60,7 +60,6 @@ fn top_down_inner<'d, Tgt: Target, D: Database<Tgt> + 'd>(
     let mut reducer = ImplReducer::new(top_k);
 
     for action in goal.0.actions() {
-        // TODO: Integrate transition logic into `apply`.
         let Some(partial_impl) = action.apply(goal) else {
             continue;
         };
