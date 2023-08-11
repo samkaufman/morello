@@ -7,7 +7,7 @@ use crate::spec::{
     conv_infer_output_shape, gen_vector_sizes, LogicalSpec, PrimitiveAux, PrimitiveBasics,
     PrimitiveSpecType,
 };
-use crate::target::{MemoryLevel, Target, X86MemoryLevel, X86Target};
+use crate::target::{CpuMemoryLevel, MemoryLevel, Target, X86Target};
 use crate::tensorspec::TensorSpecAux;
 
 use std::hash::Hash;
@@ -388,21 +388,21 @@ fn align_layout_contig_vector_size_product<'s, Tgt: Target>(
         })
 }
 
-fn level_to_int(lvl: &X86MemoryLevel) -> u8 {
+fn level_to_int(lvl: &CpuMemoryLevel) -> u8 {
     match &lvl {
-        X86MemoryLevel::GL => 3,
-        X86MemoryLevel::L1 => 2,
-        X86MemoryLevel::VRF => 1,
-        X86MemoryLevel::RF => 0,
+        CpuMemoryLevel::GL => 3,
+        CpuMemoryLevel::L1 => 2,
+        CpuMemoryLevel::VRF => 1,
+        CpuMemoryLevel::RF => 0,
     }
 }
 
-fn int_to_level(i: u32) -> X86MemoryLevel {
+fn int_to_level(i: u32) -> CpuMemoryLevel {
     match i {
-        0 => X86MemoryLevel::RF,
-        1 => X86MemoryLevel::VRF,
-        2 => X86MemoryLevel::L1,
-        3 => X86MemoryLevel::GL,
+        0 => CpuMemoryLevel::RF,
+        1 => CpuMemoryLevel::VRF,
+        2 => CpuMemoryLevel::L1,
+        3 => CpuMemoryLevel::GL,
         _ => panic!("Invalid level"),
     }
 }

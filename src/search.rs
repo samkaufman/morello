@@ -186,7 +186,7 @@ mod tests {
     use crate::common::Dtype;
     use crate::layout::{row_major, Layout};
     use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
-    use crate::target::{X86MemoryLevel, X86Target};
+    use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use smallvec::smallvec;
 
@@ -195,8 +195,8 @@ mod tests {
         let cm = Layout::Standard {
             dim_order: smallvec![1, 0],
         };
-        let spec1 = example_zero_spec(X86MemoryLevel::GL, row_major(2));
-        let spec2 = example_zero_spec(X86MemoryLevel::GL, cm);
+        let spec1 = example_zero_spec(CpuMemoryLevel::GL, row_major(2));
+        let spec2 = example_zero_spec(CpuMemoryLevel::GL, cm);
         let s1 = ParentSummary::new(&spec1);
         assert!(matches!(
             s1.transition(&spec2),
@@ -210,7 +210,7 @@ mod tests {
             dim_order: smallvec![1, 0],
         };
         let initial_spec =
-            example_move_spec(X86MemoryLevel::GL, row_major(2), X86MemoryLevel::GL, cm);
+            example_move_spec(CpuMemoryLevel::GL, row_major(2), CpuMemoryLevel::GL, cm);
         let s1 = ParentSummary::new(&initial_spec);
         assert!(matches!(
             s1.transition(&initial_spec),
@@ -224,12 +224,12 @@ mod tests {
             dim_order: smallvec![1, 0],
         };
         let spec1 = example_move_spec(
-            X86MemoryLevel::GL,
+            CpuMemoryLevel::GL,
             row_major(2),
-            X86MemoryLevel::GL,
+            CpuMemoryLevel::GL,
             cm.clone(),
         );
-        let spec2 = example_move_spec(X86MemoryLevel::GL, cm, X86MemoryLevel::GL, row_major(2));
+        let spec2 = example_move_spec(CpuMemoryLevel::GL, cm, CpuMemoryLevel::GL, row_major(2));
         let s1 = ParentSummary::new(&spec1);
         let ParentSummaryTransitionResult::NewSummary(s2) = s1.transition(&spec2) else {
             panic!();
@@ -240,9 +240,9 @@ mod tests {
         ));
     }
     fn example_move_spec(
-        from_level: X86MemoryLevel,
+        from_level: CpuMemoryLevel,
         from_layout: Layout,
-        to_level: X86MemoryLevel,
+        to_level: CpuMemoryLevel,
         to_layout: Layout,
     ) -> Spec<X86Target> {
         Spec(
@@ -274,7 +274,7 @@ mod tests {
         )
     }
 
-    fn example_zero_spec(level: X86MemoryLevel, layout: Layout) -> Spec<X86Target> {
+    fn example_zero_spec(level: CpuMemoryLevel, layout: Layout) -> Spec<X86Target> {
         Spec(
             LogicalSpec::Primitive(
                 PrimitiveBasics {

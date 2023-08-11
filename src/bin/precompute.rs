@@ -15,7 +15,7 @@ use morello::geometry::ToFromDependencyLatticeCoordinate;
 use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
 use morello::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
-use morello::target::{Target, X86MemoryLevel, X86Target};
+use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::iter_powers_of_two;
 
@@ -65,14 +65,14 @@ fn load_or_store(prim_type: PrimitiveSpecType, size: DimSize, rank: u8) -> Logic
             TensorSpecAux {
                 contig: layout.contiguous_full(),
                 aligned: true,
-                level: X86MemoryLevel::GL,
+                level: CpuMemoryLevel::GL,
                 layout: layout.clone(),
                 vector_size: None,
             },
             TensorSpecAux {
                 contig: layout.contiguous_full(),
                 aligned: true,
-                level: X86MemoryLevel::L1,
+                level: CpuMemoryLevel::L1,
                 layout,
                 vector_size: None,
             },
@@ -105,7 +105,7 @@ where
             PrimitiveAux(vec![TensorSpecAux {
                 contig: layout.contiguous_full(),
                 aligned: true,
-                level: X86MemoryLevel::GL,
+                level: CpuMemoryLevel::GL,
                 layout,
                 vector_size: None,
             }]),
@@ -117,7 +117,7 @@ where
         let a = TensorSpecAux {
             contig: layout.contiguous_full(),
             aligned: true,
-            level: X86MemoryLevel::GL,
+            level: CpuMemoryLevel::GL,
             layout,
             vector_size: None,
         };
@@ -136,7 +136,7 @@ where
         let a = TensorSpecAux {
             contig: layout.contiguous_full(),
             aligned: true,
-            level: X86MemoryLevel::GL,
+            level: CpuMemoryLevel::GL,
             layout,
             vector_size: None,
         };

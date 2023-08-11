@@ -133,7 +133,7 @@ mod test {
     use crate::imp::subspecs::SpecApp;
     use crate::layout::row_major;
     use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
-    use crate::target::{X86MemoryLevel, X86Target};
+    use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use smallvec::smallvec;
 
@@ -151,14 +151,14 @@ mod test {
                     TensorSpecAux {
                         contig: rm1.contiguous_full(),
                         aligned: true,
-                        level: X86MemoryLevel::GL,
+                        level: CpuMemoryLevel::GL,
                         layout: rm1.clone(),
                         vector_size: None,
                     },
                     TensorSpecAux {
                         contig: rm1.contiguous_full(),
                         aligned: true,
-                        level: X86MemoryLevel::L1,
+                        level: CpuMemoryLevel::L1,
                         layout: rm1.clone(),
                         vector_size: None,
                     },

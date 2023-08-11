@@ -1,12 +1,19 @@
+mod arm;
+mod x86;
+
+pub use arm::ArmTarget;
+pub use x86::X86Target;
+
+use crate::codegen::c_utils::VecType;
 use crate::common::DimSize;
 use crate::cost::MainCost;
-use crate::imp::kernels::KernelType;
 use crate::layout::{nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::tensorspec::TensorSpec;
 
+use clap::ValueEnum;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
@@ -16,66 +23,21 @@ use std::iter;
 
 pub const MAX_LEVEL_COUNT: usize = 4;
 
-pub trait Target: Clone + Copy + std::hash::Hash + Eq + Debug + 'static {
+pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Level: MemoryLevel;
-
-    fn line_size() -> u32;
-    fn max_mem() -> MemoryLimits;
-    fn processors() -> u8;
-    fn default_level() -> Self::Level;
-    fn levels() -> Vec<Self::Level>;
-    fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
-
-    fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout>;
-
-    /// Yield target-specific actions which apply to a given [LogicalSpec].
-    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
-}
-
-pub trait MemoryLevel:
-    Send + PartialOrd + Eq + Display + Debug + std::hash::Hash + Copy + DeserializeOwned + Serialize
-{
-    fn is_addressed(&self) -> bool;
-    fn cache_hit_cost(&self) -> MainCost;
-    fn vector_bytes(&self) -> &'static [u32];
-    fn vector_rf(&self) -> bool {
-        !self.vector_bytes().is_empty()
-    }
-}
-
-#[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, Serialize)]
-pub struct X86Target;
-
-impl Target for X86Target {
-    type Level = X86MemoryLevel;
 
     fn line_size() -> u32 {
         32
     }
-
     fn max_mem() -> MemoryLimits {
         MemoryLimits::Standard(MemVec::new(smallvec![64, 1024, 32_768, 1_073_741_824]))
     }
-
     fn processors() -> u8 {
         32
     }
-
-    fn default_level() -> X86MemoryLevel {
-        X86MemoryLevel::GL
-    }
-
-    fn levels() -> Vec<Self::Level> {
-        enum_iterator::all::<Self::Level>().collect()
-    }
-
-    fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
-        match slower {
-            X86MemoryLevel::RF | X86MemoryLevel::VRF => vec![slower],
-            X86MemoryLevel::L1 => vec![slower, X86MemoryLevel::RF, X86MemoryLevel::VRF],
-            X86MemoryLevel::GL => vec![slower, X86MemoryLevel::L1],
-        }
-    }
+    fn default_level() -> Self::Level;
+    fn levels() -> Vec<Self::Level>;
+    fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
 
     fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout> {
         // warn!("NHWC and packed layouts are unimplemented.");
@@ -96,125 +58,110 @@ impl Target for X86Target {
         }
     }
 
-    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>> {
-        match spec {
-            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
-                PrimitiveSpecType::Matmul { accum } => {
-                    if *accum {
-                        let mut microkernels = vec![];
-                        if mult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::Mult));
-                        }
-                        if broadcastvecmult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::BroadcastVecMult));
-                        }
-                        Box::new(microkernels.into_iter())
-                    } else {
-                        Box::new(iter::empty())
-                    }
-                }
-                PrimitiveSpecType::Conv { .. } => Box::new(iter::empty()),
-                PrimitiveSpecType::Move { .. } => {
-                    let mut microkernels = vec![];
-                    if valueassign_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::ValueAssign));
-                    }
-                    if vectorassign_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::VectorAssign));
-                    }
-                    Box::new(microkernels.into_iter())
-                }
-                PrimitiveSpecType::Zero { .. } => {
-                    let mut microkernels = vec![];
-                    if memsetzero_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::MemsetZero));
-                    }
-                    if vectorzero_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::VectorZero));
-                    }
-                    Box::new(microkernels.into_iter())
-                }
-            },
-            LogicalSpec::Compose { .. } => Box::new(iter::empty()),
-        }
+    /// Yield target-specific actions which apply to a given [LogicalSpec].
+    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
+
+    /// Get corresponding [TargetId] enum
+    fn target_id() -> TargetId;
+
+    /// Get corresponding vector types
+    fn vec_types() -> &'static [VecType; 4];
+}
+
+pub trait MemoryLevel:
+    Send + PartialOrd + Eq + Display + Debug + std::hash::Hash + Copy + DeserializeOwned + Serialize
+{
+    fn is_addressed(&self) -> bool;
+    fn cache_hit_cost(&self) -> MainCost;
+    fn vector_bytes(&self) -> &'static [u32];
+    fn vector_rf(&self) -> bool {
+        !self.vector_bytes().is_empty()
     }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum TargetId {
+    X86,
+    Arm,
 }
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(
     Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize, enum_iterator::Sequence,
 )]
-pub enum X86MemoryLevel {
+pub enum CpuMemoryLevel {
     RF,
     VRF,
     L1,
     GL,
 }
 
-impl MemoryLevel for X86MemoryLevel {
+impl MemoryLevel for CpuMemoryLevel {
     fn is_addressed(&self) -> bool {
         match &self {
-            X86MemoryLevel::RF => true,
-            X86MemoryLevel::VRF => true,
-            X86MemoryLevel::L1 => false,
-            X86MemoryLevel::GL => true,
+            CpuMemoryLevel::RF => true,
+            CpuMemoryLevel::VRF => true,
+            CpuMemoryLevel::L1 => false,
+            CpuMemoryLevel::GL => true,
         }
     }
 
     fn cache_hit_cost(&self) -> MainCost {
         match &self {
-            X86MemoryLevel::RF => 0,
-            X86MemoryLevel::VRF => 0,
-            X86MemoryLevel::L1 => 10,
-            X86MemoryLevel::GL => 100,
+            CpuMemoryLevel::RF => 0,
+            CpuMemoryLevel::VRF => 0,
+            CpuMemoryLevel::L1 => 10,
+            CpuMemoryLevel::GL => 100,
         }
     }
 
     fn vector_bytes(&self) -> &'static [u32] {
         match &self {
-            X86MemoryLevel::VRF => &[16, 32],
+            CpuMemoryLevel::VRF => &[16, 32],
             _ => &[],
         }
     }
 }
 
-impl PartialOrd for X86MemoryLevel {
+impl PartialOrd for CpuMemoryLevel {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         if self == other {
             return Some(Ordering::Equal);
         }
 
         match (self, other) {
-            (X86MemoryLevel::RF, X86MemoryLevel::VRF) => None,
-            (X86MemoryLevel::VRF, X86MemoryLevel::RF) => None,
-            (X86MemoryLevel::RF, _) => Some(Ordering::Less),
-            (X86MemoryLevel::VRF, _) => Some(Ordering::Less),
-            (_, X86MemoryLevel::RF) => Some(Ordering::Greater),
-            (_, X86MemoryLevel::VRF) => Some(Ordering::Greater),
-            (X86MemoryLevel::L1, X86MemoryLevel::GL) => Some(Ordering::Less),
-            (X86MemoryLevel::GL, X86MemoryLevel::L1) => Some(Ordering::Greater),
-            (X86MemoryLevel::L1, X86MemoryLevel::L1) => unreachable!(),
-            (X86MemoryLevel::GL, X86MemoryLevel::GL) => unreachable!(),
+            (CpuMemoryLevel::RF, CpuMemoryLevel::VRF) => None,
+            (CpuMemoryLevel::VRF, CpuMemoryLevel::RF) => None,
+            (CpuMemoryLevel::RF, _) => Some(Ordering::Less),
+            (CpuMemoryLevel::VRF, _) => Some(Ordering::Less),
+            (_, CpuMemoryLevel::RF) => Some(Ordering::Greater),
+            (_, CpuMemoryLevel::VRF) => Some(Ordering::Greater),
+            (CpuMemoryLevel::L1, CpuMemoryLevel::GL) => Some(Ordering::Less),
+            (CpuMemoryLevel::GL, CpuMemoryLevel::L1) => Some(Ordering::Greater),
+            (CpuMemoryLevel::L1, CpuMemoryLevel::L1) => unreachable!(),
+            (CpuMemoryLevel::GL, CpuMemoryLevel::GL) => unreachable!(),
         }
     }
 }
 
-impl Display for X86MemoryLevel {
+impl Display for CpuMemoryLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{}",
             match &self {
-                X86MemoryLevel::RF => "RF",
-                X86MemoryLevel::VRF => "VRF",
-                X86MemoryLevel::L1 => "L1",
-                X86MemoryLevel::GL => "GL",
+                CpuMemoryLevel::RF => "RF",
+                CpuMemoryLevel::VRF => "VRF",
+                CpuMemoryLevel::L1 => "L1",
+                CpuMemoryLevel::GL => "GL",
             }
         )
     }
 }
 
-pub fn valueassign_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
+pub fn valueassign_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
+    operands: &[TensorSpec<Tgt>],
+) -> bool {
     debug_assert_eq!(operands.len(), 2);
 
     if operands.iter().flat_map(|o| o.shape()).any(|&d| d != 1) {
@@ -227,13 +174,13 @@ pub fn valueassign_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bo
         }
     }
 
-    operands.iter().any(|o| o.level() == X86MemoryLevel::RF)
+    operands.iter().any(|o| o.level() == CpuMemoryLevel::RF)
         && operands
             .iter()
-            .all(|o| o.level() == X86MemoryLevel::RF || o.level() == X86MemoryLevel::L1)
+            .all(|o| o.level() == CpuMemoryLevel::RF || o.level() == CpuMemoryLevel::L1)
 }
 
-pub fn vectorassign_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
+pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>]) -> bool {
     if operands.iter().any(|o| !o.is_contiguous()) {
         return false;
     }
@@ -267,42 +214,46 @@ pub fn vectorassign_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> b
     has_vrf
 }
 
-pub fn cacheaccess_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
-    return false;
+pub fn cacheaccess_applies_to_operands<Tgt: Target>(_operands: &[TensorSpec<Tgt>]) -> bool {
+    false
 
-    if operands.iter().all(|o| o.level().is_addressed()) {
+    // if operands.iter().all(|o| o.level().is_addressed()) {
+    //     return false;
+    // }
+    // if operands.iter().any(|o| !o.is_contiguous()) {
+    //     return false;
+    // }
+    // if operands[0].dtype() != operands[1].dtype() {
+    //     return false;
+    // }
+    // if operands[0].shape() != operands[1].shape() {
+    //     return false;
+    // }
+    // if operands[0].layout() != operands[1].layout() {
+    //     return false;
+    // }
+    // true
+}
+
+pub fn memsetzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
+    operands: &[TensorSpec<Tgt>],
+) -> bool {
+    if !operands[0].is_contiguous() {
         return false;
     }
-    if operands.iter().any(|o| !o.is_contiguous()) {
-        return false;
-    }
-    if operands[0].dtype() != operands[1].dtype() {
-        return false;
-    }
-    if operands[0].shape() != operands[1].shape() {
-        return false;
-    }
-    if operands[0].layout() != operands[1].layout() {
+    if operands[0].level() != CpuMemoryLevel::RF {
         return false;
     }
     true
 }
 
-pub fn memsetzero_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
+pub fn vectorzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
+    operands: &[TensorSpec<Tgt>],
+) -> bool {
     if !operands[0].is_contiguous() {
         return false;
     }
-    if operands[0].level() != X86MemoryLevel::RF {
-        return false;
-    }
-    true
-}
-
-pub fn vectorzero_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
-    if !operands[0].is_contiguous() {
-        return false;
-    }
-    if operands[0].level() != X86MemoryLevel::VRF {
+    if operands[0].level() != CpuMemoryLevel::VRF {
         return false;
     }
     let volume = operands[0].shape().iter().product::<DimSize>();
@@ -316,12 +267,14 @@ pub fn vectorzero_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> boo
     true
 }
 
-pub fn broadcastvecmult_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
-    if operands[0].level() != X86MemoryLevel::RF {
+pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
+    operands: &[TensorSpec<Tgt>],
+) -> bool {
+    if operands[0].level() != CpuMemoryLevel::RF {
         return false;
     }
     for i in 1..3 {
-        if operands[i].level() != X86MemoryLevel::VRF {
+        if operands[i].level() != CpuMemoryLevel::VRF {
             return false;
         }
         let volume = operands[i].shape().iter().product::<DimSize>();
@@ -347,8 +300,10 @@ pub fn broadcastvecmult_applies_to_operands(operands: &[TensorSpec<X86Target>]) 
     true
 }
 
-pub fn mult_applies_to_operands(operands: &[TensorSpec<X86Target>]) -> bool {
+pub fn mult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
+    operands: &[TensorSpec<Tgt>],
+) -> bool {
     operands
         .iter()
-        .all(|o| o.level() == X86MemoryLevel::RF && o.shape().iter().all(|&d| d == 1))
+        .all(|o| o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == 1))
 }

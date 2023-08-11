@@ -4,7 +4,7 @@ use smallvec::{smallvec, SmallVec};
 use morello::common::Dtype;
 use morello::layout::row_major;
 use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
-use morello::target::{Target, X86MemoryLevel, X86Target};
+use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 
 #[inline(never)]
@@ -20,7 +20,7 @@ fn copy_actions_into_vec() {
             TensorSpecAux {
                 contig: rm2.contiguous_full(),
                 aligned: true,
-                level: X86MemoryLevel::GL,
+                level: CpuMemoryLevel::GL,
                 layout: rm2,
                 vector_size: None,
             };

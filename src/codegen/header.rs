@@ -1,10 +1,9 @@
+use super::c_utils::VecType;
+use crate::target::TargetId;
+
 use std::{collections::HashSet, fmt};
 
-use super::c_utils::VecType;
-
 pub struct HeaderEmitter {
-    pub emit_x86: bool,
-    pub emit_arm: bool,
     pub emit_benchmarking: bool,
     pub vector_type_defs: HashSet<&'static VecType>,
 }
@@ -12,26 +11,25 @@ pub struct HeaderEmitter {
 impl HeaderEmitter {
     pub fn new() -> Self {
         Self {
-            emit_x86: false,
-            emit_arm: false,
             emit_benchmarking: false,
             vector_type_defs: HashSet::new(),
         }
     }
 
-    pub fn emit<W: fmt::Write>(&self, out: &mut W) -> Result<(), fmt::Error> {
-        out.write_str(include_str!("../codegen_partials/std.c"))?;
+    pub fn emit<W: fmt::Write>(&self, target: TargetId, out: &mut W) -> Result<(), fmt::Error> {
+        out.write_str(include_str!("../codegen/partials/std.c"))?;
         out.write_char('\n')?;
-        if self.emit_x86 {
-            out.write_str(include_str!("../codegen_partials/x86.c"))?;
-            out.write_char('\n')?;
+        match target {
+            TargetId::X86 => {
+                out.write_str(include_str!("../codegen/partials/x86.c"))?;
+            }
+            TargetId::Arm => {
+                out.write_str(include_str!("../codegen/partials/arm.c"))?;
+            }
         }
-        if self.emit_arm {
-            out.write_str(include_str!("../codegen_partials/arm.c"))?;
-            out.write_char('\n')?;
-        }
+        out.write_char('\n')?;
         if self.emit_benchmarking {
-            out.write_str(include_str!("../codegen_partials/benchmarking.c"))?;
+            out.write_str(include_str!("../codegen/partials/benchmarking.c"))?;
             out.write_char('\n')?;
         }
 
