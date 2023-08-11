@@ -632,7 +632,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
-            CBuffer::HeapArray { name, .. } => match reinterpret {
+            CBuffer::HeapArray { name, .. } | CBuffer::Ptr { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
                 None => {
                     format!(
@@ -675,7 +675,6 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                     reinterpret,
                 )
             }
-            CBuffer::Ptr { .. } => todo!(),
         }
     }
 }
