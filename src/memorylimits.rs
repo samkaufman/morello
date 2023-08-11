@@ -29,6 +29,10 @@ pub enum MemoryLimits {
     Standard(MemVec),
 }
 
+/// The memory allocated by a single [Impl] node.
+///
+/// Put another way: this is a description of the memory live during execution of a single node,
+/// ignoring children.
 pub enum MemoryAllocation {
     Simple(MemVec),
     Inner(Vec<MemVec>),
