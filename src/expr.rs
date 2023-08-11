@@ -1,6 +1,7 @@
+use itertools::Either;
 use std::{
     num::TryFromIntError,
-    ops::{Add, Mul, Sub},
+    ops::{Add, AddAssign, Mul, Sub},
 };
 
 #[derive(Debug, PartialEq, Clone)]
@@ -20,6 +21,21 @@ impl<T: PartialEq> AffineExpr<T> {
             None => self,
         }
     }
+
+    pub fn map_terms<U, F>(mut self, mut mapper: F) -> AffineExpr<U>
+    where
+        F: FnMut(T) -> Either<U, i32>,
+        U: PartialEq,
+    {
+        let mut accum = AffineExpr(vec![], self.1);
+        for Term(c, s) in self.0.drain(..) {
+            match mapper(s) {
+                Either::Left(u) => accum += Term(c, u),
+                Either::Right(i) => accum += c * i,
+            }
+        }
+        accum
+    }
 }
 
 impl<T> PartialEq<i32> for &AffineExpr<T> {
@@ -32,16 +48,7 @@ impl<T: PartialEq> Add for AffineExpr<T> {
     type Output = Self;
 
     fn add(mut self, rhs: AffineExpr<T>) -> Self::Output {
-        // TODO: Keep the terms sorted, then join by merging (popping smaller head).
-        let AffineExpr(terms, intercept) = &mut self;
-        *intercept += rhs.1;
-        for Term(c, s) in rhs.0 {
-            if let Some(Term(c2, _)) = terms.iter_mut().find(|Term(_, s2)| &s == s2) {
-                *c2 += c;
-            } else {
-                terms.push(Term(c, s));
-            }
-        }
+        self += rhs;
         self
     }
 }
@@ -50,7 +57,7 @@ impl<T: PartialEq> Add<Term<T>> for AffineExpr<T> {
     type Output = Self;
 
     fn add(self, rhs: Term<T>) -> Self::Output {
-        self + AffineExpr(vec![rhs], 0)
+        self + AffineExpr::from(rhs)
     }
 }
 
@@ -60,6 +67,33 @@ impl<T> Add<i32> for AffineExpr<T> {
     fn add(mut self, rhs: i32) -> Self::Output {
         self.1 += rhs;
         self
+    }
+}
+
+impl<T: PartialEq> AddAssign for AffineExpr<T> {
+    fn add_assign(&mut self, rhs: Self) {
+        // TODO: Keep the terms sorted, then join by merging (popping smaller head).
+        let AffineExpr(terms, intercept) = self;
+        *intercept += rhs.1;
+        for Term(c, s) in rhs.0 {
+            if let Some(Term(c2, _)) = terms.iter_mut().find(|Term(_, s2)| &s == s2) {
+                *c2 += c;
+            } else {
+                terms.push(Term(c, s));
+            }
+        }
+    }
+}
+
+impl<T: PartialEq> AddAssign<Term<T>> for AffineExpr<T> {
+    fn add_assign(&mut self, rhs: Term<T>) {
+        self.add_assign(AffineExpr::from(rhs));
+    }
+}
+
+impl<T> AddAssign<i32> for AffineExpr<T> {
+    fn add_assign(&mut self, rhs: i32) {
+        self.1 += rhs;
     }
 }
 

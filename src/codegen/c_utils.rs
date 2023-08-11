@@ -25,6 +25,10 @@ pub enum CBuffer {
     VecVars {
         inner_vecs: Vec<CBuffer>,
     },
+    Ptr {
+        name: String,
+        dtype: Dtype,
+    },
 }
 
 #[derive(Debug, Hash, Eq, PartialEq)]
@@ -50,7 +54,8 @@ impl CBuffer {
             CBuffer::HeapArray { name, .. }
             | CBuffer::StackArray { name, .. }
             | CBuffer::ValueVar { name, .. }
-            | CBuffer::SingleVecVar { name, .. } => Some(name),
+            | CBuffer::SingleVecVar { name, .. }
+            | CBuffer::Ptr { name, .. } => Some(name),
             CBuffer::VecVars { .. } => None,
         }
     }
@@ -118,6 +123,7 @@ impl CBuffer {
                 let epi = if zero_init { " = {0}" } else { "" };
                 writeln!(w, "{}{} {}{};", indent(depth), c_type(*dtype), name, epi)
             }
+            CBuffer::Ptr { .. } => unimplemented!(),
         }
     }
 
@@ -136,6 +142,7 @@ impl CBuffer {
                 }
                 Ok(())
             }
+            CBuffer::Ptr { .. } => unimplemented!(),
         }
     }
 

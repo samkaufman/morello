@@ -19,10 +19,6 @@ use std::{
 pub trait View: Debug {
     type Tgt: Target;
 
-    fn identifier(&self) -> OpaqueSymbol {
-        todo!();
-    }
-
     fn backing_tensor<'a>(
         &'a self,
         env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
@@ -196,6 +192,11 @@ impl<Tgt: Target> Display for Param<Tgt> {
 impl<Tgt: Target> Tensor<Tgt> {
     pub fn new(spec: TensorSpec<Tgt>) -> Self {
         Tensor(spec, OpaqueSymbol::new())
+    }
+
+    // TODO: We shouldn't need to expose this.
+    pub fn identifier(&self) -> OpaqueSymbol {
+        self.1.clone()
     }
 }
 

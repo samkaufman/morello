@@ -16,7 +16,7 @@ use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferExprTerm;
 use crate::target::{CpuMemoryLevel, Target};
-use crate::utils::indent;
+use crate::utils::{indent, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
 
 const STACK_CUTOFF: u32 = 256;
@@ -47,24 +47,25 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(main_body_str, "__attribute__((noinline))\nvoid kernel(")?;
         for ((operand_idx, operand), tensor) in imp.parameters().enumerate().zip(top_arg_tensors) {
             let spec = tensor.spec();
-            let new_c_buffer = self.make_buffer(
-                spec.dim_sizes(),
-                spec.vector_size(),
-                spec.dtype(),
-                spec.level(),
-            );
+            let parameter_name = self.namer.fresh_name();
             writeln!(
                 main_body_str,
                 "  {} *restrict {}{}",
                 c_type(operand.dtype),
-                new_c_buffer.name().unwrap(),
+                parameter_name,
                 if operand_idx + 1 < imp.parameter_count().into() {
                     ", "
                 } else {
                     "\n) {"
                 }
             )?;
-            self.name_env.insert(Rc::clone(tensor), new_c_buffer);
+            self.name_env.insert(
+                Rc::clone(tensor),
+                CBuffer::Ptr {
+                    name: parameter_name,
+                    dtype: spec.dtype(),
+                },
+            );
         }
 
         // Put the tensor->c_buffer binding into `self.name_env`. (And fill
@@ -94,8 +95,9 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
         writeln!(main_body_str, "int main() {{")?;
         depth += 1;
-        // Allocate a buffer for each Impl parameter.
-        let mut buffers = Vec::with_capacity(top_arg_tensors.len());
+
+        // Allocate a buffer for each Impl parameter and re-bind to a CBuffer corresponding to the
+        // local-scope buffer. It will have been previously bound by emit_kernel to a CBuffer::Ptr.
         for kernel_argument in top_arg_tensors {
             let spec = kernel_argument.spec();
             let buf = self.make_buffer(
@@ -105,11 +107,13 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 spec.level(),
             );
             buf.emit(&mut main_body_str, true, depth)?;
-            buffers.push(buf);
+            self.name_env.insert(Rc::clone(kernel_argument), buf);
         }
+
         // Emit the kernel call, passing pointers to the Impl function.
         write!(main_body_str, "\n{}kernel(", indent(depth))?;
-        for (i, a) in buffers.iter().enumerate() {
+        for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
+            let a = self.name_env.get(kernel_argument).unwrap();
             write!(
                 main_body_str,
                 "{}{}",
@@ -124,28 +128,11 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(main_body_str)?;
 
         // Print the output tensor
-        writeln!(main_body_str, "{}// Print the output.", indent(depth))?;
-        let tensor = &top_arg_tensors[top_arg_tensors.len() - 1];
-        let c_buffer = self.name_env.get(tensor).unwrap();
-        writeln!(
-            main_body_str,
-            "{}for (int i = 0; i < {}; i++) {{",
-            indent(depth),
-            c_buffer.size().unwrap(),
-        )?;
-        depth += 1;
-        writeln!(
-            main_body_str,
-            "{}printf(\"%d \", {}[i]);",
-            indent(depth),
-            buffers.last().unwrap().name().unwrap(),
-        )?;
-        depth -= 1;
-        writeln!(main_body_str, "{}}}", indent(depth))?;
+        self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
 
         // Free the buffers.
-        writeln!(main_body_str, "\n{}// Free the buffers.", indent(depth))?;
-        for buf in buffers {
+        for kernel_argument in top_arg_tensors {
+            let buf = self.name_env.get(kernel_argument).unwrap();
             buf.emit_free(&mut main_body_str, depth)?;
         }
 
@@ -153,6 +140,52 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(main_body_str, "}}")?;
 
         out.write_str(&main_body_str)
+    }
+
+    fn emit_print_tensor<W: Write>(
+        &mut self,
+        tensor: &Tensor<Tgt>,
+        mut depth: usize,
+        out: &mut W,
+    ) -> Result<(), fmt::Error> {
+        let rank = tensor.shape().len();
+
+        let shape_str = tensor.shape().iter().map(ToString::to_string).join("x");
+        writeln!(out, "{}printf(\"{}\\n\");", indent(depth), shape_str)?;
+
+        // TODO: Generate unique names. ASCII_CHARS could lead to conflicts in the future.
+        for (dim, (d, n)) in tensor.shape().iter().copied().zip(ASCII_CHARS).enumerate() {
+            writeln!(
+                out,
+                "{}for (int {n} = 0; {n} < {d}; {n}++) {{",
+                indent(depth)
+            )?;
+            self.loop_iter_bindings.insert(
+                BufferExprTerm::Pt(dim.try_into().unwrap(), tensor.identifier()),
+                Either::Left(n.to_string()),
+            );
+        }
+
+        depth += 1;
+
+        debug_assert_eq!(tensor, tensor.backing_tensor(&self.param_bindings).unwrap());
+        let buffer = self.name_env.get(tensor).unwrap();
+        let buffer_indexing_expr = tensor.make_buffer_indexing_expr(&self.param_bindings);
+        writeln!(
+            out,
+            "{}printf(\"%\" {} \" \", {});",
+            indent(depth),
+            tensor.spec().dtype().int_fmt_macro(),
+            self.c_index(buffer, &buffer_indexing_expr, None),
+        )?;
+        depth -= 1;
+
+        writeln!(out, "{}}}", indent(depth))?;
+        for _ in 0..rank - 1 {
+            writeln!(out, "{}printf(\"\\n\");", indent(depth))?;
+            writeln!(out, "{}}}", indent(depth))?;
+        }
+        Ok(())
     }
 
     fn make_buffer(
@@ -503,19 +536,11 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     }
 
     fn sub_expr_bindings(&self, unbound_expr: AffineExpr<BufferExprTerm>) -> AffineExpr<CExprTerm> {
-        let init = AffineExpr(vec![], unbound_expr.1);
-        unbound_expr
-            .0
-            .into_iter()
-            .fold(init, |base, Term(coef, sym)| {
-                match self.loop_iter_bindings.get(&sym) {
-                    Some(Either::Left(var_name)) => {
-                        base + Term(coef, CExprTerm::CName(var_name.clone()))
-                    }
-                    Some(Either::Right(bound_constant)) => base + (coef * bound_constant),
-                    None => base + Term(coef, CExprTerm::Buffer(sym)),
-                }
-            })
+        unbound_expr.map_terms(|sym| match self.loop_iter_bindings.get(&sym) {
+            Some(Either::Left(var_name)) => Either::Left(CExprTerm::CName(var_name.clone())),
+            Some(Either::Right(bound_constant)) => Either::Right(*bound_constant),
+            None => Either::Left(CExprTerm::Buffer(sym)),
+        })
     }
 
     /// Returns a C expression referring to the value at a given expression.
@@ -529,15 +554,9 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
-            CBuffer::HeapArray { name, .. } => match reinterpret {
-                Some(_) => unimplemented!(),
-                None => format!(
-                    "{}[{}]",
-                    name,
-                    expr_to_c(&self.sub_expr_bindings(expr.clone()))
-                ), // assuming expr.c_expr() is available in scope
-            },
-            CBuffer::StackArray { name, .. } => match reinterpret {
+            CBuffer::HeapArray { name, .. }
+            | CBuffer::StackArray { name, .. }
+            | CBuffer::Ptr { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
                 None => format!(
                     "{}[{}]",
@@ -583,7 +602,10 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         #![allow(clippy::only_used_in_recursion)]
 
         match buffer {
-            CBuffer::HeapArray { .. } | CBuffer::StackArray { .. } | CBuffer::ValueVar { .. } => {
+            CBuffer::HeapArray { .. }
+            | CBuffer::StackArray { .. }
+            | CBuffer::ValueVar { .. }
+            | CBuffer::Ptr { .. } => {
                 unimplemented!()
             }
             CBuffer::SingleVecVar { name, .. } => {
@@ -657,6 +679,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                     reinterpret,
                 )
             }
+            CBuffer::Ptr { .. } => todo!(),
         }
     }
 }
