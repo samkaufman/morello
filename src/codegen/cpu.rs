@@ -1,6 +1,7 @@
 use itertools::{Either, Itertools};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug, Write};
+use std::iter;
 use std::rc::Rc;
 
 use super::namegen::NameGenerator;
@@ -295,7 +296,14 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             }
             ImplNode::Pipeline(_) => todo!("Emit code for Pipeline"),
             ImplNode::SpecApp(p) => {
-                writeln!(w, "{}assert(false);  /* {p:?} */", indent(depth))
+                writeln!(
+                    w,
+                    "{}/* {}({}) */",
+                    indent(depth),
+                    p.0,
+                    iter::repeat("_").take(p.1.len()).join(", ")
+                )?;
+                writeln!(w, "{}assert(false);  /* Missing Impl */", indent(depth))
             }
             ImplNode::Kernel(Kernel {
                 kernel_type,
