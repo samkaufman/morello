@@ -7,11 +7,11 @@ use std::fmt::Debug;
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
 use crate::{
-    common::Spec,
     cost::MainCost,
     imp::{loops::Loop, moves::MoveLet, pipeline::Pipeline, subspecs::SpecApp},
     memorylimits::{MemVec, MemoryAllocation},
     nameenv::NameEnv,
+    spec::Spec,
     target::Target,
 };
 

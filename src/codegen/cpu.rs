@@ -1,5 +1,5 @@
 use itertools::{Either, Itertools};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::{self, Debug, Write};
 use std::iter;
 use std::rc::Rc;
@@ -711,7 +711,7 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
     // builds.
     #[cfg(debug_assertions)]
     {
-        let mut seen = HashSet::new();
+        let mut seen = std::collections::HashSet::new();
         let rv = result.clone().collect::<Vec<_>>();
         for (axis, _) in rv.clone() {
             if !seen.insert(axis) {

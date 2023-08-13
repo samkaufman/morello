@@ -1,10 +1,9 @@
-use crate::common::Spec;
 use crate::cost::Cost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::pprint::PrintableAux;
 use crate::scheduling::Action;
-use crate::spec::LogicalSpec;
+use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
 
 use rusqlite::{params_from_iter, OptionalExtension};

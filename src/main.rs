@@ -7,10 +7,10 @@ use std::sync::RwLock;
 
 use morello::codegen::CodeGen;
 use morello::color::{self, ColorMode};
-use morello::common::{DimSize, Dtype, Spec};
+use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
 use morello::pprint::{pprint, PrintMode};
-use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;

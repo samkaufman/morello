@@ -2,9 +2,9 @@ use iai_callgrind::{black_box, main};
 use smallvec::smallvec;
 use std::sync::RwLock;
 
-use morello::common::{DimSize, Dtype, Spec};
+use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
-use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::InMemDatabase;
 use morello::target::{Target, X86Target};
 use morello::tensorspec::TensorSpecAux;

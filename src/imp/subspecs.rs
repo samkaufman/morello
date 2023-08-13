@@ -1,8 +1,8 @@
-use crate::common::Spec;
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
+use crate::spec::Spec;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};

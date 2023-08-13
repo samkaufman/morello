@@ -2,11 +2,11 @@ use itertools::Itertools;
 use smallvec::{smallvec, SmallVec};
 use std::sync::RwLock;
 
-use crate::common::Spec;
 use crate::cost::Cost;
 use crate::imp::{visit_leaves, ImplNode};
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
+use crate::spec::Spec;
 use crate::table::Database;
 use crate::target::Target;
 

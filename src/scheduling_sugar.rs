@@ -1,8 +1,9 @@
-use crate::common::{DimSize, Spec};
+use crate::common::DimSize;
 use crate::imp::kernels::KernelType;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::scheduling::Action;
+use crate::spec::Spec;
 use crate::target::Target;
 use std::iter;
 

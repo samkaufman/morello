@@ -1,14 +1,14 @@
 use morello::codegen::CodeGen;
-use morello::common::{Dtype, Shape, Spec};
+use morello::common::{Dtype, Shape};
 use morello::imp::kernels::KernelType;
 use morello::layout::row_major;
 use morello::pprint::{pprint, PrintMode};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
-use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
-use std::fmt::Debug;
+
 use std::io;
 
 fn main() {
