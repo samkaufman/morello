@@ -224,22 +224,37 @@ impl<Tgt: Target> Action<Tgt> {
                     }
                 };
 
-                let body = {
-                    let mut new_operands = operands;
-                    for loop_tile in &tiles {
-                        let ref_op = &mut new_operands[usize::from(loop_tile.tile.view.0)];
-                        let aligned = aligned_approx(
-                            loop_tile.tile.shape(),
-                            loop_tile.tile.step_sizes(),
-                            ref_op,
-                        );
-                        ref_op.shrink(loop_tile.tile.shape(), aligned);
-                    }
-                    let mut inner_spec = node_spec.clone();
-                    inner_spec.replace_io(&new_operands);
+                let mut new_operands = operands;
+                for loop_tile in &tiles {
+                    let ref_op = &mut new_operands[usize::from(loop_tile.tile.view.0)];
+                    let aligned =
+                        aligned_approx(loop_tile.tile.shape(), loop_tile.tile.step_sizes(), ref_op);
+                    ref_op.shrink(loop_tile.tile.shape(), aligned);
+                }
 
-                    Box::new(SpecApp::default_app(Spec(inner_spec, spec.1.clone())).into())
+                let mut inner_spec = node_spec.clone();
+                inner_spec.replace_io(&new_operands);
+                match self {
+                    Action::TileOut { .. } => {}
+                    Action::Split { .. } => {
+                        if let LogicalSpec::Primitive(
+                            PrimitiveBasics {
+                                typ: PrimitiveSpecType::Matmul { accum },
+                                ..
+                            },
+                            _,
+                            _,
+                        ) = &mut inner_spec
+                        {
+                            *accum = true;
+                        } else {
+                            // TODO: Should return `None` instead?
+                            panic!("Can only split a Matmul");
+                        };
+                    }
+                    _ => unreachable!(),
                 };
+                let body = Box::new(SpecApp::default_app(Spec(inner_spec, spec.1.clone())).into());
 
                 Some(ImplNode::Loop(Loop {
                     tiles,
