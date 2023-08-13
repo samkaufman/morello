@@ -170,10 +170,10 @@ impl<Tgt: Target> View for Param<Tgt> {
         args: &[&'i dyn View<Tgt = Self::Tgt>],
         env: &mut HashMap<Param<Self::Tgt>, &'i dyn View<Tgt = Self::Tgt>>,
     ) {
-        if env
-            .insert(self.clone(), args[usize::from(self.0)])
-            .is_some()
-        {
+        let Some(a) = args.get(usize::from(self.0)) else {
+            panic!("Param has index {} but only {} args given", self.0, args.len());
+        };
+        if env.insert(self.clone(), *a).is_some() {
             panic!("Identifier was already in environment")
         }
     }

@@ -1,6 +1,7 @@
 use super::common::{DimSize, Shape};
 use crate::common::Dtype;
 use crate::layout::Layout;
+use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
 use crate::target::Target;
@@ -23,6 +24,10 @@ use std::{assert_eq, debug_assert_eq};
 
 /// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
 const MOVE_RESULTS_CAPACITY: usize = 12;
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
+#[serde(bound = "")]
+pub struct Spec<Tgt: Target>(pub LogicalSpec<Tgt>, pub MemoryLimits);
 
 // The following should probably just be Spec::Primitive and Spec::Compose variants once
 // there are good conversions to/from image/filter shapes for Conv.
@@ -68,6 +73,12 @@ pub struct PrimitiveAux<Tgt: Target>(pub Vec<TensorSpecAux<Tgt>>);
 /// dimension of the first input (the m dimension) is bound to the m dimension
 /// of the output, and so on for the n dimension.
 pub struct TilingInference(pub Vec<(Tiling, SmallVec<[Option<u8>; 5]>)>);
+
+impl<Tgt: Target> Display for Spec<Tgt> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {})", self.0, self.1)
+    }
+}
 
 impl PrimitiveBasics {
     pub fn replace_io(&mut self, new_operands: &[(&[DimSize], Dtype)]) {

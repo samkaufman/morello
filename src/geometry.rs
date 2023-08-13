@@ -60,9 +60,6 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     let [b, f, c, h, w, fh, fw] = basics.spec_shape[..] else {
                         panic!("Convolution must have 7 Spec dimensions")
                     };
-                    let _image_shape = [b, c, h, w];
-                    let _filters_shape = [f, c, fh, fw];
-
                     let shape_vec = [b - 1, f - 1, c - 1, h - fh, w - fw, fh - 1, fw - 1];
                     Some((
                         SpecKey::Conv {

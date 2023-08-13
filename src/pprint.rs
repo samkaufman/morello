@@ -129,10 +129,10 @@ fn pprint_inner<'a, Tgt, Aux>(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::common::{Dtype, Spec};
+    use crate::common::Dtype;
     use crate::imp::subspecs::SpecApp;
     use crate::layout::row_major;
-    use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+    use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
     use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use smallvec::smallvec;

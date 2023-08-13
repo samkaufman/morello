@@ -7,11 +7,11 @@ use std::sync::RwLock;
 
 use morello::codegen::CodeGen;
 use morello::color::{self, ColorMode};
-use morello::common::{DimSize, Dtype, Spec};
+use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
 use morello::layout::Layout;
 use morello::pprint::{pprint, PrintMode};
-use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
@@ -28,7 +28,7 @@ struct Args {
 
     /// Print mode
     #[arg(long, value_enum, default_value_t = PrintMode::Full)]
-    print: PrintMode,
+    print_mode: PrintMode,
 
     /// Target architecture
     #[arg(long, value_enum, default_value_t = TargetId::X86)]
@@ -195,7 +195,7 @@ where
         panic!("No Impl found");
     };
     assert_eq!(results.len(), 1);
-    pprint(&results[0], args.print);
+    pprint(&results[0], args.print_mode);
     println!();
     let output = results[0].build(args.print_code)?.run()?;
     println!("Output: {}", String::from_utf8_lossy(&output.stdout));

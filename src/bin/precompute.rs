@@ -10,10 +10,10 @@ use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::smallvec;
 
-use morello::common::{DimSize, Dtype, Spec};
+use morello::common::{DimSize, Dtype};
 use morello::geometry::ToFromDependencyLatticeCoordinate;
 use morello::memorylimits::{MemVec, MemoryLimits};
-use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;

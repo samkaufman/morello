@@ -4,7 +4,8 @@ use std::fmt::Display;
 use std::rc::Rc;
 use std::{iter, mem};
 
-use crate::common::{DimSize, Shape, Spec};
+use crate::alignment::aligned_approx;
+use crate::common::{DimSize, Shape};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::{Kernel, KernelType};
 use crate::imp::loops::{Loop, LoopTile};
@@ -14,7 +15,7 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
@@ -79,6 +80,7 @@ impl<Tgt: Target> Action<Tgt> {
 
         match self {
             Action::TileOut { .. } | Action::Split { .. } => {
+                // TODO: Refactor this huge case body into flattened cases for TileOut and Split.
                 let (tiles, parallel) = {
                     match self {
                         Action::TileOut {
@@ -102,7 +104,12 @@ impl<Tgt: Target> Action<Tgt> {
                             assert!(output_shape.iter().enumerate().all(|(dim, dim_size)| {
                                 *dim_size > 0 && *dim_size <= current_out_shape[dim]
                             }));
-                            assert_ne!(current_out_shape, &output_shape[..]);
+                            assert_ne!(
+                                current_out_shape,
+                                &output_shape[..],
+                                "Cannot tile to same shape: {:?}",
+                                output_shape
+                            );
 
                             // Abort if it's invalid to tile the original output tensor
                             // to the new shape (e.g., the new shape is larger).
@@ -213,7 +220,7 @@ impl<Tgt: Target> Action<Tgt> {
                                             ];
                                             (tiles, false)
                                         }
-                                        _ => unimplemented!(),
+                                        _ => unimplemented!("Split not implemented for {:?}", typ),
                                     }
                                 }
                                 LogicalSpec::Compose { .. } => todo!(),
@@ -223,17 +230,37 @@ impl<Tgt: Target> Action<Tgt> {
                     }
                 };
 
-                let body = {
-                    let mut new_operands = operands;
-                    for loop_tile in &tiles {
-                        let param_idx = usize::from(loop_tile.tile.view.0);
-                        new_operands[param_idx] = loop_tile.tile.spec().clone();
-                    }
-                    let mut inner_spec = node_spec.clone();
-                    inner_spec.replace_io(&new_operands);
+                let mut new_operands = operands;
+                for loop_tile in &tiles {
+                    let ref_op = &mut new_operands[usize::from(loop_tile.tile.view.0)];
+                    let aligned =
+                        aligned_approx(loop_tile.tile.shape(), loop_tile.tile.step_sizes(), ref_op);
+                    ref_op.shrink(loop_tile.tile.shape(), aligned);
+                }
 
-                    Box::new(SpecApp::default_app(Spec(inner_spec, spec.1.clone())).into())
+                let mut inner_spec = node_spec.clone();
+                inner_spec.replace_io(&new_operands);
+                match self {
+                    Action::TileOut { .. } => {}
+                    Action::Split { .. } => {
+                        if let LogicalSpec::Primitive(
+                            PrimitiveBasics {
+                                typ: PrimitiveSpecType::Matmul { accum },
+                                ..
+                            },
+                            _,
+                            _,
+                        ) = &mut inner_spec
+                        {
+                            *accum = true;
+                        } else {
+                            // TODO: Should return `None` instead?
+                            panic!("Can only split a Matmul");
+                        };
+                    }
+                    _ => unreachable!(),
                 };
+                let body = Box::new(SpecApp::default_app(Spec(inner_spec, spec.1.clone())).into());
 
                 Some(ImplNode::Loop(Loop {
                     tiles,
@@ -503,10 +530,9 @@ impl<Tgt: Target> Action<Tgt> {
                     if f(destination_level, *source_idx, node_spec) {
                         let mut left_spec = outer_moved_operand_spec;
                         let mut right_spec = inner_moved_operand.spec();
-                        let param_idx = if flip { 1 } else { 0 };
                         let mut args: [Rc<dyn View<Tgt = Tgt>>; 2] = [
-                            Rc::new(Param::new(param_idx, outer_moved_operand_spec.clone())) as _,
-                            inner_moved_operand.inner_rc(),
+                            Rc::new(Param::new(0, outer_moved_operand_spec.clone())) as _,
+                            Rc::new(Param::new(1, inner_moved_operand.spec().clone())) as _,
                         ];
                         if flip {
                             mem::swap(&mut left_spec, &mut right_spec);
@@ -547,12 +573,8 @@ impl<Tgt: Target> Action<Tgt> {
                     };
                     let spec = Spec(new_inner_spec, lower_limits.clone());
                     let inner_operands = new_operands.iter().enumerate().map(|(i, o)| {
-                        if i == usize::from(*source_idx) {
-                            inner_moved_operand.inner_rc()
-                        } else {
-                            Rc::new(Param::new(u8::try_from(i).unwrap(), o.clone()))
-                                as Rc<dyn View<Tgt = Tgt>>
-                        }
+                        Rc::new(Param::new(u8::try_from(i).unwrap(), o.clone()))
+                            as Rc<dyn View<Tgt = Tgt>>
                     });
                     SpecApp::new(spec, inner_operands)
                 };
