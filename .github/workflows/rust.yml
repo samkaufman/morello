@@ -30,6 +30,9 @@ jobs:
         env:
           CLANG: clang
 
+      - name: Run simple_matmul example
+        run: cargo run --example simple_matmul
+
   format:
     runs-on: ubuntu-latest
 

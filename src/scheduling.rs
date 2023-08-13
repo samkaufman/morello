@@ -80,6 +80,7 @@ impl<Tgt: Target> Action<Tgt> {
 
         match self {
             Action::TileOut { .. } | Action::Split { .. } => {
+                // TODO: Refactor this huge case body into flattened cases for TileOut and Split.
                 let (tiles, parallel) = {
                     match self {
                         Action::TileOut {
@@ -103,7 +104,12 @@ impl<Tgt: Target> Action<Tgt> {
                             assert!(output_shape.iter().enumerate().all(|(dim, dim_size)| {
                                 *dim_size > 0 && *dim_size <= current_out_shape[dim]
                             }));
-                            assert_ne!(current_out_shape, &output_shape[..]);
+                            assert_ne!(
+                                current_out_shape,
+                                &output_shape[..],
+                                "Cannot tile to same shape: {:?}",
+                                output_shape
+                            );
 
                             // Abort if it's invalid to tile the original output tensor
                             // to the new shape (e.g., the new shape is larger).
@@ -214,7 +220,7 @@ impl<Tgt: Target> Action<Tgt> {
                                             ];
                                             (tiles, false)
                                         }
-                                        _ => unimplemented!(),
+                                        _ => unimplemented!("Split not implemented for {:?}", typ),
                                     }
                                 }
                                 LogicalSpec::Compose { .. } => todo!(),
@@ -524,10 +530,9 @@ impl<Tgt: Target> Action<Tgt> {
                     if f(destination_level, *source_idx, node_spec) {
                         let mut left_spec = outer_moved_operand_spec;
                         let mut right_spec = inner_moved_operand.spec();
-                        let param_idx = if flip { 1 } else { 0 };
                         let mut args: [Rc<dyn View<Tgt = Tgt>>; 2] = [
-                            Rc::new(Param::new(param_idx, outer_moved_operand_spec.clone())) as _,
-                            inner_moved_operand.inner_rc(),
+                            Rc::new(Param::new(0, outer_moved_operand_spec.clone())) as _,
+                            Rc::new(Param::new(1, inner_moved_operand.spec().clone())) as _,
                         ];
                         if flip {
                             mem::swap(&mut left_spec, &mut right_spec);
@@ -570,12 +575,8 @@ impl<Tgt: Target> Action<Tgt> {
                     };
                     let spec = Spec(new_inner_spec, lower_limits.clone());
                     let inner_operands = new_operands.iter().enumerate().map(|(i, o)| {
-                        if i == usize::from(*source_idx) {
-                            inner_moved_operand.inner_rc()
-                        } else {
-                            Rc::new(Param::new(u8::try_from(i).unwrap(), o.clone()))
-                                as Rc<dyn View<Tgt = Tgt>>
-                        }
+                        Rc::new(Param::new(u8::try_from(i).unwrap(), o.clone()))
+                            as Rc<dyn View<Tgt = Tgt>>
                     });
                     SpecApp::new(spec, inner_operands)
                 };
@@ -639,7 +640,7 @@ impl<Tgt: Target> Action<Tgt> {
                 Some(ImplNode::Block(Block {
                     stages: vec![zero_app, accum_app],
                     bindings: vec![smallvec![2], smallvec![0, 1, 2]],
-                    parameters: spec.0.parameters(),
+                    parameters: operands,
                     aux,
                 }))
             }

@@ -1,7 +1,8 @@
+use itertools::Itertools;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-
+use std::fmt::{Display, Formatter};
 use std::{
     iter,
     ops::{Index, IndexMut, Sub},
@@ -107,6 +108,14 @@ impl MemoryAllocation {
     }
 }
 
+impl Display for MemoryLimits {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryLimits::Standard(mem_vec) => mem_vec.fmt(f),
+        }
+    }
+}
+
 impl MemVec {
     pub fn new(contents: SmallVec<[u64; MAX_LEVEL_COUNT]>) -> Self {
         assert!(contents.iter().all(|&v| v == 0 || v.is_power_of_two()));
@@ -201,5 +210,11 @@ impl<'a> IntoIterator for &'a MemVec {
 impl FromIterator<u64> for MemVec {
     fn from_iter<T: IntoIterator<Item = u64>>(iter: T) -> Self {
         MemVec(iter.into_iter().collect())
+    }
+}
+
+impl Display for MemVec {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}]", self.0.iter().join(", "))
     }
 }

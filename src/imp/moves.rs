@@ -147,7 +147,6 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
 
         let param_idx = usize::from(self.parameter_idx);
         let mut moves_args = [args[param_idx], self.introduced.inner_fat_ptr()];
-
         if let Some(p) = self.prologue() {
             p.bind(&moves_args, env);
         }

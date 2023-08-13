@@ -12,6 +12,7 @@ pub mod nameenv;
 pub mod opaque_symbol;
 pub mod pprint;
 pub mod scheduling;
+pub mod scheduling_sugar;
 pub mod search;
 pub mod spec;
 pub mod table;
