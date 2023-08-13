@@ -27,7 +27,7 @@ struct Args {
 
     /// Print mode
     #[arg(long, value_enum, default_value_t = PrintMode::Full)]
-    print: PrintMode,
+    print_mode: PrintMode,
 
     /// Target architecture
     #[arg(long, value_enum, default_value_t = TargetId::X86)]
@@ -162,7 +162,7 @@ where
         panic!("No Impl found");
     };
     assert_eq!(results.len(), 1);
-    pprint(&results[0], args.print);
+    pprint(&results[0], args.print_mode);
     println!();
     let output = results[0].build(args.print_code)?.run()?;
     println!("Output: {}", String::from_utf8_lossy(&output.stdout));
