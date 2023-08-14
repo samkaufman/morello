@@ -2,7 +2,12 @@
 // README at: https://github.com/devcontainers/templates/tree/main/src/rust
 {
 	"name": "Morello (Rust)",
-	"image": "mcr.microsoft.com/devcontainers/rust:1-1-bullseye",
+	"build": { "dockerfile": "Dockerfile" },
+	"containerEnv": {
+		"RUST_LOG": "info",
+		"CLANG": "/usr/bin/clang-11",
+		"CC": "/usr/bin/clang-11"
+	},
 	"customizations": {
 		"vscode": {
 			"extensions": [
