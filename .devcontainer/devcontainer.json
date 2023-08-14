@@ -1,0 +1,26 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/rust
+{
+	"name": "Morello (Rust)",
+	"image": "mcr.microsoft.com/devcontainers/rust:1-1-bullseye",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"rust-lang.rust-analyzer",
+				"ms-vscode.cpptools",
+				"ms-vscode.cpptools-extension-pack"
+			],
+			"settings": {
+				"vim.textwidth": 88,
+				"[rust]": {
+					"vim.textwidth": 100
+				},
+				"editor.rulers": [
+					88,
+					100
+				],
+				"rust-analyzer.assist.emitMustUse": true
+			}
+		}
+	}
+}
