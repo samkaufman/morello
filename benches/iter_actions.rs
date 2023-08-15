@@ -1,5 +1,5 @@
 use iai_callgrind::{black_box, main};
-use smallvec::{smallvec, SmallVec};
+use smallvec::smallvec;
 
 use morello::common::Dtype;
 use morello::layout::row_major;
