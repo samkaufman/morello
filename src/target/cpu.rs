@@ -126,11 +126,11 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn target_id() -> TargetId {
-        todo!()
+        <Self as CpuTarget>::target_id()
     }
 
     fn vec_types() -> &'static [VecType; 4] {
-        todo!()
+        <Self as CpuTarget>::vec_types()
     }
 }
 
