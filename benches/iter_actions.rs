@@ -4,7 +4,7 @@ use smallvec::smallvec;
 use morello::common::Dtype;
 use morello::layout::row_major;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use morello::target::{CpuMemoryLevel, Target, X86Target};
+use morello::target::{CpuMemoryLevel, X86Target};
 use morello::tensorspec::TensorSpecAux;
 
 #[inline(never)]

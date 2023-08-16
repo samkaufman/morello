@@ -1,43 +1,68 @@
-mod arm;
-mod x86;
-
-pub use arm::ArmTarget;
-pub use x86::X86Target;
-
 use crate::codegen::c_utils::VecType;
 use crate::common::DimSize;
-use crate::cost::MainCost;
 use crate::layout::{nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
-use crate::spec::LogicalSpec;
+use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+use crate::target::{MemoryLevel, Target, TargetId};
 use crate::tensorspec::TensorSpec;
 
-use clap::ValueEnum;
-use serde::de::DeserializeOwned;
+use crate::cost::MainCost;
+use crate::imp::kernels::KernelType;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter;
 
-pub const MAX_LEVEL_COUNT: usize = 4;
+pub(super) trait CpuTarget:
+    Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static
+{
+    fn target_id() -> TargetId;
+    fn vec_types() -> &'static [VecType; 4];
+}
 
-pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
-    type Level: MemoryLevel;
+#[allow(clippy::upper_case_acronyms)]
+#[derive(
+    Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize, enum_iterator::Sequence,
+)]
+pub enum CpuMemoryLevel {
+    RF,
+    VRF,
+    L1,
+    GL,
+}
+
+impl<T: CpuTarget> Target for T {
+    type Level = CpuMemoryLevel;
 
     fn line_size() -> u32 {
         32
     }
+
     fn max_mem() -> MemoryLimits {
         MemoryLimits::Standard(MemVec::new(smallvec![64, 1024, 32_768, 1_073_741_824]))
     }
+
     fn processors() -> u8 {
         32
     }
-    fn default_level() -> Self::Level;
-    fn levels() -> Vec<Self::Level>;
-    fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
+
+    fn default_level() -> Self::Level {
+        CpuMemoryLevel::GL
+    }
+
+    fn levels() -> Vec<Self::Level> {
+        enum_iterator::all::<Self::Level>().collect()
+    }
+
+    fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
+        match slower {
+            CpuMemoryLevel::RF | CpuMemoryLevel::VRF => vec![slower],
+            CpuMemoryLevel::L1 => vec![slower, CpuMemoryLevel::RF, CpuMemoryLevel::VRF],
+            CpuMemoryLevel::GL => vec![slower, CpuMemoryLevel::L1],
+        }
+    }
 
     fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout> {
         // TODO: Yield (after implementing) NHWC and packed layouts as well.
@@ -57,42 +82,56 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
         }
     }
 
-    /// Yield target-specific actions which apply to a given [LogicalSpec].
-    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
-
-    /// Get corresponding [TargetId] enum
-    fn target_id() -> TargetId;
-
-    /// Get corresponding vector types
-    fn vec_types() -> &'static [VecType; 4];
-}
-
-pub trait MemoryLevel:
-    Send + PartialOrd + Eq + Display + Debug + std::hash::Hash + Copy + DeserializeOwned + Serialize
-{
-    fn is_addressed(&self) -> bool;
-    fn cache_hit_cost(&self) -> MainCost;
-    fn vector_bytes(&self) -> &'static [u32];
-    fn vector_rf(&self) -> bool {
-        !self.vector_bytes().is_empty()
+    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>> {
+        match spec {
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
+                PrimitiveSpecType::Matmul { accum } => {
+                    if *accum {
+                        let mut microkernels = vec![];
+                        if mult_applies_to_operands(&spec.parameters()) {
+                            microkernels.push(Action::Place(KernelType::Mult));
+                        }
+                        if broadcastvecmult_applies_to_operands(&spec.parameters()) {
+                            microkernels.push(Action::Place(KernelType::BroadcastVecMult));
+                        }
+                        Box::new(microkernels.into_iter())
+                    } else {
+                        Box::new(iter::empty())
+                    }
+                }
+                PrimitiveSpecType::Conv { .. } => Box::new(iter::empty()),
+                PrimitiveSpecType::Move { .. } => {
+                    let mut microkernels = vec![];
+                    if valueassign_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(Action::Place(KernelType::ValueAssign));
+                    }
+                    if vectorassign_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(Action::Place(KernelType::VectorAssign));
+                    }
+                    Box::new(microkernels.into_iter())
+                }
+                PrimitiveSpecType::Zero { .. } => {
+                    let mut microkernels = vec![];
+                    if memsetzero_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(Action::Place(KernelType::MemsetZero));
+                    }
+                    if vectorzero_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(Action::Place(KernelType::VectorZero));
+                    }
+                    Box::new(microkernels.into_iter())
+                }
+            },
+            LogicalSpec::Compose { .. } => Box::new(iter::empty()),
+        }
     }
-}
 
-#[derive(Clone, Copy, ValueEnum)]
-pub enum TargetId {
-    X86,
-    Arm,
-}
+    fn target_id() -> TargetId {
+        todo!()
+    }
 
-#[allow(clippy::upper_case_acronyms)]
-#[derive(
-    Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize, enum_iterator::Sequence,
-)]
-pub enum CpuMemoryLevel {
-    RF,
-    VRF,
-    L1,
-    GL,
+    fn vec_types() -> &'static [VecType; 4] {
+        todo!()
+    }
 }
 
 impl MemoryLevel for CpuMemoryLevel {
