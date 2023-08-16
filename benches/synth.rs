@@ -4,7 +4,7 @@ use std::sync::RwLock;
 
 use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
-use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
+use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::InMemDatabase;
 use morello::target::{Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
@@ -18,7 +18,7 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> Spec<Tgt> {
             spec_shape: smallvec![size, size, size],
             dtype: Dtype::Uint32,
         },
-        PrimitiveAux(vec![
+        vec![
             TensorSpecAux {
                 contig: rm2.contiguous_full(),
                 aligned: true,
@@ -27,7 +27,7 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> Spec<Tgt> {
                 vector_size: None,
             };
             3
-        ]),
+        ],
         true,
     );
     Spec(logical_spec, X86Target::max_mem())

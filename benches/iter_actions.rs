@@ -3,7 +3,7 @@ use smallvec::smallvec;
 
 use morello::common::Dtype;
 use morello::layout::row_major;
-use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 
@@ -16,7 +16,7 @@ fn copy_actions_into_vec() {
             spec_shape: smallvec![64, 64, 64],
             dtype: Dtype::Uint32,
         },
-        PrimitiveAux(vec![
+        vec![
             TensorSpecAux {
                 contig: rm2.contiguous_full(),
                 aligned: true,
@@ -25,7 +25,7 @@ fn copy_actions_into_vec() {
                 vector_size: None,
             };
             3
-        ]),
+        ],
         true,
     );
     black_box(logical_spec.actions().collect::<Vec<_>>());

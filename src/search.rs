@@ -3,10 +3,10 @@ use smallvec::{smallvec, SmallVec};
 use std::sync::RwLock;
 
 use crate::cost::Cost;
-use crate::imp::{visit_leaves, Impl, ImplNode};
+use crate::imp::{visit_leaves, ImplNode};
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
-use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{LogicalSpec, Spec};
 use crate::table::Database;
 use crate::target::Target;
 
@@ -183,7 +183,7 @@ mod tests {
     use super::*;
     use crate::common::Dtype;
     use crate::layout::{row_major, Layout};
-    use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType};
+    use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use smallvec::smallvec;
@@ -250,7 +250,7 @@ mod tests {
                     spec_shape: smallvec![4, 4],
                     dtype: Dtype::Uint8,
                 },
-                PrimitiveAux(vec![
+                vec![
                     TensorSpecAux {
                         contig: from_layout.contiguous_full(),
                         aligned: false,
@@ -265,7 +265,7 @@ mod tests {
                         layout: to_layout,
                         vector_size: None,
                     },
-                ]),
+                ],
                 false,
             ),
             X86Target::max_mem(),
@@ -280,13 +280,13 @@ mod tests {
                     spec_shape: smallvec![4, 4],
                     dtype: Dtype::Uint8,
                 },
-                PrimitiveAux(vec![TensorSpecAux {
+                vec![TensorSpecAux {
                     contig: layout.contiguous_full(),
                     aligned: false,
                     level,
                     layout,
                     vector_size: None,
-                }]),
+                }],
                 false,
             ),
             X86Target::max_mem(),

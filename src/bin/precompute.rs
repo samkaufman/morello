@@ -1,19 +1,17 @@
+use clap::Parser;
+use itertools::Itertools;
+use log::{debug, info};
+use rand::seq::SliceRandom;
+use rayon::prelude::*;
+use smallvec::smallvec;
 use std::collections::VecDeque;
 use std::sync::RwLock;
 use std::{iter, path};
 
-use clap::Parser;
-use itertools::Itertools;
-use log::{debug, info};
-
-use rand::seq::SliceRandom;
-use rayon::prelude::*;
-use smallvec::smallvec;
-
 use morello::common::{DimSize, Dtype};
-use morello::geometry::ToFromDependencyLatticeCoordinate;
+use morello::datadeps::ToFromDependencyLatticeCoordinate;
 use morello::memorylimits::{MemVec, MemoryLimits};
-use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
+use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
@@ -22,7 +20,7 @@ use morello::utils::iter_powers_of_two;
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(long)]
+    #[arg(long, help = "Maximum number of stages to run.")]
     stages: Option<usize>,
     #[arg(long)]
     timeout: Option<u64>,
@@ -53,34 +51,6 @@ fn main() {
     }
 }
 
-fn load_or_store(prim_type: PrimitiveSpecType, size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
-    let layout = morello::layout::row_major(rank);
-    LogicalSpec::Primitive(
-        PrimitiveBasics {
-            typ: prim_type,
-            spec_shape: smallvec![size; rank.into()],
-            dtype: Dtype::Uint32,
-        },
-        PrimitiveAux(vec![
-            TensorSpecAux {
-                contig: layout.contiguous_full(),
-                aligned: true,
-                level: CpuMemoryLevel::GL,
-                layout: layout.clone(),
-                vector_size: None,
-            },
-            TensorSpecAux {
-                contig: layout.contiguous_full(),
-                aligned: true,
-                level: CpuMemoryLevel::L1,
-                layout,
-                vector_size: None,
-            },
-        ]),
-        true,
-    )
-}
-
 fn main_per_db<D>(args: &Args, db: D)
 where
     D: Database<X86Target> + Send + Sync,
@@ -92,8 +62,7 @@ where
     // TODO: Most of the following details aren't used in computing the bound.
     // It could be simplified.
     let mut bounds = vec![];
-    bounds
-        .extend((1..5).flat_map(|rank| [load_or_store(PrimitiveSpecType::Move, args.size, rank)]));
+    bounds.extend((1..5).flat_map(|rank| [move_top(args.size, rank)]));
     bounds.extend((1..5).map(|rank| {
         let layout = morello::layout::row_major(rank);
         LogicalSpec::Primitive(
@@ -102,13 +71,13 @@ where
                 spec_shape: smallvec![args.size; rank.into()],
                 dtype: Dtype::Uint32,
             },
-            PrimitiveAux(vec![TensorSpecAux {
+            vec![TensorSpecAux {
                 contig: layout.contiguous_full(),
                 aligned: true,
                 level: CpuMemoryLevel::GL,
                 layout,
                 vector_size: None,
-            }]),
+            }],
             true,
         )
     }));
@@ -127,7 +96,7 @@ where
                 spec_shape: smallvec![args.size, args.size, args.size],
                 dtype: Dtype::Uint32,
             },
-            PrimitiveAux(vec![a.clone(), a.clone(), a]),
+            vec![a.clone(), a.clone(), a],
             true,
         )
     });
@@ -157,7 +126,7 @@ where
                         ],
                         dtype: Dtype::Uint32,
                     },
-                    PrimitiveAux(vec![a.clone(), a.clone(), a.clone()]),
+                    vec![a.clone(), a.clone(), a.clone()],
                     true,
                 )
             })
@@ -191,10 +160,9 @@ where
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
                     let spec = Spec(spec.clone(), MemoryLimits::Standard(job));
-                    let MemoryLimits::Standard(job) = &spec.1;
                     let result = morello::search::top_down(&db, &spec, 1);
                     if let [(_, only_result_cost)] = &result.0[..] {
-                        worklist.extend(limits_iterator.next_vec(job, &only_result_cost.peaks));
+                        worklist.extend(limits_iterator.next().into_iter().collect::<Vec<_>>());
                     }
                 }
             }
@@ -208,6 +176,30 @@ where
     }
 }
 
+/// Returns a logical Move Spec of given size and rank.
+fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
+    let layout = morello::layout::row_major(rank);
+    LogicalSpec::Primitive(
+        PrimitiveBasics {
+            typ: PrimitiveSpecType::Move,
+            spec_shape: smallvec![size; rank.into()],
+            dtype: Dtype::Uint32,
+        },
+        [CpuMemoryLevel::GL, CpuMemoryLevel::L1]
+            .into_iter()
+            .map(|level| TensorSpecAux {
+                contig: layout.contiguous_full(),
+                aligned: true,
+                level,
+                layout: layout.clone(),
+                vector_size: None,
+            })
+            .collect(),
+        true,
+    )
+}
+
+/// Returns an [Iterator] over power-of-two [MemVec]s from maximum memory down.
 fn make_memory_limit_iter<T: Target>() -> impl Iterator<Item = MemVec> {
     let MemoryLimits::Standard(top) = T::max_mem();
     top.into_iter()
@@ -216,49 +208,13 @@ fn make_memory_limit_iter<T: Target>() -> impl Iterator<Item = MemVec> {
         .map(move |prod| MemVec::new(prod.into_iter().collect()))
 }
 
-trait MemoryLimitsIterator {
-    fn next_vec(&mut self, last_limits: &MemVec, last_peak: &MemVec) -> Vec<MemVec>;
-}
-
-struct SkippingLimitsIterator {}
-
-impl<T: Iterator<Item = MemVec>> MemoryLimitsIterator for T {
-    fn next_vec(&mut self, _last_limits: &MemVec, _last_peak: &MemVec) -> Vec<MemVec> {
-        self.next().into_iter().collect()
-    }
-}
-
-impl MemoryLimitsIterator for SkippingLimitsIterator {
-    fn next_vec(&mut self, last_limits: &MemVec, last_peak: &MemVec) -> Vec<MemVec> {
-        let mut new_limits = Vec::new();
-
-        assert!(last_limits.iter().zip(last_peak).all(|(l, p)| *l >= p));
-
-        for idx in 0..last_limits.len() {
-            let mut new_values = last_limits.clone();
-            if last_peak[idx] == 0 {
-                continue;
-            }
-            if last_peak[idx] == 1 {
-                new_values[idx] = 0;
-            } else {
-                new_values[idx] = 2u64.pow(last_peak[idx].leading_zeros() - 1);
-            }
-            new_limits.push(new_values);
-        }
-
-        new_limits
-    }
-}
-
+/// Yield an [Iterator] over all [LogicalSpec]s to compute, in dependency order.
 fn specs_to_compute(
     bound: &LogicalSpec<X86Target>,
 ) -> impl Iterator<Item = Vec<Vec<LogicalSpec<X86Target>>>> {
-    let grid_map_result = bound.to_grid();
-    if grid_map_result.is_none() {
+    let Some((spec_key, bound_pt)) = bound.to_grid() else {
         panic!("Could not map {:?} to grid", bound);
-    }
-    let (spec_key, bound_pt) = grid_map_result.unwrap();
+    };
     // TODO: Reintroduce a check like the following.
     // debug_assert_eq!(
     //     bound,

@@ -132,7 +132,7 @@ mod test {
     use crate::common::Dtype;
     use crate::imp::subspecs::SpecApp;
     use crate::layout::row_major;
-    use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
+    use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
     use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use smallvec::smallvec;
@@ -147,7 +147,7 @@ mod test {
                     spec_shape: smallvec![4],
                     dtype: Dtype::Uint8,
                 },
-                PrimitiveAux(vec![
+                vec![
                     TensorSpecAux {
                         contig: rm1.contiguous_full(),
                         aligned: true,
@@ -162,7 +162,7 @@ mod test {
                         layout: rm1.clone(),
                         vector_size: None,
                     },
-                ]),
+                ],
                 false,
             )
         };

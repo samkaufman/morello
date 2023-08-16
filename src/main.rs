@@ -11,7 +11,7 @@ use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
 use morello::layout::Layout;
 use morello::pprint::{pprint, PrintMode};
-use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
+use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
@@ -101,7 +101,7 @@ where
                     spec_shape: smallvec![*size, *size],
                     dtype: Dtype::Uint32,
                 },
-                PrimitiveAux(vec![
+                vec![
                     TensorSpecAux {
                         contig: rm2.contiguous_full(),
                         aligned: true,
@@ -116,7 +116,7 @@ where
                         layout: cm2,
                         vector_size: None,
                     },
-                ]),
+                ],
                 true,
             )
         }
@@ -128,7 +128,7 @@ where
                     spec_shape: smallvec![*size, *size, *size],
                     dtype: Dtype::Uint32,
                 },
-                PrimitiveAux(vec![
+                vec![
                     TensorSpecAux {
                         contig: rm2.contiguous_full(),
                         aligned: true,
@@ -137,7 +137,7 @@ where
                         vector_size: None,
                     };
                     3
-                ]),
+                ],
                 true,
             )
         }
@@ -163,7 +163,7 @@ where
                     ],
                     dtype: Dtype::Uint32,
                 },
-                PrimitiveAux(vec![
+                vec![
                     TensorSpecAux {
                         contig: rm.contiguous_full(),
                         aligned: true,
@@ -172,7 +172,7 @@ where
                         vector_size: None,
                     };
                     3
-                ]),
+                ],
                 true,
             )
         }

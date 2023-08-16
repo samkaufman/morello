@@ -10,7 +10,7 @@ use crate::cost::MainCost;
 use crate::layout::{nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
-use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+use crate::spec::LogicalSpec;
 use crate::tensorspec::TensorSpec;
 
 use clap::ValueEnum;

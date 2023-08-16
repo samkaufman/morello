@@ -34,7 +34,7 @@ pub struct Spec<Tgt: Target>(pub LogicalSpec<Tgt>, pub MemoryLimits);
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub enum LogicalSpec<Tgt: Target> {
-    Primitive(PrimitiveBasics, PrimitiveAux<Tgt>, bool),
+    Primitive(PrimitiveBasics, Vec<TensorSpecAux<Tgt>>, bool),
     Compose {
         // Components contain Spec shapes, which can be partially inferred, so
         // the following stores a little bit of redundant information.
@@ -59,10 +59,6 @@ pub enum PrimitiveSpecType {
     Zero,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(bound = "")]
-pub struct PrimitiveAux<Tgt: Target>(pub Vec<TensorSpecAux<Tgt>>);
-
 /// Tilings and dimension bindings for a particular output tiling.
 ///
 /// Each dimension of an input tensor/tiling may have a binding to an output
@@ -75,7 +71,7 @@ pub struct PrimitiveAux<Tgt: Target>(pub Vec<TensorSpecAux<Tgt>>);
 pub struct TilingInference(pub Vec<(Tiling, SmallVec<[Option<u8>; 5]>)>);
 
 impl<Tgt: Target> Display for Spec<Tgt> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "({}, {})", self.0, self.1)
     }
 }
@@ -122,12 +118,12 @@ impl PrimitiveBasics {
         }
     }
 
-    pub fn aux_from_operand_auxes<'a, Tgt, I>(&self, operand_auxes: I) -> PrimitiveAux<Tgt>
+    pub fn aux_from_operand_auxes<'a, Tgt, I>(&self, operand_auxes: I) -> Vec<TensorSpecAux<Tgt>>
     where
         Tgt: Target,
         I: IntoIterator<Item = &'a TensorSpecAux<Tgt>> + 'a,
     {
-        PrimitiveAux(operand_auxes.into_iter().cloned().collect())
+        operand_auxes.into_iter().cloned().collect()
     }
 
     pub fn parameter_shapes(&self) -> Vec<Shape> {
@@ -377,18 +373,14 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
     pub fn parameters(&self) -> SmallVec<[TensorSpec<Tgt>; 3]> {
         match self {
-            LogicalSpec::Primitive(basics, aux, _) => match basics.typ {
-                PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => {
-                    let PrimitiveAux(taux) = aux;
-                    basics
-                        .parameter_shapes()
-                        .into_iter()
-                        .zip(taux)
-                        .map(|(s, a)| TensorSpec::new_noncanon_with_aux(s, basics.dtype, a.clone()))
-                        .collect()
-                }
-                PrimitiveSpecType::Move | PrimitiveSpecType::Zero => aux
-                    .0
+            LogicalSpec::Primitive(basics, auxes, _) => match basics.typ {
+                PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => basics
+                    .parameter_shapes()
+                    .into_iter()
+                    .zip(auxes)
+                    .map(|(s, a)| TensorSpec::new_noncanon_with_aux(s, basics.dtype, a.clone()))
+                    .collect(),
+                PrimitiveSpecType::Move | PrimitiveSpecType::Zero => auxes
                     .iter()
                     .map(|a| {
                         TensorSpec::new_noncanon_with_aux(
@@ -464,18 +456,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 _,
             ) => match typ {
                 PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
-                    let PrimitiveAux(aux) = primitive_aux;
-                    for i in 0..aux.len() {
-                        aux[i].contig = aux[i].layout.tile_contiguity(
+                    for i in 0..primitive_aux.len() {
+                        primitive_aux[i].contig = primitive_aux[i].layout.tile_contiguity(
                             operands[i].shape(),
                             operands[i].shape(),
-                            aux[i].contig,
+                            primitive_aux[i].contig,
                         );
-                        aux[i].layout = aux[i].layout.canonicalize_for_shape(operands[i].shape());
+                        primitive_aux[i].layout = primitive_aux[i]
+                            .layout
+                            .canonicalize_for_shape(operands[i].shape());
                     }
                 }
                 PrimitiveSpecType::Move => {
-                    let [outer_aux, inner_aux] = &mut primitive_aux.0[..] else {
+                    let [outer_aux, inner_aux] = &mut primitive_aux[..] else {
                         unreachable!();
                     };
                     outer_aux.canonicalize(spec_shape, outer_aux.aligned);
@@ -487,9 +480,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     inner_aux.layout.canonicalize_for_shape(spec_shape);
                 }
                 PrimitiveSpecType::Zero => {
-                    let PrimitiveAux(aux) = primitive_aux;
-                    let aligned = aux[0].aligned;
-                    aux[0].canonicalize(spec_shape, aligned);
+                    let aligned = primitive_aux[0].aligned;
+                    primitive_aux[0].canonicalize(spec_shape, aligned);
                 }
             },
             LogicalSpec::Compose { .. } => todo!(),
@@ -574,7 +566,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         if !*accum {
             panic!("can_spatial_split called on non-accum Conv spec");
         };
-        let PrimitiveAux(aux) = primitive_aux;
 
         let operands = self.parameters();
         let image_shape = operands[0].shape();
@@ -583,7 +574,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         if image_shape[2..] != filters_shape[2..] {
             return false;
         }
-        for a in aux {
+        for a in primitive_aux {
             if let Some(vector_size) = a.vector_size {
                 if vector_size != 1 {
                     return false;
@@ -934,10 +925,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .collect::<Vec<_>>(),
                 );
 
-                let PrimitiveAux(aux) = primitive_aux;
-                debug_assert_eq!(aux.len(), new_operands.len());
-                for i in 0..aux.len() {
-                    aux[i] = new_operands[i].aux.clone();
+                debug_assert_eq!(primitive_aux.len(), new_operands.len());
+                for i in 0..primitive_aux.len() {
+                    primitive_aux[i] = new_operands[i].aux.clone();
                 }
             }
         };
@@ -1076,7 +1066,7 @@ pub fn gen_vector_sizes_opt<'a>(
     let mut iter_a = None;
     let mut iter_b = None;
     if vector_bytes.is_empty() {
-        iter_a = Some(iter::once(None));
+        iter_a = Some(once(None));
     } else {
         iter_b = Some(gen_vector_sizes(outer_shape, dtype, vector_bytes).map(Some));
     }

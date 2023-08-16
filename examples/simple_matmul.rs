@@ -1,6 +1,4 @@
 //! This example shows how to manually schedule a simple matrix multiplication for X86.
-//!
-//!
 
 use morello::codegen::CodeGen;
 use morello::common::{Dtype, Shape};
@@ -8,7 +6,7 @@ use morello::imp::kernels::KernelType;
 use morello::layout::row_major;
 use morello::pprint::{pprint, PrintMode};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
-use morello::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
+use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
@@ -33,7 +31,7 @@ fn main() {
                 spec_shape: Shape::from([64, 64, 64].as_slice()),
                 dtype: Dtype::Uint8,
             },
-            PrimitiveAux(vec![
+            vec![
                 TensorSpecAux {
                     contig: layout.contiguous_full(),
                     aligned: true,
@@ -42,7 +40,7 @@ fn main() {
                     vector_size: None,
                 };
                 3
-            ]),
+            ],
             true,
         ),
         X86Target::max_mem(),

@@ -1,18 +1,26 @@
 use itertools::{iproduct, izip, Itertools};
 use smallvec::{smallvec, SmallVec};
+use std::hash::Hash;
+use std::iter;
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::layout::Layout;
 use crate::spec::{
-    conv_infer_output_shape, gen_vector_sizes, LogicalSpec, PrimitiveAux, PrimitiveBasics,
-    PrimitiveSpecType,
+    conv_infer_output_shape, gen_vector_sizes, LogicalSpec, PrimitiveBasics, PrimitiveSpecType,
 };
 use crate::target::{CpuMemoryLevel, MemoryLevel, Target, X86Target};
 use crate::tensorspec::TensorSpecAux;
 
-use std::hash::Hash;
-use std::iter;
-
+/// A type which has a canonical map to a grid of data dependencies.
+///
+/// A "grid" is a product of non-negative integers ordered such that a product of zeros is the
+/// bottom and there is no top. An object is mapped to a lattice such that it depends on all
+/// other objects mapped to points with no greater coordinate.
+///
+/// The specific grid to which the type maps is identified by the `Key` type parameter.
+///
+/// The grid is not a *complete* description of the type's data dependencies. There may be data
+/// dependencies between grids or entirely undescribed by the trait implementation.
 pub trait ToFromDependencyLatticeCoordinate: Sized {
     type Key: Eq + Hash;
 
@@ -36,27 +44,23 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
 
     fn to_grid(&self) -> Option<(SpecKey, Vec<u32>)> {
         match self {
-            LogicalSpec::Primitive(basics, primitive_aux, serial_only) => match basics.typ {
-                PrimitiveSpecType::Matmul { accum } => {
-                    let PrimitiveAux(auxes) = primitive_aux;
-                    Some((
-                        SpecKey::Matmul {
-                            dtype: basics.dtype,
-                        },
-                        [
-                            if accum { 0 } else { 1 },
-                            to_log2_dim_space(basics.spec_shape[0])?,
-                            to_log2_dim_space(basics.spec_shape[1])?,
-                            to_log2_dim_space(basics.spec_shape[2])?,
-                            if *serial_only { 0 } else { 1 },
-                        ]
-                        .into_iter()
-                        .chain(auxes.iter().map(|a| level_to_int(&a.level).into()))
-                        .collect(),
-                    ))
-                }
+            LogicalSpec::Primitive(basics, auxes, serial_only) => match basics.typ {
+                PrimitiveSpecType::Matmul { accum } => Some((
+                    SpecKey::Matmul {
+                        dtype: basics.dtype,
+                    },
+                    [
+                        if accum { 0 } else { 1 },
+                        to_log2_dim_space(basics.spec_shape[0])?,
+                        to_log2_dim_space(basics.spec_shape[1])?,
+                        to_log2_dim_space(basics.spec_shape[2])?,
+                        if *serial_only { 0 } else { 1 },
+                    ]
+                    .into_iter()
+                    .chain(auxes.iter().map(|a| level_to_int(&a.level).into()))
+                    .collect(),
+                )),
                 PrimitiveSpecType::Conv { accum } => {
-                    let PrimitiveAux(auxes) = primitive_aux;
                     let [b, f, c, h, w, fh, fw] = basics.spec_shape[..] else {
                         panic!("Convolution must have 7 Spec dimensions")
                     };
@@ -73,7 +77,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     ))
                 }
                 PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
-                    let mapping_level = &primitive_aux.0[0].level;
+                    let mapping_level = &auxes[0].level;
                     Some((
                         match basics.typ {
                             PrimitiveSpecType::Move => SpecKey::Move {
@@ -82,7 +86,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                     // makes sense after combining the two into a single Move Spec.
                                     // For now, we preserve this separation by determining whether
                                     // or not this is a load or a store by comparing operands.
-                                    mapping_level < &primitive_aux.0[0].level
+                                    mapping_level < &auxes[0].level
                                 },
                                 dtype: basics.dtype,
                             },
@@ -127,19 +131,17 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                 spec_shape: smallvec![m, k, n],
                                 dtype: *dtype,
                             },
-                            PrimitiveAux(
-                                izip!(contigs, alignments, layouts, vector_sizes, &levels)
-                                    .map(|(contig, aligned, layout, vector_size, level)| {
-                                        TensorSpecAux {
-                                            contig,
-                                            aligned,
-                                            layout,
-                                            vector_size,
-                                            level: *level,
-                                        }
-                                    })
-                                    .collect::<Vec<_>>(),
-                            ),
+                            izip!(contigs, alignments, layouts, vector_sizes, &levels)
+                                .map(|(contig, aligned, layout, vector_size, level)| {
+                                    TensorSpecAux {
+                                        contig,
+                                        aligned,
+                                        layout,
+                                        vector_size,
+                                        level: *level,
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
                             pt[4] == 0,
                         )
                     })
@@ -186,19 +188,17 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                 spec_shape: spec_shape.clone(),
                                 dtype: *dtype,
                             },
-                            PrimitiveAux(
-                                izip!(contigs, alignments, layouts, vector_sizes, &levels)
-                                    .map(|(contig, aligned, layout, vector_size, level)| {
-                                        TensorSpecAux {
-                                            contig,
-                                            aligned,
-                                            layout,
-                                            vector_size,
-                                            level: *level,
-                                        }
-                                    })
-                                    .collect::<Vec<_>>(),
-                            ),
+                            izip!(contigs, alignments, layouts, vector_sizes, &levels)
+                                .map(|(contig, aligned, layout, vector_size, level)| {
+                                    TensorSpecAux {
+                                        contig,
+                                        aligned,
+                                        layout,
+                                        vector_size,
+                                        level: *level,
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
                             pt[9] == 0,
                         )
                     })
@@ -258,7 +258,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                                         spec_shape: shape.clone(),
                                                         dtype: *dtype,
                                                     },
-                                                    PrimitiveAux(vec![
+                                                    vec![
                                                         TensorSpecAux {
                                                             contig: source_contig,
                                                             aligned: source_aligned,
@@ -271,10 +271,9 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                                             aligned: dest_aligned,
                                                             level: dest_level,
                                                             layout: destination_layout.clone(),
-                                                            vector_size: destination_vector_size
-                                                                .clone(),
+                                                            vector_size: *destination_vector_size,
                                                         },
-                                                    ]),
+                                                    ],
                                                     serial_only,
                                                 )
                                             }
@@ -308,13 +307,13 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                             spec_shape: shape.clone(),
                             dtype: *dtype,
                         },
-                        PrimitiveAux(vec![TensorSpecAux {
+                        vec![TensorSpecAux {
                             contig: contigs[0],
                             aligned: alignments[0],
                             level,
                             layout: layouts[0].clone(),
                             vector_size: vector_sizes[0],
-                        }]),
+                        }],
                         serial_only,
                     )
                 })

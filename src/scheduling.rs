@@ -15,7 +15,7 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::spec::{LogicalSpec, PrimitiveAux, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
@@ -449,11 +449,11 @@ impl<Tgt: Target> Action<Tgt> {
                             .collect(),
                         dtype: *dtype,
                     },
-                    PrimitiveAux(vec![
+                    vec![
                         inner_image_tile.spec().aux.clone(),
                         inner_filters_tile.spec().aux.clone(),
                         inner_output_view.spec().aux.clone(),
-                    ]),
+                    ],
                     *serial_only,
                 );
 
@@ -546,10 +546,7 @@ impl<Tgt: Target> Action<Tgt> {
                                         spec_shape: left_spec.shape().into(),
                                         dtype: left_spec.dtype(),
                                     },
-                                    PrimitiveAux(vec![
-                                        left_spec.aux.clone(),
-                                        right_spec.aux.clone(),
-                                    ]),
+                                    vec![left_spec.aux.clone(), right_spec.aux.clone()],
                                     node_spec.serial_only(),
                                 ),
                                 lower_limits.clone(),
@@ -613,7 +610,7 @@ impl<Tgt: Target> Action<Tgt> {
                             spec_shape: output_shape,
                             dtype: output_dtype,
                         },
-                        PrimitiveAux(vec![output_aux]),
+                        vec![output_aux],
                         node_spec.serial_only(),
                     );
                     subspec.canonicalize();
