@@ -1,5 +1,7 @@
 use crate::codegen::c_utils::VecType;
 use crate::common::DimSize;
+use crate::cost::MainCost;
+use crate::imp::kernels::KernelType;
 use crate::layout::{nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
@@ -7,8 +9,6 @@ use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target, TargetId};
 use crate::tensorspec::TensorSpec;
 
-use crate::cost::MainCost;
-use crate::imp::kernels::KernelType;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::cmp::Ordering;

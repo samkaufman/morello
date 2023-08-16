@@ -23,8 +23,6 @@ struct Args {
     #[arg(long, help = "Maximum number of stages to run.")]
     stages: Option<usize>,
     #[arg(long)]
-    timeout: Option<u64>,
-    #[arg(long)]
     db: Option<path::PathBuf>,
     #[arg(long, short, default_value = "1")]
     batch: DimSize,
