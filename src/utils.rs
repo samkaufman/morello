@@ -3,6 +3,8 @@ use std::fmt;
 use std::io;
 use std::iter;
 
+const INDENT_SIZE: usize = 2;
+
 // If true, schedules will be saved as if they had memory limits, for all banks,
 // that are the next highest power of 2. This discretizes the cache a bit, even
 // though it
@@ -74,6 +76,10 @@ pub fn bit_length_u32(n: u32) -> u32 {
     u32::BITS - n.leading_zeros()
 }
 
+pub const fn is_power_of_two_u32(n: u32) -> bool {
+    n & (n - 1) == 0
+}
+
 pub const fn prev_power_of_two(n: u64) -> u64 {
     let highest_bit_set_idx = (u64::BITS - 1) - (n | 1).leading_zeros();
     (1 << highest_bit_set_idx) & n
@@ -139,8 +145,6 @@ pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &
         .collect::<Vec<_>>()
         .join(separator)
 }
-
-const INDENT_SIZE: usize = 2;
 
 pub fn indent(depth: usize) -> String {
     " ".repeat(depth * INDENT_SIZE)

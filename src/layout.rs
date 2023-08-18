@@ -152,7 +152,7 @@ impl Layout {
     pub fn applies_to_shape(&self, shape: &[DimSize]) -> bool {
         match &self {
             Layout::Standard { dim_order } => {
-                if !self.super_applies(shape) {
+                if shape.iter().all(|&d| d == 1) && !self.is_row_major() {
                     return false;
                 }
                 if shape.len() != dim_order.len() {
@@ -162,14 +162,6 @@ impl Layout {
             }
             Layout::Packed { .. } => todo!(),
         }
-    }
-
-    // TODO: Inline
-    fn super_applies(&self, shape: &[DimSize]) -> bool {
-        if shape.iter().all(|&d| d == 1) && !self.is_row_major() {
-            return false;
-        }
-        true
     }
 
     pub fn is_row_major(&self) -> bool {
