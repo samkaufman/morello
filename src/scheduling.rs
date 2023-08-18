@@ -51,6 +51,14 @@ pub enum Action<Tgt: Target> {
     Place(KernelType),
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum ApplyError {
+    #[error("Cannot tile to {0:?}")]
+    InvalidTileShape(Shape),
+    #[error("Insufficient memory to apply")]
+    OutOfMemory,
+}
+
 impl<Tgt: Target> Action<Tgt> {
     pub fn child_count(&self) -> usize {
         match self {
@@ -64,7 +72,7 @@ impl<Tgt: Target> Action<Tgt> {
         }
     }
 
-    pub fn apply(&self, spec: &Spec<Tgt>) -> Option<ImplNode<Tgt, ()>> {
+    pub fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt, ()>, ApplyError> {
         self.apply_with_aux(spec, ())
     }
 
@@ -72,7 +80,7 @@ impl<Tgt: Target> Action<Tgt> {
         &self,
         spec: &Spec<Tgt>,
         aux: A,
-    ) -> Option<ImplNode<Tgt, A>> {
+    ) -> Result<ImplNode<Tgt, A>, ApplyError> {
         // TODO: Ensure that the Spec is snapped.
 
         let node_spec = &spec.0; // TODO: Rename.
@@ -114,7 +122,7 @@ impl<Tgt: Target> Action<Tgt> {
                             // Abort if it's invalid to tile the original output tensor
                             // to the new shape (e.g., the new shape is larger).
                             if !current_output.is_valid_tile_shape(output_shape) {
-                                return None;
+                                return Err(ApplyError::InvalidTileShape(output_shape.clone()));
                             }
 
                             // Tiling happens in three steps:
@@ -262,7 +270,7 @@ impl<Tgt: Target> Action<Tgt> {
                 };
                 let body = Box::new(SpecApp::default_app(Spec(inner_spec, spec.1.clone())).into());
 
-                Some(ImplNode::Loop(Loop {
+                Ok(ImplNode::Loop(Loop {
                     tiles,
                     body,
                     parallel,
@@ -364,7 +372,7 @@ impl<Tgt: Target> Action<Tgt> {
                     let mut m = MemoryLimits::Standard(match &spec.1 {
                         MemoryLimits::Standard(v) => {
                             let Some(r) = v.clone().checked_sub(&intermediate_mem_consumed_nondiscrete) else {
-                                return None;
+                                return Err(ApplyError::OutOfMemory);
                             };
                             r
                         }
@@ -393,7 +401,7 @@ impl<Tgt: Target> Action<Tgt> {
                     ImplNode::SpecApp(SpecApp::new(Spec(head_spec, new_limits), params))
                 };
 
-                Some(ImplNode::Pipeline(Pipeline {
+                Ok(ImplNode::Pipeline(Pipeline {
                     intermediates: vec![intermediate_tensor],
                     stages: vec![remainder_spec_application, head_spec_application],
                     aux,
@@ -457,7 +465,7 @@ impl<Tgt: Target> Action<Tgt> {
                     *serial_only,
                 );
 
-                Some(ImplNode::Loop(Loop {
+                Ok(ImplNode::Loop(Loop {
                     tiles: vec![
                         LoopTile {
                             axes: smallvec![0, 1],
@@ -515,7 +523,7 @@ impl<Tgt: Target> Action<Tgt> {
                                 .unwrap();
                             let mut new_limits = base.clone();
                             let Some(level_updated) = new_limits[updated_level_idx].checked_sub(additional) else {
-                                return None;
+                                return Err(ApplyError::OutOfMemory);
                             };
                             new_limits[updated_level_idx] = level_updated;
                             MemoryLimits::Standard(new_limits)
@@ -576,7 +584,7 @@ impl<Tgt: Target> Action<Tgt> {
                     SpecApp::new(spec, inner_operands)
                 };
 
-                Some(ImplNode::MoveLet(MoveLet::new(
+                Ok(ImplNode::MoveLet(MoveLet::new(
                     *source_idx,
                     outer_moved_operand_spec.clone(),
                     inner_moved_operand,
@@ -632,14 +640,14 @@ impl<Tgt: Target> Action<Tgt> {
                     SpecApp::new(spec, app_arguments).into()
                 };
 
-                Some(ImplNode::Block(Block {
+                Ok(ImplNode::Block(Block {
                     stages: vec![zero_app, accum_app],
                     bindings: vec![smallvec![2], smallvec![0, 1, 2]],
                     parameters: operands,
                     aux,
                 }))
             }
-            Action::Place(k) => Some(ImplNode::Kernel(Kernel {
+            Action::Place(k) => Ok(ImplNode::Kernel(Kernel {
                 kernel_type: *k,
                 arguments: operands
                     .iter()
