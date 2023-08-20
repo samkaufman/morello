@@ -108,7 +108,11 @@ fn pprint_inner<'a, Tgt, Aux>(
             }
             PrintMode::Compact => {
                 let joined = imp.aux().extra_column_values().join(", ");
-                r = row![format!("{indent_str}/* {joined} */\n{main_str}\n")];
+                if !joined.is_empty() {
+                    r = row![format!("{indent_str}/* {joined} */\n{main_str}\n")];
+                } else {
+                    r = row![main_str];
+                }
             }
         }
         table.add_row(r);
