@@ -83,6 +83,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(main_body_str, "}}")?;
 
         self.headers.emit(Tgt::target_id(), out)?;
+        out.write_str("\n")?;
         out.write_str(&main_body_str)
     }
 
