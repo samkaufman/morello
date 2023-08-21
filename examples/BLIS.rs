@@ -8,7 +8,7 @@ use morello::codegen::CodeGen;
 use morello::color::{self, ColorMode};
 use morello::common::{Dtype, Shape};
 use morello::imp::kernels::KernelType;
-use morello::layout::{row_major, Layout};
+use morello::layout::row_major;
 use morello::pprint::{pprint, PrintMode};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
