@@ -1,6 +1,11 @@
 use std::fmt;
 
-use crate::{common::Dtype, expr::AffineExpr, layout::BufferExprTerm, utils::indent};
+use crate::{
+    common::Dtype,
+    expr::{AffineForm, Atom, NonAffine},
+    layout::BufferVar,
+    utils::indent,
+};
 
 #[derive(Debug, Clone)]
 pub enum CBuffer {
@@ -42,8 +47,8 @@ pub struct VecType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum CExprTerm {
-    Buffer(BufferExprTerm),
+pub enum CExprVar {
+    Buffer(BufferVar),
     CName(String),
 }
 
@@ -146,14 +151,17 @@ impl CBuffer {
         }
     }
 
-    pub(super) fn inner_vec_from_expr(&self, expr: &AffineExpr<CExprTerm>) -> (&CBuffer, usize) {
+    pub(super) fn inner_vec_from_expr(
+        &self,
+        expr: &AffineForm<NonAffine<CExprVar>>,
+    ) -> (&CBuffer, usize) {
         let CBuffer::VecVars { inner_vecs, .. } = self else {
             unreachable!();
         };
         let CBuffer::SingleVecVar { name: _, vec_type } = inner_vecs[0] else {
             unreachable!();
         };
-        let AffineExpr(ref linear_terms, expr_constant) = *expr;
+        let AffineForm(ref linear_terms, expr_constant) = *expr;
         debug_assert!(linear_terms.is_empty());
         let expr_constant = usize::try_from(expr_constant).unwrap();
         let vector_size = usize::try_from(vec_type.value_cnt).unwrap();
@@ -162,6 +170,8 @@ impl CBuffer {
         (&inner_vecs[inner_vec_idx], inside_vec_offset)
     }
 }
+
+impl Atom for CExprVar {}
 
 pub fn c_type(dtype: Dtype) -> &'static str {
     match dtype {

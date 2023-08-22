@@ -5,17 +5,17 @@ use std::iter;
 use std::rc::Rc;
 
 use super::namegen::NameGenerator;
-use crate::codegen::c_utils::{c_type, CBuffer, CExprTerm, VecType};
+use crate::codegen::c_utils::{c_type, CBuffer, CExprVar, VecType};
 use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
-use crate::expr::{AffineExpr, Term};
+use crate::expr::{AffineForm, NonAffine, NonAffineExpr, Term};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::{Kernel, KernelType};
 use crate::imp::loops::Loop;
 use crate::imp::moves::TensorOrCacheView;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
-use crate::layout::BufferExprTerm;
+use crate::layout::BufferVar;
 use crate::pprint::PrintableAux;
 use crate::target::{CpuMemoryLevel, Target};
 use crate::utils::{indent, ASCII_CHARS};
@@ -27,7 +27,7 @@ const STACK_CUTOFF: u32 = 256;
 pub struct CpuCodeGenerator<'a, Tgt: Target> {
     pub namer: NameGenerator,
     pub name_env: HashMap<Rc<Tensor<Tgt>>, CBuffer>,
-    pub loop_iter_bindings: HashMap<BufferExprTerm, Either<String, i32>>,
+    pub loop_iter_bindings: HashMap<BufferVar, Either<String, i32>>,
     pub param_bindings: HashMap<Param<Tgt>, &'a dyn View<Tgt = Tgt>>,
     pub headers: HeaderEmitter,
 }
@@ -116,7 +116,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             write!(
                 main_body_str,
                 "{}{}",
-                self.c_index_ptr(a, &0i32.into(), None),
+                self.c_index_ptr(a, &AffineForm::zero(), None),
                 if i < top_arg_tensors.len() - 1 {
                     ", "
                 } else {
@@ -160,7 +160,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 indent(depth)
             )?;
             self.loop_iter_bindings.insert(
-                BufferExprTerm::Pt(dim.try_into().unwrap(), tensor.identifier()),
+                BufferVar::Pt(dim.try_into().unwrap(), tensor.identifier()),
                 Either::Left(n.to_string()),
             );
         }
@@ -439,7 +439,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         // name and store that association in the `self.loop_iter_names`.
         for loop_tile in &l.tiles {
             for tt in loop_tile.tile.tile_dim_terms() {
-                let BufferExprTerm::TileIdx(dim, _) = tt else {
+                let BufferVar::TileIdx(dim, _) = tt else {
                     unreachable!();
                 };
                 let axis = loop_tile.axes[usize::from(dim)];
@@ -509,7 +509,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             // overwrite.
             for loop_tile in &l.tiles {
                 for tt in loop_tile.tile.tile_dim_terms() {
-                    let BufferExprTerm::TileIdx(dim, _) = &tt else {
+                    let BufferVar::TileIdx(dim, _) = &tt else {
                         unreachable!();
                     };
                     let axis = loop_tile.axes[usize::from(*dim)];
@@ -530,7 +530,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
     fn param_args_to_c_indices<F>(&self, arguments: &[Param<Tgt>], f: F) -> Vec<String>
     where
-        F: Fn(usize, &CBuffer, &AffineExpr<BufferExprTerm>) -> String,
+        F: Fn(usize, &CBuffer, &NonAffineExpr<BufferVar>) -> String,
     {
         arguments
             .iter()
@@ -545,12 +545,35 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             .collect()
     }
 
-    fn sub_expr_bindings(&self, unbound_expr: AffineExpr<BufferExprTerm>) -> AffineExpr<CExprTerm> {
-        unbound_expr.map_terms(|sym| match self.loop_iter_bindings.get(&sym) {
-            Some(Either::Left(var_name)) => Either::Left(CExprTerm::CName(var_name.clone())),
-            Some(Either::Right(bound_constant)) => Either::Right(*bound_constant),
-            None => Either::Left(CExprTerm::Buffer(sym)),
-        })
+    fn sub_expr_bindings(&self, unbound_expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<CExprVar> {
+        // unbound_expr.map_terms(|non_affine| {
+        //     let original_inner_term = match &non_affine {
+        //         NonAffine::Var(t) => t,
+        //         NonAffine::FloorDiv(t, _) => t,
+        //         NonAffine::Mod(t, _) => t,
+        //     };
+        //     let inner_term_binding = match self.loop_iter_bindings.get(&original_inner_term) {
+        //         Some(Either::Left(var_name)) => Either::Left(CExprVar::CName(var_name.clone())),
+        //         Some(Either::Right(c)) => Either::Right(*c),
+        //         None => Either::Left(CExprVar::Buffer(original_inner_term)),
+        //     };
+        //
+        //     match (non_affine, inner_term_binding) {
+        //         (NonAffine::Var(_), Either::Left(t)) => Either::Left(NonAffine::Var(t)),
+        //         (NonAffine::FloorDiv(_, d), Either::Left(t)) => {
+        //             Either::Left(NonAffine::FloorDiv(t, d))
+        //         }
+        //         (NonAffine::Mod(_, m), Either::Left(t)) => Either::Left(NonAffine::Mod(t, m)),
+        //         (NonAffine::Var(_), Either::Right(n)) => Either::Right(n),
+        //         (NonAffine::FloorDiv(_, d), Either::Right(n)) => {
+        //             Either::Right(n / i32::try_from(n).unwrap())
+        //         }
+        //         (NonAffine::Mod(_, m), Either::Right(n)) => {
+        //             Either::Right(n % i32::try_from(m).unwrap())
+        //         }
+        //     }
+        // })
+        todo!();
     }
 
     /// Returns a C expression referring to the value at a given expression.
@@ -560,7 +583,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     fn c_index(
         &self,
         buffer: &CBuffer,
-        expr: &AffineExpr<BufferExprTerm>,
+        expr: &NonAffineExpr<BufferVar>,
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
@@ -595,7 +618,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index(
                     inner_vec_buffer,
-                    &vec_offset.try_into().unwrap(),
+                    &AffineForm::constant(vec_offset.try_into().unwrap()),
                     reinterpret,
                 )
             }
@@ -605,7 +628,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     fn c_index_vec(
         &self,
         buffer: &CBuffer,
-        expr: &AffineExpr<BufferExprTerm>,
+        expr: &NonAffineExpr<BufferVar>,
         reinterpret: Option<String>,
     ) -> String {
         // self is essentially unused, but included for consistency with c_index.
@@ -632,7 +655,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index_vec(
                     inner_vec_buffer,
-                    &vec_offset.try_into().unwrap(),
+                    &AffineForm::constant(vec_offset.try_into().unwrap()),
                     reinterpret,
                 )
             }
@@ -642,7 +665,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     fn c_index_ptr(
         &self,
         buffer: &CBuffer,
-        expr: &AffineExpr<BufferExprTerm>,
+        expr: &NonAffineExpr<BufferVar>,
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
@@ -685,7 +708,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index_ptr(
                     inner_vec_buffer,
-                    &vec_offset.try_into().unwrap(),
+                    &AffineForm::constant(vec_offset.try_into().unwrap()),
                     reinterpret,
                 )
             }
@@ -742,20 +765,15 @@ fn get_vector(
         .expect("VecType to match dtype and volume of vector_size")
 }
 
-fn expr_to_c(e: &AffineExpr<CExprTerm>) -> String {
+fn expr_to_c(e: &AffineForm<NonAffine<CExprVar>>) -> String {
     let mut buf =
         e.0.iter()
-            .map(|Term(coef, sym)| match sym {
-                CExprTerm::CName(name) => {
-                    if *coef == 1 {
-                        name.clone()
-                    } else {
-                        format!("{} * {}", coef, name)
-                    }
-                }
-                CExprTerm::Buffer(_) => {
-                    // TODO: Guarantee all terms are C names at the type level.
-                    panic!("Expected all terms to be C names");
+            .map(|Term(coef, sym)| {
+                let sym_string = cexpr_subexpr_to_c(sym);
+                if *coef == 1 {
+                    sym_string
+                } else {
+                    format!("{} * {}", coef, sym_string)
                 }
             })
             .join(" + ");
@@ -769,39 +787,77 @@ fn expr_to_c(e: &AffineExpr<CExprTerm>) -> String {
     if buf.is_empty() {
         buf = String::from("0");
     }
-    buf
+    format!("({})", buf)
 }
 
-fn zero_points(expr: &mut AffineExpr<BufferExprTerm>) {
-    expr.0.retain(|t| match t.1 {
-        BufferExprTerm::Pt(_, _) => false,
-        BufferExprTerm::TileIdx(_, _) => true,
-    });
+fn cexpr_subexpr_to_c(subexpr: &NonAffine<CExprVar>) -> String {
+    match subexpr {
+        NonAffine::Leaf(v) => match v {
+            CExprVar::CName(name) => name.clone(),
+            CExprVar::Buffer(_) => {
+                // TODO: Guarantee all terms are C names at the type level.
+                unreachable!("Expected all terms to be C names");
+            }
+        },
+        NonAffine::FloorDiv(v, d) => format!("({} / {})", expr_to_c(v), d),
+        NonAffine::Mod(v, m) => format!("({} % {})", expr_to_c(v), m),
+    }
+}
+
+fn zero_points(expr: &mut NonAffineExpr<BufferVar>) {
+    todo!()
 }
 
 #[cfg(test)]
 mod tests {
     use super::expr_to_c;
-    use crate::codegen::c_utils::CExprTerm;
-    use crate::expr::{AffineExpr, Term};
+    use crate::codegen::c_utils::CExprVar;
+    use crate::expr::{AffineForm, NonAffine, Term};
 
     #[test]
     fn test_expr_zero_emitted() {
-        assert_eq!(expr_to_c(&AffineExpr(vec![], 0)), "0");
+        assert_eq!(expr_to_c(&AffineForm(vec![], 0)), "(0)");
     }
 
     #[test]
     fn test_intercept_zero_not_emitted() {
-        let x = CExprTerm::CName(String::from("x"));
-        assert_eq!(expr_to_c(&AffineExpr(vec![Term(2, x)], 0)), "2 * x")
+        let x = CExprVar::CName(String::from("x"));
+        let xa = NonAffine::Leaf(x);
+        assert_eq!(expr_to_c(&AffineForm(vec![Term(2, xa)], 0)), "(2 * x)")
     }
 
     #[test]
     fn test_lower_to_c_expr() {
-        let x = CExprTerm::CName(String::from("x"));
-        let y = CExprTerm::CName(String::from("y"));
-        assert_eq!(expr_to_c(&AffineExpr(vec![], 1)), "1");
-        assert_eq!(expr_to_c(&AffineExpr(vec![Term(1, x)], 1)), "x + 1");
-        assert_eq!(expr_to_c(&AffineExpr(vec![Term(2, y)], 3)), "2 * y + 3");
+        let x = CExprVar::CName(String::from("x"));
+        let y = CExprVar::CName(String::from("y"));
+        assert_eq!(expr_to_c(&AffineForm(vec![], 1)), "(1)");
+        assert_eq!(
+            expr_to_c(&AffineForm(vec![Term(1, NonAffine::Leaf(x))], 1)),
+            "(x + 1)"
+        );
+        assert_eq!(
+            expr_to_c(&AffineForm(vec![Term(2, NonAffine::Leaf(y.clone()))], 3)),
+            "(2 * y + 3)"
+        );
+        assert_eq!(
+            expr_to_c(&AffineForm(
+                vec![Term(
+                    2,
+                    NonAffine::FloorDiv(Box::new(NonAffine::Leaf(y.clone()).into()), 4)
+                )],
+                3
+            )),
+            "(2 * ((y) / 4) + 3)"
+        );
+        assert_eq!(
+            expr_to_c(&AffineForm(
+                vec![Term(
+                    2,
+                    NonAffine::Mod(Box::new(NonAffine::Leaf(y).into()), 4)
+                )],
+                3
+            )),
+            "(2 * ((y) % 4) + 3)"
+        );
     }
 }

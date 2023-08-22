@@ -5,7 +5,7 @@ use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
-    expr::{AffineExpr, Term},
+    expr::{AffineForm, Atom, NonAffineExpr, Term},
     opaque_symbol::OpaqueSymbol,
     target::Target,
 };
@@ -23,7 +23,7 @@ pub enum Layout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BufferExprTerm {
+pub enum BufferVar {
     TileIdx(u8, OpaqueSymbol),
     // TODO: Probably don't need the OpaqueSymbol for Pt
     Pt(u8, OpaqueSymbol),
@@ -34,7 +34,7 @@ impl Layout {
         &self,
         expr_id: &OpaqueSymbol,
         concrete_shape: &[DimSize],
-    ) -> AffineExpr<BufferExprTerm> {
+    ) -> NonAffineExpr<BufferVar> {
         match self {
             Layout::Standard { dim_order } => {
                 debug_assert_eq!(dim_order.len(), concrete_shape.len());
@@ -364,19 +364,21 @@ impl Display for Layout {
     }
 }
 
+impl Atom for BufferVar {}
+
 fn regular_index_expr(
     expr_id: &OpaqueSymbol,
     logical_dims: &[u8],
     shape: &[DimSize],
-) -> AffineExpr<BufferExprTerm> {
+) -> NonAffineExpr<BufferVar> {
     assert!(!logical_dims.is_empty());
     let t = *logical_dims.last().unwrap();
     let remaining_dims = &logical_dims[..logical_dims.len() - 1];
     let s = i32::try_from(shape[usize::from(t)]).unwrap();
     let p = if s > 1 {
-        AffineExpr(vec![Term(1, BufferExprTerm::Pt(t, expr_id.clone()))], 0)
+        AffineForm(vec![Term(1, BufferVar::Pt(t, expr_id.clone()).into())], 0)
     } else {
-        AffineExpr(vec![], 0) // zero
+        AffineForm(vec![], 0) // zero
     };
     if remaining_dims.is_empty() {
         return p;
