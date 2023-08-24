@@ -34,6 +34,8 @@ pub struct Term<T>(pub i32, pub T);
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum NonAffine<T> {
+    // TODO: `Constant` should be a kind of leaf
+    Constant(i32),
     Leaf(T),
     FloorDiv(Box<NonAffineExpr<T>>, u32),
     Mod(Box<NonAffineExpr<T>>, u32),
@@ -46,6 +48,16 @@ impl<T> AffineForm<T> {
 
     pub const fn constant(c: i32) -> Self {
         AffineForm(vec![], c)
+    }
+
+    fn map_vars_debug<R, RO>(self, mapper: &mut impl FnMut(T::Atom) -> R) -> T::Output
+    where
+        T: Substitute<R, Output = AffineForm<RO>>,
+        R: Clone + Eq,
+        RO: Eq,
+    {
+        // This will flatten the resulting AffineForm, which has type... uhh... AffineForm<RO>
+        todo!("Remove this function.")
     }
 }
 
@@ -66,43 +78,46 @@ impl<T: PartialEq> AffineForm<T> {
     }
 }
 
-impl<T, R> Substitute<R> for AffineForm<T>
+// An AffineForm can sub. an R for its atoms if it contains terms which themselves yield AffineForms
+// over R.
+impl<T, R, RO> Substitute<R> for AffineForm<T>
 where
-    T: Substitute<R> + Clone + Eq,
-    T::Output: Into<AffineForm<T>>,
-    R: Clone + From<T::Atom>,
+    T: Substitute<R, Output = AffineForm<RO>>,
+    R: Clone + Eq,
+    RO: Eq,
 {
     type Atom = T::Atom;
-    type Output = Self;
+    type Output = AffineForm<RO>;
 
-    fn map_vars(mut self, mapper: &mut impl FnMut(Self::Atom) -> R) -> Self {
+    fn map_vars(mut self, mapper: &mut impl FnMut(Self::Atom) -> R) -> Self::Output {
         let mut accum = AffineForm(vec![], self.1);
         for Term(c, s) in self.0.drain(..) {
             // Flatten AffineForms resulting from the substitution.
-            accum += s.map_vars(mapper).into() * c;
+            accum += s.map_vars(mapper) * c;
         }
         accum
     }
 }
 
-// A NonAffine's leaves can be replaced with any `R` which can be constructed from the leaf's atom
-// type and for which the result of replacement is a type convertable into a NonAffineExpr.
-impl<T, R> Substitute<R> for NonAffine<T>
+impl<T, R, RO> Substitute<R> for NonAffine<T>
 where
-    T: Substitute<R> + Clone + Eq,
-    T::Output: Into<NonAffineExpr<T>>,
-    R: Clone + From<T::Atom>,
+    T: Substitute<R, Output = NonAffineExpr<RO>>,
+    R: Clone + Eq,
+    RO: Eq,
 {
     type Atom = T::Atom;
-    type Output = NonAffineExpr<T>;
+    type Output = NonAffineExpr<RO>;
 
     fn map_vars(self, mapper: &mut impl FnMut(Self::Atom) -> R) -> Self::Output {
         match self {
-            NonAffine::Leaf(v) => v.map_vars(mapper).into(),
+            NonAffine::Constant(c) => NonAffineExpr::constant(c),
+            NonAffine::Leaf(v) => v.map_vars(mapper),
             NonAffine::FloorDiv(v, d) => {
-                NonAffine::FloorDiv(Box::new(v.map_vars(mapper)), d).into()
+                AffineForm::from(NonAffine::FloorDiv(Box::new(v.map_vars(mapper)), d))
             }
-            NonAffine::Mod(v, m) => NonAffine::Mod(Box::new(v.map_vars(mapper)), m).into(),
+            NonAffine::Mod(v, m) => {
+                AffineForm::from(NonAffine::Mod(Box::new(v.map_vars(mapper)), m))
+            }
         }
     }
 }
@@ -110,7 +125,7 @@ where
 // Any type implementing `Atom` can be replaced with anything into which that type can be converted.
 // The implementation just checks equality and returns either the (converted) atom or the
 // replacement.
-impl<T: Atom + Into<R>, R: Clone> Substitute<R> for T {
+impl<T: Atom, R: Clone> Substitute<R> for T {
     type Atom = T;
     type Output = R;
 
@@ -134,6 +149,15 @@ impl<T> From<Term<T>> for AffineForm<T> {
 impl<T: Atom> From<T> for NonAffineExpr<T> {
     fn from(t: T) -> Self {
         AffineForm(vec![Term(1, NonAffine::Leaf(t))], 0)
+    }
+}
+
+impl<T: Atom> From<Option<T>> for NonAffineExpr<T> {
+    fn from(t: Option<T>) -> Self {
+        match t {
+            Some(t) => AffineForm(vec![Term(1, NonAffine::Leaf(t))], 0),
+            None => NonAffineExpr::constant(0),
+        }
     }
 }
 
@@ -221,6 +245,15 @@ impl<T: Atom> From<T> for NonAffine<T> {
     }
 }
 
+impl<T: Atom> From<Option<T>> for NonAffine<T> {
+    fn from(t: Option<T>) -> Self {
+        match t {
+            Some(t) => NonAffine::Leaf(t),
+            None => NonAffine::Constant(0),
+        }
+    }
+}
+
 impl Atom for String {}
 impl Atom for &str {}
 
@@ -268,8 +301,13 @@ mod tests {
     #[test]
     fn test_substitute_non_affine_expr_var_for_non_affine_term() {
         let original_expr = AffineForm(vec![Term(1, NonAffine::Leaf("x"))], 1);
-        let replacement = NonAffine::FloorDiv(Box::new(NonAffine::Leaf("y").into()), 2);
+        let replacement = AffineForm::from(NonAffine::FloorDiv(
+            Box::new(NonAffine::Leaf("y").into()),
+            2,
+        ));
+
         let result = original_expr.subs(&"x", &replacement);
+
         let expected = AffineForm(
             vec![Term(
                 1,
@@ -301,7 +339,10 @@ mod tests {
 
         let original_expr =
             AffineForm(vec![Term(2, NonAffine::FloorDiv(Box::new(x.into()), 4))], 1);
-        let result = original_expr.subs(&"x", &NonAffine::FloorDiv(Box::new(y.clone().into()), 2));
+        let result = original_expr.subs(
+            &"x",
+            &AffineForm::from(NonAffine::FloorDiv(Box::new(y.clone().into()), 2)),
+        );
         assert_eq!(
             result,
             AffineForm(
@@ -323,7 +364,10 @@ mod tests {
         let y = NonAffine::Leaf("y");
 
         let original_expr = AffineForm(vec![Term(2, NonAffine::Mod(Box::new(x.into()), 4))], 1);
-        let result = original_expr.subs(&"x", &NonAffine::Mod(Box::new(y.clone().into()), 2));
+        let result = original_expr.subs(
+            &"x",
+            &AffineForm::from(NonAffine::Mod(Box::new(y.clone().into()), 2)),
+        );
         assert_eq!(
             result,
             AffineForm(

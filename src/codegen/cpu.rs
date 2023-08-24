@@ -8,7 +8,7 @@ use super::namegen::NameGenerator;
 use crate::codegen::c_utils::{c_type, CBuffer, CExprVar, VecType};
 use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
-use crate::expr::{AffineForm, NonAffine, NonAffineExpr, Term};
+use crate::expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::{Kernel, KernelType};
 use crate::imp::loops::Loop;
@@ -344,7 +344,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         let buffer = self.name_env.get(backing_tensor).unwrap();
                         let mut buffer_indexing_expr =
                             arguments[0].make_buffer_indexing_expr(&self.param_bindings);
-                        zero_points(&mut buffer_indexing_expr);
+                        buffer_indexing_expr = zero_points(buffer_indexing_expr);
                         let arg_expr = self.c_index_ptr(buffer, &buffer_indexing_expr, None);
                         writeln!(
                             w,
@@ -539,16 +539,25 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 let backing_tensor = arg.backing_tensor(&self.param_bindings).unwrap();
                 let buffer = self.name_env.get(backing_tensor).unwrap();
                 let mut buffer_indexing_expr = arg.make_buffer_indexing_expr(&self.param_bindings);
-                zero_points(&mut buffer_indexing_expr);
+                buffer_indexing_expr = zero_points(buffer_indexing_expr);
                 f(idx, buffer, &buffer_indexing_expr)
             })
             .collect()
     }
 
     fn sub_expr_bindings(&self, unbound_expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<CExprVar> {
+        unbound_expr.map_vars(&mut |v| {
+            AffineForm::from(match self.loop_iter_bindings.get(&v) {
+                Some(Either::Left(var_name)) => NonAffine::Leaf(CExprVar::CName(var_name.clone())),
+                Some(Either::Right(c)) => NonAffine::Constant(*c),
+                None => NonAffine::Leaf(CExprVar::Buffer(v)),
+            })
+        })
+
         // unbound_expr.map_terms(|non_affine| {
         //     let original_inner_term = match &non_affine {
-        //         NonAffine::Var(t) => t,
+        //         NonAffine::Constant(_) => todo!("Return early"),
+        //         NonAffine::Leaf(t) => t,
         //         NonAffine::FloorDiv(t, _) => t,
         //         NonAffine::Mod(t, _) => t,
         //     };
@@ -557,14 +566,14 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         //         Some(Either::Right(c)) => Either::Right(*c),
         //         None => Either::Left(CExprVar::Buffer(original_inner_term)),
         //     };
-        //
         //     match (non_affine, inner_term_binding) {
-        //         (NonAffine::Var(_), Either::Left(t)) => Either::Left(NonAffine::Var(t)),
+        //         (NonAffine::Constant(_), _) => unreachable!(),
+        //         (NonAffine::Leaf(_), Either::Left(t)) => Either::Left(NonAffine::Var(t)),
         //         (NonAffine::FloorDiv(_, d), Either::Left(t)) => {
         //             Either::Left(NonAffine::FloorDiv(t, d))
         //         }
         //         (NonAffine::Mod(_, m), Either::Left(t)) => Either::Left(NonAffine::Mod(t, m)),
-        //         (NonAffine::Var(_), Either::Right(n)) => Either::Right(n),
+        //         (NonAffine::Leaf(_), Either::Right(n)) => Either::Right(n),
         //         (NonAffine::FloorDiv(_, d), Either::Right(n)) => {
         //             Either::Right(n / i32::try_from(n).unwrap())
         //         }
@@ -573,7 +582,6 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         //         }
         //     }
         // })
-        todo!();
     }
 
     /// Returns a C expression referring to the value at a given expression.
@@ -792,6 +800,7 @@ fn expr_to_c(e: &AffineForm<NonAffine<CExprVar>>) -> String {
 
 fn cexpr_subexpr_to_c(subexpr: &NonAffine<CExprVar>) -> String {
     match subexpr {
+        NonAffine::Constant(c) => c.to_string(),
         NonAffine::Leaf(v) => match v {
             CExprVar::CName(name) => name.clone(),
             CExprVar::Buffer(_) => {
@@ -804,8 +813,11 @@ fn cexpr_subexpr_to_c(subexpr: &NonAffine<CExprVar>) -> String {
     }
 }
 
-fn zero_points(expr: &mut NonAffineExpr<BufferVar>) {
-    todo!()
+fn zero_points(expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<BufferVar> {
+    expr.map_vars(&mut |v| match v {
+        BufferVar::TileIdx(_, _) => AffineForm::from(v),
+        BufferVar::Pt(_, _) => AffineForm::zero(),
+    })
 }
 
 #[cfg(test)]
