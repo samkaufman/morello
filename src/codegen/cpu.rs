@@ -297,6 +297,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             }
             ImplNode::Pipeline(_) => todo!("Emit code for Pipeline"),
             ImplNode::SpecApp(p) => {
+                self.headers.emit_stdbool_and_assert_headers = true;
                 writeln!(
                     w,
                     "{}/* {}({}) */",
