@@ -546,42 +546,13 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     }
 
     fn sub_expr_bindings(&self, unbound_expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<CExprVar> {
-        unbound_expr.map_vars(&mut |v| {
-            AffineForm::from(match self.loop_iter_bindings.get(&v) {
-                Some(Either::Left(var_name)) => NonAffine::Leaf(CExprVar::CName(var_name.clone())),
-                Some(Either::Right(c)) => NonAffine::Constant(*c),
-                None => NonAffine::Leaf(CExprVar::Buffer(v)),
-            })
+        unbound_expr.map_vars(&mut |v| match self.loop_iter_bindings.get(&v) {
+            Some(Either::Left(var_name)) => {
+                AffineForm::from(NonAffine::Leaf(CExprVar::CName(var_name.clone())))
+            }
+            Some(Either::Right(c)) => NonAffineExpr::constant(*c),
+            None => AffineForm::from(NonAffine::Leaf(CExprVar::Buffer(v))),
         })
-
-        // unbound_expr.map_terms(|non_affine| {
-        //     let original_inner_term = match &non_affine {
-        //         NonAffine::Constant(_) => todo!("Return early"),
-        //         NonAffine::Leaf(t) => t,
-        //         NonAffine::FloorDiv(t, _) => t,
-        //         NonAffine::Mod(t, _) => t,
-        //     };
-        //     let inner_term_binding = match self.loop_iter_bindings.get(&original_inner_term) {
-        //         Some(Either::Left(var_name)) => Either::Left(CExprVar::CName(var_name.clone())),
-        //         Some(Either::Right(c)) => Either::Right(*c),
-        //         None => Either::Left(CExprVar::Buffer(original_inner_term)),
-        //     };
-        //     match (non_affine, inner_term_binding) {
-        //         (NonAffine::Constant(_), _) => unreachable!(),
-        //         (NonAffine::Leaf(_), Either::Left(t)) => Either::Left(NonAffine::Var(t)),
-        //         (NonAffine::FloorDiv(_, d), Either::Left(t)) => {
-        //             Either::Left(NonAffine::FloorDiv(t, d))
-        //         }
-        //         (NonAffine::Mod(_, m), Either::Left(t)) => Either::Left(NonAffine::Mod(t, m)),
-        //         (NonAffine::Leaf(_), Either::Right(n)) => Either::Right(n),
-        //         (NonAffine::FloorDiv(_, d), Either::Right(n)) => {
-        //             Either::Right(n / i32::try_from(n).unwrap())
-        //         }
-        //         (NonAffine::Mod(_, m), Either::Right(n)) => {
-        //             Either::Right(n % i32::try_from(m).unwrap())
-        //         }
-        //     }
-        // })
     }
 
     /// Returns a C expression referring to the value at a given expression.

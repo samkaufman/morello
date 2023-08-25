@@ -49,16 +49,6 @@ impl<T> AffineForm<T> {
     pub const fn constant(c: i32) -> Self {
         AffineForm(vec![], c)
     }
-
-    fn map_vars_debug<R, RO>(self, mapper: &mut impl FnMut(T::Atom) -> R) -> T::Output
-    where
-        T: Substitute<R, Output = AffineForm<RO>>,
-        R: Clone + Eq,
-        RO: Eq,
-    {
-        // This will flatten the resulting AffineForm, which has type... uhh... AffineForm<RO>
-        todo!("Remove this function.")
-    }
 }
 
 impl<T: PartialEq> AffineForm<T> {
@@ -242,15 +232,6 @@ impl<T> Mul<i32> for AffineForm<T> {
 impl<T: Atom> From<T> for NonAffine<T> {
     fn from(t: T) -> Self {
         NonAffine::Leaf(t)
-    }
-}
-
-impl<T: Atom> From<Option<T>> for NonAffine<T> {
-    fn from(t: Option<T>) -> Self {
-        match t {
-            Some(t) => NonAffine::Leaf(t),
-            None => NonAffine::Constant(0),
-        }
     }
 }
 
