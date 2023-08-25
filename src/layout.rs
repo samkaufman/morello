@@ -5,7 +5,7 @@ use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
-    expr::{AffineForm, Atom, NonAffineExpr, Term},
+    expr::{AffineForm, Atom, NonAffine, NonAffineExpr, Substitute, Term},
     opaque_symbol::OpaqueSymbol,
     target::Target,
 };
@@ -41,10 +41,35 @@ impl Layout {
                 regular_index_expr(expr_id, dim_order, concrete_shape)
             }
             Layout::Packed {
-                dim_count: _,
-                strip_dim: _,
-                strip_size: _,
-            } => todo!(),
+                dim_count,
+                strip_dim,
+                strip_size,
+            } => {
+                assert_eq!(
+                    concrete_shape.len(),
+                    usize::from(*dim_count),
+                    "Expected rank-{} shape",
+                    concrete_shape.len()
+                );
+
+                if concrete_shape[usize::from(*strip_dim)] % *strip_size != 0 {
+                    return row_major(*dim_count).buffer_indexing_expr(expr_id, concrete_shape);
+                }
+
+                let expanded = self.expand_shape(concrete_shape);
+                let idx_expr = row_major(expanded.len().try_into().unwrap())
+                    .buffer_indexing_expr(expr_id, &expanded);
+                idx_expr.map_vars(&mut |v| match v {
+                    BufferVar::Pt(d, _) if d == *strip_dim => {
+                        AffineForm::from(NonAffine::FloorDiv(Box::new(v.into()), *strip_size))
+                    }
+                    BufferVar::Pt(d, _) if d == *dim_count => {
+                        let packing_p = BufferVar::Pt(*strip_dim, expr_id.clone());
+                        AffineForm::from(NonAffine::Mod(Box::new(packing_p.into()), *strip_size))
+                    }
+                    _ => AffineForm::from(v),
+                })
+            }
         }
     }
 
@@ -84,10 +109,35 @@ impl Layout {
                 cnt
             }
             Layout::Packed {
-                dim_count: _,
-                strip_dim: _,
-                strip_size: _,
-            } => todo!(),
+                dim_count,
+                strip_dim,
+                strip_size,
+            } => {
+                assert_eq!(
+                    parent_shape.len(),
+                    usize::from(*dim_count),
+                    "Expected rank-{dim_count} outer shape"
+                );
+                assert_eq!(
+                    tile_shape.len(),
+                    usize::from(*dim_count),
+                    "Expected rank-{dim_count} tile"
+                );
+
+                // Fast path for breaking the innermost/strip dimension. This avoids calling
+                // expand_shape for, among other things, tiling to 1x...x1.
+                if tile_shape[usize::from(*strip_dim)] % *strip_size != 0 {
+                    return 0;
+                }
+
+                let expanded_parent_shape = self.expand_shape(parent_shape);
+                let expanded_tile_shape = self.expand_shape(tile_shape);
+                row_major(expanded_parent_shape.len().try_into().unwrap()).tile_contiguity(
+                    &expanded_tile_shape,
+                    &expanded_parent_shape,
+                    parent_contiguous,
+                )
+            }
         }
     }
 
@@ -151,17 +201,31 @@ impl Layout {
     }
 
     pub fn applies_to_shape(&self, shape: &[DimSize]) -> bool {
+        if shape.iter().all(|&d| d == 1) && !self.is_row_major() {
+            return false;
+        }
         match &self {
             Layout::Standard { dim_order } => {
-                if shape.iter().all(|&d| d == 1) && !self.is_row_major() {
-                    return false;
-                }
                 if shape.len() != dim_order.len() {
                     return false;
                 }
                 true
             }
-            Layout::Packed { .. } => todo!(),
+            Layout::Packed {
+                dim_count,
+                strip_dim,
+                strip_size,
+            } => {
+                if usize::from(*dim_count) != shape.len() {
+                    return false;
+                }
+                // Only applies when the strip dimension is a multiple of the strip size.
+                // TODO: Relax this.
+                if shape[usize::from(*strip_dim)] % *strip_size != 0 {
+                    return false;
+                }
+                true
+            }
         }
     }
 
@@ -356,10 +420,10 @@ impl Display for Layout {
                 }
             }
             Layout::Packed {
-                dim_count: _,
-                strip_dim: _,
-                strip_size: _,
-            } => todo!(),
+                dim_count,
+                strip_dim,
+                strip_size,
+            } => write!(f, "pack({}, {}, {})", dim_count, strip_dim, strip_size),
         }
     }
 }

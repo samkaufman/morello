@@ -286,7 +286,10 @@ impl<V: View> Tile<V> {
             let steps = self.steps_dim(dim.try_into().unwrap());
             debug_assert_ne!(steps, 0);
             if steps != 1 {
-                Some(BufferVar::TileIdx(dim.try_into().unwrap(), self.expr_term_id.clone()).into())
+                Some(BufferVar::TileIdx(
+                    dim.try_into().unwrap(),
+                    self.expr_term_id.clone(),
+                ))
             } else {
                 None
             }
@@ -326,25 +329,31 @@ impl<T: View> View for Tile<T> {
         {
             todo!("Implement support for sliding tilings.");
         }
+        let other_expr = expr.clone();
         expr.map_vars(&mut |term_var| match term_var {
             BufferVar::Pt(dim, _) => {
+                // TODO: Remove
+                assert!(
+                    usize::from(dim) < self.shape().len(),
+                    "dim {} >= shape.len() {}. This is {:?}. expr is {:?}",
+                    dim,
+                    self.shape().len(),
+                    self,
+                    other_expr
+                );
+
+                let e = &self.expr_term_id;
                 let size_in_dim = self.shape()[usize::from(dim)];
-                let mut terms = vec![Term(
-                    1,
-                    NonAffine::Leaf(BufferVar::Pt(dim, self.expr_term_id.clone())),
-                )];
+                let mut terms = vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e.clone())))];
                 if size_in_dim != self.view.shape()[usize::from(dim)] {
                     terms.push(Term(
                         size_in_dim.try_into().unwrap(),
-                        NonAffine::Leaf(BufferVar::TileIdx(dim, self.expr_term_id.clone())),
+                        NonAffine::Leaf(BufferVar::TileIdx(dim, e.clone())),
                     ));
                 }
                 AffineForm(terms, 0)
             }
-            BufferVar::TileIdx(_, _) => {
-                // TODO: Shorten this.
-                AffineForm(vec![Term(1, NonAffine::Leaf(term_var))], 0)
-            }
+            BufferVar::TileIdx(_, _) => AffineForm(vec![Term(1, NonAffine::Leaf(term_var))], 0),
         })
     }
 
