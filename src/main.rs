@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use log::info;
 use smallvec::smallvec;
+use std::fs::{create_dir_all, File};
 use std::path;
 use std::sync::RwLock;
 
@@ -15,6 +16,7 @@ use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
+use morello::utils::ToWriteFmt;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -37,6 +39,10 @@ struct Args {
     /// Print the generated code
     #[arg(long)]
     print_code: bool,
+
+    /// Save the generated code into the directory
+    #[arg(long)]
+    save_code_dir: Option<path::PathBuf>,
 
     #[command(subcommand)]
     query_spec: QuerySpec,
@@ -197,7 +203,22 @@ where
     assert_eq!(results.len(), 1);
     pprint(&results[0], args.print_mode);
     println!();
+
+    // Save the generated code.
+    if let Some(save_code_dir) = &args.save_code_dir {
+        // Create the directory if it doesn't exist.
+        create_dir_all(save_code_dir)?;
+
+        let mut code_path = save_code_dir.clone();
+        code_path.push("main.c");
+        let code_file = File::create(&code_path)?;
+        // TODO: Emitting the code twice is not ideal.
+        results[0].emit(&mut ToWriteFmt(code_file))?;
+    }
+
+    // Build and run the generated code.
     let output = results[0].build(args.print_code)?.run()?;
     println!("Output: {}", String::from_utf8_lossy(&output.stdout));
+
     Ok(())
 }
