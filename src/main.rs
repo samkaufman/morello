@@ -38,6 +38,10 @@ struct Args {
     #[arg(long)]
     print_code: bool,
 
+    /// Enable benchmarking
+    #[arg(long)]
+    bench: bool,
+
     #[command(subcommand)]
     query_spec: QuerySpec,
 }
@@ -197,7 +201,7 @@ where
     assert_eq!(results.len(), 1);
     pprint(&results[0], args.print_mode);
     println!();
-    let output = results[0].build(args.print_code)?.run()?;
+    let output = results[0].build(args.bench, args.print_code)?.run()?;
     println!("Output: {}", String::from_utf8_lossy(&output.stdout));
     Ok(())
 }

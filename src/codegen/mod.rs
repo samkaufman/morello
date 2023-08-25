@@ -39,18 +39,17 @@ pub trait CodeGen<Tgt: Target> {
         }
     }
 
-    fn emit<W: fmt::Write>(&self, out: &mut W) -> fmt::Result;
+    fn emit<W: fmt::Write>(&self, bench: bool, out: &mut W) -> fmt::Result;
 
-    fn build(&self, print_code: bool) -> Result<BuiltArtifact> {
+    fn build(&self, bench: bool, print_code: bool) -> Result<BuiltArtifact> {
         let dirname = tempdir()?.into_path();
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
 
         let source_file = std::fs::File::create(&source_path)?;
-        self.emit(&mut ToWriteFmt(source_file))?;
+        self.emit(bench, &mut ToWriteFmt(source_file))?;
         if print_code {
-            self.emit(&mut ToWriteFmt(io::stdout()))?;
-            println!();
+            self.emit(bench, &mut ToWriteFmt(io::stdout()))?;
         }
 
         let mut clang_cmd = Command::new(Self::compiler_path()?);
@@ -80,15 +79,15 @@ pub trait CodeGen<Tgt: Target> {
 }
 
 impl<Tgt: Target<Level = CpuMemoryLevel>, Aux: Clone + Debug> CodeGen<Tgt> for ImplNode<Tgt, Aux> {
-    fn emit<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
+    fn emit<W: fmt::Write>(&self, bench: bool, out: &mut W) -> fmt::Result {
         let top_arg_tensors = self
             .parameters()
             .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
             .collect::<Vec<_>>();
         let mut generator = CpuCodeGenerator::<Tgt>::new();
-        generator.emit_kernel(self, &top_arg_tensors, out)?;
-        out.write_str("\n")?;
-        generator.emit_main(&top_arg_tensors, out)?;
+        generator.emit_kernel(self, &top_arg_tensors, bench, out)?;
+        out.write_char('\n')?;
+        generator.emit_main(&top_arg_tensors, bench, out)?;
         Ok(())
     }
 }

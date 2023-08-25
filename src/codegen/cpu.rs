@@ -5,7 +5,7 @@ use std::iter;
 use std::rc::Rc;
 
 use super::namegen::NameGenerator;
-use crate::codegen::c_utils::{c_type, CBuffer, CExprTerm, VecType};
+use crate::codegen::c_utils::{c_type, CBuffer, CExprTerm, InitType, VecType};
 use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineExpr, Term};
@@ -40,6 +40,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         &mut self,
         imp: &'a ImplNode<Tgt, Aux>,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+        bench: bool,
         out: &mut W,
     ) -> fmt::Result {
         debug_assert_eq!(top_arg_tensors.len(), usize::from(imp.parameter_count()));
@@ -83,13 +84,18 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(main_body_str, "}}")?;
 
         self.headers.emit(Tgt::target_id(), out)?;
-        out.write_str("\n")?;
+        out.write_char('\n')?;
+        if bench {
+            out.write_str(include_str!("../codegen/partials/benchmarking.c"))?;
+            out.write_str("\n\n")?;
+        }
         out.write_str(&main_body_str)
     }
 
     pub fn emit_main<W: Write>(
         &mut self,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+        bench: bool,
         out: &mut W,
     ) -> fmt::Result {
         let mut main_body_str = String::new();
@@ -104,29 +110,38 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             let spec = kernel_argument.spec();
             let buf =
                 self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
-            buf.emit(&mut main_body_str, true, depth)?;
-            self.name_env.insert(Rc::clone(kernel_argument), buf);
-        }
-
-        // Emit the kernel call, passing pointers to the Impl function.
-        write!(main_body_str, "\n{}kernel(", indent(depth))?;
-        for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
-            let a = self.name_env.get(kernel_argument).unwrap();
-            write!(
-                main_body_str,
-                "{}{}",
-                self.c_index_ptr(a, &0i32.into(), None),
-                if i < top_arg_tensors.len() - 1 {
-                    ", "
+            buf.emit(
+                &mut main_body_str,
+                if bench {
+                    InitType::Random
                 } else {
-                    ");\n"
+                    InitType::Zero
                 },
+                depth,
             )?;
+            self.name_env.insert(Rc::clone(kernel_argument), buf);
         }
         writeln!(main_body_str)?;
 
-        // Print the output tensor
-        self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
+        // Emit the kernel call, passing pointers to the Impl function.
+        if bench {
+            writeln!(
+                main_body_str,
+                "{}// Inlined kernel follows. This is for warm-up.",
+                indent(depth)
+            )?;
+        }
+        let kernel_call_str = self.make_kernel_call(top_arg_tensors)?;
+        writeln!(main_body_str, "{}{}\n", indent(depth), kernel_call_str)?;
+
+        if bench {
+            // Emit the benchmarking code.
+            self.emit_benchmarking(&kernel_call_str, depth, &mut main_body_str)?;
+        } else {
+            // Print the output tensor
+            self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
+        }
+        writeln!(main_body_str)?;
 
         // Free the buffers.
         for kernel_argument in top_arg_tensors {
@@ -138,6 +153,69 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(main_body_str, "}}")?;
 
         out.write_str(&main_body_str)
+    }
+
+    fn make_kernel_call(
+        &self,
+        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+    ) -> Result<String, fmt::Error> {
+        let mut kernel_call_str = String::new();
+        write!(kernel_call_str, "kernel(")?;
+        for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
+            let a = self.name_env.get(kernel_argument).unwrap();
+            write!(
+                kernel_call_str,
+                "{}{}",
+                self.c_index_ptr(a, &0i32.into(), None),
+                if i < top_arg_tensors.len() - 1 {
+                    ", "
+                } else {
+                    ");"
+                },
+            )?;
+        }
+        Ok(kernel_call_str)
+    }
+
+    fn emit_benchmarking<W: Write>(
+        &mut self,
+        kernel_call_str: &str,
+        mut depth: usize,
+        out: &mut W,
+    ) -> Result<(), fmt::Error> {
+        writeln!(out, "{}struct timespec start, end;", indent(depth))?;
+        writeln!(
+            out,
+            "{}clock_gettime(CLOCK_MONOTONIC, &start);",
+            indent(depth)
+        )?;
+        writeln!(out, "#pragma clang loop unroll(disable)")?; // preprocessor directives should not have indentation.
+        writeln!(
+            out,
+            "{}for (unsigned long bench_itr = 0; bench_itr < 10; ++bench_itr) {{",
+            indent(depth)
+        )?;
+        depth += 1;
+        writeln!(out, "{}{}", indent(depth), kernel_call_str)?;
+        depth -= 1;
+        writeln!(out, "{}}}", indent(depth))?;
+        writeln!(
+            out,
+            "{}clock_gettime(CLOCK_MONOTONIC, &end);",
+            indent(depth)
+        )?;
+        writeln!(
+            out,
+            "{}struct timespec delta = ts_diff(start, end);",
+            indent(depth)
+        )?;
+        writeln!(
+            out,
+            "{}printf(\"cpu: %llds %lldns\\n\", (long long)delta.tv_sec, (long long)delta.tv_nsec);",
+            indent(depth)
+        )?;
+
+        Ok(())
     }
 
     fn emit_print_tensor<W: Write>(
@@ -268,7 +346,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             spec.dtype(),
                             spec.level(),
                         );
-                        dest_buffer.emit(w, false, depth)?;
+                        dest_buffer.emit(w, InitType::None, depth)?;
 
                         self.name_env.insert(Rc::clone(tensor), dest_buffer);
                     }
