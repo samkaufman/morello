@@ -94,10 +94,10 @@ impl<Tgt: Target<Level = CpuMemoryLevel>, Aux: Clone + Debug> CodeGen<Tgt> for I
 }
 
 pub struct BuiltArtifact {
-    binary_path: PathBuf,
-    source_path: PathBuf,
-    whole_dir: PathBuf,
-    benchmark_samples: Option<i32>,
+    pub binary_path: PathBuf,
+    pub source_path: PathBuf,
+    pub whole_dir: PathBuf,
+    pub benchmark_samples: Option<i32>,
 }
 
 impl BuiltArtifact {
