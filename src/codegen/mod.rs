@@ -47,11 +47,11 @@ pub trait CodeGen<Tgt: Target> {
         let binary_path = dirname.join("a.out");
 
         let source_file = std::fs::File::create(&source_path)?;
-        self.emit(&mut ToWriteFmt(source_file))?;
+        let mut writers = ToWriteFmt::new(source_file);
         if print_code {
-            self.emit(&mut ToWriteFmt(io::stdout()))?;
-            println!();
+            writers.push(io::stdout());
         }
+        self.emit(&mut writers)?;
 
         let mut clang_cmd = Command::new(Self::compiler_path()?);
         if do_color() {

@@ -40,14 +40,25 @@ const fn ascii_pairs() -> [[char; 2]; 676] {
 pub const ASCII_CHARS: [char; 26] = ascii_chars();
 pub const ASCII_PAIRS: [[char; 2]; 676] = ascii_pairs();
 
-pub struct ToWriteFmt<T>(pub T);
+pub struct ToWriteFmt(pub Vec<Box<dyn io::Write>>);
 
-impl<T> fmt::Write for ToWriteFmt<T>
-where
-    T: io::Write,
-{
+impl ToWriteFmt {
+    pub fn new<W: io::Write + 'static>(w: W) -> Self {
+        Self(vec![Box::new(w)])
+    }
+
+    pub fn push<W: io::Write + 'static>(&mut self, w: W) {
+        self.0.push(Box::new(w));
+    }
+}
+
+impl fmt::Write for ToWriteFmt {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.0.write_all(s.as_bytes()).map_err(|_| fmt::Error)
+        self.0
+            .iter_mut()
+            .map(|w| w.write_all(s.as_bytes()))
+            .collect::<Result<_, _>>()
+            .map_err(|_| fmt::Error)
     }
 }
 
