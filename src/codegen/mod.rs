@@ -73,7 +73,7 @@ pub trait CodeGen<Tgt: Target> {
             );
         } else {
             // We still want to see warnings.
-            io::stderr().write_all(&clang_proc.stderr).unwrap();
+            io::stderr().write_all(&clang_proc.stderr)?;
         }
 
         Ok(BuiltArtifact::new(binary_path, source_path, dirname, None))
