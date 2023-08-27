@@ -72,7 +72,10 @@ pub trait CodeGen<Tgt: Target> {
             );
         } else {
             // We still want to see warnings.
-            println!("{}", String::from_utf8_lossy(&clang_proc.stderr));
+            let stderr = String::from_utf8_lossy(&clang_proc.stderr);
+            if !stderr.is_empty() {
+                println!("{}", stderr);
+            }
         }
 
         Ok(BuiltArtifact::new(binary_path, source_path, dirname, None))
