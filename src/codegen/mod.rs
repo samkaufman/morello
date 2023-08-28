@@ -17,6 +17,7 @@ use anyhow::{bail, Result};
 use std::fmt;
 use std::fmt::Debug;
 use std::io;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::rc::Rc;
@@ -72,7 +73,7 @@ pub trait CodeGen<Tgt: Target> {
             );
         } else {
             // We still want to see warnings.
-            println!("{}", String::from_utf8_lossy(&clang_proc.stderr));
+            io::stderr().write_all(&clang_proc.stderr)?;
         }
 
         Ok(BuiltArtifact::new(binary_path, source_path, dirname, None))
