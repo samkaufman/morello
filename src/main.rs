@@ -38,9 +38,9 @@ struct Args {
     #[arg(long)]
     print_code: bool,
 
-    /// Enable benchmarking
+    /// The number of benchmark samples
     #[arg(long)]
-    bench: bool,
+    bench_samples: Option<usize>,
 
     #[command(subcommand)]
     query_spec: QuerySpec,
@@ -201,7 +201,9 @@ where
     assert_eq!(results.len(), 1);
     pprint(&results[0], args.print_mode);
     println!();
-    let output = results[0].build(args.bench, args.print_code)?.run()?;
-    println!("Output: {}", String::from_utf8_lossy(&output.stdout));
+
+    let bench_result = results[0].time_impl_robustly(args.print_code, None)?;
+    println!("Impl Runtime: {:.4}s", bench_result.result);
+
     Ok(())
 }

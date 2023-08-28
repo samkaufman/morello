@@ -12,11 +12,14 @@ use crate::imp::ImplNode;
 use crate::target::{CpuMemoryLevel, Target, TargetId};
 use crate::utils::ToWriteFmt;
 use crate::views::Tensor;
+use std::cmp::max;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Error, Result};
+use log::info;
 use std::fmt;
 use std::fmt::Debug;
 use std::io;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::rc::Rc;
@@ -26,6 +29,9 @@ const CLI_FLAGS: [&str; 3] = ["-std=gnu99", "-O3", "-o"];
 
 const X86_CLI_VEC_FLAGS: [&str; 2] = ["-fopenmp", "-mavx2"];
 const ARM_CLI_VEC_FLAGS: [&str; 1] = ["-fopenmp"];
+
+const MIN_SAMPLES: usize = 3;
+const MIN_TRIAL_TIME_SECS: f32 = 2.5;
 
 pub trait CodeGen<Tgt: Target> {
     fn compiler_path() -> Result<String> {
@@ -39,17 +45,17 @@ pub trait CodeGen<Tgt: Target> {
         }
     }
 
-    fn emit<W: fmt::Write>(&self, bench: bool, out: &mut W) -> fmt::Result;
+    fn emit<W: fmt::Write>(&self, bench_samples: Option<usize>, out: &mut W) -> fmt::Result;
 
-    fn build(&self, bench: bool, print_code: bool) -> Result<BuiltArtifact> {
+    fn build(&self, print_code: bool, bench_samples: Option<usize>) -> Result<BuiltArtifact> {
         let dirname = tempdir()?.into_path();
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
 
         let source_file = std::fs::File::create(&source_path)?;
-        self.emit(bench, &mut ToWriteFmt(source_file))?;
+        self.emit(bench_samples, &mut ToWriteFmt(source_file))?;
         if print_code {
-            self.emit(bench, &mut ToWriteFmt(io::stdout()))?;
+            self.emit(bench_samples, &mut ToWriteFmt(io::stdout()))?;
         }
 
         let mut clang_cmd = Command::new(Self::compiler_path()?);
@@ -74,20 +80,69 @@ pub trait CodeGen<Tgt: Target> {
             println!("{}", String::from_utf8_lossy(&clang_proc.stderr));
         }
 
-        Ok(BuiltArtifact::new(binary_path, source_path, dirname, None))
+        Ok(BuiltArtifact::new(
+            binary_path,
+            source_path,
+            dirname,
+            bench_samples,
+        ))
+    }
+
+    /// Benchmark several times, returning the minimum of inner loop means.
+    //
+    //  This will first estimate a good number of inner loop iterations, then
+    //  build an executable which loops that number of times, returning the mean.
+    //  The final `result` computed is the minimum of the means after running
+    //  that executable `repeat` times.
+    fn time_impl_robustly(
+        &self,
+        print_code: bool,
+        repeat: Option<usize>,
+    ) -> Result<RobustTimingResult> {
+        let repeat = repeat.unwrap_or(10); // default: 10
+
+        // Collect a single rough sample.
+        let time_check_artifact = self.build(false, Some(1))?;
+        let rough_secs = time_check_artifact.measure_time()?;
+
+        // Choose a good number of iterations for benchmarks' inner loop.
+        let inner_iters = max(
+            MIN_SAMPLES,
+            (MIN_TRIAL_TIME_SECS / rough_secs).ceil() as usize,
+        );
+        info!("Goal iterations: {inner_iters}");
+
+        // Run main benchmark loop.
+        let artifact = self.build(print_code, Some(inner_iters))?;
+        let mut means = Vec::with_capacity(repeat);
+        for _ in 0..repeat {
+            let secs = artifact.measure_time()?;
+            info!("Sample runtime result {secs}s");
+            means.push(secs);
+        }
+
+        Ok(RobustTimingResult {
+            result: *means
+                .iter()
+                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap(),
+            outer_loop_samples: means,
+            inner_loop_iterations: inner_iters,
+            artifact,
+        })
     }
 }
 
 impl<Tgt: Target<Level = CpuMemoryLevel>, Aux: Clone + Debug> CodeGen<Tgt> for ImplNode<Tgt, Aux> {
-    fn emit<W: fmt::Write>(&self, bench: bool, out: &mut W) -> fmt::Result {
+    fn emit<W: fmt::Write>(&self, bench_samples: Option<usize>, out: &mut W) -> fmt::Result {
         let top_arg_tensors = self
             .parameters()
             .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
             .collect::<Vec<_>>();
         let mut generator = CpuCodeGenerator::<Tgt>::new();
-        generator.emit_kernel(self, &top_arg_tensors, bench, out)?;
+        generator.emit_kernel(self, &top_arg_tensors, bench_samples.is_some(), out)?;
         out.write_char('\n')?;
-        generator.emit_main(&top_arg_tensors, bench, out)?;
+        generator.emit_main(&top_arg_tensors, bench_samples, out)?;
         Ok(())
     }
 }
@@ -96,7 +151,7 @@ pub struct BuiltArtifact {
     binary_path: PathBuf,
     source_path: PathBuf,
     whole_dir: PathBuf,
-    benchmark_samples: Option<i32>,
+    bench_samples: Option<usize>,
 }
 
 impl BuiltArtifact {
@@ -104,13 +159,13 @@ impl BuiltArtifact {
         binary_path: PathBuf,
         source_path: PathBuf,
         whole_dir: PathBuf,
-        benchmark_samples: Option<i32>,
+        bench_samples: Option<usize>,
     ) -> Self {
         Self {
             binary_path,
             source_path,
             whole_dir,
-            benchmark_samples,
+            bench_samples,
         }
     }
 
@@ -118,5 +173,127 @@ impl BuiltArtifact {
         Command::new(self.binary_path.as_os_str())
             .output()
             .map_err(|e| e.into())
+    }
+
+    /// Executes and benchmarks an Impl on the local machine using Clang.
+    //
+    //  Returns the time in seconds. Measured by executing `self.bench_samples`
+    //  times and returning the mean.
+    pub fn measure_time(&self) -> Result<f32> {
+        assert!(self.bench_samples.is_some());
+
+        let output = self.run()?;
+        if !output.status.success() {
+            io::stderr().write_all(&output.stderr)?;
+            bail!("Failed to run the generated code: {}", output.status);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut lines = stdout.lines();
+        let first_line = lines.next().unwrap();
+        Ok(parse_benchmark_output(first_line)? / self.bench_samples.unwrap() as f32)
+    }
+}
+
+pub struct RobustTimingResult {
+    pub result: f32,
+    pub outer_loop_samples: Vec<f32>,
+    pub inner_loop_iterations: usize,
+    pub artifact: BuiltArtifact,
+}
+
+fn parse_benchmark_output(output: &str) -> Result<f32> {
+    let mut outs = output.split_whitespace();
+    if outs.next() != Some("cpu:") {
+        bail!("expected \"cpu:\" prefix in benchmark output");
+    }
+
+    let s_str = outs
+        .next()
+        .ok_or("invalid output format")
+        .map_err(Error::msg)?;
+    let ns_str = outs
+        .next()
+        .ok_or("invalid output format")
+        .map_err(Error::msg)?;
+    if !s_str.ends_with("s") || !ns_str.ends_with("ns") {
+        bail!("invalid time unit");
+    }
+
+    let s = s_str.trim_end_matches("s");
+    let ns = ns_str.trim_end_matches("ns");
+    Ok(s.parse::<f32>()? + (ns.parse::<f32>()? / 1e9))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_benchmark_output__valid_input() {
+        assert_eq!(
+            parse_benchmark_output("cpu: 10s 500ns").unwrap(),
+            10.0000005
+        );
+        assert_eq!(parse_benchmark_output("cpu: 5s 0ns").unwrap(), 5.0);
+        assert_eq!(parse_benchmark_output("cpu: 0s 1000000000ns").unwrap(), 1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected \"cpu:\" prefix in benchmark output")]
+    fn test_parse_benchmark_output__missing_cpu_prefix() {
+        parse_benchmark_output("10s 500ns").unwrap();
+    }
+
+    #[test]
+    fn test_parse_benchmark_output__extra_whitespace() {
+        assert_eq!(
+            parse_benchmark_output("cpu:   10s  500ns").unwrap(),
+            10.0000005
+        );
+    }
+
+    #[test]
+    fn test_parse_benchmark_output__negative_values() {
+        assert_eq!(
+            parse_benchmark_output("cpu: -10s -500ns").unwrap(),
+            -10.0000005
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid time unit")]
+    fn test_parse_benchmark_output__missing_time_unit() {
+        parse_benchmark_output("cpu: 10 500").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid float literal")]
+    fn test_parse_benchmark_output__invalid_time_value() {
+        parse_benchmark_output("cpu: ten_s 500ns").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "expected \"cpu:\" prefix in benchmark output")]
+    fn test_parse_benchmark_output__empty_string() {
+        parse_benchmark_output("").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid output format")]
+    fn test_parse_benchmark_output__missing_ns_part() {
+        parse_benchmark_output("cpu: 10s").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid output format")]
+    fn test_parse_benchmark_output__missing_s_part() {
+        parse_benchmark_output("cpu: 500ns").unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "expected \"cpu:\" prefix in benchmark output")]
+    fn test_parse_benchmark_output__whitespace_only_input() {
+        parse_benchmark_output("   ").unwrap();
     }
 }

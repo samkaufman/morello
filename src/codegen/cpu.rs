@@ -95,7 +95,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     pub fn emit_main<W: Write>(
         &mut self,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
-        bench: bool,
+        bench_samples: Option<usize>,
         out: &mut W,
     ) -> fmt::Result {
         let mut main_body_str = String::new();
@@ -112,7 +112,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
             buf.emit(
                 &mut main_body_str,
-                if bench {
+                if bench_samples.is_some() {
                     InitType::Random
                 } else {
                     InitType::Zero
@@ -124,7 +124,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(main_body_str)?;
 
         // Emit the kernel call, passing pointers to the Impl function.
-        if bench {
+        if bench_samples.is_some() {
             writeln!(
                 main_body_str,
                 "{}// Inlined kernel follows. This is for warm-up.",
@@ -134,9 +134,14 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         let kernel_call_str = self.make_kernel_call(top_arg_tensors)?;
         writeln!(main_body_str, "{}{}\n", indent(depth), kernel_call_str)?;
 
-        if bench {
+        if bench_samples.is_some() {
             // Emit the benchmarking code.
-            self.emit_benchmarking(&kernel_call_str, depth, &mut main_body_str)?;
+            self.emit_benchmarking(
+                &kernel_call_str,
+                depth,
+                bench_samples.unwrap(),
+                &mut main_body_str,
+            )?;
         } else {
             // Print the output tensor
             self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
@@ -181,6 +186,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         &mut self,
         kernel_call_str: &str,
         mut depth: usize,
+        bench_samples: usize,
         out: &mut W,
     ) -> Result<(), fmt::Error> {
         writeln!(out, "{}struct timespec start, end;", indent(depth))?;
@@ -192,8 +198,9 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(out, "#pragma clang loop unroll(disable)")?; // preprocessor directives should not have indentation.
         writeln!(
             out,
-            "{}for (unsigned long bench_itr = 0; bench_itr < 10; ++bench_itr) {{",
-            indent(depth)
+            "{}for (unsigned long bench_itr = 0; bench_itr < {}; ++bench_itr) {{",
+            indent(depth),
+            bench_samples
         )?;
         depth += 1;
         writeln!(out, "{}{}", indent(depth), kernel_call_str)?;
