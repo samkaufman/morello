@@ -47,7 +47,7 @@ pub enum CExprTerm {
     CName(String),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum InitType {
     None,
     Zero,
@@ -100,31 +100,14 @@ impl CBuffer {
                             name,
                             size,
                             c_type(*dtype)
-                        )?;
+                        )
                     }
-                    InitType::Random => {
-                        writeln!(
-                            w,
-                            "{}for (size_t idx = 0; idx < {}; idx++) {{",
-                            indent(depth),
-                            size,
-                        )?;
-                        writeln!(
-                            w,
-                            "{}{}[idx] = ({})rand();",
-                            indent(depth + 1),
-                            name,
-                            c_type(*dtype)
-                        )?;
-                        writeln!(w, "{}}}", indent(depth))?;
-                    }
-                    _ => {}
+                    InitType::Random => self.emit_rand_init(w, depth, *size, name, *dtype),
+                    _ => Ok(()),
                 }
-
-                Ok(())
             }
             CBuffer::StackArray { name, size, dtype } => {
-                let epi = if matches!(init_type, InitType::Zero) {
+                let epi = if init_type == InitType::Zero {
                     " = {0}"
                 } else {
                     ""
@@ -137,7 +120,11 @@ impl CBuffer {
                     name,
                     size,
                     epi
-                )
+                )?;
+                if init_type == InitType::Random {
+                    self.emit_rand_init(w, depth, *size, name, *dtype)?;
+                }
+                Ok(())
             }
             CBuffer::SingleVecVar { name, vec_type } => {
                 let epi = if matches!(init_type, InitType::Zero) {
@@ -163,6 +150,30 @@ impl CBuffer {
             }
             CBuffer::Ptr { .. } => unimplemented!(),
         }
+    }
+
+    fn emit_rand_init<W: fmt::Write>(
+        &self,
+        w: &mut W,
+        depth: usize,
+        size: u32,
+        name: &str,
+        dtype: Dtype,
+    ) -> fmt::Result {
+        writeln!(
+            w,
+            "{}for (size_t idx = 0; idx < {}; idx++) {{",
+            indent(depth),
+            size,
+        )?;
+        writeln!(
+            w,
+            "{}{}[idx] = ({})rand();",
+            indent(depth + 1),
+            name,
+            c_type(dtype)
+        )?;
+        writeln!(w, "{}}}", indent(depth))
     }
 
     pub fn emit_free<W: fmt::Write>(&self, w: &mut W, depth: usize) -> fmt::Result {
