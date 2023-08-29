@@ -16,6 +16,7 @@ use crate::imp::moves::TensorOrCacheView;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferExprTerm;
+use crate::pprint::PrintableAux;
 use crate::target::{CpuMemoryLevel, Target};
 use crate::utils::{indent, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
@@ -36,7 +37,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         Self::default()
     }
 
-    pub fn emit_kernel<W: Write, Aux: Clone + Debug>(
+    pub fn emit_kernel<W: Write, Aux: PrintableAux + Debug>(
         &mut self,
         imp: &'a ImplNode<Tgt, Aux>,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
@@ -230,12 +231,15 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         }
     }
 
-    fn emit<Aux: Clone + Debug, W: Write>(
+    fn emit<Aux: PrintableAux + Debug, W: Write>(
         &mut self,
         w: &mut W,
         imp: &ImplNode<Tgt, Aux>,
         depth: usize,
     ) -> fmt::Result {
+        if let Some(h) = imp.aux().c_header() {
+            writeln!(w, "{}// {}", indent(depth), h)?;
+        }
         match imp {
             ImplNode::Loop(l) => {
                 // Emit a C loop nest or, if any tensor view is requires unrolling (i.e., vector
@@ -417,7 +421,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         }
     }
 
-    fn emit_rolled_loop<Aux: Clone + Debug, W: Write>(
+    fn emit_rolled_loop<Aux: PrintableAux + Debug, W: Write>(
         &mut self,
         w: &mut W,
         l: &Loop<Tgt, Aux>,
@@ -476,7 +480,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         Ok(())
     }
 
-    fn emit_unrolled_loop<Aux: Clone + Debug, W: Write>(
+    fn emit_unrolled_loop<Aux: PrintableAux + Debug, W: Write>(
         &mut self,
         w: &mut W,
         l: &Loop<Tgt, Aux>,

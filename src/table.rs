@@ -38,6 +38,10 @@ impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
             vec![String::from(""); Tgt::levels().len() + 2]
         }
     }
+
+    fn c_header(&self) -> Option<String> {
+        self.0.as_ref().map(|(spec, _)| spec.to_string())
+    }
 }
 
 impl<Tgt: Target> Default for DbImplAux<Tgt> {

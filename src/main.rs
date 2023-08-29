@@ -1,20 +1,21 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use log::info;
 use smallvec::smallvec;
-use std::path;
 use std::sync::RwLock;
+use std::{io, path};
 
 use morello::codegen::CodeGen;
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
 use morello::layout::Layout;
-use morello::pprint::{pprint, PrintMode};
+use morello::pprint::{pprint, ImplPrintStyle};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
+use morello::utils::ToWriteFmt;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -26,20 +27,30 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
     color: ColorMode,
 
-    /// Print mode
-    #[arg(long, value_enum, default_value_t = PrintMode::Full)]
-    print_mode: PrintMode,
+    /// Output format
+    #[arg(short, long, value_enum, default_value_t = OutputFormat::C)]
+    format: OutputFormat,
+
+    /// Impl style
+    #[arg(long, value_enum, default_value_t = ImplPrintStyle::Full)]
+    impl_style: ImplPrintStyle,
+
+    /// Compile and run the synthesized implementation
+    #[arg(short, long)]
+    run: bool,
 
     /// Target architecture
     #[arg(long, value_enum, default_value_t = TargetId::X86)]
     target: TargetId,
 
-    /// Print the generated code
-    #[arg(long)]
-    print_code: bool,
-
     #[command(subcommand)]
     query_spec: QuerySpec,
+}
+
+#[derive(Clone, ValueEnum)]
+enum OutputFormat {
+    C,
+    Impl,
 }
 
 #[derive(clap::Subcommand)]
@@ -194,10 +205,23 @@ where
     let Some(results) = db_lock.read().unwrap().get_impl(&spec) else {
         panic!("No Impl found");
     };
-    assert_eq!(results.len(), 1);
-    pprint(&results[0], args.print_mode);
-    println!();
-    let output = results[0].build(args.print_code)?.run()?;
-    println!("Output: {}", String::from_utf8_lossy(&output.stdout));
+    let [synthesized_impl] = &results[..] else {
+        unreachable!();
+    };
+
+    match args.format {
+        OutputFormat::C => {
+            synthesized_impl.emit(&mut ToWriteFmt(io::stdout()))?;
+        }
+        OutputFormat::Impl => {
+            // TODO: How to use Compact? Should we?
+            pprint(synthesized_impl, args.impl_style)
+        }
+    }
+    if args.run {
+        let output = synthesized_impl.build()?.run()?;
+        println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
+    }
+
     Ok(())
 }
