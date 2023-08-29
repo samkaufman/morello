@@ -31,7 +31,7 @@ jobs:
           CLANG: clang
 
       - name: Run simple_matmul example
-        run: cargo run --example simple_matmul
+        run: cargo run --release --example simple_matmul
 
   format:
     runs-on: ubuntu-latest
