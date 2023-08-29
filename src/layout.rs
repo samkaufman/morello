@@ -1,3 +1,4 @@
+use divrem::DivCeil;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
@@ -269,21 +270,21 @@ impl Layout {
                 let mut new_shape = Shape::from_slice(shape);
                 if let Ok(strip_dim_idx) = usize::try_from(*strip_dim) {
                     if let Some(strip_dim_val) = new_shape.get_mut(strip_dim_idx) {
-                        *strip_dim_val /= *strip_size;
+                        *strip_dim_val = DivCeil::div_ceil(*strip_dim_val, *strip_size);
                     } else {
                         panic!("strip_dim index is out of bounds");
                     }
                     new_shape.push(*strip_size);
                     assert!(
                         new_shape.iter().all(|&d| d > 0),
-                        "All dimensions must be greater than 0"
+                        "Expanded shape has a zero size dimension: {new_shape:?}"
                     );
                     new_shape
                 } else {
                     panic!("Unable to convert strip_dim to usize")
                 }
             }
-            _ => panic!("expand_shape method is only applicable to Packed layout variant"),
+            _ => panic!("expand_shape method is only applicable to Packed layouts"),
         }
     }
 
