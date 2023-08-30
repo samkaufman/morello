@@ -205,27 +205,8 @@ impl Layout {
             return false;
         }
         match &self {
-            Layout::Standard { dim_order } => {
-                if shape.len() != dim_order.len() {
-                    return false;
-                }
-                true
-            }
-            Layout::Packed {
-                dim_count,
-                strip_dim,
-                strip_size,
-            } => {
-                if usize::from(*dim_count) != shape.len() {
-                    return false;
-                }
-                // Only applies when the strip dimension is a multiple of the strip size.
-                // TODO: Relax this.
-                if shape[usize::from(*strip_dim)] % *strip_size != 0 {
-                    return false;
-                }
-                true
-            }
+            Layout::Standard { dim_order } => shape.len() == dim_order.len(),
+            Layout::Packed { dim_count, .. } => shape.len() == usize::from(*dim_count),
         }
     }
 

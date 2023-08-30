@@ -159,7 +159,7 @@ impl<Tgt: Target> Action<Tgt> {
                                 // since these weren't affected by the output tiling.
                                 let tiling_shape = updated_input_tiling.shape();
                                 if !original_input.is_valid_tile_shape(tiling_shape) {
-                                    continue;
+                                    return Err(ApplyError::InvalidTileShape(tiling_shape.clone()));
                                 }
 
                                 // Compute loop dimension names for the tile. Any axis which is None
