@@ -131,28 +131,28 @@ impl PrimitiveBasics {
         operand_auxes.into_iter().cloned().collect()
     }
 
-    pub fn parameter_shapes(&self) -> Vec<Shape> {
+    pub fn parameter_shapes(&self) -> SmallVec<[Shape; 3]> {
         match self.typ {
             PrimitiveSpecType::Matmul { .. } => {
                 let [m, k, n] = self.spec_shape[..] else {
                     panic!("Matmul spec_shape must have length 3")
                 };
-                vec![smallvec![m, k], smallvec![k, n], smallvec![m, n]]
+                smallvec![smallvec![m, k], smallvec![k, n], smallvec![m, n]]
             }
             PrimitiveSpecType::Conv { .. } => {
                 let [b, f, c, h, w, fh, fw] = self.spec_shape[..] else {
-                    unreachable!()
+                    panic!("Conv must have rank 7")
                 };
                 debug_assert!(h >= fh && w >= fw);
                 let img = smallvec![b, c, h, w];
                 let filt = smallvec![f, c, fh, fw];
                 let out = conv_infer_output_shape(&img, &filt);
-                vec![img, filt, out]
+                smallvec![img, filt, out]
             }
             PrimitiveSpecType::Move => {
-                vec![self.spec_shape.clone(), self.spec_shape.clone()]
+                smallvec![self.spec_shape.clone(), self.spec_shape.clone()]
             }
-            PrimitiveSpecType::Zero => vec![self.spec_shape.clone()],
+            PrimitiveSpecType::Zero => smallvec![self.spec_shape.clone()],
         }
     }
 

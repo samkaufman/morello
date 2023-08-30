@@ -49,5 +49,9 @@ name = "iter_actions"
 harness = false
 
 [[bench]]
+name = "logicalspec_parameters"
+harness = false
+
+[[bench]]
 name = "synth"
 harness = false
