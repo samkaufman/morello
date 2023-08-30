@@ -8,6 +8,7 @@ use std::{
     ops::{Index, IndexMut, Sub},
 };
 
+use crate::utils::iter_powers_of_two;
 use crate::{
     target::{Target, MAX_LEVEL_COUNT},
     utils::prev_power_of_two,
@@ -152,6 +153,29 @@ impl MemVec {
 
     pub fn iter(&self) -> impl Iterator<Item = &u64> {
         self.0.iter()
+    }
+
+    /// Returns an [Iterator] over smaller power-of-two [MemVec]s.
+    ///
+    /// ```
+    /// # use smallvec::smallvec;
+    /// # use morello::memorylimits::MemVec;
+    /// # use morello::target::X86Target;
+    /// let it = MemVec::new(smallvec![2, 1]).iter_down_by_powers_of_two::<X86Target>();
+    /// assert_eq!(it.collect::<Vec<_>>(), vec![
+    ///     MemVec::new(smallvec![2, 1]),
+    ///     MemVec::new(smallvec![2, 0]),
+    ///     MemVec::new(smallvec![1, 1]),
+    ///     MemVec::new(smallvec![1, 0]),
+    ///     MemVec::new(smallvec![0, 1]),
+    ///     MemVec::new(smallvec![0, 0]),
+    /// ]);
+    /// ```
+    pub fn iter_down_by_powers_of_two<T: Target>(&self) -> impl Iterator<Item = MemVec> {
+        self.into_iter()
+            .map(|l| iter_powers_of_two(l, true).rev())
+            .multi_cartesian_product()
+            .map(move |prod| MemVec::new(prod.into_iter().collect()))
     }
 }
 

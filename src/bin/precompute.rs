@@ -199,11 +199,9 @@ fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
 
 /// Returns an [Iterator] over power-of-two [MemVec]s from maximum memory down.
 fn make_memory_limit_iter<T: Target>() -> impl Iterator<Item = MemVec> {
+    // TOOD: Skip ahead rather than recursing for every limit.
     let MemoryLimits::Standard(top) = T::max_mem();
-    top.into_iter()
-        .map(|l| iter_powers_of_two(l, true).rev())
-        .multi_cartesian_product()
-        .map(move |prod| MemVec::new(prod.into_iter().collect()))
+    top.iter_down_by_powers_of_two::<T>()
 }
 
 /// Yield an [Iterator] over all [LogicalSpec]s to compute, in dependency order.
