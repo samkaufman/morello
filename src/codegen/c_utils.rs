@@ -152,6 +152,7 @@ impl CBuffer {
         }
     }
 
+    /// Emit a loop that initializes buffer values with `rand()`.
     fn emit_rand_init<W: fmt::Write>(
         &self,
         w: &mut W,
