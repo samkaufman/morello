@@ -12,10 +12,10 @@ use crate::imp::ImplNode;
 use crate::target::{CpuMemoryLevel, Target, TargetId};
 use crate::utils::ToWriteFmt;
 use crate::views::Tensor;
-use std::cmp::max;
 
 use anyhow::{bail, Error, Result};
 use log::info;
+use std::cmp::max;
 use std::fmt;
 use std::fmt::Debug;
 use std::io;
