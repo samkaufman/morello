@@ -162,7 +162,11 @@ impl CBuffer {
             unreachable!();
         };
         let AffineForm(ref linear_terms, expr_constant) = *expr;
-        debug_assert!(linear_terms.is_empty(), "Linear terms was non-empty: {:?}", linear_terms);
+        debug_assert!(
+            linear_terms.is_empty(),
+            "Linear terms was non-empty: {:?}",
+            linear_terms
+        );
         let expr_constant = usize::try_from(expr_constant).unwrap();
         let vector_size = usize::try_from(vec_type.value_cnt).unwrap();
         let inner_vec_idx = expr_constant / vector_size;
