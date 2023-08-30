@@ -5,7 +5,7 @@ use crate::imp::kernels::KernelType;
 use crate::layout::{nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
-use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+use crate::spec::{dim_range, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target, TargetId};
 use crate::tensorspec::TensorSpec;
 
@@ -65,20 +65,37 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout> {
-        // TODO: Yield (after implementing) NHWC and packed layouts as well.
-        let rm_iter = iter::once(row_major(shape.len().try_into().unwrap()));
+        let rank = u8::try_from(shape.len()).unwrap();
+        let rm_iter = iter::once(row_major(rank));
         if shape.iter().all(|d| *d == 1) {
-            rm_iter.collect()
-        } else if shape.len() == 2 {
-            rm_iter
-                .chain(iter::once(Layout::Standard {
-                    dim_order: smallvec![1, 0],
-                }))
+            return rm_iter.collect();
+        }
+
+        let multidim_iter = rm_iter.chain({
+            shape
+                .iter()
+                .take(shape.len() - 1)
+                .copied()
+                .enumerate()
+                .flat_map(|(dim, dim_size)| {
+                    let dim_u8 = u8::try_from(dim).unwrap();
+                    dim_range(dim_size, false).map(move |strip_size| {
+                        debug_assert!(
+                            strip_size < dim_size,
+                            "strip_size {strip_size} >= dim_size {dim_size}"
+                        );
+                        Layout::new_packed(rank, dim_u8, strip_size)
+                    })
+                })
+        });
+        if rank == 2 {
+            multidim_iter
+                .chain(iter::once(Layout::new_standard(smallvec![1, 0])))
                 .collect()
-        } else if shape.len() == 4 {
-            rm_iter.chain(iter::once(nhwc())).collect()
+        } else if rank == 4 {
+            multidim_iter.chain(iter::once(nhwc())).collect()
         } else {
-            rm_iter.collect()
+            multidim_iter.collect()
         }
     }
 

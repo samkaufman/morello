@@ -155,8 +155,6 @@ impl<Tgt: Target> Action<Tgt> {
                                     continue;
                                 }
 
-                                // Toss out tiles with the same TensorSpec as their source,
-                                // since these weren't affected by the output tiling.
                                 let tiling_shape = updated_input_tiling.shape();
                                 if !original_input.is_valid_tile_shape(tiling_shape) {
                                     return Err(ApplyError::InvalidTileShape(tiling_shape.clone()));

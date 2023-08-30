@@ -30,6 +30,19 @@ pub enum BufferVar {
 }
 
 impl Layout {
+    pub fn new_standard(dim_order: SmallVec<[u8; 5]>) -> Layout {
+        Layout::Standard { dim_order }
+    }
+
+    pub fn new_packed(dim_count: u8, strip_dim: u8, strip_size: DimSize) -> Layout {
+        assert!(strip_dim < dim_count - 1);
+        Layout::Packed {
+            dim_count,
+            strip_dim,
+            strip_size,
+        }
+    }
+
     pub fn buffer_indexing_expr(
         &self,
         expr_id: &OpaqueSymbol,
@@ -196,7 +209,12 @@ impl Layout {
                         )
                 }
             }
-            Layout::Packed { .. } => todo!(),
+            Layout::Packed { .. } => {
+                // TODO: Use contiguous from the caller rather than assuming no contiguousness?
+                let rm_like_shape = self.expand_shape(shape);
+                let expanded = row_major(rm_like_shape.len().try_into().unwrap());
+                expanded.estimate_cache_lines::<Tgt>(&rm_like_shape, dtype, false)
+            }
         }
     }
 
@@ -255,9 +273,7 @@ impl Layout {
                 }
 
                 (
-                    Self::Standard {
-                        dim_order: SmallVec::from(new_dim_order),
-                    },
+                    Self::new_standard(SmallVec::from(new_dim_order)),
                     new_contiguous,
                 )
             }
@@ -294,11 +310,11 @@ impl Layout {
                     .unwrap();
 
                 (
-                    Self::Packed {
-                        dim_count: dim_count - u8::try_from(dropped_dims.len()).unwrap(),
-                        strip_dim: *strip_dim,
-                        strip_size: *strip_size,
-                    },
+                    Self::new_packed(
+                        dim_count - u8::try_from(dropped_dims.len()).unwrap(),
+                        *strip_dim,
+                        *strip_size,
+                    ),
                     fifth_dim_contig + standard_contig - contig_dropped,
                 )
             }

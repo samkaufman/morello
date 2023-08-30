@@ -702,6 +702,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             // includes relayouts in registers and movements from level 1 to RF.
             let i = u8::try_from(i).unwrap();
             for layout in Tgt::all_layouts_for_shape(operand.shape()) {
+                // TODO: Prevent moving into packed layouts where strip size equals the whole dim.
                 for level in Tgt::possible_destination_levels(operand.level()) {
                     if !operand.can_move_to(&layout, &level) {
                         continue;
