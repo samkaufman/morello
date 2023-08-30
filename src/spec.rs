@@ -684,19 +684,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         // TODO: Don't accumulate. Return an iterator.
         let mut results = Vec::with_capacity(MOVE_RESULTS_CAPACITY);
 
-        // Move actions can only be applied when both from and to the same-level memory.
-        let mut applying_to_move_spec = false;
-        if let LogicalSpec::Primitive(
-            PrimitiveBasics {
-                typ: PrimitiveSpecType::Move,
-                ..
-            },
-            ..,
-        ) = self
-        {
-            applying_to_move_spec = true;
-        }
-
         for (i, operand) in self.parameters().iter().enumerate() {
             // Yield actions for movement with register file destination, which
             // includes relayouts in registers and movements from level 1 to RF.
