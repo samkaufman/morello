@@ -122,7 +122,7 @@ fn pprint_inner<'a, Tgt, Aux>(
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::common::Dtype;
     use crate::imp::subspecs::SpecApp;

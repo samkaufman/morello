@@ -5,7 +5,7 @@ use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
-    expr::{AffineForm, Atom, NonAffine, NonAffineExpr, Substitute, Term},
+    expr::{AffineForm, Atom, Bounds, NonAffine, NonAffineExpr, Substitute, Term},
     opaque_symbol::OpaqueSymbol,
     target::Target,
 };
@@ -65,13 +65,9 @@ impl Layout {
                     concrete_shape.len()
                 );
 
-                if concrete_shape[usize::from(*strip_dim)] % *strip_size != 0 {
-                    return row_major(*dim_count).buffer_indexing_expr(expr_id, concrete_shape);
-                }
-
                 let expanded = self.expand_shape(concrete_shape);
-                let idx_expr = row_major(expanded.len().try_into().unwrap())
-                    .buffer_indexing_expr(expr_id, &expanded);
+                debug_assert_eq!(expanded.len(), usize::from(*dim_count) + 1);
+                let idx_expr = row_major(dim_count + 1).buffer_indexing_expr(expr_id, &expanded);
                 idx_expr.map_vars(&mut |v| match v {
                     BufferVar::Pt(d, _) if d == *strip_dim => {
                         AffineForm::from(NonAffine::FloorDiv(Box::new(v.into()), *strip_size))
@@ -425,7 +421,17 @@ impl Display for Layout {
     }
 }
 
+impl Display for BufferVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BufferVar::TileIdx(dim, _) => write!(f, "t{}", dim),
+            BufferVar::Pt(dim, _) => write!(f, "p{}", dim),
+        }
+    }
+}
+
 impl Atom for BufferVar {}
+impl Bounds for BufferVar {}
 
 fn regular_index_expr(
     expr_id: &OpaqueSymbol,

@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::{
     common::Dtype,
-    expr::{AffineForm, Atom, NonAffine},
+    expr::{AffineForm, Atom, Bounds, NonAffine},
     layout::BufferVar,
     utils::indent,
 };
@@ -176,6 +176,7 @@ impl CBuffer {
 }
 
 impl Atom for CExprVar {}
+impl Bounds for CExprVar {}
 
 pub fn c_type(dtype: Dtype) -> &'static str {
     match dtype {

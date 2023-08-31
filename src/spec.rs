@@ -631,7 +631,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let o = components[1].parameter_shapes();
         let intermediate_shape = &o[components[1].typ.output_idx()];
 
-        for layout in Tgt::all_layouts_for_shape(intermediate_shape) {
+        for layout in Tgt::move_destination_layouts(intermediate_shape) {
             for level in Tgt::levels() {
                 // TODO: Need to implement `can_move_to`-style logic here.
 
@@ -688,7 +688,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             // Yield actions for movement with register file destination, which
             // includes relayouts in registers and movements from level 1 to RF.
             let i = u8::try_from(i).unwrap();
-            for layout in Tgt::all_layouts_for_shape(operand.shape()) {
+            for layout in Tgt::move_destination_layouts(operand.shape()) {
                 // TODO: Prevent moving into packed layouts where strip size equals the whole dim.
                 for level in Tgt::possible_destination_levels(operand.level()) {
                     if !operand.can_move_to(&layout, &level) {
