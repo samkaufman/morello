@@ -124,23 +124,6 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         }
 
         // Emit the kernel call, passing pointers to the Impl function.
-        write!(main_body_str, "\n{}kernel(", indent(depth))?;
-        for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
-            let a = self.name_env.get(kernel_argument).unwrap();
-            write!(
-                main_body_str,
-                "{}{}",
-                self.c_index_ptr(a, &AffineForm::zero(), None),
-                if i < top_arg_tensors.len() - 1 {
-                    ", "
-                } else {
-                    ");\n"
-                },
-            )?;
-        }
-        writeln!(main_body_str)?;
-
-        // Emit the kernel call, passing pointers to the Impl function.
         if bench_samples.is_some() {
             writeln!(
                 main_body_str,
@@ -182,17 +165,17 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
     ) -> Result<String, fmt::Error> {
         let mut kernel_call_str = String::new();
-        write!(kernel_call_str, "kernel(")?;
+        write!(kernel_call_str, "\nkernel(")?;
         for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
             let a = self.name_env.get(kernel_argument).unwrap();
             write!(
                 kernel_call_str,
                 "{}{}",
-                self.c_index_ptr(a, &0i32.into(), None),
+                self.c_index_ptr(a, &AffineForm::zero(), None),
                 if i < top_arg_tensors.len() - 1 {
                     ", "
                 } else {
-                    ");"
+                    ");\n"
                 },
             )?;
         }
