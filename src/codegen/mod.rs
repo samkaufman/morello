@@ -230,7 +230,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_benchmark_output__valid_input() {
+    fn test_parse_benchmark_output_valid_input() {
         assert_eq!(
             parse_benchmark_output("cpu: 10s 500ns").unwrap(),
             10.0000005
@@ -241,12 +241,12 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "expected \"cpu:\" prefix in benchmark output")]
-    fn test_parse_benchmark_output__missing_cpu_prefix() {
+    fn test_parse_benchmark_output_missing_cpu_prefix() {
         parse_benchmark_output("10s 500ns").unwrap();
     }
 
     #[test]
-    fn test_parse_benchmark_output__extra_whitespace() {
+    fn test_parse_benchmark_output_extra_whitespace() {
         assert_eq!(
             parse_benchmark_output("cpu:   10s  500ns").unwrap(),
             10.0000005
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_benchmark_output__negative_values() {
+    fn test_parse_benchmark_output_negative_values() {
         assert_eq!(
             parse_benchmark_output("cpu: -10s -500ns").unwrap(),
             -10.0000005
@@ -263,37 +263,37 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "invalid time unit")]
-    fn test_parse_benchmark_output__missing_time_unit() {
+    fn test_parse_benchmark_output_missing_time_unit() {
         parse_benchmark_output("cpu: 10 500").unwrap();
     }
 
     #[test]
     #[should_panic(expected = "invalid float literal")]
-    fn test_parse_benchmark_output__invalid_time_value() {
+    fn test_parse_benchmark_output_invalid_time_value() {
         parse_benchmark_output("cpu: ten_s 500ns").unwrap();
     }
 
     #[test]
     #[should_panic(expected = "expected \"cpu:\" prefix in benchmark output")]
-    fn test_parse_benchmark_output__empty_string() {
+    fn test_parse_benchmark_output_empty_string() {
         parse_benchmark_output("").unwrap();
     }
 
     #[test]
     #[should_panic(expected = "invalid output format")]
-    fn test_parse_benchmark_output__missing_ns_part() {
+    fn test_parse_benchmark_output_missing_ns_part() {
         parse_benchmark_output("cpu: 10s").unwrap();
     }
 
     #[test]
     #[should_panic(expected = "invalid output format")]
-    fn test_parse_benchmark_output__missing_s_part() {
+    fn test_parse_benchmark_output_missing_s_part() {
         parse_benchmark_output("cpu: 500ns").unwrap();
     }
 
     #[test]
     #[should_panic(expected = "expected \"cpu:\" prefix in benchmark output")]
-    fn test_parse_benchmark_output__whitespace_only_input() {
+    fn test_parse_benchmark_output_whitespace_only_input() {
         parse_benchmark_output("   ").unwrap();
     }
 }
