@@ -1,10 +1,11 @@
+use divrem::DivCeil;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
-    expr::{AffineExpr, Term},
+    expr::{AffineForm, Atom, Bounds, NonAffine, NonAffineExpr, Substitute, Term},
     opaque_symbol::OpaqueSymbol,
     target::Target,
 };
@@ -22,28 +23,62 @@ pub enum Layout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BufferExprTerm {
+pub enum BufferVar {
     TileIdx(u8, OpaqueSymbol),
     // TODO: Probably don't need the OpaqueSymbol for Pt
     Pt(u8, OpaqueSymbol),
 }
 
 impl Layout {
+    pub fn new_standard(dim_order: SmallVec<[u8; 5]>) -> Layout {
+        Layout::Standard { dim_order }
+    }
+
+    pub fn new_packed(dim_count: u8, strip_dim: u8, strip_size: DimSize) -> Layout {
+        assert!(strip_dim < dim_count - 1);
+        Layout::Packed {
+            dim_count,
+            strip_dim,
+            strip_size,
+        }
+    }
+
     pub fn buffer_indexing_expr(
         &self,
         expr_id: &OpaqueSymbol,
         concrete_shape: &[DimSize],
-    ) -> AffineExpr<BufferExprTerm> {
+    ) -> NonAffineExpr<BufferVar> {
         match self {
             Layout::Standard { dim_order } => {
                 debug_assert_eq!(dim_order.len(), concrete_shape.len());
                 regular_index_expr(expr_id, dim_order, concrete_shape)
             }
             Layout::Packed {
-                dim_count: _,
-                strip_dim: _,
-                strip_size: _,
-            } => todo!(),
+                dim_count,
+                strip_dim,
+                strip_size,
+            } => {
+                assert_eq!(
+                    concrete_shape.len(),
+                    usize::from(*dim_count),
+                    "Expected rank-{} shape",
+                    concrete_shape.len()
+                );
+
+                let expanded = self.expand_shape(concrete_shape);
+                debug_assert_eq!(expanded.len(), usize::from(*dim_count) + 1);
+                let idx_expr = row_major(dim_count + 1).buffer_indexing_expr(expr_id, &expanded);
+                idx_expr.map_vars(&mut |v| match v {
+                    BufferVar::Pt(d, _) if d == *strip_dim => {
+                        AffineForm::from(NonAffine::FloorDiv(Box::new(v.into()), *strip_size))
+                    }
+                    BufferVar::Pt(d, _) if d == *dim_count => {
+                        let packing_p = BufferVar::Pt(*strip_dim, expr_id.clone());
+                        AffineForm::from(NonAffine::Mod(Box::new(packing_p.into()), *strip_size))
+                    }
+                    _ => AffineForm::from(v),
+                })
+            }
         }
     }
 
@@ -83,10 +118,35 @@ impl Layout {
                 cnt
             }
             Layout::Packed {
-                dim_count: _,
-                strip_dim: _,
-                strip_size: _,
-            } => todo!(),
+                dim_count,
+                strip_dim,
+                strip_size,
+            } => {
+                assert_eq!(
+                    parent_shape.len(),
+                    usize::from(*dim_count),
+                    "Expected rank-{dim_count} outer shape"
+                );
+                assert_eq!(
+                    tile_shape.len(),
+                    usize::from(*dim_count),
+                    "Expected rank-{dim_count} tile"
+                );
+
+                // Fast path for breaking the innermost/strip dimension. This avoids calling
+                // expand_shape for, among other things, tiling to 1x...x1.
+                if tile_shape[usize::from(*strip_dim)] % *strip_size != 0 {
+                    return 0;
+                }
+
+                let expanded_parent_shape = self.expand_shape(parent_shape);
+                let expanded_tile_shape = self.expand_shape(tile_shape);
+                row_major(expanded_parent_shape.len().try_into().unwrap()).tile_contiguity(
+                    &expanded_tile_shape,
+                    &expanded_parent_shape,
+                    parent_contiguous,
+                )
+            }
         }
     }
 
@@ -145,22 +205,22 @@ impl Layout {
                         )
                 }
             }
-            Layout::Packed { .. } => todo!(),
+            Layout::Packed { .. } => {
+                // TODO: Use contiguous from the caller rather than assuming no contiguousness?
+                let rm_like_shape = self.expand_shape(shape);
+                let expanded = row_major(rm_like_shape.len().try_into().unwrap());
+                expanded.estimate_cache_lines::<Tgt>(&rm_like_shape, dtype, false)
+            }
         }
     }
 
     pub fn applies_to_shape(&self, shape: &[DimSize]) -> bool {
+        if shape.iter().all(|&d| d == 1) && !self.is_row_major() {
+            return false;
+        }
         match &self {
-            Layout::Standard { dim_order } => {
-                if shape.iter().all(|&d| d == 1) && !self.is_row_major() {
-                    return false;
-                }
-                if shape.len() != dim_order.len() {
-                    return false;
-                }
-                true
-            }
-            Layout::Packed { .. } => todo!(),
+            Layout::Standard { dim_order } => shape.len() == dim_order.len(),
+            Layout::Packed { dim_count, .. } => shape.len() == usize::from(*dim_count),
         }
     }
 
@@ -209,9 +269,7 @@ impl Layout {
                 }
 
                 (
-                    Self::Standard {
-                        dim_order: SmallVec::from(new_dim_order),
-                    },
+                    Self::new_standard(SmallVec::from(new_dim_order)),
                     new_contiguous,
                 )
             }
@@ -248,11 +306,11 @@ impl Layout {
                     .unwrap();
 
                 (
-                    Self::Packed {
-                        dim_count: dim_count - u8::try_from(dropped_dims.len()).unwrap(),
-                        strip_dim: *strip_dim,
-                        strip_size: *strip_size,
-                    },
+                    Self::new_packed(
+                        dim_count - u8::try_from(dropped_dims.len()).unwrap(),
+                        *strip_dim,
+                        *strip_size,
+                    ),
                     fifth_dim_contig + standard_contig - contig_dropped,
                 )
             }
@@ -269,21 +327,21 @@ impl Layout {
                 let mut new_shape = Shape::from_slice(shape);
                 if let Ok(strip_dim_idx) = usize::try_from(*strip_dim) {
                     if let Some(strip_dim_val) = new_shape.get_mut(strip_dim_idx) {
-                        *strip_dim_val /= *strip_size;
+                        *strip_dim_val = DivCeil::div_ceil(*strip_dim_val, *strip_size);
                     } else {
                         panic!("strip_dim index is out of bounds");
                     }
                     new_shape.push(*strip_size);
                     assert!(
                         new_shape.iter().all(|&d| d > 0),
-                        "All dimensions must be greater than 0"
+                        "Expanded shape has a zero size dimension: {new_shape:?}"
                     );
                     new_shape
                 } else {
                     panic!("Unable to convert strip_dim to usize")
                 }
             }
-            _ => panic!("expand_shape method is only applicable to Packed layout variant"),
+            _ => panic!("expand_shape method is only applicable to Packed layouts"),
         }
     }
 
@@ -355,27 +413,39 @@ impl Display for Layout {
                 }
             }
             Layout::Packed {
-                dim_count: _,
-                strip_dim: _,
-                strip_size: _,
-            } => todo!(),
+                dim_count,
+                strip_dim,
+                strip_size,
+            } => write!(f, "pack({}, {}, {})", dim_count, strip_dim, strip_size),
         }
     }
 }
+
+impl Display for BufferVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BufferVar::TileIdx(dim, _) => write!(f, "t{}", dim),
+            BufferVar::Pt(dim, _) => write!(f, "p{}", dim),
+        }
+    }
+}
+
+impl Atom for BufferVar {}
+impl Bounds for BufferVar {}
 
 fn regular_index_expr(
     expr_id: &OpaqueSymbol,
     logical_dims: &[u8],
     shape: &[DimSize],
-) -> AffineExpr<BufferExprTerm> {
+) -> NonAffineExpr<BufferVar> {
     assert!(!logical_dims.is_empty());
     let t = *logical_dims.last().unwrap();
     let remaining_dims = &logical_dims[..logical_dims.len() - 1];
     let s = i32::try_from(shape[usize::from(t)]).unwrap();
     let p = if s > 1 {
-        AffineExpr(vec![Term(1, BufferExprTerm::Pt(t, expr_id.clone()))], 0)
+        AffineForm(vec![Term(1, BufferVar::Pt(t, expr_id.clone()).into())], 0)
     } else {
-        AffineExpr(vec![], 0) // zero
+        AffineForm(vec![], 0) // zero
     };
     if remaining_dims.is_empty() {
         return p;
@@ -389,6 +459,12 @@ pub fn row_major(rank: u8) -> Layout {
     }
 }
 
+pub fn col_major(rank: u8) -> Layout {
+    Layout::Standard {
+        dim_order: (0..rank).rev().collect(),
+    }
+}
+
 pub fn nhwc() -> Layout {
     Layout::Standard {
         dim_order: vec![0, 2, 3, 1].into(),
@@ -397,14 +473,11 @@ pub fn nhwc() -> Layout {
 
 #[cfg(test)]
 mod tests {
-    use super::Layout;
-    use smallvec::smallvec;
+    use super::col_major;
 
     #[test]
     fn test_col_major_slices_are_non_contiguous() {
-        let col_major = Layout::Standard {
-            dim_order: smallvec![1, 0],
-        };
+        let col_major = col_major(2);
         let inner_contig =
             col_major.tile_contiguity(&[1, 8], &[128, 128], col_major.contiguous_full());
         assert_eq!(inner_contig, 1);

@@ -5,17 +5,18 @@ use std::iter;
 use std::rc::Rc;
 
 use super::namegen::NameGenerator;
-use crate::codegen::c_utils::{c_type, CBuffer, CExprTerm, InitType, VecType};
+use crate::codegen::c_utils::{c_type, CBuffer, CExprVar, InitType, VecType};
 use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
-use crate::expr::{AffineExpr, Term};
+use crate::expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::{Kernel, KernelType};
 use crate::imp::loops::Loop;
 use crate::imp::moves::TensorOrCacheView;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
-use crate::layout::BufferExprTerm;
+use crate::layout::BufferVar;
+use crate::pprint::PrintableAux;
 use crate::target::{CpuMemoryLevel, Target};
 use crate::utils::{indent, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
@@ -26,7 +27,7 @@ const STACK_CUTOFF: u32 = 256;
 pub struct CpuCodeGenerator<'a, Tgt: Target> {
     pub namer: NameGenerator,
     pub name_env: HashMap<Rc<Tensor<Tgt>>, CBuffer>,
-    pub loop_iter_bindings: HashMap<BufferExprTerm, Either<String, i32>>,
+    pub loop_iter_bindings: HashMap<BufferVar, Either<String, i32>>,
     pub param_bindings: HashMap<Param<Tgt>, &'a dyn View<Tgt = Tgt>>,
     pub headers: HeaderEmitter,
 }
@@ -36,7 +37,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         Self::default()
     }
 
-    pub fn emit_kernel<W: Write, Aux: Clone + Debug>(
+    pub fn emit_kernel<W: Write, Aux: PrintableAux + Debug>(
         &mut self,
         imp: &'a ImplNode<Tgt, Aux>,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
@@ -120,6 +121,22 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 depth,
             )?;
             self.name_env.insert(Rc::clone(kernel_argument), buf);
+        }
+
+        // Emit the kernel call, passing pointers to the Impl function.
+        write!(main_body_str, "\n{}kernel(", indent(depth))?;
+        for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
+            let a = self.name_env.get(kernel_argument).unwrap();
+            write!(
+                main_body_str,
+                "{}{}",
+                self.c_index_ptr(a, &AffineForm::zero(), None),
+                if i < top_arg_tensors.len() - 1 {
+                    ", "
+                } else {
+                    ");\n"
+                },
+            )?;
         }
         writeln!(main_body_str)?;
 
@@ -244,7 +261,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 indent(depth)
             )?;
             self.loop_iter_bindings.insert(
-                BufferExprTerm::Pt(dim.try_into().unwrap(), tensor.identifier()),
+                BufferVar::Pt(dim.try_into().unwrap(), tensor.identifier()),
                 Either::Left(n.to_string()),
             );
         }
@@ -315,12 +332,15 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         }
     }
 
-    fn emit<Aux: Clone + Debug, W: Write>(
+    fn emit<Aux: PrintableAux + Debug, W: Write>(
         &mut self,
         w: &mut W,
         imp: &ImplNode<Tgt, Aux>,
         depth: usize,
     ) -> fmt::Result {
+        if let Some(h) = imp.aux().c_header() {
+            writeln!(w, "{}// {}", indent(depth), h)?;
+        }
         match imp {
             ImplNode::Loop(l) => {
                 // Emit a C loop nest or, if any tensor view is requires unrolling (i.e., vector
@@ -382,6 +402,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             }
             ImplNode::Pipeline(_) => todo!("Emit code for Pipeline"),
             ImplNode::SpecApp(p) => {
+                self.headers.emit_stdbool_and_assert_headers = true;
                 writeln!(
                     w,
                     "{}/* {}({}) */",
@@ -424,7 +445,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         let buffer = self.name_env.get(backing_tensor).unwrap();
                         let mut buffer_indexing_expr =
                             arguments[0].make_buffer_indexing_expr(&self.param_bindings);
-                        zero_points(&mut buffer_indexing_expr);
+                        buffer_indexing_expr = zero_points(buffer_indexing_expr);
                         let arg_expr = self.c_index_ptr(buffer, &buffer_indexing_expr, None);
                         writeln!(
                             w,
@@ -501,7 +522,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         }
     }
 
-    fn emit_rolled_loop<Aux: Clone + Debug, W: Write>(
+    fn emit_rolled_loop<Aux: PrintableAux + Debug, W: Write>(
         &mut self,
         w: &mut W,
         l: &Loop<Tgt, Aux>,
@@ -519,7 +540,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         // name and store that association in the `self.loop_iter_names`.
         for loop_tile in &l.tiles {
             for tt in loop_tile.tile.tile_dim_terms() {
-                let BufferExprTerm::TileIdx(dim, _) = tt else {
+                let BufferVar::TileIdx(dim, _) = tt else {
                     unreachable!();
                 };
                 let axis = loop_tile.axes[usize::from(dim)];
@@ -560,7 +581,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         Ok(())
     }
 
-    fn emit_unrolled_loop<Aux: Clone + Debug, W: Write>(
+    fn emit_unrolled_loop<Aux: PrintableAux + Debug, W: Write>(
         &mut self,
         w: &mut W,
         l: &Loop<Tgt, Aux>,
@@ -589,7 +610,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             // overwrite.
             for loop_tile in &l.tiles {
                 for tt in loop_tile.tile.tile_dim_terms() {
-                    let BufferExprTerm::TileIdx(dim, _) = &tt else {
+                    let BufferVar::TileIdx(dim, _) = &tt else {
                         unreachable!();
                     };
                     let axis = loop_tile.axes[usize::from(*dim)];
@@ -610,7 +631,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
     fn param_args_to_c_indices<F>(&self, arguments: &[Param<Tgt>], f: F) -> Vec<String>
     where
-        F: Fn(usize, &CBuffer, &AffineExpr<BufferExprTerm>) -> String,
+        F: Fn(usize, &CBuffer, &NonAffineExpr<BufferVar>) -> String,
     {
         arguments
             .iter()
@@ -619,17 +640,19 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 let backing_tensor = arg.backing_tensor(&self.param_bindings).unwrap();
                 let buffer = self.name_env.get(backing_tensor).unwrap();
                 let mut buffer_indexing_expr = arg.make_buffer_indexing_expr(&self.param_bindings);
-                zero_points(&mut buffer_indexing_expr);
+                buffer_indexing_expr = zero_points(buffer_indexing_expr);
                 f(idx, buffer, &buffer_indexing_expr)
             })
             .collect()
     }
 
-    fn sub_expr_bindings(&self, unbound_expr: AffineExpr<BufferExprTerm>) -> AffineExpr<CExprTerm> {
-        unbound_expr.map_terms(|sym| match self.loop_iter_bindings.get(&sym) {
-            Some(Either::Left(var_name)) => Either::Left(CExprTerm::CName(var_name.clone())),
-            Some(Either::Right(bound_constant)) => Either::Right(*bound_constant),
-            None => Either::Left(CExprTerm::Buffer(sym)),
+    fn sub_expr_bindings(&self, unbound_expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<CExprVar> {
+        unbound_expr.map_vars(&mut |v| match self.loop_iter_bindings.get(&v) {
+            Some(Either::Left(var_name)) => {
+                AffineForm::from(NonAffine::Leaf(CExprVar::CName(var_name.clone())))
+            }
+            Some(Either::Right(c)) => NonAffineExpr::constant(*c),
+            None => AffineForm::from(NonAffine::Leaf(CExprVar::Buffer(v))),
         })
     }
 
@@ -640,7 +663,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     fn c_index(
         &self,
         buffer: &CBuffer,
-        expr: &AffineExpr<BufferExprTerm>,
+        expr: &NonAffineExpr<BufferVar>,
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
@@ -675,7 +698,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index(
                     inner_vec_buffer,
-                    &vec_offset.try_into().unwrap(),
+                    &AffineForm::constant(vec_offset.try_into().unwrap()),
                     reinterpret,
                 )
             }
@@ -685,7 +708,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     fn c_index_vec(
         &self,
         buffer: &CBuffer,
-        expr: &AffineExpr<BufferExprTerm>,
+        expr: &NonAffineExpr<BufferVar>,
         reinterpret: Option<String>,
     ) -> String {
         // self is essentially unused, but included for consistency with c_index.
@@ -712,7 +735,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index_vec(
                     inner_vec_buffer,
-                    &vec_offset.try_into().unwrap(),
+                    &AffineForm::constant(vec_offset.try_into().unwrap()),
                     reinterpret,
                 )
             }
@@ -722,7 +745,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     fn c_index_ptr(
         &self,
         buffer: &CBuffer,
-        expr: &AffineExpr<BufferExprTerm>,
+        expr: &NonAffineExpr<BufferVar>,
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
@@ -765,7 +788,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 self.c_index_ptr(
                     inner_vec_buffer,
-                    &vec_offset.try_into().unwrap(),
+                    &AffineForm::constant(vec_offset.try_into().unwrap()),
                     reinterpret,
                 )
             }
@@ -822,20 +845,15 @@ fn get_vector(
         .expect("VecType to match dtype and volume of vector_size")
 }
 
-fn expr_to_c(e: &AffineExpr<CExprTerm>) -> String {
+fn expr_to_c(e: &AffineForm<NonAffine<CExprVar>>) -> String {
     let mut buf =
         e.0.iter()
-            .map(|Term(coef, sym)| match sym {
-                CExprTerm::CName(name) => {
-                    if *coef == 1 {
-                        name.clone()
-                    } else {
-                        format!("{} * {}", coef, name)
-                    }
-                }
-                CExprTerm::Buffer(_) => {
-                    // TODO: Guarantee all terms are C names at the type level.
-                    panic!("Expected all terms to be C names");
+            .map(|Term(coef, sym)| {
+                let sym_string = cexpr_subexpr_to_c(sym);
+                if *coef == 1 {
+                    sym_string
+                } else {
+                    format!("{} * {}", coef, sym_string)
                 }
             })
             .join(" + ");
@@ -849,39 +867,81 @@ fn expr_to_c(e: &AffineExpr<CExprTerm>) -> String {
     if buf.is_empty() {
         buf = String::from("0");
     }
-    buf
+    format!("({})", buf)
 }
 
-fn zero_points(expr: &mut AffineExpr<BufferExprTerm>) {
-    expr.0.retain(|t| match t.1 {
-        BufferExprTerm::Pt(_, _) => false,
-        BufferExprTerm::TileIdx(_, _) => true,
-    });
+fn cexpr_subexpr_to_c(subexpr: &NonAffine<CExprVar>) -> String {
+    match subexpr {
+        NonAffine::Constant(c) => c.to_string(),
+        NonAffine::Leaf(v) => match v {
+            CExprVar::CName(name) => name.clone(),
+            CExprVar::Buffer(_) => {
+                // TODO: Guarantee all terms are C names at the type level.
+                unreachable!("Expected all terms to be C names");
+            }
+        },
+        NonAffine::FloorDiv(v, d) => format!("({} / {})", expr_to_c(v), d),
+        NonAffine::Mod(v, m) => format!("({} % {})", expr_to_c(v), m),
+    }
+}
+
+fn zero_points(expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<BufferVar> {
+    expr.map_vars(&mut |v| match v {
+        BufferVar::TileIdx(_, _) => AffineForm::from(v),
+        BufferVar::Pt(_, _) => AffineForm::zero(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::expr_to_c;
-    use crate::codegen::c_utils::CExprTerm;
-    use crate::expr::{AffineExpr, Term};
+    use crate::codegen::c_utils::CExprVar;
+    use crate::expr::{AffineForm, NonAffine, Term};
 
     #[test]
     fn test_expr_zero_emitted() {
-        assert_eq!(expr_to_c(&AffineExpr(vec![], 0)), "0");
+        assert_eq!(expr_to_c(&AffineForm(vec![], 0)), "(0)");
     }
 
     #[test]
     fn test_intercept_zero_not_emitted() {
-        let x = CExprTerm::CName(String::from("x"));
-        assert_eq!(expr_to_c(&AffineExpr(vec![Term(2, x)], 0)), "2 * x")
+        let x = CExprVar::CName(String::from("x"));
+        let xa = NonAffine::Leaf(x);
+        assert_eq!(expr_to_c(&AffineForm(vec![Term(2, xa)], 0)), "(2 * x)")
     }
 
     #[test]
     fn test_lower_to_c_expr() {
-        let x = CExprTerm::CName(String::from("x"));
-        let y = CExprTerm::CName(String::from("y"));
-        assert_eq!(expr_to_c(&AffineExpr(vec![], 1)), "1");
-        assert_eq!(expr_to_c(&AffineExpr(vec![Term(1, x)], 1)), "x + 1");
-        assert_eq!(expr_to_c(&AffineExpr(vec![Term(2, y)], 3)), "2 * y + 3");
+        let x = CExprVar::CName(String::from("x"));
+        let y = CExprVar::CName(String::from("y"));
+        assert_eq!(expr_to_c(&AffineForm(vec![], 1)), "(1)");
+        assert_eq!(
+            expr_to_c(&AffineForm(vec![Term(1, NonAffine::Leaf(x))], 1)),
+            "(x + 1)"
+        );
+        assert_eq!(
+            expr_to_c(&AffineForm(vec![Term(2, NonAffine::Leaf(y.clone()))], 3)),
+            "(2 * y + 3)"
+        );
+        assert_eq!(
+            expr_to_c(&AffineForm(
+                vec![Term(
+                    2,
+                    NonAffine::FloorDiv(Box::new(NonAffine::Leaf(y.clone()).into()), 4)
+                )],
+                3
+            )),
+            "(2 * ((y) / 4) + 3)"
+        );
+        assert_eq!(
+            expr_to_c(&AffineForm(
+                vec![Term(
+                    2,
+                    NonAffine::Mod(Box::new(NonAffine::Leaf(y).into()), 4)
+                )],
+                3
+            )),
+            "(2 * ((y) % 4) + 3)"
+        );
     }
 }

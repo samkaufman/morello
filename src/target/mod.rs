@@ -32,7 +32,9 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn levels() -> Vec<Self::Level>;
     fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
 
+    // TODO: Canonicalization should unify the following two fns:
     fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout>;
+    fn move_destination_layouts(shape: &[DimSize]) -> Vec<Layout>;
 
     /// Yield target-specific actions which apply to a given [LogicalSpec].
     fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;

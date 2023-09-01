@@ -131,28 +131,28 @@ impl PrimitiveBasics {
         operand_auxes.into_iter().cloned().collect()
     }
 
-    pub fn parameter_shapes(&self) -> Vec<Shape> {
+    pub fn parameter_shapes(&self) -> SmallVec<[Shape; 3]> {
         match self.typ {
             PrimitiveSpecType::Matmul { .. } => {
                 let [m, k, n] = self.spec_shape[..] else {
                     panic!("Matmul spec_shape must have length 3")
                 };
-                vec![smallvec![m, k], smallvec![k, n], smallvec![m, n]]
+                smallvec![smallvec![m, k], smallvec![k, n], smallvec![m, n]]
             }
             PrimitiveSpecType::Conv { .. } => {
                 let [b, f, c, h, w, fh, fw] = self.spec_shape[..] else {
-                    unreachable!()
+                    panic!("Conv must have rank 7")
                 };
                 debug_assert!(h >= fh && w >= fw);
                 let img = smallvec![b, c, h, w];
                 let filt = smallvec![f, c, fh, fw];
                 let out = conv_infer_output_shape(&img, &filt);
-                vec![img, filt, out]
+                smallvec![img, filt, out]
             }
             PrimitiveSpecType::Move => {
-                vec![self.spec_shape.clone(), self.spec_shape.clone()]
+                smallvec![self.spec_shape.clone(), self.spec_shape.clone()]
             }
-            PrimitiveSpecType::Zero => vec![self.spec_shape.clone()],
+            PrimitiveSpecType::Zero => smallvec![self.spec_shape.clone()],
         }
     }
 
@@ -631,7 +631,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let o = components[1].parameter_shapes();
         let intermediate_shape = &o[components[1].typ.output_idx()];
 
-        for layout in Tgt::all_layouts_for_shape(intermediate_shape) {
+        for layout in Tgt::move_destination_layouts(intermediate_shape) {
             for level in Tgt::levels() {
                 // TODO: Need to implement `can_move_to`-style logic here.
 
@@ -684,24 +684,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         // TODO: Don't accumulate. Return an iterator.
         let mut results = Vec::with_capacity(MOVE_RESULTS_CAPACITY);
 
-        // Move actions can only be applied when both from and to the same-level memory.
-        let mut applying_to_move_spec = false;
-        if let LogicalSpec::Primitive(
-            PrimitiveBasics {
-                typ: PrimitiveSpecType::Move,
-                ..
-            },
-            ..,
-        ) = self
-        {
-            applying_to_move_spec = true;
-        }
-
         for (i, operand) in self.parameters().iter().enumerate() {
             // Yield actions for movement with register file destination, which
             // includes relayouts in registers and movements from level 1 to RF.
             let i = u8::try_from(i).unwrap();
-            for layout in Tgt::all_layouts_for_shape(operand.shape()) {
+            for layout in Tgt::move_destination_layouts(operand.shape()) {
+                // TODO: Prevent moving into packed layouts where strip size equals the whole dim.
                 for level in Tgt::possible_destination_levels(operand.level()) {
                     if !operand.can_move_to(&layout, &level) {
                         continue;

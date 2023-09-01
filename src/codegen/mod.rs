@@ -9,6 +9,7 @@ use crate::codegen::cpu::CpuCodeGenerator;
 use crate::color::do_color;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
+use crate::pprint::PrintableAux;
 use crate::target::{CpuMemoryLevel, Target, TargetId};
 use crate::utils::ToWriteFmt;
 use crate::views::Tensor;
@@ -49,16 +50,13 @@ pub trait CodeGen<Tgt: Target> {
 
     fn emit<W: fmt::Write>(&self, bench_samples: Option<u32>, out: &mut W) -> fmt::Result;
 
-    fn build(&self, print_code: bool, bench_samples: Option<u32>) -> Result<BuiltArtifact> {
+    fn build(&self, bench_samples: Option<u32>) -> Result<BuiltArtifact> {
         let dirname = tempdir()?.into_path();
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
 
         let source_file = std::fs::File::create(&source_path)?;
         self.emit(bench_samples, &mut ToWriteFmt(source_file))?;
-        if print_code {
-            self.emit(bench_samples, &mut ToWriteFmt(io::stdout()))?;
-        }
 
         let mut clang_cmd = Command::new(Self::compiler_path()?);
         if do_color() {
@@ -79,7 +77,7 @@ pub trait CodeGen<Tgt: Target> {
             );
         } else {
             // We still want to see warnings.
-            println!("{}", String::from_utf8_lossy(&clang_proc.stderr));
+            io::stderr().write_all(&clang_proc.stderr)?;
         }
 
         Ok(BuiltArtifact::new(
@@ -96,15 +94,11 @@ pub trait CodeGen<Tgt: Target> {
     /// build an executable which loops that number of times, returning the mean.
     /// The final `result` computed is the minimum of the means after running
     /// that executable `repeat` times.
-    fn time_impl_robustly(
-        &self,
-        print_code: bool,
-        repeat: Option<usize>,
-    ) -> Result<RobustTimingResult> {
+    fn time_impl_robustly(&self, repeat: Option<usize>) -> Result<RobustTimingResult> {
         let repeat = repeat.unwrap_or(10); // default: 10
 
         // Collect a single rough sample.
-        let time_check_artifact = self.build(false, Some(1))?;
+        let time_check_artifact = self.build(Some(1))?;
         let rough_secs = time_check_artifact.measure_time()?;
 
         // Choose a good number of iterations for benchmarks' inner loop.
@@ -115,7 +109,7 @@ pub trait CodeGen<Tgt: Target> {
         info!("Goal iterations: {inner_iters}");
 
         // Run main benchmark loop.
-        let artifact = self.build(print_code, Some(inner_iters))?;
+        let artifact = self.build(Some(inner_iters))?;
         let mut means = Vec::with_capacity(repeat);
         for _ in 0..repeat {
             let time = artifact.measure_time()?;
@@ -132,7 +126,11 @@ pub trait CodeGen<Tgt: Target> {
     }
 }
 
-impl<Tgt: Target<Level = CpuMemoryLevel>, Aux: Clone + Debug> CodeGen<Tgt> for ImplNode<Tgt, Aux> {
+impl<Tgt, Aux> CodeGen<Tgt> for ImplNode<Tgt, Aux>
+where
+    Tgt: Target<Level = CpuMemoryLevel>,
+    Aux: PrintableAux + Debug,
+{
     fn emit<W: fmt::Write>(&self, bench_samples: Option<u32>, out: &mut W) -> fmt::Result {
         let top_arg_tensors = self
             .parameters()

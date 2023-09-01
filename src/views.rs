@@ -1,8 +1,8 @@
 use crate::{
     alignment::aligned_approx,
     common::{DimSize, Shape},
-    expr::{AffineExpr, Term},
-    layout::BufferExprTerm,
+    expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term},
+    layout::BufferVar,
     opaque_symbol::OpaqueSymbol,
     target::Target,
     tensorspec::TensorSpec,
@@ -33,7 +33,7 @@ pub trait View: Debug {
     fn make_buffer_indexing_expr(
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-    ) -> AffineExpr<BufferExprTerm>;
+    ) -> NonAffineExpr<BufferVar>;
 
     /// Update environment to map all nested [Param]s to Views, given `args`.
     fn bind<'i>(
@@ -160,7 +160,7 @@ impl<Tgt: Target> View for Param<Tgt> {
     fn make_buffer_indexing_expr(
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-    ) -> AffineExpr<BufferExprTerm> {
+    ) -> NonAffineExpr<BufferVar> {
         let resolved = env.get(self).expect("Param should be in environment");
         resolved.make_buffer_indexing_expr(env)
     }
@@ -217,7 +217,7 @@ impl<Tgt: Target> View for Tensor<Tgt> {
     fn make_buffer_indexing_expr(
         &self,
         _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-    ) -> AffineExpr<BufferExprTerm> {
+    ) -> NonAffineExpr<BufferVar> {
         self.spec()
             .layout()
             .buffer_indexing_expr(&self.1, self.shape())
@@ -248,7 +248,7 @@ impl<V: View> View for CacheView<V> {
     fn make_buffer_indexing_expr(
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-    ) -> AffineExpr<BufferExprTerm> {
+    ) -> NonAffineExpr<BufferVar> {
         self.source.make_buffer_indexing_expr(env)
     }
 
@@ -280,13 +280,13 @@ impl<V: View> Tile<V> {
         &self.step_sizes
     }
 
-    /// Yields [`BufferExprTerm::TileIdx`] terms for each non-degenerate tiling dimension.
-    pub fn tile_dim_terms(&self) -> impl Iterator<Item = BufferExprTerm> + '_ {
+    /// Yields [`BufferVar::TileIdx`] terms for each non-degenerate tiling dimension.
+    pub fn tile_dim_terms(&self) -> impl Iterator<Item = BufferVar> + '_ {
         (0..self.shape.len()).filter_map(|dim| {
             let steps = self.steps_dim(dim.try_into().unwrap());
             debug_assert_ne!(steps, 0);
             if steps != 1 {
-                Some(BufferExprTerm::TileIdx(
+                Some(BufferVar::TileIdx(
                     dim.try_into().unwrap(),
                     self.expr_term_id.clone(),
                 ))
@@ -319,7 +319,7 @@ impl<T: View> View for Tile<T> {
     fn make_buffer_indexing_expr(
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-    ) -> AffineExpr<BufferExprTerm> {
+    ) -> NonAffineExpr<BufferVar> {
         let expr = self.view.make_buffer_indexing_expr(env);
         if self
             .shape()
@@ -329,28 +329,32 @@ impl<T: View> View for Tile<T> {
         {
             todo!("Implement support for sliding tilings.");
         }
+        let other_expr = expr.clone();
+        expr.map_vars(&mut |term_var| match term_var {
+            BufferVar::Pt(dim, _) => {
+                // TODO: Remove
+                assert!(
+                    usize::from(dim) < self.shape().len(),
+                    "dim {} >= shape.len() {}. This is {:?}. expr is {:?}",
+                    dim,
+                    self.shape().len(),
+                    self,
+                    other_expr
+                );
 
-        let mut new_expr = expr.clone();
-        for t in &expr.0 {
-            let BufferExprTerm::Pt(dim, _) = &t.1 else {
-                continue;
-            };
-
-            let size_in_dim = self.shape()[usize::from(*dim)];
-
-            let logical_substitution = {
-                let mut terms = vec![Term(1, BufferExprTerm::Pt(*dim, self.expr_term_id.clone()))];
-                if size_in_dim != self.view.shape()[usize::from(*dim)] {
+                let e = &self.expr_term_id;
+                let size_in_dim = self.shape()[usize::from(dim)];
+                let mut terms = vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e.clone())))];
+                if size_in_dim != self.view.shape()[usize::from(dim)] {
                     terms.push(Term(
                         size_in_dim.try_into().unwrap(),
-                        BufferExprTerm::TileIdx(*dim, self.expr_term_id.clone()),
+                        NonAffine::Leaf(BufferVar::TileIdx(dim, e.clone())),
                     ));
                 }
-                AffineExpr(terms, 0)
-            };
-            new_expr = new_expr.subs(&t.1, logical_substitution);
-        }
-        new_expr
+                AffineForm(terms, 0)
+            }
+            BufferVar::TileIdx(_, _) => AffineForm(vec![Term(1, NonAffine::Leaf(term_var))], 0),
+        })
     }
 
     fn bind<'i>(
@@ -379,7 +383,7 @@ impl<T: View> View for SqueezeDimsView<T> {
     fn make_buffer_indexing_expr(
         &self,
         _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-    ) -> AffineExpr<BufferExprTerm> {
+    ) -> NonAffineExpr<BufferVar> {
         todo!()
     }
 
@@ -409,7 +413,7 @@ impl<T: View> View for TransposeView<T> {
     fn make_buffer_indexing_expr(
         &self,
         _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-    ) -> AffineExpr<BufferExprTerm> {
+    ) -> NonAffineExpr<BufferVar> {
         todo!()
     }
 

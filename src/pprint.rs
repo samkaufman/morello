@@ -11,7 +11,7 @@ use clap::ValueEnum;
 use prettytable::{self, format, row, Cell};
 
 #[derive(Copy, Clone, PartialEq, ValueEnum)]
-pub enum PrintMode {
+pub enum ImplPrintStyle {
     Full,
     Compact,
 }
@@ -19,6 +19,7 @@ pub enum PrintMode {
 pub trait PrintableAux: Clone {
     fn extra_column_titles(&self) -> Vec<String>;
     fn extra_column_values(&self) -> Vec<String>;
+    fn c_header(&self) -> Option<String>;
 }
 
 impl PrintableAux for () {
@@ -29,9 +30,13 @@ impl PrintableAux for () {
     fn extra_column_values(&self) -> Vec<String> {
         vec![]
     }
+
+    fn c_header(&self) -> Option<String> {
+        None
+    }
 }
 
-pub fn pprint<Tgt, Aux>(root: &ImplNode<Tgt, Aux>, print_mode: PrintMode)
+pub fn pprint<Tgt, Aux>(root: &ImplNode<Tgt, Aux>, style: ImplPrintStyle)
 where
     Tgt: Target,
     Aux: PrintableAux,
@@ -41,13 +46,13 @@ where
     // Set up table
     let mut table = prettytable::Table::new();
     let mut titles = row!["Impl"];
-    match print_mode {
-        PrintMode::Full => {
+    match style {
+        ImplPrintStyle::Full => {
             for col_name in root.aux().extra_column_titles() {
                 titles.add_cell(Cell::new(&col_name));
             }
         }
-        PrintMode::Compact => {}
+        ImplPrintStyle::Compact => {}
     }
     table.set_titles(titles);
 
@@ -63,14 +68,7 @@ where
 
     let mut param_bindings = HashMap::new();
     root.bind(&args_ptrs, &mut param_bindings);
-    pprint_inner(
-        &mut table,
-        root,
-        &param_bindings,
-        &mut name_env,
-        0,
-        print_mode,
-    );
+    pprint_inner(&mut table, root, &param_bindings, &mut name_env, 0, style);
 
     // Format and print the table.
     let format = format::FormatBuilder::new()
@@ -90,7 +88,7 @@ fn pprint_inner<'a, Tgt, Aux>(
     param_bindings: &'a HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     name_env: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
     depth: usize,
-    print_mode: PrintMode,
+    style: ImplPrintStyle,
 ) where
     Tgt: Target,
     Aux: PrintableAux,
@@ -99,14 +97,14 @@ fn pprint_inner<'a, Tgt, Aux>(
         let indent_str = indent(depth);
         let main_str = format!("{indent_str}{line_top}");
         let mut r;
-        match print_mode {
-            PrintMode::Full => {
+        match style {
+            ImplPrintStyle::Full => {
                 r = row![main_str];
                 for column_value in imp.aux().extra_column_values() {
                     r.add_cell(Cell::new(&column_value));
                 }
             }
-            PrintMode::Compact => {
+            ImplPrintStyle::Compact => {
                 let joined = imp.aux().extra_column_values().join(", ");
                 if !joined.is_empty() {
                     r = row![format!("{indent_str}/* {joined} */\n{main_str}\n")];
@@ -119,19 +117,12 @@ fn pprint_inner<'a, Tgt, Aux>(
     }
 
     for child in imp.children() {
-        pprint_inner(
-            table,
-            child,
-            param_bindings,
-            name_env,
-            depth + 1,
-            print_mode,
-        );
+        pprint_inner(table, child, param_bindings, name_env, depth + 1, style);
     }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::common::Dtype;
     use crate::imp::subspecs::SpecApp;
@@ -177,7 +168,7 @@ mod test {
             .map(|(i, ts)| Param::new(i.try_into().unwrap(), ts));
         let spec_app: ImplNode<X86Target, ()> =
             SpecApp::new(Spec(logical_spec, X86Target::max_mem()), args).into();
-        pprint(&spec_app, PrintMode::Full);
-        pprint(&spec_app, PrintMode::Compact);
+        pprint(&spec_app, ImplPrintStyle::Full);
+        pprint(&spec_app, ImplPrintStyle::Compact);
     }
 }

@@ -1,67 +1,239 @@
-use itertools::Either;
 use std::{
-    num::TryFromIntError,
+    fmt::Display,
     ops::{Add, AddAssign, Mul, Sub},
 };
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct AffineExpr<T>(pub Vec<Term<T>>, pub i32);
+pub type NonAffineExpr<T> = AffineForm<NonAffine<T>>;
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct Term<T>(pub i32, pub T);
-
-impl<T: PartialEq> AffineExpr<T> {
-    pub fn subs(mut self, symbol: &T, replacement: AffineExpr<T>) -> AffineExpr<T> {
-        match self.0.iter().position(|t| &t.1 == symbol) {
-            Some(idx) => {
-                let coef = self.0[idx].0;
-                self.0.swap_remove(idx);
-                self + (replacement * coef)
-            }
-            None => self,
-        }
+pub trait Bounds {
+    /// The inclusive bounds of the value, if known.
+    fn bounds(&self) -> Option<(u32, u32)> {
+        None
     }
 
-    pub fn map_terms<U, F>(mut self, mut mapper: F) -> AffineExpr<U>
+    fn as_constant(&self) -> Option<i32> {
+        // TODO: Weird this returns i32, not u32. Unify types as u32 if possible.
+        if let Some((lower_bound, upper_bound)) = self.bounds() {
+            if lower_bound == upper_bound {
+                return Some(lower_bound.try_into().unwrap());
+            }
+        }
+        None
+    }
+}
+
+pub trait Substitute<R> {
+    type Atom: Atom;
+    type Output;
+
+    fn subs(self, atom: &Self::Atom, replacement: &R) -> Self::Output
     where
-        F: FnMut(T) -> Either<U, i32>,
-        U: PartialEq,
+        Self: Sized,
+        R: Clone + From<Self::Atom>,
     {
-        let mut accum = AffineExpr(vec![], self.1);
+        self.map_vars(&mut |a| {
+            if atom == &a {
+                replacement.clone()
+            } else {
+                a.into()
+            }
+        })
+    }
+
+    fn map_vars(self, mapper: &mut impl FnMut(Self::Atom) -> R) -> Self::Output;
+}
+
+pub trait Atom: Clone + Eq + Bounds {}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct AffineForm<T>(pub Vec<Term<T>>, pub i32);
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Term<T>(pub i32, pub T);
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum NonAffine<T> {
+    // TODO: `Constant` should be a kind of leaf
+    Constant(i32),
+    Leaf(T),
+    FloorDiv(Box<NonAffineExpr<T>>, u32),
+    Mod(Box<NonAffineExpr<T>>, u32),
+}
+
+impl<T> AffineForm<T> {
+    pub const fn zero() -> Self {
+        AffineForm(vec![], 0)
+    }
+
+    pub const fn constant(c: i32) -> Self {
+        AffineForm(vec![], c)
+    }
+}
+
+impl<T: Bounds> Bounds for AffineForm<T> {
+    fn bounds(&self) -> Option<(u32, u32)> {
+        let mut minimum = 0u32;
+        let mut maximum: Option<u32> = None;
+        for term in &self.0 {
+            let Some((term_min, term_max)) = term.1.bounds() else {
+                return None;
+            };
+            minimum = minimum.min(u32::try_from(term.0).unwrap() * term_min);
+            maximum = Some(
+                maximum
+                    .unwrap_or(0)
+                    .max(u32::try_from(term.0).unwrap() * term_max),
+            );
+        }
+        // maximum is `None` if there are no terms. In this case, minimum is 0.
+        let c = u32::try_from(self.1).unwrap();
+        Some((minimum + c, maximum.unwrap_or(0) + c))
+    }
+}
+
+impl<T: Bounds> Bounds for NonAffine<T> {
+    fn bounds(&self) -> Option<(u32, u32)> {
+        match self {
+            NonAffine::Constant(v) => {
+                let v = (*v).try_into().unwrap();
+                Some((v, v))
+            }
+            NonAffine::Leaf(v) => v.bounds(),
+            NonAffine::FloorDiv(v, d) => v.bounds().map(|(v_min, v_max)| (v_min / d, v_max / d)),
+            NonAffine::Mod(v, m) => {
+                v.bounds().map(|(_, v_max)| {
+                    // TODO: Tighten (raise) the minimum bound.
+                    let adjusted_max = v_max.min(m - 1);
+                    (0, adjusted_max)
+                })
+            }
+        }
+    }
+}
+
+impl Bounds for String {}
+impl Bounds for &str {}
+
+// An AffineForm can sub. an R for its atoms if it contains terms which themselves yield AffineForms
+// over R.
+impl<T, R, RO> Substitute<R> for AffineForm<T>
+where
+    T: Substitute<R, Output = AffineForm<RO>> + Bounds,
+    R: Clone + Eq,
+    RO: Bounds + Eq,
+{
+    type Atom = T::Atom;
+    type Output = AffineForm<RO>;
+
+    fn map_vars(mut self, mapper: &mut impl FnMut(Self::Atom) -> R) -> Self::Output {
+        let mut accum = AffineForm(vec![], self.1);
         for Term(c, s) in self.0.drain(..) {
-            match mapper(s) {
-                Either::Left(u) => accum += Term(c, u),
-                Either::Right(i) => accum += c * i,
+            // Flatten AffineForms resulting from the substitution.
+            let subbed = s.map_vars(mapper);
+            if subbed.as_constant() != Some(0) {
+                accum += subbed * c;
             }
         }
         accum
     }
 }
 
-impl<T> PartialEq<i32> for &AffineExpr<T> {
+impl<T, R, RO> Substitute<R> for NonAffine<T>
+where
+    T: Substitute<R, Output = NonAffineExpr<RO>> + Bounds,
+    R: Clone + Eq,
+    RO: Bounds + Eq,
+{
+    type Atom = T::Atom;
+    type Output = NonAffineExpr<RO>;
+
+    fn map_vars(self, mapper: &mut impl FnMut(Self::Atom) -> R) -> Self::Output {
+        match self {
+            NonAffine::Constant(c) => NonAffineExpr::constant(c),
+            NonAffine::Leaf(v) => v.map_vars(mapper),
+            NonAffine::FloorDiv(v, d) => {
+                let subbed = v.map_vars(mapper);
+                if let Some(c) = subbed.as_constant() {
+                    NonAffineExpr::constant(c)
+                } else {
+                    AffineForm::from(NonAffine::FloorDiv(Box::new(subbed), d))
+                }
+            }
+            NonAffine::Mod(v, m) => {
+                let subbed = v.map_vars(mapper);
+                if let Some(c) = subbed.as_constant() {
+                    NonAffineExpr::constant(c)
+                } else {
+                    AffineForm::from(NonAffine::Mod(Box::new(subbed), m))
+                }
+            }
+        }
+    }
+}
+
+// Any type implementing `Atom` can be replaced with anything into which that type can be converted.
+// The implementation just checks equality and returns either the (converted) atom or the
+// replacement.
+impl<T: Atom, R: Clone> Substitute<R> for T {
+    type Atom = T;
+    type Output = R;
+
+    fn map_vars(self, mapper: &mut impl FnMut(Self::Atom) -> R) -> R {
+        mapper(self)
+    }
+}
+
+impl<T> From<T> for AffineForm<T> {
+    fn from(t: T) -> Self {
+        AffineForm(vec![Term(1, t)], 0)
+    }
+}
+
+impl<T> From<Term<T>> for AffineForm<T> {
+    fn from(t: Term<T>) -> Self {
+        AffineForm(vec![t], 0)
+    }
+}
+
+impl<T: Atom> From<T> for NonAffineExpr<T> {
+    fn from(t: T) -> Self {
+        AffineForm(vec![Term(1, NonAffine::Leaf(t))], 0)
+    }
+}
+
+impl<T: Atom> From<Option<T>> for NonAffineExpr<T> {
+    fn from(t: Option<T>) -> Self {
+        match t {
+            Some(t) => AffineForm(vec![Term(1, NonAffine::Leaf(t))], 0),
+            None => NonAffineExpr::constant(0),
+        }
+    }
+}
+
+impl<T> PartialEq<i32> for &AffineForm<T> {
     fn eq(&self, rhs: &i32) -> bool {
         self.0.is_empty() && self.1 == *rhs
     }
 }
 
-impl<T: PartialEq> Add for AffineExpr<T> {
+impl<T: PartialEq> Add for AffineForm<T> {
     type Output = Self;
 
-    fn add(mut self, rhs: AffineExpr<T>) -> Self::Output {
+    fn add(mut self, rhs: AffineForm<T>) -> Self::Output {
         self += rhs;
         self
     }
 }
 
-impl<T: PartialEq> Add<Term<T>> for AffineExpr<T> {
+impl<T: PartialEq> Add<Term<T>> for AffineForm<T> {
     type Output = Self;
 
     fn add(self, rhs: Term<T>) -> Self::Output {
-        self + AffineExpr::from(rhs)
+        self + AffineForm::from(rhs)
     }
 }
 
-impl<T> Add<i32> for AffineExpr<T> {
+impl<T> Add<i32> for AffineForm<T> {
     type Output = Self;
 
     fn add(mut self, rhs: i32) -> Self::Output {
@@ -70,10 +242,10 @@ impl<T> Add<i32> for AffineExpr<T> {
     }
 }
 
-impl<T: PartialEq> AddAssign for AffineExpr<T> {
+impl<T: PartialEq> AddAssign for AffineForm<T> {
     fn add_assign(&mut self, rhs: Self) {
         // TODO: Keep the terms sorted, then join by merging (popping smaller head).
-        let AffineExpr(terms, intercept) = self;
+        let AffineForm(terms, intercept) = self;
         *intercept += rhs.1;
         for Term(c, s) in rhs.0 {
             if let Some(Term(c2, _)) = terms.iter_mut().find(|Term(_, s2)| &s == s2) {
@@ -85,19 +257,19 @@ impl<T: PartialEq> AddAssign for AffineExpr<T> {
     }
 }
 
-impl<T: PartialEq> AddAssign<Term<T>> for AffineExpr<T> {
+impl<T: PartialEq> AddAssign<Term<T>> for AffineForm<T> {
     fn add_assign(&mut self, rhs: Term<T>) {
-        self.add_assign(AffineExpr::from(rhs));
+        self.add_assign(AffineForm::from(rhs));
     }
 }
 
-impl<T> AddAssign<i32> for AffineExpr<T> {
+impl<T> AddAssign<i32> for AffineForm<T> {
     fn add_assign(&mut self, rhs: i32) {
         self.1 += rhs;
     }
 }
 
-impl<T> Sub<i32> for AffineExpr<T> {
+impl<T> Sub<i32> for AffineForm<T> {
     type Output = Self;
 
     fn sub(mut self, rhs: i32) -> Self::Output {
@@ -106,7 +278,7 @@ impl<T> Sub<i32> for AffineExpr<T> {
     }
 }
 
-impl<T> Mul<i32> for AffineExpr<T> {
+impl<T> Mul<i32> for AffineForm<T> {
     type Output = Self;
 
     fn mul(mut self, rhs: i32) -> Self::Output {
@@ -116,54 +288,94 @@ impl<T> Mul<i32> for AffineExpr<T> {
     }
 }
 
-impl<T> From<Term<T>> for AffineExpr<T> {
-    fn from(t: Term<T>) -> Self {
-        AffineExpr(vec![t], 0)
+impl<T: Atom> From<T> for NonAffine<T> {
+    fn from(t: T) -> Self {
+        NonAffine::Leaf(t)
     }
 }
 
-impl<T> From<i32> for AffineExpr<T> {
-    fn from(i: i32) -> Self {
-        AffineExpr(vec![], i)
+impl<T: Display> Display for AffineForm<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some((first_term, rest_terms)) = self.0.split_first() else {
+            return write!(f, "{}", self.1);
+        };
+
+        write_affine_term(f, first_term)?;
+        for t in rest_terms {
+            write!(f, " + ")?;
+            write_affine_term(f, t)?;
+        }
+        if self.1 != 0 {
+            write!(f, " + {}", self.1)?;
+        }
+        Ok(())
     }
 }
 
-impl<T> TryFrom<usize> for AffineExpr<T> {
-    type Error = TryFromIntError;
+impl<T: Display> Display for NonAffine<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NonAffine::Constant(v) => write!(f, "{}", v),
+            NonAffine::Leaf(v) => write!(f, "{}", v),
+            NonAffine::FloorDiv(v, d) => write!(f, "{} / {}", v, d),
+            NonAffine::Mod(v, m) => write!(f, "{} % {}", v, m),
+        }
+    }
+}
 
-    fn try_from(i: usize) -> Result<Self, Self::Error> {
-        Ok(AffineExpr(vec![], i.try_into()?))
+impl Atom for String {}
+impl Atom for &str {}
+
+fn write_affine_term<T: Display>(f: &mut std::fmt::Formatter<'_>, t: &Term<T>) -> std::fmt::Result {
+    if t.0 == 1 {
+        write!(f, "({})", t.1)
+    } else {
+        write!(f, "{}({})", t.0, t.1)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AffineExpr, Term};
+    use crate::expr::Substitute;
+
+    use super::{AffineForm, NonAffine, Term};
 
     #[test]
     fn test_intercept_scalar_addition() {
-        assert_eq!(AffineExpr::<()>(vec![], 1) + 2, AffineExpr::<()>(vec![], 3));
-        assert_eq!(AffineExpr::<()>(vec![], 1) + 0, AffineExpr::<()>(vec![], 1));
+        assert_eq!(
+            AffineForm::<&str>(vec![], 1) + 2,
+            AffineForm::<&str>(vec![], 3)
+        );
+        assert_eq!(
+            AffineForm::<&str>(vec![], 1) + 0,
+            AffineForm::<&str>(vec![], 1)
+        );
     }
 
     #[test]
     #[allow(clippy::erasing_op)]
     fn test_intercept_scalar_multiplication() {
-        assert_eq!(AffineExpr::<()>(vec![], 1) * 2, AffineExpr::<()>(vec![], 2));
-        assert_eq!(AffineExpr::<()>(vec![], 1) * 0, AffineExpr::<()>(vec![], 0));
+        assert_eq!(
+            AffineForm::<&str>(vec![], 1) * 2,
+            AffineForm::<&str>(vec![], 2)
+        );
+        assert_eq!(
+            AffineForm::<&str>(vec![], 1) * 0,
+            AffineForm::<&str>(vec![], 0)
+        );
     }
 
     #[test]
-    fn test_subs() {
-        let e = AffineExpr(
+    fn test_substitute_affine_expr_var_for_affine_expr() {
+        let e = AffineForm(
             vec![Term(2, String::from("x")), Term(4, String::from("y"))],
             1,
         );
-        let replacement = AffineExpr(
+        let replacement = AffineForm(
             vec![Term(1, String::from("y")), Term(2, String::from("z"))],
             1,
         );
-        let expected = AffineExpr(
+        let expected = AffineForm(
             vec![
                 Term(2, String::from("x")),
                 Term(4, String::from("y")),
@@ -171,6 +383,89 @@ mod tests {
             ],
             5,
         );
-        assert_eq!(e.subs(&"y".to_string(), replacement), expected);
+        let result = e.subs(&String::from("y"), &replacement);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_substitute_non_affine_expr_var_for_non_affine_term() {
+        let original_expr = AffineForm(vec![Term(1, NonAffine::Leaf("x"))], 1);
+        let replacement = AffineForm::from(NonAffine::FloorDiv(
+            Box::new(NonAffine::Leaf("y").into()),
+            2,
+        ));
+
+        let result = original_expr.subs(&"x", &replacement);
+
+        let expected = AffineForm(
+            vec![Term(
+                1,
+                NonAffine::FloorDiv(Box::new(NonAffine::Leaf("y").into()), 2),
+            )],
+            1,
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_substitute_non_affine_expr_var_for_affine_expr_1() {
+        let x = NonAffine::Leaf("x");
+        let y = NonAffine::Leaf("y");
+        let z = NonAffine::Leaf("z");
+
+        let original_expr = AffineForm(vec![Term(1, x)], 1);
+        let result = original_expr.subs(
+            &"x",
+            &AffineForm(vec![Term(1, y.clone()), Term(2, z.clone())], 1),
+        );
+        assert_eq!(result, AffineForm(vec![Term(1, y), Term(2, z)], 2,));
+    }
+
+    #[test]
+    fn test_substitute_non_affine_expr_var_for_affine_expr_2() {
+        let x = NonAffine::Leaf("x");
+        let y = NonAffine::Leaf("y");
+
+        let original_expr =
+            AffineForm(vec![Term(2, NonAffine::FloorDiv(Box::new(x.into()), 4))], 1);
+        let result = original_expr.subs(
+            &"x",
+            &AffineForm::from(NonAffine::FloorDiv(Box::new(y.clone().into()), 2)),
+        );
+        assert_eq!(
+            result,
+            AffineForm(
+                vec![Term(
+                    2,
+                    NonAffine::FloorDiv(
+                        Box::new(NonAffine::FloorDiv(Box::new(y.into()), 2).into()),
+                        4
+                    )
+                )],
+                1,
+            )
+        );
+    }
+
+    #[test]
+    fn test_substitute_non_affine_expr_var_for_affine_expr_3() {
+        let x = NonAffine::Leaf("x");
+        let y = NonAffine::Leaf("y");
+
+        let original_expr = AffineForm(vec![Term(2, NonAffine::Mod(Box::new(x.into()), 4))], 1);
+        let result = original_expr.subs(
+            &"x",
+            &AffineForm::from(NonAffine::Mod(Box::new(y.clone().into()), 2)),
+        );
+        assert_eq!(
+            result,
+            AffineForm(
+                vec![Term(
+                    2,
+                    NonAffine::Mod(Box::new(NonAffine::Mod(Box::new(y.into()), 2).into()), 4)
+                )],
+                1,
+            )
+        );
     }
 }

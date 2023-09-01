@@ -4,7 +4,7 @@ use morello::codegen::CodeGen;
 use morello::common::{Dtype, Shape};
 use morello::imp::kernels::KernelType;
 use morello::layout::row_major;
-use morello::pprint::{pprint, PrintMode};
+use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
@@ -95,7 +95,7 @@ fn main() {
     //                 Mult(al, ao, ar)
     //                 ValueAssign(ar, ai)
     println!("\nImpl resulting from manual scheduling:");
-    pprint(&implementation, PrintMode::Full);
+    pprint(&implementation, ImplPrintStyle::Full);
 
     // Finally, we can lower that Impl to the following C code:
     //
