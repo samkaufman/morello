@@ -17,12 +17,6 @@ use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
-#[derive(Clone, ValueEnum)]
-enum OutputFormat {
-    C,
-    Impl,
-}
-
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -47,6 +41,12 @@ struct Args {
 
     #[command(subcommand)]
     subcmd: Subcommand,
+}
+
+#[derive(Clone, ValueEnum)]
+enum OutputFormat {
+    C,
+    Impl,
 }
 
 #[derive(Parser)]
