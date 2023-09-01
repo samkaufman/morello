@@ -211,7 +211,7 @@ where
 
     match args.format {
         OutputFormat::C => {
-            synthesized_impl.emit(&mut ToWriteFmt(io::stdout()))?;
+            synthesized_impl.emit(None, &mut ToWriteFmt(io::stdout()))?;
         }
         OutputFormat::Impl => {
             // TODO: How to use Compact? Should we?
@@ -219,7 +219,7 @@ where
         }
     }
     if args.run {
-        let output = synthesized_impl.build()?.run()?;
+        let output = synthesized_impl.build(None)?.run()?;
         println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
     }
 
