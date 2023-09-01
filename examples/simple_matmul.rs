@@ -155,5 +155,7 @@ fn main() {
     //   }
 
     println!("\nThe above Impl lowered to C:");
-    implementation.emit(&mut ToWriteFmt(io::stdout())).unwrap();
+    implementation
+        .emit(None, &mut ToWriteFmt(io::stdout()))
+        .unwrap();
 }

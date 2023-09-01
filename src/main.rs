@@ -35,22 +35,30 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ImplPrintStyle::Full)]
     impl_style: ImplPrintStyle,
 
-    /// Compile and run the synthesized implementation
-    #[arg(short, long)]
-    run: bool,
-
     /// Target architecture
     #[arg(long, value_enum, default_value_t = TargetId::X86)]
     target: TargetId,
 
     #[command(subcommand)]
-    query_spec: QuerySpec,
+    subcmd: Subcommand,
 }
 
 #[derive(Clone, ValueEnum)]
 enum OutputFormat {
     C,
     Impl,
+}
+
+#[derive(Parser)]
+enum Subcommand {
+    #[command(flatten)]
+    Emit(QuerySpec),
+
+    /// Compile and run the synthesized implementation
+    Run(RunCmd),
+
+    /// Compile and benchmark the synthesized implementation
+    Bench(BenchCmd),
 }
 
 #[derive(clap::Subcommand)]
@@ -71,6 +79,22 @@ enum QuerySpec {
         filters_size: DimSize,
         size: DimSize,
     },
+}
+
+#[derive(Parser)]
+struct RunCmd {
+    #[command(subcommand)]
+    query_spec: QuerySpec,
+}
+
+#[derive(Parser)]
+struct BenchCmd {
+    /// Number of benchmark samples
+    #[arg(long, short)]
+    bench_samples: Option<u32>,
+
+    #[command(subcommand)]
+    query_spec: QuerySpec,
 }
 
 fn main() -> Result<()> {
@@ -100,7 +124,13 @@ where
     D: Database<Tgt> + Send + Sync,
     Tgt: Target<Level = CpuMemoryLevel>,
 {
-    let query_spec = match &args.query_spec {
+    let subcmd = &args.subcmd;
+    let query_spec = match subcmd {
+        Subcommand::Emit(query_spec) => query_spec,
+        Subcommand::Run(run_cmd) => &run_cmd.query_spec,
+        Subcommand::Bench(bench_cmd) => &bench_cmd.query_spec,
+    };
+    let logical_spec = match query_spec {
         QuerySpec::Transpose { size } => {
             let rm2 = row_major(2);
             let cm2 = Layout::Standard {
@@ -189,7 +219,7 @@ where
         }
     };
 
-    let spec = Spec(query_spec, Tgt::max_mem());
+    let spec = Spec(logical_spec, Tgt::max_mem());
 
     let start_time = std::time::Instant::now();
     let db_lock = RwLock::new(db);
@@ -209,18 +239,39 @@ where
         unreachable!();
     };
 
+    let bench_samples = if let Subcommand::Bench(BenchCmd { bench_samples, .. }) = subcmd {
+        // We need an exact number of samples when benchmarking.
+        match *bench_samples {
+            // The user specified a number of samples.
+            Some(bench_samples) => Some(bench_samples),
+            // The user didn't specify a number of samples, so we estimate
+            // a good number of samples.
+            None => Some(synthesized_impl.estimate_optimal_iters()?),
+        }
+    } else {
+        None
+    };
+
     match args.format {
         OutputFormat::C => {
-            synthesized_impl.emit(&mut ToWriteFmt(io::stdout()))?;
+            synthesized_impl.emit(bench_samples, &mut ToWriteFmt(io::stdout()))?;
         }
         OutputFormat::Impl => {
             // TODO: How to use Compact? Should we?
             pprint(synthesized_impl, args.impl_style)
         }
     }
-    if args.run {
-        let output = synthesized_impl.build()?.run()?;
-        println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
+
+    match subcmd {
+        Subcommand::Run(_) => {
+            let output = synthesized_impl.build()?.run()?;
+            println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
+        }
+        Subcommand::Bench(BenchCmd { .. }) => {
+            let result = synthesized_impl.bench(bench_samples.unwrap(), None)?;
+            println!("\nImpl Runtime: {:.4}s", result.result.as_secs_f32());
+        }
+        _ => {}
     }
 
     Ok(())

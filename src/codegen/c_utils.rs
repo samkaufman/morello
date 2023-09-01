@@ -52,6 +52,13 @@ pub enum CExprVar {
     CName(String),
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum InitType {
+    None,
+    Zero,
+    Random,
+}
+
 impl CBuffer {
     /// Returns the C identifier name if the receiver has just one (i.e., is not distributed).
     pub fn name(&self) -> Option<&str> {
@@ -76,7 +83,7 @@ impl CBuffer {
         matches!(self, CBuffer::VecVars { .. })
     }
 
-    pub fn emit<W: fmt::Write>(&self, w: &mut W, zero_init: bool, depth: usize) -> fmt::Result {
+    pub fn emit<W: fmt::Write>(&self, w: &mut W, init_type: InitType, depth: usize) -> fmt::Result {
         match self {
             CBuffer::HeapArray { name, size, dtype } => {
                 writeln!(w, "{}{} *restrict {};", indent(depth), c_type(*dtype), name)?;
@@ -89,21 +96,27 @@ impl CBuffer {
                     c_type(*dtype)
                 )?;
 
-                if zero_init {
-                    writeln!(
-                        w,
-                        "{}memset({}, 0, {}*sizeof({}));",
-                        indent(depth),
-                        name,
-                        size,
-                        c_type(*dtype)
-                    )?;
+                match init_type {
+                    InitType::Zero => {
+                        writeln!(
+                            w,
+                            "{}memset({}, 0, {}*sizeof({}));",
+                            indent(depth),
+                            name,
+                            size,
+                            c_type(*dtype)
+                        )
+                    }
+                    InitType::Random => self.emit_rand_init(w, depth, *size, name, *dtype),
+                    _ => Ok(()),
                 }
-
-                Ok(())
             }
             CBuffer::StackArray { name, size, dtype } => {
-                let epi = if zero_init { " = {0}" } else { "" };
+                let epi = if init_type == InitType::Zero {
+                    " = {0}"
+                } else {
+                    ""
+                };
                 writeln!(
                     w,
                     "{}{} {}[{}] __attribute__((aligned (128))){};",
@@ -112,24 +125,61 @@ impl CBuffer {
                     name,
                     size,
                     epi
-                )
+                )?;
+                if init_type == InitType::Random {
+                    self.emit_rand_init(w, depth, *size, name, *dtype)?;
+                }
+                Ok(())
             }
             CBuffer::SingleVecVar { name, vec_type } => {
-                let epi = if zero_init { " = {0}" } else { "" };
+                let epi = if init_type == InitType::Zero {
+                    " = {0}"
+                } else {
+                    ""
+                };
                 writeln!(w, "{}{} {}{};", indent(depth), vec_type.name, name, epi)
             }
             CBuffer::VecVars { inner_vecs, .. } => {
                 for inner_vec in inner_vecs {
-                    inner_vec.emit(w, zero_init, depth)?;
+                    inner_vec.emit(w, init_type, depth)?;
                 }
                 Ok(())
             }
             CBuffer::ValueVar { name, dtype } => {
-                let epi = if zero_init { " = {0}" } else { "" };
+                let epi = if init_type == InitType::Zero {
+                    " = {0}"
+                } else {
+                    ""
+                };
                 writeln!(w, "{}{} {}{};", indent(depth), c_type(*dtype), name, epi)
             }
             CBuffer::Ptr { .. } => unimplemented!(),
         }
+    }
+
+    /// Emit a loop that initializes buffer values with `rand()`.
+    fn emit_rand_init<W: fmt::Write>(
+        &self,
+        w: &mut W,
+        depth: usize,
+        size: u32,
+        name: &str,
+        dtype: Dtype,
+    ) -> fmt::Result {
+        writeln!(
+            w,
+            "{}for (size_t idx = 0; idx < {}; idx++) {{",
+            indent(depth),
+            size,
+        )?;
+        writeln!(
+            w,
+            "{}{}[idx] = ({})rand();",
+            indent(depth + 1),
+            name,
+            c_type(dtype)
+        )?;
+        writeln!(w, "{}}}", indent(depth))
     }
 
     pub fn emit_free<W: fmt::Write>(&self, w: &mut W, depth: usize) -> fmt::Result {
