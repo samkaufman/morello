@@ -216,7 +216,7 @@ fn parse_benchmark_output(output: &str) -> Result<f32> {
         .next()
         .ok_or("invalid output format")
         .map_err(Error::msg)?;
-    if !s_str.ends_with("s") || !ns_str.ends_with("ns") {
+    if !s_str.ends_with('s') || !ns_str.ends_with("ns") {
         bail!("invalid time unit");
     }
 
