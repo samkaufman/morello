@@ -50,7 +50,11 @@ pub trait CodeGen<Tgt: Target> {
 
     fn emit<W: fmt::Write>(&self, bench_samples: Option<u32>, out: &mut W) -> fmt::Result;
 
-    fn build(&self, bench_samples: Option<u32>) -> Result<BuiltArtifact> {
+    fn build(&self) -> Result<BuiltArtifact> {
+        self.build_impl(None)
+    }
+
+    fn build_impl(&self, bench_samples: Option<u32>) -> Result<BuiltArtifact> {
         let dirname = tempdir()?.into_path();
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
@@ -94,22 +98,28 @@ pub trait CodeGen<Tgt: Target> {
     /// build an executable which loops that number of times, returning the mean.
     /// The final `result` computed is the minimum of the means after running
     /// that executable `repeat` times.
-    fn time_impl_robustly(&self, repeat: Option<usize>) -> Result<RobustTimingResult> {
+    fn bench(
+        &self,
+        bench_samples: Option<u32>,
+        repeat: Option<usize>,
+    ) -> Result<RobustTimingResult> {
         let repeat = repeat.unwrap_or(10); // default: 10
 
-        // Collect a single rough sample.
-        let time_check_artifact = self.build(Some(1))?;
-        let rough_secs = time_check_artifact.measure_time()?;
+        let inner_iters = bench_samples.unwrap_or_else(|| {
+            // Collect a single rough sample.
+            let time_check_artifact = self.build_impl(Some(1)).unwrap();
+            let rough_secs = time_check_artifact.measure_time().unwrap();
 
-        // Choose a good number of iterations for benchmarks' inner loop.
-        let inner_iters = max(
-            MIN_SAMPLES,
-            (MIN_TRIAL_TIME_SECS / rough_secs.as_secs_f32()).ceil() as u32,
-        );
+            // Choose a good number of iterations for benchmarks' inner loop.
+            max(
+                MIN_SAMPLES,
+                (MIN_TRIAL_TIME_SECS / rough_secs.as_secs_f32()).ceil() as u32,
+            )
+        });
         info!("Goal iterations: {inner_iters}");
 
         // Run main benchmark loop.
-        let artifact = self.build(Some(inner_iters))?;
+        let artifact = self.build_impl(Some(inner_iters))?;
         let mut means = Vec::with_capacity(repeat);
         for _ in 0..repeat {
             let time = artifact.measure_time()?;
