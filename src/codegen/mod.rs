@@ -93,7 +93,7 @@ pub trait CodeGen<Tgt: Target> {
     }
 
     /// Estimate a good number of inner loop iterations.
-    fn estimate_optimal_itrs(&self) -> Result<u32> {
+    fn estimate_optimal_iters(&self) -> Result<u32> {
         // Collect a single rough sample.
         let time_check_artifact = self.build_impl(Some(1))?;
         let rough_secs = time_check_artifact.measure_time()?;
