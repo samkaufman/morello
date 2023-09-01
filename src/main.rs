@@ -255,7 +255,7 @@ where
         }
         Subcommand::Bench(BenchCmd { bench_samples, .. }) => {
             let result = results[0].bench(*bench_samples, None)?;
-            println!("Impl Runtime: {:.4}s", result.result.as_secs_f32());
+            println!("\nImpl Runtime: {:.4}s", result.result.as_secs_f32());
         }
         _ => {}
     }
