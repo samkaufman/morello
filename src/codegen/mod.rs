@@ -111,28 +111,12 @@ pub trait CodeGen<Tgt: Target> {
     /// build an executable which loops that number of times, returning the mean.
     /// The final `result` computed is the minimum of the means after running
     /// that executable `repeat` times.
-    fn bench(
-        &self,
-        bench_samples: Option<u32>,
-        repeat: Option<usize>,
-    ) -> Result<RobustTimingResult> {
+    fn bench(&self, bench_samples: u32, repeat: Option<usize>) -> Result<RobustTimingResult> {
         let repeat = repeat.unwrap_or(10); // default: 10
 
-        let inner_iters = bench_samples.unwrap_or_else(|| {
-            // Collect a single rough sample.
-            let time_check_artifact = self.build_impl(Some(1)).unwrap();
-            let rough_secs = time_check_artifact.measure_time().unwrap();
-
-            // Choose a good number of iterations for benchmarks' inner loop.
-            max(
-                MIN_SAMPLES,
-                (MIN_TRIAL_TIME_SECS / rough_secs.as_secs_f32()).ceil() as u32,
-            )
-        });
-        info!("Goal iterations: {inner_iters}");
-
         // Run main benchmark loop.
-        let artifact = self.build_impl(Some(inner_iters))?;
+        info!("Goal iterations: {bench_samples}");
+        let artifact = self.build_impl(Some(bench_samples))?;
         let mut means = Vec::with_capacity(repeat);
         for _ in 0..repeat {
             let time = artifact.measure_time()?;
@@ -143,7 +127,7 @@ pub trait CodeGen<Tgt: Target> {
         Ok(RobustTimingResult {
             result: *means.iter().min_by(|a, b| a.cmp(b)).unwrap(),
             outer_loop_samples: means,
-            inner_loop_iterations: inner_iters,
+            inner_loop_iterations: bench_samples,
             artifact,
         })
     }
