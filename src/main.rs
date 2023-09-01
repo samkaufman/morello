@@ -261,7 +261,7 @@ where
             println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
         }
         Subcommand::Bench(BenchCmd { bench_samples, .. }) => {
-            let result = results[0].bench(*bench_samples, None)?;
+            let result = synthesized_impl.bench(*bench_samples, None)?;
             println!("\nImpl Runtime: {:.4}s", result.result.as_secs_f32());
         }
         _ => {}
