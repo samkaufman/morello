@@ -90,6 +90,7 @@ struct RunCmd {
 #[derive(Parser)]
 struct BenchCmd {
     /// Number of benchmark samples
+    #[arg(long, short)]
     bench_samples: Option<u32>,
 
     #[command(subcommand)]
@@ -240,7 +241,13 @@ where
 
     match args.format {
         OutputFormat::C => {
-            synthesized_impl.emit(None, &mut ToWriteFmt(io::stdout()))?;
+            // TODO: With no bench_samples, how do we want to emit the auto-calculated bench_samples?
+            let bench_samples = if let Subcommand::Bench(BenchCmd { bench_samples, .. }) = subcmd {
+                bench_samples
+            } else {
+                &None
+            };
+            synthesized_impl.emit(*bench_samples, &mut ToWriteFmt(io::stdout()))?;
         }
         OutputFormat::Impl => {
             // TODO: How to use Compact? Should we?
