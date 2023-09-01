@@ -20,4 +20,6 @@ pub mod target;
 pub mod tensorspec;
 pub mod tiling;
 pub mod utils;
+#[cfg(feature = "verification")]
+pub mod verification;
 pub mod views;

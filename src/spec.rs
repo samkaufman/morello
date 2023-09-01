@@ -982,6 +982,44 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
         cloned
     }
+
+    #[cfg(feature = "verification")]
+    pub fn execute<S>(&self, args: &mut [ndarray::ArrayViewMutD<S>])
+    where
+        S: num_traits::Zero + ndarray::LinalgScalar + Clone,
+    {
+        use ndarray::Ix2;
+
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => match basics.typ {
+                PrimitiveSpecType::Matmul { accum } => {
+                    let [lhs, rhs, out] = args else {
+                        panic!("Matmul requires 3 arguments");
+                    };
+                    // TODO: Check shapes and dtypes are correct for this Spec.
+                    if !accum {
+                        out.fill(S::zero());
+                    }
+                    let lhs = lhs
+                        .view_mut()
+                        .into_dimensionality::<Ix2>()
+                        .expect("lhs should be rank 2");
+                    let rhs = rhs
+                        .view_mut()
+                        .into_dimensionality::<Ix2>()
+                        .expect("rhs should be rank 2");
+                    out.assign(&lhs.dot(&rhs));
+                }
+                PrimitiveSpecType::Conv { accum: _ } => todo!(),
+                PrimitiveSpecType::Move => todo!(),
+                PrimitiveSpecType::Zero => {
+                    // TODO: Check shape and dtype are correct for this Spec.
+                    args[0].fill(S::zero());
+                }
+            },
+            LogicalSpec::Compose { .. } => todo!(),
+        }
+    }
 }
 
 impl<Tgt: Target> Display for LogicalSpec<Tgt> {

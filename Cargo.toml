@@ -6,6 +6,10 @@ default-run = "morello"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = ["verification"]
+verification = ["dep:ndarray", "dep:num-traits"]
+
 [dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
 atty = "0.2"
@@ -14,12 +18,14 @@ by_address = "1.1.0"
 clap = { version = "4.2.5", features = ["derive"] }
 crossbeam-channel = "0.5.8"
 divrem = "1.0.0"
-enum-iterator = "1.4.1"
 enum_dispatch = "0.3.11"
+enum-iterator = "1.4.1"
 env_logger = "0.10.0"
 itertools = "0.11.0"
 lazy_static = "1.4.0"
 log = "0.4.0"
+ndarray = { version = "0.15.6", optional = true }
+num-traits = { version = "0.2.16", optional = true }
 prettytable-rs = "^0.10"
 rand = "0.8.5"
 rayon = "1.7.0"

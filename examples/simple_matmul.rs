@@ -12,6 +12,7 @@ use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
 use std::io;
+use std::panic;
 
 fn main() {
     // First, we'll define the Spec for the program we will implement: a 64x64x64 matrix
@@ -29,7 +30,7 @@ fn main() {
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Matmul { accum: false },
                 spec_shape: Shape::from([64, 64, 64].as_slice()),
-                dtype: Dtype::Uint8,
+                dtype: Dtype::Uint32,
             },
             vec![
                 TensorSpecAux {
@@ -73,89 +74,75 @@ fn main() {
             matmul_bb.move_param(2, CpuMemoryLevel::RF, row_major(2), None)
         })
         .subschedule(&[1, 1, 0], &|s| s.place(KernelType::ValueAssign))
-        .subschedule(&[1, 1, 1], &|s| s.place(KernelType::Mult))
+        .subschedule(&[1, 1, 1], &|s| s.split(1).place(KernelType::Mult))
         .subschedule(&[1, 1, 2], &|s| s.place(KernelType::ValueAssign));
 
     // The resulting implementation, as encoded in our Impl intermediate representation, is:
     //
-    // tile (aa: (16×64, u8) <-[0, 2]- #0, ab: (64×16, u8, c1, ua) <-[3, 1]- #1, ac: (16×16, u8, c1, ua) <-[0, 1]- #2)
-    // alloc ad: (16×64, u8, L1) <- aa
-    //     alloc ae: (64×16, u8, L1, c1, ua) <- ab
-    //     alloc af: (16×16, u8, L1, c1, ua) <- ac
-    //         tile (ag: (1×64, u8, L1) <-[0, 2]- ad, ah: (64×1, u8, L1, c1, ua) <-[3, 1]- ae, ai: (1×1, u8, L1, ua) <-[0, 1]- af)
-    //         tile (aj: (1×4, u8, L1, ua) <-[0, 1]- ag, ak: (4×1, u8, L1, c1, ua) <-[1, 2]- ah)
-    //             alloc al: (1×4, u8, RF)
-    //             tile (am: (1×1, u8, L1, ua) <-[0, 1]- aj, an: (1×1, u8, RF, ua) <-[0, 1]- al)
-    //                 ValueAssign(am, an)
-    //             alloc ao: (4×1, u8, RF)
-    //                 tile (ap: (1×1, u8, L1, ua) <-[0, 1]- ak, aq: (1×1, u8, RF, ua) <-[0, 1]- ao)
-    //                 ValueAssign(ap, aq)
-    //                 alloc ar: (1×1, u8, RF)
-    //                 ValueAssign(ai, ar)
-    //                 Mult(al, ao, ar)
-    //                 ValueAssign(ar, ai)
+    //   tile (aa: (8×16, u32, c1) <-[3, 1]- #1, ab: (16×16, u32, c1) <-[0, 1]- #2)
+    //   alloc ac: (16×8, u32, L1) <- #0
+    //     alloc ad: (8×16, u32, L1, c1) <- aa
+    //       alloc ae: (16×16, u32, L1, c1) <- ab
+    //         tile (af: (1×8, u32, L1) <-[0, 2]- ac, ag: (8×1, u32, L1, c1, ua) <-[3, 1]- ad, ah: (1×1, u32, L1, ua) <-[0, 1]- ae)
+    //           tile (ai: (1×4, u32, L1, ua) <-[0, 1]- af, aj: (4×1, u32, L1, c1, ua) <-[1, 2]- ag)
+    //             alloc ak: (1×4, u32, RF)
+    //               tile (al: (1×1, u32, L1, ua) <-[0, 1]- ai, am: (1×1, u32, RF, ua) <-[0, 1]- ak)
+    //                 ValueAssign(al, am)
+    //               alloc an: (4×1, u32, RF)
+    //                 tile (ao: (1×1, u32, L1, ua) <-[0, 1]- aj, ap: (1×1, u32, RF, ua) <-[0, 1]- an)
+    //                   ValueAssign(ao, ap)
+    //                 alloc aq: (1×1, u32, RF)
+    //                   ValueAssign(ah, aq)
+    //                   tile (ar: (1×1, u32, RF, ua) <-[0, 1]- ak, as: (1×1, u32, RF, ua) <-[1, 2]- an)
+    //                     Mult(ar, as, aq)
+    //                   ValueAssign(aq, ah)
     println!("\nImpl resulting from manual scheduling:");
     pprint(&implementation, ImplPrintStyle::Full);
 
-    // Finally, we can lower that Impl to the following C code:
+    // Finally, we can lower that Impl to the following C kernel:
     //
-    //   #include <inttypes.h>
-    //   #include <stdlib.h>
-    //   #include <stdint.h>
-    //   #include <stdio.h>
-    //   #include <string.h>
-    //   #include <time.h>
-    //   #include <immintrin.h>
     //   __attribute__((noinline))
     //   void kernel(
-    //     uint8_t *restrict aa,
-    //     uint8_t *restrict ab,
-    //     uint8_t *restrict ac
+    //     uint32_t *restrict aa,
+    //     uint32_t *restrict ab,
+    //     uint32_t *restrict ac
     //   ) {
-    //     for (int ad = 0; ad < 4; ad++) {
-    //     for (int ae = 0; ae < 4; ae++) {
+    //     for (int ad = 0; ad < 2; ad++) {
+    //       for (int ae = 0; ae < 16; ae++) {
     //       for (int af = 0; af < 16; af++) {
-    //       for (int ag = 0; ag < 16; ag++) {
-    //         for (int ah = 0; ah < 16; ah++) {
-    //           uint8_t ai[4] __attribute__((aligned (128)));
-    //           for (int aj = 0; aj < 4; aj++) {
-    //             ai[aj] = aa[1024 * ad + 64 * af + 4 * ah + aj];
+    //         for (int ag = 0; ag < 2; ag++) {
+    //           uint32_t ah[4] __attribute__((aligned (128)));
+    //           for (int ai = 0; ai < 4; ai++) {
+    //             ah[(ai)] = aa[(8 * ae + ai + 4 * ag)];
     //           }
-    //           uint8_t ak[4] __attribute__((aligned (128)));
-    //           for (int al = 0; al < 4; al++) {
-    //             ak[al] = ab[16 * ae + ag + 256 * ah + 64 * al];
+    //           uint32_t aj[4] __attribute__((aligned (128)));
+    //           for (int ak = 0; ak < 4; ak++) {
+    //             aj[(ak)] = ab[(32 * ak + 128 * ag + af + 16 * ad)];
     //           }
-    //           uint8_t am;
-    //           am = ac[1024 * ad + 16 * ae + 64 * af + ag];
-    //           am += ai[0] * ak[0];  /* Mult */
-    //           ac[1024 * ad + 16 * ae + 64 * af + ag] = am;
+    //           uint32_t al;
+    //           al = ac[(32 * ae + af + 16 * ad)];
+    //           for (int am = 0; am < 4; am++) {
+    //             al += ah[(am)] * aj[(am)];  /* Mult */
+    //           }
+    //           ac[(32 * ae + af + 16 * ad)] = al;
     //         }
     //       }
     //       }
     //     }
-    //     }
-    //   }
-    //
-    //   int main() {
-    //     uint8_t an[4096] __attribute__((aligned (128))) = {0};
-    //     uint8_t ao[4096] __attribute__((aligned (128))) = {0};
-    //     uint8_t ap[4096] __attribute__((aligned (128))) = {0};
-    //
-    //     kernel(&an[0], &ao[0], &ap[0]);
-    //
-    //     printf("64x64\n");
-    //     for (int a = 0; a < 64; a++) {
-    //     for (int b = 0; b < 64; b++) {
-    //       printf("%" PRIu8 " ", ap[64 * a + b]);
-    //     }
-    //     printf("\n");
-    //     }
-    //
-    //     return 0;
     //   }
 
     println!("\nThe above Impl lowered to C:");
     implementation
         .emit(None, None, &mut ToWriteFmt(io::stdout()))
         .unwrap();
+
+    // If the verification flag is set, let's additionally double-check that the lowered
+    // code builds and produces the correct results.
+    #[cfg(feature = "verification")]
+    {
+        let artifact = implementation.build(None).unwrap();
+        if !artifact.check_correctness(&spec) {
+            panic!("Generated code returned incorrect output");
+        }
+    }
 }

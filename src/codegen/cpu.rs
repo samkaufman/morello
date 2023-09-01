@@ -105,6 +105,66 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         out.write_str(&main_body_str)
     }
 
+    pub fn emit_load_inputs<W: Write>(
+        &mut self,
+        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+        out: &mut W,
+    ) -> fmt::Result {
+        if top_arg_tensors
+            .iter()
+            .any(|t| !t.spec().layout().is_row_major())
+        {
+            todo!("Support changing layout for non-row-major tensors");
+        }
+
+        write!(out, "int load_inputs(char *paths[]")?;
+        for i in 0..(top_arg_tensors.len() - 1) {
+            write!(out, ", void *restrict dest{i}")?;
+        }
+        writeln!(out, ") {{")?;
+
+        writeln!(out, "{}int fd;", indent(1))?;
+        writeln!(out, "{}void *mapped;", indent(1))?;
+
+        let input_cnt = top_arg_tensors.len() - 1;
+        for (idx, input_tensor) in top_arg_tensors[..input_cnt].iter().enumerate() {
+            // Open and mmap the data.
+            let input_shape = input_tensor.0.shape();
+            let value_cnt = input_shape
+                .iter()
+                .map(|v| usize::try_from(*v).unwrap())
+                .product::<usize>();
+            let byte_cnt = value_cnt * usize::from(input_tensor.spec().dtype().size());
+            writeln!(out)?;
+            writeln!(
+                out,
+                "{}if ((fd = open(paths[{idx}], O_RDONLY)) == -1)",
+                indent(1)
+            )?;
+            writeln!(out, "{}return 1;", indent(2))?;
+            writeln!(out, "{}if ((mapped = mmap(NULL, {byte_cnt}, PROT_READ, MAP_SHARED, fd, 0)) == MAP_FAILED)", indent(1))?;
+            writeln!(out, "{}return 2;", indent(2))?;
+            writeln!(out, "{}close(fd);", indent(1))?;
+
+            // Move into destination argument.
+            writeln!(out, "{}for (int i = 0; i < {value_cnt}; i++)", indent(1))?;
+            writeln!(
+                out,
+                "{}(({1} *)dest{idx})[i] = {2}((({1} *)mapped)[i]);",
+                indent(2),
+                input_tensor.spec().dtype().c_type(),
+                endian_convert_fn(input_tensor.spec().dtype())
+            )?;
+
+            // Un-map.
+            writeln!(out, "{}if (munmap(mapped, {byte_cnt}) != 0)", indent(1))?;
+            writeln!(out, "{}return 3;", indent(2))?;
+        }
+
+        writeln!(out, "{}return 0;", indent(1))?;
+        writeln!(out, "}}")
+    }
+
     pub fn emit_main<W: Write>(
         &mut self,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
@@ -114,11 +174,12 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         let mut main_body_str = String::new();
         let mut depth = 0_usize;
 
-        writeln!(main_body_str, "int main() {{")?;
+        writeln!(main_body_str, "int main(int argc, char *argv[]) {{")?;
         depth += 1;
 
         // Allocate a buffer for each Impl parameter and re-bind to a CBuffer corresponding to the
         // local-scope buffer. It will have been previously bound by emit_kernel to a CBuffer::Ptr.
+        let mut input_buf_names = vec![];
         for kernel_argument in top_arg_tensors {
             let spec = kernel_argument.spec();
             let buf =
@@ -132,8 +193,47 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 },
                 depth,
             )?;
+            input_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
             self.name_env.insert(Rc::clone(kernel_argument), buf);
+            writeln!(main_body_str)?;
         }
+        input_buf_names.pop(); // Remove output tensor buf.
+
+        // Load data, if provided.
+        writeln!(
+            main_body_str,
+            "{}if (argc == {}) {{",
+            indent(depth),
+            top_arg_tensors.len()
+        )?;
+        depth += 1;
+        writeln!(
+            main_body_str,
+            "{}int load_result = load_inputs(&argv[1]{});",
+            indent(depth),
+            input_buf_names.iter().map(|n| format!(", {}", n)).join("")
+        )?;
+        writeln!(main_body_str, "{}if (load_result != 0) {{", indent(depth))?;
+        depth += 1;
+        writeln!(
+            main_body_str,
+            "{}fprintf(stderr, \"Error loading input tensors.\");",
+            indent(depth)
+        )?;
+        writeln!(main_body_str, "{}return 2;", indent(depth))?;
+        depth -= 1;
+        writeln!(main_body_str, "{}}}", indent(depth))?;
+        depth -= 1;
+        writeln!(main_body_str, "{}}} else if (argc != 1) {{", indent(depth))?;
+        depth += 1;
+        writeln!(
+            main_body_str,
+            "{}fprintf(stderr, \"Unexpected number of arguments.\");",
+            indent(depth)
+        )?;
+        writeln!(main_body_str, "{}return 1;", indent(depth))?;
+        depth -= 1;
+        writeln!(main_body_str, "{}}}", indent(depth))?;
 
         // Emit the kernel call, passing pointers to the Impl function.
         if bench_samples.is_some() {
@@ -892,6 +992,16 @@ fn zero_points(expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<BufferVar> {
         BufferVar::TileIdx(_, _) => AffineForm::from(v),
         BufferVar::Pt(_, _) => AffineForm::zero(),
     })
+}
+
+/// Returns the function/macro name for converting a value of some type to processor byte order.
+///
+/// The functions/macros are included via `partials/cpu.c`.
+const fn endian_convert_fn(dtype: Dtype) -> &'static str {
+    match dtype {
+        Dtype::Uint8 => "",
+        Dtype::Uint32 => "LE_TO_CPU32",
+    }
 }
 
 #[cfg(test)]

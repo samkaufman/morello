@@ -5,7 +5,7 @@ use smallvec::smallvec;
 use std::sync::RwLock;
 use std::{io, path};
 
-use morello::codegen::CodeGen;
+use morello::codegen::{BuiltArtifact, CodeGen};
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
@@ -270,10 +270,16 @@ where
 
     match subcmd {
         Subcommand::Run(_) => {
-            let output = synthesized_impl.build()?.run()?;
+            let built_artifact = synthesized_impl.build(None)?;
+            let output = built_artifact.run()?;
             println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
+            #[cfg(feature = "verification")]
+            if !built_artifact.check_correctness(&spec) {
+                panic!("Generated code returned incorrect output");
+            }
         }
         Subcommand::Bench(_) => {
+            // TODO: Test correctness (allow disabling with flag)
             let result = synthesized_impl.bench(bench_samples.unwrap(), None)?;
             println!("\nImpl Runtime: {:.4}s", result.result.as_secs_f32());
         }
