@@ -38,10 +38,6 @@ struct Args {
     #[arg(long)]
     print_code: bool,
 
-    /// The number of benchmark samples
-    #[arg(long)]
-    bench_samples: Option<u32>,
-
     #[command(subcommand)]
     query_spec: QuerySpec,
 }
