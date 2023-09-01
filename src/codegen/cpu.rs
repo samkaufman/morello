@@ -127,13 +127,20 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         if bench_samples.is_some() {
             writeln!(
                 main_body_str,
-                "{}// Inlined kernel follows. This is for warm-up.",
+                "\n{}// Inlined kernel follows. This is for warm-up.",
                 indent(depth)
             )?;
         }
         let kernel_call_str = self.make_kernel_call(top_arg_tensors)?;
-        writeln!(main_body_str, "\n{}{}", indent(depth), kernel_call_str)?;
+        writeln!(
+            main_body_str,
+            "{}{}{}",
+            if bench_samples.is_some() { "" } else { "\n" },
+            indent(depth),
+            kernel_call_str
+        )?;
 
+        writeln!(main_body_str)?;
         if bench_samples.is_some() {
             // Emit the benchmarking code.
             self.emit_benchmarking(
@@ -175,7 +182,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 if i < top_arg_tensors.len() - 1 {
                     ", "
                 } else {
-                    ");\n"
+                    ");"
                 },
             )?;
         }
