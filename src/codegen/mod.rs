@@ -89,11 +89,11 @@ pub trait CodeGen<Tgt: Target> {
     }
 
     /// Benchmark several times, returning the minimum of inner loop means.
-    //
-    //  This will first estimate a good number of inner loop iterations, then
-    //  build an executable which loops that number of times, returning the mean.
-    //  The final `result` computed is the minimum of the means after running
-    //  that executable `repeat` times.
+    ///
+    /// This will first estimate a good number of inner loop iterations, then
+    /// build an executable which loops that number of times, returning the mean.
+    /// The final `result` computed is the minimum of the means after running
+    /// that executable `repeat` times.
     fn time_impl_robustly(
         &self,
         print_code: bool,
@@ -176,9 +176,9 @@ impl BuiltArtifact {
     }
 
     /// Executes and benchmarks an Impl on the local machine using Clang.
-    //
-    //  Returns the time in seconds. Measured by executing `self.bench_samples`
-    //  times and returning the mean.
+    ///
+    /// Returns the time in seconds. Measured by executing `self.bench_samples`
+    /// times and returning the mean.
     pub fn measure_time(&self) -> Result<f32> {
         assert!(self.bench_samples.is_some());
 
