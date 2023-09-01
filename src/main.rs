@@ -246,7 +246,7 @@ where
             Some(bench_samples) => Some(bench_samples),
             // The user didn't specify a number of samples, so we estimate
             // a good number of samples.
-            None => Some(synthesized_impl.estimate_optimal_itrs()?),
+            None => Some(synthesized_impl.estimate_optimal_iters()?),
         }
     } else {
         None
