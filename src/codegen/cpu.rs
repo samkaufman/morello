@@ -132,7 +132,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             )?;
         }
         let kernel_call_str = self.make_kernel_call(top_arg_tensors)?;
-        writeln!(main_body_str, "{}{}\n", indent(depth), kernel_call_str)?;
+        writeln!(main_body_str, "\n{}{}", indent(depth), kernel_call_str)?;
 
         if bench_samples.is_some() {
             // Emit the benchmarking code.
@@ -165,7 +165,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
     ) -> Result<String, fmt::Error> {
         let mut kernel_call_str = String::new();
-        write!(kernel_call_str, "\nkernel(")?;
+        write!(kernel_call_str, "kernel(")?;
         for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
             let a = self.name_env.get(kernel_argument).unwrap();
             write!(
