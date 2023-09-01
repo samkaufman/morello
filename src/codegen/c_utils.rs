@@ -127,7 +127,7 @@ impl CBuffer {
                 Ok(())
             }
             CBuffer::SingleVecVar { name, vec_type } => {
-                let epi = if matches!(init_type, InitType::Zero) {
+                let epi = if init_type == InitType::Zero {
                     " = {0}"
                 } else {
                     ""
@@ -141,7 +141,7 @@ impl CBuffer {
                 Ok(())
             }
             CBuffer::ValueVar { name, dtype } => {
-                let epi = if matches!(init_type, InitType::Zero) {
+                let epi = if init_type == InitType::Zero {
                     " = {0}"
                 } else {
                     ""
