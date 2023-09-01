@@ -220,7 +220,7 @@ fn parse_benchmark_output(output: &str) -> Result<f32> {
         bail!("invalid time unit");
     }
 
-    let s = s_str.trim_end_matches("s");
+    let s = s_str.trim_end_matches('s');
     let ns = ns_str.trim_end_matches("ns");
     Ok(s.parse::<f32>()? + (ns.parse::<f32>()? / 1e9))
 }
