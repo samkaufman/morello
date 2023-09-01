@@ -92,6 +92,19 @@ pub trait CodeGen<Tgt: Target> {
         ))
     }
 
+    /// Estimate a good number of inner loop iterations.
+    fn estimate_optimal_itrs(&self) -> Result<u32> {
+        // Collect a single rough sample.
+        let time_check_artifact = self.build_impl(Some(1))?;
+        let rough_secs = time_check_artifact.measure_time()?;
+
+        // Choose a good number of iterations for benchmarks' inner loop.
+        Ok(max(
+            MIN_SAMPLES,
+            (MIN_TRIAL_TIME_SECS / rough_secs.as_secs_f32()).ceil() as u32,
+        ))
+    }
+
     /// Benchmark several times, returning the minimum of inner loop means.
     ///
     /// This will first estimate a good number of inner loop iterations, then

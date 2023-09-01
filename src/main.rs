@@ -239,15 +239,22 @@ where
         unreachable!();
     };
 
+    let bench_samples = if let Subcommand::Bench(BenchCmd { bench_samples, .. }) = subcmd {
+        // We need an exact number of samples when benchmarking.
+        match *bench_samples {
+            // The user specified a number of samples.
+            Some(bench_samples) => Some(bench_samples),
+            // The user didn't specify a number of samples, so we estimate
+            // a good number of samples.
+            None => Some(synthesized_impl.estimate_optimal_itrs()?),
+        }
+    } else {
+        None
+    };
+
     match args.format {
         OutputFormat::C => {
-            // TODO: With no bench_samples, how do we want to emit the auto-calculated bench_samples?
-            let bench_samples = if let Subcommand::Bench(BenchCmd { bench_samples, .. }) = subcmd {
-                bench_samples
-            } else {
-                &None
-            };
-            synthesized_impl.emit(*bench_samples, &mut ToWriteFmt(io::stdout()))?;
+            synthesized_impl.emit(bench_samples, &mut ToWriteFmt(io::stdout()))?;
         }
         OutputFormat::Impl => {
             // TODO: How to use Compact? Should we?
@@ -260,8 +267,8 @@ where
             let output = synthesized_impl.build()?.run()?;
             println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
         }
-        Subcommand::Bench(BenchCmd { bench_samples, .. }) => {
-            let result = synthesized_impl.bench(*bench_samples, None)?;
+        Subcommand::Bench(BenchCmd { .. }) => {
+            let result = synthesized_impl.bench(bench_samples, None)?;
             println!("\nImpl Runtime: {:.4}s", result.result.as_secs_f32());
         }
         _ => {}
