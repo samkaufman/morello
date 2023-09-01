@@ -198,7 +198,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(out, "#pragma clang loop unroll(disable)")?; // preprocessor directives should not have indentation.
         writeln!(
             out,
-            "{}for (unsigned long bench_itr = 0; bench_itr < {}; ++bench_itr) {{",
+            "{}for (unsigned long bench_itr = 0; bench_itr < {}UL; ++bench_itr) {{",
             indent(depth),
             bench_samples
         )?;
