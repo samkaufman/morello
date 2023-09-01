@@ -95,7 +95,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     pub fn emit_main<W: Write>(
         &mut self,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
-        bench_samples: Option<usize>,
+        bench_samples: Option<u32>,
         out: &mut W,
     ) -> fmt::Result {
         let mut main_body_str = String::new();
@@ -186,7 +186,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         &mut self,
         kernel_call_str: &str,
         mut depth: usize,
-        bench_samples: usize,
+        bench_samples: u32,
         out: &mut W,
     ) -> Result<(), fmt::Error> {
         writeln!(out, "{}struct timespec start, end;", indent(depth))?;

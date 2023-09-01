@@ -40,7 +40,7 @@ struct Args {
 
     /// The number of benchmark samples
     #[arg(long)]
-    bench_samples: Option<usize>,
+    bench_samples: Option<u32>,
 
     #[command(subcommand)]
     query_spec: QuerySpec,
@@ -203,7 +203,7 @@ where
     println!();
 
     let bench_result = results[0].time_impl_robustly(args.print_code, None)?;
-    println!("Impl Runtime: {:.4}s", bench_result.result);
+    println!("Impl Runtime: {:.4}s", bench_result.result.as_secs_f32());
 
     Ok(())
 }

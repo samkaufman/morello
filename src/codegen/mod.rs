@@ -20,9 +20,11 @@ use std::fmt;
 use std::fmt::Debug;
 use std::io;
 use std::io::Write;
+use std::ops::Div;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::rc::Rc;
+use std::time::Duration;
 use tempfile::tempdir;
 
 const CLI_FLAGS: [&str; 3] = ["-std=gnu99", "-O3", "-o"];
@@ -30,7 +32,7 @@ const CLI_FLAGS: [&str; 3] = ["-std=gnu99", "-O3", "-o"];
 const X86_CLI_VEC_FLAGS: [&str; 2] = ["-fopenmp", "-mavx2"];
 const ARM_CLI_VEC_FLAGS: [&str; 1] = ["-fopenmp"];
 
-const MIN_SAMPLES: usize = 3;
+const MIN_SAMPLES: u32 = 3;
 const MIN_TRIAL_TIME_SECS: f32 = 2.5;
 
 pub trait CodeGen<Tgt: Target> {
@@ -45,9 +47,9 @@ pub trait CodeGen<Tgt: Target> {
         }
     }
 
-    fn emit<W: fmt::Write>(&self, bench_samples: Option<usize>, out: &mut W) -> fmt::Result;
+    fn emit<W: fmt::Write>(&self, bench_samples: Option<u32>, out: &mut W) -> fmt::Result;
 
-    fn build(&self, print_code: bool, bench_samples: Option<usize>) -> Result<BuiltArtifact> {
+    fn build(&self, print_code: bool, bench_samples: Option<u32>) -> Result<BuiltArtifact> {
         let dirname = tempdir()?.into_path();
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
@@ -108,7 +110,7 @@ pub trait CodeGen<Tgt: Target> {
         // Choose a good number of iterations for benchmarks' inner loop.
         let inner_iters = max(
             MIN_SAMPLES,
-            (MIN_TRIAL_TIME_SECS / rough_secs).ceil() as usize,
+            (MIN_TRIAL_TIME_SECS / rough_secs.as_secs_f32()).ceil() as u32,
         );
         info!("Goal iterations: {inner_iters}");
 
@@ -116,16 +118,13 @@ pub trait CodeGen<Tgt: Target> {
         let artifact = self.build(print_code, Some(inner_iters))?;
         let mut means = Vec::with_capacity(repeat);
         for _ in 0..repeat {
-            let secs = artifact.measure_time()?;
-            info!("Sample runtime result {secs}s");
-            means.push(secs);
+            let time = artifact.measure_time()?;
+            info!("Sample runtime result {}s", time.as_secs_f32());
+            means.push(time);
         }
 
         Ok(RobustTimingResult {
-            result: *means
-                .iter()
-                .min_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap(),
+            result: *means.iter().min_by(|a, b| a.cmp(b)).unwrap(),
             outer_loop_samples: means,
             inner_loop_iterations: inner_iters,
             artifact,
@@ -134,7 +133,7 @@ pub trait CodeGen<Tgt: Target> {
 }
 
 impl<Tgt: Target<Level = CpuMemoryLevel>, Aux: Clone + Debug> CodeGen<Tgt> for ImplNode<Tgt, Aux> {
-    fn emit<W: fmt::Write>(&self, bench_samples: Option<usize>, out: &mut W) -> fmt::Result {
+    fn emit<W: fmt::Write>(&self, bench_samples: Option<u32>, out: &mut W) -> fmt::Result {
         let top_arg_tensors = self
             .parameters()
             .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
@@ -151,7 +150,7 @@ pub struct BuiltArtifact {
     binary_path: PathBuf,
     source_path: PathBuf,
     whole_dir: PathBuf,
-    bench_samples: Option<usize>,
+    bench_samples: Option<u32>,
 }
 
 impl BuiltArtifact {
@@ -159,7 +158,7 @@ impl BuiltArtifact {
         binary_path: PathBuf,
         source_path: PathBuf,
         whole_dir: PathBuf,
-        bench_samples: Option<usize>,
+        bench_samples: Option<u32>,
     ) -> Self {
         Self {
             binary_path,
@@ -179,7 +178,7 @@ impl BuiltArtifact {
     ///
     /// Returns the time in seconds. Measured by executing `self.bench_samples`
     /// times and returning the mean.
-    pub fn measure_time(&self) -> Result<f32> {
+    pub fn measure_time(&self) -> Result<Duration> {
         assert!(self.bench_samples.is_some());
 
         let output = self.run()?;
@@ -191,18 +190,18 @@ impl BuiltArtifact {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut lines = stdout.lines();
         let first_line = lines.next().unwrap();
-        Ok(parse_benchmark_output(first_line)? / self.bench_samples.unwrap() as f32)
+        Ok(parse_benchmark_output(first_line)?.div(self.bench_samples.unwrap()))
     }
 }
 
 pub struct RobustTimingResult {
-    pub result: f32,
-    pub outer_loop_samples: Vec<f32>,
-    pub inner_loop_iterations: usize,
+    pub result: Duration,
+    pub outer_loop_samples: Vec<Duration>,
+    pub inner_loop_iterations: u32,
     pub artifact: BuiltArtifact,
 }
 
-fn parse_benchmark_output(output: &str) -> Result<f32> {
+fn parse_benchmark_output(output: &str) -> Result<Duration> {
     let mut outs = output.split_whitespace();
     if outs.next() != Some("cpu:") {
         bail!("expected \"cpu:\" prefix in benchmark output");
@@ -222,7 +221,7 @@ fn parse_benchmark_output(output: &str) -> Result<f32> {
 
     let s = s_str.trim_end_matches('s');
     let ns = ns_str.trim_end_matches("ns");
-    Ok(s.parse::<f32>()? + (ns.parse::<f32>()? / 1e9))
+    Ok(Duration::new(s.parse::<u64>()?, ns.parse::<u32>()?))
 }
 
 #[cfg(test)]
@@ -233,10 +232,16 @@ mod tests {
     fn test_parse_benchmark_output_valid_input() {
         assert_eq!(
             parse_benchmark_output("cpu: 10s 500ns").unwrap(),
-            10.0000005
+            Duration::new(10, 500)
         );
-        assert_eq!(parse_benchmark_output("cpu: 5s 0ns").unwrap(), 5.0);
-        assert_eq!(parse_benchmark_output("cpu: 0s 1000000000ns").unwrap(), 1.0);
+        assert_eq!(
+            parse_benchmark_output("cpu: 5s 0ns").unwrap(),
+            Duration::new(5, 0)
+        );
+        assert_eq!(
+            parse_benchmark_output("cpu: 0s 1000000000ns").unwrap(),
+            Duration::new(1, 0)
+        );
     }
 
     #[test]
@@ -249,16 +254,14 @@ mod tests {
     fn test_parse_benchmark_output_extra_whitespace() {
         assert_eq!(
             parse_benchmark_output("cpu:   10s  500ns").unwrap(),
-            10.0000005
+            Duration::new(10, 500)
         );
     }
 
     #[test]
+    #[should_panic(expected = "invalid digit found in string")]
     fn test_parse_benchmark_output_negative_values() {
-        assert_eq!(
-            parse_benchmark_output("cpu: -10s -500ns").unwrap(),
-            -10.0000005
-        );
+        parse_benchmark_output("cpu: -10s -500ns").unwrap();
     }
 
     #[test]
@@ -268,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid float literal")]
+    #[should_panic(expected = "invalid digit found in string")]
     fn test_parse_benchmark_output_invalid_time_value() {
         parse_benchmark_output("cpu: ten_s 500ns").unwrap();
     }
