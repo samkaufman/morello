@@ -275,7 +275,7 @@ where
             let output = synthesized_impl.build()?.run()?;
             println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
         }
-        Subcommand::Bench(BenchCmd { .. }) => {
+        Subcommand::Bench(_) => {
             let result = synthesized_impl.bench(bench_samples.unwrap(), None)?;
             println!("\nImpl Runtime: {:.4}s", result.result.as_secs_f32());
         }
