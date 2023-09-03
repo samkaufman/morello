@@ -47,6 +47,7 @@ struct Args {
 enum OutputFormat {
     C,
     Impl,
+    Both,
 }
 
 #[derive(Parser)]
@@ -252,14 +253,15 @@ where
         None
     };
 
-    match args.format {
-        OutputFormat::C => {
-            synthesized_impl.emit(bench_samples, &mut ToWriteFmt(io::stdout()))?;
-        }
-        OutputFormat::Impl => {
-            // TODO: How to use Compact? Should we?
-            pprint(synthesized_impl, args.impl_style)
-        }
+    if let OutputFormat::C | OutputFormat::Both = args.format {
+        synthesized_impl.emit(bench_samples, &mut ToWriteFmt(io::stdout()))?;
+    }
+    if let OutputFormat::Both = args.format {
+        println!();
+    }
+    if let OutputFormat::Impl | OutputFormat::Both = args.format {
+        // TODO: How to use Compact? Should we?
+        pprint(synthesized_impl, args.impl_style);
     }
 
     match subcmd {
