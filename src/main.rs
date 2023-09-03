@@ -13,7 +13,7 @@ use morello::layout::Layout;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
-use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
+use morello::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
@@ -36,8 +36,8 @@ struct Args {
     impl_style: ImplPrintStyle,
 
     /// Target architecture
-    #[arg(long, value_enum, default_value_t = TargetId::X86)]
-    target: TargetId,
+    #[arg(short, long, value_enum, default_value_t = TargetArch::Local)]
+    target_arch: TargetArch,
 
     #[command(subcommand)]
     subcmd: Subcommand,
@@ -47,6 +47,13 @@ struct Args {
 enum OutputFormat {
     C,
     Impl,
+}
+
+#[derive(Clone, ValueEnum)]
+enum TargetArch {
+    Local,
+    X86,
+    Arm,
 }
 
 #[derive(Parser)]
@@ -101,15 +108,28 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     color::set_color_mode(args.color);
-    match &args.target {
-        TargetId::X86 => {
+    match &args.target_arch {
+        TargetArch::Local => {
+            #[cfg(target_arch = "x86_64")]
+            let db = InMemDatabase::<X86Target>::new();
+            #[cfg(target_arch = "aarch64")]
+            let db = InMemDatabase::<ArmTarget>::new();
+            #[cfg(all(not(target_arch = "x86_64"), not(target_arch = "aarch64")))]
+            unimplemented!("Only `x86_64` and `aarch64` are supported for now");
+
+            match &args.db {
+                Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
+                None => main_per_db(&args, db),
+            }
+        }
+        TargetArch::X86 => {
             let db = InMemDatabase::<X86Target>::new();
             match &args.db {
                 Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
                 None => main_per_db(&args, db),
             }
         }
-        TargetId::Arm => {
+        TargetArch::Arm => {
             let db = InMemDatabase::<ArmTarget>::new();
             match &args.db {
                 Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),

@@ -14,7 +14,6 @@ use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
 
-use clap::ValueEnum;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::{Debug, Display};
@@ -57,7 +56,7 @@ pub trait MemoryLevel:
     }
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy)]
 pub enum TargetId {
     X86,
     Arm,
