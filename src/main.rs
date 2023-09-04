@@ -13,9 +13,7 @@ use morello::layout::Layout;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
-use morello::target::{
-    get_target_id_for_local, ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target,
-};
+use morello::target::{local_target_id, ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
@@ -114,7 +112,7 @@ fn main() -> Result<()> {
     let target_id = match &args.target_arch {
         TargetArch::X86 => TargetId::X86,
         TargetArch::Arm => TargetId::Arm,
-        TargetArch::Local => get_target_id_for_local(),
+        TargetArch::Local => local_target_id(),
     };
     match target_id {
         TargetId::X86 => {
