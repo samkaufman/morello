@@ -110,9 +110,9 @@ fn main() -> Result<()> {
     color::set_color_mode(args.color);
 
     let target_id = match &args.target_arch {
+        TargetArch::Local => local_target_id(),
         TargetArch::X86 => TargetId::X86,
         TargetArch::Arm => TargetId::Arm,
-        TargetArch::Local => local_target_id(),
     };
     match target_id {
         TargetId::X86 => {
