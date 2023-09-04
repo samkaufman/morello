@@ -13,7 +13,9 @@ use morello::layout::Layout;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
-use morello::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
+use morello::target::{
+    get_target_id_for_local, ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target,
+};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
@@ -108,28 +110,21 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     color::set_color_mode(args.color);
-    match &args.target_arch {
-        TargetArch::Local => {
-            #[cfg(target_arch = "x86_64")]
-            let db = InMemDatabase::<X86Target>::new();
-            #[cfg(target_arch = "aarch64")]
-            let db = InMemDatabase::<ArmTarget>::new();
-            #[cfg(all(not(target_arch = "x86_64"), not(target_arch = "aarch64")))]
-            unimplemented!("Only `x86_64` and `aarch64` are supported for now");
 
-            match &args.db {
-                Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
-                None => main_per_db(&args, db),
-            }
-        }
-        TargetArch::X86 => {
+    let target_id = match &args.target_arch {
+        TargetArch::X86 => TargetId::X86,
+        TargetArch::Arm => TargetId::Arm,
+        TargetArch::Local => get_target_id_for_local(),
+    };
+    match target_id {
+        TargetId::X86 => {
             let db = InMemDatabase::<X86Target>::new();
             match &args.db {
                 Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
                 None => main_per_db(&args, db),
             }
         }
-        TargetArch::Arm => {
+        TargetId::Arm => {
             let db = InMemDatabase::<ArmTarget>::new();
             match &args.db {
                 Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
