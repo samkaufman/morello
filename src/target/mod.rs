@@ -63,10 +63,10 @@ pub enum TargetId {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn get_target_id_for_local() -> TargetId {
+pub fn local_target_id() -> TargetId {
     TargetId::X86
 }
 #[cfg(target_arch = "aarch64")]
-pub fn get_target_id_for_local() -> TargetId {
+pub fn local_target_id() -> TargetId {
     TargetId::Arm
 }
