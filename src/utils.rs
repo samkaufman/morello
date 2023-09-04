@@ -1,4 +1,6 @@
 use crate::memorylimits::MemVec;
+
+use itertools::Itertools;
 use std::fmt;
 use std::io;
 use std::iter;
@@ -9,6 +11,45 @@ const INDENT_SIZE: usize = 2;
 // that are the next highest power of 2. This discretizes the cache a bit, even
 // though it
 const SNAP_CAP_TO_POWER_OF_TWO: bool = true;
+
+pub const ASCII_CHARS: [char; 26] = ascii_chars();
+pub const ASCII_PAIRS: [[char; 2]; 676] = ascii_pairs();
+
+/// Wraps an [io::Write] for use as a [fmt::Write].
+pub struct ToWriteFmt<T: io::Write>(pub T);
+
+// Wraps a [fmt::Write] to prepend [str] to each line.
+pub struct LinePrefixWrite<'a, W: fmt::Write>(W, &'a str, bool);
+
+impl<T: io::Write> fmt::Write for ToWriteFmt<T> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0.write_all(s.as_bytes()).map_err(|_| fmt::Error)
+    }
+}
+
+impl<'a, W: fmt::Write> LinePrefixWrite<'a, W> {
+    pub fn new(inner: W, line_prefix: &'a str) -> Self {
+        LinePrefixWrite(inner, line_prefix, true)
+    }
+}
+
+impl<'a, W: fmt::Write> fmt::Write for LinePrefixWrite<'a, W> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        if self.2 && !s.is_empty() {
+            self.0.write_str(self.1)?;
+        }
+
+        let mut split_iter = s.split_inclusive('\n').peekable();
+        while let Some(substring) = split_iter.next() {
+            self.0.write_str(substring)?;
+            if split_iter.peek().is_some() {
+                self.0.write_str(self.1)?;
+            }
+        }
+        self.2 = s.ends_with('\n');
+        Ok(())
+    }
+}
 
 const fn ascii_chars() -> [char; 26] {
     let mut chars = ['\0'; 26];
@@ -35,20 +76,6 @@ const fn ascii_pairs() -> [[char; 2]; 676] {
         c1 += 1;
     }
     result
-}
-
-pub const ASCII_CHARS: [char; 26] = ascii_chars();
-pub const ASCII_PAIRS: [[char; 2]; 676] = ascii_pairs();
-
-pub struct ToWriteFmt<T>(pub T);
-
-impl<T> fmt::Write for ToWriteFmt<T>
-where
-    T: io::Write,
-{
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.0.write_all(s.as_bytes()).map_err(|_| fmt::Error)
-    }
 }
 
 pub fn snap_availables_up_memvec(available: MemVec, always: bool) -> MemVec {
@@ -148,4 +175,55 @@ pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &
 
 pub fn indent(depth: usize) -> String {
     " ".repeat(depth * INDENT_SIZE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt::Write;
+
+    #[test]
+    fn test_lineprefixwrite_prefixes_1() {
+        let mut write = LinePrefixWrite::new(String::new(), "--");
+        write!(write, "Oh, ").unwrap();
+        writeln!(write, "hi.").unwrap();
+        assert_eq!(write.0, "--Oh, hi.\n");
+    }
+
+    #[test]
+    fn test_lineprefixwrite_prefixes_2() {
+        let mut write = LinePrefixWrite::new(String::new(), "--");
+        writeln!(write, "Line 1.").unwrap();
+        writeln!(write, "Line 2.").unwrap();
+        assert_eq!(write.0, "--Line 1.\n--Line 2.\n");
+    }
+
+    #[test]
+    fn test_lineprefixwrite_supports_incremental_line_writing() {
+        let mut write = LinePrefixWrite::new(String::new(), "--");
+        write!(write, "a").unwrap();
+        write!(write, "b").unwrap();
+        assert_eq!(write.0, "--ab");
+    }
+
+    #[test]
+    fn test_lineprefixwrite_multiline() {
+        let mut write = LinePrefixWrite::new(String::new(), "--");
+        writeln!(write, "Line 1.\nLine 2.").unwrap();
+        assert_eq!(write.0, "--Line 1.\n--Line 2.\n");
+    }
+
+    #[test]
+    fn test_lineprefixwrite_noop_with_empty_string() {
+        let mut write = LinePrefixWrite::new(String::new(), "--");
+        write!(write, "").unwrap();
+        assert_eq!(write.0, "");
+    }
+
+    #[test]
+    fn test_lineprefixwrite_print_prefix_with_empty_line() {
+        let mut write = LinePrefixWrite::new(String::new(), "--");
+        writeln!(write).unwrap();
+        assert_eq!(write.0, "--\n");
+    }
 }

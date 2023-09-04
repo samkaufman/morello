@@ -48,7 +48,12 @@ pub trait CodeGen<Tgt: Target> {
         }
     }
 
-    fn emit<W: fmt::Write>(&self, bench_samples: Option<u32>, out: &mut W) -> fmt::Result;
+    fn emit<W: fmt::Write>(
+        &self,
+        bench_samples: Option<u32>,
+        impl_comment: bool,
+        out: &mut W,
+    ) -> fmt::Result;
 
     fn build(&self) -> Result<BuiltArtifact> {
         self.build_impl(None)
@@ -60,7 +65,7 @@ pub trait CodeGen<Tgt: Target> {
         let binary_path = dirname.join("a.out");
 
         let source_file = std::fs::File::create(&source_path)?;
-        self.emit(bench_samples, &mut ToWriteFmt(source_file))?;
+        self.emit(bench_samples, false, &mut ToWriteFmt(source_file))?;
 
         let mut clang_cmd = Command::new(Self::compiler_path()?);
         if do_color() {
@@ -138,12 +143,21 @@ where
     Tgt: Target<Level = CpuMemoryLevel>,
     Aux: PrintableAux + Debug,
 {
-    fn emit<W: fmt::Write>(&self, bench_samples: Option<u32>, out: &mut W) -> fmt::Result {
+    fn emit<W: fmt::Write>(
+        &self,
+        bench_samples: Option<u32>,
+        impl_comment: bool,
+        out: &mut W,
+    ) -> fmt::Result {
         let top_arg_tensors = self
             .parameters()
             .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
             .collect::<Vec<_>>();
         let mut generator = CpuCodeGenerator::<Tgt>::new();
+        if impl_comment {
+            generator.emit_impl_comment(self, out)?;
+            writeln!(out)?;
+        }
         generator.emit_kernel(self, &top_arg_tensors, bench_samples.is_some(), out)?;
         out.write_char('\n')?;
         generator.emit_main(&top_arg_tensors, bench_samples, out)?;

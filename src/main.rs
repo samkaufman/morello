@@ -31,6 +31,10 @@ struct Args {
     #[arg(short, long, value_enum, default_value_t = OutputFormat::C)]
     format: OutputFormat,
 
+    // Include Impl as a comment in generated C
+    #[arg(long, default_value_t = false)]
+    include_impl: bool,
+
     /// Impl style
     #[arg(long, value_enum, default_value_t = ImplPrintStyle::Full)]
     impl_style: ImplPrintStyle,
@@ -254,7 +258,11 @@ where
 
     match args.format {
         OutputFormat::C => {
-            synthesized_impl.emit(bench_samples, &mut ToWriteFmt(io::stdout()))?;
+            synthesized_impl.emit(
+                bench_samples,
+                args.include_impl,
+                &mut ToWriteFmt(io::stdout()),
+            )?;
         }
         OutputFormat::Impl => {
             // TODO: How to use Compact? Should we?
