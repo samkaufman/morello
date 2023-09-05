@@ -36,7 +36,7 @@ struct Args {
     include_impl: bool,
 
     /// Impl style
-    #[arg(long, value_enum, default_value_t = ImplPrintStyle::Full)]
+    #[arg(long, value_enum, default_value_t = ImplPrintStyle::Compact)]
     impl_style: ImplPrintStyle,
 
     /// Target architecture
@@ -258,16 +258,14 @@ where
 
     match args.format {
         OutputFormat::C => {
-            synthesized_impl.emit(
-                bench_samples,
-                args.include_impl,
-                &mut ToWriteFmt(io::stdout()),
-            )?;
+            let impl_style = if args.include_impl {
+                Some(args.impl_style)
+            } else {
+                None
+            };
+            synthesized_impl.emit(bench_samples, impl_style, &mut ToWriteFmt(io::stdout()))?;
         }
-        OutputFormat::Impl => {
-            // TODO: How to use Compact? Should we?
-            pprint(synthesized_impl, args.impl_style)
-        }
+        OutputFormat::Impl => pprint(synthesized_impl, args.impl_style),
     }
 
     match subcmd {
