@@ -16,9 +16,9 @@ use crate::imp::moves::TensorOrCacheView;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferVar;
-use crate::pprint::PrintableAux;
+use crate::pprint::{pprint_write, ImplPrintStyle, PrintableAux};
 use crate::target::{CpuMemoryLevel, Target};
-use crate::utils::{indent, ASCII_CHARS};
+use crate::utils::{indent, LinePrefixWrite, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
 
 const STACK_CUTOFF: u32 = 256;
@@ -35,6 +35,18 @@ pub struct CpuCodeGenerator<'a, Tgt: Target> {
 impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Write a pretty-printed Impl as a C comment.
+    pub fn emit_impl_comment<W: Write, Aux: PrintableAux + Debug>(
+        &mut self,
+        imp: &'a ImplNode<Tgt, Aux>,
+        impl_style: ImplPrintStyle,
+        out: &mut W,
+    ) -> fmt::Result {
+        let mut commenting_out = LinePrefixWrite::new(out, "// ");
+        pprint_write(&mut commenting_out, imp, impl_style)?;
+        Ok(())
     }
 
     pub fn emit_kernel<W: Write, Aux: PrintableAux + Debug>(

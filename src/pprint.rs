@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::imp::ImplNode;
 use crate::nameenv::NameEnv;
 use crate::target::Target;
@@ -9,6 +7,8 @@ use crate::{imp::Impl, views::Param};
 
 use clap::ValueEnum;
 use prettytable::{self, format, row, Cell};
+use std::collections::HashMap;
+use std::fmt;
 
 #[derive(Copy, Clone, PartialEq, ValueEnum)]
 pub enum ImplPrintStyle {
@@ -36,7 +36,30 @@ impl PrintableAux for () {
     }
 }
 
+/// Pretty-print an [ImplNode] to stdout.
 pub fn pprint<Tgt, Aux>(root: &ImplNode<Tgt, Aux>, style: ImplPrintStyle)
+where
+    Tgt: Target,
+    Aux: PrintableAux,
+{
+    pprint_table(root, style).printstd()
+}
+
+/// Pretty-print an [ImplNode] to a given [fmt::Write].
+pub fn pprint_write<Tgt, W, Aux>(
+    out: &mut W,
+    root: &ImplNode<Tgt, Aux>,
+    style: ImplPrintStyle,
+) -> fmt::Result
+where
+    Tgt: Target,
+    W: fmt::Write,
+    Aux: PrintableAux,
+{
+    write!(out, "{}", pprint_table(root, style))
+}
+
+fn pprint_table<Tgt, Aux>(root: &ImplNode<Tgt, Aux>, style: ImplPrintStyle) -> prettytable::Table
 where
     Tgt: Target,
     Aux: PrintableAux,
@@ -79,7 +102,7 @@ where
         .column_separator(' ')
         .build();
     table.set_format(format);
-    table.printstd();
+    table
 }
 
 fn pprint_inner<'a, Tgt, Aux>(
