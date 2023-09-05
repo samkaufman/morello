@@ -1,6 +1,5 @@
 use crate::memorylimits::MemVec;
 
-use itertools::Itertools;
 use std::fmt;
 use std::io;
 use std::iter;

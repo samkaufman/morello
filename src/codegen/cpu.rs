@@ -44,7 +44,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         out: &mut W,
     ) -> fmt::Result {
         let mut commenting_out = LinePrefixWrite::new(out, "// ");
-        pprint_write(&mut commenting_out, imp, ImplPrintStyle::Full)?;
+        pprint_write(&mut commenting_out, imp, ImplPrintStyle::Compact)?;
         Ok(())
     }
 
