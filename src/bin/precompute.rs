@@ -1,5 +1,4 @@
 use clap::Parser;
-use itertools::Itertools;
 use log::{debug, info};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
@@ -15,7 +14,6 @@ use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
-use morello::utils::iter_powers_of_two;
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]

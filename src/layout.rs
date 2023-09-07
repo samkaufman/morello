@@ -383,6 +383,7 @@ impl Layout {
         }
     }
 
+    #[must_use]
     pub fn canonicalize_for_shape(&self, shape: &[DimSize]) -> Layout {
         if shape.iter().all(|d| *d == 1) {
             row_major(shape.len().try_into().unwrap())

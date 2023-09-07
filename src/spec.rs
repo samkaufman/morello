@@ -482,7 +482,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         operands[1].shape(),
                         inner_aux.contig,
                     );
-                    inner_aux.layout.canonicalize_for_shape(spec_shape);
+                    inner_aux.layout = inner_aux.layout.canonicalize_for_shape(spec_shape);
                 }
                 PrimitiveSpecType::Zero => {
                     let aligned = primitive_aux[0].aligned;
@@ -492,7 +492,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             LogicalSpec::Compose { .. } => todo!(),
         }
 
-        // TODO: What if you want to call `operands` on a non-canon Spec?
+        // After a LogicalSpec is made canonical, its parameters should also be canonical.
         debug_assert_eq!(
             self.parameters().to_vec(),
             self.parameters()
