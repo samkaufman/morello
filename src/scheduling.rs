@@ -55,7 +55,7 @@ pub enum Action<Tgt: Target> {
 pub enum ApplyError {
     #[error("Cannot tile to {0:?}")]
     InvalidTileShape(Shape),
-    #[error("Insufficient memory to apply")]
+    #[error("Insufficient memory to apply action")]
     OutOfMemory,
 }
 

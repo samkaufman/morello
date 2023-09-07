@@ -325,7 +325,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 }
             }
             CpuMemoryLevel::L1 | CpuMemoryLevel::GL => {
-                if size * u32::from(dtype.size()) < STACK_CUTOFF {
+                if size * u32::from(dtype.size()) > STACK_CUTOFF {
                     CBuffer::HeapArray { name, size, dtype }
                 } else {
                     CBuffer::StackArray { name, size, dtype }
