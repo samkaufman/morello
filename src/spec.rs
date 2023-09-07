@@ -1011,7 +1011,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     out.assign(&lhs.dot(&rhs));
                 }
                 PrimitiveSpecType::Conv { accum: _ } => todo!(),
-                PrimitiveSpecType::Move => todo!(),
+                PrimitiveSpecType::Move => {
+                    let [inp, out] = args else {
+                        panic!("Move requires 2 arguments");
+                    };
+                    // TODO: Check shape and dtype match.
+                    out.assign(inp);
+                }
                 PrimitiveSpecType::Zero => {
                     // TODO: Check shape and dtype are correct for this Spec.
                     args[0].fill(S::zero());
