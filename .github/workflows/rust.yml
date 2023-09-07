@@ -24,6 +24,14 @@ jobs:
       - name: Smoke-test 1x1x1 matrix multiplication synthesis
         run: cargo run matmul 1
 
+  smoke-test-precompute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --bin precompute -- --stages 8 2
+
   format:
     runs-on: ubuntu-latest
     steps:
