@@ -280,7 +280,12 @@ impl<Tgt: Target> Action<Tgt> {
                 level,
                 vector_size,
             } => {
-                let LogicalSpec::Compose { components, operand_auxes, serial_only } = node_spec else {
+                let LogicalSpec::Compose {
+                    components,
+                    operand_auxes,
+                    serial_only,
+                } = node_spec
+                else {
                     panic!();
                 };
                 debug_assert!(components.len() >= 2);
@@ -369,7 +374,10 @@ impl<Tgt: Target> Action<Tgt> {
                     // TODO: Use MemoryLimits::Pipeline where appropriate instead.
                     let mut m = MemoryLimits::Standard(match &spec.1 {
                         MemoryLimits::Standard(v) => {
-                            let Some(r) = v.clone().checked_sub(&intermediate_mem_consumed_nondiscrete) else {
+                            let Some(r) = v
+                                .clone()
+                                .checked_sub(&intermediate_mem_consumed_nondiscrete)
+                            else {
                                 return Err(ApplyError::OutOfMemory);
                             };
                             r
@@ -406,7 +414,16 @@ impl<Tgt: Target> Action<Tgt> {
                 }))
             }
             Action::SpatialSplit => {
-                let LogicalSpec::Primitive(PrimitiveBasics { typ: PrimitiveSpecType::Conv { accum: conv_accum }, spec_shape: _, dtype }, _, serial_only) = node_spec else {
+                let LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Conv { accum: conv_accum },
+                        spec_shape: _,
+                        dtype,
+                    },
+                    _,
+                    serial_only,
+                ) = node_spec
+                else {
                     panic!();
                 };
                 if !*conv_accum {
@@ -520,7 +537,9 @@ impl<Tgt: Target> Action<Tgt> {
                                 .position(|l| l == destination_level)
                                 .unwrap();
                             let mut new_limits = base.clone();
-                            let Some(level_updated) = new_limits[updated_level_idx].checked_sub(additional) else {
+                            let Some(level_updated) =
+                                new_limits[updated_level_idx].checked_sub(additional)
+                            else {
                                 return Err(ApplyError::OutOfMemory);
                             };
                             new_limits[updated_level_idx] = level_updated;
@@ -593,10 +612,20 @@ impl<Tgt: Target> Action<Tgt> {
                 )))
             }
             Action::ToAccum => {
-                let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape: _, dtype: _ }, _, _) = node_spec else {
+                let LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ,
+                        spec_shape: _,
+                        dtype: _,
+                    },
+                    _,
+                    _,
+                ) = node_spec
+                else {
                     panic!();
                 };
-                let (PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum }) = typ else {
+                let (PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum }) = typ
+                else {
                     panic!();
                 };
                 if *accum {

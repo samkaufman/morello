@@ -98,8 +98,12 @@ impl PrimitiveBasics {
             }
             PrimitiveSpecType::Conv { accum: _ } => {
                 assert_eq!(self.dtype, new_operands[0].1);
-                let [b, c, h, w] = new_operands[0].0[..] else { panic!(); };
-                let [f, alt_c, fh, fw] = new_operands[1].0[..] else { panic!() };
+                let [b, c, h, w] = new_operands[0].0[..] else {
+                    panic!();
+                };
+                let [f, alt_c, fh, fw] = new_operands[1].0[..] else {
+                    panic!()
+                };
                 assert_eq!(c, alt_c);
                 self.spec_shape = smallvec![b, f, c, h, w, fh, fw];
                 self.dtype = new_operands[0].1;
@@ -604,7 +608,14 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     fn split_actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
-        let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape, .. }, _, _) = self else {
+        let LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ, spec_shape, ..
+            },
+            _,
+            _,
+        ) = self
+        else {
             panic!("split_actions called on non-primitive Spec");
         };
         let PrimitiveSpecType::Matmul { accum } = typ else {
@@ -622,7 +633,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     fn peel_actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
-        let LogicalSpec::Compose { components, operand_auxes: _, serial_only: _ } = self else {
+        let LogicalSpec::Compose {
+            components,
+            operand_auxes: _,
+            serial_only: _,
+        } = self
+        else {
             panic!("peel_actions called on non-Compose Spec");
         };
 
@@ -654,7 +670,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     fn split_valid(&self, new_k: DimSize) -> bool {
-        let LogicalSpec::Primitive(PrimitiveBasics { typ, spec_shape, dtype: _ }, _, _) = self else {
+        let LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ,
+                spec_shape,
+                dtype: _,
+            },
+            _,
+            _,
+        ) = self
+        else {
             panic!();
         };
         debug_assert!(matches!(typ, PrimitiveSpecType::Matmul { .. }));
