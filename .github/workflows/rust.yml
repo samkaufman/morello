@@ -36,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      - run: rustup toolchain install stable --profile default --no-self-update
       - run: cargo fmt --all -- --check
 
   bench:
