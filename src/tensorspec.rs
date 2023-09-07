@@ -76,13 +76,6 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             panic!("Invalid shape: {:?}", shape);
         }
 
-        if !aux.layout.applies_to_shape(&shape) {
-            panic!(
-                "Layout {:?} does not apply to shape {:?}",
-                aux.layout, shape
-            );
-        }
-
         if aux.vector_size.is_some() != aux.level.vector_rf() {
             panic!(
                 "vector_size must be specified if and only if the bank ({:?}) is a vector register file", aux.level
