@@ -11,7 +11,7 @@ use morello::common::{DimSize, Dtype};
 use morello::datadeps::ToFromDependencyLatticeCoordinate;
 use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use morello::table::{Database, InMemDatabase, SqliteDatabaseWrapper};
+use morello::db::{Database, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 

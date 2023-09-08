@@ -12,7 +12,7 @@ use morello::layout::row_major;
 use morello::layout::Layout;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use morello::table::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
+use morello::db::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;

@@ -5,7 +5,7 @@ use std::sync::RwLock;
 use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use morello::table::InMemDatabase;
+use morello::db::InMemDatabase;
 use morello::target::{Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 
