@@ -148,10 +148,10 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     .collect()
             }
             SpecKey::Conv { dtype } => {
-                let accum = pt[0] == 0;
-                let [pb, pf, pc, ph, pw, pfh, pfw] = pt[..] else {
-                    panic!();
+                let [accum_int, pb, pf, pc, ph, pw, pfh, pfw, _, _, _, serial_int] = pt[..] else {
+                    panic!("Conv must have 7 Spec dimensions, but was given point: {pt:?}");
                 };
+                let accum = accum_int == 0;
 
                 let spec_shape = smallvec![
                     pb + 1,
@@ -199,7 +199,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                                     }
                                 })
                                 .collect::<Vec<_>>(),
-                            pt[9] == 0,
+                            serial_int == 0,
                         )
                     })
                     .collect()
