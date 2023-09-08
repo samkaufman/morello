@@ -7,7 +7,7 @@ use crate::imp::{visit_leaves, ImplNode};
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, Spec};
-use crate::table::Database;
+use crate::db::Database;
 use crate::target::Target;
 
 struct ImplReducer<Tgt: Target> {
