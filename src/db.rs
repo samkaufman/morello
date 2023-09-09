@@ -6,19 +6,57 @@ use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
 
-use rusqlite::{params_from_iter, OptionalExtension};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::collections::HashMap;
-use std::path;
-use std::{iter, mem};
-
-const SQLITE_BATCH_SIZE: usize = 1_000;
+use std::collections::hash_map::RandomState;
+use std::marker::PhantomData;
+use std::ops::Deref;
+use std::time::Instant;
+use std::{iter, path};
 
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
+pub trait Database<'a, Tgt: Target> {
+    type Value: AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> + 'a;
+
+    fn get(&'a self, query: &Spec<Tgt>) -> Option<Self::Value>;
+    // TODO: Document interior mutability of put.
+    fn put(&'a self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) -> Self::Value;
+    fn flush(&'a self);
+    // TODO: `save` return Result
+    fn save(&'a self);
+}
+
+pub trait DatabaseExt<'a, Tgt: Target> {
+    fn get_impl(&'a self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>;
+}
+
 #[derive(Clone, Debug)]
 pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
+
+pub struct DashmapDiskDatabase<Tgt: Target> {
+    file_path: Option<path::PathBuf>,
+    grouped_entries: DashMap<LogicalSpec<Tgt>, LogicalSpecEntry<Tgt>>,
+}
+
+// TODO: Entry should not need to be public.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(bound = "")]
+pub struct LogicalSpecEntry<Tgt: Target> {
+    ranges: Vec<(MemVec, MemVec)>,
+    values: Vec<ActionCostVec<Tgt>>,
+}
+
+pub struct LogicalSpecEntryRef<'a, Tgt: Target, S = RandomState>(
+    dashmap::mapref::one::Ref<'a, LogicalSpec<Tgt>, LogicalSpecEntry<Tgt>, S>,
+    usize,
+    PhantomData<Tgt>,
+);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct ActionCostVec<Tgt: Target>(pub SmallVec<[(Action<Tgt>, Cost); 1]>);
 
 impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
     fn extra_column_titles(&self) -> Vec<String> {
@@ -50,244 +88,115 @@ impl<Tgt: Target> Default for DbImplAux<Tgt> {
     }
 }
 
-pub trait Database<Tgt: Target> {
-    fn get(&self, query: &Spec<Tgt>) -> Option<SmallVec<[(Action<Tgt>, Cost); 1]>>;
-    // TODO: Drop get_spec, which exists solely for SqliteDatabaseWrapper.
-    fn get_spec(&self, spec: &LogicalSpec<Tgt>) -> Option<&Entry<Tgt>>;
-    fn put(&mut self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>);
-    fn flush(&mut self);
-}
-
-pub trait DatabaseExt<Tgt: Target> {
-    fn get_impl(&self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>;
-}
-
-pub struct InMemDatabase<Tgt: Target> {
-    grouped_entries: HashMap<LogicalSpec<Tgt>, Entry<Tgt>>,
-}
-
-pub struct SqliteDatabaseWrapper<Tgt: Target, D: Database<Tgt>> {
-    inner: D,
-    tx: crossbeam_channel::Sender<SqliteDatabaseWrapperMsg<Tgt>>,
-    rx: crossbeam_channel::Receiver<SqliteDatabaseWrapperResponse<Tgt>>,
-    bg_thread_handle: Option<std::thread::JoinHandle<()>>,
-}
-
-#[allow(clippy::large_enum_variant)] // Because Flush and Stop are rare.
-enum SqliteDatabaseWrapperMsg<Tgt: Target> {
-    Get(Spec<Tgt>),
-    Put(LogicalSpec<Tgt>, Entry<Tgt>),
-    Flush { should_respond: bool },
-    Stop,
-}
-
-enum SqliteDatabaseWrapperResponse<Tgt: Target> {
-    GetResponse(Option<SmallVec<[(Action<Tgt>, Cost); 1]>>),
-    FlushDone,
-}
-
-// TODO: Entry should not need to be public.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(bound = "")]
-pub struct Entry<Tgt: Target> {
-    ranges: Vec<(MemVec, MemVec)>,
-    values: Vec<SmallVec<[(Action<Tgt>, Cost); 1]>>,
-}
-
-impl<Tgt: Target> InMemDatabase<Tgt> {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl<Tgt: Target> Default for InMemDatabase<Tgt> {
-    fn default() -> Self {
-        InMemDatabase {
-            grouped_entries: Default::default(),
+impl<Tgt: Target> DashmapDiskDatabase<Tgt> {
+    // TODO: This does I/O; it should return errors, not panic.
+    pub fn new(file_path: Option<&path::Path>) -> Self {
+        let grouped_entries = match file_path {
+            Some(path) => match std::fs::File::open(path) {
+                Ok(f) => {
+                    let start = Instant::now();
+                    let decoder = snap::read::FrameDecoder::new(f);
+                    let result = bincode::deserialize_from(decoder).unwrap();
+                    log::debug!("Loading database took {:?}", start.elapsed());
+                    result
+                }
+                Err(err) => match err.kind() {
+                    std::io::ErrorKind::NotFound => Default::default(),
+                    _ => todo!("Handle other file errors"),
+                },
+            },
+            None => Default::default(),
+        };
+        Self {
+            file_path: file_path.map(|p| p.to_owned()),
+            grouped_entries,
         }
     }
 }
 
-impl<Tgt: Target> Database<Tgt> for InMemDatabase<Tgt> {
-    fn get(&self, query: &Spec<Tgt>) -> Option<SmallVec<[(Action<Tgt>, Cost); 1]>> {
-        self.grouped_entries
-            .get(&query.0)
-            .and_then(|e| get_from_entry(&query.1, e).cloned())
+impl<Tgt: Target> AsRef<ActionCostVec<Tgt>> for ActionCostVec<Tgt> {
+    fn as_ref(&self) -> &ActionCostVec<Tgt> {
+        self
+    }
+}
+
+impl<'a, Tgt: Target> Database<'a, Tgt> for DashmapDiskDatabase<Tgt>
+where
+    Self: 'a,
+{
+    type Value = LogicalSpecEntryRef<'a, Tgt>;
+
+    fn get(&'a self, query: &Spec<Tgt>) -> Option<LogicalSpecEntryRef<'a, Tgt>> {
+        let Some(e) = self.grouped_entries.get(&query.0) else {
+            return None;
+        };
+        get_from_entry(&query.1, e.value())
+            .map(move |i| LogicalSpecEntryRef::<'a, Tgt>(e, i, PhantomData))
     }
 
-    fn get_spec(&self, spec: &LogicalSpec<Tgt>) -> Option<&Entry<Tgt>> {
-        self.grouped_entries.get(spec)
-    }
-
-    fn put(&mut self, spec: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) {
-        // self.entries.insert(spec, impls);
-
-        let original_spec = spec.clone(); // Save for debug_assert_eq! postcondition.
-        let orig_impls = impls.clone();
-
+    fn put(
+        &'a self,
+        spec: Spec<Tgt>,
+        impls: SmallVec<[(Action<Tgt>, Cost); 1]>,
+    ) -> LogicalSpecEntryRef<'a, Tgt> {
         // TODO: How to treat non-powers of two memory bounds?
-        match spec.1 {
+        let impls_ref = match spec.1 {
             MemoryLimits::Standard(lims) => {
                 assert!(impls.len() <= 1);
-                let existing: &mut Entry<Tgt> =
-                    self.grouped_entries.entry(spec.0.clone()).or_default();
+                let mut existing = self.grouped_entries.entry(spec.0.clone()).or_default();
                 if impls.is_empty() {
                     existing.ranges.push((lims, MemVec::zero::<Tgt>()));
                 } else {
                     existing.ranges.push((lims, impls[0].1.peaks.clone()));
                 }
-                existing.values.push(impls);
+                let insertion_idx = existing.values.len();
+                existing.values.push(ActionCostVec(impls));
+                LogicalSpecEntryRef(existing.downgrade(), insertion_idx, PhantomData)
             }
-        }
-
-        debug_assert_eq!(
-            self.get(&original_spec),
-            Some(orig_impls),
-            "Original Spec {:?} was incorrect after put.",
-            original_spec
-        );
-    }
-
-    fn flush(&mut self) {}
-}
-
-impl<Tgt: Target, D: Database<Tgt>> SqliteDatabaseWrapper<Tgt, D> {
-    pub fn new(inner: D, db_path: &path::Path) -> Self {
-        let db_path = db_path.to_owned();
-        let (request_tx, request_rx) = crossbeam_channel::bounded(1);
-        let (response_tx, response_rx) = crossbeam_channel::bounded(1);
-        SqliteDatabaseWrapper {
-            inner,
-            tx: request_tx,
-            rx: response_rx,
-            bg_thread_handle: Some(std::thread::spawn(move || {
-                let conn = rusqlite::Connection::open(db_path).unwrap();
-                conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS impls (
-                    spec  BLOB PRIMARY KEY,
-                    entry BLOB
-                )",
-                    (),
-                )
-                .unwrap();
-
-                let mut pending_puts = HashMap::with_capacity(SQLITE_BATCH_SIZE);
-                loop {
-                    match request_rx.recv().unwrap() {
-                        SqliteDatabaseWrapperMsg::Get(spec) => {
-                            let db_result: Option<Entry<Tgt>> = conn
-                                .query_row(
-                                    "SELECT entry FROM impls WHERE spec = ?",
-                                    [serde_json::to_string(&spec.0).unwrap()],
-                                    |row| {
-                                        Ok(serde_json::from_str(&row.get::<_, String>(0).unwrap())
-                                            .unwrap())
-                                    },
-                                )
-                                .optional()
-                                .unwrap();
-                            let response = match db_result {
-                                Some(entry) => get_from_entry(&spec.1, &entry).cloned(),
-                                None => None,
-                            };
-                            response_tx
-                                .send(SqliteDatabaseWrapperResponse::GetResponse(response))
-                                .unwrap();
-                        }
-                        SqliteDatabaseWrapperMsg::Put(logical_spec, impls) => {
-                            pending_puts.insert(logical_spec, impls);
-                            if pending_puts.len() >= SQLITE_BATCH_SIZE {
-                                do_flush(&conn, &mut pending_puts);
-                            }
-                        }
-                        SqliteDatabaseWrapperMsg::Flush { should_respond } => {
-                            do_flush(&conn, &mut pending_puts);
-                            if should_respond {
-                                response_tx
-                                    .send(SqliteDatabaseWrapperResponse::FlushDone)
-                                    .unwrap();
-                            }
-                        }
-                        SqliteDatabaseWrapperMsg::Stop => {
-                            break;
-                        }
-                    }
-                }
-            })),
-        }
-    }
-
-    fn stop(&mut self) {
-        self.flush();
-        self.tx.send(SqliteDatabaseWrapperMsg::Stop).unwrap();
-        mem::take(&mut self.bg_thread_handle)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-}
-
-impl<Tgt: Target, D: Database<Tgt>> Database<Tgt> for SqliteDatabaseWrapper<Tgt, D> {
-    fn get(&self, query: &Spec<Tgt>) -> Option<SmallVec<[(Action<Tgt>, Cost); 1]>> {
-        if let Some(r) = self.inner.get(query) {
-            return Some(r);
         };
-        self.tx
-            .send(SqliteDatabaseWrapperMsg::Get(query.clone()))
-            .unwrap();
-        match self.rx.recv().unwrap() {
-            SqliteDatabaseWrapperResponse::GetResponse(r) => r,
-            SqliteDatabaseWrapperResponse::FlushDone => {
-                panic!("Unexpected FlushDone response to Get from background thread")
-            }
+
+        // debug_assert_eq!(
+        //     self.get(&original_spec).map(|x| x.deref()),
+        //     Some(impls_ref),
+        //     "Original Spec {:?} was incorrect after put.",
+        //     original_spec
+        // );
+
+        impls_ref
+    }
+
+    fn flush(&'a self) {}
+
+    fn save(&'a self) {
+        if let Some(path) = &self.file_path {
+            let file = std::fs::File::create(path).unwrap();
+            let encoder = snap::write::FrameEncoder::new(file);
+            let start = Instant::now();
+            bincode::serialize_into(encoder, &self.grouped_entries).unwrap();
+            log::debug!("Saving database took {:?}", start.elapsed());
         }
     }
-
-    fn get_spec(&self, _spec: &LogicalSpec<Tgt>) -> Option<&Entry<Tgt>> {
-        unimplemented!()
-    }
-
-    fn put(&mut self, spec: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) {
-        self.inner.put(spec.clone(), impls);
-        let updated = self.inner.get_spec(&spec.0).unwrap();
-        self.tx
-            .send(SqliteDatabaseWrapperMsg::Put(spec.0, updated.clone()))
-            .unwrap();
-    }
-
-    fn flush(&mut self) {
-        self.inner.flush();
-        self.tx
-            .send(SqliteDatabaseWrapperMsg::Flush {
-                should_respond: true,
-            })
-            .unwrap();
-        self.rx.recv().unwrap();
-    }
 }
 
-impl<Tgt: Target, D: Database<Tgt>> Drop for SqliteDatabaseWrapper<Tgt, D> {
+// TODO: Phase out save-on-Drop, since we may want to have read-only databases.
+impl<T: Target> Drop for DashmapDiskDatabase<T> {
     fn drop(&mut self) {
-        self.stop();
+        self.save();
     }
 }
 
-impl<Tgt: Target, T: Database<Tgt>> DatabaseExt<Tgt> for T {
-    fn get_impl(&self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>> {
+impl<'a, Tgt: Target, T: Database<'a, Tgt>> DatabaseExt<'a, Tgt> for T {
+    fn get_impl(&'a self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>> {
         let Some(root_results) = self.get(query) else {
             return None;
         };
         Some(
             root_results
+                .as_ref()
                 .iter()
-                .map(|root_result| {
-                    let root = root_result
-                        .0
-                        .apply_with_aux(
-                            query,
-                            DbImplAux(Some((query.clone(), root_result.1.clone()))),
-                        )
+                .map(|(action, cost)| {
+                    let root = action
+                        .apply_with_aux(query, DbImplAux(Some((query.clone(), cost.clone()))))
                         .unwrap();
                     let children = root.children();
                     let new_children = children
@@ -301,7 +210,7 @@ impl<Tgt: Target, T: Database<Tgt>> DatabaseExt<Tgt> for T {
     }
 }
 
-impl<Tgt: Target> Default for Entry<Tgt> {
+impl<Tgt: Target> Default for LogicalSpecEntry<Tgt> {
     fn default() -> Self {
         Self {
             ranges: Default::default(),
@@ -310,27 +219,50 @@ impl<Tgt: Target> Default for Entry<Tgt> {
     }
 }
 
-fn do_flush<Tgt: Target>(
-    conn: &rusqlite::Connection,
-    pending_puts: &mut HashMap<LogicalSpec<Tgt>, Entry<Tgt>>,
-) {
-    if !pending_puts.is_empty() {
-        let post = vec!["(?, ?)"].repeat(pending_puts.len()).join(", ");
-
-        conn.execute(
-            &format!("INSERT OR REPLACE INTO impls (spec, entry) VALUES {}", post),
-            params_from_iter(pending_puts.drain().flat_map(|(s, entry)| {
-                vec![
-                    serde_json::to_string(&s).unwrap(),
-                    serde_json::to_string(&entry).unwrap(),
-                ]
-            })),
-        )
-        .unwrap();
+impl<Tgt: Target> AsRef<ActionCostVec<Tgt>> for LogicalSpecEntry<Tgt> {
+    fn as_ref(&self) -> &ActionCostVec<Tgt> {
+        &self.values[0]
     }
 }
 
-fn construct_impl<Tgt: Target, D: Database<Tgt>>(db: &D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt> {
+impl<'a, Tgt: Target> Deref for LogicalSpecEntryRef<'a, Tgt> {
+    type Target = ActionCostVec<Tgt>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.value().values[self.1]
+    }
+}
+
+impl<'a, Tgt: Target> AsRef<ActionCostVec<Tgt>> for LogicalSpecEntryRef<'a, Tgt> {
+    fn as_ref(&self) -> &ActionCostVec<Tgt> {
+        self.deref()
+    }
+}
+
+impl<'a, Tgt: Target> AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> for LogicalSpecEntryRef<'a, Tgt> {
+    fn as_ref(&self) -> &SmallVec<[(Action<Tgt>, Cost); 1]> {
+        self.deref().as_ref()
+    }
+}
+
+impl<Tgt: Target> Deref for ActionCostVec<Tgt> {
+    type Target = SmallVec<[(Action<Tgt>, Cost); 1]>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<Tgt: Target> AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> for ActionCostVec<Tgt> {
+    fn as_ref(&self) -> &SmallVec<[(Action<Tgt>, Cost); 1]> {
+        self.deref()
+    }
+}
+
+fn construct_impl<'a, Tgt: Target, D: Database<'a, Tgt>>(
+    db: &'a D,
+    imp: &DbImpl<Tgt>,
+) -> DbImpl<Tgt> {
     match imp {
         ImplNode::SpecApp(p) => db
             .get_impl(&p.0)
@@ -349,10 +281,10 @@ fn construct_impl<Tgt: Target, D: Database<Tgt>>(db: &D, imp: &DbImpl<Tgt>) -> D
     }
 }
 
-fn get_from_entry<'a, Tgt: Target>(
+fn get_from_entry<Tgt: Target>(
     mlims: &MemoryLimits,
-    entry: &'a Entry<Tgt>,
-) -> Option<&'a SmallVec<[(Action<Tgt>, Cost); 1]>> {
+    entry: &LogicalSpecEntry<Tgt>,
+) -> Option<usize> {
     match mlims {
         MemoryLimits::Standard(query_lims) => {
             for (i, (lims, peaks)) in entry.ranges.iter().enumerate() {
@@ -362,7 +294,7 @@ fn get_from_entry<'a, Tgt: Target>(
                     .zip(peaks)
                     .all(|((q, l), p)| l >= q && q >= p)
                 {
-                    return Some(&entry.values[i]);
+                    return Some(i);
                 }
             }
             None

@@ -4,14 +4,13 @@ use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::smallvec;
 use std::collections::VecDeque;
-use std::sync::RwLock;
 use std::{iter, path};
 
 use morello::common::{DimSize, Dtype};
 use morello::datadeps::ToFromDependencyLatticeCoordinate;
+use morello::db::{DashmapDiskDatabase, Database};
 use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use morello::db::{Database, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 
@@ -35,25 +34,16 @@ struct Args {
 
 fn main() {
     env_logger::init();
-
     let args = Args::parse();
-
-    if let Some(db_path) = args.db.as_ref() {
-        let db = SqliteDatabaseWrapper::new(InMemDatabase::<X86Target>::new(), db_path);
-        main_per_db(&args, db)
-    } else {
-        let db = InMemDatabase::<X86Target>::new();
-        main_per_db(&args, db)
-    }
+    let db = DashmapDiskDatabase::<X86Target>::new(args.db.as_deref());
+    main_per_db(&args, &db)
 }
 
-fn main_per_db<D>(args: &Args, db: D)
+fn main_per_db<'a, D>(args: &Args, db: &'a D)
 where
-    D: Database<X86Target> + Send + Sync,
+    D: Database<'a, X86Target> + Send + Sync,
 {
     let MemoryLimits::Standard(top) = X86Target::max_mem();
-
-    let db = RwLock::new(db);
 
     // TODO: Most of the following details aren't used in computing the bound.
     // It could be simplified.
@@ -156,14 +146,14 @@ where
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
                     let spec = Spec(spec.clone(), MemoryLimits::Standard(job));
-                    let result = morello::search::top_down(&db, &spec, 1);
+                    let result = morello::search::top_down(db, &spec, 1);
                     if let [(_, only_result_cost)] = &result.0[..] {
                         worklist.extend(limits_iterator.next().into_iter().collect::<Vec<_>>());
                     }
                 }
             }
-            db.write().unwrap().flush();
         });
+        db.save();
         info!("Stage {} took {:?}", stage_idx, stage_start.elapsed());
         if Some(stage_idx) == args.stages {
             info!("Stopping early because --stages was passed");

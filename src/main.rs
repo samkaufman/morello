@@ -2,17 +2,16 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::info;
 use smallvec::smallvec;
-use std::sync::RwLock;
 use std::{io, path};
 
-use morello::codegen::{BuiltArtifact, CodeGen};
+use morello::codegen::CodeGen;
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
+use morello::db::{DashmapDiskDatabase, Database, DatabaseExt};
 use morello::layout::row_major;
 use morello::layout::Layout;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use morello::db::{Database, DatabaseExt, InMemDatabase, SqliteDatabaseWrapper};
 use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
@@ -106,26 +105,20 @@ fn main() -> Result<()> {
     let args = Args::parse();
     color::set_color_mode(args.color);
     match &args.target {
-        TargetId::X86 => {
-            let db = InMemDatabase::<X86Target>::new();
-            match &args.db {
-                Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
-                None => main_per_db(&args, db),
-            }
-        }
-        TargetId::Arm => {
-            let db = InMemDatabase::<ArmTarget>::new();
-            match &args.db {
-                Some(db_path) => main_per_db(&args, SqliteDatabaseWrapper::new(db, db_path)),
-                None => main_per_db(&args, db),
-            }
-        }
+        TargetId::X86 => main_per_db(
+            &args,
+            &DashmapDiskDatabase::<X86Target>::new(args.db.as_deref()),
+        ),
+        TargetId::Arm => main_per_db(
+            &args,
+            &DashmapDiskDatabase::<ArmTarget>::new(args.db.as_deref()),
+        ),
     }
 }
 
-fn main_per_db<D, Tgt>(args: &Args, db: D) -> Result<()>
+fn main_per_db<'d, D, Tgt>(args: &Args, db: &'d D) -> Result<()>
 where
-    D: Database<Tgt> + Send + Sync,
+    D: Database<'d, Tgt> + Send + Sync,
     Tgt: Target<Level = CpuMemoryLevel>,
 {
     let subcmd = &args.subcmd;
@@ -226,8 +219,7 @@ where
     let spec = Spec(logical_spec, Tgt::max_mem());
 
     let start_time = std::time::Instant::now();
-    let db_lock = RwLock::new(db);
-    let (_, hits, misses) = morello::search::top_down(&db_lock, &spec, 1);
+    let (_, hits, misses) = morello::search::top_down(db, &spec, 1);
     info!("top_down took {:?}", start_time.elapsed());
     info!(
         "top_down missed {} times ({:.2}% of {})",
@@ -236,8 +228,8 @@ where
         hits + misses
     );
 
-    let Some(results) = db_lock.read().unwrap().get_impl(&spec) else {
-        unreachable!("Database should contain result after synthesis");
+    let Some(results) = db.get_impl(&spec) else {
+        panic!("No Impl found");
     };
     let Some(synthesized_impl) = results.first() else {
         panic!("No Impl found");
