@@ -1,11 +1,10 @@
 use iai_callgrind::{black_box, main};
+use morello::db::DashmapDiskDatabase;
 use smallvec::smallvec;
-use std::sync::RwLock;
 
 use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use morello::db::InMemDatabase;
 use morello::target::{Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 
@@ -34,9 +33,8 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> Spec<Tgt> {
 }
 
 fn synth(goal: &Spec<X86Target>) {
-    let db = InMemDatabase::<X86Target>::new();
-    let db_lock = RwLock::new(db);
-    morello::search::top_down(&db_lock, black_box(goal), 1);
+    let db = DashmapDiskDatabase::<X86Target>::new(None);
+    morello::search::top_down(&db, black_box(goal), 1);
 }
 
 #[inline(never)]

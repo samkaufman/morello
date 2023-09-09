@@ -1,13 +1,12 @@
 use itertools::Itertools;
 use smallvec::{smallvec, SmallVec};
-use std::sync::RwLock;
 
 use crate::cost::Cost;
+use crate::db::Database;
 use crate::imp::{visit_leaves, ImplNode};
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, Spec};
-use crate::db::Database;
 use crate::target::Target;
 
 struct ImplReducer<Tgt: Target> {
@@ -28,28 +27,29 @@ enum ParentSummaryTransitionResult<'a, Tgt: Target> {
 }
 
 /// Computes an optimal Impl for `goal` and stores it in `db`.
-pub fn top_down<'d, Tgt: Target, D: Database<Tgt> + 'd>(
-    db: &RwLock<D>,
+pub fn top_down<'d, Tgt: Target, D: Database<'d, Tgt>>(
+    db: &'d D,
     goal: &Spec<Tgt>,
     top_k: usize,
 ) -> (SmallVec<[(Action<Tgt>, Cost); 1]>, u64, u64) {
-    top_down_inner(db, goal, top_k, 0, &ParentSummary::new(goal))
+    let (actions, hits, misses) = top_down_inner(db, goal, top_k, 0, &ParentSummary::new(goal));
+    (actions.as_ref().clone(), hits, misses)
 }
 
-fn top_down_inner<'d, Tgt: Target, D: Database<Tgt> + 'd>(
-    db: &RwLock<D>,
+fn top_down_inner<'d, Tgt: Target, D: Database<'d, Tgt>>(
+    db: &'d D,
     goal: &Spec<Tgt>,
     top_k: usize,
     depth: usize,
     parent_summary: &ParentSummary<Tgt>,
-) -> (SmallVec<[(Action<Tgt>, Cost); 1]>, u64, u64) {
+) -> (D::Value, u64, u64) {
     if top_k > 1 {
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
 
     // First, check if the Spec is already in the database.
-    if let Some(stored) = db.read().unwrap().get(goal) {
-        return (stored.clone(), 1, 0);
+    if let Some(stored) = db.get(goal) {
+        return (stored, 1, 0);
     }
 
     let mut hits = 0u64;
@@ -89,11 +89,11 @@ fn top_down_inner<'d, Tgt: Target, D: Database<Tgt> + 'd>(
                 top_down_inner(db, nested_spec, top_k, depth + 1, &summary_to_forward);
             hits += subhits;
             misses += submisses;
-            if child_results.is_empty() {
+            if child_results.as_ref().is_empty() {
                 unsat = true;
                 return false;
             }
-            nested_spec_costs.push(child_results[0].1.clone()); // TODO: Should move
+            nested_spec_costs.push(child_results.as_ref()[0].1.clone()); // TODO: Move, don't clone
             true
         });
         if unsat {
@@ -115,8 +115,8 @@ fn top_down_inner<'d, Tgt: Target, D: Database<Tgt> + 'd>(
 
     // Save to memo. table and return.
     let final_result = reducer.finalize();
-    db.write().unwrap().put(goal.clone(), final_result.clone());
-    (final_result, hits, misses)
+    let final_result_ref = db.put(goal.clone(), final_result);
+    (final_result_ref, hits, misses)
 }
 
 impl<'a, Tgt: Target> ParentSummary<'a, Tgt> {
