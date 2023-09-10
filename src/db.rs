@@ -24,7 +24,7 @@ pub trait Database<'a, Tgt: Target> {
     // TODO: Document interior mutability of put.
     fn put(&'a self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) -> Self::Value;
     fn flush(&'a self);
-    // TODO: `save` return Result
+    // TODO: `save` should return Result
     fn save(&'a self);
 }
 
@@ -169,10 +169,14 @@ where
 
     fn save(&'a self) {
         if let Some(path) = &self.file_path {
-            let file = std::fs::File::create(path).unwrap();
-            let encoder = snap::write::FrameEncoder::new(file);
             let start = Instant::now();
-            bincode::serialize_into(encoder, &self.grouped_entries).unwrap();
+            let temp_file_path = {
+                let temp_file = tempfile::NamedTempFile::new().unwrap();
+                let encoder = snap::write::FrameEncoder::new(&temp_file);
+                bincode::serialize_into(encoder, &self.grouped_entries).unwrap();
+                temp_file.keep().unwrap().1
+            };
+            std::fs::rename(temp_file_path, path).unwrap();
             log::debug!("Saving database took {:?}", start.elapsed());
         }
     }
