@@ -1,8 +1,13 @@
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+
 use std::collections::HashSet;
 use std::fmt::Display;
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
+use crate::grid::canon::CanonicalBimap;
+use crate::grid::general::Bimap;
+use crate::grid::linear::BimapInt;
 use crate::layout::{row_major, Layout};
 use crate::target::{MemoryLevel, Target};
 use crate::utils::join_into_string;
@@ -24,6 +29,16 @@ pub struct TensorSpecAux<Tgt: Target> {
     pub level: Tgt::Level,
     pub layout: Layout,
     pub vector_size: Option<DimSize>,
+}
+
+#[derive(Default)]
+pub struct TensorSpecAuxBimap<Tgt: Target> {
+    phantom: std::marker::PhantomData<Tgt>,
+}
+
+#[derive(Default)]
+pub struct TensorSpecAuxNonDepBimap<Tgt: Target> {
+    phantom: std::marker::PhantomData<Tgt>,
 }
 
 impl<Tgt: Target> TensorSpec<Tgt> {
@@ -263,6 +278,19 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
     }
 }
 
+impl<Tgt> CanonicalBimap for TensorSpecAux<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Domain = Tgt::Level, Codomain = BimapInt>,
+{
+    type Bimap = TensorSpecAuxBimap<Tgt>;
+
+    fn bimap() -> Self::Bimap {
+        TensorSpecAuxBimap::default()
+    }
+}
+
 impl<Tgt: Target> Display for TensorSpecAux<Tgt> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let aux_part = tensorspec_aux_str(self);
@@ -271,6 +299,83 @@ impl<Tgt: Target> Display for TensorSpecAux<Tgt> {
         } else {
             write!(f, "({})", aux_part)
         }
+    }
+}
+
+impl<Tgt> Bimap for TensorSpecAuxBimap<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Domain = Tgt::Level, Codomain = BimapInt>,
+{
+    type Domain = TensorSpecAux<Tgt>;
+    type Codomain = ((Contig, bool, Layout, Option<DimSize>), [BimapInt; 1]);
+    type DomainIter = std::iter::Once<TensorSpecAux<Tgt>>;
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        (
+            (t.contig, t.aligned, t.layout.clone(), t.vector_size),
+            [Tgt::Level::bimap().apply(&t.level)],
+        )
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+        let ((contig, aligned, layout, vector_size), [level_val]) = i.clone();
+        std::iter::once(TensorSpecAux {
+            contig,
+            aligned,
+            layout,
+            vector_size,
+            level: Tgt::Level::bimap()
+                .apply_inverse(&level_val)
+                .exactly_one()
+                .unwrap_or_else(|_| panic!()),
+        })
+    }
+}
+
+impl<Tgt> Bimap for TensorSpecAuxNonDepBimap<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Domain = Tgt::Level, Codomain = BimapInt>,
+{
+    type Domain = TensorSpecAux<Tgt>;
+    type Codomain = (Layout, [BimapInt; 4]);
+    type DomainIter = std::iter::Once<Self::Domain>;
+
+    fn apply(&self, aux: &TensorSpecAux<Tgt>) -> Self::Codomain {
+        let inverted_contig = aux.layout.contiguous_full() - aux.contig;
+        (
+            aux.layout.clone(),
+            [
+                inverted_contig.into(),
+                aux.aligned as _,
+                Tgt::Level::bimap().apply(&aux.level),
+                aux.vector_size.unwrap_or(0),
+            ],
+        )
+    }
+
+    fn apply_inverse(&self, v: &Self::Codomain) -> Self::DomainIter {
+        let (layout, pt) = v;
+        let [inverted_contig, aligned_val, level_val, vector_size_val] = pt;
+        // `unwrap_or_else` rather than `unwrap` to avoid needing a Debug bound
+        let level = Tgt::Level::bimap()
+            .apply_inverse(level_val)
+            .exactly_one()
+            .unwrap_or_else(|_| panic!());
+        std::iter::once(TensorSpecAux {
+            layout: layout.clone(),
+            contig: layout.contiguous_full() - Contig::try_from(*inverted_contig).unwrap(),
+            aligned: *aligned_val != 0,
+            level,
+            vector_size: if *vector_size_val == 0 {
+                None
+            } else {
+                Some(*vector_size_val)
+            },
+        })
     }
 }
 

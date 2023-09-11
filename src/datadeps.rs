@@ -1,4 +1,5 @@
 use itertools::{iproduct, izip, Itertools};
+use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::hash::Hash;
 use std::iter;
@@ -31,14 +32,15 @@ pub trait ToFromDependencyLatticeCoordinate: Sized {
 }
 
 // TODO: Simplify code by making this the foundation of our Spec enum.
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SpecKey {
     Matmul { dtype: Dtype },
     Conv { dtype: Dtype },
-    Move { is_load: bool, dtype: Dtype },
+    Move { dtype: Dtype },
     Zero { dtype: Dtype },
 }
 
+// TODO: Replace with Bimap.
 impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
     type Key = SpecKey;
 
@@ -81,13 +83,6 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     Some((
                         match basics.typ {
                             PrimitiveSpecType::Move => SpecKey::Move {
-                                is_load: {
-                                    // geometry breaks loads and stores into separate tables, which
-                                    // makes sense after combining the two into a single Move Spec.
-                                    // For now, we preserve this separation by determining whether
-                                    // or not this is a load or a store by comparing operands.
-                                    mapping_level < &auxes[0].level
-                                },
                                 dtype: basics.dtype,
                             },
                             PrimitiveSpecType::Zero => SpecKey::Zero {
@@ -204,7 +199,7 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
                     })
                     .collect()
             }
-            SpecKey::Move { is_load: _, dtype } => {
+            SpecKey::Move { dtype } => {
                 let source_level = int_to_level(pt[pt.len() - 2]);
                 let shape = &pt[..pt.len() - 2]
                     .iter()

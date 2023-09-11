@@ -3,7 +3,7 @@ use smallvec::smallvec;
 
 use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
-use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use morello::target::{Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 

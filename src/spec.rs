@@ -1,5 +1,10 @@
 use super::common::{DimSize, Shape};
 use crate::common::Dtype;
+use crate::datadeps::SpecKey;
+use crate::grid::canon::CanonicalBimap;
+use crate::grid::general::Bimap;
+use crate::grid::linear::BimapInt;
+use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
@@ -72,6 +77,17 @@ pub enum PrimitiveSpecType {
 /// dimension of the first input (the m dimension) is bound to the m dimension
 /// of the output, and so on for the n dimension.
 pub struct TilingInference(pub Vec<(Tiling, SmallVec<[Option<u8>; 5]>)>);
+
+#[derive(Default)]
+pub struct LogicalSpecBimap<Tgt, A>
+where
+    Tgt: Target,
+    A: Bimap<Domain = TensorSpecAux<Tgt>>,
+{
+    pub aux_bimap: A,
+}
+
+pub struct PrimitiveBasicsBimap;
 
 impl<Tgt: Target> Display for Spec<Tgt> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -292,6 +308,14 @@ impl Display for PrimitiveBasics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let shape_str = join_into_string(&self.spec_shape, "×");
         write!(f, "{}({}, {})", self.typ, shape_str, self.dtype)
+    }
+}
+
+impl CanonicalBimap for PrimitiveBasics {
+    type Bimap = PrimitiveBasicsBimap;
+
+    fn bimap() -> Self::Bimap {
+        PrimitiveBasicsBimap
     }
 }
 
@@ -1098,6 +1122,91 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
         let serial_str = if self.serial_only() { ", serial" } else { "" };
 
         write!(f, "{}({}{})", header, operand_str, serial_str)
+    }
+}
+
+impl<Tgt, A, Aa, Ab> Bimap for LogicalSpecBimap<Tgt, A>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Domain = Tgt::Level, Codomain = BimapInt>,
+    A: Bimap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
+    Ab: IntoIterator<Item = BimapInt>,
+{
+    type Domain = LogicalSpec<Tgt>;
+    type Codomain = ((SpecKey, Vec<Aa>), Vec<BimapInt>);
+    type DomainIter = std::iter::Once<LogicalSpec<Tgt>>;
+
+    fn apply(&self, spec: &LogicalSpec<Tgt>) -> Self::Codomain {
+        match spec {
+            LogicalSpec::Primitive(basics, auxes, serial_only) => {
+                let (key, mut pt) = PrimitiveBasics::bimap().apply(basics);
+                let mut aux_keys = Vec::with_capacity(auxes.len());
+                for aux in auxes {
+                    let (aux_key, aux_pt) = self.aux_bimap.apply(aux);
+                    aux_keys.push(aux_key);
+                    pt.extend(aux_pt.into_iter());
+                }
+                pt.push(!*serial_only as _);
+                ((key, aux_keys), pt)
+            }
+            LogicalSpec::Compose { .. } => todo!(),
+        }
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+        todo!()
+    }
+}
+
+impl Bimap for PrimitiveBasicsBimap {
+    type Domain = PrimitiveBasics;
+    type Codomain = (SpecKey, Vec<BimapInt>);
+    type DomainIter = iter::Once<Self::Domain>;
+
+    fn apply(&self, basics: &PrimitiveBasics) -> Self::Codomain {
+        let PrimitiveBasics {
+            typ,
+            spec_shape,
+            dtype,
+        } = basics;
+        let shifted_shape = spec_shape.iter().map(|d| d - 1);
+        match *typ {
+            PrimitiveSpecType::Matmul { accum } => {
+                let v = once(!accum as _).chain(shifted_shape).collect();
+                (SpecKey::Matmul { dtype: *dtype }, v)
+            }
+            PrimitiveSpecType::Conv { accum } => {
+                let v = once(!accum as _).chain(shifted_shape).collect();
+                (SpecKey::Conv { dtype: *dtype }, v)
+            }
+            PrimitiveSpecType::Move => (SpecKey::Move { dtype: *dtype }, shifted_shape.collect()),
+            PrimitiveSpecType::Zero => (SpecKey::Zero { dtype: *dtype }, shifted_shape.collect()),
+        }
+    }
+
+    fn apply_inverse(&self, c: &Self::Codomain) -> Self::DomainIter {
+        let (key, v) = c;
+        let basics = match key {
+            SpecKey::Matmul { dtype } | SpecKey::Conv { dtype } => {
+                let accum = v[0] == 0;
+                let typ = match key {
+                    SpecKey::Matmul { .. } => PrimitiveSpecType::Matmul { accum },
+                    SpecKey::Conv { .. } => PrimitiveSpecType::Conv { accum },
+                    _ => unreachable!(),
+                };
+                PrimitiveBasics {
+                    typ,
+                    spec_shape: v.iter().skip(1).map(|d| d + 1).collect(),
+                    dtype: *dtype,
+                }
+            }
+            SpecKey::Move { dtype } => {
+                todo!()
+            }
+            SpecKey::Zero { dtype } => todo!(),
+        };
+        once(basics)
     }
 }
 

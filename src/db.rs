@@ -1,21 +1,32 @@
 use crate::cost::Cost;
+use crate::datadeps::SpecKey;
+use crate::grid::canon::CanonicalBimap;
+use crate::grid::general::Bimap;
+use crate::grid::linear::BimapInt;
 use crate::imp::{Impl, ImplNode};
+use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::pprint::PrintableAux;
 use crate::scheduling::Action;
-use crate::spec::{LogicalSpec, Spec};
+use crate::spec::{LogicalSpec, LogicalSpecBimap, Spec};
 use crate::target::Target;
+use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::hash_map::RandomState;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::time::Instant;
 use std::{iter, path};
 
+const SCALE_FACTOR: BimapInt = 2;
+
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
+
+type DbKey = ((SpecKey, Vec<Layout>), Vec<BimapInt>);
 
 pub trait Database<'a, Tgt: Target> {
     type Value: AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> + 'a;
@@ -28,16 +39,21 @@ pub trait Database<'a, Tgt: Target> {
     fn save(&'a self);
 }
 
-pub trait DatabaseExt<'a, Tgt: Target> {
+pub trait DatabaseExt<'a, Tgt: Target>: Database<'a, Tgt> {
     fn get_impl(&'a self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>;
 }
 
 #[derive(Clone, Debug)]
 pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
 
-pub struct DashmapDiskDatabase<Tgt: Target> {
+pub struct DashmapDiskDatabase<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
+{
     file_path: Option<path::PathBuf>,
-    grouped_entries: DashMap<LogicalSpec<Tgt>, LogicalSpecEntry<Tgt>>,
+    grouped_entries: DashMap<DbKey, HashMap<LogicalSpec<Tgt>, LogicalSpecEntry<Tgt>>>,
 }
 
 // TODO: Entry should not need to be public.
@@ -48,8 +64,10 @@ pub struct LogicalSpecEntry<Tgt: Target> {
     values: Vec<ActionCostVec<Tgt>>,
 }
 
+// TODO: Storing Spec and usize is too expensive.
 pub struct LogicalSpecEntryRef<'a, Tgt: Target, S = RandomState>(
-    dashmap::mapref::one::Ref<'a, LogicalSpec<Tgt>, LogicalSpecEntry<Tgt>, S>,
+    dashmap::mapref::one::Ref<'a, DbKey, HashMap<LogicalSpec<Tgt>, LogicalSpecEntry<Tgt>>, S>,
+    LogicalSpec<Tgt>,
     usize,
     PhantomData<Tgt>,
 );
@@ -88,7 +106,12 @@ impl<Tgt: Target> Default for DbImplAux<Tgt> {
     }
 }
 
-impl<Tgt: Target> DashmapDiskDatabase<Tgt> {
+impl<Tgt> DashmapDiskDatabase<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
+{
     // TODO: This does I/O; it should return errors, not panic.
     pub fn new(file_path: Option<&path::Path>) -> Self {
         let grouped_entries = match file_path {
@@ -120,18 +143,25 @@ impl<Tgt: Target> AsRef<ActionCostVec<Tgt>> for ActionCostVec<Tgt> {
     }
 }
 
-impl<'a, Tgt: Target> Database<'a, Tgt> for DashmapDiskDatabase<Tgt>
+impl<'a, Tgt> Database<'a, Tgt> for DashmapDiskDatabase<Tgt>
 where
     Self: 'a,
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
 {
     type Value = LogicalSpecEntryRef<'a, Tgt>;
 
     fn get(&'a self, query: &Spec<Tgt>) -> Option<LogicalSpecEntryRef<'a, Tgt>> {
-        let Some(e) = self.grouped_entries.get(&query.0) else {
+        let db_key = compute_db_key(query);
+        let Some(group) = self.grouped_entries.get(&db_key) else {
             return None;
         };
-        get_from_entry(&query.1, e.value())
-            .map(move |i| LogicalSpecEntryRef::<'a, Tgt>(e, i, PhantomData))
+        let Some(e) = group.get(&query.0) else {
+            return None;
+        };
+        get_from_entry(&query.1, e)
+            .map(move |i| LogicalSpecEntryRef::<'a, Tgt>(group, query.0.clone(), i, PhantomData))
     }
 
     fn put(
@@ -140,10 +170,17 @@ where
         impls: SmallVec<[(Action<Tgt>, Cost); 1]>,
     ) -> LogicalSpecEntryRef<'a, Tgt> {
         // TODO: How to treat non-powers of two memory bounds?
+
+        #[cfg(debug_assertions)]
+        let original_spec = spec.clone();
+
+        let db_key = compute_db_key(&spec);
+
+        assert!(impls.len() <= 1);
         let impls_ref = match spec.1 {
             MemoryLimits::Standard(lims) => {
-                assert!(impls.len() <= 1);
-                let mut existing = self.grouped_entries.entry(spec.0.clone()).or_default();
+                let mut group = self.grouped_entries.entry(db_key).or_default();
+                let mut existing = group.entry(spec.0.clone()).or_default();
                 if impls.is_empty() {
                     existing.ranges.push((lims, MemVec::zero::<Tgt>()));
                 } else {
@@ -151,16 +188,25 @@ where
                 }
                 let insertion_idx = existing.values.len();
                 existing.values.push(ActionCostVec(impls));
-                LogicalSpecEntryRef(existing.downgrade(), insertion_idx, PhantomData)
+                LogicalSpecEntryRef(
+                    group.downgrade(),
+                    spec.0.clone(),
+                    insertion_idx,
+                    PhantomData,
+                )
             }
         };
 
-        // debug_assert_eq!(
-        //     self.get(&original_spec).map(|x| x.deref()),
-        //     Some(impls_ref),
-        //     "Original Spec {:?} was incorrect after put.",
-        //     original_spec
-        // );
+        #[cfg(debug_assertions)]
+        {
+            let lhs = self.get(&original_spec);
+            debug_assert_eq!(
+                lhs.as_deref(),
+                Some(impls_ref.deref()),
+                "Original Spec {:?} was incorrect after put.",
+                original_spec
+            )
+        }
 
         impls_ref
     }
@@ -182,8 +228,12 @@ where
     }
 }
 
-// TODO: Phase out save-on-Drop, since we may want to have read-only databases.
-impl<T: Target> Drop for DashmapDiskDatabase<T> {
+impl<Tgt> Drop for DashmapDiskDatabase<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
+{
     fn drop(&mut self) {
         self.save();
     }
@@ -233,7 +283,7 @@ impl<'a, Tgt: Target> Deref for LogicalSpecEntryRef<'a, Tgt> {
     type Target = ActionCostVec<Tgt>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0.value().values[self.1]
+        &self.0.value().get(&self.1).unwrap().values[self.2]
     }
 }
 
@@ -304,4 +354,25 @@ fn get_from_entry<Tgt: Target>(
             None
         }
     }
+}
+
+/// Compute a key by which to group this [Spec]'s entries.
+///
+/// This key will not uniquely identify the [Spec].
+fn compute_db_key<Tgt>(spec: &Spec<Tgt>) -> DbKey
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
+{
+    // TODO: Inline this function and lift bimap construction.
+    // TODO: Scale the coordinates to be more appropriate DB key.
+    let bimap = LogicalSpecBimap {
+        aux_bimap: TensorSpecAuxNonDepBimap::<Tgt>::default(),
+    };
+    let (table_key, mut pt) = bimap.apply(&spec.0);
+    for d in pt.iter_mut() {
+        *d = *d / SCALE_FACTOR;
+    }
+    (table_key, pt)
 }
