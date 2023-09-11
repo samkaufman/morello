@@ -53,7 +53,7 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
 {
     file_path: Option<path::PathBuf>,
-    grouped_entries: DashMap<DbKey, HashMap<LogicalSpec<Tgt>, LogicalSpecEntry<Tgt>>>,
+    blocks: DashMap<DbKey, HashMap<LogicalSpec<Tgt>, LogicalSpecEntry<Tgt>>>,
 }
 
 // TODO: Entry should not need to be public.
@@ -132,7 +132,7 @@ where
         };
         Self {
             file_path: file_path.map(|p| p.to_owned()),
-            grouped_entries,
+            blocks: grouped_entries,
         }
     }
 }
@@ -154,7 +154,7 @@ where
 
     fn get(&'a self, query: &Spec<Tgt>) -> Option<LogicalSpecEntryRef<'a, Tgt>> {
         let db_key = compute_db_key(query);
-        let Some(group) = self.grouped_entries.get(&db_key) else {
+        let Some(group) = self.blocks.get(&db_key) else {
             return None;
         };
         let Some(e) = group.get(&query.0) else {
@@ -179,8 +179,8 @@ where
         assert!(impls.len() <= 1);
         let impls_ref = match spec.1 {
             MemoryLimits::Standard(lims) => {
-                let mut group = self.grouped_entries.entry(db_key).or_default();
-                let mut existing = group.entry(spec.0.clone()).or_default();
+                let mut block = self.blocks.entry(db_key).or_default();
+                let existing = block.entry(spec.0.clone()).or_default();
                 if impls.is_empty() {
                     existing.ranges.push((lims, MemVec::zero::<Tgt>()));
                 } else {
@@ -189,7 +189,7 @@ where
                 let insertion_idx = existing.values.len();
                 existing.values.push(ActionCostVec(impls));
                 LogicalSpecEntryRef(
-                    group.downgrade(),
+                    block.downgrade(),
                     spec.0.clone(),
                     insertion_idx,
                     PhantomData,
@@ -219,7 +219,7 @@ where
             let temp_file_path = {
                 let temp_file = tempfile::NamedTempFile::new().unwrap();
                 let encoder = snap::write::FrameEncoder::new(&temp_file);
-                bincode::serialize_into(encoder, &self.grouped_entries).unwrap();
+                bincode::serialize_into(encoder, &self.blocks).unwrap();
                 temp_file.keep().unwrap().1
             };
             std::fs::rename(temp_file_path, path).unwrap();
