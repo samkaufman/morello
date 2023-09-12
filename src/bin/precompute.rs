@@ -21,6 +21,8 @@ struct Args {
     stages: Option<usize>,
     #[arg(long)]
     db: Option<path::PathBuf>,
+    #[arg(long, default_value = "false")]
+    include_conv: bool,
     #[arg(long, short, default_value = "1")]
     batch: DimSize,
     #[arg(long, default_value = "4")]
@@ -86,38 +88,40 @@ where
             true,
         )
     });
-    bounds.extend({
-        let layout = morello::layout::row_major(4);
-        let a = TensorSpecAux {
-            contig: layout.contiguous_full(),
-            aligned: true,
-            level: CpuMemoryLevel::GL,
-            layout,
-            vector_size: None,
-        };
-        args.filters_size
-            .iter()
-            .map(|&fs| {
-                LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::Conv { accum: false },
-                        spec_shape: smallvec![
-                            args.batch,
-                            args.filters,
-                            args.channels,
-                            args.size,
-                            args.size,
-                            fs,
-                            fs
-                        ],
-                        dtype: Dtype::Uint32,
-                    },
-                    vec![a.clone(), a.clone(), a.clone()],
-                    true,
-                )
-            })
-            .collect::<Vec<_>>()
-    });
+    if args.include_conv {
+        bounds.extend({
+            let layout = morello::layout::row_major(4);
+            let a = TensorSpecAux {
+                contig: layout.contiguous_full(),
+                aligned: true,
+                level: CpuMemoryLevel::GL,
+                layout,
+                vector_size: None,
+            };
+            args.filters_size
+                .iter()
+                .map(|&fs| {
+                    LogicalSpec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::Conv { accum: false },
+                            spec_shape: smallvec![
+                                args.batch,
+                                args.filters,
+                                args.channels,
+                                args.size,
+                                args.size,
+                                fs,
+                                fs
+                            ],
+                            dtype: Dtype::Uint32,
+                        },
+                        vec![a.clone(), a.clone(), a.clone()],
+                        true,
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+    }
 
     let mut rng = rand::thread_rng();
     for (stage_idx, stage) in bounds.iter().flat_map(logical_specs_to_compute).enumerate() {
