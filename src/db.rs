@@ -217,7 +217,8 @@ where
         if let Some(path) = &self.file_path {
             let start = Instant::now();
             let temp_file_path = {
-                let temp_file = tempfile::NamedTempFile::new().unwrap();
+                let dir = path.parent().unwrap();
+                let temp_file = tempfile::NamedTempFile::new_in(dir).unwrap();
                 let encoder = snap::write::FrameEncoder::new(&temp_file);
                 bincode::serialize_into(encoder, &self.blocks).unwrap();
                 temp_file.keep().unwrap().1
