@@ -372,7 +372,7 @@ where
     };
     let (table_key, mut pt) = bimap.apply(&spec.0);
     for d in pt.iter_mut() {
-        *d = *d / SCALE_FACTOR;
+        *d = (*d + 1).ilog2() / SCALE_FACTOR;
     }
     (table_key, pt)
 }
