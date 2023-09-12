@@ -108,9 +108,9 @@ impl ToFromDependencyLatticeCoordinate for LogicalSpec<X86Target> {
         // TODO: Relying on indices in the below implementations is fragile. Fix that.
         match key {
             SpecKey::Matmul { dtype } => {
-                let m = pt[1] + 1;
-                let k = pt[2] + 1;
-                let n = pt[3] + 1;
+                let m = from_log2_dim_space(pt[1]);
+                let k = from_log2_dim_space(pt[2]);
+                let n = from_log2_dim_space(pt[3]);
                 let levels = pt[5..8]
                     .iter()
                     .map(|&i| int_to_level(i))
@@ -400,16 +400,16 @@ fn int_to_level(i: u32) -> CpuMemoryLevel {
 
 fn to_log2_dim_space(dim: DimSize) -> Option<u32> {
     assert!(dim > 0);
-    Some(dim - 1)
-    // let r = bit_length_u32(dim) - 1;
-    // if from_log2_dim_space(r) == dim {
-    //     Some(r)
-    // } else {
-    //     None
-    // }
+    let r = dim.ilog2();
+    if from_log2_dim_space(r) == dim {
+        Some(r)
+    } else {
+        None
+    }
+    // Some(dim - 1)
 }
 
 fn from_log2_dim_space(log2_dim: u32) -> DimSize {
-    // 1 << log2_dim
-    log2_dim + 1
+    // log2_dim + 1
+    1 << log2_dim
 }
