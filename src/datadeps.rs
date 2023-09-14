@@ -348,8 +348,7 @@ fn align_layout_contig_vector_size_product<'s, Tgt: Target>(
         .flat_map(move |(alignments, layouts)| {
             let contigs = layouts
                 .iter()
-                // TODO: Make iterator cloneable instead of collecting into Vec.
-                .map(|l| l.all_contiguous_abs().collect::<Vec<_>>())
+                .map(|l| l.all_contiguous_abs())
                 .multi_cartesian_product();
             let vector_sizes = levels
                 .iter()
