@@ -986,9 +986,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     #[cfg(feature = "verification")]
     pub fn execute<S>(&self, args: &mut [ndarray::ArrayViewMutD<S>])
     where
-        S: num_traits::Zero + ndarray::LinalgScalar + Clone,
+        S: num_traits::Zero
+            + num_traits::NumAssign
+            + ndarray::LinalgScalar
+            + Clone
+            + std::fmt::Debug,
     {
-        use ndarray::Ix2;
+        use ndarray::{s, Ix2, Ix4};
 
         match self {
             LogicalSpec::Primitive(basics, _, _) => match basics.typ {
@@ -1010,7 +1014,43 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .expect("rhs should be rank 2");
                     out.assign(&lhs.dot(&rhs));
                 }
-                PrimitiveSpecType::Conv { accum: _ } => todo!(),
+                PrimitiveSpecType::Conv { accum } => {
+                    use ndarray_conv::*;
+
+                    let [lhs, rhs, out] = args else {
+                        panic!("Conv requires 3 arguments");
+                    };
+
+                    // TODO: Check shapes and dtypes are correct for this Spec.
+                    if !accum {
+                        out.fill(S::zero());
+                    }
+                    let lhs = lhs
+                        .view_mut()
+                        .into_dimensionality::<Ix4>()
+                        .expect("lhs should be rank 4");
+                    let rhs = rhs
+                        .view_mut()
+                        .into_dimensionality::<Ix4>()
+                        .expect("rhs should be rank 4");
+                    for b in 0..lhs.shape()[0] {
+                        for c in 0..lhs.shape()[1] {
+                            for f in 0..rhs.shape()[0] {
+                                let single_img_ch = lhs.slice(s![b, c, .., ..]);
+                                let filter_ch = rhs.slice(s![f, c, .., ..]);
+                                out.slice_mut(s![b, c, .., ..]).assign(
+                                    &Conv2DExt::conv_2d(
+                                        &single_img_ch,
+                                        &filter_ch,
+                                        PaddingSize::Valid,
+                                        PaddingMode::Zeros,
+                                    )
+                                    .unwrap(),
+                                );
+                            }
+                        }
+                    }
+                }
                 PrimitiveSpecType::Move => {
                     let [inp, out] = args else {
                         panic!("Move requires 2 arguments");
