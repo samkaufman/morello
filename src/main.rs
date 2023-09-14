@@ -237,10 +237,10 @@ where
     );
 
     let Some(results) = db_lock.read().unwrap().get_impl(&spec) else {
-        panic!("No Impl found");
+        unreachable!("Database should contain result after synthesis");
     };
-    let [synthesized_impl] = &results[..] else {
-        unreachable!();
+    let Some(synthesized_impl) = results.first() else {
+        panic!("No Impl found");
     };
 
     let bench_samples = if let Subcommand::Bench(BenchCmd { bench_samples, .. }) = subcmd {
