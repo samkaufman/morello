@@ -116,7 +116,6 @@ impl<V: View> CacheView<V> {
 /// A tile with a fixed shape, resulting from applying a [Tiling] to a [View].
 #[derive(Debug, Clone)]
 pub struct Tile<V: View> {
-    // TODO: Since Tiles don't have boundaries, we shouldn't store Tiling.
     shape: Shape,
     step_sizes: SmallVec<[DimSize; 5]>,
     pub view: V,
@@ -266,7 +265,6 @@ impl<V: View> View for CacheView<V> {
 }
 
 impl<V: View> Tile<V> {
-    // TODO: Drop this. Callers can build.
     pub fn new(shape: Shape, step_sizes: Shape, view: V) -> Self {
         let expr_term_id = OpaqueSymbol::new();
         let mut spec = view.spec().clone();
@@ -333,19 +331,8 @@ impl<T: View> View for Tile<T> {
         {
             todo!("Implement support for sliding tilings.");
         }
-        let other_expr = expr.clone();
         expr.map_vars(&mut |term_var| match term_var {
             BufferVar::Pt(dim, _) => {
-                // TODO: Remove
-                assert!(
-                    usize::from(dim) < self.shape().len(),
-                    "dim {} >= shape.len() {}. This is {:?}. expr is {:?}",
-                    dim,
-                    self.shape().len(),
-                    self,
-                    other_expr
-                );
-
                 let e = &self.expr_term_id;
                 let size_in_dim = self.shape()[usize::from(dim)];
                 let mut terms = vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e.clone())))];

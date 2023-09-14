@@ -130,7 +130,7 @@ where
     });
 
     let mut rng = rand::thread_rng();
-    for (stage_idx, stage) in bounds.iter().flat_map(specs_to_compute).enumerate() {
+    for (stage_idx, stage) in bounds.iter().flat_map(logical_specs_to_compute).enumerate() {
         info!(
             "Beginning stage {}, which has peak parallelism of {}",
             stage_idx,
@@ -203,7 +203,7 @@ fn make_memory_limit_iter<T: Target>() -> impl Iterator<Item = MemVec> {
 }
 
 /// Yield an [Iterator] over all [LogicalSpec]s to compute, in dependency order.
-fn specs_to_compute(
+fn logical_specs_to_compute(
     bound: &LogicalSpec<X86Target>,
 ) -> impl Iterator<Item = Vec<Vec<LogicalSpec<X86Target>>>> {
     let Some((spec_key, bound_pt)) = bound.to_grid() else {

@@ -391,7 +391,6 @@ impl<Tgt: Target> Action<Tgt> {
                 // nest in the Pipeline body.
                 let remainder_spec_application = {
                     let mut params: SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]> = smallvec![];
-                    // TODO: Fill in.
                     params.extend(remainder.inputs().iter().enumerate().map(|(i, inp)| {
                         Rc::new(Param::new(i.try_into().unwrap(), inp.clone())) as _
                     }));
@@ -683,34 +682,6 @@ impl<Tgt: Target> Action<Tgt> {
                     .collect(),
                 aux,
             })),
-        }
-    }
-}
-
-// TODO: Remove. Debug should be enough now that Impl exists.
-impl<Tgt: Target> Display for Action<Tgt> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self {
-            Action::Move {
-                source_idx,
-                destination_level,
-                destination_layout,
-                destination_vector_size,
-            } => write!(
-                f,
-                "Move({}, {}, {}, {:?})",
-                source_idx, destination_level, destination_layout, destination_vector_size
-            ),
-            Action::Place(KernelType::Mult) => write!(f, "Mult"),
-            Action::Place(KernelType::BroadcastVecMult) => {
-                write!(f, "BroadcastVecMult")
-            }
-            Action::Place(KernelType::ValueAssign) => write!(f, "ValueAssign"),
-            Action::Place(KernelType::VectorAssign) => write!(f, "VectorAssign"),
-            Action::Place(KernelType::MemsetZero) => write!(f, "MemsetZero"),
-            Action::Place(KernelType::VectorZero) => write!(f, "VectorZero"),
-            Action::Place(KernelType::CacheAccess) => write!(f, "CacheAccess"),
-            _ => write!(f, "{:?}", self),
         }
     }
 }
