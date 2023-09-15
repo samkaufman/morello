@@ -329,7 +329,11 @@ impl<T: View> View for Tile<T> {
             .zip(&self.step_sizes)
             .any(|(a, b)| *a != *b)
         {
-            todo!("Implement support for sliding tilings.");
+            todo!(
+                "Implement support for sliding tilings. (Shape was {:?} and step sizes were {:?}.)",
+                self.shape(),
+                self.step_sizes
+            );
         }
         expr.map_vars(&mut |term_var| match term_var {
             BufferVar::Pt(dim, _) => {

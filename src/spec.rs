@@ -147,7 +147,14 @@ impl PrimitiveBasics {
                 let [b, f, c, h, w, fh, fw] = self.spec_shape[..] else {
                     panic!("Conv must have rank 7")
                 };
-                debug_assert!(h >= fh && w >= fw);
+                debug_assert!(
+                    h >= fh && w >= fw,
+                    "Conv spatial dims. {}x{} were larger than filter {}x{}",
+                    h,
+                    w,
+                    fh,
+                    fw
+                );
                 let img = smallvec![b, c, h, w];
                 let filt = smallvec![f, c, fh, fw];
                 let out = conv_infer_output_shape(&img, &filt);
