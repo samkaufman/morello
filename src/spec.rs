@@ -219,8 +219,8 @@ impl PrimitiveBasics {
                 new_filters_steps[0] = smaller_output.step_sizes()[1];
 
                 // Construct the bindings Vecs.
-                let image_bindings = smallvec![Some(0), None];
-                let filter_bindings = smallvec![None, Some(1)];
+                let image_bindings = smallvec![Some(0), None, None, None];
+                let filter_bindings = smallvec![None, Some(1), None, None];
 
                 TilingInference(vec![
                     (

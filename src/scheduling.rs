@@ -482,11 +482,11 @@ impl<Tgt: Target> Action<Tgt> {
                 Ok(ImplNode::Loop(Loop {
                     tiles: vec![
                         LoopTile {
-                            axes: smallvec![0, 1],
+                            axes: smallvec![7, 8, 0, 1],
                             tile: outer_image_tile,
                         },
                         LoopTile {
-                            axes: smallvec![1, 2],
+                            axes: smallvec![9, 8, 0, 1],
                             tile: outer_filters_tile,
                         },
                     ],
