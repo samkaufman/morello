@@ -1,6 +1,5 @@
 use super::common::{DimSize, Shape};
 use crate::common::Dtype;
-use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
@@ -13,7 +12,6 @@ use crate::utils::join_into_string;
 use core::panic;
 use itertools::Either;
 use itertools::Itertools;
-use log::warn;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec, ToSmallVec};
 use std::collections::HashMap;
@@ -602,10 +600,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let output = self.output();
         let multi_dim = MULTI_DIM_TILING || !serial_only;
         gen_tile_sizes::<Tgt>(output.shape(), true, multi_dim).flat_map(move |tile_shape| {
-            let left = once(self.tile_out(&tile_shape, false));
+            let left = once(Action::TileOut {
+                output_shape: tile_shape.clone(),
+                parallel: false,
+            });
             let mut right = None;
             if !serial_only {
-                right = Some(self.tile_out(&tile_shape, true));
+                right = Some(Action::TileOut {
+                    output_shape: tile_shape,
+                    parallel: true,
+                });
             }
             left.into_iter().chain(right.into_iter())
         })
@@ -632,7 +636,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         Box::new(
             dim_range(k, false)
                 .filter(|&new_k| self.split_valid(new_k))
-                .map(|k| self.split(k)),
+                .map(|k| Action::Split { k }),
         )
     }
 
@@ -662,10 +666,18 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         components[1].dtype,
                         vector_bytes,
                     ) {
-                        results.push(self.peel(layout.clone(), level, Some(vector_size)));
+                        results.push(Action::Peel {
+                            layout: layout.clone(),
+                            level,
+                            vector_size: Some(vector_size),
+                        });
                     }
                 } else {
-                    results.push(self.peel(layout.clone(), level, None));
+                    results.push(Action::Peel {
+                        layout: layout.clone(),
+                        level,
+                        vector_size: None,
+                    });
                 }
             }
         }
@@ -753,28 +765,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
 
         results.into_iter()
-    }
-
-    /// Produces a loop.
-    ///
-    /// If the Spec cannot be tiled to that shape, returns None.
-    pub fn tile_out(&self, output_shape: &[DimSize], parallel: bool) -> Action<Tgt> {
-        Action::TileOut {
-            output_shape: Shape::from(output_shape),
-            parallel,
-        }
-    }
-
-    fn split(&self, size: DimSize) -> Action<Tgt> {
-        Action::Split { k: size }
-    }
-
-    fn peel(&self, layout: Layout, level: Tgt::Level, vector_size: Option<DimSize>) -> Action<Tgt> {
-        Action::Peel {
-            layout,
-            level,
-            vector_size,
-        }
     }
 
     pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> TilingInference {
