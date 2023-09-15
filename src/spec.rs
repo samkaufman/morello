@@ -570,9 +570,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     fn can_spatial_split(&self) -> bool {
-        warn!("spatial split disabled");
-        return false;
-
         let LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, primitive_aux, _) = self else {
             panic!("can_spatial_split called on non-Primitive spec");
         };
@@ -583,9 +580,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             panic!("can_spatial_split called on non-accum Conv spec");
         };
 
-        let operands = self.parameters();
-        let image_shape = operands[0].shape();
-        let filters_shape = operands[1].shape();
+        let parameters = self.parameters();
+        let image_shape = parameters[0].shape();
+        let filters_shape = parameters[1].shape();
 
         if image_shape[2..] != filters_shape[2..] {
             return false;
