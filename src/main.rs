@@ -200,9 +200,9 @@ where
                     spec_shape: smallvec![
                         *batch,
                         *filters,
-                        *filters,
-                        *size - *filters_size + 1,
-                        *size - *filters_size + 1,
+                        *channels,
+                        *size,
+                        *size,
                         *filters_size,
                         *filters_size,
                     ],
