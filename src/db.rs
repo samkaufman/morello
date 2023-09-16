@@ -25,7 +25,7 @@ const SCALE_FACTOR: BimapInt = 2;
 
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
-type DbKey = ((SpecKey, Vec<Layout>), Vec<BimapInt>);
+type DbKey = ((SpecKey, SmallVec<[Layout; 3]>), SmallVec<[BimapInt; 10]>);
 
 pub trait Database<'a, Tgt: Target> {
     type ValueRef: AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> + 'a;
