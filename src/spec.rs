@@ -5,7 +5,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::Bimap;
 use crate::grid::linear::BimapInt;
 use crate::layout::Layout;
-use crate::memorylimits::MemoryLimits;
+use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
 use crate::target::Target;
@@ -14,7 +14,6 @@ use crate::tiling::Tiling;
 use crate::utils::is_power_of_two_u32;
 use crate::utils::join_into_string;
 
-use core::panic;
 use itertools::Either;
 use itertools::Itertools;
 use log::warn;
@@ -26,6 +25,7 @@ use std::fmt::Display;
 use std::iter::Iterator;
 use std::iter::{self, once};
 use std::mem;
+use std::panic;
 use std::{assert_eq, debug_assert_eq};
 
 /// Whether `tile_out` actions should tile in all dimensions per Spec.
@@ -78,6 +78,19 @@ pub enum PrimitiveSpecType {
 /// dimension of the first input (the m dimension) is bound to the m dimension
 /// of the output, and so on for the n dimension.
 pub struct TilingInference(pub Vec<(Tiling, SmallVec<[Option<u8>; 5]>)>);
+
+/// A [BiMap] which extends [LogicalSpecBimap] with memory limits dimensions.
+///
+/// Memory limits are represented identically in the codomain. They are not scaled logarithmically
+/// or inverted to be in data dependency order.
+#[derive(Default)]
+pub struct SpecBimap<Tgt, A>
+where
+    Tgt: Target,
+    A: Bimap<Domain = TensorSpecAux<Tgt>>,
+{
+    pub logical_spec_bimap: LogicalSpecBimap<Tgt, A>,
+}
 
 #[derive(Default)]
 pub struct LogicalSpecBimap<Tgt, A>
@@ -1090,6 +1103,48 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
     }
 }
 
+impl<Tgt, A, Aa, Ab> Bimap for SpecBimap<Tgt, A>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Domain = Tgt::Level, Codomain = BimapInt>,
+    A: Bimap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
+    Aa: Clone,
+    Ab: IntoIterator<Item = BimapInt>,
+{
+    type Domain = Spec<Tgt>;
+    type Codomain = ((SpecKey, Vec<Aa>), Vec<BimapInt>);
+    type DomainIter = iter::Once<Spec<Tgt>>;
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        let mut initial = self.logical_spec_bimap.apply(&t.0);
+        match &t.1 {
+            MemoryLimits::Standard(limits_vec) => {
+                debug_assert_eq!(limits_vec.len(), Tgt::levels().len());
+                initial
+                    .1
+                    .extend(limits_vec.iter().map(|l| BimapInt::try_from(*l).unwrap()));
+            }
+        }
+        initial
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+        let (left, right) = i;
+        let (inner_right, memory_right) = right.split_at(i.1.len() - Tgt::levels().len());
+
+        let limits = memory_right.into_iter().copied().map_into().collect();
+        let limits = MemoryLimits::Standard(limits);
+        let remaining_value: ((SpecKey, Vec<Aa>), Vec<BimapInt>) = (
+            left.clone(),
+            inner_right.iter().copied().map_into().collect(),
+        );
+        let mut inner_iter = self.logical_spec_bimap.apply_inverse(&remaining_value);
+        debug_assert_eq!(inner_iter.len(), 1);
+        once(Spec(inner_iter.next().unwrap(), limits))
+    }
+}
+
 impl<Tgt, A, Aa, Ab> Bimap for LogicalSpecBimap<Tgt, A>
 where
     Tgt: Target,
@@ -1100,7 +1155,7 @@ where
 {
     type Domain = LogicalSpec<Tgt>;
     type Codomain = ((SpecKey, Vec<Aa>), Vec<BimapInt>);
-    type DomainIter = std::iter::Once<LogicalSpec<Tgt>>;
+    type DomainIter = iter::Once<LogicalSpec<Tgt>>;
 
     fn apply(&self, spec: &LogicalSpec<Tgt>) -> Self::Codomain {
         match spec {

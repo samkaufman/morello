@@ -5,19 +5,18 @@ use crate::grid::general::Bimap;
 use crate::grid::linear::BimapInt;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
-use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::pprint::PrintableAux;
 use crate::scheduling::Action;
-use crate::spec::{LogicalSpec, LogicalSpecBimap, Spec};
+use crate::spec::{LogicalSpecBimap, Spec, SpecBimap};
 use crate::target::Target;
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
+use dashmap::mapref::one::MappedRef;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::time::Instant;
 use std::{iter, path};
@@ -29,11 +28,15 @@ pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 type DbKey = ((SpecKey, Vec<Layout>), Vec<BimapInt>);
 
 pub trait Database<'a, Tgt: Target> {
-    type Value: AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> + 'a;
+    type ValueRef: AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> + 'a;
 
-    fn get(&'a self, query: &Spec<Tgt>) -> Option<Self::Value>;
+    fn get(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef>;
     // TODO: Document interior mutability of put.
-    fn put(&'a self, problem: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) -> Self::Value;
+    fn put(
+        &'a self,
+        problem: Spec<Tgt>,
+        impls: SmallVec<[(Action<Tgt>, Cost); 1]>,
+    ) -> Self::ValueRef;
     fn flush(&'a self);
     // TODO: `save` should return Result
     fn save(&'a self);
@@ -53,23 +56,13 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
 {
     file_path: Option<path::PathBuf>,
-    blocks: DashMap<DbKey, HashMap<LogicalSpec<Tgt>, LogicalSpecEntry<Tgt>>>,
-}
-
-// TODO: Entry should not need to be public.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(bound = "")]
-pub struct LogicalSpecEntry<Tgt: Target> {
-    ranges: Vec<(MemVec, MemVec)>,
-    values: Vec<ActionCostVec<Tgt>>,
+    blocks: DashMap<DbKey, HashMap<Spec<Tgt>, ActionCostVec<Tgt>>>,
 }
 
 // TODO: Storing Spec and usize is too expensive.
-pub struct LogicalSpecEntryRef<'a, Tgt: Target, S = RandomState>(
-    dashmap::mapref::one::Ref<'a, DbKey, HashMap<LogicalSpec<Tgt>, LogicalSpecEntry<Tgt>>, S>,
-    LogicalSpec<Tgt>,
-    usize,
-    PhantomData<Tgt>,
+pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
+    dashmap::mapref::one::Ref<'a, DbKey, HashMap<Spec<Tgt>, ActionCostVec<Tgt>>, S>,
+    Option<&'a ActionCostVec<Tgt>>,
 );
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,52 +143,35 @@ where
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
 {
-    type Value = LogicalSpecEntryRef<'a, Tgt>;
+    type ValueRef =
+        MappedRef<'a, DbKey, HashMap<Spec<Tgt>, ActionCostVec<Tgt>>, ActionCostVec<Tgt>>;
 
-    fn get(&'a self, query: &Spec<Tgt>) -> Option<LogicalSpecEntryRef<'a, Tgt>> {
+    fn get(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef> {
         let db_key = compute_db_key(query);
         let Some(group) = self.blocks.get(&db_key) else {
             return None;
         };
-        let Some(e) = group.get(&query.0) else {
+        if group.get(query).is_none() {
             return None;
-        };
-        get_from_entry(&query.1, e)
-            .map(move |i| LogicalSpecEntryRef::<'a, Tgt>(group, query.0.clone(), i, PhantomData))
+        }
+        // TODO: Obviate need to hash and look up on the inner HashMap for each deref of the below.
+        Some(group.map(|g| g.get(query).unwrap()))
     }
 
-    fn put(
-        &'a self,
-        spec: Spec<Tgt>,
-        impls: SmallVec<[(Action<Tgt>, Cost); 1]>,
-    ) -> LogicalSpecEntryRef<'a, Tgt> {
+    fn put(&'a self, spec: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) -> Self::ValueRef {
         // TODO: How to treat non-powers of two memory bounds?
 
         #[cfg(debug_assertions)]
         let original_spec = spec.clone();
 
         let db_key = compute_db_key(&spec);
+        let spec_b = spec.clone();
 
         assert!(impls.len() <= 1);
-        let impls_ref = match spec.1 {
-            MemoryLimits::Standard(lims) => {
-                let mut block = self.blocks.entry(db_key).or_default();
-                let existing = block.entry(spec.0.clone()).or_default();
-                if impls.is_empty() {
-                    existing.ranges.push((lims, MemVec::zero::<Tgt>()));
-                } else {
-                    existing.ranges.push((lims, impls[0].1.peaks.clone()));
-                }
-                let insertion_idx = existing.values.len();
-                existing.values.push(ActionCostVec(impls));
-                LogicalSpecEntryRef(
-                    block.downgrade(),
-                    spec.0.clone(),
-                    insertion_idx,
-                    PhantomData,
-                )
-            }
-        };
+        let mut block = self.blocks.entry(db_key).or_default();
+        block.insert(spec, ActionCostVec(impls));
+        // TODO: Re-hashing and re-querying the inner HashMap is unnecessary. Avoid that.
+        let impls_ref = block.downgrade().map(|submap| submap.get(&spec_b).unwrap());
 
         #[cfg(debug_assertions)]
         {
@@ -265,36 +241,21 @@ impl<'a, Tgt: Target, T: Database<'a, Tgt>> DatabaseExt<'a, Tgt> for T {
     }
 }
 
-impl<Tgt: Target> Default for LogicalSpecEntry<Tgt> {
-    fn default() -> Self {
-        Self {
-            ranges: Default::default(),
-            values: Default::default(),
-        }
-    }
-}
-
-impl<Tgt: Target> AsRef<ActionCostVec<Tgt>> for LogicalSpecEntry<Tgt> {
-    fn as_ref(&self) -> &ActionCostVec<Tgt> {
-        &self.values[0]
-    }
-}
-
-impl<'a, Tgt: Target> Deref for LogicalSpecEntryRef<'a, Tgt> {
+impl<'a, Tgt: Target> Deref for DashmapDbRef<'a, Tgt> {
     type Target = ActionCostVec<Tgt>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0.value().get(&self.1).unwrap().values[self.2]
+        self.1.unwrap()
     }
 }
 
-impl<'a, Tgt: Target> AsRef<ActionCostVec<Tgt>> for LogicalSpecEntryRef<'a, Tgt> {
+impl<'a, Tgt: Target> AsRef<ActionCostVec<Tgt>> for DashmapDbRef<'a, Tgt> {
     fn as_ref(&self) -> &ActionCostVec<Tgt> {
         self.deref()
     }
 }
 
-impl<'a, Tgt: Target> AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> for LogicalSpecEntryRef<'a, Tgt> {
+impl<'a, Tgt: Target> AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> for DashmapDbRef<'a, Tgt> {
     fn as_ref(&self) -> &SmallVec<[(Action<Tgt>, Cost); 1]> {
         self.deref().as_ref()
     }
@@ -336,27 +297,6 @@ fn construct_impl<'a, Tgt: Target, D: Database<'a, Tgt>>(
     }
 }
 
-fn get_from_entry<Tgt: Target>(
-    mlims: &MemoryLimits,
-    entry: &LogicalSpecEntry<Tgt>,
-) -> Option<usize> {
-    match mlims {
-        MemoryLimits::Standard(query_lims) => {
-            for (i, (lims, peaks)) in entry.ranges.iter().enumerate() {
-                if query_lims
-                    .into_iter()
-                    .zip(lims)
-                    .zip(peaks)
-                    .all(|((q, l), p)| l >= q && q >= p)
-                {
-                    return Some(i);
-                }
-            }
-            None
-        }
-    }
-}
-
 /// Compute a key by which to group this [Spec]'s entries.
 ///
 /// This key will not uniquely identify the [Spec].
@@ -366,12 +306,12 @@ where
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
 {
-    // TODO: Inline this function and lift bimap construction.
-    // TODO: Scale the coordinates to be more appropriate DB key.
-    let bimap = LogicalSpecBimap {
-        aux_bimap: TensorSpecAuxNonDepBimap::<Tgt>::default(),
+    let bimap = SpecBimap {
+        logical_spec_bimap: LogicalSpecBimap {
+            aux_bimap: TensorSpecAuxNonDepBimap::<Tgt>::default(),
+        },
     };
-    let (table_key, mut pt) = bimap.apply(&spec.0);
+    let (table_key, mut pt) = bimap.apply(spec);
     for d in pt.iter_mut() {
         *d = (*d + 1).ilog2() / SCALE_FACTOR;
     }

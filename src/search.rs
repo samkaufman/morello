@@ -42,7 +42,7 @@ fn top_down_inner<'d, Tgt: Target, D: Database<'d, Tgt>>(
     top_k: usize,
     depth: usize,
     parent_summary: &ParentSummary<Tgt>,
-) -> (D::Value, u64, u64) {
+) -> (D::ValueRef, u64, u64) {
     if top_k > 1 {
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
