@@ -32,7 +32,7 @@ pub trait ToFromDependencyLatticeCoordinate: Sized {
 }
 
 // TODO: Simplify code by making this the foundation of our Spec enum.
-#[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub enum SpecKey {
     Matmul { dtype: Dtype },
     Conv { dtype: Dtype },
