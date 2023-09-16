@@ -11,6 +11,7 @@ use crate::spec::{LogicalSpecBimap, Spec, SpecBimap};
 use crate::target::Target;
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
+use anyhow::anyhow;
 use dashmap::mapref::one::MappedRef;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -38,8 +39,7 @@ pub trait Database<'a, Tgt: Target> {
         impls: SmallVec<[(Action<Tgt>, Cost); 1]>,
     ) -> Self::ValueRef;
     fn flush(&'a self);
-    // TODO: `save` should return Result
-    fn save(&'a self);
+    fn save(&'a self) -> anyhow::Result<()>;
 }
 
 pub trait DatabaseExt<'a, Tgt: Target>: Database<'a, Tgt> {
@@ -189,19 +189,20 @@ where
 
     fn flush(&'a self) {}
 
-    fn save(&'a self) {
+    fn save(&'a self) -> anyhow::Result<()> {
         if let Some(path) = &self.file_path {
             let start = Instant::now();
-            let temp_file_path = {
-                let dir = path.parent().unwrap();
-                let temp_file = tempfile::NamedTempFile::new_in(dir).unwrap();
-                let encoder = snap::write::FrameEncoder::new(&temp_file);
-                bincode::serialize_into(encoder, &self.blocks).unwrap();
-                temp_file.keep().unwrap().1
-            };
-            std::fs::rename(temp_file_path, path).unwrap();
+            let dir = path
+                .parent()
+                .ok_or_else(|| anyhow!("path must have parent, but is: {:?}", path))?;
+            let temp_file = tempfile::NamedTempFile::new_in(dir)?;
+            let encoder = snap::write::FrameEncoder::new(&temp_file);
+            bincode::serialize_into(encoder, &self.blocks)?;
+            let temp_file_path = temp_file.keep()?.1;
+            std::fs::rename(temp_file_path, path)?;
             log::debug!("Saving database took {:?}", start.elapsed());
         }
+        Ok(())
     }
 }
 
@@ -212,7 +213,7 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
 {
     fn drop(&mut self) {
-        self.save();
+        self.save().unwrap();
     }
 }
 

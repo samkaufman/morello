@@ -157,7 +157,7 @@ where
                 }
             }
         });
-        db.save();
+        db.save().unwrap();
         info!("Stage {} took {:?}", stage_idx, stage_start.elapsed());
         if Some(stage_idx) == args.stages {
             info!("Stopping early because --stages was passed");

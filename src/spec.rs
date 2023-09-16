@@ -5,7 +5,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::Bimap;
 use crate::grid::linear::BimapInt;
 use crate::layout::Layout;
-use crate::memorylimits::{MemVec, MemoryLimits};
+use crate::memorylimits::MemoryLimits;
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
 use crate::target::Target;
