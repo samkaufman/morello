@@ -1113,7 +1113,7 @@ where
     Ab: IntoIterator<Item = BimapInt>,
 {
     type Domain = Spec<Tgt>;
-    type Codomain = ((SpecKey, Vec<Aa>), Vec<BimapInt>);
+    type Codomain = <LogicalSpecBimap<Tgt, A> as Bimap>::Codomain;
     type DomainIter = iter::Once<Spec<Tgt>>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
@@ -1135,7 +1135,7 @@ where
 
         let limits = memory_right.into_iter().copied().map_into().collect();
         let limits = MemoryLimits::Standard(limits);
-        let remaining_value: ((SpecKey, Vec<Aa>), Vec<BimapInt>) = (
+        let remaining_value = (
             left.clone(),
             inner_right.iter().copied().map_into().collect(),
         );
@@ -1151,22 +1151,25 @@ where
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Domain = Tgt::Level, Codomain = BimapInt>,
     A: Bimap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
+    Aa: Clone,
     Ab: IntoIterator<Item = BimapInt>,
 {
     type Domain = LogicalSpec<Tgt>;
-    type Codomain = ((SpecKey, Vec<Aa>), Vec<BimapInt>);
+    type Codomain = ((SpecKey, SmallVec<[Aa; 3]>), SmallVec<[BimapInt; 10]>);
     type DomainIter = iter::Once<LogicalSpec<Tgt>>;
 
     fn apply(&self, spec: &LogicalSpec<Tgt>) -> Self::Codomain {
         match spec {
             LogicalSpec::Primitive(basics, auxes, serial_only) => {
                 let (key, mut pt) = PrimitiveBasics::bimap().apply(basics);
-                let mut aux_keys = Vec::with_capacity(auxes.len());
-                for aux in auxes {
-                    let (aux_key, aux_pt) = self.aux_bimap.apply(aux);
-                    aux_keys.push(aux_key);
-                    pt.extend(aux_pt.into_iter());
-                }
+                let aux_keys = auxes
+                    .iter()
+                    .map(|aux| {
+                        let (aux_key, aux_pt) = self.aux_bimap.apply(aux);
+                        pt.extend(aux_pt.into_iter());
+                        aux_key
+                    })
+                    .collect();
                 pt.push(!*serial_only as _);
                 ((key, aux_keys), pt)
             }
@@ -1181,7 +1184,7 @@ where
 
 impl Bimap for PrimitiveBasicsBimap {
     type Domain = PrimitiveBasics;
-    type Codomain = (SpecKey, Vec<BimapInt>);
+    type Codomain = (SpecKey, SmallVec<[BimapInt; 10]>);
     type DomainIter = iter::Once<Self::Domain>;
 
     fn apply(&self, basics: &PrimitiveBasics) -> Self::Codomain {
