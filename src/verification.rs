@@ -16,13 +16,19 @@ impl BuiltArtifact {
     /// This method can be used for a little extra defense against bugs in Morello or the underlying
     /// C compiler.
     pub fn check_correctness<Tgt: Target>(&self, spec: &Spec<Tgt>) -> bool {
-        match &spec.0 {
+        let test_result = match &spec.0 {
             LogicalSpec::Primitive(PrimitiveBasics { dtype, .. }, _, _) => match dtype {
                 Dtype::Uint8 => test_artifact_correct_inner::<Tgt, u8>(spec, self),
                 Dtype::Uint32 => test_artifact_correct_inner::<Tgt, u32>(spec, self),
             },
             LogicalSpec::Compose { .. } => todo!(),
+        };
+        if test_result {
+            log::debug!("Artifact passed correctness check");
+        } else {
+            log::debug!("Artifact failed correctness check");
         }
+        test_result
     }
 }
 
@@ -31,8 +37,8 @@ where
     Tgt: Target,
     T: num_traits::Bounded
         + num_traits::WrappingAdd
-        + num_traits::Num
         + num_traits::ToBytes
+        + num_traits::NumAssignRef
         + std::str::FromStr
         + std::fmt::Debug
         + Copy
@@ -83,6 +89,7 @@ where
     lowered_output == expected_output
 }
 
+/// Returns an iterator that yields infinitely all values of a numeric type in ascending order.
 fn cycle_int_values<T>() -> impl Iterator<Item = T>
 where
     T: num_traits::Bounded + num_traits::WrappingAdd + num_traits::Num + Copy,

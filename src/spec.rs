@@ -16,7 +16,6 @@ use crate::utils::{bit_length_u32, is_power_of_two_u32};
 
 use itertools::Either;
 use itertools::Itertools;
-use log::warn;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec, ToSmallVec};
 use std::collections::HashMap;
@@ -178,7 +177,14 @@ impl PrimitiveBasics {
                 let [b, f, c, h, w, fh, fw] = self.spec_shape[..] else {
                     panic!("Conv must have rank 7")
                 };
-                debug_assert!(h >= fh && w >= fw);
+                debug_assert!(
+                    h >= fh && w >= fw,
+                    "Conv spatial dims. {}x{} were larger than filter {}x{}",
+                    h,
+                    w,
+                    fh,
+                    fw
+                );
                 let img = smallvec![b, c, h, w];
                 let filt = smallvec![f, c, fh, fw];
                 let out = conv_infer_output_shape(&img, &filt);
@@ -250,8 +256,8 @@ impl PrimitiveBasics {
                 new_filters_steps[0] = smaller_output.step_sizes()[1];
 
                 // Construct the bindings Vecs.
-                let image_bindings = smallvec![Some(0), None];
-                let filter_bindings = smallvec![None, Some(1)];
+                let image_bindings = smallvec![Some(0), None, None, None];
+                let filter_bindings = smallvec![None, Some(1), None, None];
 
                 TilingInference(vec![
                     (
@@ -602,9 +608,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     fn can_spatial_split(&self) -> bool {
-        warn!("spatial split disabled");
-        return false;
-
         let LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, primitive_aux, _) = self else {
             panic!("can_spatial_split called on non-Primitive spec");
         };
@@ -615,9 +618,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             panic!("can_spatial_split called on non-accum Conv spec");
         };
 
-        let operands = self.parameters();
-        let image_shape = operands[0].shape();
-        let filters_shape = operands[1].shape();
+        let parameters = self.parameters();
+        let image_shape = parameters[0].shape();
+        let filters_shape = parameters[1].shape();
 
         if image_shape[2..] != filters_shape[2..] {
             return false;
@@ -637,10 +640,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let output = self.output();
         let multi_dim = MULTI_DIM_TILING || !serial_only;
         gen_tile_sizes::<Tgt>(output.shape(), true, multi_dim).flat_map(move |tile_shape| {
-            let left = once(self.tile_out(&tile_shape, false));
+            let left = once(Action::TileOut {
+                output_shape: tile_shape.clone(),
+                parallel: false,
+            });
             let mut right = None;
             if !serial_only {
-                right = Some(self.tile_out(&tile_shape, true));
+                right = Some(Action::TileOut {
+                    output_shape: tile_shape,
+                    parallel: true,
+                });
             }
             left.into_iter().chain(right.into_iter())
         })
@@ -667,7 +676,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         Box::new(
             dim_range(k, false)
                 .filter(|&new_k| self.split_valid(new_k))
-                .map(|k| self.split(k)),
+                .map(|k| Action::Split { k }),
         )
     }
 
@@ -697,10 +706,18 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         components[1].dtype,
                         vector_bytes,
                     ) {
-                        results.push(self.peel(layout.clone(), level, Some(vector_size)));
+                        results.push(Action::Peel {
+                            layout: layout.clone(),
+                            level,
+                            vector_size: Some(vector_size),
+                        });
                     }
                 } else {
-                    results.push(self.peel(layout.clone(), level, None));
+                    results.push(Action::Peel {
+                        layout: layout.clone(),
+                        level,
+                        vector_size: None,
+                    });
                 }
             }
         }
@@ -788,28 +805,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
 
         results.into_iter()
-    }
-
-    /// Produces a loop.
-    ///
-    /// If the Spec cannot be tiled to that shape, returns None.
-    pub fn tile_out(&self, output_shape: &[DimSize], parallel: bool) -> Action<Tgt> {
-        Action::TileOut {
-            output_shape: Shape::from(output_shape),
-            parallel,
-        }
-    }
-
-    fn split(&self, size: DimSize) -> Action<Tgt> {
-        Action::Split { k: size }
-    }
-
-    fn peel(&self, layout: Layout, level: Tgt::Level, vector_size: Option<DimSize>) -> Action<Tgt> {
-        Action::Peel {
-            layout,
-            level,
-            vector_size,
-        }
     }
 
     pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> TilingInference {
@@ -1025,9 +1020,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     #[cfg(feature = "verification")]
     pub fn execute<S>(&self, args: &mut [ndarray::ArrayViewMutD<S>])
     where
-        S: num_traits::Zero + ndarray::LinalgScalar + Clone,
+        S: num_traits::Zero
+            + num_traits::NumAssign
+            + ndarray::LinalgScalar
+            + Clone
+            + std::fmt::Debug,
     {
-        use ndarray::Ix2;
+        use ndarray::{s, Ix2, Ix4};
 
         match self {
             LogicalSpec::Primitive(basics, _, _) => match basics.typ {
@@ -1049,7 +1048,43 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .expect("rhs should be rank 2");
                     out.assign(&lhs.dot(&rhs));
                 }
-                PrimitiveSpecType::Conv { accum: _ } => todo!(),
+                PrimitiveSpecType::Conv { accum } => {
+                    use ndarray_conv::*;
+
+                    let [lhs, rhs, out] = args else {
+                        panic!("Conv requires 3 arguments");
+                    };
+
+                    // TODO: Check shapes and dtypes are correct for this Spec.
+                    if !accum {
+                        out.fill(S::zero());
+                    }
+                    let lhs = lhs
+                        .view_mut()
+                        .into_dimensionality::<Ix4>()
+                        .expect("lhs should be rank 4");
+                    let rhs = rhs
+                        .view_mut()
+                        .into_dimensionality::<Ix4>()
+                        .expect("rhs should be rank 4");
+                    for b in 0..lhs.shape()[0] {
+                        for c in 0..lhs.shape()[1] {
+                            for f in 0..rhs.shape()[0] {
+                                let single_img_ch = lhs.slice(s![b, c, .., ..]);
+                                let filter_ch = rhs.slice(s![f, c, .., ..]);
+                                out.slice_mut(s![b, c, .., ..]).assign(
+                                    &Conv2DExt::conv_2d(
+                                        &single_img_ch,
+                                        &filter_ch,
+                                        PaddingSize::Valid,
+                                        PaddingMode::Zeros,
+                                    )
+                                    .unwrap(),
+                                );
+                            }
+                        }
+                    }
+                }
                 PrimitiveSpecType::Move => {
                     let [inp, out] = args else {
                         panic!("Move requires 2 arguments");

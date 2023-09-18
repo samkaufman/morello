@@ -193,9 +193,9 @@ where
                     spec_shape: smallvec![
                         *batch,
                         *filters,
-                        *filters,
-                        *size - *filters_size + 1,
-                        *size - *filters_size + 1,
+                        *channels,
+                        *size,
+                        *size,
                         *filters_size,
                         *filters_size,
                     ],
@@ -229,10 +229,10 @@ where
     );
 
     let Some(results) = db.get_impl(&spec) else {
-        panic!("No Impl found");
+        unreachable!("Database should contain result after synthesis");
     };
-    let [synthesized_impl] = &results[..] else {
-        unreachable!();
+    let Some(synthesized_impl) = results.first() else {
+        panic!("No Impl found");
     };
 
     let bench_samples = if let Subcommand::Bench(BenchCmd { bench_samples, .. }) = subcmd {

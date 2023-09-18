@@ -89,7 +89,7 @@ impl Layout {
         }
     }
 
-    pub fn all_contiguous_abs(&self) -> impl Iterator<Item = Contig> {
+    pub fn all_contiguous_abs(&self) -> impl Iterator<Item = Contig> + Clone {
         match self {
             Layout::Standard { dim_order } => 0u8..(dim_order.len() + 1).try_into().unwrap(),
             Layout::Packed { dim_count, .. } => 0u8..(*dim_count + 2),
