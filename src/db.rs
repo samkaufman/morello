@@ -25,8 +25,6 @@ use std::ops::Deref;
 use std::time::Instant;
 use std::{iter, path};
 
-const SCALE_FACTOR: BimapInt = 2;
-
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
 type DbKey = ((SpecKey, SmallVec<[Layout; 3]>), SmallVec<[BimapInt; 10]>);
@@ -62,8 +60,8 @@ where
     blocks: DashMap<DbKey, DbBlock<Tgt>>,
 }
 
-/// Stores a [Database] block. This may be a single value if all block entries have been filled
-/// with the same [ActionCostVec], or a [HashMap] along with a count of identical entries
+/// Stores a [Database] block. This may be a single value if all block entries have been filled with
+/// the same [ActionCostVec], or an n-dimensional array along with a count of identical entries
 /// accumulated until the first differing entry.
 ///
 /// This isn't designed to be compressed in the case that a non-identical value is added and later
@@ -81,7 +79,7 @@ where
     Single(ActionCostVec<Tgt>),
     Expanded {
         // TODO: This should be a full multi-dimensional array, not a HashMap keyed by Specs.
-        actions: HashMap<Spec<Tgt>, ActionCostVec<Tgt>>,
+        actions: crate::ndarray::NDArray<Option<ActionCostVec<Tgt>>>,
         matches: Option<NonZeroU32>,
     },
 }
@@ -92,7 +90,7 @@ pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
     Option<&'a ActionCostVec<Tgt>>,
 );
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct ActionCostVec<Tgt: Target>(pub SmallVec<[(Action<Tgt>, Cost); 1]>);
 
@@ -173,14 +171,14 @@ where
     type ValueRef = MappedRef<'a, DbKey, DbBlock<Tgt>, ActionCostVec<Tgt>>;
 
     fn get(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef> {
-        let db_key = compute_db_key(query);
+        let (db_key, inner_pt) = compute_db_key(query);
         let Some(group) = self.blocks.get(&db_key) else {
             return None;
         };
         match group.deref() {
             DbBlock::Single(_) => {}
             DbBlock::Expanded { actions, .. } => {
-                actions.get(query)?;
+                actions[&inner_pt].as_ref()?;
             }
         }
         // TODO: Obviate need to hash and look up on the inner HashMap for each deref of the below.
@@ -191,7 +189,7 @@ where
         #[cfg(debug_assertions)]
         let original_spec = spec.clone();
 
-        let db_key = compute_db_key(&spec);
+        let (db_key, inner_pt) = compute_db_key(&spec);
         let spec_b = spec.clone();
 
         let block_shape = max_block_shape(&db_key);
@@ -207,12 +205,15 @@ where
                     }
                     DbBlock::Single(_) => {}
                     DbBlock::Expanded { actions, matches } => {
-                        let arbitrary_value = actions.values().next().unwrap();
+                        // TODO: Avoid the following scan.
+                        let arbitrary_value = actions.data.iter().find_map(|v| v.as_ref()).unwrap();
                         let new_entry_matches = arbitrary_value.0 == impls;
-                        let previous_value = actions.insert(spec, ActionCostVec(impls));
+                        let replaced_value = actions[&inner_pt].is_some();
+                        actions[&inner_pt] = Some(ActionCostVec(impls));
+                        // TODO: This should fill a range and update mactches correctly.
                         if let Some(m) = matches {
                             if new_entry_matches {
-                                if previous_value.is_none() {
+                                if !replaced_value {
                                     *m = m.checked_add(1).unwrap();
                                 }
                             } else {
@@ -224,8 +225,16 @@ where
                 try_compress_block(r, &block_shape);
                 existing_block.into_ref()
             }
-            Entry::Vacant(mut entry) => entry.insert(DbBlock::Expanded {
-                actions: [(spec, ActionCostVec(impls))].into_iter().collect(),
+            Entry::Vacant(entry) => entry.insert(DbBlock::Expanded {
+                actions: {
+                    let arr_shape = block_shape
+                        .into_iter()
+                        .map(|v| v.try_into().unwrap())
+                        .collect::<Vec<_>>();
+                    let mut arr = crate::ndarray::NDArray::new(&arr_shape);
+                    arr[&inner_pt] = Some(ActionCostVec(impls));
+                    arr
+                },
                 matches: Some(NonZeroU32::new(1).unwrap()),
             }),
         };
@@ -306,12 +315,13 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
 {
     fn get(&self, query: &Spec<Tgt>) -> Option<&ActionCostVec<Tgt>> {
+        let (_, inner_pt) = compute_db_key(query);
         match self {
             DbBlock::Single(v) => {
                 // TODO: Check that v is in bounds
                 Some(v)
             }
-            DbBlock::Expanded { actions, .. } => actions.get(query),
+            DbBlock::Expanded { actions, .. } => actions[&inner_pt].as_ref(),
         }
     }
 }
@@ -363,7 +373,8 @@ where
             actions,
             matches: Some(m),
         } if m.get() == block_volume => {
-            let new_value = DbBlock::Single(actions.drain().next().unwrap().1);
+            // log::debug!("Compressing block of size {}", block_volume);
+            let new_value = DbBlock::Single(actions.data.pop().unwrap().unwrap());
             *block = new_value;
         }
         _ => {}
@@ -395,7 +406,7 @@ fn construct_impl<'a, Tgt: Target, D: Database<'a, Tgt>>(
 /// Compute a key by which to group this [Spec]'s entries.
 ///
 /// This key will not uniquely identify the [Spec].
-fn compute_db_key<Tgt>(spec: &Spec<Tgt>) -> DbKey
+fn compute_db_key<Tgt>(spec: &Spec<Tgt>) -> (DbKey, SmallVec<[usize; 10]>)
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -408,33 +419,45 @@ where
         ..Default::default()
     };
     let (table_key, mut pt) = BiMap::apply(&bimap, spec);
+    let rank = pt.len();
+    let mut inner_pt = SmallVec::new();
     for (i, d) in pt.iter_mut().enumerate() {
-        *d = db_key_scale(i, *d);
+        let (outer, inner) = db_key_scale(i, *d, rank);
+        *d = outer;
+        inner_pt.push(inner);
     }
-    (table_key, pt)
+    ((table_key, pt), inner_pt)
 }
 
 fn max_block_shape(key: &DbKey) -> SmallVec<[BimapInt; 10]> {
     let (_, pt) = key;
     pt.iter()
         .enumerate()
-        .map(|(i, &d)| block_dimension_value_count(i, d))
+        .map(|(i, &d)| block_dimension_value_count(i, d, pt.len()))
         .collect()
 }
 
-fn db_key_scale(dim: usize, value: BimapInt) -> BimapInt {
+fn db_key_scale(dim: usize, value: BimapInt, rank: usize) -> (BimapInt, usize) {
     // TODO: Autotune rather than hardcode these arbitrary dimensions.
-    if dim >= 2 || dim <= 8 || dim >= 13 {
-        value / SCALE_FACTOR
+
+    let scale_factor = if dim == 2 { 2 } else { 4 };
+    // if dim >= 2 || dim <= 4 || dim >= 13 {
+    if dim == 2 || dim >= rank - 4 {
+        (
+            value / scale_factor,
+            (value % scale_factor).try_into().unwrap(),
+        )
     } else {
-        value
+        (value, 0)
     }
 }
 
-fn block_dimension_value_count(dim: usize, _block_offset: BimapInt) -> u32 {
+fn block_dimension_value_count(dim: usize, _block_offset: BimapInt, rank: usize) -> u32 {
     // TODO: Autotune rather than hardcode these arbitrary dimensions.
-    if dim >= 2 || dim <= 8 || dim >= 13 {
-        SCALE_FACTOR
+    // if dim >= 2 || dim <= 4 || dim >= 13 {
+    let scale_factor = if dim == 2 { 2 } else { 4 };
+    if dim == 2 || dim >= rank - 4 {
+        scale_factor
     } else {
         1
     }
