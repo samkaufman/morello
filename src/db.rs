@@ -25,7 +25,7 @@ use std::ops::Deref;
 use std::time::Instant;
 use std::{iter, path};
 
-const SCALE_FACTOR: BimapInt = 2;
+const SCALE_FACTOR: BimapInt = 4;
 
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
@@ -357,20 +357,14 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
 {
     // TODO: Should just precompute block_shape as MAX_BLOCK_VOLUME
-    let block_volume = block_shape.into_iter().product::<DimSize>();
+    let block_volume = block_shape.iter().product::<DimSize>();
     match block {
         DbBlock::Expanded {
             actions,
             matches: Some(m),
         } if m.get() == block_volume => {
-            log::debug!("Compressing block of volume {block_volume} to single value");
             let new_value = DbBlock::Single(actions.drain().next().unwrap().1);
             *block = new_value;
-        }
-        DbBlock::Expanded {
-            matches: Some(m), ..
-        } if m.get() > 1000 => {
-            log::debug!("Not compressing; matches = {m:?} (volume = {block_volume})");
         }
         _ => {}
     }
@@ -429,7 +423,8 @@ fn max_block_shape(key: &DbKey) -> SmallVec<[BimapInt; 10]> {
 }
 
 fn db_key_scale(dim: usize, value: BimapInt) -> BimapInt {
-    if dim == 2 || dim == 3 || dim == 4 {
+    // TODO: Autotune rather than hardcode these arbitrary dimensions.
+    if dim >= 2 || dim <= 8 || dim >= 13 {
         value / SCALE_FACTOR
     } else {
         value
@@ -437,7 +432,8 @@ fn db_key_scale(dim: usize, value: BimapInt) -> BimapInt {
 }
 
 fn block_dimension_value_count(dim: usize, _block_offset: BimapInt) -> u32 {
-    if dim == 2 || dim == 3 || dim == 4 {
+    // TODO: Autotune rather than hardcode these arbitrary dimensions.
+    if dim >= 2 || dim <= 8 || dim >= 13 {
         SCALE_FACTOR
     } else {
         1
