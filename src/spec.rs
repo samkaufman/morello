@@ -2,17 +2,17 @@ use super::common::{DimSize, Shape};
 use crate::common::Dtype;
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::Bimap;
+use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
 use crate::layout::Layout;
-use crate::memorylimits::MemoryLimits;
+use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
-use crate::utils::is_power_of_two_u32;
 use crate::utils::join_into_string;
+use crate::utils::{bit_length_u32, is_power_of_two_u32};
 
 use itertools::Either;
 use itertools::Itertools;
@@ -33,6 +33,8 @@ const MULTI_DIM_TILING: bool = false;
 
 /// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
 const MOVE_RESULTS_CAPACITY: usize = 12;
+
+const LOG_SCALE_SHAPES_BIMAP: bool = true;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
 #[serde(bound = "")]
@@ -87,16 +89,17 @@ pub struct TilingInference(pub Vec<(Tiling, SmallVec<[Option<u8>; 5]>)>);
 pub struct SpecBimap<Tgt, A>
 where
     Tgt: Target,
-    A: Bimap<Domain = TensorSpecAux<Tgt>>,
+    A: BiMap<Domain = TensorSpecAux<Tgt>>,
 {
     pub logical_spec_bimap: LogicalSpecBimap<Tgt, A>,
+    pub memory_limits_bimap: MemoryLimitsBimap<Tgt>,
 }
 
 #[derive(Default)]
 pub struct LogicalSpecBimap<Tgt, A>
 where
     Tgt: Target,
-    A: Bimap<Domain = TensorSpecAux<Tgt>>,
+    A: BiMap<Domain = TensorSpecAux<Tgt>>,
 {
     pub aux_bimap: A,
 }
@@ -1103,70 +1106,62 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
     }
 }
 
-impl<Tgt, A, Aa, Ab> Bimap for SpecBimap<Tgt, A>
+impl<Tgt, A, Aa, Ab> BiMap for SpecBimap<Tgt, A>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Domain = Tgt::Level, Codomain = BimapInt>,
-    A: Bimap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = BimapInt>,
+    A: BiMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
     Aa: Clone,
     Ab: IntoIterator<Item = BimapInt>,
 {
     type Domain = Spec<Tgt>;
-    type Codomain = <LogicalSpecBimap<Tgt, A> as Bimap>::Codomain;
-    type DomainIter = iter::Once<Spec<Tgt>>;
+    type Codomain = <LogicalSpecBimap<Tgt, A> as SurMap>::Codomain;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
-        let mut initial = self.logical_spec_bimap.apply(&t.0);
-        match &t.1 {
-            MemoryLimits::Standard(limits_vec) => {
-                debug_assert_eq!(limits_vec.len(), Tgt::levels().len());
-                initial
-                    .1
-                    .extend(limits_vec.iter().map(|l| BimapInt::try_from(*l).unwrap()));
-            }
-        }
+        let mut initial = BiMap::apply(&self.logical_spec_bimap, &t.0);
+        initial
+            .1
+            .extend(BiMap::apply(&self.memory_limits_bimap, &t.1));
         initial
     }
 
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
         let (left, right) = i;
         let (inner_right, memory_right) = right.split_at(i.1.len() - Tgt::levels().len());
 
-        let limits = memory_right.into_iter().copied().map_into().collect();
-        let limits = MemoryLimits::Standard(limits);
         let remaining_value = (
             left.clone(),
             inner_right.iter().copied().map_into().collect(),
         );
-        let mut inner_iter = self.logical_spec_bimap.apply_inverse(&remaining_value);
-        debug_assert_eq!(inner_iter.len(), 1);
-        once(Spec(inner_iter.next().unwrap(), limits))
+        Spec(
+            BiMap::apply_inverse(&self.logical_spec_bimap, &remaining_value),
+            BiMap::apply_inverse(&self.memory_limits_bimap, &memory_right.into()),
+        )
     }
 }
 
-impl<Tgt, A, Aa, Ab> Bimap for LogicalSpecBimap<Tgt, A>
+impl<Tgt, A, Aa, Ab> BiMap for LogicalSpecBimap<Tgt, A>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Domain = Tgt::Level, Codomain = BimapInt>,
-    A: Bimap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = BimapInt>,
+    A: BiMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
     Aa: Clone,
     Ab: IntoIterator<Item = BimapInt>,
 {
     type Domain = LogicalSpec<Tgt>;
     type Codomain = ((SpecKey, SmallVec<[Aa; 3]>), SmallVec<[BimapInt; 10]>);
-    type DomainIter = iter::Once<LogicalSpec<Tgt>>;
 
     fn apply(&self, spec: &LogicalSpec<Tgt>) -> Self::Codomain {
         match spec {
             LogicalSpec::Primitive(basics, auxes, serial_only) => {
-                let (key, mut pt) = PrimitiveBasics::bimap().apply(basics);
+                let (key, mut pt) = BiMap::apply(&PrimitiveBasics::bimap(), basics);
                 let aux_keys = auxes
                     .iter()
                     .map(|aux| {
                         let (aux_key, aux_pt) = self.aux_bimap.apply(aux);
-                        pt.extend(aux_pt.into_iter());
+                        pt.extend(aux_pt);
                         aux_key
                     })
                     .collect();
@@ -1177,15 +1172,14 @@ where
         }
     }
 
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
         todo!()
     }
 }
 
-impl Bimap for PrimitiveBasicsBimap {
+impl BiMap for PrimitiveBasicsBimap {
     type Domain = PrimitiveBasics;
     type Codomain = (SpecKey, SmallVec<[BimapInt; 10]>);
-    type DomainIter = iter::Once<Self::Domain>;
 
     fn apply(&self, basics: &PrimitiveBasics) -> Self::Codomain {
         let PrimitiveBasics {
@@ -1193,7 +1187,14 @@ impl Bimap for PrimitiveBasicsBimap {
             spec_shape,
             dtype,
         } = basics;
-        let shifted_shape = spec_shape.iter().map(|d| d - 1);
+        let shifted_shape = spec_shape.iter().map(|&d| {
+            debug_assert!(is_power_of_two_u32(d));
+            if LOG_SCALE_SHAPES_BIMAP {
+                bit_length_u32(d - 1)
+            } else {
+                d - 1
+            }
+        });
         match *typ {
             PrimitiveSpecType::Matmul { accum } => {
                 let v = once(!accum as _).chain(shifted_shape).collect();
@@ -1208,7 +1209,7 @@ impl Bimap for PrimitiveBasicsBimap {
         }
     }
 
-    fn apply_inverse(&self, c: &Self::Codomain) -> Self::DomainIter {
+    fn apply_inverse(&self, c: &Self::Codomain) -> Self::Domain {
         let (key, v) = c;
         let basics = match key {
             SpecKey::Matmul { dtype } | SpecKey::Conv { dtype } => {
@@ -1218,9 +1219,15 @@ impl Bimap for PrimitiveBasicsBimap {
                     SpecKey::Conv { .. } => PrimitiveSpecType::Conv { accum },
                     _ => unreachable!(),
                 };
+                let spec_shape = v.iter().skip(1);
+                let spec_shape = if LOG_SCALE_SHAPES_BIMAP {
+                    todo!()
+                } else {
+                    spec_shape.map(|d| d + 1)
+                };
                 PrimitiveBasics {
                     typ,
-                    spec_shape: v.iter().skip(1).map(|d| d + 1).collect(),
+                    spec_shape: spec_shape.collect(),
                     dtype: *dtype,
                 }
             }
@@ -1229,7 +1236,7 @@ impl Bimap for PrimitiveBasicsBimap {
             }
             SpecKey::Zero { dtype } => todo!(),
         };
-        once(basics)
+        basics
     }
 }
 
