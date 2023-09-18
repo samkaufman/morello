@@ -25,7 +25,7 @@ use std::ops::Deref;
 use std::time::Instant;
 use std::{iter, path};
 
-const SCALE_FACTOR: BimapInt = 4;
+const SCALE_FACTOR: BimapInt = 2;
 
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 

@@ -208,7 +208,6 @@ fn next_limits<'a>(
             new_values[idx] = 0;
         } else {
             new_values[idx] = 1 << (bit_length(result_peak[idx]) - 2);
-            debug_assert!(new_values[idx] >= 0);
         }
         Some(new_values)
     })
