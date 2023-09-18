@@ -13,6 +13,7 @@ use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
+use morello::utils::bit_length;
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -143,16 +144,14 @@ where
         let stage_iter = nonempty_tasks.into_par_iter().with_min_len(4);
         stage_iter.for_each(|task| {
             let mut worklist = VecDeque::new();
-            // for (_task_idx, spec) in chunk.iter().flat_map(|e| *e).enumerate() {
-            for (_task_idx, spec) in task.iter().enumerate() {
-                let mut limits_iterator = make_memory_limit_iter::<X86Target>();
+            for (_task_idx, logical_spec) in task.iter().enumerate() {
                 debug_assert!(worklist.is_empty());
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
-                    let spec = Spec(spec.clone(), MemoryLimits::Standard(job));
+                    let spec = Spec(logical_spec.clone(), MemoryLimits::Standard(job));
                     let result = morello::search::top_down(db, &spec, 1);
                     if let [(_, only_result_cost)] = &result.0[..] {
-                        worklist.extend(limits_iterator.next().into_iter().collect::<Vec<_>>());
+                        worklist.extend(next_limits(&spec.1, &only_result_cost.peaks));
                     }
                 }
             }
@@ -189,11 +188,30 @@ fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
     )
 }
 
-/// Returns an [Iterator] over power-of-two [MemVec]s from maximum memory down.
-fn make_memory_limit_iter<T: Target>() -> impl Iterator<Item = MemVec> {
-    // TOOD: Skip ahead rather than recursing for every limit.
-    let MemoryLimits::Standard(top) = T::max_mem();
-    top.iter_down_by_powers_of_two::<T>()
+fn next_limits<'a>(
+    result_limits: &'a MemoryLimits,
+    result_peak: &'a MemVec,
+) -> impl Iterator<Item = MemVec> + 'a {
+    let MemoryLimits::Standard(limits_vec) = result_limits else {
+        panic!("Not a standard memory limit");
+    };
+    debug_assert!(limits_vec
+        .iter()
+        .zip(result_peak.iter())
+        .all(|(&l, &p)| l >= p));
+    (0..limits_vec.len()).filter_map(|idx| {
+        let mut new_values = limits_vec.clone();
+        if result_peak[idx] == 0 {
+            return None;
+        }
+        if result_peak[idx] == 1 {
+            new_values[idx] = 0;
+        } else {
+            new_values[idx] = 1 << (bit_length(result_peak[idx]) - 2);
+            debug_assert!(new_values[idx] >= 0);
+        }
+        Some(new_values)
+    })
 }
 
 /// Yield an [Iterator] over all [LogicalSpec]s to compute, in dependency order.
