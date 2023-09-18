@@ -1,3 +1,11 @@
+use crate::grid::general::BiMap;
+use crate::grid::linear::BimapInt;
+use crate::utils::{bit_length, is_power_of_two, iter_powers_of_two};
+use crate::{
+    target::{Target, MAX_LEVEL_COUNT},
+    utils::prev_power_of_two,
+};
+
 use itertools::Itertools;
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -6,12 +14,6 @@ use std::fmt::{Display, Formatter};
 use std::{
     iter,
     ops::{Index, IndexMut, Sub},
-};
-
-use crate::utils::iter_powers_of_two;
-use crate::{
-    target::{Target, MAX_LEVEL_COUNT},
-    utils::prev_power_of_two,
 };
 
 /// MemoryLimits are bounds on available memory for each level of a target.
@@ -46,6 +48,11 @@ pub enum MemoryAllocation {
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
 pub struct MemVec(SmallVec<[u64; MAX_LEVEL_COUNT]>);
+
+#[derive(Default)]
+pub struct MemoryLimitsBimap<Tgt: Target> {
+    phantom: std::marker::PhantomData<Tgt>,
+}
 
 impl MemoryLimits {
     /// Convert to a `MemoryLimits::Standard`.
@@ -241,5 +248,34 @@ impl FromIterator<u64> for MemVec {
 impl Display for MemVec {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{}]", self.0.iter().join(", "))
+    }
+}
+
+impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
+    type Domain = MemoryLimits;
+    type Codomain = SmallVec<[BimapInt; 4]>;
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        match t {
+            MemoryLimits::Standard(limits_vec) => {
+                debug_assert_eq!(limits_vec.len(), Tgt::levels().len());
+                debug_assert!(limits_vec
+                    .iter()
+                    .copied()
+                    .all(|v| v == 0 || is_power_of_two(v)));
+                limits_vec
+                    .iter()
+                    .map(|&v| BimapInt::try_from(bit_length(v)).unwrap())
+                    .collect()
+            }
+        }
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
+        MemoryLimits::Standard(
+            i.iter()
+                .map(|&v| if v == 0 { 0 } else { 1 << (v - 1) })
+                .collect(),
+        )
     }
 }

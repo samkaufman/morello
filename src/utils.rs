@@ -94,15 +94,25 @@ pub fn snap_availables_up_memvec(available: MemVec, always: bool) -> MemVec {
         .collect()
 }
 
-pub fn bit_length(n: u64) -> u32 {
+pub const fn bit_length(n: u64) -> u32 {
     u64::BITS - n.leading_zeros()
 }
 
-pub fn bit_length_u32(n: u32) -> u32 {
+pub const fn bit_length_u32(n: u32) -> u32 {
     u32::BITS - n.leading_zeros()
 }
 
+pub const fn is_power_of_two(n: u64) -> bool {
+    if n == 0 {
+        return false;
+    }
+    n & (n - 1) == 0
+}
+
 pub const fn is_power_of_two_u32(n: u32) -> bool {
+    if n == 0 {
+        return false;
+    }
     n & (n - 1) == 0
 }
 

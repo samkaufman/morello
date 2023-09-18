@@ -1,8 +1,8 @@
-use super::general::Bimap;
+use super::general::BiMap;
 use super::linear::BoolBimap;
 
 pub trait CanonicalBimap {
-    type Bimap: Bimap<Domain = Self>;
+    type Bimap: BiMap<Domain = Self>;
     fn bimap() -> Self::Bimap;
 }
 

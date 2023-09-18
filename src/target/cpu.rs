@@ -2,7 +2,7 @@ use crate::codegen::c_utils::VecType;
 use crate::common::DimSize;
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::Bimap;
+use crate::grid::general::IntBiMap;
 use crate::grid::linear::BimapInt;
 use crate::imp::kernels::KernelType;
 use crate::layout::{col_major, nhwc, row_major, Layout};
@@ -241,10 +241,8 @@ impl Display for CpuMemoryLevel {
     }
 }
 
-impl Bimap for CpuMemoryLevelBimap {
+impl IntBiMap for CpuMemoryLevelBimap {
     type Domain = CpuMemoryLevel;
-    type Codomain = BimapInt;
-    type DomainIter = std::iter::Once<CpuMemoryLevel>;
 
     fn apply(&self, level: &CpuMemoryLevel) -> BimapInt {
         match level {
@@ -255,12 +253,12 @@ impl Bimap for CpuMemoryLevelBimap {
         }
     }
 
-    fn apply_inverse(&self, i: &BimapInt) -> Self::DomainIter {
-        match *i {
-            0 => std::iter::once(CpuMemoryLevel::RF),
-            1 => std::iter::once(CpuMemoryLevel::VRF),
-            2 => std::iter::once(CpuMemoryLevel::L1),
-            3 => std::iter::once(CpuMemoryLevel::GL),
+    fn apply_inverse(&self, i: BimapInt) -> CpuMemoryLevel {
+        match i {
+            0 => CpuMemoryLevel::RF,
+            1 => CpuMemoryLevel::VRF,
+            2 => CpuMemoryLevel::L1,
+            3 => CpuMemoryLevel::GL,
             _ => panic!("Invalid index: {}", i),
         }
     }

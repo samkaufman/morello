@@ -1,7 +1,8 @@
+use crate::common::DimSize;
 use crate::cost::Cost;
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::Bimap;
+use crate::grid::general::BiMap;
 use crate::grid::linear::BimapInt;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
@@ -12,12 +13,14 @@ use crate::target::Target;
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
 use anyhow::anyhow;
+use dashmap::mapref::entry::Entry;
 use dashmap::mapref::one::MappedRef;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::time::Instant;
 use std::{iter, path};
@@ -53,10 +56,34 @@ pub struct DashmapDiskDatabase<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
 {
     file_path: Option<path::PathBuf>,
-    blocks: DashMap<DbKey, HashMap<Spec<Tgt>, ActionCostVec<Tgt>>>,
+    blocks: DashMap<DbKey, DbBlock<Tgt>>,
+}
+
+/// Stores a [Database] block. This may be a single value if all block entries have been filled
+/// with the same [ActionCostVec], or a [HashMap] along with a count of identical entries
+/// accumulated until the first differing entry.
+///
+/// This isn't designed to be compressed in the case that a non-identical value is added and later
+/// overwritten with an identical value. In that case, `matches` will be `None` and all values
+/// would need to be scanned to determine whether they are all identical and, to set `matches`, how
+/// many there are.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub enum DbBlock<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+{
+    Single(ActionCostVec<Tgt>),
+    Expanded {
+        // TODO: This should be a full multi-dimensional array, not a HashMap keyed by Specs.
+        actions: HashMap<Spec<Tgt>, ActionCostVec<Tgt>>,
+        matches: Option<NonZeroU32>,
+    },
 }
 
 // TODO: Storing Spec and usize is too expensive.
@@ -103,7 +130,7 @@ impl<Tgt> DashmapDiskDatabase<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
 {
     // TODO: This does I/O; it should return errors, not panic.
     pub fn new(file_path: Option<&path::Path>) -> Self {
@@ -141,49 +168,79 @@ where
     Self: 'a,
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
 {
-    type ValueRef =
-        MappedRef<'a, DbKey, HashMap<Spec<Tgt>, ActionCostVec<Tgt>>, ActionCostVec<Tgt>>;
+    type ValueRef = MappedRef<'a, DbKey, DbBlock<Tgt>, ActionCostVec<Tgt>>;
 
     fn get(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef> {
         let db_key = compute_db_key(query);
         let Some(group) = self.blocks.get(&db_key) else {
             return None;
         };
-        if group.get(query).is_none() {
-            return None;
+        match group.deref() {
+            DbBlock::Single(_) => {}
+            DbBlock::Expanded { actions, .. } => {
+                actions.get(query)?;
+            }
         }
         // TODO: Obviate need to hash and look up on the inner HashMap for each deref of the below.
         Some(group.map(|g| g.get(query).unwrap()))
     }
 
     fn put(&'a self, spec: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) -> Self::ValueRef {
-        // TODO: How to treat non-powers of two memory bounds?
-
         #[cfg(debug_assertions)]
         let original_spec = spec.clone();
 
         let db_key = compute_db_key(&spec);
         let spec_b = spec.clone();
 
+        let block_shape = max_block_shape(&db_key);
+
         assert!(impls.len() <= 1);
-        let mut block = self.blocks.entry(db_key).or_default();
-        block.insert(spec, ActionCostVec(impls));
-        // TODO: Re-hashing and re-querying the inner HashMap is unnecessary. Avoid that.
-        let impls_ref = block.downgrade().map(|submap| submap.get(&spec_b).unwrap());
+        let block_entry = self.blocks.entry(db_key);
+        let block_entry_ref = match block_entry {
+            Entry::Occupied(mut existing_block) => {
+                let r = existing_block.get_mut();
+                match r {
+                    DbBlock::Single(v) if v.0 != impls => {
+                        todo!("Convert back into Expanded and update in the entry")
+                    }
+                    DbBlock::Single(_) => {}
+                    DbBlock::Expanded { actions, matches } => {
+                        let arbitrary_value = actions.values().next().unwrap();
+                        let new_entry_matches = arbitrary_value.0 == impls;
+                        let previous_value = actions.insert(spec, ActionCostVec(impls));
+                        if let Some(m) = matches {
+                            if new_entry_matches {
+                                if previous_value.is_none() {
+                                    *m = m.checked_add(1).unwrap();
+                                }
+                            } else {
+                                *matches = None;
+                            }
+                        }
+                    }
+                }
+                try_compress_block(r, &block_shape);
+                existing_block.into_ref()
+            }
+            Entry::Vacant(mut entry) => entry.insert(DbBlock::Expanded {
+                actions: [(spec, ActionCostVec(impls))].into_iter().collect(),
+                matches: Some(NonZeroU32::new(1).unwrap()),
+            }),
+        };
 
+        // TODO: Re-hashing and re-querying the inner HashMap should be unnecessary. Don't.
+        let impls_ref = block_entry_ref
+            .downgrade()
+            .map(|submap| submap.get(&spec_b).unwrap());
         #[cfg(debug_assertions)]
-        {
-            let lhs = self.get(&original_spec);
-            debug_assert_eq!(
-                lhs.as_deref(),
-                Some(impls_ref.deref()),
-                "Original Spec {:?} was incorrect after put.",
-                original_spec
-            )
-        }
-
+        debug_assert_eq!(
+            self.get(&original_spec).as_deref(),
+            Some(impls_ref.deref()),
+            "Original Spec {:?} was incorrect after put.",
+            original_spec
+        );
         impls_ref
     }
 
@@ -210,7 +267,7 @@ impl<Tgt> Drop for DashmapDiskDatabase<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
 {
     fn drop(&mut self) {
         self.save().unwrap();
@@ -239,6 +296,23 @@ impl<'a, Tgt: Target, T: Database<'a, Tgt>> DatabaseExt<'a, Tgt> for T {
                 })
                 .collect::<SmallVec<_>>(),
         )
+    }
+}
+
+impl<Tgt> DbBlock<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+{
+    fn get(&self, query: &Spec<Tgt>) -> Option<&ActionCostVec<Tgt>> {
+        match self {
+            DbBlock::Single(v) => {
+                // TODO: Check that v is in bounds
+                Some(v)
+            }
+            DbBlock::Expanded { actions, .. } => actions.get(query),
+        }
     }
 }
 
@@ -276,6 +350,32 @@ impl<Tgt: Target> AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> for ActionCostVec<Tg
     }
 }
 
+fn try_compress_block<Tgt>(block: &mut DbBlock<Tgt>, block_shape: &[DimSize])
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+{
+    // TODO: Should just precompute block_shape as MAX_BLOCK_VOLUME
+    let block_volume = block_shape.into_iter().product::<DimSize>();
+    match block {
+        DbBlock::Expanded {
+            actions,
+            matches: Some(m),
+        } if m.get() == block_volume => {
+            log::debug!("Compressing block of volume {block_volume} to single value");
+            let new_value = DbBlock::Single(actions.drain().next().unwrap().1);
+            *block = new_value;
+        }
+        DbBlock::Expanded {
+            matches: Some(m), ..
+        } if m.get() > 1000 => {
+            log::debug!("Not compressing; matches = {m:?} (volume = {block_volume})");
+        }
+        _ => {}
+    }
+}
+
 fn construct_impl<'a, Tgt: Target, D: Database<'a, Tgt>>(
     db: &'a D,
     imp: &DbImpl<Tgt>,
@@ -305,16 +405,41 @@ fn compute_db_key<Tgt>(spec: &Spec<Tgt>) -> DbKey
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: Bimap<Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
 {
     let bimap = SpecBimap {
         logical_spec_bimap: LogicalSpecBimap {
-            aux_bimap: TensorSpecAuxNonDepBimap::<Tgt>::default(),
+            aux_bimap: TensorSpecAuxNonDepBimap::default(),
         },
+        ..Default::default()
     };
-    let (table_key, mut pt) = bimap.apply(spec);
-    for d in pt.iter_mut() {
-        *d = (*d + 1).ilog2() / SCALE_FACTOR;
+    let (table_key, mut pt) = BiMap::apply(&bimap, spec);
+    for (i, d) in pt.iter_mut().enumerate() {
+        *d = db_key_scale(i, *d);
     }
     (table_key, pt)
+}
+
+fn max_block_shape(key: &DbKey) -> SmallVec<[BimapInt; 10]> {
+    let (_, pt) = key;
+    pt.iter()
+        .enumerate()
+        .map(|(i, &d)| block_dimension_value_count(i, d))
+        .collect()
+}
+
+fn db_key_scale(dim: usize, value: BimapInt) -> BimapInt {
+    if dim == 2 || dim == 3 || dim == 4 {
+        value / SCALE_FACTOR
+    } else {
+        value
+    }
+}
+
+fn block_dimension_value_count(dim: usize, _block_offset: BimapInt) -> u32 {
+    if dim == 2 || dim == 3 || dim == 4 {
+        SCALE_FACTOR
+    } else {
+        1
+    }
 }
