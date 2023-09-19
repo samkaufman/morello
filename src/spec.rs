@@ -672,10 +672,29 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         if !accum {
             panic!("split_actions called on non-accumulating Matmul");
         }
-        let k = spec_shape[1];
+        let [m, orig_k, n] = spec_shape[..] else {
+            unreachable!();
+        };
+
+        let operands = self.parameters();
         Box::new(
-            dim_range(k, false)
-                .filter(|&new_k| self.split_valid(new_k))
+            dim_range(orig_k, false)
+                .filter(move |&new_k| {
+                    // Special-case for splitting to single-element tensors, which will be normalized
+                    // to row-major. This is necessary for splits in any other layout to be
+                    // discovered by search.
+                    // TODO: This is pretty ad-hoc. Should there be an alternative to
+                    //   `is_valid_tile_shape` that includes this case?
+                    if m == 1 && new_k == 1 && n == 1 {
+                        return true;
+                    }
+
+                    if new_k >= orig_k || !operands[0].is_valid_tile_shape(&[m, new_k]) {
+                        false
+                    } else {
+                        operands[1].is_valid_tile_shape(&[new_k, n])
+                    }
+                })
                 .map(|k| Action::Split { k }),
         )
     }
@@ -723,42 +742,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
 
         Box::new(results.into_iter())
-    }
-
-    fn split_valid(&self, new_k: DimSize) -> bool {
-        let LogicalSpec::Primitive(
-            PrimitiveBasics {
-                typ,
-                spec_shape,
-                dtype: _,
-            },
-            _,
-            _,
-        ) = self
-        else {
-            panic!();
-        };
-        debug_assert!(matches!(typ, PrimitiveSpecType::Matmul { .. }));
-
-        let [m, orig_k, n] = spec_shape[..] else {
-            unreachable!();
-        };
-
-        // Special-case for splitting to single-element tensors, which will be normalized
-        // to row-major. This is necessary for splits in any other layout to be
-        // discovered by search.
-        // TODO: This is pretty ad-hoc. Should there be an alternative to
-        //   `is_valid_tile_shape` that includes this case?
-        if m == 1 && new_k == 1 && n == 1 {
-            return true;
-        }
-
-        let operands = self.parameters();
-        if new_k >= orig_k || !operands[0].is_valid_tile_shape(&[m, new_k]) {
-            false
-        } else {
-            operands[1].is_valid_tile_shape(&[new_k, n])
-        }
     }
 
     fn move_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
