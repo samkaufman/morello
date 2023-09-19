@@ -117,20 +117,10 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     /// Returns true if this TensorSpec can be tiled to the given shape.
     pub fn is_valid_tile_shape(&self, shape: &[DimSize]) -> bool {
-        if shape.len() != self.shape.len() {
-            return false;
-        }
-
-        if !shape.iter().zip(self.shape.iter()).all(|(i, o)| i <= o) {
-            return false;
-        }
-
+        debug_assert_eq!(shape.len(), self.shape.len());
+        debug_assert!(shape.iter().zip(self.shape.iter()).all(|(i, o)| i <= o));
         let all_ones = shape.iter().all(|d| *d == 1);
-        if !all_ones && !self.aux.layout.applies_to_shape(shape) {
-            return false;
-        }
-
-        true
+        all_ones || self.aux.layout.applies_to_shape(shape)
     }
 
     pub fn bytes_used(&self) -> u64 {

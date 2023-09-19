@@ -1,10 +1,10 @@
 use super::common::{DimSize, Shape};
+use crate::action_seq::ActionSeq;
 use crate::common::Dtype;
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
-use crate::layout::Layout;
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
@@ -562,7 +562,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         self == &c
     }
 
-    pub fn actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
+    pub fn actions(&self) -> impl ActionSeq<Tgt> + '_ {
         let iter = self.tile_out_actions();
         let iter = iter.chain(self.move_actions());
         let iter = iter.chain(Tgt::actions(self));
@@ -578,23 +578,23 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 _serial_only,
             ) => match typ {
                 PrimitiveSpecType::Matmul { accum } if !*accum => {
-                    Box::new(iter.chain(once(Action::ToAccum)))
+                    iter.chain(once(Action::ToAccum)).collect::<Vec<_>>()
                 }
                 PrimitiveSpecType::Matmul { accum } if *accum => {
-                    Box::new(iter.chain(self.split_actions()))
+                    iter.chain(self.split_actions()).collect::<Vec<_>>()
                 }
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
                         if self.can_spatial_split() {
-                            Box::new(iter.chain(once(Action::SpatialSplit)))
+                            iter.chain(once(Action::SpatialSplit)).collect::<Vec<_>>()
                         } else {
-                            Box::new(iter)
+                            iter.collect::<Vec<_>>()
                         }
                     } else {
-                        Box::new(iter.chain(once(Action::ToAccum)))
+                        iter.chain(once(Action::ToAccum)).collect::<Vec<_>>()
                     }
                 }
-                _ => Box::new(iter),
+                _ => iter.collect::<Vec<_>>(),
             },
             LogicalSpec::Compose {
                 components: _,
@@ -602,7 +602,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 serial_only: _,
             } => {
                 // TODO: Add head reduce split actions as well.
-                Box::new(iter.chain(self.peel_actions()))
+                iter.chain(self.peel_actions()).collect::<Vec<_>>()
             }
         }
     }
@@ -660,8 +660,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             PrimitiveBasics {
                 typ, spec_shape, ..
             },
-            _,
-            _,
+            ..,
         ) = self
         else {
             panic!("split_actions called on non-primitive Spec");
@@ -680,20 +679,10 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         Box::new(
             dim_range(orig_k, false)
                 .filter(move |&new_k| {
-                    // Special-case for splitting to single-element tensors, which will be normalized
-                    // to row-major. This is necessary for splits in any other layout to be
-                    // discovered by search.
-                    // TODO: This is pretty ad-hoc. Should there be an alternative to
-                    //   `is_valid_tile_shape` that includes this case?
-                    if m == 1 && new_k == 1 && n == 1 {
-                        return true;
-                    }
-
-                    if new_k >= orig_k || !operands[0].is_valid_tile_shape(&[m, new_k]) {
-                        false
-                    } else {
-                        operands[1].is_valid_tile_shape(&[new_k, n])
-                    }
+                    let r = operands[0].is_valid_tile_shape(&[m, new_k])
+                        && operands[1].is_valid_tile_shape(&[new_k, n]);
+                    debug_assert!(m > 1 || new_k > 1 || n > 1 || r); // TODO: Remove
+                    r
                 })
                 .map(|k| Action::Split { k }),
         )

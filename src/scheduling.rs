@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
-use std::fmt::Display;
 use std::rc::Rc;
 use std::{iter, mem};
 
