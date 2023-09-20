@@ -28,7 +28,7 @@ fn copy_actions_into_vec() {
         ],
         true,
     );
-    black_box(logical_spec.actions().collect::<Vec<_>>());
+    black_box(logical_spec.actions().into_iter().collect::<Vec<_>>());
 }
 
 main!(

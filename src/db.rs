@@ -7,7 +7,6 @@ use crate::grid::linear::BimapInt;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::pprint::PrintableAux;
-use crate::scheduling::Action;
 use crate::spec::{LogicalSpecBimap, Spec, SpecBimap};
 use crate::target::Target;
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
@@ -29,35 +28,45 @@ pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
 type DbKey = ((SpecKey, SmallVec<[Layout; 3]>), SmallVec<[BimapInt; 10]>);
 
-pub trait Database<'a, Tgt: Target> {
-    type ValueRef: AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> + 'a;
+pub trait Database<'a> {
+    type ValueRef: AsRef<SmallVec<[(usize, Cost); 1]>> + 'a;
 
-    fn get(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef>;
+    fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>;
+
     // TODO: Document interior mutability of put.
-    fn put(
+    fn put<Tgt>(
         &'a self,
         problem: Spec<Tgt>,
-        impls: SmallVec<[(Action<Tgt>, Cost); 1]>,
-    ) -> Self::ValueRef;
+        impls: SmallVec<[(usize, Cost); 1]>,
+    ) -> Self::ValueRef
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>;
+
     fn flush(&'a self);
+
     fn save(&'a self) -> anyhow::Result<()>;
 }
 
-pub trait DatabaseExt<'a, Tgt: Target>: Database<'a, Tgt> {
-    fn get_impl(&'a self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>;
+pub trait DatabaseExt<'a>: Database<'a> {
+    fn get_impl<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>;
 }
 
 #[derive(Clone, Debug)]
 pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
 
-pub struct DashmapDiskDatabase<Tgt>
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
-{
+pub struct DashmapDiskDatabase {
     file_path: Option<path::PathBuf>,
-    blocks: DashMap<DbKey, DbBlock<Tgt>>,
+    blocks: DashMap<DbKey, DbBlock>,
 }
 
 /// Stores a [Database] block. This may be a single value if all block entries have been filled with
@@ -70,29 +79,24 @@ where
 /// many there are.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub enum DbBlock<Tgt>
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
-{
-    Single(ActionCostVec<Tgt>),
+pub enum DbBlock {
+    Single(ActionCostVec),
     Expanded {
-        // TODO: This should be a full multi-dimensional array, not a HashMap keyed by Specs.
-        actions: crate::ndarray::NDArray<Option<ActionCostVec<Tgt>>>,
+        // TODO: Optimize memory with Option + NonZeroU32
+        actions: crate::ndarray::NDArray<Option<ActionCostVec>>,
         matches: Option<NonZeroU32>,
     },
 }
 
 // TODO: Storing Spec and usize is too expensive.
 pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
-    dashmap::mapref::one::Ref<'a, DbKey, HashMap<Spec<Tgt>, ActionCostVec<Tgt>>, S>,
-    Option<&'a ActionCostVec<Tgt>>,
+    dashmap::mapref::one::Ref<'a, DbKey, HashMap<Spec<Tgt>, ActionCostVec>, S>,
+    Option<&'a ActionCostVec>,
 );
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct ActionCostVec<Tgt: Target>(pub SmallVec<[(Action<Tgt>, Cost); 1]>);
+pub struct ActionCostVec(pub SmallVec<[(usize, Cost); 1]>);
 
 impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
     fn extra_column_titles(&self) -> Vec<String> {
@@ -124,12 +128,7 @@ impl<Tgt: Target> Default for DbImplAux<Tgt> {
     }
 }
 
-impl<Tgt> DashmapDiskDatabase<Tgt>
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
-{
+impl DashmapDiskDatabase {
     // TODO: This does I/O; it should return errors, not panic.
     pub fn new(file_path: Option<&path::Path>) -> Self {
         let grouped_entries = match file_path {
@@ -155,22 +154,18 @@ where
     }
 }
 
-impl<Tgt: Target> AsRef<ActionCostVec<Tgt>> for ActionCostVec<Tgt> {
-    fn as_ref(&self) -> &ActionCostVec<Tgt> {
-        self
-    }
-}
-
-impl<'a, Tgt> Database<'a, Tgt> for DashmapDiskDatabase<Tgt>
+impl<'a> Database<'a> for DashmapDiskDatabase
 where
     Self: 'a,
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
 {
-    type ValueRef = MappedRef<'a, DbKey, DbBlock<Tgt>, ActionCostVec<Tgt>>;
+    type ValueRef = MappedRef<'a, DbKey, DbBlock, ActionCostVec>;
 
-    fn get(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef> {
+    fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    {
         let (db_key, inner_pt) = compute_db_key(query);
         let Some(group) = self.blocks.get(&db_key) else {
             return None;
@@ -185,7 +180,12 @@ where
         Some(group.map(|g| g.get(query).unwrap()))
     }
 
-    fn put(&'a self, spec: Spec<Tgt>, impls: SmallVec<[(Action<Tgt>, Cost); 1]>) -> Self::ValueRef {
+    fn put<Tgt>(&'a self, spec: Spec<Tgt>, impls: SmallVec<[(usize, Cost); 1]>) -> Self::ValueRef
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    {
         #[cfg(debug_assertions)]
         let original_spec = spec.clone();
 
@@ -255,7 +255,7 @@ where
 
     fn flush(&'a self) {}
 
-    fn save(&'a self) -> anyhow::Result<()> {
+    fn save(&self) -> anyhow::Result<()> {
         if let Some(path) = &self.file_path {
             let start = Instant::now();
             let dir = path
@@ -272,28 +272,29 @@ where
     }
 }
 
-impl<Tgt> Drop for DashmapDiskDatabase<Tgt>
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
-{
+impl Drop for DashmapDiskDatabase {
     fn drop(&mut self) {
         self.save().unwrap();
     }
 }
 
-impl<'a, Tgt: Target, T: Database<'a, Tgt>> DatabaseExt<'a, Tgt> for T {
-    fn get_impl(&'a self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>> {
+impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
+    fn get_impl<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    {
         let Some(root_results) = self.get(query) else {
             return None;
         };
+        let actions = query.0.actions();
         Some(
             root_results
                 .as_ref()
                 .iter()
-                .map(|(action, cost)| {
-                    let root = action
+                .map(|(action_idx, cost)| {
+                    let root = actions[*action_idx]
                         .apply_with_aux(query, DbImplAux(Some((query.clone(), cost.clone()))))
                         .unwrap();
                     let children = root.children();
@@ -308,13 +309,13 @@ impl<'a, Tgt: Target, T: Database<'a, Tgt>> DatabaseExt<'a, Tgt> for T {
     }
 }
 
-impl<Tgt> DbBlock<Tgt>
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
-{
-    fn get(&self, query: &Spec<Tgt>) -> Option<&ActionCostVec<Tgt>> {
+impl DbBlock {
+    fn get<Tgt: Target>(&self, query: &Spec<Tgt>) -> Option<&ActionCostVec>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    {
         let (_, inner_pt) = compute_db_key(query);
         match self {
             DbBlock::Single(v) => {
@@ -327,45 +328,40 @@ where
 }
 
 impl<'a, Tgt: Target> Deref for DashmapDbRef<'a, Tgt> {
-    type Target = ActionCostVec<Tgt>;
+    type Target = ActionCostVec;
 
     fn deref(&self) -> &Self::Target {
         self.1.unwrap()
     }
 }
 
-impl<'a, Tgt: Target> AsRef<ActionCostVec<Tgt>> for DashmapDbRef<'a, Tgt> {
-    fn as_ref(&self) -> &ActionCostVec<Tgt> {
+impl<'a, Tgt: Target> AsRef<ActionCostVec> for DashmapDbRef<'a, Tgt> {
+    fn as_ref(&self) -> &ActionCostVec {
         self.deref()
     }
 }
 
-impl<'a, Tgt: Target> AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> for DashmapDbRef<'a, Tgt> {
-    fn as_ref(&self) -> &SmallVec<[(Action<Tgt>, Cost); 1]> {
+impl<'a, Tgt: Target> AsRef<SmallVec<[(usize, Cost); 1]>> for DashmapDbRef<'a, Tgt> {
+    fn as_ref(&self) -> &SmallVec<[(usize, Cost); 1]> {
         self.deref().as_ref()
     }
 }
 
-impl<Tgt: Target> Deref for ActionCostVec<Tgt> {
-    type Target = SmallVec<[(Action<Tgt>, Cost); 1]>;
+impl Deref for ActionCostVec {
+    type Target = SmallVec<[(usize, Cost); 1]>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<Tgt: Target> AsRef<SmallVec<[(Action<Tgt>, Cost); 1]>> for ActionCostVec<Tgt> {
-    fn as_ref(&self) -> &SmallVec<[(Action<Tgt>, Cost); 1]> {
+impl AsRef<SmallVec<[(usize, Cost); 1]>> for ActionCostVec {
+    fn as_ref(&self) -> &SmallVec<[(usize, Cost); 1]> {
         self.deref()
     }
 }
 
-fn try_compress_block<Tgt>(block: &mut DbBlock<Tgt>, block_shape: &[DimSize])
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
-{
+fn try_compress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
     // TODO: Should just precompute block_shape as MAX_BLOCK_VOLUME
     let block_volume = block_shape.iter().product::<DimSize>();
     match block {
@@ -381,10 +377,13 @@ where
     }
 }
 
-fn construct_impl<'a, Tgt: Target, D: Database<'a, Tgt>>(
-    db: &'a D,
-    imp: &DbImpl<Tgt>,
-) -> DbImpl<Tgt> {
+fn construct_impl<'a, Tgt, D>(db: &'a D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    D: Database<'a>,
+{
     match imp {
         ImplNode::SpecApp(p) => db
             .get_impl(&p.0)

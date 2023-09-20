@@ -38,13 +38,13 @@ struct Args {
 fn main() {
     env_logger::init();
     let args = Args::parse();
-    let db = DashmapDiskDatabase::<X86Target>::new(args.db.as_deref());
+    let db = DashmapDiskDatabase::new(args.db.as_deref());
     main_per_db(&args, &db)
 }
 
 fn main_per_db<'a, D>(args: &Args, db: &'a D)
 where
-    D: Database<'a, X86Target> + Send + Sync,
+    D: Database<'a> + Send + Sync,
 {
     let MemoryLimits::Standard(top) = X86Target::max_mem();
 

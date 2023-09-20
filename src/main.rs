@@ -105,20 +105,18 @@ fn main() -> Result<()> {
     let args = Args::parse();
     color::set_color_mode(args.color);
     match &args.target {
-        TargetId::X86 => main_per_db(
-            &args,
-            &DashmapDiskDatabase::<X86Target>::new(args.db.as_deref()),
-        ),
-        TargetId::Arm => main_per_db(
-            &args,
-            &DashmapDiskDatabase::<ArmTarget>::new(args.db.as_deref()),
-        ),
+        TargetId::X86 => {
+            main_per_db::<_, X86Target>(&args, &DashmapDiskDatabase::new(args.db.as_deref()))
+        }
+        TargetId::Arm => {
+            main_per_db::<_, ArmTarget>(&args, &DashmapDiskDatabase::new(args.db.as_deref()))
+        }
     }
 }
 
 fn main_per_db<'d, D, Tgt>(args: &Args, db: &'d D) -> Result<()>
 where
-    D: Database<'d, Tgt> + Send + Sync,
+    D: Database<'d> + Send + Sync,
     Tgt: Target<Level = CpuMemoryLevel>,
 {
     let subcmd = &args.subcmd;
@@ -140,14 +138,14 @@ where
                     dtype: Dtype::Uint32,
                 },
                 vec![
-                    TensorSpecAux {
+                    TensorSpecAux::<Tgt> {
                         contig: rm2.contiguous_full(),
                         aligned: true,
                         level: CpuMemoryLevel::GL,
                         layout: rm2,
                         vector_size: None,
                     },
-                    TensorSpecAux {
+                    TensorSpecAux::<Tgt> {
                         contig: cm2.contiguous_full(),
                         aligned: true,
                         level: CpuMemoryLevel::GL,

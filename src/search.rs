@@ -3,14 +3,16 @@ use smallvec::{smallvec, SmallVec};
 
 use crate::cost::Cost;
 use crate::db::Database;
+use crate::grid::canon::CanonicalBimap;
+use crate::grid::general::BiMap;
+use crate::grid::linear::BimapInt;
 use crate::imp::{visit_leaves, ImplNode};
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
 
-struct ImplReducer<Tgt: Target> {
-    results: SmallVec<[(Action<Tgt>, Cost); 1]>,
+struct ImplReducer {
+    results: SmallVec<[(usize, Cost); 1]>,
     top_k: usize,
 }
 
@@ -27,22 +29,34 @@ enum ParentSummaryTransitionResult<'a, Tgt: Target> {
 }
 
 /// Computes an optimal Impl for `goal` and stores it in `db`.
-pub fn top_down<'d, Tgt: Target, D: Database<'d, Tgt>>(
+pub fn top_down<'d, Tgt, D>(
     db: &'d D,
     goal: &Spec<Tgt>,
     top_k: usize,
-) -> (SmallVec<[(Action<Tgt>, Cost); 1]>, u64, u64) {
+) -> (SmallVec<[(usize, Cost); 1]>, u64, u64)
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    D: Database<'d>,
+{
     let (actions, hits, misses) = top_down_inner(db, goal, top_k, 0, &ParentSummary::new(goal));
     (actions.as_ref().clone(), hits, misses)
 }
 
-fn top_down_inner<'d, Tgt: Target, D: Database<'d, Tgt>>(
+fn top_down_inner<'d, Tgt, D>(
     db: &'d D,
     goal: &Spec<Tgt>,
     top_k: usize,
     depth: usize,
     parent_summary: &ParentSummary<Tgt>,
-) -> (D::ValueRef, u64, u64) {
+) -> (D::ValueRef, u64, u64)
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    D: Database<'d>,
+{
     if top_k > 1 {
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
@@ -58,7 +72,7 @@ fn top_down_inner<'d, Tgt: Target, D: Database<'d, Tgt>>(
     // Enumerate action applications, computing their costs from their childrens' costs.
     let mut reducer = ImplReducer::new(top_k);
 
-    for action in goal.0.actions() {
+    for (action_idx, action) in goal.0.actions().into_iter().enumerate() {
         let Ok(partial_impl) = action.apply(goal) else {
             continue;
         };
@@ -110,7 +124,7 @@ fn top_down_inner<'d, Tgt: Target, D: Database<'d, Tgt>>(
             partial_impl,
             cost.peaks
         );
-        reducer.insert(action, cost);
+        reducer.insert(action_idx, cost);
     }
 
     // Save to memo. table and return.
@@ -150,7 +164,7 @@ impl<'a, Tgt: Target> ParentSummary<'a, Tgt> {
     }
 }
 
-impl<Tgt: Target> ImplReducer<Tgt> {
+impl ImplReducer {
     fn new(top_k: usize) -> Self {
         ImplReducer {
             results: smallvec![],
@@ -158,7 +172,7 @@ impl<Tgt: Target> ImplReducer<Tgt> {
         }
     }
 
-    fn insert(&mut self, new_impl: Action<Tgt>, cost: Cost) {
+    fn insert(&mut self, new_impl: usize, cost: Cost) {
         match self.results.binary_search_by_key(&&cost, |imp| &imp.1) {
             Ok(idx) | Err(idx) => {
                 if idx < self.top_k {
@@ -173,7 +187,7 @@ impl<Tgt: Target> ImplReducer<Tgt> {
         debug_assert!(self.results.len() <= self.top_k);
     }
 
-    fn finalize(self) -> SmallVec<[(Action<Tgt>, Cost); 1]> {
+    fn finalize(self) -> SmallVec<[(usize, Cost); 1]> {
         self.results
     }
 }
