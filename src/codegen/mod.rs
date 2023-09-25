@@ -123,7 +123,7 @@ pub trait CodeGen<Tgt: Target> {
         let mut means = Vec::with_capacity(repeat);
         for _ in 0..repeat {
             let time = artifact.measure_time()?;
-            info!("Sample runtime result {}s", time.as_secs_f32());
+            debug!("Sample runtime result {}s", time.as_secs_f32());
             means.push(time);
         }
 
