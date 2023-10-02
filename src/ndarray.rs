@@ -35,6 +35,10 @@ impl<T> NDArray<T> {
             .map(|(&idx, &stride)| idx * stride)
             .sum()
     }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
 }
 
 impl<T> Index<&[usize]> for NDArray<T> {

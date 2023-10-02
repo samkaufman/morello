@@ -66,7 +66,7 @@ pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
 
 pub struct DashmapDiskDatabase {
     file_path: Option<path::PathBuf>,
-    blocks: DashMap<DbKey, DbBlock>,
+    pub blocks: DashMap<DbKey, DbBlock>,
 }
 
 /// Stores a [Database] block. This may be a single value if all block entries have been filled with
@@ -323,6 +323,13 @@ impl DbBlock {
                 Some(v)
             }
             DbBlock::Expanded { actions, .. } => actions[&inner_pt].as_ref(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            DbBlock::Single(_) => 1,
+            DbBlock::Expanded { actions, matches } => actions.len(),
         }
     }
 }

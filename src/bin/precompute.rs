@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::{iter, path};
 
 use morello::common::{DimSize, Dtype};
-use morello::datadeps::ToFromDependencyLatticeCoordinate;
+use morello::datadeps::{SpecKey, ToFromDependencyLatticeCoordinate};
 use morello::db::{DashmapDiskDatabase, Database};
 use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
@@ -39,7 +39,60 @@ fn main() {
     env_logger::init();
     let args = Args::parse();
     let db = DashmapDiskDatabase::new(args.db.as_deref());
-    main_per_db(&args, &db)
+    main_per_db(&args, &db);
+
+    let mut matmul_group_cnt = 0;
+    let mut matmul_entry_cnt = 0;
+    let mut conv_group_cnt = 0;
+    let mut conv_entry_cnt = 0;
+    let mut move_group_cnt = 0;
+    let mut move_entry_cnt = 0;
+    let mut zero_group_cnt = 0;
+    let mut zero_entry_cnt = 0;
+    for iref in db.blocks.iter() {
+        match iref.key().0 .0 {
+            SpecKey::Matmul { .. } => {
+                matmul_group_cnt += 1;
+                matmul_entry_cnt += iref.value().len();
+            }
+            SpecKey::Conv { .. } => {
+                conv_group_cnt += 1;
+                conv_entry_cnt += iref.value().len();
+            }
+            SpecKey::Move { .. } => {
+                move_group_cnt += 1;
+                move_entry_cnt += iref.value().len();
+            }
+            SpecKey::Zero { .. } => {
+                zero_group_cnt += 1;
+                zero_entry_cnt += iref.value().len();
+            }
+        }
+    }
+    println!(
+        "Matmul ratio: {}/{} = {:.2}",
+        matmul_group_cnt,
+        matmul_entry_cnt,
+        matmul_entry_cnt as f64 / matmul_group_cnt as f64
+    );
+    println!(
+        "Conv ratio: {}/{} = {:.2}",
+        conv_group_cnt,
+        conv_entry_cnt,
+        conv_entry_cnt as f64 / conv_group_cnt as f64
+    );
+    println!(
+        "Move ratio: {}/{} = {:.2}",
+        move_group_cnt,
+        move_entry_cnt,
+        move_entry_cnt as f64 / move_group_cnt as f64
+    );
+    println!(
+        "Zero ratio: {}/{} = {:.2}",
+        zero_group_cnt,
+        zero_entry_cnt,
+        zero_entry_cnt as f64 / zero_group_cnt as f64
+    );
 }
 
 fn main_per_db<'a, D>(args: &Args, db: &'a D)
