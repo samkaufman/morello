@@ -28,6 +28,8 @@ pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
 type DbKey = ((SpecKey, SmallVec<[Layout; 3]>), SmallVec<[BimapInt; 10]>);
 
+const INITIAL_HASHMAP_CAPACITY: usize = 100_000_000;
+
 pub trait Database<'a> {
     type ValueRef: AsRef<SmallVec<[(usize, Cost); 1]>> + 'a;
 
@@ -129,8 +131,25 @@ impl<Tgt: Target> Default for DbImplAux<Tgt> {
 }
 
 impl DashmapDiskDatabase {
-    // TODO: This does I/O; it should return errors, not panic.
     pub fn new(file_path: Option<&path::Path>) -> Self {
+        Self::new_with_dashmap_constructor(file_path, &DashMap::new)
+    }
+
+    pub fn new_with_shard_count(file_path: Option<&path::Path>, shard_count: usize) -> Self {
+        Self::new_with_dashmap_constructor(file_path, &|| {
+            DashMap::with_capacity_and_hasher_and_shard_amount(
+                INITIAL_HASHMAP_CAPACITY,
+                RandomState::default(),
+                shard_count,
+            )
+        })
+    }
+
+    // TODO: This does I/O; it (and the pub constructors) should return errors, not panic.
+    fn new_with_dashmap_constructor(
+        file_path: Option<&path::Path>,
+        dashmap_constructor: &dyn Fn() -> DashMap<DbKey, DbBlock>,
+    ) -> Self {
         let grouped_entries = match file_path {
             Some(path) => match std::fs::File::open(path) {
                 Ok(f) => {
@@ -141,7 +160,7 @@ impl DashmapDiskDatabase {
                     result
                 }
                 Err(err) => match err.kind() {
-                    std::io::ErrorKind::NotFound => Default::default(),
+                    std::io::ErrorKind::NotFound => dashmap_constructor(),
                     _ => todo!("Handle other file errors"),
                 },
             },

@@ -12,7 +12,7 @@ pub struct NDArray<T> {
 
 impl<T: Default + Clone> NDArray<T> {
     pub fn new(shape: &[usize]) -> Self {
-        let strides = calculate_strides(&shape);
+        let strides = calculate_strides(shape);
         let volume = shape.iter().product();
         Self {
             data: vec![T::default(); volume],

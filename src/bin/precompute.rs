@@ -4,7 +4,7 @@ use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::smallvec;
 use std::collections::VecDeque;
-use std::{iter, path};
+use std::{iter, path, thread};
 
 use morello::common::{DimSize, Dtype};
 use morello::datadeps::{SpecKey, ToFromDependencyLatticeCoordinate};
@@ -38,7 +38,10 @@ struct Args {
 fn main() {
     env_logger::init();
     let args = Args::parse();
-    let db = DashmapDiskDatabase::new(args.db.as_deref());
+    let db = DashmapDiskDatabase::new_with_shard_count(
+        args.db.as_deref(),
+        thread::available_parallelism().unwrap().into(),
+    );
     main_per_db(&args, &db);
 
     let mut matmul_group_cnt = 0;
