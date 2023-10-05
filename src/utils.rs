@@ -82,16 +82,13 @@ pub fn snap_availables_up_memvec(available: MemVec, always: bool) -> MemVec {
         return available;
     }
 
-    available
-        .iter()
-        .map(|&v| {
-            if v == 0 {
-                0
-            } else {
-                2u64.pow(bit_length(v - 1))
-            }
-        })
-        .collect()
+    available.map(|v| {
+        if v == 0 {
+            0
+        } else {
+            2u64.pow(bit_length(v - 1))
+        }
+    })
 }
 
 pub const fn bit_length(n: u64) -> u32 {

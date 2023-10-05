@@ -19,7 +19,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::{Debug, Display};
 
-pub const MAX_LEVEL_COUNT: usize = 4;
+// TODO: This should be generic per Target. Right now, all targets must have 4 levels!
+pub const LEVEL_COUNT: usize = 4;
 
 // TODO: Do we need so many trait bounds, here or in [CpuTarget]?
 pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
@@ -29,7 +30,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn max_mem() -> MemoryLimits;
     fn processors() -> u8;
     fn default_level() -> Self::Level;
-    fn levels() -> Vec<Self::Level>;
+    fn levels() -> [Self::Level; LEVEL_COUNT];
     fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
 
     // TODO: Canonicalization should unify the following two fns:

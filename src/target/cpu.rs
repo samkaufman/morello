@@ -9,11 +9,10 @@ use crate::layout::{col_major, nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::{dim_range, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use crate::target::{MemoryLevel, Target, TargetId};
+use crate::target::{MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::TensorSpec;
 
 use serde::{Deserialize, Serialize};
-use smallvec::smallvec;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter;
@@ -48,7 +47,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn max_mem() -> MemoryLimits {
-        MemoryLimits::Standard(MemVec::new(smallvec![64, 1024, 32_768, 1_073_741_824]))
+        MemoryLimits::Standard(MemVec::new([64, 1024, 32_768, 1_073_741_824]))
     }
 
     fn processors() -> u8 {
@@ -59,8 +58,11 @@ impl<T: CpuTarget> Target for T {
         CpuMemoryLevel::GL
     }
 
-    fn levels() -> Vec<Self::Level> {
-        enum_iterator::all::<Self::Level>().collect()
+    fn levels() -> [Self::Level; LEVEL_COUNT] {
+        enum_iterator::all::<Self::Level>()
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap()
     }
 
     fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level> {

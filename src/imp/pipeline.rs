@@ -1,6 +1,6 @@
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
-use crate::memorylimits::MemoryAllocation;
+use crate::memorylimits::{MemVec, MemoryAllocation};
 use crate::nameenv::NameEnv;
 use crate::target::Target;
 use crate::views::{Param, Tensor, View};
@@ -31,16 +31,13 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
                 .intermediates
                 .iter()
                 .map(|t| {
-                    Tgt::levels()
-                        .iter()
-                        .map(|l| {
-                            if &t.spec().level() == l {
-                                t.spec().bytes_used()
-                            } else {
-                                0
-                            }
-                        })
-                        .collect()
+                    MemVec::new(Tgt::levels().map(|l| {
+                        if t.spec().level() == l {
+                            t.spec().bytes_used()
+                        } else {
+                            0
+                        }
+                    }))
                 })
                 .collect(),
         }

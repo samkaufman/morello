@@ -358,17 +358,15 @@ impl<Tgt: Target> Action<Tgt> {
                     let next_to_outer_basics = &components[1];
                     let output_shape = &next_to_outer_basics.parameter_shapes()
                         [next_to_outer_basics.typ.output_idx()];
-                    let intermediate_mem_consumed_nondiscrete: MemVec = Tgt::levels()
-                        .iter()
-                        .map(|l| {
-                            if level == l {
+                    let intermediate_mem_consumed_nondiscrete =
+                        MemVec::new(Tgt::levels().map(|l| {
+                            if level == &l {
                                 u64::from(next_to_outer_basics.dtype.size())
                                     * u64::from(output_shape.into_iter().product::<DimSize>())
                             } else {
                                 0u64
                             }
-                        })
-                        .collect();
+                        }));
 
                     // TODO: Use MemoryLimits::Pipeline where appropriate instead.
                     let mut m = MemoryLimits::Standard(match &spec.1 {

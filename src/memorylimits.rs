@@ -2,7 +2,7 @@ use crate::grid::general::BiMap;
 use crate::grid::linear::BimapInt;
 use crate::utils::{bit_length, is_power_of_two, iter_powers_of_two};
 use crate::{
-    target::{Target, MAX_LEVEL_COUNT},
+    target::{Target, LEVEL_COUNT},
     utils::prev_power_of_two,
 };
 
@@ -47,7 +47,7 @@ pub enum MemoryAllocation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
-pub struct MemVec(SmallVec<[u64; MAX_LEVEL_COUNT]>);
+pub struct MemVec([u64; LEVEL_COUNT]);
 
 #[derive(Default)]
 pub struct MemoryLimitsBimap<Tgt: Target> {
@@ -126,13 +126,14 @@ impl Display for MemoryLimits {
 }
 
 impl MemVec {
-    pub fn new(contents: SmallVec<[u64; MAX_LEVEL_COUNT]>) -> Self {
+    pub fn new(contents: [u64; LEVEL_COUNT]) -> Self {
         assert!(contents.iter().all(|&v| v == 0 || v.is_power_of_two()));
         MemVec(contents)
     }
 
     pub fn zero<Tgt: Target>() -> Self {
-        MemVec(SmallVec::from_elem(0, Tgt::levels().len()))
+        assert_eq!(Tgt::levels().len(), LEVEL_COUNT);
+        MemVec([0; LEVEL_COUNT])
     }
 
     pub fn len(&self) -> usize {
@@ -159,27 +160,34 @@ impl MemVec {
         self.0.iter()
     }
 
+    pub fn map<F>(self, f: F) -> MemVec
+    where
+        F: FnMut(u64) -> u64,
+    {
+        MemVec::new(self.0.map(f))
+    }
+
     /// Returns an [Iterator] over smaller power-of-two [MemVec]s.
     ///
     /// ```
     /// # use smallvec::smallvec;
     /// # use morello::memorylimits::MemVec;
     /// # use morello::target::X86Target;
-    /// let it = MemVec::new(smallvec![2, 1]).iter_down_by_powers_of_two::<X86Target>();
+    /// let it = MemVec::new([2, 1, 0, 0]).iter_down_by_powers_of_two::<X86Target>();
     /// assert_eq!(it.collect::<Vec<_>>(), vec![
-    ///     MemVec::new(smallvec![2, 1]),
-    ///     MemVec::new(smallvec![2, 0]),
-    ///     MemVec::new(smallvec![1, 1]),
-    ///     MemVec::new(smallvec![1, 0]),
-    ///     MemVec::new(smallvec![0, 1]),
-    ///     MemVec::new(smallvec![0, 0]),
+    ///     MemVec::new([2, 1, 0, 0]),
+    ///     MemVec::new([2, 0, 0, 0]),
+    ///     MemVec::new([1, 1, 0, 0]),
+    ///     MemVec::new([1, 0, 0, 0]),
+    ///     MemVec::new([0, 1, 0, 0]),
+    ///     MemVec::new([0, 0, 0, 0]),
     /// ]);
     /// ```
     pub fn iter_down_by_powers_of_two<T: Target>(&self) -> impl Iterator<Item = MemVec> {
         self.into_iter()
             .map(|l| iter_powers_of_two(l, true).rev())
             .multi_cartesian_product()
-            .map(move |prod| MemVec::new(prod.into_iter().collect()))
+            .map(move |prod| MemVec::new(prod.into_iter().collect::<Vec<_>>().try_into().unwrap()))
     }
 }
 
@@ -221,7 +229,7 @@ impl IndexMut<usize> for MemVec {
 impl IntoIterator for MemVec {
     type Item = u64;
 
-    type IntoIter = smallvec::IntoIter<[u64; MAX_LEVEL_COUNT]>;
+    type IntoIter = std::array::IntoIter<u64, LEVEL_COUNT>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -236,12 +244,6 @@ impl<'a> IntoIterator for &'a MemVec {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter().cloned()
-    }
-}
-
-impl FromIterator<u64> for MemVec {
-    fn from_iter<T: IntoIterator<Item = u64>>(iter: T) -> Self {
-        MemVec(iter.into_iter().collect())
     }
 }
 
@@ -272,10 +274,12 @@ impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
-        MemoryLimits::Standard(
+        MemoryLimits::Standard(MemVec::new(
             i.iter()
                 .map(|&v| if v == 0 { 0 } else { 1 << (v - 1) })
-                .collect(),
-        )
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        ))
     }
 }
