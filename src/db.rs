@@ -27,11 +27,12 @@ use std::{iter, path};
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
 type DbKey = ((SpecKey, SmallVec<[Layout; 3]>), SmallVec<[BimapInt; 10]>);
+pub type ActionIdx = u16;
 
 const INITIAL_HASHMAP_CAPACITY: usize = 100_000_000;
 
 pub trait Database<'a> {
-    type ValueRef: AsRef<SmallVec<[(usize, Cost); 1]>> + 'a;
+    type ValueRef: AsRef<SmallVec<[(ActionIdx, Cost); 1]>> + 'a;
 
     fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef>
     where
@@ -43,7 +44,7 @@ pub trait Database<'a> {
     fn put<Tgt>(
         &'a self,
         problem: Spec<Tgt>,
-        impls: SmallVec<[(usize, Cost); 1]>,
+        impls: SmallVec<[(ActionIdx, Cost); 1]>,
     ) -> Self::ValueRef
     where
         Tgt: Target,
@@ -98,7 +99,7 @@ pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct ActionCostVec(pub SmallVec<[(usize, Cost); 1]>);
+pub struct ActionCostVec(pub SmallVec<[(ActionIdx, Cost); 1]>);
 
 impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
     fn extra_column_titles(&self) -> Vec<String> {
@@ -199,7 +200,11 @@ where
         Some(group.map(|g| g.get(query).unwrap()))
     }
 
-    fn put<Tgt>(&'a self, spec: Spec<Tgt>, impls: SmallVec<[(usize, Cost); 1]>) -> Self::ValueRef
+    fn put<Tgt>(
+        &'a self,
+        spec: Spec<Tgt>,
+        impls: SmallVec<[(ActionIdx, Cost); 1]>,
+    ) -> Self::ValueRef
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -313,7 +318,7 @@ impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
                 .as_ref()
                 .iter()
                 .map(|(action_idx, cost)| {
-                    let root = actions[*action_idx]
+                    let root = actions[(*action_idx).into()]
                         .apply_with_aux(query, DbImplAux(Some((query.clone(), cost.clone()))))
                         .unwrap();
                     let children = root.children();
@@ -367,22 +372,22 @@ impl<'a, Tgt: Target> AsRef<ActionCostVec> for DashmapDbRef<'a, Tgt> {
     }
 }
 
-impl<'a, Tgt: Target> AsRef<SmallVec<[(usize, Cost); 1]>> for DashmapDbRef<'a, Tgt> {
-    fn as_ref(&self) -> &SmallVec<[(usize, Cost); 1]> {
+impl<'a, Tgt: Target> AsRef<SmallVec<[(ActionIdx, Cost); 1]>> for DashmapDbRef<'a, Tgt> {
+    fn as_ref(&self) -> &SmallVec<[(ActionIdx, Cost); 1]> {
         self.deref().as_ref()
     }
 }
 
 impl Deref for ActionCostVec {
-    type Target = SmallVec<[(usize, Cost); 1]>;
+    type Target = SmallVec<[(ActionIdx, Cost); 1]>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl AsRef<SmallVec<[(usize, Cost); 1]>> for ActionCostVec {
-    fn as_ref(&self) -> &SmallVec<[(usize, Cost); 1]> {
+impl AsRef<SmallVec<[(ActionIdx, Cost); 1]>> for ActionCostVec {
+    fn as_ref(&self) -> &SmallVec<[(ActionIdx, Cost); 1]> {
         self.deref()
     }
 }

@@ -2,7 +2,7 @@ use itertools::Itertools;
 use smallvec::{smallvec, SmallVec};
 
 use crate::cost::Cost;
-use crate::db::Database;
+use crate::db::{ActionIdx, Database};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::grid::linear::BimapInt;
@@ -12,7 +12,7 @@ use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
 
 struct ImplReducer {
-    results: SmallVec<[(usize, Cost); 1]>,
+    results: SmallVec<[(ActionIdx, Cost); 1]>,
     top_k: usize,
 }
 
@@ -33,7 +33,7 @@ pub fn top_down<'d, Tgt, D>(
     db: &'d D,
     goal: &Spec<Tgt>,
     top_k: usize,
-) -> (SmallVec<[(usize, Cost); 1]>, u64, u64)
+) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64)
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -124,7 +124,7 @@ where
             partial_impl,
             cost.peaks
         );
-        reducer.insert(action_idx, cost);
+        reducer.insert(action_idx.try_into().unwrap(), cost);
     }
 
     // Save to memo. table and return.
@@ -172,7 +172,7 @@ impl ImplReducer {
         }
     }
 
-    fn insert(&mut self, new_impl: usize, cost: Cost) {
+    fn insert(&mut self, new_impl: ActionIdx, cost: Cost) {
         match self.results.binary_search_by_key(&&cost, |imp| &imp.1) {
             Ok(idx) | Err(idx) => {
                 if idx < self.top_k {
@@ -187,7 +187,7 @@ impl ImplReducer {
         debug_assert!(self.results.len() <= self.top_k);
     }
 
-    fn finalize(self) -> SmallVec<[(usize, Cost); 1]> {
+    fn finalize(self) -> SmallVec<[(ActionIdx, Cost); 1]> {
         self.results
     }
 }
