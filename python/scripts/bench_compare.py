@@ -499,7 +499,7 @@ class BaseJAXBackend(LoopingBackend):
                 jax_to_ir.jax_to_ir(
                     self.jitted_fn,
                     input_shapes=[
-                        (n, jax.ShapedArray(arr.shape, arr.dtype))
+                        (n, jax.core.ShapedArray(arr.shape, arr.dtype))
                         for n, arr in self.data_deps
                     ],
                     format="HLO",
@@ -647,11 +647,12 @@ class MatmulTorch(BaseTorchBackend):
 
 
 class TorchScriptBackend(BaseTorchBackend):
-    def __init__(self, torch_backend: BenchmarkBackend, extras_dir, print_graphs=True):
+    def __init__(self, torch_backend: BenchmarkBackend, extras_dir, print_graphs=True, trace=False):
         super().__init__(extras_dir)
         self.torch_backend = torch_backend
         self.print_graphs = print_graphs
-        self.jitted_fn = torch.compile(self._make_jittable())
+        self.jittable = self._make_jittable()
+        self.jitted_fn = torch.compile(self.jittable)
 
     def _make_jittable(self):
         codelet = f"""
@@ -755,8 +756,12 @@ class RelayBackend(_RelayBase):
     def _make_relay(self, extras_dir: pathlib.Path):
         backend = self.torchscript_backend
         shape_list = [(n, v.shape) for n, v in backend.data_deps]
+        traced = torch.jit.trace(
+            backend.jittable,
+            tuple(torch.rand(shp) for _, shp in shape_list)
+        )
         relay_mod, relay_params = relay.frontend.from_pytorch(
-            backend.jitted_fn, shape_list
+            traced, shape_list
         )
 
         tvm_mod_text = None
@@ -913,7 +918,7 @@ class GEMM3JAX(BaseJAXBackend):
         return jax_gemm3
 
     def set_inputs(self):
-        numpy_backend = GEMM3Numpy(self.benchmark)
+        numpy_backend = GEMM3Numpy(self.benchmark, self.extras_dir)
         self.a = jax.numpy.array(numpy_backend.a)
         self.b = jax.numpy.array(numpy_backend.b)
         self.c = jax.numpy.array(numpy_backend.c)
@@ -927,7 +932,7 @@ class GEMM3Torch(BaseTorchBackend):
     def __init__(self, benchmark: GEMM3Benchmark, extras_dir) -> None:
         super().__init__(extras_dir)
         self.benchmark = benchmark
-        numpy_backend = GEMM3Numpy(benchmark)
+        numpy_backend = GEMM3Numpy(benchmark, self.extras_dir)
         self.a = _to_torch(numpy_backend.a)
         self.b = _to_torch(numpy_backend.b)
         self.c = _to_torch(numpy_backend.c)
@@ -1332,7 +1337,7 @@ class MatmulHalide(BaseHalideBackend):
 
 class GEMM3Halide(BaseHalideBackend):
     def _make_pipeline(self):
-        mmnp = GEMM3Numpy(self.benchmark)
+        mmnp = GEMM3Numpy(self.benchmark, self.extras_dir)
         a_hl, b_hl, c_hl = (
             hl.Buffer(mmnp.a, name="a"),
             hl.Buffer(mmnp.b, name="b"),
