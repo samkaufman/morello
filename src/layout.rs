@@ -1,6 +1,7 @@
 use divrem::DivCeil;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use std::mem::swap;
 use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{
@@ -292,7 +293,8 @@ impl Layout {
                             .difference(&after_strip_dims)
                             .cloned()
                             .collect(),
-                        (contiguous_abs - u8::try_from(after_strip_dims.len()).unwrap() - 1).max(0),
+                        contiguous_abs
+                            .saturating_sub(u8::try_from(after_strip_dims.len()).unwrap() + 1),
                     );
                 }
 
@@ -368,7 +370,28 @@ impl Layout {
                     contiguous_abs,
                 )
             }
-            Layout::Packed { .. } => todo!(),
+            Layout::Packed {
+                dim_count,
+                strip_dim,
+                strip_size,
+            } => {
+                let new_packed = if *strip_dim == swap_dims.0 {
+                    Layout::Packed {
+                        dim_count: *dim_count,
+                        strip_dim: swap_dims.1,
+                        strip_size: *strip_size,
+                    }
+                } else if *strip_dim == swap_dims.1 {
+                    Layout::Packed {
+                        dim_count: *dim_count,
+                        strip_dim: swap_dims.0,
+                        strip_size: *strip_size,
+                    }
+                } else {
+                    todo!("not expressible in general with Packed layouts")
+                };
+                (new_packed, contiguous_abs)
+            }
         }
     }
 
