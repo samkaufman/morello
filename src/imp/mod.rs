@@ -1,14 +1,16 @@
-use blocks::Block;
 use enum_dispatch::enum_dispatch;
-use kernels::Kernel;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
+use crate::target::LEVEL_COUNT;
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
 use crate::{
     cost::MainCost,
-    imp::{loops::Loop, moves::MoveLet, pipeline::Pipeline, subspecs::SpecApp},
+    imp::{
+        blocks::Block, kernels::Kernel, loops::Loop, moves::MoveLet, pipeline::Pipeline,
+        subspecs::SpecApp,
+    },
     memorylimits::{MemVec, MemoryAllocation},
     nameenv::NameEnv,
     spec::Spec,
@@ -98,7 +100,7 @@ impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
                 intermediate_consumption,
             } => {
                 debug_assert_eq!(child_peaks.len() + 1, intermediate_consumption.len());
-                let z = MemVec::zero::<Tgt>();
+                let z = [0; LEVEL_COUNT];
                 let mut preceding_consumption = &z;
                 let mut following_consumption = &intermediate_consumption[0];
                 for (child_idx, child_peak) in child_peaks.iter().enumerate() {
@@ -114,6 +116,27 @@ impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
             }
         }
         peak
+    }
+}
+
+#[cfg(test)]
+impl<Tgt, Aux> proptest::arbitrary::Arbitrary for ImplNode<Tgt, Aux>
+where
+    Tgt: Target,
+    Aux: Debug + Clone + proptest::arbitrary::Arbitrary + 'static,
+{
+    type Parameters = ();
+    type Strategy = proptest::strategy::BoxedStrategy<ImplNode<Tgt, Aux>>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+
+        // TODO: Generate non-leaf Impls.
+        let impl_leaf_strategy = prop_oneof![
+            any::<Kernel<Tgt, Aux>>().prop_map(ImplNode::Kernel),
+            any::<SpecApp<Tgt, Spec<Tgt>, Aux>>().prop_map(ImplNode::SpecApp)
+        ];
+        return impl_leaf_strategy.boxed();
     }
 }
 

@@ -85,11 +85,20 @@ pub fn snap_memvec_up(available: MemVec, always: bool) -> MemVec {
 }
 
 pub const fn bit_length(n: u64) -> u32 {
+    debug_assert!(n == 0 || is_power_of_two(n));
     u64::BITS - n.leading_zeros()
 }
 
 pub const fn bit_length_u32(n: u32) -> u32 {
+    debug_assert!(n == 0 || is_power_of_two_u32(n));
     u32::BITS - n.leading_zeros()
+}
+
+pub const fn bit_length_inverse(n: u32) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    2u64.pow(n - 1)
 }
 
 pub const fn is_power_of_two(n: u64) -> bool {

@@ -36,17 +36,20 @@ pub enum MemoryLimits {
 
 /// The memory allocated by a single [Impl] node.
 ///
+/// These are *not* snapped to zero or powers of two.
+///
 /// Put another way: this is a description of the memory live during execution of a single node,
 /// ignoring children.
 pub enum MemoryAllocation {
-    Simple(MemVec),
-    Inner(Vec<MemVec>),
+    Simple([u64; LEVEL_COUNT]),
+    Inner(Vec<[u64; LEVEL_COUNT]>),
     Pipeline {
-        intermediate_consumption: Vec<MemVec>,
+        intermediate_consumption: Vec<[u64; LEVEL_COUNT]>,
     },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub struct MemVec([u64; LEVEL_COUNT]);
 
 #[derive(Default)]
@@ -85,7 +88,7 @@ impl MemoryLimits {
     ) -> Option<Vec<MemoryLimits>> {
         warn!("Not transitioning to pipeline MemoryLimits yet");
 
-        let per_child_diffs: Box<dyn Iterator<Item = &MemVec>> = match allocated {
+        let per_child_diffs: Box<dyn Iterator<Item = _>> = match allocated {
             MemoryAllocation::Simple(v) => Box::new(iter::repeat(v)),
             MemoryAllocation::Inner(during_children) => Box::new(during_children.iter()),
             MemoryAllocation::Pipeline {
@@ -98,7 +101,8 @@ impl MemoryLimits {
                 let mut result = Vec::with_capacity(cur_limit.len());
                 for child_allocation in per_child_diffs {
                     debug_assert_eq!(child_allocation.len(), cur_limit.len());
-                    let Some(to_push) = cur_limit.clone().checked_sub(child_allocation) else {
+                    let Some(to_push) = cur_limit.clone().checked_sub_snap_down(child_allocation)
+                    else {
                         return None;
                     };
                     let mut to_push = MemoryLimits::Standard(to_push);
@@ -113,7 +117,7 @@ impl MemoryLimits {
 
 impl MemoryAllocation {
     pub fn none<Tgt: Target>() -> Self {
-        MemoryAllocation::Simple(MemVec::zero::<Tgt>())
+        MemoryAllocation::Simple([0; LEVEL_COUNT])
     }
 }
 
@@ -144,14 +148,13 @@ impl MemVec {
         self.0.is_empty()
     }
 
-    pub fn checked_sub(self, rhs: &MemVec) -> Option<MemVec> {
-        assert_eq!(self.len(), rhs.len());
+    pub fn checked_sub_snap_down(self, rhs: &[u64; LEVEL_COUNT]) -> Option<MemVec> {
         let mut result = self;
         for idx in 0..result.len() {
             if result[idx] < rhs[idx] {
                 return None;
             }
-            result[idx] -= rhs[idx];
+            result[idx] = prev_power_of_two(result[idx] - rhs[idx]);
         }
         Some(result)
     }
@@ -282,4 +285,33 @@ impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
                 .unwrap(),
         ))
     }
+}
+
+#[cfg(test)]
+pub fn arb_memorylimits<Tgt: Target>(
+    maximum_memory: &MemVec,
+) -> impl proptest::strategy::Strategy<Value = MemoryLimits> {
+    arb_memorylimits_ext(&MemVec::zero::<Tgt>(), maximum_memory)
+}
+
+#[cfg(test)]
+pub fn arb_memorylimits_ext(
+    minimum_memory: &MemVec,
+    maximum_memory: &MemVec,
+) -> impl proptest::strategy::Strategy<Value = MemoryLimits> {
+    use crate::utils::bit_length_inverse;
+    use proptest::prelude::*;
+
+    let component_ranges = minimum_memory
+        .into_iter()
+        .zip(maximum_memory)
+        .map(|(b, t)| bit_length(b)..=bit_length(t))
+        .collect::<Vec<_>>();
+    component_ranges.prop_map(|v| {
+        let linear_v = v
+            .into_iter()
+            .map(|v| bit_length_inverse(v))
+            .collect::<Vec<_>>();
+        MemoryLimits::Standard(MemVec::new(linear_v.try_into().unwrap()))
+    })
 }

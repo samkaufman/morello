@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Deserialize, Serialize)]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub struct Cost {
     pub main: MainCost,
     pub peaks: MemVec,

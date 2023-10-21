@@ -26,6 +26,7 @@ use crate::views::{CacheView, Param, Tensor, Tile, View, ViewExt};
 /// decision from another, which makes it appropriate for storing in a database so that the
 /// corresponding Impl node can be computed given the Spec.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(test, derive(Hash))]
 pub enum Action<Tgt: Target> {
     TileOut {
         output_shape: Shape,
@@ -358,22 +359,21 @@ impl<Tgt: Target> Action<Tgt> {
                     let next_to_outer_basics = &components[1];
                     let output_shape = &next_to_outer_basics.parameter_shapes()
                         [next_to_outer_basics.typ.output_idx()];
-                    let intermediate_mem_consumed_nondiscrete =
-                        MemVec::new(Tgt::levels().map(|l| {
-                            if level == &l {
-                                u64::from(next_to_outer_basics.dtype.size())
-                                    * u64::from(output_shape.into_iter().product::<DimSize>())
-                            } else {
-                                0u64
-                            }
-                        }));
+                    let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
+                        if level == &l {
+                            u64::from(next_to_outer_basics.dtype.size())
+                                * u64::from(output_shape.into_iter().product::<DimSize>())
+                        } else {
+                            0u64
+                        }
+                    });
 
                     // TODO: Use MemoryLimits::Pipeline where appropriate instead.
                     let mut m = MemoryLimits::Standard(match &spec.1 {
                         MemoryLimits::Standard(v) => {
                             let Some(r) = v
                                 .clone()
-                                .checked_sub(&intermediate_mem_consumed_nondiscrete)
+                                .checked_sub_snap_down(&intermediate_mem_consumed_nondiscrete)
                             else {
                                 return Err(ApplyError::OutOfMemory);
                             };

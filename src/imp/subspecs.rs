@@ -126,3 +126,35 @@ where
         &self.2
     }
 }
+
+#[cfg(test)]
+impl<Tgt, Aux> proptest::arbitrary::Arbitrary for SpecApp<Tgt, Spec<Tgt>, Aux>
+where
+    Tgt: Target,
+    Aux: Debug + Clone + proptest::arbitrary::Arbitrary + 'static,
+{
+    type Parameters = ();
+    type Strategy = proptest::strategy::BoxedStrategy<Self>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+
+        (any::<Spec<Tgt>>(), any::<Aux>())
+            .prop_map(|(spec, aux)| {
+                let parameter_specs = spec.0.parameters();
+                SpecApp(
+                    spec,
+                    parameter_specs
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, parameter_spec)| {
+                            Rc::new(Param::new(idx.try_into().unwrap(), parameter_spec)) as Rc<_>
+                        })
+                        .collect(),
+                    aux,
+                    PhantomData,
+                )
+            })
+            .boxed()
+    }
+}

@@ -10,6 +10,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashMap;
+use std::fmt::Debug;
 
 const INST_COST: MainCost = 1000;
 const ASSIGN_INST_COST: MainCost = 10;
@@ -22,6 +23,7 @@ pub struct Kernel<Tgt: Target, Aux> {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(Hash, proptest_derive::Arbitrary))]
 pub enum KernelType {
     Mult,
     BroadcastVecMult,
@@ -34,6 +36,10 @@ pub enum KernelType {
 
 impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
+        debug_assert_eq!(
+            usize::from(self.kernel_type.argument_count()),
+            self.arguments.len()
+        );
         Box::new(self.arguments.iter().map(|param| param.spec()))
     }
 
@@ -66,6 +72,10 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
         args: &[&'j dyn View<Tgt = Tgt>],
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
+        debug_assert_eq!(
+            usize::from(self.kernel_type.argument_count()),
+            self.arguments.len()
+        );
         for a in &self.arguments {
             a.bind(args, env)
         }
@@ -95,5 +105,50 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
     fn aux(&self) -> &Aux {
         &self.aux
+    }
+}
+
+impl KernelType {
+    pub const fn argument_count(&self) -> u8 {
+        match self {
+            KernelType::Mult | KernelType::BroadcastVecMult => 3,
+            KernelType::ValueAssign | KernelType::VectorAssign => 2,
+            KernelType::MemsetZero | KernelType::VectorZero => 1,
+            KernelType::CacheAccess => todo!(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<Tgt: Target, Aux: Debug + proptest::arbitrary::Arbitrary> proptest::arbitrary::Arbitrary
+    for Kernel<Tgt, Aux>
+{
+    type Parameters = ();
+    type Strategy = proptest::strategy::BoxedStrategy<Self>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+
+        any::<KernelType>()
+            .prop_flat_map(|kernel_type| {
+                (
+                    Just(kernel_type),
+                    proptest::collection::vec(
+                        any::<TensorSpec<Tgt>>(),
+                        usize::from(kernel_type.argument_count()),
+                    ),
+                    any::<Aux>(),
+                )
+            })
+            .prop_map(|(kernel_type, argument_specs, aux)| Kernel {
+                kernel_type,
+                arguments: argument_specs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, spec)| Param::new(i.try_into().unwrap(), spec))
+                    .collect(),
+                aux,
+            })
+            .boxed()
     }
 }

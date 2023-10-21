@@ -6,6 +6,7 @@ pub type Shape = smallvec::SmallVec<[DimSize; 5]>;
 pub type Contig = u8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum Dtype {
     Uint8,
     Uint32,

@@ -33,6 +33,8 @@ const MULTI_DIM_TILING: bool = false;
 /// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
 const MOVE_RESULTS_CAPACITY: usize = 12;
 
+const ARBITRARY_SPEC_MAX_SIZE: DimSize = 8;
+
 const LOG_SCALE_SHAPES_BIMAP: bool = true;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
@@ -62,11 +64,12 @@ pub struct PrimitiveBasics {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum PrimitiveSpecType {
+    Zero,
+    Move,
     Matmul { accum: bool },
     Conv { accum: bool },
-    Move,
-    Zero,
 }
 
 /// Tilings and dimension bindings for a particular output tiling.
@@ -108,6 +111,30 @@ pub struct PrimitiveBasicsBimap;
 impl<Tgt: Target> Display for Spec<Tgt> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "({}, {})", self.0, self.1)
+    }
+}
+
+#[cfg(test)]
+impl<Tgt: Target> proptest::arbitrary::Arbitrary for Spec<Tgt> {
+    type Parameters = (Option<DimSize>, Option<u64>);
+    type Strategy = proptest::strategy::BoxedStrategy<Spec<Tgt>>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use crate::memorylimits::arb_memorylimits;
+        use proptest::prelude::*;
+
+        // Optionally lower the max memory limits.
+        let MemoryLimits::Standard(mut max_memory) = Tgt::max_mem();
+        if let Some(lower_max) = args.1 {
+            max_memory = max_memory.map(|v| v.min(lower_max));
+        }
+
+        (
+            any_with::<LogicalSpec<Tgt>>(args.0),
+            arb_memorylimits::<Tgt>(&max_memory),
+        )
+            .prop_map(|(logical_spec, mem_limits)| Spec(logical_spec, mem_limits))
+            .boxed()
     }
 }
 
@@ -332,6 +359,53 @@ impl CanonicalBimap for PrimitiveBasics {
 
     fn bimap() -> Self::Bimap {
         PrimitiveBasicsBimap
+    }
+}
+
+#[cfg(test)]
+impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
+    type Parameters = Option<DimSize>;
+    type Strategy = proptest::strategy::BoxedStrategy<PrimitiveBasics>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+
+        let max_size = args.unwrap_or(ARBITRARY_SPEC_MAX_SIZE);
+
+        (any::<PrimitiveSpecType>(), any::<Dtype>(), Just(max_size))
+            .prop_flat_map(|(typ, dtype, max_size)| {
+                let shape_strategy = match typ {
+                    PrimitiveSpecType::Matmul { accum: _ } => {
+                        proptest::collection::vec(1..=max_size, 3).boxed()
+                    }
+                    PrimitiveSpecType::Conv { accum: _ } => (1..=max_size, 1..=max_size)
+                        .prop_flat_map(move |(h, w)| {
+                            (
+                                1..max_size,
+                                1..8u32,
+                                1..4u32,
+                                Just(h),
+                                Just(w),
+                                1..=h,
+                                1..=w,
+                            )
+                        })
+                        .prop_map(|(b, f, c, h, w, fh, fw)| vec![b, f, c, h, w, fh, fw])
+                        .boxed(),
+                    PrimitiveSpecType::Move | PrimitiveSpecType::Zero => (1..=4usize)
+                        .prop_flat_map(move |tensor_rank| {
+                            proptest::collection::vec(1..=max_size, tensor_rank)
+                        })
+                        .boxed(),
+                };
+                (Just(typ), Just(dtype), shape_strategy)
+            })
+            .prop_map(move |(typ, dtype, spec_shape)| PrimitiveBasics {
+                typ,
+                spec_shape: spec_shape.into(),
+                dtype,
+            })
+            .boxed()
     }
 }
 
@@ -1244,6 +1318,33 @@ impl BiMap for PrimitiveBasicsBimap {
             SpecKey::Zero { dtype } => todo!(),
         };
         basics
+    }
+}
+
+#[cfg(test)]
+impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
+    type Parameters = Option<DimSize>;
+    type Strategy = proptest::strategy::BoxedStrategy<LogicalSpec<Tgt>>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use crate::tensorspec::TensorSpecArbMaxShape;
+        use proptest::prelude::*;
+
+        // TODO: Generate Compose as well.
+        (any_with::<PrimitiveBasics>(args), any::<bool>())
+            .prop_flat_map(|(basics, serial_only)| {
+                // TODO: These don't all make sense. Are they canonical for shapes?
+                let auxes_strategy = basics
+                    .parameter_shapes()
+                    .into_iter()
+                    .map(|s| any_with::<TensorSpecAux<Tgt>>(TensorSpecArbMaxShape(s)))
+                    .collect::<Vec<_>>();
+                (Just(basics), auxes_strategy, Just(serial_only))
+            })
+            .prop_map(|(basics, auxes, serial_only)| {
+                LogicalSpec::Primitive(basics, auxes, serial_only)
+            })
+            .boxed()
     }
 }
 

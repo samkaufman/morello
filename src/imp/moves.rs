@@ -105,13 +105,13 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
     fn memory_allocated(&self) -> MemoryAllocation {
         let introduced_spec = self.introduced.spec();
         let bytes_consumed = introduced_spec.bytes_used();
-        MemoryAllocation::Simple(MemVec::new(Tgt::levels().map(|level| {
+        MemoryAllocation::Simple(Tgt::levels().map(|level| {
             if introduced_spec.level() == level {
                 bytes_consumed
             } else {
                 0u64
             }
-        })))
+        }))
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-
+use smallvec::smallvec;
 use std::collections::HashSet;
 use std::fmt::Display;
 
@@ -39,6 +39,10 @@ pub struct TensorSpecAuxBimap<Tgt: Target> {
 pub struct TensorSpecAuxNonDepBimap<Tgt: Target> {
     phantom: std::marker::PhantomData<Tgt>,
 }
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct TensorSpecArbMaxShape(pub Shape);
 
 impl<Tgt: Target> TensorSpec<Tgt> {
     pub fn new_canon(
@@ -259,6 +263,42 @@ impl<Tgt: Target> Display for TensorSpec<Tgt> {
     }
 }
 
+/// Implements [`proptest::arbitrary::Arbitrary`] to yield valid [TensorSpec]s.
+///
+/// This generates [TensorSpec]s of varying shapes, dtypes, levels and, alignments.
+/// The [Layout], vector shape, and contiguousness abstraction are constrained to be valid together
+/// and for the generated shape.
+///
+/// The maximum shape and rank of the [TensorSpec] can be controlled by providing a
+/// [TensorSpecArbMaxShape].
+#[cfg(test)]
+impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
+    type Parameters = TensorSpecArbMaxShape;
+    type Strategy = proptest::strategy::BoxedStrategy<TensorSpec<Tgt>>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+
+        args.0
+            .into_iter()
+            .map(|m| 1..=m)
+            .collect::<Vec<_>>()
+            .prop_flat_map(|shp| {
+                let shp1 = TensorSpecArbMaxShape(Shape::from(shp));
+                let shp2 = shp1.clone();
+                let aux_strategy = TensorSpecAux::arbitrary_with(shp1);
+                let dtype_strategy = any::<Dtype>();
+                (Just(shp2), dtype_strategy, aux_strategy)
+            })
+            .prop_map(|(shp, dtype, aux)| {
+                let mut tensor_spec = TensorSpec::new_noncanon_with_aux(shp.0, dtype, aux);
+                tensor_spec.canonicalize();
+                tensor_spec
+            })
+            .boxed()
+    }
+}
+
 impl<Tgt: Target> TensorSpecAux<Tgt> {
     pub fn canonicalize(&mut self, shape: &Shape, aligned: bool) {
         self.contig = self.layout.tile_contiguity(shape, shape, self.contig);
@@ -288,6 +328,28 @@ impl<Tgt: Target> Display for TensorSpecAux<Tgt> {
         } else {
             write!(f, "({})", aux_part)
         }
+    }
+}
+
+#[cfg(test)]
+impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpecAux<Tgt> {
+    type Parameters = TensorSpecArbMaxShape;
+    type Strategy = proptest::strategy::BoxedStrategy<TensorSpecAux<Tgt>>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+
+        let shape = args.0;
+        any::<Dtype>()
+            .prop_flat_map(move |d| arb_tensorspecaux(&shape, d))
+            .boxed()
+    }
+}
+
+#[cfg(test)]
+impl Default for TensorSpecArbMaxShape {
+    fn default() -> Self {
+        Self(smallvec![8, 8])
     }
 }
 
@@ -384,4 +446,44 @@ fn tensorspec_aux_str<Tgt: Target>(aux: &TensorSpecAux<Tgt>) -> String {
     }
 
     join_into_string(&parts, ", ")
+}
+
+#[cfg(test)]
+fn arb_tensorspecaux<Tgt: Target>(
+    max_shape: &[DimSize],
+    dtype: Dtype,
+) -> impl proptest::strategy::Strategy<Value = TensorSpecAux<Tgt>> {
+    use crate::spec::gen_vector_sizes_opt;
+    use proptest::prelude::*;
+    use proptest::sample::select;
+
+    let max_shape = Shape::from(max_shape);
+
+    (
+        select(Tgt::all_layouts_for_shape(&max_shape)),
+        select(Tgt::levels().to_vec()),
+    )
+        .prop_flat_map(move |(layout, level)| {
+            let contiguous_abs = layout.all_contiguous_abs().collect::<Vec<_>>();
+            (
+                Just(layout),
+                Just(level),
+                select(contiguous_abs),
+                any::<bool>(),
+                select(
+                    gen_vector_sizes_opt(Some(&max_shape), dtype, level.vector_bytes())
+                        .collect::<Vec<_>>(),
+                ),
+            )
+        })
+        .prop_map(
+            |(layout, level, contig, aligned, vector_size)| TensorSpecAux {
+                contig,
+                aligned,
+                level,
+                layout,
+                vector_size,
+            },
+        )
+        .boxed()
 }

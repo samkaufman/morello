@@ -31,13 +31,13 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
                 .intermediates
                 .iter()
                 .map(|t| {
-                    MemVec::new(Tgt::levels().map(|l| {
+                    Tgt::levels().map(|l| {
                         if t.spec().level() == l {
                             t.spec().bytes_used()
                         } else {
                             0
                         }
-                    }))
+                    })
                 })
                 .collect(),
         }

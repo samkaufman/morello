@@ -1,7 +1,6 @@
 use divrem::DivCeil;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::mem::swap;
 use std::{cmp::min, collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{

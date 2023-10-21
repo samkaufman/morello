@@ -10,7 +10,8 @@ use prettytable::{self, format, row, Cell};
 use std::collections::HashMap;
 use std::fmt;
 
-#[derive(Copy, Clone, PartialEq, ValueEnum)]
+#[derive(Debug, Copy, Clone, PartialEq, ValueEnum)]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum ImplPrintStyle {
     Full,
     Compact,
