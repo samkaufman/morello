@@ -77,18 +77,11 @@ const fn ascii_pairs() -> [[char; 2]; 676] {
     result
 }
 
-pub fn snap_availables_up_memvec(available: MemVec, always: bool) -> MemVec {
+pub fn snap_memvec_up(available: MemVec, always: bool) -> MemVec {
     if !SNAP_CAP_TO_POWER_OF_TWO && !always {
         return available;
     }
-
-    available.map(|v| {
-        if v == 0 {
-            0
-        } else {
-            2u64.pow(bit_length(v - 1))
-        }
-    })
+    available.map(|v| if v == 0 { 0 } else { v.next_power_of_two() })
 }
 
 pub const fn bit_length(n: u64) -> u32 {

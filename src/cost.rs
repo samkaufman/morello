@@ -1,7 +1,7 @@
 use crate::imp::{Impl, ImplExt};
 use crate::memorylimits::MemVec;
 use crate::target::Target;
-use crate::utils::snap_availables_up_memvec;
+use crate::utils::snap_memvec_up;
 
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -32,8 +32,7 @@ impl Cost {
             .collect::<SmallVec<[_; 3]>>();
         let main_cost: MainCost = imp.compute_main_cost(&child_main_costs);
         // TODO: Handle other kinds of memory, not just standard/TinyMap peaks.
-        let raised_peaks =
-            snap_availables_up_memvec(imp.peak_memory_from_child_peaks(&child_peaks), false);
+        let raised_peaks = snap_memvec_up(imp.peak_memory_from_child_peaks(&child_peaks), false);
         Cost {
             main: main_cost,
             peaks: raised_peaks,
