@@ -39,12 +39,8 @@ pub fn aligned_approx<Tgt: Target>(
             )
         }
         (_, false) => {
-            if tile_shape[1..] == parent.shape()[1..] {
-                todo!()
-            } else {
-                warn!("No alignment analysis for non-batch convolution");
-                false
-            }
+            warn!("No alignment analysis for sliding layouts");
+            false
         }
     }
 }
