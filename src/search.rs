@@ -195,12 +195,20 @@ impl ImplReducer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Dtype;
+    use crate::common::{DimSize, Dtype};
+    use crate::db::DashmapDiskDatabase;
     use crate::layout::{row_major, Layout};
     use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
+    use crate::utils::{bit_length, bit_length_inverse};
+    use proptest::prelude::*;
+    use proptest::sample::select;
     use smallvec::smallvec;
+    use std::rc::Rc;
+
+    const TEST_LOWER_SIZE_MAX: DimSize = 2;
+    const TEST_LOWER_MEMORY_MAX: u64 = 2048;
 
     #[test]
     fn test_parentsummary_doesnt_prune_rm_to_cm_relayout() {
@@ -251,6 +259,32 @@ mod tests {
             ParentSummaryTransitionResult::PruneAction
         ));
     }
+
+    proptest! {
+        #[test]
+        fn test_more_memory_never_worsens_solution_with_shared_db(
+            spec_pair in lower_and_higher_spec::<X86Target>()
+        ) {
+            let (spec, raised_spec) = spec_pair;
+            let db = DashmapDiskDatabase::new(None, false);
+
+            // Solve the first, lower Spec.
+            let (lower_result_vec, _, _) = top_down(&db, &spec, 1);
+
+            // If the lower spec can't be solved, then there is no way for the raised Spec to have
+            // a worse solution, so we can return here.
+            if let Some((_, lower_cost)) = lower_result_vec.first() {
+                // Check that the raised result has no lower cost and does not move from being
+                // possible to impossible.
+                let (raised_result, _, _) = top_down(&db, &raised_spec, 1);
+                let (_, raised_cost) = raised_result
+                    .first()
+                    .expect("raised result should be possible");
+                assert!(raised_cost <= lower_cost);
+            }
+        }
+    }
+
     fn example_move_spec(
         from_level: CpuMemoryLevel,
         from_layout: Layout,
@@ -305,5 +339,41 @@ mod tests {
             ),
             X86Target::max_mem(),
         )
+    }
+
+    fn lower_and_higher_spec<Tgt: Target>() -> impl Strategy<Value = (Spec<Tgt>, Spec<Tgt>)> {
+        let MemoryLimits::Standard(mut top_memvec) = X86Target::max_mem();
+        top_memvec = top_memvec.map(|v| v.min(TEST_LOWER_MEMORY_MAX));
+
+        let top_memory_a = Rc::new(MemoryLimits::Standard(top_memvec));
+        let top_memory_b = Rc::clone(&top_memory_a);
+        let top_memory_c = Rc::clone(&top_memory_a);
+
+        any_with::<Spec<Tgt>>((Some(TEST_LOWER_SIZE_MAX), Some(TEST_LOWER_MEMORY_MAX)))
+            .prop_filter("limits should not be max", move |s| &s.1 != &*top_memory_a)
+            .prop_flat_map(move |spec| {
+                let MemoryLimits::Standard(top_memvec) = top_memory_b.as_ref();
+                let MemoryLimits::Standard(raised_memory) = &spec.1;
+                let non_top_levels = (0..raised_memory.len())
+                    .filter(|&idx| raised_memory[idx] < top_memvec[idx])
+                    .collect::<Vec<_>>();
+                (Just(spec), select(non_top_levels))
+            })
+            .prop_flat_map(move |(spec, dim_idx_to_raise)| {
+                let MemoryLimits::Standard(top_memvec) = top_memory_c.as_ref();
+                let MemoryLimits::Standard(spec_memvec) = &spec.1;
+
+                let low = bit_length(spec_memvec[dim_idx_to_raise]);
+                let high = bit_length(top_memvec[dim_idx_to_raise]);
+                (Just(spec), Just(dim_idx_to_raise), (low + 1)..=high)
+            })
+            .prop_map(|(spec, dim_idx_to_raise, raise_bits)| {
+                let raise_amount = bit_length_inverse(raise_bits);
+                let mut raised_memory = spec.1.clone();
+                let MemoryLimits::Standard(ref mut raised_memvec) = raised_memory;
+                raised_memvec[dim_idx_to_raise] = raise_amount;
+                let raised_spec = Spec(spec.0.clone(), raised_memory);
+                (spec, raised_spec)
+            })
     }
 }
