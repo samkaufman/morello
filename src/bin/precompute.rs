@@ -40,6 +40,7 @@ fn main() {
     let args = Args::parse();
     let db = DashmapDiskDatabase::new_with_shard_count(
         args.db.as_deref(),
+        true,
         thread::available_parallelism().unwrap().into(),
     );
     main_per_db(&args, &db);

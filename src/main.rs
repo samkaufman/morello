@@ -16,6 +16,8 @@ use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
+const BINARY_SCALE_SHAPES: bool = true;
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -105,12 +107,14 @@ fn main() -> Result<()> {
     let args = Args::parse();
     color::set_color_mode(args.color);
     match &args.target {
-        TargetId::X86 => {
-            main_per_db::<_, X86Target>(&args, &DashmapDiskDatabase::new(args.db.as_deref()))
-        }
-        TargetId::Arm => {
-            main_per_db::<_, ArmTarget>(&args, &DashmapDiskDatabase::new(args.db.as_deref()))
-        }
+        TargetId::X86 => main_per_db::<_, X86Target>(
+            &args,
+            &DashmapDiskDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES),
+        ),
+        TargetId::Arm => main_per_db::<_, ArmTarget>(
+            &args,
+            &DashmapDiskDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES),
+        ),
     }
 }
 

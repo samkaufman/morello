@@ -115,8 +115,21 @@ pub const fn is_power_of_two_u32(n: u32) -> bool {
     n & (n - 1) == 0
 }
 
+pub const fn next_binary_power(n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    n.next_power_of_two()
+}
+
+// TODO: Rename
 pub const fn prev_power_of_two(n: u64) -> u64 {
     let highest_bit_set_idx = (u64::BITS - 1) - (n | 1).leading_zeros();
+    (1 << highest_bit_set_idx) & n
+}
+
+pub const fn prev_power_of_two_u32(n: u32) -> u32 {
+    let highest_bit_set_idx = (u32::BITS - 1) - (n | 1).leading_zeros();
     (1 << highest_bit_set_idx) & n
 }
 

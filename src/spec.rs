@@ -12,7 +12,7 @@ use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::join_into_string;
-use crate::utils::{bit_length_u32, is_power_of_two_u32};
+use crate::utils::{bit_length_u32, is_power_of_two_u32, prev_power_of_two_u32};
 
 use itertools::Either;
 use itertools::Itertools;
@@ -81,13 +81,13 @@ pub enum PrimitiveSpecType {
 /// `smallvec![None, Some(1)]` for each of its inputs, indicating that the first
 /// dimension of the first input (the m dimension) is bound to the m dimension
 /// of the output, and so on for the n dimension.
+#[derive(Debug)]
 pub struct TilingInference(pub Vec<(Tiling, SmallVec<[Option<u8>; 5]>)>);
 
 /// A [BiMap] which extends [LogicalSpecBimap] with memory limits dimensions.
 ///
 /// Memory limits are represented identically in the codomain. They are not scaled logarithmically
 /// or inverted to be in data dependency order.
-#[derive(Default)]
 pub struct SpecBimap<Tgt, A>
 where
     Tgt: Target,
@@ -97,16 +97,18 @@ where
     pub memory_limits_bimap: MemoryLimitsBimap<Tgt>,
 }
 
-#[derive(Default)]
 pub struct LogicalSpecBimap<Tgt, A>
 where
     Tgt: Target,
     A: BiMap<Domain = TensorSpecAux<Tgt>>,
 {
+    pub primitive_basics_bimap: PrimitiveBasicsBimap,
     pub aux_bimap: A,
 }
 
-pub struct PrimitiveBasicsBimap;
+pub struct PrimitiveBasicsBimap {
+    pub binary_scale_shapes: bool,
+}
 
 impl<Tgt: Target> Display for Spec<Tgt> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -351,14 +353,6 @@ impl Display for PrimitiveBasics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let shape_str = join_into_string(&self.spec_shape, "×");
         write!(f, "{}({}, {})", self.typ, shape_str, self.dtype)
-    }
-}
-
-impl CanonicalBimap for PrimitiveBasics {
-    type Bimap = PrimitiveBasicsBimap;
-
-    fn bimap() -> Self::Bimap {
-        PrimitiveBasicsBimap
     }
 }
 
@@ -961,7 +955,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     // TODO: Should move new_operands in.
     pub fn replace_io(&mut self, new_operands: &[TensorSpec<Tgt>]) {
         assert_eq!(new_operands.len(), self.operand_count());
-        let replaced = match self {
+        match self {
             LogicalSpec::Compose {
                 components,
                 operand_auxes,
@@ -1029,7 +1023,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     primitive_aux[i] = new_operands[i].aux.clone();
                 }
             }
-        };
+        }
         debug_assert!(
             self.parameters()
                 .iter()
@@ -1039,7 +1033,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             self,
             new_operands.iter().map(|o| o.to_string()).join(", "),
         );
-        replaced
     }
 
     pub fn output_is_read(&self) -> bool {
@@ -1237,7 +1230,7 @@ where
     fn apply(&self, spec: &LogicalSpec<Tgt>) -> Self::Codomain {
         match spec {
             LogicalSpec::Primitive(basics, auxes, serial_only) => {
-                let (key, mut pt) = BiMap::apply(&PrimitiveBasics::bimap(), basics);
+                let (key, mut pt) = BiMap::apply(&self.primitive_basics_bimap, basics);
                 let aux_keys = auxes
                     .iter()
                     .map(|aux| {
@@ -1269,9 +1262,11 @@ impl BiMap for PrimitiveBasicsBimap {
             dtype,
         } = basics;
         let shifted_shape = spec_shape.iter().map(|&d| {
-            debug_assert!(is_power_of_two_u32(d));
-            if LOG_SCALE_SHAPES_BIMAP {
-                bit_length_u32(d - 1)
+            if self.binary_scale_shapes {
+                if !d.is_power_of_two() {
+                    panic!("Given non-zero/power-of-two shape {}", d);
+                }
+                bit_length_u32(prev_power_of_two_u32(d - 1))
             } else {
                 d - 1
             }
@@ -1301,7 +1296,7 @@ impl BiMap for PrimitiveBasicsBimap {
                     _ => unreachable!(),
                 };
                 let spec_shape = v.iter().skip(1);
-                let spec_shape = if LOG_SCALE_SHAPES_BIMAP {
+                let spec_shape = if self.binary_scale_shapes {
                     todo!()
                 } else {
                     spec_shape.map(|d| d + 1)
@@ -1441,14 +1436,14 @@ pub fn gen_vector_sizes_opt<'a>(
         .chain(iter_b.into_iter().flatten())
 }
 
-pub fn dim_range(dim: DimSize, include_end: bool) -> impl Iterator<Item = DimSize> {
+pub fn dim_range(dim_size: DimSize, include_end: bool) -> impl Iterator<Item = DimSize> {
     let it = (0..)
         .map(|power| 2u32.pow(power))
-        .take_while(move |x| *x < dim);
+        .take_while(move |x| *x < dim_size);
 
     it.chain(
-        once(if include_end && dim != 0 {
-            Some(dim)
+        once(if include_end && dim_size != 0 {
+            Some(dim_size)
         } else {
             None
         })
@@ -1486,7 +1481,15 @@ pub fn conv_infer_output_shape(image_shape: &[u32], filters_shape: &[u32]) -> Sh
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::X86Target;
+    use crate::imp::ImplNode;
+    use crate::memorylimits::arb_memorylimits_ext;
+    use crate::{
+        imp::Impl,
+        memorylimits::{MemVec, MemoryAllocation},
+        target::{Target, X86Target},
+        utils::next_binary_power,
+    };
+    use proptest::prelude::*;
 
     #[test]
     fn test_gen_tile_sizes_empty() {
@@ -1539,6 +1542,60 @@ mod tests {
         for drop_given in [true, false] {
             assert_gen_tile_sizes(&[2, 3], [[1, 3], [2, 1], [2, 2]], drop_given, false);
         }
+    }
+
+    proptest! {
+        #[test]
+        fn test_action_applies_everywhere_down_through_peak_memory(
+            (spec, action, applied, lower_limit) in arb_spec_action_and_lower_limit::<X86Target>()
+        ) {
+            let lower_spec = Spec(spec.0.clone(), lower_limit);
+            assert!(lower_spec.0.actions().into_iter().contains(&action),
+                "Action {:?} was not present in lower-limits Spec {:?}",
+                action, lower_spec);
+        }
+    }
+
+    fn arb_spec_action_and_lower_limit<Tgt: Target>(
+    ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt, ()>, MemoryLimits)> {
+        any::<Spec<Tgt>>()
+            .prop_filter_map("Spec had zero applicable actions", |spec| {
+                let applied_actions = spec
+                    .0
+                    .actions()
+                    .into_iter()
+                    .filter_map(|a| a.apply(&spec).ok().map(|applied| (a, applied)))
+                    .collect::<Vec<_>>();
+                if applied_actions.is_empty() {
+                    None
+                } else {
+                    Some((spec, applied_actions))
+                }
+            })
+            .prop_flat_map(|(spec, applied_actions)| {
+                (Just(spec), proptest::sample::select(applied_actions))
+            })
+            .prop_flat_map(|(spec, action_pair)| {
+                let (action, applied) = action_pair;
+                let lower_bound = match applied.memory_allocated() {
+                    MemoryAllocation::Simple(allocated) => allocated,
+                    MemoryAllocation::Inner(_) => todo!(),
+                    MemoryAllocation::Pipeline {
+                        intermediate_consumption: _,
+                    } => todo!(),
+                };
+                let MemoryLimits::Standard(limits_memvec) = &spec.1;
+                let lower_limit_strategy = arb_memorylimits_ext(
+                    &MemVec::new(lower_bound.map(next_binary_power)),
+                    limits_memvec,
+                );
+                (
+                    Just(spec),
+                    Just(action),
+                    Just(applied),
+                    lower_limit_strategy,
+                )
+            })
     }
 
     fn shared_test_gen_tile_sizes_dim_1(multi_dim: bool) {
