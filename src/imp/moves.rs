@@ -223,8 +223,8 @@ pub fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tgt>) -> 
         dest.is_contiguous(),
     ));
 
-    let src_cost = 10 * (src_hit_cost * src_cache_lines);
-    let dest_cost = 10 * (dest_hit_cost * dest_cache_lines);
+    let src_cost = src_hit_cost * src_cache_lines;
+    let dest_cost = dest_hit_cost * dest_cache_lines;
 
     let mut cost: MainCost = src_cost + dest_cost;
     if !src.is_contiguous() || src.layout() != dest.layout() {

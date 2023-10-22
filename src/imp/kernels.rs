@@ -12,8 +12,8 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-const INST_COST: MainCost = 1000;
-const ASSIGN_INST_COST: MainCost = 10;
+const INST_COST: MainCost = 100;
+const ASSIGN_INST_COST: MainCost = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Kernel<Tgt: Target, Aux> {

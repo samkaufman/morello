@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use std::{cmp, iter, slice};
 
-const MAX_COST: MainCost = u64::MAX;
+const MAX_COST: MainCost = u32::MAX;
 
 /// An Impl representing a loop over a set of zipped [`Tile`]s.
 ///

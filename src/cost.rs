@@ -14,7 +14,7 @@ pub struct Cost {
     pub depth: u8,
 }
 
-pub type MainCost = u64;
+pub type MainCost = u32;
 
 impl Cost {
     pub fn from_child_costs<Tgt, Aux, I>(imp: &I, child_costs: &[Cost]) -> Cost
