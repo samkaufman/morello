@@ -41,7 +41,10 @@ fn main() {
     let db = DashmapDiskDatabase::new_with_shard_count(
         args.db.as_deref(),
         true,
-        thread::available_parallelism().unwrap().into(),
+        thread::available_parallelism()
+            .unwrap()
+            .get()
+            .next_power_of_two(),
     );
     main_per_db(&args, &db);
 
