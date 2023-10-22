@@ -88,11 +88,16 @@ pub struct DashmapDiskDatabase {
 #[serde(bound = "")]
 pub enum DbBlock {
     Single(ActionCostVec),
-    Expanded {
-        // TODO: Optimize memory with Option + NonZeroU32
-        actions: crate::ndarray::NDArray<Option<ActionCostVec>>,
-        matches: Option<NonZeroU32>,
-    },
+    Expanded(Box<Expanded>),
+}
+
+// TODO: Flatten something to avoid two indirections from DbBlock to NDArray contents.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct Expanded {
+    // TODO: Optimize memory with Option + NonZeroU32
+    pub actions: crate::ndarray::NDArray<Option<ActionCostVec>>,
+    pub matches: Option<NonZeroU32>,
 }
 
 // TODO: Storing Spec and usize is too expensive.
@@ -204,8 +209,8 @@ where
         };
         match group.deref() {
             DbBlock::Single(_) => {}
-            DbBlock::Expanded { actions, .. } => {
-                actions[&inner_pt_usize].as_ref()?;
+            DbBlock::Expanded(e) => {
+                e.actions[&inner_pt_usize].as_ref()?;
             }
         }
         // TODO: Obviate need to hash and look up on the inner HashMap for each deref of the below.
@@ -269,18 +274,19 @@ where
                                     .iter()
                                     .map(|v| (*v).try_into().unwrap())
                                     .collect::<Vec<_>>();
-                                let new_block = DbBlock::Expanded {
+                                let new_block = DbBlock::Expanded(Box::new(Expanded {
                                     actions: crate::ndarray::NDArray::new_with_value(
                                         &block_shape_usize,
                                         Some(v.clone()), // TODO: Avoid this clone
                                     ),
                                     matches: None,
-                                };
+                                }));
                                 *r = new_block;
 
-                                let DbBlock::Expanded { actions, matches } = r else {
+                                let DbBlock::Expanded(e) = r else {
                                     unreachable! {};
                                 };
+                                let Expanded { actions, matches } = e.as_mut();
                                 debug_assert!(matches.is_none());
                                 fill_ndarray_region(
                                     actions,
@@ -300,7 +306,9 @@ where
                                 );
                             }
                             DbBlock::Single(_) => {}
-                            DbBlock::Expanded { actions, matches } => {
+                            DbBlock::Expanded(e) => {
+                                let Expanded { actions, matches } = e.as_mut();
+
                                 // Examine the table before updating.
                                 // TODO: Avoid the following scan.
                                 let arbitrary_value =
@@ -341,10 +349,10 @@ where
                             joined_row.iter().map(|(_, r)| r.clone()),
                             &Some(ActionCostVec(decisions.clone())), // TODO: Remove this clone
                         );
-                        let r = entry.insert(DbBlock::Expanded {
+                        let r = entry.insert(DbBlock::Expanded(Box::new(Expanded {
                             actions: arr,
                             matches: Some(NonZeroU32::new(values_updated).unwrap()),
-                        });
+                        })));
                         r
                     }
                 }
@@ -439,7 +447,8 @@ impl DbBlock {
                 // TODO: Confirm that v is in bounds
                 Some(v)
             }
-            DbBlock::Expanded { actions, .. } => {
+            DbBlock::Expanded(e) => {
+                let Expanded { actions, .. } = e.as_ref();
                 let (_, global_pt) = compute_db_key(query, binary_scale_shapes);
                 let (_, inner_pt) = blockify_point(global_pt);
                 let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
@@ -451,10 +460,7 @@ impl DbBlock {
     pub fn len(&self) -> usize {
         match self {
             DbBlock::Single(_) => 1,
-            DbBlock::Expanded {
-                actions,
-                matches: _,
-            } => actions.len(),
+            DbBlock::Expanded(e) => e.actions.len(),
         }
     }
 
@@ -498,19 +504,26 @@ impl AsRef<SmallVec<[(ActionIdx, Cost); 1]>> for ActionCostVec {
 }
 
 fn try_compress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
+    let DbBlock::Expanded(expanded) = block else {
+        return;
+    };
+    let Expanded {
+        actions,
+        matches: Some(m),
+    } = expanded.as_mut()
+    else {
+        return;
+    };
+
     // TODO: Should just precompute block_shape as MAX_BLOCK_VOLUME
     let block_volume = block_shape.iter().product::<DimSize>();
-    match block {
-        DbBlock::Expanded {
-            actions,
-            matches: Some(m),
-        } if m.get() == block_volume => {
-            // log::debug!("Compressing block of size {}", block_volume);
-            let new_value = DbBlock::Single(actions.data.pop().unwrap().unwrap());
-            *block = new_value;
-        }
-        _ => {}
+    if m.get() != block_volume {
+        return;
     }
+
+    // log::debug!("Compressing block of size {}", block_volume);
+    let new_value = DbBlock::Single(actions.data.pop().unwrap().unwrap());
+    *block = new_value;
 }
 
 fn decompress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
@@ -521,11 +534,11 @@ fn decompress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
         .iter()
         .map(|v| (*v).try_into().unwrap())
         .collect::<Vec<_>>();
-    let new_block = DbBlock::Expanded {
+    let new_block = DbBlock::Expanded(Box::new(Expanded {
         // Avoid the following clone of `v`
         actions: crate::ndarray::NDArray::new_with_value(&block_shape_usize, Some(v.clone())),
         matches: None,
-    };
+    }));
     *block = new_block;
 }
 
