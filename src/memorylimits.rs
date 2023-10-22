@@ -1,6 +1,6 @@
 use crate::grid::general::BiMap;
 use crate::grid::linear::BimapInt;
-use crate::utils::{bit_length, is_power_of_two, iter_powers_of_two};
+use crate::utils::{bit_length, bit_length_inverse};
 use crate::{
     target::{Target, LEVEL_COUNT},
     utils::prev_power_of_two,
@@ -11,10 +11,7 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::fmt::{Display, Formatter};
-use std::{
-    iter,
-    ops::{Index, IndexMut, Sub},
-};
+use std::{iter, ops::Sub};
 
 /// MemoryLimits are bounds on available memory for each level of a target.
 ///
@@ -50,7 +47,7 @@ pub enum MemoryAllocation {
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
-pub struct MemVec([u64; LEVEL_COUNT]);
+pub struct MemVec([u8; LEVEL_COUNT]);
 
 #[derive(Default)]
 pub struct MemoryLimitsBimap<Tgt: Target> {
@@ -71,7 +68,7 @@ impl MemoryLimits {
         match self {
             MemoryLimits::Standard(mem_vec) => {
                 for i in 0..mem_vec.len() {
-                    mem_vec[i] = prev_power_of_two(mem_vec[i]);
+                    mem_vec.set_unscaled(i, prev_power_of_two(mem_vec.get_unscaled(i)));
                 }
             }
         }
@@ -131,12 +128,15 @@ impl Display for MemoryLimits {
 
 impl MemVec {
     pub fn new(contents: [u64; LEVEL_COUNT]) -> Self {
-        assert!(contents.iter().all(|&v| v == 0 || v.is_power_of_two()));
+        MemVec::new_from_binary_scaled(contents.map(|v| bit_length(v).try_into().unwrap()))
+    }
+
+    pub fn new_from_binary_scaled(contents: [u8; LEVEL_COUNT]) -> Self {
         MemVec(contents)
     }
 
     pub fn zero<Tgt: Target>() -> Self {
-        assert_eq!(Tgt::levels().len(), LEVEL_COUNT);
+        debug_assert_eq!(Tgt::levels().len(), LEVEL_COUNT);
         MemVec([0; LEVEL_COUNT])
     }
 
@@ -148,26 +148,46 @@ impl MemVec {
         self.0.is_empty()
     }
 
+    pub fn get_unscaled(&self, idx: usize) -> u64 {
+        bit_length_inverse(self.0[idx].into())
+    }
+
+    pub fn set_unscaled(&mut self, idx: usize, value: u64) {
+        self.0[idx] = bit_length(value).try_into().unwrap();
+    }
+
     pub fn checked_sub_snap_down(self, rhs: &[u64; LEVEL_COUNT]) -> Option<MemVec> {
         let mut result = self;
         for idx in 0..result.len() {
-            if result[idx] < rhs[idx] {
+            let cur = bit_length_inverse(result.0[idx].into());
+            if cur < rhs[idx] {
                 return None;
             }
-            result[idx] = prev_power_of_two(result[idx] - rhs[idx]);
+            result.0[idx] = bit_length(prev_power_of_two(cur - rhs[idx]))
+                .try_into()
+                .unwrap();
         }
         Some(result)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &u64> {
-        self.0.iter()
+    pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.0.iter().map(|&v| bit_length_inverse(v.into()))
     }
 
-    pub fn map<F>(self, f: F) -> MemVec
+    pub fn iter_binary_scaled(&self) -> impl Iterator<Item = u8> + '_ {
+        self.0.iter().copied()
+    }
+
+    pub fn map<F>(mut self, mut f: F) -> MemVec
     where
         F: FnMut(u64) -> u64,
     {
-        MemVec::new(self.0.map(f))
+        for idx in 0..self.len() {
+            self.0[idx] = bit_length(f(bit_length_inverse(self.0[idx].into())))
+                .try_into()
+                .unwrap();
+        }
+        self
     }
 
     /// Returns an [Iterator] over smaller power-of-two [MemVec]s.
@@ -187,23 +207,19 @@ impl MemVec {
     /// ]);
     /// ```
     pub fn iter_down_by_powers_of_two<T: Target>(&self) -> impl Iterator<Item = MemVec> {
-        self.into_iter()
-            .map(|l| iter_powers_of_two(l, true).rev())
+        self.iter_binary_scaled()
+            .map(|t| (0..=t).rev())
             .multi_cartesian_product()
-            .map(move |prod| MemVec::new(prod.into_iter().collect::<Vec<_>>().try_into().unwrap()))
+            .map(|prod| MemVec::new_from_binary_scaled(prod.try_into().unwrap()))
     }
 }
 
 impl Sub for MemVec {
     type Output = Self;
 
+    // TODO: Implement this without converting to linear space. (And add test!)
     fn sub(self, rhs: Self) -> Self::Output {
-        assert_eq!(self.len(), rhs.len());
-        let mut result = self;
-        for idx in 0..result.len() {
-            result[idx] -= rhs[idx];
-        }
-        result
+        todo!()
     }
 }
 
@@ -212,41 +228,6 @@ impl Sub<MemVec> for &MemVec {
 
     fn sub(self, rhs: MemVec) -> Self::Output {
         self.clone() - rhs
-    }
-}
-
-impl Index<usize> for MemVec {
-    type Output = u64;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.0[index]
-    }
-}
-
-impl IndexMut<usize> for MemVec {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.0[index]
-    }
-}
-
-impl IntoIterator for MemVec {
-    type Item = u64;
-
-    type IntoIter = std::array::IntoIter<u64, LEVEL_COUNT>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-// .into_iter() on a MemVec will just return values since we know they're small.
-impl<'a> IntoIterator for &'a MemVec {
-    type Item = u64;
-
-    type IntoIter = iter::Cloned<std::slice::Iter<'a, u64>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter().cloned()
     }
 }
 
@@ -264,26 +245,18 @@ impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
         match t {
             MemoryLimits::Standard(limits_vec) => {
                 debug_assert_eq!(limits_vec.len(), Tgt::levels().len());
-                debug_assert!(limits_vec
-                    .iter()
-                    .copied()
-                    .all(|v| v == 0 || is_power_of_two(v)));
                 limits_vec
-                    .iter()
-                    .map(|&v| BimapInt::try_from(bit_length(v)).unwrap())
+                    .iter_binary_scaled()
+                    .map(|v| BimapInt::try_from(v).unwrap())
                     .collect()
             }
         }
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
-        MemoryLimits::Standard(MemVec::new(
-            i.iter()
-                .map(|&v| if v == 0 { 0 } else { 1 << (v - 1) })
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
-        ))
+        // Convert array from BimapInt to u8.
+        let a = std::array::from_fn(|idx| i[idx].try_into().unwrap());
+        MemoryLimits::Standard(MemVec::new_from_binary_scaled(a))
     }
 }
 
@@ -299,18 +272,17 @@ pub fn arb_memorylimits_ext(
     minimum_memory: &MemVec,
     maximum_memory: &MemVec,
 ) -> impl proptest::strategy::Strategy<Value = MemoryLimits> {
-    use crate::utils::bit_length_inverse;
     use proptest::prelude::*;
 
     let component_ranges = minimum_memory
-        .into_iter()
-        .zip(maximum_memory)
-        .map(|(b, t)| bit_length(b)..=bit_length(t))
+        .iter_binary_scaled()
+        .zip(maximum_memory.iter_binary_scaled())
+        .map(|(b, t)| b..=t)
         .collect::<Vec<_>>();
     component_ranges.prop_map(|v| {
         let linear_v = v
             .into_iter()
-            .map(|v| bit_length_inverse(v))
+            .map(|v| bit_length_inverse(v.into()))
             .collect::<Vec<_>>();
         MemoryLimits::Standard(MemVec::new(linear_v.try_into().unwrap()))
     })

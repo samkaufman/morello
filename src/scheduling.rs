@@ -13,11 +13,12 @@ use crate::imp::pipeline::Pipeline;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
-use crate::memorylimits::{MemVec, MemoryLimits};
+use crate::memorylimits::MemoryLimits;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
+use crate::utils::prev_power_of_two;
 use crate::views::{CacheView, Param, Tensor, Tile, View, ViewExt};
 
 /// A scheduling decision which can be applied to a Spec to produce an Impl.
@@ -526,24 +527,24 @@ impl<Tgt: Target> Action<Tgt> {
                     // We assume bytes_used will be the same for source and destination
                     // tensors.
                     let additional = operands[usize::from(*source_idx)].bytes_used();
-                    let mut l = match &spec.1 {
+                    match &spec.1 {
                         MemoryLimits::Standard(base) => {
                             let updated_level_idx = Tgt::levels()
                                 .iter()
                                 .position(|l| l == destination_level)
                                 .unwrap();
                             let mut new_limits = base.clone();
-                            let Some(level_updated) =
-                                new_limits[updated_level_idx].checked_sub(additional)
+                            let Some(level_updated) = new_limits
+                                .get_unscaled(updated_level_idx)
+                                .checked_sub(additional)
                             else {
                                 return Err(ApplyError::OutOfMemory);
                             };
-                            new_limits[updated_level_idx] = level_updated;
+                            new_limits
+                                .set_unscaled(updated_level_idx, prev_power_of_two(level_updated));
                             MemoryLimits::Standard(new_limits)
                         }
-                    };
-                    l.discretize();
-                    l
+                    }
                 };
 
                 // Closure which makes a prologue or epilogue for this Spec.

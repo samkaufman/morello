@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use smallvec::smallvec;
 use std::collections::HashSet;
 use std::fmt::Display;
 
@@ -349,6 +348,7 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpecAux<Tgt> {
 #[cfg(test)]
 impl Default for TensorSpecArbMaxShape {
     fn default() -> Self {
+        use smallvec::smallvec;
         Self(smallvec![8, 8])
     }
 }

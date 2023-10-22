@@ -1,6 +1,6 @@
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
-use crate::memorylimits::{MemVec, MemoryAllocation};
+use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
 use crate::target::Target;
 use crate::views::{Param, Tensor, View};

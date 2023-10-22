@@ -639,7 +639,7 @@ where
     // Compute the per-level maximum limits of the solutions. This lower bounds the range.
     let mut per_level_peaks = [0; LEVEL_COUNT];
     for (_, cost) in impls {
-        for (i, &peak) in cost.peaks.iter().enumerate() {
+        for (i, peak) in cost.peaks.iter().enumerate() {
             per_level_peaks[i] = per_level_peaks[i].max(peak);
         }
     }
@@ -806,8 +806,8 @@ mod tests {
             let db = DashmapDiskDatabase::new(None, false);
             let value_ref = db.put(spec, smallvec![(action, cost)]);
             let filled_limits_iter = spec_limits
-                .into_iter()
-                .zip(&value_ref.value().0[0].1.peaks)
+                .iter()
+                .zip(value_ref.value().0[0].1.peaks.iter())
                 .map(|(l, p)| {
                     assert!(l == 0 || l.is_power_of_two());
                     assert!(p == 0 || p.is_power_of_two());
@@ -833,16 +833,15 @@ mod tests {
             let MemoryLimits::Standard(max_memory) = X86Target::max_mem();
             let MemoryLimits::Standard(spec_limits) = &spec_b.1;
             let filled_limits_iter = max_memory
-                .into_iter()
+                .iter_binary_scaled()
                 .map(|l| {
-                    assert!(l == 0 || l.is_power_of_two());
-                    (0..=bit_length(l)).map(bit_length_inverse)
+                    (0..=u32::from(l)).map(bit_length_inverse)
                 })
                 .multi_cartesian_product();
             for limit_to_check in filled_limits_iter {
                 // Skip limits inside the put range
-                if limit_to_check.iter().zip(value_ref.value().0[0].1.peaks.iter().zip(spec_limits)).any(|(c, (p, l))| {
-                    c < p || c > &l
+                if limit_to_check.iter().zip(value_ref.value().0[0].1.peaks.iter().zip(spec_limits.iter())).any(|(c, (p, l))| {
+                    c < &p || c > &l
                 }) {
                     let spec_to_check = Spec(
                         spec_b.0.clone(),
@@ -876,15 +875,10 @@ mod tests {
             let vr_b_peaks = value_ref_b.value().0[0].1.peaks.clone();
             drop(value_ref_b);
 
-            let relevant_limits_iter = spec_limits_a.iter().zip(spec_limits_b)
-                .zip(vr_a_peaks.iter().zip(&vr_b_peaks))
+            // TODO: Use the binary-scaled values directly rather than converting back and forth.
+            let relevant_limits_iter = spec_limits_a.iter().zip(spec_limits_b.iter())
+                .zip(vr_a_peaks.iter().zip(vr_b_peaks.iter()))
                 .map(|((l_a, l_b), (p_a, p_b))| {
-                    let l_a = *l_a;
-                    let p_a = *p_a;
-                    assert!(l_a == 0 || l_a.is_power_of_two());
-                    assert!(l_b == 0 || l_b.is_power_of_two());
-                    assert!(p_a == 0 || p_a.is_power_of_two());
-                    assert!(p_b == 0 || p_b.is_power_of_two());
                     (bit_length(p_a.min(p_b))..=bit_length(l_a.max(l_b))).map(bit_length_inverse)
                 })
                 .multi_cartesian_product();
@@ -892,13 +886,13 @@ mod tests {
             for limit_to_check in relevant_limits_iter {
                 // b was put second, so if we're in its range, that should be the result. Check a
                 // second.
-                let limit_in_a = vr_a_peaks.iter().zip(spec_limits_a).zip(&limit_to_check).all(|((bot, top), p)| {
-                    debug_assert!(*bot <= top);
-                    *bot <= *p && *p <= top
+                let limit_in_a = vr_a_peaks.iter().zip(spec_limits_a.iter()).zip(limit_to_check.iter()).all(|((bot, top), p)| {
+                    assert!(bot <= top);
+                    bot <= *p && *p <= top
                 });
-                let limit_in_b = vr_b_peaks.iter().zip(spec_limits_b).zip(&limit_to_check).all(|((bot, top), p)| {
-                    debug_assert!(*bot <= top);
-                    *bot <= *p && *p <= top
+                let limit_in_b = vr_b_peaks.iter().zip(spec_limits_b.iter()).zip(limit_to_check.iter()).all(|((bot, top), p)| {
+                    assert!(bot <= top);
+                    bot <= *p && *p <= top
                 });
 
                 let expected_value = if limit_in_b {
@@ -946,11 +940,8 @@ mod tests {
             .prop_flat_map(|spec| {
                 let MemoryLimits::Standard(spec_limits) = &spec.1;
                 let limits_strategy = spec_limits
-                    .iter()
-                    .map(|&l| {
-                        (0..=bit_length(l))
-                            .prop_map(|bits| if bits == 0 { 0 } else { 1 << (bits - 1) })
-                    })
+                    .iter_binary_scaled()
+                    .map(|l| (0..=l).prop_map(|bits| if bits == 0 { 0 } else { 1 << (bits - 1) }))
                     .collect::<Vec<_>>();
                 (
                     Just(spec),
@@ -983,8 +974,8 @@ mod tests {
                         let MemoryLimits::Standard(limits_a) = limits_a;
                         let MemoryLimits::Standard(limits_b) = limits_b;
 
-                        let spec_limits = limits_a.iter().zip(&limits_b).map(|(a, b)| (*a).max(b)).collect::<Vec<_>>();
-                        let peaks = limits_a.iter().zip(&limits_b).map(|(a, b)| (*a).min(b)).collect::<Vec<_>>();
+                        let spec_limits = limits_a.iter().zip(limits_b.iter()).map(|(a, b)| a.max(b)).collect::<Vec<_>>();
+                        let peaks = limits_a.iter().zip(limits_b.iter()).map(|(a, b)| a.min(b)).collect::<Vec<_>>();
 
                         let new_spec = Spec(
                             first.0.0.clone(),

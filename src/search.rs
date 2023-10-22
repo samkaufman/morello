@@ -117,7 +117,7 @@ where
         let cost = Cost::from_child_costs(&partial_impl, &nested_spec_costs);
         let MemoryLimits::Standard(goal_vec) = &goal.1;
         debug_assert!(
-            cost.peaks.iter().zip(goal_vec).all(|(a, b)| *a <= b),
+            cost.peaks.iter().zip(goal_vec.iter()).all(|(a, b)| a <= b),
             "While synthesizing {:?}, action yielded memory \
             bound-violating {:?} with peak memory {:?}",
             goal,
@@ -355,7 +355,7 @@ mod tests {
                 let MemoryLimits::Standard(top_memvec) = top_memory_b.as_ref();
                 let MemoryLimits::Standard(raised_memory) = &spec.1;
                 let non_top_levels = (0..raised_memory.len())
-                    .filter(|&idx| raised_memory[idx] < top_memvec[idx])
+                    .filter(|&idx| raised_memory.get_unscaled(idx) < top_memvec.get_unscaled(idx))
                     .collect::<Vec<_>>();
                 (Just(spec), select(non_top_levels))
             })
@@ -363,15 +363,15 @@ mod tests {
                 let MemoryLimits::Standard(top_memvec) = top_memory_c.as_ref();
                 let MemoryLimits::Standard(spec_memvec) = &spec.1;
 
-                let low = bit_length(spec_memvec[dim_idx_to_raise]);
-                let high = bit_length(top_memvec[dim_idx_to_raise]);
+                let low = bit_length(spec_memvec.get_unscaled(dim_idx_to_raise));
+                let high = bit_length(top_memvec.get_unscaled(dim_idx_to_raise));
                 (Just(spec), Just(dim_idx_to_raise), (low + 1)..=high)
             })
             .prop_map(|(spec, dim_idx_to_raise, raise_bits)| {
                 let raise_amount = bit_length_inverse(raise_bits);
                 let mut raised_memory = spec.1.clone();
                 let MemoryLimits::Standard(ref mut raised_memvec) = raised_memory;
-                raised_memvec[dim_idx_to_raise] = raise_amount;
+                raised_memvec.set_unscaled(dim_idx_to_raise, raise_amount);
                 let raised_spec = Spec(spec.0.clone(), raised_memory);
                 (spec, raised_spec)
             })

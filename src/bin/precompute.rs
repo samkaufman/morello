@@ -249,22 +249,20 @@ fn next_limits<'a>(
     result_limits: &'a MemoryLimits,
     result_peak: &'a MemVec,
 ) -> impl Iterator<Item = MemVec> + 'a {
-    let MemoryLimits::Standard(limits_vec) = result_limits else {
-        panic!("Not a standard memory limit");
-    };
+    let MemoryLimits::Standard(limits_vec) = result_limits;
     debug_assert!(limits_vec
         .iter()
         .zip(result_peak.iter())
-        .all(|(&l, &p)| l >= p));
+        .all(|(l, p)| l >= p));
     (0..limits_vec.len()).filter_map(|idx| {
         let mut new_values = limits_vec.clone();
-        if result_peak[idx] == 0 {
+        if result_peak.get_unscaled(idx) == 0 {
             return None;
         }
-        if result_peak[idx] == 1 {
-            new_values[idx] = 0;
+        if result_peak.get_unscaled(idx) == 1 {
+            new_values.set_unscaled(idx, 0);
         } else {
-            new_values[idx] = 1 << (bit_length(result_peak[idx]) - 2);
+            new_values.set_unscaled(idx, 1 << (bit_length(result_peak.get_unscaled(idx)) - 2));
         }
         Some(new_values)
     })

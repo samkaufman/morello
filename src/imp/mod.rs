@@ -4,6 +4,7 @@ use std::fmt::Debug;
 
 use crate::target::LEVEL_COUNT;
 use crate::tensorspec::TensorSpec;
+use crate::utils::next_binary_power;
 use crate::views::{Param, View};
 use crate::{
     cost::MainCost,
@@ -83,16 +84,27 @@ impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
         match self.memory_allocated() {
             MemoryAllocation::Simple(own) => {
                 for child_peak in child_peaks {
-                    for i in 0..peak.len() {
-                        peak[i] = peak[i].max(own[i] + child_peak[i]);
+                    for (i, o) in own.iter().enumerate() {
+                        peak.set_unscaled(
+                            i,
+                            next_binary_power(
+                                peak.get_unscaled(i).max(o + child_peak.get_unscaled(i)),
+                            ),
+                        );
                     }
                 }
             }
             MemoryAllocation::Inner(child_adds) => {
                 debug_assert_eq!(child_peaks.len(), child_adds.len());
                 for (child_peak, own_child_alloc) in child_peaks.iter().zip(&child_adds) {
-                    for i in 0..peak.len() {
-                        peak[i] = peak[i].max(child_peak[i] + own_child_alloc[i]);
+                    for (i, o) in own_child_alloc.iter().enumerate() {
+                        peak.set_unscaled(
+                            i,
+                            next_binary_power(
+                                peak.get_unscaled(i)
+                                    .max(child_peak.get_unscaled(i) + *o),
+                            ),
+                        )
                     }
                 }
             }
@@ -105,8 +117,13 @@ impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
                 let mut following_consumption = &intermediate_consumption[0];
                 for (child_idx, child_peak) in child_peaks.iter().enumerate() {
                     for i in 0..peak.len() {
-                        peak[i] = peak[i].max(
-                            preceding_consumption[i] + child_peak[i] + following_consumption[i],
+                        peak.set_unscaled(
+                            i,
+                            next_binary_power(peak.get_unscaled(i).max(
+                                preceding_consumption[i]
+                                    + child_peak.get_unscaled(i)
+                                    + following_consumption[i],
+                            )),
                         );
                     }
                     preceding_consumption = following_consumption;
