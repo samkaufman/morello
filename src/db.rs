@@ -263,14 +263,39 @@ where
                             DbBlock::Single(v) if v.0 != decisions => {
                                 // Format `v.0` first we don't keep the mutable borrow of `v`.
                                 let value_str = format!("{:?}", v.0);
-                                let block_pt = &existing_block.key().1;
-                                unimplemented!(
-                                    "Replacement not supported. Tried to insert {:?} into \
-                                    compressed block of {}. Block was ({:?}, {:?}). Spec was {}.",
+
+                                // decompress_block(r, &block_shape);
+                                let block_shape_usize = block_shape
+                                    .iter()
+                                    .map(|v| (*v).try_into().unwrap())
+                                    .collect::<Vec<_>>();
+                                let new_block = DbBlock::Expanded {
+                                    actions: crate::ndarray::NDArray::new_with_value(
+                                        &block_shape_usize,
+                                        Some(v.clone()), // TODO: Avoid this clone
+                                    ),
+                                    matches: None,
+                                };
+                                *r = new_block;
+
+                                let DbBlock::Expanded { actions, matches } = r else {
+                                    unreachable! {};
+                                };
+                                debug_assert!(matches.is_none());
+                                fill_ndarray_region(
+                                    actions,
+                                    joined_row.iter().map(|(_, r)| r.clone()),
+                                    &Some(ActionCostVec(decisions.clone())),
+                                );
+
+                                log::warn!(
+                                    "Updating a previously compressed block with new values. Tried \
+                                    to insert {:?} into block of {}. Block was ({:?}, {:?}). Spec \
+                                    was {}.",
                                     decisions,
                                     value_str,
                                     db_key,
-                                    block_pt,
+                                    existing_block.key().1,
                                     spec
                                 );
                             }
@@ -298,9 +323,10 @@ where
                                         *matches = None;
                                     }
                                 }
+
+                                try_compress_block(r, &block_shape);
                             }
                         }
-                        try_compress_block(r, &block_shape);
                         existing_block.into_ref()
                     }
                     Entry::Vacant(entry) => {
@@ -485,6 +511,22 @@ fn try_compress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
         }
         _ => {}
     }
+}
+
+fn decompress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
+    let DbBlock::Single(v) = block else {
+        unreachable!();
+    };
+    let block_shape_usize = block_shape
+        .iter()
+        .map(|v| (*v).try_into().unwrap())
+        .collect::<Vec<_>>();
+    let new_block = DbBlock::Expanded {
+        // Avoid the following clone of `v`
+        actions: crate::ndarray::NDArray::new_with_value(&block_shape_usize, Some(v.clone())),
+        matches: None,
+    };
+    *block = new_block;
 }
 
 fn construct_impl<'a, Tgt, D>(db: &'a D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
