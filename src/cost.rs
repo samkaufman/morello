@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 pub struct Cost {
     pub main: MainCost,
     pub peaks: MemVec,
-    pub depth: u32,
+    pub depth: u8,
 }
 
 pub type MainCost = u64;
@@ -37,7 +37,12 @@ impl Cost {
         Cost {
             main: main_cost,
             peaks: raised_peaks,
-            depth: 1 + child_costs.iter().map(|k| k.depth).max().unwrap_or(0),
+            depth: child_costs
+                .iter()
+                .map(|k| k.depth)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
         }
     }
 }

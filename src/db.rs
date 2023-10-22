@@ -961,7 +961,7 @@ mod tests {
                     limits_strategy,
                     any::<ActionIdx>(),
                     any::<MainCost>(),
-                    any::<u32>(),
+                    any::<u8>(),
                 )
             })
             .prop_map(|(spec, peaks, action_idx, main_cost, depth)| {
