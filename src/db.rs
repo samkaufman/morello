@@ -1,5 +1,5 @@
 use crate::common::DimSize;
-use crate::cost::Cost;
+use crate::cost::{Cost, MainCost};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
@@ -14,12 +14,12 @@ use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
 use anyhow::anyhow;
 use dashmap::mapref::entry::Entry;
-use dashmap::mapref::one::MappedRef;
 use dashmap::DashMap;
 use divrem::DivRem;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -35,20 +35,14 @@ pub type ActionIdx = u16;
 const INITIAL_HASHMAP_CAPACITY: usize = 100_000_000;
 
 pub trait Database<'a> {
-    type ValueRef: AsRef<SmallVec<[(ActionIdx, Cost); 1]>> + 'a;
-
-    fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef>
+    fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<ActionCostVec>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>;
 
     // TODO: Document interior mutability of put.
-    fn put<Tgt>(
-        &'a self,
-        problem: Spec<Tgt>,
-        impls: SmallVec<[(ActionIdx, Cost); 1]>,
-    ) -> Self::ValueRef
+    fn put<Tgt>(&'a self, problem: Spec<Tgt>, impls: SmallVec<[(ActionIdx, Cost); 1]>)
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -57,6 +51,11 @@ pub trait Database<'a> {
     fn flush(&'a self);
 
     fn save(&'a self) -> anyhow::Result<()>;
+
+    /// Returns the maximum number of Impls this [Database] as store per Spec.
+    ///
+    /// If unlimited, returns `None`.
+    fn max_k(&'a self) -> Option<usize>;
 }
 
 pub trait DatabaseExt<'a>: Database<'a> {
@@ -74,6 +73,7 @@ pub struct DashmapDiskDatabase {
     file_path: Option<path::PathBuf>,
     pub blocks: DashMap<DbKey, DbBlock>,
     binary_scale_shapes: bool,
+    k: u8,
 }
 
 /// Stores a [Database] block. This may be a single value if all block entries have been filled with
@@ -95,8 +95,11 @@ pub enum DbBlock {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Expanded {
-    // TODO: Optimize memory with Option + NonZeroU32
-    pub actions: crate::ndarray::NDArray<Option<ActionCostVec>>,
+    pub filled: crate::ndarray::NDArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
+    pub main_costs: crate::ndarray::NDArray<MainCost>,
+    pub peaks: crate::ndarray::NDArray<MemVec>,
+    pub depths: crate::ndarray::NDArray<u8>,
+    pub action_idxs: crate::ndarray::NDArray<ActionIdx>,
     pub matches: Option<NonZeroU32>,
 }
 
@@ -141,16 +144,17 @@ impl<Tgt: Target> Default for DbImplAux<Tgt> {
 }
 
 impl DashmapDiskDatabase {
-    pub fn new(file_path: Option<&path::Path>, binary_scale_shapes: bool) -> Self {
-        Self::new_with_dashmap_constructor(file_path, binary_scale_shapes, &DashMap::new)
+    pub fn new(file_path: Option<&path::Path>, binary_scale_shapes: bool, k: u8) -> Self {
+        Self::new_with_dashmap_constructor(file_path, binary_scale_shapes, k, &DashMap::new)
     }
 
     pub fn new_with_shard_count(
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
         shard_count: usize,
+        k: u8,
     ) -> Self {
-        Self::new_with_dashmap_constructor(file_path, binary_scale_shapes, &|| {
+        Self::new_with_dashmap_constructor(file_path, binary_scale_shapes, k, &|| {
             DashMap::with_capacity_and_hasher_and_shard_amount(
                 INITIAL_HASHMAP_CAPACITY,
                 RandomState::default(),
@@ -163,6 +167,7 @@ impl DashmapDiskDatabase {
     fn new_with_dashmap_constructor(
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
+        k: u8,
         dashmap_constructor: &dyn Fn() -> DashMap<DbKey, DbBlock>,
     ) -> Self {
         let grouped_entries = match file_path {
@@ -185,6 +190,7 @@ impl DashmapDiskDatabase {
             file_path: file_path.map(|p| p.to_owned()),
             blocks: grouped_entries,
             binary_scale_shapes,
+            k,
         }
     }
 }
@@ -193,35 +199,21 @@ impl<'a> Database<'a> for DashmapDiskDatabase
 where
     Self: 'a,
 {
-    type ValueRef = MappedRef<'a, DbKey, DbBlock, ActionCostVec>;
-
-    fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<Self::ValueRef>
+    fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<ActionCostVec>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
     {
         let (table_key, global_pt) = compute_db_key(query, self.binary_scale_shapes);
-        let (block_pt, inner_pt) = blockify_point(global_pt);
-        let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
+        let (block_pt, _) = blockify_point(global_pt);
         let Some(group) = self.blocks.get(&(table_key, block_pt)) else {
             return None;
         };
-        match group.deref() {
-            DbBlock::Single(_) => {}
-            DbBlock::Expanded(e) => {
-                e.actions[&inner_pt_usize].as_ref()?;
-            }
-        }
-        // TODO: Obviate need to hash and look up on the inner HashMap for each deref of the below.
-        Some(group.map(|g| g.get(query, self.binary_scale_shapes).unwrap()))
+        group.get(query, self.binary_scale_shapes)
     }
 
-    fn put<Tgt>(
-        &'a self,
-        spec: Spec<Tgt>,
-        decisions: SmallVec<[(ActionIdx, Cost); 1]>,
-    ) -> Self::ValueRef
+    fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -246,11 +238,7 @@ where
             .map(|((b, t), shp)| iter_blocks_in_single_dim_range(b, *t, (*shp).try_into().unwrap()))
             .multi_cartesian_product();
 
-        let mut any_entry_ref = None;
         for joined_row in blocks_iter {
-            // Drop any_entry_ref so the upcoming `.entry` call doesn't deadlock.
-            drop(any_entry_ref);
-
             let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
             let fill_whole_block = joined_row
                 .iter()
@@ -269,35 +257,30 @@ where
                                 // Format `v.0` first we don't keep the mutable borrow of `v`.
                                 let value_str = format!("{:?}", v.0);
 
-                                // decompress_block(r, &block_shape);
                                 let block_shape_usize = block_shape
                                     .iter()
                                     .map(|v| (*v).try_into().unwrap())
                                     .collect::<Vec<_>>();
-                                let new_block = DbBlock::Expanded(Box::new(Expanded {
-                                    actions: crate::ndarray::NDArray::new_with_value(
-                                        &block_shape_usize,
-                                        Some(v.clone()), // TODO: Avoid this clone
-                                    ),
-                                    matches: None,
-                                }));
-                                *r = new_block;
 
-                                let DbBlock::Expanded(e) = r else {
-                                    unreachable! {};
-                                };
-                                let Expanded { actions, matches } = e.as_mut();
-                                debug_assert!(matches.is_none());
-                                fill_ndarray_region(
-                                    actions,
-                                    joined_row.iter().map(|(_, r)| r.clone()),
-                                    &Some(ActionCostVec(decisions.clone())),
-                                );
+                                *r = DbBlock::Expanded(Box::new({
+                                    let mut new_expanded =
+                                        Expanded::filled::<Tgt>(self.k, &block_shape_usize, v);
+                                    new_expanded.fill(
+                                        self.k,
+                                        &joined_row
+                                            .iter()
+                                            .map(|(_, r)| r.clone())
+                                            .collect::<Vec<_>>(),
+                                        &ActionCostVec(decisions.clone()),
+                                    );
+                                    debug_assert!(new_expanded.matches.is_none());
+                                    new_expanded
+                                }));
 
                                 log::warn!(
-                                    "Updating a previously compressed block with new values. Tried \
-                                    to insert {:?} into block of {}. Block was ({:?}, {:?}). Spec \
-                                    was {}.",
+                                    "Updating a previously compressed block with new values. \
+                                        Tried to insert {:?} into block of {}. Block was ({:?}, \
+                                        {:?}). Spec was {}.",
                                     decisions,
                                     value_str,
                                     db_key,
@@ -307,28 +290,29 @@ where
                             }
                             DbBlock::Single(_) => {}
                             DbBlock::Expanded(e) => {
-                                let Expanded { actions, matches } = e.as_mut();
-
                                 // Examine the table before updating.
-                                // TODO: Avoid the following scan.
-                                let arbitrary_value =
-                                    actions.data.iter().find_map(|v| v.as_ref()).unwrap();
+                                // TODO: Avoid the following scan by storing an index in the block.
+                                let arbitrary_value = e.get_any().unwrap();
                                 let inserting_same_value = arbitrary_value.0 == decisions;
 
-                                let values_updated = fill_ndarray_region(
-                                    actions,
-                                    joined_row.iter().map(|(_, r)| r.clone()),
-                                    &Some(ActionCostVec(decisions.clone())),
+                                let values_updated = e.fill(
+                                    self.k,
+                                    &joined_row
+                                        .iter()
+                                        .map(|(_, r)| r.clone())
+                                        .collect::<Vec<_>>(),
+                                    &ActionCostVec(decisions.clone()),
                                 );
 
-                                if let Some(m) = matches {
+                                if let Some(m) = e.matches {
                                     if inserting_same_value {
-                                        *m = m.checked_add(values_updated).unwrap();
+                                        let new_m = m.checked_add(values_updated).unwrap();
+                                        e.matches = Some(new_m);
                                         debug_assert!(
-                                            m.get() <= block_shape.iter().product::<DimSize>()
+                                            new_m.get() <= block_shape.iter().product::<DimSize>()
                                         );
                                     } else {
-                                        *matches = None;
+                                        e.matches = None;
                                     }
                                 }
 
@@ -343,36 +327,23 @@ where
                             .copied()
                             .map(|v| v.try_into().unwrap())
                             .collect::<Vec<_>>();
-                        let mut arr = crate::ndarray::NDArray::new(&block_shape_usize);
-                        let values_updated = fill_ndarray_region(
-                            &mut arr,
-                            joined_row.iter().map(|(_, r)| r.clone()),
-                            &Some(ActionCostVec(decisions.clone())), // TODO: Remove this clone
+
+                        let mut new_expanded = Expanded::empty::<Tgt>(self.k, &block_shape_usize);
+                        let values_updated = new_expanded.fill(
+                            self.k,
+                            &joined_row
+                                .iter()
+                                .map(|(_, r)| r.clone())
+                                .collect::<Vec<_>>(),
+                            &ActionCostVec(decisions.clone()),
                         );
-                        let r = entry.insert(DbBlock::Expanded(Box::new(Expanded {
-                            actions: arr,
-                            matches: Some(NonZeroU32::new(values_updated).unwrap()),
-                        })));
-                        r
+                        new_expanded.matches = Some(values_updated.try_into().unwrap());
+                        debug_assert!(values_updated < block_shape.iter().product());
+                        entry.insert(DbBlock::Expanded(Box::new(new_expanded)))
                     }
                 }
             };
-            any_entry_ref = Some(block_entry_ref);
         }
-
-        // TODO: Re-hashing and re-querying the inner HashMap should be unnecessary. Don't.
-        let impls_ref = any_entry_ref
-            .unwrap()
-            .downgrade()
-            .map(|submap| submap.get(&spec_b, self.binary_scale_shapes).unwrap());
-        #[cfg(debug_assertions)]
-        debug_assert_eq!(
-            self.get(&original_spec).as_deref(),
-            Some(impls_ref.deref()),
-            "Original Spec {:?} was incorrect after put.",
-            original_spec
-        );
-        impls_ref
     }
 
     fn flush(&'a self) {}
@@ -391,6 +362,10 @@ where
             log::debug!("Saving database took {:?}", start.elapsed());
         }
         Ok(())
+    }
+
+    fn max_k(&'a self) -> Option<usize> {
+        Some(self.k.into())
     }
 }
 
@@ -436,7 +411,7 @@ impl DbBlock {
         &self,
         query: &Spec<Tgt>,
         binary_scale_shapes: bool,
-    ) -> Option<&ActionCostVec>
+    ) -> Option<ActionCostVec>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -445,27 +420,149 @@ impl DbBlock {
         match self {
             DbBlock::Single(v) => {
                 // TODO: Confirm that v is in bounds
-                Some(v)
+                Some(v.clone())
             }
             DbBlock::Expanded(e) => {
-                let Expanded { actions, .. } = e.as_ref();
                 let (_, global_pt) = compute_db_key(query, binary_scale_shapes);
                 let (_, inner_pt) = blockify_point(global_pt);
                 let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
-                actions[&inner_pt_usize].as_ref()
+                e.get(&inner_pt_usize)
             }
         }
     }
 
-    pub fn len(&self) -> usize {
+    /// Returns the number of entries for which storage is allocated.
+    ///
+    /// This is a rough way to estimate memory consumption of the [DbBlock].
+    pub fn storage_size(&self) -> usize {
         match self {
             DbBlock::Single(_) => 1,
-            DbBlock::Expanded(e) => e.actions.len(),
+            DbBlock::Expanded(e) => e.filled.shape().iter().product(),
+        }
+    }
+}
+
+impl Expanded {
+    pub(crate) fn empty<Tgt: Target>(k: u8, shape: &[usize]) -> Self {
+        let mut shape_with_k = Vec::with_capacity(shape.len() + 1);
+        shape_with_k.extend_from_slice(shape);
+        shape_with_k.push(k.into());
+
+        Expanded {
+            filled: crate::ndarray::NDArray::new_with_value(shape, 0),
+            main_costs: crate::ndarray::NDArray::new(&shape_with_k),
+            peaks: crate::ndarray::NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
+            depths: crate::ndarray::NDArray::new(&shape_with_k),
+            action_idxs: crate::ndarray::NDArray::new(&shape_with_k),
+            matches: None,
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub(crate) fn filled<Tgt: Target>(k: u8, shape: &[usize], value: &ActionCostVec) -> Self {
+        let mut shape_with_k = Vec::with_capacity(shape.len() + 1);
+        shape_with_k.extend_from_slice(shape);
+        shape_with_k.push(k.into());
+
+        Expanded {
+            filled: crate::ndarray::NDArray::new_with_value(
+                shape,
+                u8::try_from(value.len()).unwrap() + 1,
+            ),
+            main_costs: broadcast_1d(&shape_with_k, value.0.iter().map(|(_, c)| c.main)),
+            peaks: broadcast_1d_with_padding(
+                &shape_with_k,
+                value.0.iter().map(|(_, c)| c.peaks.clone()),
+                MemVec::zero::<Tgt>,
+            ),
+            depths: broadcast_1d(&shape_with_k, value.0.iter().map(|(_, c)| c.depth)),
+            action_idxs: broadcast_1d(&shape_with_k, value.0.iter().map(|(a, _)| *a)),
+            matches: Some(
+                NonZeroU32::new(shape.iter().map(|&d| u32::try_from(d).unwrap()).product())
+                    .unwrap(),
+            ),
+        }
+    }
+
+    pub(crate) fn fill(
+        &mut self,
+        k: u8,
+        dim_ranges: &[Range<BimapInt>],
+        value: &ActionCostVec,
+    ) -> u32 {
+        let shape = self.filled.shape();
+        debug_assert_eq!(dim_ranges.len(), shape.len());
+        let mut shape_with_k = Vec::with_capacity(shape.len() + 1);
+        shape_with_k.extend_from_slice(shape);
+        shape_with_k.push(k.into());
+
+        let values_updated = fill_ndarray_region(
+            &mut self.filled,
+            dim_ranges.iter().cloned(),
+            &(u8::try_from(value.len()).unwrap() + 1),
+        );
+        fill_ndarray_broadcast_1d(
+            &mut self.main_costs,
+            dim_ranges.iter().cloned(),
+            &value.0.iter().map(|(_, c)| c.main).collect::<Vec<_>>(),
+        );
+        fill_ndarray_broadcast_1d(
+            &mut self.peaks,
+            dim_ranges.iter().cloned(),
+            &value
+                .0
+                .iter()
+                .map(|(_, c)| c.peaks.clone())
+                .collect::<Vec<_>>(),
+        );
+        fill_ndarray_broadcast_1d(
+            &mut self.depths,
+            dim_ranges.iter().cloned(),
+            &value.0.iter().map(|(_, c)| c.depth).collect::<Vec<_>>(),
+        );
+        fill_ndarray_broadcast_1d(
+            &mut self.action_idxs,
+            dim_ranges.iter().cloned(),
+            &value.0.iter().map(|(a, _)| *a).collect::<Vec<_>>(),
+        );
+
+        // TODO: Count matches instead of bailing to `None`!
+        self.matches = None;
+
+        values_updated
+    }
+
+    /// Returns an arbitrary value from the block, if any.  
+    pub(crate) fn get_any(&self) -> Option<ActionCostVec> {
+        let Some(arbitrary_index) = self.filled.find_index(|&v| v != 0) else {
+            return None;
+        };
+        self.get(&arbitrary_index)
+    }
+
+    pub(crate) fn get(&self, pt: &[usize]) -> Option<ActionCostVec> {
+        let f = self.filled[pt];
+        if f == 0 {
+            return None;
+        }
+        let local_k = f - 1;
+        let mut pt_with_k = Vec::with_capacity(pt.len() + 1);
+        pt_with_k.extend_from_slice(pt);
+        pt_with_k.push(0);
+        Some(ActionCostVec(
+            (0..local_k)
+                .map(move |i| {
+                    *pt_with_k.last_mut().unwrap() = i.into();
+                    (
+                        self.action_idxs[&pt_with_k],
+                        Cost {
+                            main: self.main_costs[&pt_with_k],
+                            peaks: self.peaks[&pt_with_k].clone(),
+                            depth: self.depths[&pt_with_k],
+                        },
+                    )
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -508,38 +605,21 @@ fn try_compress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
         return;
     };
     let Expanded {
-        actions,
-        matches: Some(m),
+        matches: Some(m), ..
     } = expanded.as_mut()
     else {
         return;
     };
 
-    // TODO: Should just precompute block_shape as MAX_BLOCK_VOLUME
+    // TODO: Instead, precompute block volume as MAX_BLOCK_VOLUME
     let block_volume = block_shape.iter().product::<DimSize>();
     if m.get() != block_volume {
         return;
     }
 
     // log::debug!("Compressing block of size {}", block_volume);
-    let new_value = DbBlock::Single(actions.data.pop().unwrap().unwrap());
+    let new_value = DbBlock::Single(expanded.get_any().unwrap());
     *block = new_value;
-}
-
-fn decompress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
-    let DbBlock::Single(v) = block else {
-        unreachable!();
-    };
-    let block_shape_usize = block_shape
-        .iter()
-        .map(|v| (*v).try_into().unwrap())
-        .collect::<Vec<_>>();
-    let new_block = DbBlock::Expanded(Box::new(Expanded {
-        // Avoid the following clone of `v`
-        actions: crate::ndarray::NDArray::new_with_value(&block_shape_usize, Some(v.clone())),
-        matches: None,
-    }));
-    *block = new_block;
 }
 
 fn construct_impl<'a, Tgt, D>(db: &'a D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
@@ -694,7 +774,7 @@ where
 /// assert_eq!(iter_blocks_in_single_dim_range(4, 4, 4).collect::<Vec<_>>(),
 ///            vec![(1, 0..1)]);
 /// ```
-// TODO: Make private.
+// TODO: Make private. (Will break doctests.)
 pub fn iter_blocks_in_single_dim_range(
     global_bottom: BimapInt,
     global_top: BimapInt,
@@ -748,7 +828,7 @@ fn fill_ndarray_region<T, I>(
     value: &T,
 ) -> u32
 where
-    T: Clone + PartialEq + std::fmt::Debug,
+    T: Clone + Eq + std::fmt::Debug,
     I: Iterator<Item = Range<BimapInt>>,
 {
     let mut values_updated = 0;
@@ -759,10 +839,68 @@ where
             .collect::<Vec<_>>();
         if &array[&pt_usize] != value {
             values_updated += 1;
-            array[&pt_usize] = value.clone();
+            array.set_pt(&pt_usize, value.clone());
         }
     }
     values_updated
+}
+
+fn fill_ndarray_broadcast_1d<T, I>(
+    array: &mut crate::ndarray::NDArray<T>,
+    dim_iterators: I,
+    inner_slice: &[T],
+) -> u32
+where
+    T: Clone + Eq,
+    I: Iterator<Item = Range<BimapInt>>,
+{
+    let mut values_updated = 0;
+    for pt in dim_iterators.multi_cartesian_product() {
+        let mut pt_usize = pt
+            .iter()
+            .map(|v| usize::try_from(*v).unwrap())
+            .chain(iter::once(0))
+            .collect::<Vec<_>>();
+        for (i, value) in inner_slice.iter().enumerate() {
+            *pt_usize.last_mut().unwrap() = i;
+            if &array[&pt_usize] != value {
+                values_updated += 1;
+                array.set_pt(&pt_usize, value.clone());
+            }
+        }
+    }
+    values_updated
+}
+
+fn broadcast_1d<T: Default + Clone + Eq>(
+    shape: &[usize],
+    inner_dim_iter: impl Iterator<Item = T>,
+) -> crate::ndarray::NDArray<T> {
+    broadcast_1d_with_padding(shape, inner_dim_iter, Default::default)
+}
+
+fn broadcast_1d_with_padding<T, F>(
+    shape: &[usize],
+    inner_dim_iter: impl Iterator<Item = T>,
+    pad_value_fn: F,
+) -> crate::ndarray::NDArray<T>
+where
+    T: Clone + Eq,
+    F: FnMut() -> T,
+{
+    let k = *shape.last().unwrap();
+
+    let mut inner_dim_vec = Vec::with_capacity(k);
+    inner_dim_vec.extend(inner_dim_iter);
+    debug_assert!(inner_dim_vec.len() <= k);
+    inner_dim_vec.resize_with(k, pad_value_fn);
+
+    let v = shape.iter().product();
+
+    crate::ndarray::NDArray::new_from_buffer(
+        shape,
+        inner_dim_vec.iter().cycle().cloned().take(v).collect(),
+    )
 }
 
 #[cfg(test)]
@@ -816,11 +954,11 @@ mod tests {
             let (spec, action, cost) = entry.clone();
             let (spec_b, action_b, cost_b) = entry;
             let MemoryLimits::Standard(spec_limits) = spec.1.clone();
-            let db = DashmapDiskDatabase::new(None, false);
+            let db = DashmapDiskDatabase::new(None, false, 1);
             let value_ref = db.put(spec, smallvec![(action, cost)]);
             let filled_limits_iter = spec_limits
                 .iter()
-                .zip(value_ref.value().0[0].1.peaks.iter())
+                .zip(cost_b.peaks.iter())
                 .map(|(l, p)| {
                     assert!(l == 0 || l.is_power_of_two());
                     assert!(p == 0 || p.is_power_of_two());
@@ -832,8 +970,7 @@ mod tests {
                 let limit_to_check = limit_to_check_bits.iter().copied().map(bit_length_inverse).collect::<Vec<_>>();
                 let spec_to_check = Spec(spec_b.0.clone(), MemoryLimits::Standard(MemVec::new(limit_to_check.try_into().unwrap())));
                 let get_result = db.get(&spec_to_check).expect("Spec should be in database");
-                let g = get_result.value();
-                assert_eq!(g, &expected);
+                assert_eq!(get_result, expected);
             }
         }
 
@@ -841,8 +978,11 @@ mod tests {
         fn test_database_empty_outside_range_after_one_put(entry in arb_spec_and_action::<X86Target>()) {
             let spec_b = entry.0.clone();
             let (spec, action, cost) = entry;
-            let db = DashmapDiskDatabase::new(None, false);
-            let value_ref = db.put(spec, smallvec![(action, cost)]);
+            let peaks = cost.peaks.clone();
+
+            let db = DashmapDiskDatabase::new(None, false, 1);
+            db.put(spec, smallvec![(action, cost)]);
+
             let MemoryLimits::Standard(max_memory) = X86Target::max_mem();
             let MemoryLimits::Standard(spec_limits) = &spec_b.1;
             let filled_limits_iter = max_memory
@@ -853,7 +993,7 @@ mod tests {
                 .multi_cartesian_product();
             for limit_to_check in filled_limits_iter {
                 // Skip limits inside the put range
-                if limit_to_check.iter().zip(value_ref.value().0[0].1.peaks.iter().zip(spec_limits.iter())).any(|(c, (p, l))| {
+                if limit_to_check.iter().zip(peaks.iter().zip(spec_limits.iter())).any(|(c, (p, l))| {
                     c < &p || c > &l
                 }) {
                     let spec_to_check = Spec(
@@ -869,7 +1009,7 @@ mod tests {
         fn test_two_puts_return_correct_gets_for_second_put(
             entry_pair in arb_spec_and_action_pair::<X86Target>()
         ) {
-            let db = DashmapDiskDatabase::new(None, false);
+            let db = DashmapDiskDatabase::new(None, false, 1);
             let ((spec_a, action_a, cost_a), (spec_b, action_b, cost_b)) = entry_pair;
             let logical_specs_match = spec_a.0 == spec_b.0;
 
@@ -878,15 +1018,14 @@ mod tests {
             let MemoryLimits::Standard(spec_limits_a) = &spec_a_cloned.1;
             let MemoryLimits::Standard(spec_limits_b) = &spec_b_cloned.1;
 
-            let value_ref_a = db.put(spec_a, smallvec![(action_a, cost_a)]);
-            let (action_a, cost_a) = value_ref_a.value().0[0].clone();
-            let vr_a_peaks = value_ref_a.value().0[0].1.peaks.clone();
-            drop(value_ref_a);
+            let cost_a_clone = cost_a.clone();
+            let cost_b_clone = cost_b.clone();
 
-            let value_ref_b = db.put(spec_b, smallvec![(action_b, cost_b)]);
-            let (action_b, cost_b) = value_ref_b.value().0[0].clone();
-            let vr_b_peaks = value_ref_b.value().0[0].1.peaks.clone();
-            drop(value_ref_b);
+            db.put(spec_a, smallvec![(action_a, cost_a)]);
+            db.put(spec_b, smallvec![(action_b, cost_b)]);
+
+            let vr_a_peaks = &cost_a_clone.peaks;
+            let vr_b_peaks = &cost_b_clone.peaks;
 
             // TODO: Use the binary-scaled values directly rather than converting back and forth.
             let relevant_limits_iter = spec_limits_a.iter().zip(spec_limits_b.iter())
@@ -909,9 +1048,9 @@ mod tests {
                 });
 
                 let expected_value = if limit_in_b {
-                    Some(ActionCostVec(smallvec![(action_b, cost_b.clone())]))
+                    Some(ActionCostVec(smallvec![(action_b, cost_b_clone.clone())]))
                 } else if limit_in_a && logical_specs_match {
-                    Some(ActionCostVec(smallvec![(action_a, cost_a.clone())]))
+                    Some(ActionCostVec(smallvec![(action_a, cost_a_clone.clone())]))
                 } else {
                     None
                 };
@@ -922,7 +1061,7 @@ mod tests {
                 );
                 let get_result = db.get(&spec_to_check);
                 match (get_result.as_ref(), expected_value.as_ref()) {
-                    (Some(g), Some(e)) if g.value() == e => {}
+                    (Some(g), Some(e)) if g == e => {}
                     (None, None) => {}
                     _ => {
                         eprintln!("First-inserted Spec: {}", spec_a_cloned);
@@ -935,7 +1074,7 @@ mod tests {
                             format!("{:?}", expected_value)
                         };
                         let result_description = match get_result {
-                            Some(g) => format!("Some({:?})", g.value()),
+                            Some(g) => format!("Some({g:?})"),
                             None => "None".to_string(),
                         };
                         panic!(

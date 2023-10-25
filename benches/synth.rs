@@ -33,7 +33,7 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> Spec<Tgt> {
 }
 
 fn synth(goal: &Spec<X86Target>) {
-    let db = DashmapDiskDatabase::new(None, true);
+    let db = DashmapDiskDatabase::new(None, true, 1);
     morello::search::top_down(&db, black_box(goal), 1);
 }
 

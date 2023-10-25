@@ -32,13 +32,14 @@ num-traits = { version = "0.2.16", optional = true }
 prettytable-rs = "^0.10"
 rand = "0.8.5"
 rayon = "1.7.0"
+rle_vec = { version = "0.4.0", features = ["serialize"] }
 scc = "1.7.0"
 serde = { version = "1.0.160", features = ["derive"] }
 smallvec = {version = "1.10.0", features = ["serde"]}
+snap = "1.1.0"
 tempfile = "3"
 thiserror = "1.0.47"
 thread_local = "1.1.7"
-snap = "1.1.0"
 
 [profile.dev]
 opt-level = 1  # Synthesis is relatively slow and often part of the dev. cycle, so optimize more than usual.

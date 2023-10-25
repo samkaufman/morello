@@ -40,8 +40,8 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
     D: Database<'d>,
 {
-    let (actions, hits, misses) = top_down_inner(db, goal, top_k, 0, &ParentSummary::new(goal));
-    (actions.as_ref().clone(), hits, misses)
+    assert!(db.max_k().map_or(true, |k| k >= top_k));
+    top_down_inner(db, goal, top_k, 0, &ParentSummary::new(goal))
 }
 
 fn top_down_inner<'d, Tgt, D>(
@@ -50,7 +50,7 @@ fn top_down_inner<'d, Tgt, D>(
     top_k: usize,
     depth: usize,
     parent_summary: &ParentSummary<Tgt>,
-) -> (D::ValueRef, u64, u64)
+) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64)
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -63,7 +63,7 @@ where
 
     // First, check if the Spec is already in the database.
     if let Some(stored) = db.get(goal) {
-        return (stored, 1, 0);
+        return (stored.0, 1, 0);
     }
 
     let mut hits = 0u64;
@@ -127,10 +127,10 @@ where
         reducer.insert(action_idx.try_into().unwrap(), cost);
     }
 
-    // Save to memo. table and return.
+    // Copy into the memo. table and return.
     let final_result = reducer.finalize();
-    let final_result_ref = db.put(goal.clone(), final_result);
-    (final_result_ref, hits, misses)
+    db.put(goal.clone(), final_result.clone());
+    (final_result, hits, misses)
 }
 
 impl<'a, Tgt: Target> ParentSummary<'a, Tgt> {
@@ -266,7 +266,7 @@ mod tests {
             spec_pair in lower_and_higher_spec::<X86Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
-            let db = DashmapDiskDatabase::new(None, false);
+            let db = DashmapDiskDatabase::new(None, false, 1);
 
             // Solve the first, lower Spec.
             let (lower_result_vec, _, _) = top_down(&db, &spec, 1);

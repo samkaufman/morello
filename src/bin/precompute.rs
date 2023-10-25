@@ -15,6 +15,8 @@ use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::bit_length;
 
+const K: u8 = 1;
+
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -45,6 +47,7 @@ fn main() {
             .unwrap()
             .get()
             .next_power_of_two(),
+        K,
     );
     main_per_db(&args, &db);
     print_stats(&db);
@@ -186,19 +189,19 @@ fn print_stats(db: &DashmapDiskDatabase) {
         match iref.key().0 .0 {
             SpecKey::Matmul { .. } => {
                 matmul_group_cnt += 1;
-                matmul_entry_cnt += iref.value().len();
+                matmul_entry_cnt += iref.value().storage_size();
             }
             SpecKey::Conv { .. } => {
                 conv_group_cnt += 1;
-                conv_entry_cnt += iref.value().len();
+                conv_entry_cnt += iref.value().storage_size();
             }
             SpecKey::Move { .. } => {
                 move_group_cnt += 1;
-                move_entry_cnt += iref.value().len();
+                move_entry_cnt += iref.value().storage_size();
             }
             SpecKey::Zero { .. } => {
                 zero_group_cnt += 1;
-                zero_entry_cnt += iref.value().len();
+                zero_entry_cnt += iref.value().storage_size();
             }
         }
     }

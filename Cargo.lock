@@ -643,6 +643,7 @@ dependencies = [
  "proptest-derive",
  "rand",
  "rayon",
+ "rle_vec",
  "scc",
  "serde",
  "smallvec",
@@ -1069,6 +1070,16 @@ name = "regex-syntax"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "436b050e76ed2903236f032a59761c1eb99e1b0aead2c257922771dab1fc8c78"
+
+[[package]]
+name = "rle_vec"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a14622f24cef977254293d3ff9571eb70e3b37c9bee038910c597b635860401"
+dependencies = [
+ "serde",
+ "serde_derive",
+]
 
 [[package]]
 name = "rustc-demangle"

@@ -17,6 +17,7 @@ use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
 const BINARY_SCALE_SHAPES: bool = true;
+const K: u8 = 1;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -109,11 +110,11 @@ fn main() -> Result<()> {
     match &args.target {
         TargetId::X86 => main_per_db::<_, X86Target>(
             &args,
-            &DashmapDiskDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES),
+            &DashmapDiskDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES, K),
         ),
         TargetId::Arm => main_per_db::<_, ArmTarget>(
             &args,
-            &DashmapDiskDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES),
+            &DashmapDiskDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES, K),
         ),
     }
 }
@@ -221,7 +222,7 @@ where
     let spec = Spec(logical_spec, Tgt::max_mem());
 
     let start_time = std::time::Instant::now();
-    let (_, hits, misses) = morello::search::top_down(db, &spec, 1);
+    let (_, hits, misses) = morello::search::top_down(db, &spec, K.into());
     info!("top_down took {:?}", start_time.elapsed());
     info!(
         "top_down missed {} times ({:.2}% of {})",
