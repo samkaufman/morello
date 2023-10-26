@@ -36,6 +36,10 @@ impl<T> NDArray<T> {
         }
         None
     }
+
+    pub fn runs_len(&self) -> usize {
+        self.data.runs_len()
+    }
 }
 
 impl<T: Clone + Eq> NDArray<T> {

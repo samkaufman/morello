@@ -360,6 +360,16 @@ where
         let start = Instant::now();
         let mut compressed_block_count = 0;
         let mut compressable_count = 0;
+        let mut runs_filled = 0;
+        let mut lens_filled = 0;
+        let mut runs_main_costs = 0;
+        let mut lens_main_costs = 0;
+        let mut runs_peaks = 0;
+        let mut lens_peaks = 0;
+        let mut runs_depths = 0;
+        let mut lens_depths = 0;
+        let mut runs_action_idxs = 0;
+        let mut lens_action_idxs = 0;
         for block in &self.blocks {
             match block.value() {
                 DbBlock::Single(_) => {
@@ -369,16 +379,33 @@ where
                     if e.matches.is_some() {
                         compressable_count += 1;
                     }
+                    runs_filled += e.filled.runs_len();
+                    lens_filled += e.filled.len();
+                    runs_main_costs += e.main_costs.runs_len();
+                    lens_main_costs += e.main_costs.len();
+                    runs_peaks += e.peaks.runs_len();
+                    lens_peaks += e.peaks.len();
+                    runs_depths += e.depths.runs_len();
+                    lens_depths += e.depths.len();
+                    runs_action_idxs += e.action_idxs.runs_len();
+                    lens_action_idxs += e.action_idxs.len();
                 }
             }
         }
         let stat_duration = start.elapsed();
         format!(
-            "blocks={} compressed={} compressable={} statms={}",
+            "blocks={} compressed={} compressable={} runs_filled={:.4} \
+            runs_main_costs={:.4} runs_peaks={:.4} runs_depths={:.4} runs_action_idxs={:.4} \
+            statms={}",
             self.blocks.len(),
             compressed_block_count,
             compressable_count,
-            stat_duration.as_millis()
+            runs_filled as f32 / lens_filled as f32,
+            runs_main_costs as f32 / lens_main_costs as f32,
+            runs_peaks as f32 / lens_peaks as f32,
+            runs_depths as f32 / lens_depths as f32,
+            runs_action_idxs as f32 / lens_action_idxs as f32,
+            stat_duration.as_millis(),
         )
     }
 }
@@ -712,26 +739,14 @@ where
 /// Convert a single dimension of a global point to a block and within-block index.
 fn db_key_scale(dim: usize, value: BimapInt, dim_count: usize) -> (BimapInt, u8) {
     // TODO: Autotune rather than hardcode these arbitrary dimensions.
-    let scale_factor = if dim == 2 { 2 } else { 4 };
-    if dim == 2 || dim >= dim_count - 4 {
-        let (quotient, remainder) = value.div_rem(&scale_factor);
-        (quotient, remainder.try_into().unwrap())
-    } else {
-        (value, 0)
-    }
+    let scale_factor = if dim >= dim_count - 4 { 4 } else { 2 };
+    let (quotient, remainder) = value.div_rem(&scale_factor);
+    (quotient, remainder.try_into().unwrap())
 }
 
 fn block_shape(rank: usize) -> SmallVec<[BimapInt; 10]> {
     (0..rank)
-        .map(|i| {
-            if i == 2 {
-                2
-            } else if i >= rank - 4 {
-                4
-            } else {
-                1
-            }
-        })
+        .map(|i| if i >= rank - 4 { 4 } else { 2 })
         .collect()
 }
 
