@@ -56,6 +56,10 @@ pub trait Database<'a> {
     ///
     /// If unlimited, returns `None`.
     fn max_k(&'a self) -> Option<usize>;
+
+    fn stats_str(&self) -> String {
+        "".to_string()
+    }
 }
 
 pub trait DatabaseExt<'a>: Database<'a> {
@@ -247,6 +251,9 @@ where
 
             let block_entry = self.blocks.entry((db_key.clone(), block_pt));
             let block_entry_ref = if fill_whole_block {
+                // Note that this branch is never hit in the common case that block dims. are >= 1
+                // in non-memory limits dimensions and `put_range_to_fill` only extends across the
+                // memory limit dimensions.
                 block_entry.insert(DbBlock::Single(ActionCostVec(decisions.clone())))
             } else {
                 match block_entry {
@@ -265,7 +272,7 @@ where
                                 *r = DbBlock::Expanded(Box::new({
                                     let mut new_expanded =
                                         Expanded::filled::<Tgt>(self.k, &block_shape_usize, v);
-                                    new_expanded.fill(
+                                    new_expanded.fill_region(
                                         self.k,
                                         &joined_row
                                             .iter()
@@ -291,11 +298,7 @@ where
                             DbBlock::Single(_) => {}
                             DbBlock::Expanded(e) => {
                                 // Examine the table before updating.
-                                // TODO: Avoid the following scan by storing an index in the block.
-                                let arbitrary_value = e.get_any().unwrap();
-                                let inserting_same_value = arbitrary_value.0 == decisions;
-
-                                let values_updated = e.fill(
+                                e.fill_region(
                                     self.k,
                                     &joined_row
                                         .iter()
@@ -303,19 +306,6 @@ where
                                         .collect::<Vec<_>>(),
                                     &ActionCostVec(decisions.clone()),
                                 );
-
-                                if let Some(m) = e.matches {
-                                    if inserting_same_value {
-                                        let new_m = m.checked_add(values_updated).unwrap();
-                                        e.matches = Some(new_m);
-                                        debug_assert!(
-                                            new_m.get() <= block_shape.iter().product::<DimSize>()
-                                        );
-                                    } else {
-                                        e.matches = None;
-                                    }
-                                }
-
                                 try_compress_block(r, &block_shape);
                             }
                         }
@@ -327,19 +317,17 @@ where
                             .copied()
                             .map(|v| v.try_into().unwrap())
                             .collect::<Vec<_>>();
-
-                        let mut new_expanded = Expanded::empty::<Tgt>(self.k, &block_shape_usize);
-                        let values_updated = new_expanded.fill(
-                            self.k,
-                            &joined_row
-                                .iter()
-                                .map(|(_, r)| r.clone())
-                                .collect::<Vec<_>>(),
-                            &ActionCostVec(decisions.clone()),
-                        );
-                        new_expanded.matches = Some(values_updated.try_into().unwrap());
-                        debug_assert!(values_updated < block_shape.iter().product());
-                        entry.insert(DbBlock::Expanded(Box::new(new_expanded)))
+                        entry.insert(DbBlock::Expanded(Box::new(
+                            Expanded::partially_filled::<Tgt>(
+                                self.k,
+                                &block_shape_usize,
+                                &joined_row
+                                    .iter()
+                                    .map(|(_, r)| r.clone())
+                                    .collect::<Vec<_>>(),
+                                &ActionCostVec(decisions.clone()),
+                            ),
+                        )))
                     }
                 }
             };
@@ -366,6 +354,32 @@ where
 
     fn max_k(&'a self) -> Option<usize> {
         Some(self.k.into())
+    }
+
+    fn stats_str(&self) -> String {
+        let start = Instant::now();
+        let mut compressed_block_count = 0;
+        let mut compressable_count = 0;
+        for block in &self.blocks {
+            match block.value() {
+                DbBlock::Single(_) => {
+                    compressed_block_count += 1;
+                }
+                DbBlock::Expanded(e) => {
+                    if e.matches.is_some() {
+                        compressable_count += 1;
+                    }
+                }
+            }
+        }
+        let stat_duration = start.elapsed();
+        format!(
+            "blocks={} compressed={} compressable={} statms={}",
+            self.blocks.len(),
+            compressed_block_count,
+            compressable_count,
+            stat_duration.as_millis()
+        )
     }
 }
 
@@ -443,7 +457,7 @@ impl DbBlock {
 }
 
 impl Expanded {
-    pub(crate) fn empty<Tgt: Target>(k: u8, shape: &[usize]) -> Self {
+    fn empty<Tgt: Target>(k: u8, shape: &[usize]) -> Self {
         let mut shape_with_k = Vec::with_capacity(shape.len() + 1);
         shape_with_k.extend_from_slice(shape);
         shape_with_k.push(k.into());
@@ -456,6 +470,18 @@ impl Expanded {
             action_idxs: crate::ndarray::NDArray::new(&shape_with_k),
             matches: None,
         }
+    }
+
+    pub(crate) fn partially_filled<Tgt: Target>(
+        k: u8,
+        shape: &[usize],
+        dim_ranges: &[Range<BimapInt>],
+        value: &ActionCostVec,
+    ) -> Self {
+        let mut e = Self::empty::<Tgt>(k, shape);
+        let empties_filled = e.fill_region_without_updating_match(k, dim_ranges, value);
+        e.matches = Some(empties_filled.try_into().unwrap());
+        e
     }
 
     pub(crate) fn filled<Tgt: Target>(k: u8, shape: &[usize], value: &ActionCostVec) -> Self {
@@ -483,7 +509,33 @@ impl Expanded {
         }
     }
 
-    pub(crate) fn fill(
+    pub(crate) fn fill_region(
+        &mut self,
+        k: u8,
+        dim_ranges: &[Range<BimapInt>],
+        value: &ActionCostVec,
+    ) {
+        if let Some(m) = self.matches {
+            // TODO: Avoid the following scan by storing an index in the block.
+            let inserting_mismatched_value = self
+                .get_any()
+                .map(|arb_val| value != &arb_val)
+                .unwrap_or(false);
+
+            let empties_filled = self.fill_region_without_updating_match(k, dim_ranges, value);
+
+            if inserting_mismatched_value {
+                self.matches = None;
+            } else {
+                let new_m = m.checked_add(empties_filled).unwrap();
+                self.matches = Some(new_m);
+            }
+        } else {
+            self.fill_region_without_updating_match(k, dim_ranges, value);
+        }
+    }
+
+    fn fill_region_without_updating_match(
         &mut self,
         k: u8,
         dim_ranges: &[Range<BimapInt>],
@@ -495,10 +547,11 @@ impl Expanded {
         shape_with_k.extend_from_slice(shape);
         shape_with_k.push(k.into());
 
-        let values_updated = fill_ndarray_region(
+        let empties_filled = fill_ndarray_region(
             &mut self.filled,
             dim_ranges.iter().cloned(),
             &(u8::try_from(value.len()).unwrap() + 1),
+            &0,
         );
         fill_ndarray_broadcast_1d(
             &mut self.main_costs,
@@ -525,10 +578,7 @@ impl Expanded {
             &value.0.iter().map(|(a, _)| *a).collect::<Vec<_>>(),
         );
 
-        // TODO: Count matches instead of bailing to `None`!
-        self.matches = None;
-
-        values_updated
+        empties_filled
     }
 
     /// Returns an arbitrary value from the block, if any.  
@@ -826,23 +876,26 @@ fn fill_ndarray_region<T, I>(
     array: &mut crate::ndarray::NDArray<T>,
     dim_iterators: I,
     value: &T,
+    counting_value: &T,
 ) -> u32
 where
     T: Clone + Eq + std::fmt::Debug,
     I: Iterator<Item = Range<BimapInt>>,
 {
-    let mut values_updated = 0;
+    debug_assert_ne!(value, counting_value);
+
+    let mut affected = 0;
     for pt in dim_iterators.multi_cartesian_product() {
         let pt_usize = pt
             .iter()
             .map(|v| usize::try_from(*v).unwrap())
             .collect::<Vec<_>>();
-        if &array[&pt_usize] != value {
-            values_updated += 1;
-            array.set_pt(&pt_usize, value.clone());
+        if &array[&pt_usize] == counting_value {
+            affected += 1;
         }
+        array.set_pt(&pt_usize, value.clone());
     }
-    values_updated
+    affected
 }
 
 fn fill_ndarray_broadcast_1d<T, I>(
