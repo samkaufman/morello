@@ -570,39 +570,41 @@ impl Expanded {
     ) -> u32 {
         let shape = self.filled.shape();
         debug_assert_eq!(dim_ranges.len(), shape.len());
+
         let mut shape_with_k = Vec::with_capacity(shape.len() + 1);
         shape_with_k.extend_from_slice(shape);
         shape_with_k.push(k.into());
 
+        let dim_ranges_usize: Vec<Range<usize>> = dim_ranges
+            .iter()
+            .map(|rng| rng.start.try_into().unwrap()..rng.end.try_into().unwrap())
+            .collect();
+
         let empties_filled = fill_ndarray_region(
             &mut self.filled,
-            dim_ranges.iter().cloned(),
+            dim_ranges_usize.iter().cloned(),
             &(u8::try_from(value.len()).unwrap() + 1),
             &0,
         );
         fill_ndarray_broadcast_1d(
             &mut self.main_costs,
-            dim_ranges.iter().cloned(),
-            &value.0.iter().map(|(_, c)| c.main).collect::<Vec<_>>(),
+            dim_ranges,
+            value.0.iter().map(|(_, c)| &c.main),
         );
         fill_ndarray_broadcast_1d(
             &mut self.peaks,
-            dim_ranges.iter().cloned(),
-            &value
-                .0
-                .iter()
-                .map(|(_, c)| c.peaks.clone())
-                .collect::<Vec<_>>(),
+            dim_ranges,
+            value.0.iter().map(|(_, c)| &c.peaks),
         );
         fill_ndarray_broadcast_1d(
             &mut self.depths,
-            dim_ranges.iter().cloned(),
-            &value.0.iter().map(|(_, c)| c.depth).collect::<Vec<_>>(),
+            dim_ranges,
+            value.0.iter().map(|(_, c)| &c.depth),
         );
         fill_ndarray_broadcast_1d(
             &mut self.action_idxs,
-            dim_ranges.iter().cloned(),
-            &value.0.iter().map(|(a, _)| *a).collect::<Vec<_>>(),
+            dim_ranges,
+            value.0.iter().map(|(a, _)| a),
         );
 
         empties_filled
@@ -895,49 +897,40 @@ fn fill_ndarray_region<T, I>(
 ) -> u32
 where
     T: Clone + Eq + std::fmt::Debug,
-    I: Iterator<Item = Range<BimapInt>>,
+    I: Iterator<Item = Range<usize>>,
 {
     debug_assert_ne!(value, counting_value);
 
     let mut affected = 0;
     for pt in dim_iterators.multi_cartesian_product() {
-        let pt_usize = pt
-            .iter()
-            .map(|v| usize::try_from(*v).unwrap())
-            .collect::<Vec<_>>();
-        if &array[&pt_usize] == counting_value {
+        if &array[&pt] == counting_value {
             affected += 1;
         }
-        array.set_pt(&pt_usize, value.clone());
+        array.set_pt(&pt, value.clone());
     }
     affected
 }
 
-fn fill_ndarray_broadcast_1d<T, I>(
+fn fill_ndarray_broadcast_1d<'a, T, I>(
     array: &mut crate::ndarray::NDArray<T>,
-    dim_iterators: I,
-    inner_slice: &[T],
-) -> u32
-where
-    T: Clone + Eq,
-    I: Iterator<Item = Range<BimapInt>>,
+    dim_iterators: &[Range<BimapInt>],
+    inner_slice_iter: I,
+) where
+    T: Clone + Eq + 'a,
+    I: Clone + Iterator<Item = &'a T>,
 {
-    let mut values_updated = 0;
-    for pt in dim_iterators.multi_cartesian_product() {
-        let mut pt_usize = pt
-            .iter()
-            .map(|v| usize::try_from(*v).unwrap())
-            .chain(iter::once(0))
-            .collect::<Vec<_>>();
-        for (i, value) in inner_slice.iter().enumerate() {
+    let mut pt_usize = Vec::with_capacity(dim_iterators.len() + 1);
+    for pt in dim_iterators.iter().cloned().multi_cartesian_product() {
+        pt_usize.clear();
+        pt_usize.extend(pt.into_iter().map(|v| usize::try_from(v).unwrap()));
+        pt_usize.push(0);
+        for (i, value) in inner_slice_iter.clone().enumerate() {
             *pt_usize.last_mut().unwrap() = i;
             if &array[&pt_usize] != value {
-                values_updated += 1;
                 array.set_pt(&pt_usize, value.clone());
             }
         }
     }
-    values_updated
 }
 
 fn broadcast_1d<T: Default + Clone + Eq>(
@@ -967,7 +960,7 @@ where
 
     crate::ndarray::NDArray::new_from_buffer(
         shape,
-        inner_dim_vec.iter().cycle().cloned().take(v).collect(),
+        inner_dim_vec.iter().cycle().take(v).cloned().collect(),
     )
 }
 
