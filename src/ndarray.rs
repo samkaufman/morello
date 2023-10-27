@@ -2,7 +2,7 @@ use divrem::DivRem;
 use rle_vec::RleVec;
 use serde::{Deserialize, Serialize};
 
-use std::ops::{Index, IndexMut};
+use std::ops::Index;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NDArray<T> {
@@ -85,6 +85,10 @@ impl<T> NDArray<T> {
             .sum()
     }
 
+    pub fn strides(&self) -> &[usize] {
+        &self.strides
+    }
+
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
@@ -103,7 +107,7 @@ impl<T> Index<&[usize]> for NDArray<T> {
 }
 
 fn calculate_strides(shape: &[usize]) -> Vec<usize> {
-    let mut strides = Vec::new();
+    let mut strides = Vec::with_capacity(shape.len());
     let mut stride = 1;
     for &dim in shape.iter().rev() {
         strides.push(stride);

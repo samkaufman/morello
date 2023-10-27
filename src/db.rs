@@ -104,7 +104,7 @@ pub struct Expanded {
     pub peaks: crate::ndarray::NDArray<MemVec>,
     pub depths: crate::ndarray::NDArray<u8>,
     pub action_idxs: crate::ndarray::NDArray<ActionIdx>,
-    pub matches: Option<NonZeroU32>,
+    pub matches: Option<(NonZeroU32, Vec<usize>)>,
 }
 
 // TODO: Storing Spec and usize is too expensive.
@@ -505,9 +505,13 @@ impl Expanded {
         dim_ranges: &[Range<BimapInt>],
         value: &ActionCostVec,
     ) -> Self {
+        let arbitrary_pt = dim_ranges
+            .iter()
+            .map(|rng| rng.start.try_into().unwrap())
+            .collect::<Vec<_>>();
         let mut e = Self::empty::<Tgt>(k, shape);
         let empties_filled = e.fill_region_without_updating_match(k, dim_ranges, value);
-        e.matches = Some(empties_filled.try_into().unwrap());
+        e.matches = Some((empties_filled.try_into().unwrap(), arbitrary_pt));
         e
     }
 
@@ -529,10 +533,11 @@ impl Expanded {
             ),
             depths: broadcast_1d(&shape_with_k, value.0.iter().map(|(_, c)| c.depth)),
             action_idxs: broadcast_1d(&shape_with_k, value.0.iter().map(|(a, _)| *a)),
-            matches: Some(
+            matches: Some((
                 NonZeroU32::new(shape.iter().map(|&d| u32::try_from(d).unwrap()).product())
                     .unwrap(),
-            ),
+                vec![0; shape.len()],
+            )),
         }
     }
 
@@ -542,23 +547,26 @@ impl Expanded {
         dim_ranges: &[Range<BimapInt>],
         value: &ActionCostVec,
     ) {
-        if let Some(m) = self.matches {
-            // TODO: Avoid the following scan by storing an index in the block.
-            let inserting_mismatched_value = self
-                .get_any()
-                .map(|arb_val| value != &arb_val)
-                .unwrap_or(false);
+        let mut new_m = None;
+        if let Some((m, arbitrary_filled_pt)) = &self.matches {
+            let m = *m;
+            let inserting_mismatched_value =
+                self.get(arbitrary_filled_pt).as_ref().unwrap() != value;
 
             let empties_filled = self.fill_region_without_updating_match(k, dim_ranges, value);
 
             if inserting_mismatched_value {
                 self.matches = None;
             } else {
-                let new_m = m.checked_add(empties_filled).unwrap();
-                self.matches = Some(new_m);
+                new_m = Some(m.checked_add(empties_filled).unwrap());
             }
         } else {
             self.fill_region_without_updating_match(k, dim_ranges, value);
+        }
+
+        if let Some(new_m_val) = new_m {
+            let old_m_ref = &mut self.matches.as_mut().unwrap().0;
+            *old_m_ref = new_m_val;
         }
     }
 
@@ -684,7 +692,8 @@ fn try_compress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
         return;
     };
     let Expanded {
-        matches: Some(m), ..
+        matches: Some((m, _)),
+        ..
     } = expanded.as_mut()
     else {
         return;
