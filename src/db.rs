@@ -394,12 +394,18 @@ where
         }
         let stat_duration = start.elapsed();
         format!(
-            "blocks={} compressed={} compressable={} runs_filled={:.4} \
-            runs_main_costs={:.4} runs_peaks={:.4} runs_depths={:.4} runs_action_idxs={:.4} \
-            statms={}",
+            "blocks={} compressed={} compressable={} \
+            runs_filled={} runs_main_costs={} runs_peaks={} runs_depths={} runs_action_idxs={} \
+            cr_filled={:.4} cr_main_costs={:.4} cr_peaks={:.4} cr_depths={:.4}
+            cr_action_idxs={:.4} statms={}",
             self.blocks.len(),
             compressed_block_count,
             compressable_count,
+            runs_filled,
+            runs_main_costs,
+            runs_peaks,
+            runs_depths,
+            runs_action_idxs,
             runs_filled as f32 / lens_filled as f32,
             runs_main_costs as f32 / lens_main_costs as f32,
             runs_peaks as f32 / lens_peaks as f32,
@@ -583,37 +589,19 @@ impl Expanded {
         shape_with_k.extend_from_slice(shape);
         shape_with_k.push(k.into());
 
-        let dim_ranges_usize: Vec<Range<usize>> = dim_ranges
-            .iter()
-            .map(|rng| rng.start.try_into().unwrap()..rng.end.try_into().unwrap())
-            .collect();
-
-        let empties_filled = fill_ndarray_region(
-            &mut self.filled,
-            dim_ranges_usize.iter().cloned(),
+        let empties_filled = self.filled.fill_region_counting(
+            &dim_ranges,
             &(u8::try_from(value.len()).unwrap() + 1),
             &0,
         );
-        fill_ndarray_broadcast_1d(
-            &mut self.main_costs,
-            dim_ranges,
-            value.0.iter().map(|(_, c)| &c.main),
-        );
-        fill_ndarray_broadcast_1d(
-            &mut self.peaks,
-            dim_ranges,
-            value.0.iter().map(|(_, c)| &c.peaks),
-        );
-        fill_ndarray_broadcast_1d(
-            &mut self.depths,
-            dim_ranges,
-            value.0.iter().map(|(_, c)| &c.depth),
-        );
-        fill_ndarray_broadcast_1d(
-            &mut self.action_idxs,
-            dim_ranges,
-            value.0.iter().map(|(a, _)| a),
-        );
+        self.main_costs
+            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| &c.main));
+        self.peaks
+            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| &c.peaks));
+        self.depths
+            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| &c.depth));
+        self.action_idxs
+            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(a, _)| a));
 
         empties_filled
     }
@@ -896,50 +884,6 @@ pub fn iter_blocks_in_single_dim_range(
         ((block_bottom + 1)..block_top_full).map(move |block_idx| (block_idx, 0..block_dim_size));
 
     prefix.into_iter().chain(full_blocks_iter).chain(suffix)
-}
-
-fn fill_ndarray_region<T, I>(
-    array: &mut crate::ndarray::NDArray<T>,
-    dim_iterators: I,
-    value: &T,
-    counting_value: &T,
-) -> u32
-where
-    T: Clone + Eq + std::fmt::Debug,
-    I: Iterator<Item = Range<usize>>,
-{
-    debug_assert_ne!(value, counting_value);
-
-    let mut affected = 0;
-    for pt in dim_iterators.multi_cartesian_product() {
-        if &array[&pt] == counting_value {
-            affected += 1;
-        }
-        array.set_pt(&pt, value.clone());
-    }
-    affected
-}
-
-fn fill_ndarray_broadcast_1d<'a, T, I>(
-    array: &mut crate::ndarray::NDArray<T>,
-    dim_iterators: &[Range<BimapInt>],
-    inner_slice_iter: I,
-) where
-    T: Clone + Eq + 'a,
-    I: Clone + Iterator<Item = &'a T>,
-{
-    let mut pt_usize = Vec::with_capacity(dim_iterators.len() + 1);
-    for pt in dim_iterators.iter().cloned().multi_cartesian_product() {
-        pt_usize.clear();
-        pt_usize.extend(pt.into_iter().map(|v| usize::try_from(v).unwrap()));
-        pt_usize.push(0);
-        for (i, value) in inner_slice_iter.clone().enumerate() {
-            *pt_usize.last_mut().unwrap() = i;
-            if &array[&pt_usize] != value {
-                array.set_pt(&pt_usize, value.clone());
-            }
-        }
-    }
 }
 
 fn broadcast_1d<T: Default + Clone + Eq>(

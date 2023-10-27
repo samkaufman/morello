@@ -1,8 +1,9 @@
 use divrem::DivRem;
 use rle_vec::RleVec;
 use serde::{Deserialize, Serialize};
+use std::ops::{Index, Range};
+use crate::utils::iter_multidim_range;
 
-use std::ops::Index;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NDArray<T> {
@@ -95,6 +96,46 @@ impl<T> NDArray<T> {
 
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    pub fn fill_region_counting(
+        &mut self,
+        dim_ranges: &[Range<u32>],
+        value: &T,
+        counting_value: &T,
+    ) -> u32
+    where
+        T: Clone + Eq + std::fmt::Debug,
+    {
+        debug_assert_ne!(value, counting_value);
+        let mut affected = 0;
+        iter_multidim_range(dim_ranges, &self.strides, |index, _| {
+            if &self.data[index] == counting_value {
+                affected += 1;
+            }
+            self.data.set(index, value.clone());
+        });
+        affected
+    }
+
+    pub fn fill_broadcast_1d<'a, I>(&mut self, dim_ranges: &[Range<u32>], inner_slice_iter: I)
+    where
+        T: Clone + Eq + 'a,
+        I: Clone + Iterator<Item = &'a T>,
+    {
+        let inner_slice_iter = inner_slice_iter.fuse();
+
+        let k = u32::try_from(self.shape[self.shape.len() - 1]).unwrap();
+        let mut slice_iter = inner_slice_iter.clone();
+        iter_multidim_range(dim_ranges, &self.strides, |index, pt| {
+            // TODO: This still iterates over k. Instead, this should skip remaining k.
+            if let Some(next_value) = slice_iter.next() {
+                self.data.set(index, next_value.clone());
+            }
+            if pt[pt.len() - 1] == k - 1 {
+                slice_iter = inner_slice_iter.clone();
+            }
+        });
     }
 }
 

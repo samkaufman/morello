@@ -3,6 +3,7 @@ use crate::memorylimits::MemVec;
 use std::fmt;
 use std::io;
 use std::iter;
+use std::ops::Range;
 
 const INDENT_SIZE: usize = 2;
 
@@ -196,6 +197,40 @@ pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &
 
 pub fn indent(depth: usize) -> String {
     " ".repeat(depth * INDENT_SIZE)
+}
+
+pub(crate) fn iter_multidim_range<F>(dim_ranges: &[Range<u32>], strides: &[usize], mut callback: F)
+where
+    F: FnMut(usize, &[u32]),
+{
+    let mut current_pt = dim_ranges.iter().map(|rng| rng.start).collect::<Vec<_>>();
+
+    let mut buffer_index = current_pt
+        .iter()
+        .zip(strides)
+        .map(|(&dim, &stride)| usize::try_from(dim).unwrap() * stride)
+        .sum();
+
+    loop {
+        callback(buffer_index, &current_pt);
+
+        let mut dimension = current_pt.len() - 1; // Start with the innermost dimension
+        loop {
+            current_pt[dimension] += 1;
+            buffer_index += strides[dimension];
+            if current_pt[dimension] < dim_ranges[dimension].end {
+                break;
+            }
+            if dimension == 0 {
+                return;
+            }
+
+            buffer_index -= strides[dimension]
+                * usize::try_from(current_pt[dimension] - dim_ranges[dimension].start).unwrap();
+            current_pt[dimension] = dim_ranges[dimension].start;
+            dimension -= 1;
+        }
+    }
 }
 
 #[cfg(test)]
