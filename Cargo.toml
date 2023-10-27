@@ -41,6 +41,9 @@ tempfile = "3"
 thiserror = "1.0.47"
 thread_local = "1.1.7"
 
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.5"
+
 [profile.dev]
 opt-level = 1  # Synthesis is relatively slow and often part of the dev. cycle, so optimize more than usual.
 
