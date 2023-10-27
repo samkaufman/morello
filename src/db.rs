@@ -396,7 +396,7 @@ where
         format!(
             "blocks={} compressed={} compressable={} \
             runs_filled={} runs_main_costs={} runs_peaks={} runs_depths={} runs_action_idxs={} \
-            cr_filled={:.4} cr_main_costs={:.4} cr_peaks={:.4} cr_depths={:.4}
+            cr_filled={:.4} cr_main_costs={:.4} cr_peaks={:.4} cr_depths={:.4} \
             cr_action_idxs={:.4} statms={}",
             self.blocks.len(),
             compressed_block_count,

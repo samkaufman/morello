@@ -1,16 +1,18 @@
+use crate::utils::iter_multidim_range;
 use divrem::DivRem;
 use rle_vec::RleVec;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::ops::{Index, Range};
-use crate::utils::iter_multidim_range;
 
+const NDARRAY_DEFAULT_RANK: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NDArray<T> {
     pub data: RleVec<T>,
     // TODO: Not necessary to store shape or strides, which can be stored externally in database.
-    shape: Vec<usize>,
-    strides: Vec<usize>,
+    shape: SmallVec<[usize; NDARRAY_DEFAULT_RANK]>,
+    strides: SmallVec<[usize; NDARRAY_DEFAULT_RANK]>,
 }
 
 impl<T> NDArray<T> {
@@ -54,7 +56,7 @@ impl<T: Clone + Eq> NDArray<T> {
         assert_eq!(buffer.len(), volume, "Buffer size must match shape.");
         Self {
             data: buffer.as_slice().into(),
-            shape: shape.to_vec(),
+            shape: SmallVec::from_slice(shape),
             strides,
         }
     }
@@ -147,8 +149,8 @@ impl<T> Index<&[usize]> for NDArray<T> {
     }
 }
 
-fn calculate_strides(shape: &[usize]) -> Vec<usize> {
-    let mut strides = Vec::with_capacity(shape.len());
+fn calculate_strides(shape: &[usize]) -> SmallVec<[usize; NDARRAY_DEFAULT_RANK]> {
+    let mut strides = SmallVec::with_capacity(shape.len());
     let mut stride = 1;
     for &dim in shape.iter().rev() {
         strides.push(stride);
