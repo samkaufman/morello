@@ -190,7 +190,7 @@ mod tests {
     fn test_fill_subarray() {
         let mut arr = NDArray::new_with_value(&[3, 2], false);
         #[allow(clippy::single_range_in_vec_init)]
-        arr.fill_broadcast_1d(&[0..2], std::iter::once(&true));
+        arr.fill_broadcast_1d(&[0..2], std::iter::once(true));
         assert!(arr[&[0, 0]]);
         assert!(!arr[&[0, 1]]);
         assert!(arr[&[1, 0]]);
