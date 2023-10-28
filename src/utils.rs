@@ -203,6 +203,11 @@ pub(crate) fn iter_multidim_range<F>(dim_ranges: &[Range<u32>], strides: &[usize
 where
     F: FnMut(usize, &[u32]),
 {
+    assert_eq!(dim_ranges.len(), strides.len());
+    if dim_ranges.is_empty() || dim_ranges.iter().any(|rng| rng.is_empty()) {
+        return;
+    }
+
     let mut current_pt = dim_ranges.iter().map(|rng| rng.start).collect::<Vec<_>>();
 
     let mut buffer_index = current_pt
@@ -236,6 +241,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use itertools::Itertools;
+    use proptest::prelude::*;
     use std::fmt::Write;
 
     #[test]
@@ -281,5 +288,50 @@ mod tests {
         let mut write = LinePrefixWrite::new(String::new(), "--");
         writeln!(write).unwrap();
         assert_eq!(write.0, "--\n");
+    }
+
+    proptest! {
+        #[test]
+        fn test_iter_multidim_range_matches_itertools_product(
+            rngs in proptest::collection::vec((0u32..5, 0u32..5, 0u32..5), 1..4)
+        ) {
+            let dim_ranges: Vec<Range<u32>> = rngs
+                .iter()
+                .map(|(s, l, _)| *s..(*s + *l))
+                .collect::<Vec<_>>();
+
+            let shape = rngs
+                .iter()
+                .map(|(s, l, d)| usize::try_from(*s + *l + *d).unwrap())
+                .collect::<Vec<_>>();
+            let strides = (1..shape.len())
+                .map(|i| shape[i..].iter().product())
+                .chain(std::iter::once(1))
+                .collect::<Vec<_>>();
+
+            let mut fast_pts = Vec::new();
+            let mut fast_indices = Vec::new();
+            iter_multidim_range(&dim_ranges, &strides, |i, pt| {
+                fast_indices.push(i);
+                fast_pts.push(pt.to_vec());
+            });
+
+            let itertools_product_pts = dim_ranges
+                .into_iter()
+                .multi_cartesian_product()
+                .collect::<Vec<_>>();
+            let itertools_product_indices = itertools_product_pts
+                .iter()
+                .map(|pt| {
+                    pt.iter()
+                        .zip(&strides)
+                        .map(|(&dim, &stride)| usize::try_from(dim).unwrap() * stride)
+                        .sum()
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(fast_pts, itertools_product_pts);
+            assert_eq!(fast_indices, itertools_product_indices);
+        }
     }
 }

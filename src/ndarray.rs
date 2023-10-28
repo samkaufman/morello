@@ -134,9 +134,13 @@ impl<T> NDArray<T> {
     {
         let inner_slice_iter = inner_slice_iter.fuse();
 
+        let mut dim_ranges_ext = Vec::with_capacity(dim_ranges.len() + 1);
+        dim_ranges_ext.extend_from_slice(dim_ranges);
+        dim_ranges_ext.push(0..self.shape[self.shape.len() - 1].try_into().unwrap());
+
         let k = u32::try_from(self.shape[self.shape.len() - 1]).unwrap();
         let mut slice_iter = inner_slice_iter.clone();
-        iter_multidim_range(dim_ranges, &self.strides, |index, pt| {
+        iter_multidim_range(&dim_ranges_ext, &self.strides, |index, pt| {
             // TODO: This still iterates over k. Instead, this should skip remaining k.
             if let Some(next_value) = slice_iter.next() {
                 self.data.set(index, next_value);
@@ -179,5 +183,19 @@ mod tests {
         arr.set_pt(&insertion_point, true);
         let retrieved_idx = arr.find_index(|&v| v);
         assert_eq!(retrieved_idx, Some(insertion_point));
+    }
+
+    // TODO: proptest-ize this test.
+    #[test]
+    fn test_fill_subarray() {
+        let mut arr = NDArray::new_with_value(&[3, 2], false);
+        #[allow(clippy::single_range_in_vec_init)]
+        arr.fill_broadcast_1d(&[0..2], std::iter::once(&true));
+        assert!(arr[&[0, 0]]);
+        assert!(!arr[&[0, 1]]);
+        assert!(arr[&[1, 0]]);
+        assert!(!arr[&[1, 1]]);
+        assert!(!arr[&[2, 0]]);
+        assert!(!arr[&[2, 1]]);
     }
 }
