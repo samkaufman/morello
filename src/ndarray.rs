@@ -47,15 +47,22 @@ impl<T> NDArray<T> {
 
 impl<T: Clone + Eq> NDArray<T> {
     pub fn new_with_value(shape: &[usize], value: T) -> Self {
-        Self::new_from_buffer(shape, vec![value; shape.iter().product()])
+        let volume = shape.iter().product();
+        let mut buffer = RleVec::new();
+        buffer.push_n(volume, value);
+        Self::new_from_rlevec(shape, volume, buffer)
     }
 
     pub fn new_from_buffer(shape: &[usize], buffer: Vec<T>) -> Self {
-        let strides = calculate_strides(shape);
         let volume = shape.iter().product();
+        Self::new_from_rlevec(shape, volume, buffer.as_slice().into())
+    }
+
+    fn new_from_rlevec(shape: &[usize], volume: usize, buffer: RleVec<T>) -> Self {
+        let strides = calculate_strides(shape);
         assert_eq!(buffer.len(), volume, "Buffer size must match shape.");
         Self {
-            data: buffer.as_slice().into(),
+            data: buffer,
             shape: SmallVec::from_slice(shape),
             strides,
         }
