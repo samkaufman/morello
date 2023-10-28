@@ -92,13 +92,13 @@ pub struct DashmapDiskDatabase {
 #[serde(bound = "")]
 pub enum DbBlock {
     Single(ActionCostVec),
-    Expanded(Box<Expanded>),
+    Rle(Box<RleBlock>),
 }
 
 // TODO: Flatten something to avoid two indirections from DbBlock to NDArray contents.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct Expanded {
+pub struct RleBlock {
     pub filled: crate::ndarray::NDArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
     pub main_costs: crate::ndarray::NDArray<MainCost>,
     pub peaks: crate::ndarray::NDArray<MemVec>,
@@ -268,9 +268,9 @@ where
                                     .map(|v| (*v).try_into().unwrap())
                                     .collect::<Vec<_>>();
 
-                                *r = DbBlock::Expanded(Box::new({
+                                *r = DbBlock::Rle(Box::new({
                                     let mut new_expanded =
-                                        Expanded::filled::<Tgt>(self.k, &block_shape_usize, v);
+                                        RleBlock::filled::<Tgt>(self.k, &block_shape_usize, v);
                                     new_expanded.fill_region(
                                         self.k,
                                         &joined_row
@@ -295,7 +295,7 @@ where
                                 );
                             }
                             DbBlock::Single(_) => {}
-                            DbBlock::Expanded(e) => {
+                            DbBlock::Rle(e) => {
                                 // Examine the table before updating.
                                 e.fill_region(
                                     self.k,
@@ -316,8 +316,8 @@ where
                             .copied()
                             .map(|v| v.try_into().unwrap())
                             .collect::<Vec<_>>();
-                        entry.insert(DbBlock::Expanded(Box::new(
-                            Expanded::partially_filled::<Tgt>(
+                        entry.insert(DbBlock::Rle(Box::new(
+                            RleBlock::partially_filled::<Tgt>(
                                 self.k,
                                 &block_shape_usize,
                                 &joined_row
@@ -372,7 +372,7 @@ where
                 DbBlock::Single(_) => {
                     compressed_block_count += 1;
                 }
-                DbBlock::Expanded(e) => {
+                DbBlock::Rle(e) => {
                     if e.matches.is_some() {
                         compressable_count += 1;
                     }
@@ -461,7 +461,7 @@ impl DbBlock {
                 // TODO: Confirm that v is in bounds
                 Some(v.clone())
             }
-            DbBlock::Expanded(e) => {
+            DbBlock::Rle(e) => {
                 let (_, global_pt) = compute_db_key(query, binary_scale_shapes);
                 let (_, inner_pt) = blockify_point(global_pt);
                 let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
@@ -476,18 +476,18 @@ impl DbBlock {
     pub fn storage_size(&self) -> usize {
         match self {
             DbBlock::Single(_) => 1,
-            DbBlock::Expanded(e) => e.filled.shape().iter().product(),
+            DbBlock::Rle(e) => e.filled.shape().iter().product(),
         }
     }
 }
 
-impl Expanded {
+impl RleBlock {
     fn empty<Tgt: Target>(k: u8, shape: &[usize]) -> Self {
         let mut shape_with_k = Vec::with_capacity(shape.len() + 1);
         shape_with_k.extend_from_slice(shape);
         shape_with_k.push(k.into());
 
-        Expanded {
+        RleBlock {
             filled: crate::ndarray::NDArray::new_with_value(shape, 0),
             main_costs: crate::ndarray::NDArray::new(&shape_with_k),
             peaks: crate::ndarray::NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
@@ -517,7 +517,7 @@ impl Expanded {
         shape_with_k.extend_from_slice(shape);
         shape_with_k.push(k.into());
 
-        Expanded {
+        RleBlock {
             filled: crate::ndarray::NDArray::new_with_value(
                 shape,
                 u8::try_from(value.len()).unwrap() + 1,
@@ -665,10 +665,10 @@ impl AsRef<SmallVec<[(ActionIdx, Cost); 1]>> for ActionCostVec {
 }
 
 fn try_compress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
-    let DbBlock::Expanded(expanded) = block else {
+    let DbBlock::Rle(expanded) = block else {
         return;
     };
-    let Expanded {
+    let RleBlock {
         matches: Some((m, _)),
         ..
     } = expanded.as_mut()
