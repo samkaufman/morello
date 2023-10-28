@@ -120,10 +120,10 @@ impl<T> NDArray<T> {
         affected
     }
 
-    pub fn fill_broadcast_1d<'a, I>(&mut self, dim_ranges: &[Range<u32>], inner_slice_iter: I)
+    pub fn fill_broadcast_1d<I>(&mut self, dim_ranges: &[Range<u32>], inner_slice_iter: I)
     where
-        T: Clone + Eq + 'a,
-        I: Clone + Iterator<Item = &'a T>,
+        T: Clone + Eq,
+        I: Clone + Iterator<Item = T>,
     {
         let inner_slice_iter = inner_slice_iter.fuse();
 
@@ -132,7 +132,7 @@ impl<T> NDArray<T> {
         iter_multidim_range(dim_ranges, &self.strides, |index, pt| {
             // TODO: This still iterates over k. Instead, this should skip remaining k.
             if let Some(next_value) = slice_iter.next() {
-                self.data.set(index, next_value.clone());
+                self.data.set(index, next_value);
             }
             if pt[pt.len() - 1] == k - 1 {
                 slice_iter = inner_slice_iter.clone();

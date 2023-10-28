@@ -102,8 +102,7 @@ pub struct Expanded {
     pub filled: crate::ndarray::NDArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
     pub main_costs: crate::ndarray::NDArray<MainCost>,
     pub peaks: crate::ndarray::NDArray<MemVec>,
-    pub depths: crate::ndarray::NDArray<u8>,
-    pub action_idxs: crate::ndarray::NDArray<ActionIdx>,
+    pub depths_actions: crate::ndarray::NDArray<(u8, ActionIdx)>,
     pub matches: Option<(NonZeroU32, Vec<usize>)>,
 }
 
@@ -366,10 +365,8 @@ where
         let mut lens_main_costs = 0;
         let mut runs_peaks = 0;
         let mut lens_peaks = 0;
-        let mut runs_depths = 0;
-        let mut lens_depths = 0;
-        let mut runs_action_idxs = 0;
-        let mut lens_action_idxs = 0;
+        let mut runs_depths_actions = 0;
+        let mut lens_depths_actions = 0;
         for block in &self.blocks {
             match block.value() {
                 DbBlock::Single(_) => {
@@ -385,32 +382,27 @@ where
                     lens_main_costs += e.main_costs.len();
                     runs_peaks += e.peaks.runs_len();
                     lens_peaks += e.peaks.len();
-                    runs_depths += e.depths.runs_len();
-                    lens_depths += e.depths.len();
-                    runs_action_idxs += e.action_idxs.runs_len();
-                    lens_action_idxs += e.action_idxs.len();
+                    runs_depths_actions += e.depths_actions.runs_len();
+                    lens_depths_actions += e.depths_actions.len();
                 }
             }
         }
         let stat_duration = start.elapsed();
         format!(
             "blocks={} compressed={} compressable={} \
-            runs_filled={} runs_main_costs={} runs_peaks={} runs_depths={} runs_action_idxs={} \
-            cr_filled={:.4} cr_main_costs={:.4} cr_peaks={:.4} cr_depths={:.4} \
-            cr_action_idxs={:.4} statms={}",
+            runs_filled={} runs_main_costs={} runs_peaks={} runs_depthsactions={} \
+            cr_filled={:.4} cr_main_costs={:.4} cr_peaks={:.4} cr_depthsactions={:.4} statms={}",
             self.blocks.len(),
             compressed_block_count,
             compressable_count,
             runs_filled,
             runs_main_costs,
             runs_peaks,
-            runs_depths,
-            runs_action_idxs,
+            runs_depths_actions,
             runs_filled as f32 / lens_filled as f32,
             runs_main_costs as f32 / lens_main_costs as f32,
             runs_peaks as f32 / lens_peaks as f32,
-            runs_depths as f32 / lens_depths as f32,
-            runs_action_idxs as f32 / lens_action_idxs as f32,
+            runs_depths_actions as f32 / lens_depths_actions as f32,
             stat_duration.as_millis(),
         )
     }
@@ -499,8 +491,7 @@ impl Expanded {
             filled: crate::ndarray::NDArray::new_with_value(shape, 0),
             main_costs: crate::ndarray::NDArray::new(&shape_with_k),
             peaks: crate::ndarray::NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
-            depths: crate::ndarray::NDArray::new(&shape_with_k),
-            action_idxs: crate::ndarray::NDArray::new(&shape_with_k),
+            depths_actions: crate::ndarray::NDArray::new(&shape_with_k),
             matches: None,
         }
     }
@@ -537,8 +528,7 @@ impl Expanded {
                 value.0.iter().map(|(_, c)| c.peaks.clone()),
                 MemVec::zero::<Tgt>,
             ),
-            depths: broadcast_1d(&shape_with_k, value.0.iter().map(|(_, c)| c.depth)),
-            action_idxs: broadcast_1d(&shape_with_k, value.0.iter().map(|(a, _)| *a)),
+            depths_actions: broadcast_1d(&shape_with_k, value.0.iter().map(|(a, c)| (c.depth, *a))),
             matches: Some((
                 NonZeroU32::new(shape.iter().map(|&d| u32::try_from(d).unwrap()).product())
                     .unwrap(),
@@ -590,18 +580,16 @@ impl Expanded {
         shape_with_k.push(k.into());
 
         let empties_filled = self.filled.fill_region_counting(
-            &dim_ranges,
+            dim_ranges,
             &(u8::try_from(value.len()).unwrap() + 1),
             &0,
         );
         self.main_costs
-            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| &c.main));
+            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| c.main));
         self.peaks
-            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| &c.peaks));
-        self.depths
-            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| &c.depth));
-        self.action_idxs
-            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(a, _)| a));
+            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| c.peaks.clone()));
+        self.depths_actions
+            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(a, c)| (c.depth, *a)));
 
         empties_filled
     }
@@ -627,12 +615,13 @@ impl Expanded {
             (0..local_k)
                 .map(move |i| {
                     *pt_with_k.last_mut().unwrap() = i.into();
+                    let (depth, action_idx) = self.depths_actions[&pt_with_k];
                     (
-                        self.action_idxs[&pt_with_k],
+                        action_idx,
                         Cost {
                             main: self.main_costs[&pt_with_k],
                             peaks: self.peaks[&pt_with_k].clone(),
-                            depth: self.depths[&pt_with_k],
+                            depth,
                         },
                     )
                 })
