@@ -118,11 +118,12 @@ impl<T> NDArray<T> {
     {
         debug_assert_ne!(value, counting_value);
         let mut affected = 0;
+        let mut last_run_idx = 0;
         iter_multidim_range(dim_ranges, &self.strides, |index, _| {
             if &self.data[index] == counting_value {
                 affected += 1;
             }
-            self.data.set(index, value.clone());
+            last_run_idx = self.data.set_hint(index, value.clone(), last_run_idx);
         });
         affected
     }
@@ -140,10 +141,11 @@ impl<T> NDArray<T> {
 
         let k = u32::try_from(self.shape[self.shape.len() - 1]).unwrap();
         let mut slice_iter = inner_slice_iter.clone();
+        let mut last_run_idx = 0;
         iter_multidim_range(&dim_ranges_ext, &self.strides, |index, pt| {
             // TODO: This still iterates over k. Instead, this should skip remaining k.
             if let Some(next_value) = slice_iter.next() {
-                self.data.set(index, next_value);
+                last_run_idx = self.data.set_hint(index, next_value, last_run_idx);
             }
             if pt[pt.len() - 1] == k - 1 {
                 slice_iter = inner_slice_iter.clone();

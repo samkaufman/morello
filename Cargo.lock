@@ -1075,8 +1075,7 @@ checksum = "436b050e76ed2903236f032a59761c1eb99e1b0aead2c257922771dab1fc8c78"
 [[package]]
 name = "rle_vec"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a14622f24cef977254293d3ff9571eb70e3b37c9bee038910c597b635860401"
+source = "git+https://github.com/samkaufman/rle_vec.git?branch=hints#5bc3fe640937d16565fe95ca1a7d66c4b89e8d56"
 dependencies = [
  "serde",
  "serde_derive",
