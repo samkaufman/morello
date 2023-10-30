@@ -173,6 +173,8 @@ where
                 }
             }
         });
+        db.compact();
+        debug!("Stage (without saving) took {:?}", stage_start.elapsed());
         db.save().unwrap();
         info!("Stage {} took {:?}", stage_idx, stage_start.elapsed());
         info!("Database stats: {}", db.stats_str());

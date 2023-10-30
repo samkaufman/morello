@@ -52,6 +52,8 @@ pub trait Database<'a> {
 
     fn save(&'a self) -> anyhow::Result<()>;
 
+    fn compact(&'a self);
+
     /// Returns the maximum number of Impls this [Database] as store per Spec.
     ///
     /// If unlimited, returns `None`.
@@ -349,6 +351,12 @@ where
         Ok(())
     }
 
+    fn compact(&'a self) {
+        for mut block in self.blocks.iter_mut() {
+            block.compact();
+        }
+    }
+
     fn max_k(&'a self) -> Option<usize> {
         Some(self.k.into())
     }
@@ -475,6 +483,15 @@ impl DbBlock {
         match self {
             DbBlock::Single(_) => 1,
             DbBlock::Rle(e) => e.filled.shape().iter().product(),
+        }
+    }
+
+    pub fn compact(&mut self) {
+        match self {
+            DbBlock::Single(_) => {}
+            DbBlock::Rle(e) => {
+                e.compact();
+            }
         }
     }
 }
@@ -625,6 +642,13 @@ impl RleBlock {
                 })
                 .collect(),
         ))
+    }
+
+    pub(crate) fn compact(&mut self) {
+        self.filled.compact();
+        self.main_costs.compact();
+        self.peaks.compact();
+        self.depths_actions.compact();
     }
 }
 
