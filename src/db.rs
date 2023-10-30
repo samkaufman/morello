@@ -316,17 +316,15 @@ where
                             .copied()
                             .map(|v| v.try_into().unwrap())
                             .collect::<Vec<_>>();
-                        entry.insert(DbBlock::Rle(Box::new(
-                            RleBlock::partially_filled::<Tgt>(
-                                self.k,
-                                &block_shape_usize,
-                                &joined_row
-                                    .iter()
-                                    .map(|(_, r)| r.clone())
-                                    .collect::<Vec<_>>(),
-                                &ActionCostVec(decisions.clone()),
-                            ),
-                        )))
+                        entry.insert(DbBlock::Rle(Box::new(RleBlock::partially_filled::<Tgt>(
+                            self.k,
+                            &block_shape_usize,
+                            &joined_row
+                                .iter()
+                                .map(|(_, r)| r.clone())
+                                .collect::<Vec<_>>(),
+                            &ActionCostVec(decisions.clone()),
+                        ))))
                     }
                 }
             };
