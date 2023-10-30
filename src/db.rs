@@ -363,8 +363,8 @@ where
 
     fn stats_str(&self) -> String {
         let start = Instant::now();
-        let mut compressed_block_count = 0;
-        let mut compressable_count = 0;
+        let mut single_count = 0;
+        let mut single_or_empty_count = 0;
         let mut runs_filled = 0;
         let mut lens_filled = 0;
         let mut runs_main_costs = 0;
@@ -376,11 +376,11 @@ where
         for block in &self.blocks {
             match block.value() {
                 DbBlock::Single(_) => {
-                    compressed_block_count += 1;
+                    single_count += 1;
                 }
                 DbBlock::Rle(e) => {
                     if e.matches.is_some() {
-                        compressable_count += 1;
+                        single_or_empty_count += 1;
                     }
                     runs_filled += e.filled.runs_len();
                     lens_filled += e.filled.len();
@@ -395,12 +395,12 @@ where
         }
         let stat_duration = start.elapsed();
         format!(
-            "blocks={} compressed={} compressable={} \
+            "blocks={} single={} singleorempty={} \
             runs_filled={} runs_main_costs={} runs_peaks={} runs_depthsactions={} \
             cr_filled={:.5} cr_main_costs={:.5} cr_peaks={:.5} cr_depthsactions={:.5} statms={}",
             self.blocks.len(),
-            compressed_block_count,
-            compressable_count,
+            single_count,
+            single_or_empty_count,
             runs_filled,
             runs_main_costs,
             runs_peaks,

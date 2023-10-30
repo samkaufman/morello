@@ -246,26 +246,26 @@ fn print_stats(db: &DashmapDiskDatabase) {
     }
     println!(
         "Matmul ratio: {}/{} = {:.2}",
-        matmul_group_cnt,
         matmul_entry_cnt,
+        matmul_group_cnt,
         matmul_entry_cnt as f64 / matmul_group_cnt as f64
     );
     println!(
         "Conv ratio: {}/{} = {:.2}",
-        conv_group_cnt,
         conv_entry_cnt,
+        conv_group_cnt,
         conv_entry_cnt as f64 / conv_group_cnt as f64
     );
     println!(
         "Move ratio: {}/{} = {:.2}",
-        move_group_cnt,
         move_entry_cnt,
+        move_group_cnt,
         move_entry_cnt as f64 / move_group_cnt as f64
     );
     println!(
         "Zero ratio: {}/{} = {:.2}",
-        zero_group_cnt,
         zero_entry_cnt,
+        zero_group_cnt,
         zero_entry_cnt as f64 / zero_group_cnt as f64
     );
 }
