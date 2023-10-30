@@ -159,8 +159,7 @@ where
         }
 
         let stage_start = std::time::Instant::now();
-        let stage_iter = nonempty_tasks.into_par_iter().with_min_len(4);
-        stage_iter.for_each(|task| {
+        nonempty_tasks.into_par_iter().for_each(|task| {
             let mut worklist = VecDeque::new();
             for (_task_idx, logical_spec) in task.iter().enumerate() {
                 debug_assert!(worklist.is_empty());
