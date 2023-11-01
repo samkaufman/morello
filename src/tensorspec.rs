@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::Display;
+use std::num::NonZeroU32;
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
@@ -310,7 +311,7 @@ impl<Tgt> CanonicalBimap for TensorSpecAux<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
 {
     type Bimap = TensorSpecAuxBimap<Tgt>;
 
@@ -357,7 +358,7 @@ impl<Tgt> BiMap for TensorSpecAuxBimap<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
     type Codomain = ((Contig, bool, Layout, Option<DimSize>), [BimapInt; 1]);
@@ -365,7 +366,7 @@ where
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
         (
             (t.contig, t.aligned, t.layout.clone(), t.vector_size),
-            [BiMap::apply(&Tgt::Level::bimap(), &t.level)],
+            [BiMap::apply(&Tgt::Level::bimap(), &t.level).into()],
         )
     }
 
@@ -376,7 +377,7 @@ where
             aligned,
             layout,
             vector_size,
-            level: BiMap::apply_inverse(&Tgt::Level::bimap(), &level_val),
+            level: BiMap::apply_inverse(&Tgt::Level::bimap(), &level_val.try_into().unwrap()),
         }
     }
 }
@@ -385,27 +386,26 @@ impl<Tgt> BiMap for TensorSpecAuxNonDepBimap<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
-    type Codomain = (Layout, [BimapInt; 4]);
+    type Codomain = ((Layout, u8, Option<NonZeroU32>), [BimapInt; 2]);
 
     fn apply(&self, aux: &TensorSpecAux<Tgt>) -> Self::Codomain {
         let inverted_contig = aux.layout.contiguous_full() - aux.contig;
         (
-            aux.layout.clone(),
-            [
-                inverted_contig.into(),
-                aux.aligned as _,
+            (
+                aux.layout.clone(),
                 BiMap::apply(&Tgt::Level::bimap(), &aux.level),
-                aux.vector_size.unwrap_or(0),
-            ],
+                aux.vector_size.map(|v| NonZeroU32::try_from(v).unwrap()),
+            ),
+            [inverted_contig.into(), aux.aligned as _],
         )
     }
 
     fn apply_inverse(&self, v: &Self::Codomain) -> Self::Domain {
-        let (layout, pt) = v;
-        let [inverted_contig, aligned_val, level_val, vector_size_val] = pt;
+        let ((layout, level_val, vector_size), pt) = v;
+        let [inverted_contig, aligned_val] = pt;
         // `unwrap_or_else` rather than `unwrap` to avoid needing a Debug bound
         let level = BiMap::apply_inverse(&Tgt::Level::bimap(), level_val);
         TensorSpecAux {
@@ -413,11 +413,7 @@ where
             contig: layout.contiguous_full() - Contig::try_from(*inverted_contig).unwrap(),
             aligned: *aligned_val != 0,
             level,
-            vector_size: if *vector_size_val == 0 {
-                None
-            } else {
-                Some(*vector_size_val)
-            },
+            vector_size: vector_size.map(|v| v.try_into().unwrap()),
         }
     }
 }

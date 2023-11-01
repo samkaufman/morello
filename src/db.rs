@@ -29,7 +29,10 @@ use std::{iter, path};
 
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
-type DbKey = ((SpecKey, SmallVec<[Layout; 3]>), SmallVec<[BimapInt; 10]>);
+type DbKey = (
+    (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
+    SmallVec<[BimapInt; 10]>,
+);
 pub type ActionIdx = u16;
 
 const INITIAL_HASHMAP_CAPACITY: usize = 100_000_000;
@@ -39,14 +42,14 @@ pub trait Database<'a> {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>;
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
 
     // TODO: Document interior mutability of put.
     fn put<Tgt>(&'a self, problem: Spec<Tgt>, impls: SmallVec<[(ActionIdx, Cost); 1]>)
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>;
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
 
     fn flush(&'a self);
 
@@ -69,7 +72,7 @@ pub trait DatabaseExt<'a>: Database<'a> {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>;
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
 }
 
 #[derive(Clone, Debug)]
@@ -208,7 +211,7 @@ where
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let (table_key, global_pt) = compute_db_key(query, self.binary_scale_shapes);
         let (block_pt, _) = blockify_point(global_pt);
@@ -222,7 +225,7 @@ where
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         #[cfg(debug_assertions)]
         let original_spec = spec.clone();
@@ -425,7 +428,7 @@ impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let Some(root_results) = self.get(query) else {
             return None;
@@ -460,7 +463,7 @@ impl DbBlock {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         match self {
             DbBlock::Single(v) => {
@@ -713,7 +716,7 @@ fn construct_impl<'a, Tgt, D>(db: &'a D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'a>,
 {
     match imp {
@@ -732,7 +735,7 @@ fn compute_db_key<Tgt>(spec: &Spec<Tgt>, binary_scale_shapes: bool) -> DbKey
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     let bimap = SpecBimap {
         logical_spec_bimap: LogicalSpecBimap {
@@ -746,18 +749,23 @@ where
     BiMap::apply(&bimap, spec)
 }
 
+fn scale_factor(dim: usize, dim_count: usize) -> u32 {
+    if dim >= dim_count - 4 {
+        4
+    } else {
+        2
+    }
+}
+
 /// Convert a single dimension of a global point to a block and within-block index.
 fn db_key_scale(dim: usize, value: BimapInt, dim_count: usize) -> (BimapInt, u8) {
     // TODO: Autotune rather than hardcode these arbitrary dimensions.
-    let scale_factor = if dim >= dim_count - 4 { 4 } else { 2 };
-    let (quotient, remainder) = value.div_rem(&scale_factor);
+    let (quotient, remainder) = value.div_rem(&scale_factor(dim, dim_count));
     (quotient, remainder.try_into().unwrap())
 }
 
 fn block_shape(rank: usize) -> SmallVec<[BimapInt; 10]> {
-    (0..rank)
-        .map(|i| if i >= rank - 4 { 4 } else { 2 })
-        .collect()
+    (0..rank).map(|i| scale_factor(i, rank)).collect()
 }
 
 /// Converts a given global coordinate into block and within-block coordinates.
@@ -796,13 +804,13 @@ fn put_range_to_fill<Tgt>(
     impls: &SmallVec<[(ActionIdx, Cost); 1]>,
     binary_scale_shapes: bool,
 ) -> (
-    (SpecKey, SmallVec<[Layout; 3]>),
+    (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
     (SmallVec<[BimapInt; 10]>, SmallVec<[BimapInt; 10]>),
 )
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     // Compute the per-level maximum limits of the solutions. This lower bounds the range.
     let mut per_level_peaks = [0; LEVEL_COUNT];

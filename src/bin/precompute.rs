@@ -87,7 +87,7 @@ where
                 layout,
                 vector_size: None,
             }],
-            true,
+            false,
         )
     }));
     bounds.push({
@@ -106,7 +106,7 @@ where
                 dtype: Dtype::Uint32,
             },
             vec![a.clone(), a.clone(), a],
-            true,
+            false,
         )
     });
     if args.include_conv {
@@ -137,7 +137,7 @@ where
                             dtype: Dtype::Uint32,
                         },
                         vec![a.clone(), a.clone(), a.clone()],
-                        true,
+                        false,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -165,7 +165,7 @@ where
         let stage_start = std::time::Instant::now();
         nonempty_tasks.into_par_iter().for_each(|task| {
             let mut worklist = VecDeque::new();
-            for (_task_idx, logical_spec) in task.iter().enumerate() {
+            for (_, logical_spec) in task.iter().enumerate() {
                 debug_assert!(worklist.is_empty());
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
@@ -289,7 +289,7 @@ fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
                 vector_size: None,
             })
             .collect(),
-        true,
+        false,
     )
 }
 

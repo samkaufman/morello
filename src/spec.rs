@@ -11,7 +11,7 @@ use crate::target::MemoryLevel;
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
-use crate::utils::join_into_string;
+use crate::utils::{bit_length_inverse, join_into_string};
 use crate::utils::{bit_length_u32, is_power_of_two_u32, prev_power_of_two_u32};
 
 use itertools::Either;
@@ -1184,10 +1184,10 @@ impl<Tgt, A, Aa, Ab> BiMap for SpecBimap<Tgt, A>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
     A: BiMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
     Aa: Clone,
-    Ab: IntoIterator<Item = BimapInt>,
+    Ab: IntoIterator<Item = BimapInt> + for<'a> TryFrom<&'a [BimapInt]>,
 {
     type Domain = Spec<Tgt>;
     type Codomain = <LogicalSpecBimap<Tgt, A> as SurMap>::Codomain;
@@ -1219,10 +1219,10 @@ impl<Tgt, A, Aa, Ab> BiMap for LogicalSpecBimap<Tgt, A>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
     A: BiMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
     Aa: Clone,
-    Ab: IntoIterator<Item = BimapInt>,
+    Ab: IntoIterator<Item = BimapInt> + for<'a> TryFrom<&'a [BimapInt]>, // TODO: Can't Vec be slice?
 {
     type Domain = LogicalSpec<Tgt>;
     type Codomain = ((SpecKey, SmallVec<[Aa; 3]>), SmallVec<[BimapInt; 10]>);
@@ -1233,8 +1233,8 @@ where
                 let (key, mut pt) = BiMap::apply(&self.primitive_basics_bimap, basics);
                 let aux_keys = auxes
                     .iter()
-                    .map(|aux| {
-                        let (aux_key, aux_pt) = self.aux_bimap.apply(aux);
+                    .map(|tensor_aux| {
+                        let (aux_key, aux_pt) = self.aux_bimap.apply(tensor_aux);
                         pt.extend(aux_pt);
                         aux_key
                     })
@@ -1246,8 +1246,28 @@ where
         }
     }
 
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
-        todo!()
+    fn apply_inverse(&self, i: &Self::Codomain) -> LogicalSpec<Tgt> {
+        let ((key, aux_keys), pt) = i;
+
+        let operand_count = aux_keys.len();
+        let (basics_pt, tensor_aux_pts) =
+            pt[..pt.len() - 1].split_at(pt.len() - (operand_count * 2) - 1);
+
+        let primitive_basics = BiMap::apply_inverse(
+            &self.primitive_basics_bimap,
+            &(key.clone(), basics_pt.into()),
+        );
+        let tensor_auxes = (0..operand_count)
+            .map(|i| {
+                let Ok(tap) = (&tensor_aux_pts[i * 2..(i + 1) * 2]).try_into() else {
+                    panic!("Couldn't reverse the TensorSpecAux pt.");
+                };
+                self.aux_bimap.apply_inverse(&(aux_keys[i].clone(), tap))
+            })
+            .collect();
+        let serial = pt[pt.len() - 1] == 0;
+
+        LogicalSpec::Primitive(primitive_basics, tensor_auxes, serial)
     }
 }
 
@@ -1308,7 +1328,18 @@ impl BiMap for PrimitiveBasicsBimap {
                 }
             }
             SpecKey::Move { dtype } => {
-                todo!()
+                let unshifted_shape = v.iter().map(|&d| {
+                    if self.binary_scale_shapes {
+                        DimSize::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
+                    } else {
+                        d + 1
+                    }
+                });
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Move,
+                    spec_shape: unshifted_shape.collect(),
+                    dtype: *dtype,
+                }
             }
             SpecKey::Zero { dtype } => todo!(),
         };

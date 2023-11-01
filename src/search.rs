@@ -37,7 +37,7 @@ pub fn top_down<'d, Tgt, D>(
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d>,
 {
     assert!(db.max_k().map_or(true, |k| k >= top_k));
@@ -54,7 +54,7 @@ fn top_down_inner<'d, Tgt, D>(
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = BimapInt>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d>,
 {
     if top_k > 1 {
