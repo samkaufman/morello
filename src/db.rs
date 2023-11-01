@@ -983,22 +983,27 @@ mod tests {
 
         // TODO: Add tests for top-2, etc. Impls
         #[test]
-        fn test_put_then_get_fills_across_memory_limits(entry in arb_spec_and_action::<X86Target>()) {
-            let (spec, action, cost) = entry.clone();
-            let (spec_b, action_b, cost_b) = entry;
+        fn test_put_then_get_fills_across_memory_limits(entry in arb_spec_and_decision::<X86Target>()) {
+            let (spec, decisions) = entry.clone();
+            let (spec_b, decisions_b) = entry;
             let MemoryLimits::Standard(spec_limits) = spec.1.clone();
             let db = DashmapDiskDatabase::new(None, false, 1);
-            let value_ref = db.put(spec, smallvec![(action, cost)]);
+            db.put(spec, decisions.into());
+            let peaks = if let Some((_, c)) = decisions_b.first() {
+                c.peaks.clone()
+            } else {
+                MemVec::zero::<X86Target>()
+            };
             let filled_limits_iter = spec_limits
                 .iter()
-                .zip(cost_b.peaks.iter())
+                .zip(peaks.iter())
                 .map(|(l, p)| {
                     assert!(l == 0 || l.is_power_of_two());
                     assert!(p == 0 || p.is_power_of_two());
                     bit_length(p)..=bit_length(l)
                 })
                 .multi_cartesian_product();
-            let expected = ActionCostVec(smallvec![(action_b, cost_b)]);
+            let expected = ActionCostVec(decisions_b.into());
             for limit_to_check_bits in filled_limits_iter {
                 let limit_to_check = limit_to_check_bits.iter().copied().map(bit_length_inverse).collect::<Vec<_>>();
                 let spec_to_check = Spec(spec_b.0.clone(), MemoryLimits::Standard(MemVec::new(limit_to_check.try_into().unwrap())));
@@ -1008,13 +1013,17 @@ mod tests {
         }
 
         #[test]
-        fn test_database_empty_outside_range_after_one_put(entry in arb_spec_and_action::<X86Target>()) {
+        fn test_database_empty_outside_range_after_one_put(entry in arb_spec_and_decision::<X86Target>()) {
             let spec_b = entry.0.clone();
-            let (spec, action, cost) = entry;
-            let peaks = cost.peaks.clone();
+            let (spec, decisions) = entry;
+            let peaks = if let Some((_, c)) = decisions.first() {
+                c.peaks.clone()
+            } else {
+                MemVec::zero::<X86Target>()
+            };
 
             let db = DashmapDiskDatabase::new(None, false, 1);
-            db.put(spec, smallvec![(action, cost)]);
+            db.put(spec, decisions.into());
 
             let MemoryLimits::Standard(max_memory) = X86Target::max_mem();
             let MemoryLimits::Standard(spec_limits) = &spec_b.1;
@@ -1120,6 +1129,14 @@ mod tests {
         }
     }
 
+    fn arb_spec_and_decision<Tgt: Target>(
+    ) -> impl Strategy<Value = (Spec<Tgt>, Vec<(ActionIdx, Cost)>)> {
+        prop_oneof![
+            arb_spec_and_action().prop_map(|(sp, a, c)| (sp, vec![(a, c)])),
+            any::<Spec<Tgt>>().prop_map(|sp| (sp, vec![])),
+        ]
+    }
+
     fn arb_spec_and_action<Tgt: Target>() -> impl Strategy<Value = (Spec<Tgt>, ActionIdx, Cost)> {
         (any::<Spec<Tgt>>())
             .prop_flat_map(|spec| {
@@ -1146,6 +1163,7 @@ mod tests {
             })
     }
 
+    // TODO: Implement arb_spec_and_decision_pair and use that everywhere instead.
     fn arb_spec_and_action_pair<Tgt: Target>(
     ) -> impl Strategy<Value = ((Spec<Tgt>, ActionIdx, Cost), (Spec<Tgt>, ActionIdx, Cost))> {
         arb_spec_and_action().prop_flat_map(|first| {

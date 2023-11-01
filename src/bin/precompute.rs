@@ -154,7 +154,10 @@ where
             stage.len()
         );
 
-        let nonempty_tasks = stage.iter().filter(|v| !v.is_empty()).collect::<Vec<_>>();
+        let nonempty_tasks = stage
+            .into_iter()
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<_>>();
         if let Some(example_spec) = nonempty_tasks
             .choose(&mut rng)
             .and_then(|v| v.choose(&mut rng))
@@ -166,7 +169,6 @@ where
         nonempty_tasks.into_par_iter().for_each(|task| {
             let mut worklist = VecDeque::new();
             for (_, logical_spec) in task.iter().enumerate() {
-                debug_assert!(worklist.is_empty());
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
                     let spec = Spec(logical_spec.clone(), MemoryLimits::Standard(job));
