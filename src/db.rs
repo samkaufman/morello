@@ -1,4 +1,3 @@
-use crate::common::DimSize;
 use crate::cost::{Cost, MainCost};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
@@ -22,7 +21,7 @@ use smallvec::SmallVec;
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, Range};
 use std::time::Instant;
 use std::{iter, path};
@@ -109,6 +108,8 @@ pub struct RleBlock {
     pub peaks: crate::ndarray::NDArray<MemVec>,
     pub depths_actions: crate::ndarray::NDArray<(u8, ActionIdx)>,
     pub matches: Option<(NonZeroU32, Vec<usize>)>,
+    shape: SmallVec<[usize; 10]>,
+    volume: NonZeroU32,
 }
 
 // TODO: Storing Spec and usize is too expensive.
@@ -234,27 +235,24 @@ where
             put_range_to_fill(&spec, &decisions, self.binary_scale_shapes);
         let spec_b = spec.clone();
 
-        // Compute the block shape for a table of this rank. Blocks are larger than necessary at the
-        // boundaries when true dimensions aren't multiples of the block shape.
-        let block_shape = block_shape(bottom.len());
-
         // Construct an iterator over all blocks to fill.
+        let rank = bottom.len();
         let blocks_iter = bottom
             .into_iter()
             .zip(&top)
-            .zip(&block_shape)
-            .map(|((b, t), shp)| iter_blocks_in_single_dim_range(b, *t, (*shp).try_into().unwrap()))
+            .enumerate()
+            .map(|(dim, (b, t))| iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank)))
             .multi_cartesian_product();
 
         for joined_row in blocks_iter {
             let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
             let fill_whole_block = joined_row
                 .iter()
-                .zip(&block_shape)
-                .all(|((_, r), shp)| r.len() == usize::try_from(*shp).unwrap());
+                .enumerate()
+                .all(|(dim, (_, r))| r.len() == block_size_dim(dim, rank).try_into().unwrap());
 
-            let block_entry = self.blocks.entry((db_key.clone(), block_pt));
-            let block_entry_ref = if fill_whole_block {
+            let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
+            if fill_whole_block {
                 // Note that this branch is never hit in the common case that block dims. are >= 1
                 // in non-memory limits dimensions and `put_range_to_fill` only extends across the
                 // memory limit dimensions.
@@ -268,10 +266,10 @@ where
                                 // Format `v.0` first we don't keep the mutable borrow of `v`.
                                 let value_str = format!("{:?}", v.0);
 
-                                let block_shape_usize = block_shape
-                                    .iter()
-                                    .map(|v| (*v).try_into().unwrap())
-                                    .collect::<Vec<_>>();
+                                let block_shape_usize =
+                                    block_shape(&block_pt, &db_shape::<Tgt>(rank), block_size_dim)
+                                        .map(|v| v.try_into().unwrap())
+                                        .collect::<Vec<_>>();
 
                                 *r = DbBlock::Rle(Box::new({
                                     let mut new_expanded =
@@ -310,17 +308,16 @@ where
                                         .collect::<Vec<_>>(),
                                     &ActionCostVec(decisions.clone()),
                                 );
-                                try_compress_block(r, &block_shape);
+                                try_compress_block(r);
                             }
                         }
                         existing_block.into_ref()
                     }
                     Entry::Vacant(entry) => {
-                        let block_shape_usize = block_shape
-                            .iter()
-                            .copied()
-                            .map(|v| v.try_into().unwrap())
-                            .collect::<Vec<_>>();
+                        let db_shape = db_shape::<Tgt>(rank);
+                        let bs = block_shape(&block_pt, &db_shape, block_size_dim);
+                        let block_shape_usize =
+                            bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
                         entry.insert(DbBlock::Rle(Box::new(RleBlock::partially_filled::<Tgt>(
                             self.k,
                             &block_shape_usize,
@@ -482,10 +479,10 @@ impl DbBlock {
     /// Returns the number of entries for which storage is allocated.
     ///
     /// This is a rough way to estimate memory consumption of the [DbBlock].
-    pub fn storage_size(&self) -> usize {
+    pub fn storage_size(&self) -> u32 {
         match self {
             DbBlock::Single(_) => 1,
-            DbBlock::Rle(e) => e.filled.shape().iter().product(),
+            DbBlock::Rle(e) => e.volume.get(),
         }
     }
 
@@ -511,6 +508,13 @@ impl RleBlock {
             peaks: crate::ndarray::NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
             depths_actions: crate::ndarray::NDArray::new(&shape_with_k),
             matches: None,
+            shape: shape.into(),
+            volume: shape
+                .iter()
+                .map(|&s| u32::try_from(s).unwrap())
+                .product::<u32>()
+                .try_into()
+                .unwrap(),
         }
     }
 
@@ -552,6 +556,13 @@ impl RleBlock {
                     .unwrap(),
                 vec![0; shape.len()],
             )),
+            shape: shape.into(),
+            volume: shape
+                .iter()
+                .map(|&s| u32::try_from(s).unwrap())
+                .product::<u32>()
+                .try_into()
+                .unwrap(),
         }
     }
 
@@ -689,12 +700,13 @@ impl AsRef<SmallVec<[(ActionIdx, Cost); 1]>> for ActionCostVec {
     }
 }
 
-fn try_compress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
+fn try_compress_block(block: &mut DbBlock) {
     let DbBlock::Rle(expanded) = block else {
         return;
     };
     let RleBlock {
         matches: Some((m, _)),
+        volume,
         ..
     } = expanded.as_mut()
     else {
@@ -702,8 +714,7 @@ fn try_compress_block(block: &mut DbBlock, block_shape: &[DimSize]) {
     };
 
     // TODO: Instead, precompute block volume as MAX_BLOCK_VOLUME
-    let block_volume = block_shape.iter().product::<DimSize>();
-    if m.get() != block_volume {
+    if m != volume {
         return;
     }
 
@@ -749,7 +760,7 @@ where
     BiMap::apply(&bimap, spec)
 }
 
-fn scale_factor(dim: usize, dim_count: usize) -> u32 {
+fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
     if dim >= dim_count - 4 {
         4
     } else {
@@ -760,12 +771,45 @@ fn scale_factor(dim: usize, dim_count: usize) -> u32 {
 /// Convert a single dimension of a global point to a block and within-block index.
 fn db_key_scale(dim: usize, value: BimapInt, dim_count: usize) -> (BimapInt, u8) {
     // TODO: Autotune rather than hardcode these arbitrary dimensions.
-    let (quotient, remainder) = value.div_rem(&scale_factor(dim, dim_count));
+    let (quotient, remainder) = value.div_rem(&block_size_dim(dim, dim_count));
     (quotient, remainder.try_into().unwrap())
 }
 
-fn block_shape(rank: usize) -> SmallVec<[BimapInt; 10]> {
-    (0..rank).map(|i| scale_factor(i, rank)).collect()
+/// Computes the shape of a block in the database.
+///
+/// Given a maximum block shape and the coordinate of that block in the database, this will
+/// truncate at the edges. If the given database shape is `None` in that dimension, that dimension
+/// will be the full block size.
+fn block_shape<'a, F>(
+    block_pt: &'a [u32],
+    db_shape: &'a [Option<NonZeroUsize>],
+    block_max_size_fn: F,
+) -> impl Iterator<Item = BimapInt> + ExactSizeIterator + 'a
+where
+    F: Fn(usize, usize) -> u32 + 'a,
+{
+    let rank = db_shape.len();
+    assert_eq!(block_pt.len(), rank);
+    db_shape.iter().enumerate().map(move |(i, db_max_option)| {
+        let full_block_size = block_max_size_fn(i, rank);
+        if let Some(db_max) = db_max_option {
+            let remaining_size =
+                u32::try_from(db_max.get()).unwrap() - block_pt[i] * full_block_size;
+            remaining_size.min(full_block_size)
+        } else {
+            full_block_size
+        }
+    })
+}
+
+fn db_shape<Tgt: Target>(rank: usize) -> SmallVec<[Option<NonZeroUsize>; 10]> {
+    let mut shape = smallvec::smallvec![None; rank];
+    let MemoryLimits::Standard(m) = Tgt::max_mem();
+    for (level_idx, dest_idx) in ((rank - m.len())..rank).enumerate() {
+        shape[dest_idx] =
+            Some(NonZeroUsize::new((m.get_binary_scaled(level_idx) + 1).into()).unwrap());
+    }
+    shape
 }
 
 /// Converts a given global coordinate into block and within-block coordinates.
@@ -948,6 +992,37 @@ mod tests {
     use itertools::Itertools;
     use proptest::prelude::*;
     use smallvec::smallvec;
+
+    #[test]
+    fn test_block_shape() {
+        let db_shape = [4, 7]
+            .into_iter()
+            .map(|v| Some(v.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            block_shape(&[0, 0], &db_shape, |i, _| 2)
+                .collect_vec()
+                .as_slice(),
+            &[2, 2]
+        );
+        assert_eq!(
+            block_shape(&[1, 1], &db_shape, |i, _| 2)
+                .collect_vec()
+                .as_slice(),
+            &[2, 2]
+        );
+        assert_eq!(
+            block_shape(&[1, 3], &db_shape, |i, _| 2)
+                .collect_vec()
+                .as_slice(),
+            &[2, 1]
+        );
+    }
+
+    #[test]
+    fn test_block_shape_panics_on_oob() {
+        todo!();
+    }
 
     proptest! {
         #[test]

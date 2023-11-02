@@ -148,6 +148,10 @@ impl MemVec {
         self.0.is_empty()
     }
 
+    pub fn get_binary_scaled(&self, idx: usize) -> u8 {
+        self.0[idx]
+    }
+
     pub fn get_unscaled(&self, idx: usize) -> u64 {
         bit_length_inverse(self.0[idx].into())
     }
