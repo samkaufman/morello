@@ -11,8 +11,7 @@ use std::time::{Duration, Instant};
 use std::{iter, path, thread};
 
 use morello::common::{DimSize, Dtype};
-use morello::datadeps::{SpecKey, ToFromDependencyLatticeCoordinate};
-use morello::db::{DashmapDiskDatabase, Database};
+use morello::db::{DashmapDiskDatabase, Database, CURIOUS_SPEC};
 use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
@@ -173,6 +172,19 @@ where
                 while let Some(job) = worklist.pop_front() {
                     let spec = Spec(logical_spec.clone(), MemoryLimits::Standard(job));
                     let result = morello::search::top_down(db, &spec, 1);
+
+                    if format!("{}", logical_spec) == CURIOUS_SPEC {
+                        if result.0.is_empty() {
+                            log::debug!("searched for {} and got UNSAT", spec);
+                        } else {
+                            log::debug!(
+                                "searched for {} and got peak {}",
+                                spec,
+                                result.0[0].1.peaks
+                            );
+                        }
+                    }
+
                     if let [(_, only_result_cost)] = &result.0[..] {
                         worklist.extend(next_limits(&spec.1, &only_result_cost.peaks));
                     }
@@ -186,6 +198,8 @@ where
             stage_start.elapsed()
         );
         info!("Database stats: {}", db.stats_str());
+
+        // db.print_some_block::<X86Target>();
 
         last_stage_results_saved = false;
         if last_save_completion
@@ -341,6 +355,9 @@ fn logical_specs_to_compute(
             let mut task = vec![];
             for sp in LogicalSpec::<X86Target>::objects_in_grid_pt(&spec_key, &pt) {
                 if sp.is_canonical() {
+                    if format!("{}", sp) == CURIOUS_SPEC {
+                        println!("pushing task ({:?}): {}", sp.is_canonical(), sp);
+                    }
                     task.push(sp);
                 }
             }

@@ -567,6 +567,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         // TODO: This is expensive. Make an operand_shapes() method instead.
         let operands = self.parameters();
 
+        // TODO; Remove
+        let orig_str = format!("{}", self);
+
         match self {
             LogicalSpec::Primitive(
                 PrimitiveBasics {
