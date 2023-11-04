@@ -23,6 +23,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::iter::Iterator;
 use std::iter::{self, once};
+use std::marker::PhantomData;
 use std::mem;
 use std::panic;
 use std::{assert_eq, debug_assert_eq};
@@ -84,26 +85,19 @@ pub enum PrimitiveSpecType {
 #[derive(Debug)]
 pub struct TilingInference(pub Vec<(Tiling, SmallVec<[Option<u8>; 5]>)>);
 
-/// A [BiMap] which extends [LogicalSpecBimap] with memory limits dimensions.
+/// A [BiMap] which extends [LogicalSpecSurMap] with memory limits dimensions.
 ///
 /// Memory limits are represented identically in the codomain. They are not scaled logarithmically
 /// or inverted to be in data dependency order.
-pub struct SpecBimap<Tgt, A>
-where
-    Tgt: Target,
-    A: BiMap<Domain = TensorSpecAux<Tgt>>,
-{
-    pub logical_spec_bimap: LogicalSpecBimap<Tgt, A>,
+pub struct SpecSurMap<Tgt: Target, F, A, Aa> {
+    pub logical_spec_surmap: LogicalSpecSurMap<Tgt, F, A, Aa>,
     pub memory_limits_bimap: MemoryLimitsBimap<Tgt>,
 }
 
-pub struct LogicalSpecBimap<Tgt, A>
-where
-    Tgt: Target,
-    A: BiMap<Domain = TensorSpecAux<Tgt>>,
-{
+pub struct LogicalSpecSurMap<Tgt, F, A, Aa> {
     pub primitive_basics_bimap: PrimitiveBasicsBimap,
-    pub aux_bimap: A,
+    pub aux_surmap_fn: F,
+    marker: std::marker::PhantomData<(Tgt, A, Aa)>,
 }
 
 pub struct PrimitiveBasicsBimap {
@@ -622,7 +616,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     o.canonicalize();
                     o
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            "Parameters were not canonical after canonicalizing {}",
+            orig_str
         );
     }
 
@@ -1183,27 +1179,29 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
     }
 }
 
-impl<Tgt, A, Aa, Ab> BiMap for SpecBimap<Tgt, A>
+impl<Tgt, F, A, Aa, const N: usize> SurMap for SpecSurMap<Tgt, F, A, Aa>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
-    A: BiMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
+    F: Fn(&[DimSize], Dtype) -> A,
+    A: SurMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, [BimapInt; N])>,
+    A::DomainIter: 'static,
     Aa: Clone,
-    Ab: IntoIterator<Item = BimapInt> + for<'a> TryFrom<&'a [BimapInt]>,
 {
     type Domain = Spec<Tgt>;
-    type Codomain = <LogicalSpecBimap<Tgt, A> as SurMap>::Codomain;
+    type Codomain = <LogicalSpecSurMap<Tgt, F, A, Aa> as SurMap>::Codomain;
+    type DomainIter = Box<dyn Iterator<Item = Self::Domain>>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
-        let mut initial = BiMap::apply(&self.logical_spec_bimap, &t.0);
+        let mut initial = SurMap::apply(&self.logical_spec_surmap, &t.0);
         initial
             .1
             .extend(BiMap::apply(&self.memory_limits_bimap, &t.1));
         initial
     }
 
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let (left, right) = i;
         let (inner_right, memory_right) = right.split_at(i.1.len() - Tgt::levels().len());
 
@@ -1211,33 +1209,50 @@ where
             left.clone(),
             inner_right.iter().copied().map_into().collect(),
         );
-        Spec(
-            BiMap::apply_inverse(&self.logical_spec_bimap, &remaining_value),
-            BiMap::apply_inverse(&self.memory_limits_bimap, &memory_right.into()),
+        let m = BiMap::apply_inverse(&self.memory_limits_bimap, &memory_right.into());
+        Box::new(
+            self.logical_spec_surmap
+                .apply_inverse(&remaining_value)
+                .map(move |ls| Spec(ls, m.clone())),
         )
     }
 }
 
-impl<Tgt, A, Aa, Ab> BiMap for LogicalSpecBimap<Tgt, A>
+impl<Tgt, F, A, Aa> LogicalSpecSurMap<Tgt, F, A, Aa> {
+    pub fn new(primitive_basics_bimap: PrimitiveBasicsBimap, aux_surmap_fn: F) -> Self {
+        Self {
+            primitive_basics_bimap,
+            aux_surmap_fn,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<Tgt, F, A, Aa, const N: usize> SurMap for LogicalSpecSurMap<Tgt, F, A, Aa>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
-    A: BiMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, Ab)>,
+    F: Fn(&[DimSize], Dtype) -> A,
+    A: SurMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, [BimapInt; N])>,
+    A::DomainIter: 'static,
     Aa: Clone,
-    Ab: IntoIterator<Item = BimapInt> + for<'a> TryFrom<&'a [BimapInt]>, // TODO: Can't Vec be slice?
 {
     type Domain = LogicalSpec<Tgt>;
     type Codomain = ((SpecKey, SmallVec<[Aa; 3]>), SmallVec<[BimapInt; 10]>);
+    type DomainIter = Box<dyn Iterator<Item = Self::Domain>>;
 
     fn apply(&self, spec: &LogicalSpec<Tgt>) -> Self::Codomain {
         match spec {
             LogicalSpec::Primitive(basics, auxes, serial_only) => {
                 let (key, mut pt) = BiMap::apply(&self.primitive_basics_bimap, basics);
+                let dtype = key.dtype();
                 let aux_keys = auxes
                     .iter()
-                    .map(|tensor_aux| {
-                        let (aux_key, aux_pt) = self.aux_bimap.apply(tensor_aux);
+                    .zip(basics.parameter_shapes())
+                    .map(|(tensor_aux, tensor_shape)| {
+                        let aux_bimap = (self.aux_surmap_fn)(&tensor_shape, dtype);
+                        let (aux_key, aux_pt) = aux_bimap.apply(tensor_aux);
                         pt.extend(aux_pt);
                         aux_key
                     })
@@ -1249,28 +1264,39 @@ where
         }
     }
 
-    fn apply_inverse(&self, i: &Self::Codomain) -> LogicalSpec<Tgt> {
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let ((key, aux_keys), pt) = i;
-
+        let dtype = key.dtype();
         let operand_count = aux_keys.len();
+
+        let pt_without_serial = &pt[..pt.len() - 1];
         let (basics_pt, tensor_aux_pts) =
-            pt[..pt.len() - 1].split_at(pt.len() - (operand_count * 2) - 1);
+            pt_without_serial.split_at(pt.len() - (operand_count * N) - 1);
+        let serial = pt[pt.len() - 1] == 0;
 
         let primitive_basics = BiMap::apply_inverse(
             &self.primitive_basics_bimap,
             &(key.clone(), basics_pt.into()),
         );
-        let tensor_auxes = (0..operand_count)
-            .map(|i| {
-                let Ok(tap) = (&tensor_aux_pts[i * 2..(i + 1) * 2]).try_into() else {
-                    panic!("Couldn't reverse the TensorSpecAux pt.");
-                };
-                self.aux_bimap.apply_inverse(&(aux_keys[i].clone(), tap))
-            })
-            .collect();
-        let serial = pt[pt.len() - 1] == 0;
+        let parameter_shapes = primitive_basics.parameter_shapes();
 
-        LogicalSpec::Primitive(primitive_basics, tensor_auxes, serial)
+        Box::new(
+            (0..operand_count)
+                .map(move |i| {
+                    let Ok(tap) = (&tensor_aux_pts[i * N..(i + 1) * N]).try_into() else {
+                        panic!("Couldn't reverse the TensorSpecAux pt.");
+                    };
+                    let aux_surmap = (self.aux_surmap_fn)(&parameter_shapes[i], dtype);
+                    // TODO: Avoid collect, which is here to avoid needing the iter to be Clone
+                    aux_surmap
+                        .apply_inverse(&(aux_keys[i].clone(), tap))
+                        .collect::<Vec<_>>()
+                })
+                .multi_cartesian_product()
+                .map(move |tensor_auxes| {
+                    LogicalSpec::Primitive(primitive_basics.clone(), tensor_auxes, serial)
+                }),
+        )
     }
 }
 
@@ -1517,6 +1543,8 @@ mod tests {
     use super::*;
     use crate::imp::ImplNode;
     use crate::memorylimits::arb_memorylimits_ext;
+    use crate::scheduling_sugar::SchedulingSugar;
+    use crate::tensorspec::TensorSpecArbMaxShape;
     use crate::{
         imp::Impl,
         memorylimits::{MemVec, MemoryAllocation},
@@ -1579,6 +1607,69 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn test_canonicalizing_specs_canonicalizes_parameters(
+            logical_spec in any::<LogicalSpec<X86Target>>()
+        ) {
+            let mut logical_spec = logical_spec;
+            logical_spec.canonicalize();
+            assert!(logical_spec.parameters().iter().all(|p| {
+                let mut c = p.clone();
+                c.canonicalize();
+                p == &c
+            }));
+        }
+
+        #[test]
+        fn test_canonicalizing_move_tiled_to_one_canonicalizes_parameters(
+            logical_spec in
+                (1usize..=4)
+                    .prop_flat_map(|rank| (Just(rank), 0..rank))
+                    .prop_flat_map(|(rank, nonone_idx)| {
+                        (vec![1u32..=4; nonone_idx],
+                         2u32..=4,
+                         vec![1u32..=4; rank - nonone_idx - 1],
+                        any::<Dtype>())
+                    })
+                    .prop_flat_map(|(left, si, right, dtype)| {
+                        let shape =
+                            left.into_iter().chain(iter::once(si)).chain(right).collect::<Vec<_>>();
+                        let basics = PrimitiveBasics {
+                            typ: PrimitiveSpecType::Move,
+                            spec_shape: Shape::from(shape),
+                            dtype
+                        };
+                        let auxes_strategy = basics
+                            .parameter_shapes()
+                            .into_iter()
+                            .map(|s| any_with::<TensorSpecAux<X86Target>>(TensorSpecArbMaxShape(s)))
+                            .collect::<Vec<_>>();
+                        (Just(basics), auxes_strategy, any::<bool>())
+                    })
+                    .prop_map(|(basics, auxes, serial_only)| {
+                        LogicalSpec::Primitive(basics, auxes, serial_only)
+                    })
+        ) {
+            let spec = Spec(logical_spec, X86Target::max_mem());
+            let LogicalSpec::Primitive(PrimitiveBasics { spec_shape, ..}, _, _) = &spec.0 else {
+                unreachable!();
+            };
+            let tile_out_result = spec.tile_out(&vec![1; spec_shape.len()], false);
+            let ImplNode::SpecApp(child_spec_app) = &tile_out_result.children()[0] else {
+                panic!("First child was not a SpecApp; was: {:?}", tile_out_result.children()[0]);
+            };
+            let mut tiled_logical_spec = child_spec_app.0.0.clone();
+            tiled_logical_spec.canonicalize();
+            assert!(tiled_logical_spec.parameters().iter().all(|p| {
+                p.shape().iter().all(|&d| d == 1)
+            }));
+            assert!(tiled_logical_spec.parameters().iter().all(|p| {
+                let mut c = p.clone();
+                c.canonicalize();
+                p == &c
+            }));
+        }
+
         #[test]
         fn test_action_applies_everywhere_down_through_peak_memory(
             (spec, action, applied, lower_limit) in arb_spec_action_and_lower_limit::<X86Target>()

@@ -2,7 +2,7 @@ use crate::codegen::c_utils::VecType;
 use crate::common::DimSize;
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::{BiMap, SurMap};
+use crate::grid::general::BiMap;
 use crate::imp::kernels::KernelType;
 use crate::layout::{col_major, nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
@@ -34,7 +34,6 @@ pub enum CpuMemoryLevel {
     GL,
 }
 
-// TODO: Move into datadeps since this isn't very general.
 #[derive(Debug, Clone, Copy)]
 pub struct CpuMemoryLevelBimap;
 
@@ -266,7 +265,6 @@ impl BiMap for CpuMemoryLevelBimap {
     }
 }
 
-// TODO: Move into datadeps since this isn't very general.
 impl CanonicalBimap for CpuMemoryLevel {
     type Bimap = CpuMemoryLevelBimap;
 

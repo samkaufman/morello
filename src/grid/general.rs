@@ -24,6 +24,13 @@ pub trait IntBiMap: SurMap {
     fn apply_inverse(&self, i: BimapInt) -> <Self as IntBiMap>::Domain;
 }
 
+pub trait AsBimap: SurMap {
+    type Wrapper: BiMap<Domain = Self::Domain, Codomain = Self::Codomain>;
+    fn into_bimap(self) -> Self::Wrapper;
+}
+
+pub struct BimapEnforcer<T: SurMap>(T);
+
 impl<T: BiMap> SurMap for T {
     type Domain = <T as BiMap>::Domain;
     type Codomain = <T as BiMap>::Codomain;
@@ -48,5 +55,29 @@ impl<T: IntBiMap> BiMap for T {
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
         <Self as IntBiMap>::apply_inverse(self, *i)
+    }
+}
+
+impl<T: SurMap> AsBimap for T {
+    type Wrapper = BimapEnforcer<T>;
+
+    fn into_bimap(self) -> Self::Wrapper {
+        BimapEnforcer(self)
+    }
+}
+
+impl<T: SurMap> BiMap for BimapEnforcer<T> {
+    type Domain = <T as SurMap>::Domain;
+    type Codomain = <T as SurMap>::Codomain;
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        <T as SurMap>::apply(&self.0, t)
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
+        let mut i = <T as SurMap>::apply_inverse(&self.0, i);
+        let result = i.next().unwrap();
+        debug_assert!(i.next().is_none());
+        result
     }
 }

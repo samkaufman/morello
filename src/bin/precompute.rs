@@ -5,17 +5,21 @@ use clap::Parser;
 use log::{debug, info};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
-use smallvec::smallvec;
+use smallvec::{smallvec, SmallVec};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use std::{iter, path, thread};
 
 use morello::common::{DimSize, Dtype};
+use morello::datadeps::SpecKey;
 use morello::db::{DashmapDiskDatabase, Database, CURIOUS_SPEC};
+use morello::grid::general::SurMap;
 use morello::memorylimits::{MemVec, MemoryLimits};
-use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use morello::spec::{
+    LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
+};
 use morello::target::{CpuMemoryLevel, Target, X86Target};
-use morello::tensorspec::TensorSpecAux;
+use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
 use morello::utils::bit_length;
 
 #[cfg(not(target_env = "msvc"))]
@@ -334,16 +338,16 @@ fn next_limits<'a>(
 
 /// Yield an [Iterator] over all [LogicalSpec]s to compute, in dependency order.
 fn logical_specs_to_compute(
-    bound: &LogicalSpec<X86Target>,
+    bound_spec: &LogicalSpec<X86Target>,
 ) -> impl Iterator<Item = Vec<Vec<LogicalSpec<X86Target>>>> {
-    let Some((spec_key, bound_pt)) = bound.to_grid() else {
-        panic!("Could not map {:?} to grid", bound);
-    };
-    // TODO: Reintroduce a check like the following.
-    // debug_assert_eq!(
-    //     bound,
-    //     &Spec::<X86Target>::from_grid(&spec_key, &bound_pt, &inner_key)
-    // );
+    let surmap = LogicalSpecSurMap::new(
+        PrimitiveBasicsBimap {
+            binary_scale_shapes: true,
+        },
+        TensorSpecAuxSurMap::new,
+    );
+
+    let (spec_key, bound_pt) = SurMap::apply(&surmap, bound_spec);
     debug!(
         "Grid shape is {:?}",
         bound_pt.iter().map(|d| d + 1).collect::<Vec<_>>()
@@ -353,7 +357,8 @@ fn logical_specs_to_compute(
         let mut tasks = vec![];
         for pt in morello::utils::sum_seqs(&bound_pt, stage) {
             let mut task = vec![];
-            for sp in LogicalSpec::<X86Target>::objects_in_grid_pt(&spec_key, &pt) {
+            // TODO: Factor out below key
+            for sp in SurMap::apply_inverse(&surmap, &(spec_key.clone(), SmallVec::from_vec(pt))) {
                 if sp.is_canonical() {
                     if format!("{}", sp) == CURIOUS_SPEC {
                         println!("pushing task ({:?}): {}", sp.is_canonical(), sp);

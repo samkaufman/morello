@@ -1,13 +1,14 @@
+use crate::common::DimSize;
 use crate::cost::{Cost, MainCost};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::BiMap;
+use crate::grid::general::{AsBimap, BiMap};
 use crate::grid::linear::BimapInt;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::pprint::PrintableAux;
-use crate::spec::{LogicalSpecBimap, PrimitiveBasicsBimap, Spec, SpecBimap};
+use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
@@ -210,6 +211,24 @@ impl DashmapDiskDatabase {
             k,
         }
     }
+
+    fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    {
+        let surmap = SpecSurMap::<Tgt, _, _, _> {
+            logical_spec_surmap: LogicalSpecSurMap::new(
+                PrimitiveBasicsBimap {
+                    binary_scale_shapes: self.binary_scale_shapes,
+                },
+                |_: &[DimSize], _| TensorSpecAuxNonDepBimap::<Tgt>::default(),
+            ),
+            memory_limits_bimap: MemoryLimitsBimap::default(),
+        };
+        surmap.into_bimap()
+    }
 }
 
 impl<'a> Database<'a> for DashmapDiskDatabase
@@ -222,12 +241,12 @@ where
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        let (table_key, global_pt) = compute_db_key(query, self.binary_scale_shapes);
+        let (table_key, global_pt) = self.spec_bimap().apply(query);
         let (block_pt, _) = blockify_point(global_pt);
         let Some(group) = self.blocks.get(&(table_key, block_pt)) else {
             return None;
         };
-        group.get(query, self.binary_scale_shapes)
+        group.get(query, &self.spec_bimap())
     }
 
     fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
@@ -239,8 +258,8 @@ where
         #[cfg(debug_assertions)]
         let original_spec = spec.clone();
 
-        let (db_key, (bottom, top)) =
-            put_range_to_fill(&spec, &decisions, self.binary_scale_shapes);
+        let bimap = self.spec_bimap();
+        let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
         let spec_b = spec.clone();
 
         if format!("{}", spec.0) == CURIOUS_SPEC {
@@ -263,6 +282,7 @@ where
 
         for joined_row in blocks_iter {
             let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
+            let block_pt_b = block_pt.clone();
             let fill_whole_block = joined_row
                 .iter()
                 .enumerate()
@@ -607,15 +627,12 @@ impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
 }
 
 impl DbBlock {
-    fn get<Tgt: Target>(
-        &self,
-        query: &Spec<Tgt>,
-        binary_scale_shapes: bool,
-    ) -> Option<ActionCostVec>
+    fn get<Tgt: Target, B>(&self, query: &Spec<Tgt>, bimap: &B) -> Option<ActionCostVec>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
     {
         match self {
             DbBlock::Single(v) => {
@@ -623,7 +640,7 @@ impl DbBlock {
                 Some(v.clone())
             }
             DbBlock::Rle(e) => {
-                let (_, global_pt) = compute_db_key(query, binary_scale_shapes);
+                let (_, global_pt) = bimap.apply(query);
                 let (_, inner_pt) = blockify_point(global_pt);
                 let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
                 e.get(&inner_pt_usize)
@@ -896,25 +913,6 @@ where
     }
 }
 
-/// Convert a [Spec] into a database key, block coordinate, and within-block coordinate.
-fn compute_db_key<Tgt>(spec: &Spec<Tgt>, binary_scale_shapes: bool) -> DbKey
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-{
-    let bimap = SpecBimap {
-        logical_spec_bimap: LogicalSpecBimap {
-            primitive_basics_bimap: PrimitiveBasicsBimap {
-                binary_scale_shapes,
-            },
-            aux_bimap: TensorSpecAuxNonDepBimap::default(),
-        },
-        memory_limits_bimap: MemoryLimitsBimap::default(),
-    };
-    BiMap::apply(&bimap, spec)
-}
-
 fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
     if dim >= dim_count - 4 {
         4
@@ -981,27 +979,13 @@ fn blockify_point(
     (pt, inner_pt)
 }
 
-/// Iterate over all points in the hyper-rectangle between two points, inclusive.
-fn iter_between_points<const N: usize>(
-    bottom_pt: &[u64; N],
-    top_pt: &[u64; N],
-) -> impl Iterator<Item = [u64; N]> {
-    debug_assert!(bottom_pt.iter().zip(top_pt).all(|(b, t)| b <= t));
-    bottom_pt
-        .iter()
-        .zip(top_pt)
-        .map(|(b, t)| (*b..=*t))
-        .multi_cartesian_product()
-        .map(|v| v.try_into().unwrap())
-}
-
 /// Compute the bottom and top points (inclusive) to fill in a database table.
 ///
 /// Returned points are in global coordinates, not within-block coordinates.
-fn put_range_to_fill<Tgt>(
+fn put_range_to_fill<Tgt, B>(
+    bimap: &B,
     spec: &Spec<Tgt>,
     impls: &SmallVec<[(ActionIdx, Cost); 1]>,
-    binary_scale_shapes: bool,
 ) -> (
     (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
     (SmallVec<[BimapInt; 10]>, SmallVec<[BimapInt; 10]>),
@@ -1010,6 +994,7 @@ where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
 {
     // Compute the per-level maximum limits of the solutions. This lower bounds the range.
     let mut per_level_peaks = [0; LEVEL_COUNT];
@@ -1021,11 +1006,11 @@ where
 
     // Compute the complete upper and lower bounds from the given Spec and that Spec modified with
     // the peaks' bound (computed above).
-    let upper_inclusive = compute_db_key(spec, binary_scale_shapes);
+    let upper_inclusive = bimap.apply(spec);
     let lower_inclusive = {
         let mut lower_bound_spec = spec.clone();
         lower_bound_spec.1 = MemoryLimits::Standard(MemVec::new(per_level_peaks));
-        compute_db_key(&lower_bound_spec, binary_scale_shapes)
+        bimap.apply(&lower_bound_spec)
     };
 
     // TODO: This computes the non-memory dimensions of the key/coordinates twice. Avoid that.
@@ -1172,11 +1157,6 @@ mod tests {
                 .as_slice(),
             &[2, 1]
         );
-    }
-
-    #[test]
-    fn test_block_shape_panics_on_oob() {
-        todo!();
     }
 
     proptest! {
