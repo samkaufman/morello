@@ -133,8 +133,17 @@ impl Layout {
                     "Expected rank-{dim_count} tile"
                 );
 
-                // Fast path for breaking the innermost/strip dimension. This avoids calling
-                // expand_shape for, among other things, tiling to 1x...x1.
+                // If we're tiling to 1x…x1, then we'll return full contig. for row-major, not
+                // packed, since the caller is going to change the layout to row-major.
+                // TODO: This really tightly couples contig. and layout logic. Improve the
+                //    abstraction, perhaps by making contig. a property of Layout.
+                if tile_shape.iter().all(|&d| d == 1) {
+                    return row_major(*dim_count).contiguous_full();
+                }
+
+                // Contig. is zero if non-multiple breaking innermost/strip dimension. This avoids
+                // calling expand_shape for, among other things, tiling to 1x...x1. More
+                // importantly,
                 if tile_shape[usize::from(*strip_dim)] % *strip_size != 0 {
                     return 0;
                 }
