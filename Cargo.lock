@@ -1036,7 +1036,7 @@ checksum = "c08c74e62047bb2de4ff487b251e4a92e24f48745648451635cec7d591162d9f"
 [[package]]
 name = "rle_vec"
 version = "0.4.1"
-source = "git+https://github.com/samkaufman/rle_vec.git?branch=gapbuf#65bee1a1a39a199cb4555a1ad2f047a27ab65f7d"
+source = "git+https://github.com/samkaufman/rle_vec.git?branch=u32-runs#0a19605cf95cbc99db81be9096fd9075f0a9b5a3"
 dependencies = [
  "gapbuf",
  "serde",

@@ -47,9 +47,9 @@ impl<T> NDArray<T> {
 
 impl<T: Clone + Eq> NDArray<T> {
     pub fn new_with_value(shape: &[usize], value: T) -> Self {
-        let volume = shape.iter().product();
+        let volume = shape.iter().product::<usize>();
         let mut buffer = RleVec::new();
-        buffer.push_n(volume, value);
+        buffer.push_n(volume.try_into().unwrap(), value);
         Self::new_from_rlevec(shape, volume, buffer)
     }
 
