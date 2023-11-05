@@ -120,6 +120,7 @@ pub struct RleBlock {
     pub matches: Option<(NonZeroU32, Vec<usize>)>,
     shape: SmallVec<[usize; 10]>,
     volume: NonZeroU32,
+    infilled: bool,
 }
 
 // TODO: Storing Spec and usize is too expensive.
@@ -688,6 +689,7 @@ impl RleBlock {
                 .product::<u32>()
                 .try_into()
                 .unwrap(),
+            infilled: false,
         }
     }
 
@@ -736,6 +738,7 @@ impl RleBlock {
                 .product::<u32>()
                 .try_into()
                 .unwrap(),
+            infilled: false,
         }
     }
 
@@ -745,6 +748,8 @@ impl RleBlock {
         dim_ranges: &[Range<BimapInt>],
         value: &ActionCostVec,
     ) {
+        self.infilled = false;
+
         let mut new_m = None;
         if let Some((m, arbitrary_filled_pt)) = &self.matches {
             let m = *m;
@@ -774,6 +779,8 @@ impl RleBlock {
         dim_ranges: &[Range<BimapInt>],
         value: &ActionCostVec,
     ) -> u32 {
+        self.infilled = false;
+
         let shape = self.filled.shape();
         debug_assert_eq!(dim_ranges.len(), shape.len());
 
@@ -834,9 +841,12 @@ impl RleBlock {
     pub(crate) fn compact(&mut self) {
         self.filled.shrink_to_fit();
 
+        if !self.infilled {
         self.main_costs.infill_empties(&self.filled);
         self.peaks.infill_empties(&self.filled);
         self.depths_actions.infill_empties(&self.filled);
+            self.infilled = true;
+        }
 
         self.main_costs.shrink_to_fit();
         self.peaks.shrink_to_fit();
