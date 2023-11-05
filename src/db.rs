@@ -17,6 +17,7 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use divrem::DivRem;
 use itertools::Itertools;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
@@ -404,9 +405,9 @@ where
     }
 
     fn compact(&'a self) {
-        for mut block in self.blocks.iter_mut() {
+        self.blocks.par_iter_mut().for_each(|mut block| {
             block.compact();
-        }
+        });
     }
 
     fn max_k(&'a self) -> Option<usize> {
@@ -831,10 +832,15 @@ impl RleBlock {
     }
 
     pub(crate) fn compact(&mut self) {
-        self.filled.compact();
-        self.main_costs.compact();
-        self.peaks.compact();
-        self.depths_actions.compact();
+        self.filled.shrink_to_fit();
+
+        self.main_costs.infill_empties(&self.filled);
+        self.peaks.infill_empties(&self.filled);
+        self.depths_actions.infill_empties(&self.filled);
+
+        self.main_costs.shrink_to_fit();
+        self.peaks.shrink_to_fit();
+        self.depths_actions.shrink_to_fit();
     }
 }
 
@@ -1223,38 +1229,17 @@ mod tests {
         }
 
         #[test]
-        fn test_database_empty_outside_range_after_one_put(entry in arb_spec_and_decision::<X86Target>()) {
-            let spec_b = entry.0.clone();
-            let (spec, decisions) = entry;
-            let peaks = if let Some((_, c)) = decisions.first() {
-                c.peaks.clone()
-            } else {
-                MemVec::zero::<X86Target>()
-            };
+        fn test_database_empty_outside_range_after_one_put(
+            entry in arb_spec_and_decision::<X86Target>()
+        ) {
+            test_db_put(entry, false);
+        }
 
-            let db = DashmapDiskDatabase::new(None, false, 1);
-            db.put(spec, decisions.into());
-
-            let MemoryLimits::Standard(max_memory) = X86Target::max_mem();
-            let MemoryLimits::Standard(spec_limits) = &spec_b.1;
-            let filled_limits_iter = max_memory
-                .iter_binary_scaled()
-                .map(|l| {
-                    (0..=u32::from(l)).map(bit_length_inverse)
-                })
-                .multi_cartesian_product();
-            for limit_to_check in filled_limits_iter {
-                // Skip limits inside the put range
-                if limit_to_check.iter().zip(peaks.iter().zip(spec_limits.iter())).any(|(c, (p, l))| {
-                    c < &p || c > &l
-                }) {
-                    let spec_to_check = Spec(
-                        spec_b.0.clone(),
-                        MemoryLimits::Standard(MemVec::new(limit_to_check.try_into().unwrap())),
-                    );
-                    assert!(db.get(&spec_to_check).is_none());
-                }
-            }
+        #[test]
+        fn test_database_empty_outside_range_after_one_put_with_compact(
+            entry in arb_spec_and_decision::<X86Target>()
+        ) {
+            test_db_put(entry, true);
         }
 
         #[test]
@@ -1335,6 +1320,44 @@ mod tests {
                         )
                     }
                 }
+            }
+        }
+    }
+
+    fn test_db_put(entry: (Spec<X86Target>, Vec<(ActionIdx, Cost)>), compact_after_put: bool) {
+        let spec_b = entry.0.clone();
+        let (spec, decisions) = entry;
+        let peaks = if let Some((_, c)) = decisions.first() {
+            c.peaks.clone()
+        } else {
+            MemVec::zero::<X86Target>()
+        };
+
+        let db = DashmapDiskDatabase::new(None, false, 1);
+        db.put(spec, decisions.into());
+
+        if compact_after_put {
+            db.compact();
+        }
+
+        let MemoryLimits::Standard(max_memory) = X86Target::max_mem();
+        let MemoryLimits::Standard(spec_limits) = &spec_b.1;
+        let filled_limits_iter = max_memory
+            .iter_binary_scaled()
+            .map(|l| (0..=u32::from(l)).map(bit_length_inverse))
+            .multi_cartesian_product();
+        for limit_to_check in filled_limits_iter {
+            // Skip limits inside the put range
+            if limit_to_check
+                .iter()
+                .zip(peaks.iter().zip(spec_limits.iter()))
+                .any(|(c, (p, l))| c < &p || c > &l)
+            {
+                let spec_to_check = Spec(
+                    spec_b.0.clone(),
+                    MemoryLimits::Standard(MemVec::new(limit_to_check.try_into().unwrap())),
+                );
+                assert!(db.get(&spec_to_check).is_none());
             }
         }
     }

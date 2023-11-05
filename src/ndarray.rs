@@ -72,6 +72,43 @@ impl<T: Clone + Eq> NDArray<T> {
         let index = self.data_offset(pt);
         self.data.set(index, value);
     }
+
+    pub fn infill_empties(&mut self, filled: &NDArray<u8>) {
+        // TODO: This probably shouldn't be done for each array. Instead, do one pass over filled.
+        let (&k, main_shape) = self.shape().split_last().unwrap();
+        debug_assert_eq!(filled.shape(), main_shape);
+
+        let mut runs_iter = filled.data.runs();
+
+        // The first run should head forward.
+        let Some(first_run) = runs_iter.next() else {
+            return;
+        };
+        if *first_run.value == 0 {
+            // TODO: Following should be get_hint, not Index::index
+            let mapped_len = usize::try_from(first_run.len).unwrap() * k;
+            let next_value = self.data[mapped_len].clone();
+            rle_set_n(&mut self.data, 0, mapped_len, &next_value);
+        }
+
+        // Following runs will all be filled with the previous value.
+        let mut start = usize::try_from(first_run.len).unwrap();
+        for run in runs_iter {
+            if *run.value == 0 {
+                let prev_idx = (start - 1) * k;
+                let prev_value = self.data[prev_idx].clone();
+                rle_set_n(
+                    &mut self.data,
+                    start,
+                    usize::try_from(run.len).unwrap() * k,
+                    &prev_value,
+                );
+            }
+            start += usize::try_from(run.len).unwrap();
+        }
+
+        self.shrink_to_fit()
+    }
 }
 
 impl<T: Default + Clone + Eq> NDArray<T> {
@@ -153,7 +190,7 @@ impl<T> NDArray<T> {
         });
     }
 
-    pub fn compact(&mut self) {
+    pub fn shrink_to_fit(&mut self) {
         self.data.shrink_to_fit();
     }
 }
@@ -163,6 +200,14 @@ impl<T> Index<&[usize]> for NDArray<T> {
 
     fn index(&self, pt: &[usize]) -> &Self::Output {
         &self.data[self.data_offset(pt)]
+    }
+}
+
+// TODO: Integrate into rle_vec, but faster. Don't need the repeated calls to set_hint.
+fn rle_set_n<T: Clone + Eq>(rvec: &mut RleVec<T>, start: usize, len: usize, value: &T) {
+    let mut last_run_idx = 0;
+    for i in start..(start + len) {
+        last_run_idx = rvec.set_hint(i, value.clone(), last_run_idx);
     }
 }
 
