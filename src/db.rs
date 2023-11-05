@@ -37,7 +37,6 @@ type DbKey = (
 pub type ActionIdx = u16;
 
 const INITIAL_HASHMAP_CAPACITY: usize = 100_000_000;
-pub const CURIOUS_SPEC: &str = "Move((1×4, u32, L1, <1,0>, ua), (1×4, u32, VRF, c0, ua, 8))";
 
 pub trait Database<'a> {
     fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<ActionCostVec>
@@ -264,15 +263,6 @@ where
         let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
         let spec_b = spec.clone();
 
-        if format!("{}", spec.0) == CURIOUS_SPEC {
-            log::debug!(
-                "For Spec {}, filling from {:?} down to {:?}",
-                spec,
-                top,
-                bottom
-            );
-        }
-
         // Construct an iterator over all blocks to fill.
         let rank = bottom.len();
         let blocks_iter = bottom
@@ -295,9 +285,6 @@ where
                 // Note that this branch is never hit in the common case that block dims. are >= 1
                 // in non-memory limits dimensions and `put_range_to_fill` only extends across the
                 // memory limit dimensions.
-                if format!("{}", spec.0) == CURIOUS_SPEC {
-                    log::debug!("Filling whole block at {:?}", block_entry.key());
-                }
                 block_entry.insert(DbBlock::Single(ActionCostVec(decisions.clone())))
             } else {
                 match block_entry {
@@ -305,9 +292,6 @@ where
                         let r = existing_block.get_mut();
                         match r {
                             DbBlock::Single(v) if v.0 != decisions => {
-                                // Format `v.0` first we don't keep the mutable borrow of `v`.
-                                let value_str = format!("{:?}", v.0);
-
                                 let block_shape_usize =
                                     block_shape(&block_pt, &db_shape::<Tgt>(rank), block_size_dim)
                                         .map(|v| v.try_into().unwrap())
@@ -330,10 +314,9 @@ where
 
                                 log::warn!(
                                     "Updating a previously compressed block with new values. \
-                                        Tried to insert {:?} into block of {}. Block was ({:?}, \
+                                        Tried to insert {:?} into block. Block was ({:?}, \
                                         {:?}). Spec was {}.",
                                     decisions,
-                                    value_str,
                                     db_key,
                                     existing_block.key().1,
                                     spec
@@ -342,18 +325,6 @@ where
                             DbBlock::Single(_) => {}
                             DbBlock::Rle(e) => {
                                 // Examine the table before updating.
-                                if format!("{}", spec.0) == CURIOUS_SPEC {
-                                    let simple_bottom =
-                                        joined_row.iter().map(|(_, r)| r.start).collect::<Vec<_>>();
-                                    let simple_top =
-                                        joined_row.iter().map(|(_, r)| r.end).collect::<Vec<_>>();
-                                    log::debug!(
-                                        "Filling range of RLE {:?} with: {:?}, {:?}",
-                                        (db_key.clone(), block_pt_b),
-                                        simple_bottom,
-                                        simple_top
-                                    );
-                                }
                                 e.fill_region(
                                     self.k,
                                     &joined_row
@@ -842,9 +813,9 @@ impl RleBlock {
         self.filled.shrink_to_fit();
 
         if !self.infilled {
-        self.main_costs.infill_empties(&self.filled);
-        self.peaks.infill_empties(&self.filled);
-        self.depths_actions.infill_empties(&self.filled);
+            self.main_costs.infill_empties(&self.filled);
+            self.peaks.infill_empties(&self.filled);
+            self.depths_actions.infill_empties(&self.filled);
             self.infilled = true;
         }
 

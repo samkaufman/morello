@@ -1,10 +1,8 @@
-use std::collections::LinkedList;
-
 use itertools::Itertools;
 use smallvec::{smallvec, SmallVec};
 
 use crate::cost::Cost;
-use crate::db::{ActionIdx, Database, CURIOUS_SPEC};
+use crate::db::{ActionIdx, Database};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{visit_leaves, ImplNode};
@@ -42,14 +40,7 @@ where
     D: Database<'d>,
 {
     assert!(db.max_k().map_or(true, |k| k >= top_k));
-    top_down_inner(
-        db,
-        goal,
-        top_k,
-        0,
-        &ParentSummary::new(goal),
-        LinkedList::new(),
-    )
+    top_down_inner(db, goal, top_k, 0, &ParentSummary::new(goal))
 }
 
 fn top_down_inner<'d, Tgt, D>(
@@ -58,7 +49,6 @@ fn top_down_inner<'d, Tgt, D>(
     top_k: usize,
     depth: usize,
     parent_summary: &ParentSummary<Tgt>,
-    stack: LinkedList<String>,
 ) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64)
 where
     Tgt: Target,
@@ -73,17 +63,6 @@ where
     // First, check if the Spec is already in the database.
     if let Some(stored) = db.get(goal) {
         return (stored.0, 1, 0);
-    }
-
-    // TODO: Remove
-    let mut stack = stack.clone();
-    stack.push_front(format!("{}", goal));
-    if format!("{}", goal.0) == CURIOUS_SPEC {
-        log::debug!(
-            "top_down_inner missed on {}\n{}",
-            goal,
-            stack.iter().join("\n")
-        );
     }
 
     let mut hits = 0u64;
@@ -119,14 +98,8 @@ where
                 }
                 ParentSummaryTransitionResult::NewSummary(new_summary) => new_summary,
             };
-            let (child_results, subhits, submisses) = top_down_inner(
-                db,
-                nested_spec,
-                top_k,
-                depth + 1,
-                &summary_to_forward,
-                stack.clone(),
-            );
+            let (child_results, subhits, submisses) =
+                top_down_inner(db, nested_spec, top_k, depth + 1, &summary_to_forward);
             hits += subhits;
             misses += submisses;
             if child_results.as_ref().is_empty() {
@@ -155,13 +128,7 @@ where
 
     // Copy into the memo. table and return.
     let final_result = reducer.finalize();
-    if format!("{}", goal.0) == CURIOUS_SPEC {
-        log::debug!("About to put, for {}, the result {:?}", goal, final_result);
-    }
     db.put(goal.clone(), final_result.clone());
-    if format!("{}", goal.0) == CURIOUS_SPEC {
-        log::debug!("Immediately after put, got: {:?}", db.get(goal))
-    }
     (final_result, hits, misses)
 }
 

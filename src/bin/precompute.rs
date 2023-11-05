@@ -12,7 +12,7 @@ use std::{iter, path, thread};
 
 use morello::common::{DimSize, Dtype};
 use morello::datadeps::SpecKey;
-use morello::db::{DashmapDiskDatabase, Database, CURIOUS_SPEC};
+use morello::db::{DashmapDiskDatabase, Database};
 use morello::grid::general::SurMap;
 use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::spec::{
@@ -176,19 +176,6 @@ where
                 while let Some(job) = worklist.pop_front() {
                     let spec = Spec(logical_spec.clone(), MemoryLimits::Standard(job));
                     let result = morello::search::top_down(db, &spec, 1);
-
-                    if format!("{}", logical_spec) == CURIOUS_SPEC {
-                        if result.0.is_empty() {
-                            log::debug!("searched for {} and got UNSAT", spec);
-                        } else {
-                            log::debug!(
-                                "searched for {} and got peak {}",
-                                spec,
-                                result.0[0].1.peaks
-                            );
-                        }
-                    }
-
                     if let [(_, only_result_cost)] = &result.0[..] {
                         worklist.extend(next_limits(&spec.1, &only_result_cost.peaks));
                     }
@@ -360,9 +347,6 @@ fn logical_specs_to_compute(
             // TODO: Factor out below key
             for sp in SurMap::apply_inverse(&surmap, &(spec_key.clone(), SmallVec::from_vec(pt))) {
                 if sp.is_canonical() {
-                    if format!("{}", sp) == CURIOUS_SPEC {
-                        println!("pushing task ({:?}): {}", sp.is_canonical(), sp);
-                    }
                     task.push(sp);
                 }
             }
