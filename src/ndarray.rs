@@ -149,20 +149,15 @@ impl<T> NDArray<T> {
         dim_ranges: &[Range<u32>],
         value: &T,
         counting_value: &T,
-    ) -> u32
+    )
     where
         T: Clone + Eq + std::fmt::Debug,
     {
         debug_assert_ne!(value, counting_value);
-        let mut affected = 0;
         let mut last_run_idx = 0;
         iter_multidim_range(dim_ranges, &self.strides, |index, _| {
-            if &self.data[index] == counting_value {
-                affected += 1;
-            }
             last_run_idx = self.data.set_hint(index, value.clone(), last_run_idx);
         });
-        affected
     }
 
     pub fn fill_broadcast_1d<I>(&mut self, dim_ranges: &[Range<u32>], inner_slice_iter: I)

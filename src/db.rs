@@ -97,7 +97,6 @@ pub struct DashmapDiskDatabase {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub enum DbBlock {
-    Single(ActionCostVec),
     Rle(Box<RleBlock>),
 }
 
@@ -109,7 +108,6 @@ pub struct RleBlock {
     pub main_costs: crate::ndarray::NDArray<MainCost>,
     pub peaks: crate::ndarray::NDArray<MemVec>,
     pub depths_actions: crate::ndarray::NDArray<(u8, ActionIdx)>,
-    pub matches: Option<(NonZeroU32, Vec<usize>)>,
     shape: SmallVec<[usize; 10]>,
     volume: NonZeroU32,
     infilled: bool,
@@ -268,86 +266,40 @@ where
         for joined_row in blocks_iter {
             let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
             let block_pt_b = block_pt.clone();
-            let fill_whole_block = joined_row
-                .iter()
-                .enumerate()
-                .all(|(dim, (_, r))| r.len() == block_size_dim(dim, rank).try_into().unwrap());
 
             let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
-            if fill_whole_block {
-                // Note that this branch is never hit in the common case that block dims. are >= 1
-                // in non-memory limits dimensions and `put_range_to_fill` only extends across the
-                // memory limit dimensions.
-                block_entry.insert(DbBlock::Single(ActionCostVec(decisions.clone())))
-            } else {
-                match block_entry {
-                    Entry::Occupied(mut existing_block) => {
-                        let r = existing_block.get_mut();
-                        match r {
-                            DbBlock::Single(v) if v.0 != decisions => {
-                                let block_shape_usize =
-                                    block_shape(&block_pt, &db_shape::<Tgt>(rank), block_size_dim)
-                                        .map(|v| v.try_into().unwrap())
-                                        .collect::<Vec<_>>();
-
-                                *r = DbBlock::Rle(Box::new({
-                                    let mut new_expanded =
-                                        RleBlock::filled::<Tgt>(self.k, &block_shape_usize, v);
-                                    new_expanded.fill_region(
-                                        self.k,
-                                        &joined_row
-                                            .iter()
-                                            .map(|(_, r)| r.clone())
-                                            .collect::<Vec<_>>(),
-                                        &ActionCostVec(decisions.clone()),
-                                    );
-                                    debug_assert!(new_expanded.matches.is_none());
-                                    new_expanded
-                                }));
-
-                                log::warn!(
-                                    "Updating a previously compressed block with new values. \
-                                        Tried to insert {:?} into block. Block was ({:?}, \
-                                        {:?}). Spec was {}.",
-                                    decisions,
-                                    db_key,
-                                    existing_block.key().1,
-                                    spec
-                                );
-                            }
-                            DbBlock::Single(_) => {}
-                            DbBlock::Rle(e) => {
-                                // Examine the table before updating.
-                                e.fill_region(
-                                    self.k,
-                                    &joined_row
-                                        .iter()
-                                        .map(|(_, r)| r.clone())
-                                        .collect::<Vec<_>>(),
-                                    &ActionCostVec(decisions.clone()),
-                                );
-                                try_compress_block(r);
-                            }
+            match block_entry {
+                Entry::Occupied(mut existing_block) => {
+                    let r = existing_block.get_mut();
+                    match r {
+                        DbBlock::Rle(e) => {
+                            // Examine the table before updating.
+                            e.fill_region(
+                                self.k,
+                                &joined_row
+                                    .iter()
+                                    .map(|(_, r)| r.clone())
+                                    .collect::<Vec<_>>(),
+                                &ActionCostVec(decisions.clone()),
+                            );
                         }
-                        existing_block.into_ref()
-                    }
-                    Entry::Vacant(entry) => {
-                        let db_shape = db_shape::<Tgt>(rank);
-                        let bs = block_shape(&block_pt, &db_shape, block_size_dim);
-                        let block_shape_usize =
-                            bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
-                        entry.insert(DbBlock::Rle(Box::new(RleBlock::partially_filled::<Tgt>(
-                            self.k,
-                            &block_shape_usize,
-                            &joined_row
-                                .iter()
-                                .map(|(_, r)| r.clone())
-                                .collect::<Vec<_>>(),
-                            &ActionCostVec(decisions.clone()),
-                        ))))
                     }
                 }
-            };
+                Entry::Vacant(entry) => {
+                    let db_shape = db_shape::<Tgt>(rank);
+                    let bs = block_shape(&block_pt, &db_shape, block_size_dim);
+                    let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
+                    entry.insert(DbBlock::Rle(Box::new(RleBlock::partially_filled::<Tgt>(
+                        self.k,
+                        &block_shape_usize,
+                        &joined_row
+                            .iter()
+                            .map(|(_, r)| r.clone())
+                            .collect::<Vec<_>>(),
+                        &ActionCostVec(decisions.clone()),
+                    ))));
+                }
+            }
         }
     }
 
@@ -381,8 +333,6 @@ where
 
     fn stats_str(&self) -> String {
         let start = Instant::now();
-        let mut single_count = 0;
-        let mut single_or_empty_count = 0;
         let mut runs_filled = 0;
         let mut lens_filled = 0;
         let mut runs_main_costs = 0;
@@ -393,13 +343,7 @@ where
         let mut lens_depths_actions = 0;
         for block in &self.blocks {
             match block.value() {
-                DbBlock::Single(_) => {
-                    single_count += 1;
-                }
                 DbBlock::Rle(e) => {
-                    if e.matches.is_some() {
-                        single_or_empty_count += 1;
-                    }
                     runs_filled += e.filled.runs_len();
                     lens_filled += e.filled.len();
                     runs_main_costs += e.main_costs.runs_len();
@@ -413,12 +357,9 @@ where
         }
         let stat_duration = start.elapsed();
         format!(
-            "blocks={} single={} singleorempty={} \
-            runs_filled={} runs_main_costs={} runs_peaks={} runs_depthsactions={} \
+            "blocks={} runs_filled={} runs_main_costs={} runs_peaks={} runs_depthsactions={} \
             cr_filled={:.5} cr_main_costs={:.5} cr_peaks={:.5} cr_depthsactions={:.5} statms={}",
             self.blocks.len(),
-            single_count,
-            single_or_empty_count,
             runs_filled,
             runs_main_costs,
             runs_peaks,
@@ -478,10 +419,6 @@ impl DbBlock {
         B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
     {
         match self {
-            DbBlock::Single(v) => {
-                // TODO: Confirm that v is in bounds
-                Some(v.clone())
-            }
             DbBlock::Rle(e) => {
                 let (_, global_pt) = bimap.apply(query);
                 let (_, inner_pt) = blockify_point(global_pt);
@@ -496,14 +433,12 @@ impl DbBlock {
     /// This is a rough way to estimate memory consumption of the [DbBlock].
     pub fn storage_size(&self) -> u32 {
         match self {
-            DbBlock::Single(_) => 1,
             DbBlock::Rle(e) => e.volume.get(),
         }
     }
 
     pub fn compact(&mut self) {
         match self {
-            DbBlock::Single(_) => {}
             DbBlock::Rle(e) => {
                 e.compact();
             }
@@ -522,7 +457,6 @@ impl RleBlock {
             main_costs: crate::ndarray::NDArray::new(&shape_with_k),
             peaks: crate::ndarray::NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
             depths_actions: crate::ndarray::NDArray::new(&shape_with_k),
-            matches: None,
             shape: shape.into(),
             volume: shape
                 .iter()
@@ -540,47 +474,9 @@ impl RleBlock {
         dim_ranges: &[Range<BimapInt>],
         value: &ActionCostVec,
     ) -> Self {
-        let arbitrary_pt = dim_ranges
-            .iter()
-            .map(|rng| rng.start.try_into().unwrap())
-            .collect::<Vec<_>>();
         let mut e = Self::empty::<Tgt>(k, shape);
-        let empties_filled = e.fill_region_without_updating_match(k, dim_ranges, value);
-        e.matches = Some((empties_filled.try_into().unwrap(), arbitrary_pt));
+        e.fill_region_without_updating_match(k, dim_ranges, value);
         e
-    }
-
-    pub(crate) fn filled<Tgt: Target>(k: u8, shape: &[usize], value: &ActionCostVec) -> Self {
-        let mut shape_with_k = Vec::with_capacity(shape.len() + 1);
-        shape_with_k.extend_from_slice(shape);
-        shape_with_k.push(k.into());
-
-        RleBlock {
-            filled: crate::ndarray::NDArray::new_with_value(
-                shape,
-                u8::try_from(value.len()).unwrap() + 1,
-            ),
-            main_costs: broadcast_1d(&shape_with_k, value.0.iter().map(|(_, c)| c.main)),
-            peaks: broadcast_1d_with_padding(
-                &shape_with_k,
-                value.0.iter().map(|(_, c)| c.peaks.clone()),
-                MemVec::zero::<Tgt>,
-            ),
-            depths_actions: broadcast_1d(&shape_with_k, value.0.iter().map(|(a, c)| (c.depth, *a))),
-            matches: Some((
-                NonZeroU32::new(shape.iter().map(|&d| u32::try_from(d).unwrap()).product())
-                    .unwrap(),
-                vec![0; shape.len()],
-            )),
-            shape: shape.into(),
-            volume: shape
-                .iter()
-                .map(|&s| u32::try_from(s).unwrap())
-                .product::<u32>()
-                .try_into()
-                .unwrap(),
-            infilled: false,
-        }
     }
 
     pub(crate) fn fill_region(
@@ -590,28 +486,7 @@ impl RleBlock {
         value: &ActionCostVec,
     ) {
         self.infilled = false;
-
-        let mut new_m = None;
-        if let Some((m, arbitrary_filled_pt)) = &self.matches {
-            let m = *m;
-            let inserting_mismatched_value =
-                self.get(arbitrary_filled_pt).as_ref().unwrap() != value;
-
-            let empties_filled = self.fill_region_without_updating_match(k, dim_ranges, value);
-
-            if inserting_mismatched_value {
-                self.matches = None;
-            } else {
-                new_m = Some(m.checked_add(empties_filled).unwrap());
-            }
-        } else {
-            self.fill_region_without_updating_match(k, dim_ranges, value);
-        }
-
-        if let Some(new_m_val) = new_m {
-            let old_m_ref = &mut self.matches.as_mut().unwrap().0;
-            *old_m_ref = new_m_val;
-        }
+        self.fill_region_without_updating_match(k, dim_ranges, value);
     }
 
     fn fill_region_without_updating_match(
@@ -619,7 +494,7 @@ impl RleBlock {
         k: u8,
         dim_ranges: &[Range<BimapInt>],
         value: &ActionCostVec,
-    ) -> u32 {
+    ) {
         self.infilled = false;
 
         let shape = self.filled.shape();
@@ -629,27 +504,14 @@ impl RleBlock {
         shape_with_k.extend_from_slice(shape);
         shape_with_k.push(k.into());
 
-        let empties_filled = self.filled.fill_region_counting(
-            dim_ranges,
-            &(u8::try_from(value.len()).unwrap() + 1),
-            &0,
-        );
+        self.filled
+            .fill_region_counting(dim_ranges, &(u8::try_from(value.len()).unwrap() + 1), &0);
         self.main_costs
             .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| c.main));
         self.peaks
             .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| c.peaks.clone()));
         self.depths_actions
             .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(a, c)| (c.depth, *a)));
-
-        empties_filled
-    }
-
-    /// Returns an arbitrary value from the block, if any.  
-    pub(crate) fn get_any(&self) -> Option<ActionCostVec> {
-        let Some(arbitrary_index) = self.filled.find_index(|&v| v != 0) else {
-            return None;
-        };
-        self.get(&arbitrary_index)
     }
 
     pub(crate) fn get(&self, pt: &[usize]) -> Option<ActionCostVec> {
@@ -727,29 +589,6 @@ impl AsRef<SmallVec<[(ActionIdx, Cost); 1]>> for ActionCostVec {
     fn as_ref(&self) -> &SmallVec<[(ActionIdx, Cost); 1]> {
         self.deref()
     }
-}
-
-fn try_compress_block(block: &mut DbBlock) {
-    let DbBlock::Rle(expanded) = block else {
-        return;
-    };
-    let RleBlock {
-        matches: Some((m, _)),
-        volume,
-        ..
-    } = expanded.as_mut()
-    else {
-        return;
-    };
-
-    // TODO: Instead, precompute block volume as MAX_BLOCK_VOLUME
-    if m != volume {
-        return;
-    }
-
-    // log::debug!("Compressing block of size {}", block_volume);
-    let new_value = DbBlock::Single(expanded.get_any().unwrap());
-    *block = new_value;
 }
 
 fn construct_impl<'a, Tgt, D>(db: &'a D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
@@ -944,37 +783,6 @@ pub fn iter_blocks_in_single_dim_range(
         ((block_bottom + 1)..block_top_full).map(move |block_idx| (block_idx, 0..block_dim_size));
 
     prefix.into_iter().chain(full_blocks_iter).chain(suffix)
-}
-
-fn broadcast_1d<T: Default + Clone + Eq>(
-    shape: &[usize],
-    inner_dim_iter: impl Iterator<Item = T>,
-) -> crate::ndarray::NDArray<T> {
-    broadcast_1d_with_padding(shape, inner_dim_iter, Default::default)
-}
-
-fn broadcast_1d_with_padding<T, F>(
-    shape: &[usize],
-    inner_dim_iter: impl Iterator<Item = T>,
-    pad_value_fn: F,
-) -> crate::ndarray::NDArray<T>
-where
-    T: Clone + Eq,
-    F: FnMut() -> T,
-{
-    let k = *shape.last().unwrap();
-
-    let mut inner_dim_vec = Vec::with_capacity(k);
-    inner_dim_vec.extend(inner_dim_iter);
-    debug_assert!(inner_dim_vec.len() <= k);
-    inner_dim_vec.resize_with(k, pad_value_fn);
-
-    let v = shape.iter().product();
-
-    crate::ndarray::NDArray::new_from_buffer(
-        shape,
-        inner_dim_vec.iter().cycle().take(v).cloned().collect(),
-    )
 }
 
 #[cfg(test)]
