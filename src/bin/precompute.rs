@@ -190,8 +190,6 @@ where
         );
         info!("Database stats: {}", db.stats_str());
 
-        // db.print_some_block::<X86Target>();
-
         last_stage_results_saved = false;
         if last_save_completion
             .map(|t| t.elapsed() >= DB_SAVE_PERIOD)
