@@ -1356,7 +1356,7 @@ impl BiMap for PrimitiveBasicsBimap {
                     dtype: *dtype,
                 }
             }
-            SpecKey::Move { dtype } => {
+            SpecKey::Move { dtype } | SpecKey::Zero { dtype } => {
                 let unshifted_shape = v.iter().map(|&d| {
                     if self.binary_scale_shapes {
                         DimSize::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
@@ -1364,13 +1364,17 @@ impl BiMap for PrimitiveBasicsBimap {
                         d + 1
                     }
                 });
+                let typ = if matches!(key, SpecKey::Move { .. }) {
+                    PrimitiveSpecType::Move
+                } else {
+                    PrimitiveSpecType::Zero
+                };
                 PrimitiveBasics {
-                    typ: PrimitiveSpecType::Move,
+                    typ,
                     spec_shape: unshifted_shape.collect(),
                     dtype: *dtype,
                 }
             }
-            SpecKey::Zero { dtype } => todo!(),
         };
         basics
     }
