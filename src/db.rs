@@ -923,7 +923,7 @@ fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
     if dim >= dim_count - 4 {
         4
     } else {
-        2
+        3
     }
 }
 
