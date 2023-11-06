@@ -1345,11 +1345,13 @@ impl BiMap for PrimitiveBasicsBimap {
                     _ => unreachable!(),
                 };
                 let spec_shape = v.iter().skip(1);
-                let spec_shape = if self.binary_scale_shapes {
-                    todo!()
-                } else {
-                    spec_shape.map(|d| d + 1)
-                };
+                let spec_shape = spec_shape.map(|&d| {
+                    if self.binary_scale_shapes {
+                        DimSize::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
+                    } else {
+                        d + 1
+                    }
+                });
                 PrimitiveBasics {
                     typ,
                     spec_shape: spec_shape.collect(),
