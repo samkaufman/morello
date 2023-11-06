@@ -88,7 +88,8 @@ impl<T: Clone + Eq> NDArray<T> {
             // TODO: Following should be get_hint, not Index::index
             let mapped_len = usize::try_from(first_run.len).unwrap() * k;
             let next_value = self.data[mapped_len].clone();
-            rle_set_n(&mut self.data, 0, mapped_len, &next_value);
+            self.data
+                .set_range(0, mapped_len.try_into().unwrap(), next_value);
         }
 
         // Following runs will all be filled with the previous value.
@@ -97,11 +98,10 @@ impl<T: Clone + Eq> NDArray<T> {
             if *run.value == 0 {
                 let prev_idx = (start - 1) * k;
                 let prev_value = self.data[prev_idx].clone();
-                rle_set_n(
-                    &mut self.data,
-                    start,
-                    usize::try_from(run.len).unwrap() * k,
-                    &prev_value,
+                self.data.set_range(
+                    start.try_into().unwrap(),
+                    run.len * u32::try_from(k).unwrap(),
+                    prev_value,
                 );
             }
             start += usize::try_from(run.len).unwrap();
@@ -144,34 +144,69 @@ impl<T> NDArray<T> {
         self.data.len()
     }
 
-    pub fn fill_region_counting(
-        &mut self,
-        dim_ranges: &[Range<u32>],
-        value: &T,
-        counting_value: &T,
-    )
+    pub fn fill_region(&mut self, dim_ranges: &[Range<u32>], value: &T)
     where
-        T: Clone + Eq + std::fmt::Debug,
+        T: Clone + Eq,
     {
-        debug_assert_ne!(value, counting_value);
-        let mut last_run_idx = 0;
-        iter_multidim_range(dim_ranges, &self.strides, |index, _| {
-            last_run_idx = self.data.set_hint(index, value.clone(), last_run_idx);
-        });
+        // Figure out the volume of contiguous inner tile.
+        let mut prefix_size = self.shape.len();
+        let mut step_size: u32 = 1;
+        for (&sh, dr) in self.shape().iter().zip(dim_ranges).rev() {
+            if sh != dr.len() {
+                break;
+            }
+            step_size *= u32::try_from(sh).unwrap();
+            prefix_size -= 1;
+        }
+
+        if prefix_size > 0 {
+            let next_rng = &dim_ranges[prefix_size - 1];
+            let offset = next_rng.start * step_size;
+            step_size *= next_rng.end - next_rng.start;
+
+            iter_multidim_range(
+                &dim_ranges[..(prefix_size - 1)],
+                &self.strides[..(prefix_size - 1)],
+                |index, _| {
+                    self.data.set_range(
+                        u32::try_from(index).unwrap() + offset,
+                        step_size,
+                        value.clone(),
+                    );
+                },
+            );
+        } else {
+            todo!(
+                "Fill all {} entries of this {:?} NDArray.",
+                step_size,
+                self.shape()
+            );
+        }
     }
 
-    pub fn fill_broadcast_1d<I>(&mut self, dim_ranges: &[Range<u32>], inner_slice_iter: I)
+    pub fn fill_broadcast_1d<I>(&mut self, dim_ranges: &[Range<u32>], mut inner_slice_iter: I)
     where
         T: Clone + Eq,
         I: Clone + Iterator<Item = T>,
     {
-        let inner_slice_iter = inner_slice_iter.fuse();
-
+        // Update dim_ranges with a Range for the k dimension, which will be (partially) filled with
+        // repeated copies out of inner_slice_iter.
+        let k = u32::try_from(self.shape[self.shape.len() - 1]).unwrap();
         let mut dim_ranges_ext = Vec::with_capacity(dim_ranges.len() + 1);
         dim_ranges_ext.extend_from_slice(dim_ranges);
-        dim_ranges_ext.push(0..self.shape[self.shape.len() - 1].try_into().unwrap());
+        dim_ranges_ext.push(0..k);
 
-        let k = u32::try_from(self.shape[self.shape.len() - 1]).unwrap();
+        // TODO: If k = 1, we'll use the faster implementation provided by `fill_region_counting`.
+        // If may faster to always use this implementation, even when k > 1, which we could
+        // accomplish by moving the k dimension to the front of the shape.
+        if k == 1 {
+            if let Some(single_value) = inner_slice_iter.next() {
+                self.fill_region(&dim_ranges_ext, &single_value);
+            }
+            return;
+        }
+
+        let inner_slice_iter = inner_slice_iter.fuse();
         let mut slice_iter = inner_slice_iter.clone();
         let mut last_run_idx = 0;
         iter_multidim_range(&dim_ranges_ext, &self.strides, |index, pt| {
@@ -195,14 +230,6 @@ impl<T> Index<&[usize]> for NDArray<T> {
 
     fn index(&self, pt: &[usize]) -> &Self::Output {
         &self.data[self.data_offset(pt)]
-    }
-}
-
-// TODO: Integrate into rle_vec, but faster. Don't need the repeated calls to set_hint.
-fn rle_set_n<T: Clone + Eq>(rvec: &mut RleVec<T>, start: usize, len: usize, value: &T) {
-    let mut last_run_idx = 0;
-    for i in start..(start + len) {
-        last_run_idx = rvec.set_hint(i, value.clone(), last_run_idx);
     }
 }
 
