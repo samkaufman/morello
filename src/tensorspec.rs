@@ -34,6 +34,7 @@ pub struct TensorSpecAux<Tgt: Target> {
 
 pub struct TensorSpecAuxSurMap<Tgt: Target> {
     tensor_shape: SmallVec<[DimSize; 3]>, // TODO: Make into &'a [DimSize]
+    tensor_dtype: Dtype,
     phantom: std::marker::PhantomData<Tgt>,
 }
 
@@ -348,6 +349,7 @@ impl<Tgt: Target> TensorSpecAuxSurMap<Tgt> {
         debug_assert!(!tensor_shape.is_empty());
         Self {
             tensor_shape: tensor_shape.into(),
+            tensor_dtype,
             phantom: std::marker::PhantomData,
         }
     }
@@ -370,11 +372,11 @@ where
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let ((), [level_int]) = i;
         let level = BiMap::apply_inverse(&Tgt::Level::bimap(), &(*level_int).try_into().unwrap());
+        let dtype_bytes = u32::from(self.tensor_dtype.size());
         let mut vector_options = level
             .vector_bytes()
             .iter()
-            .copied()
-            .map(Some)
+            .map(|&vb| Some(vb / dtype_bytes))
             .collect::<Vec<_>>();
         if vector_options.is_empty() {
             vector_options.push(None);
