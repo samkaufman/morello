@@ -14,6 +14,6 @@ impl OpaqueSymbol {
     #![allow(clippy::new_without_default)]
 
     pub fn new() -> Self {
-        Self(OPAQUE_SYMBOL_NEXT_ID.fetch_add(1, atomic::Ordering::SeqCst))
+        Self(OPAQUE_SYMBOL_NEXT_ID.fetch_add(1, atomic::Ordering::Relaxed))
     }
 }
