@@ -656,7 +656,7 @@ fn blockify_point(
     mut pt: SmallVec<[BimapInt; 10]>,
 ) -> (SmallVec<[BimapInt; 10]>, SmallVec<[u8; 10]>) {
     let rank = pt.len();
-    let mut inner_pt = SmallVec::new();
+    let mut inner_pt = SmallVec::with_capacity(rank);
     for (i, d) in pt.iter_mut().enumerate() {
         let (outer, inner) = db_key_scale(i, *d, rank);
         *d = outer;

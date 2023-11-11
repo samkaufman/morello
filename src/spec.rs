@@ -924,7 +924,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     fn increment_dims_axes(subs: &[SmallVec<[u8; 4]>], inc: &mut u8) -> Vec<SmallVec<[u8; 4]>> {
         let mut result = Vec::new();
         for dims in subs {
-            let mut subresult = SmallVec::new();
+            let mut subresult = SmallVec::with_capacity(dims.len());
             for &d in dims {
                 *inc = (*inc).max(d);
                 subresult.push(d + *inc);
@@ -941,7 +941,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     ) -> Vec<SmallVec<[u8; 4]>> {
         let mut result = Vec::new();
         for dims in source {
-            let mut subresult = SmallVec::new();
+            let mut subresult = SmallVec::with_capacity(dims.len());
             for &d in dims {
                 subresult.push(*substitutions.get(&d).unwrap_or(&d));
             }
