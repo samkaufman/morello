@@ -169,7 +169,7 @@ where
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
                     let spec = Spec(logical_spec.clone(), MemoryLimits::Standard(job));
-                    let result = morello::search::top_down(db, &spec, 1);
+                    let result = morello::search::top_down(db, &spec, 1, false);
                     if let [(_, only_result_cost)] = &result.0[..] {
                         worklist.extend(next_limits(&spec.1, &only_result_cost.peaks));
                     }

@@ -229,7 +229,7 @@ where
     let spec = Spec(logical_spec, Tgt::max_mem());
 
     let start_time = std::time::Instant::now();
-    let (_, hits, misses) = morello::search::top_down(db, &spec, K.into());
+    let (_, hits, misses) = morello::search::top_down(db, &spec, K.into(), true);
     info!("top_down took {:?}", start_time.elapsed());
     info!(
         "top_down missed {} times ({:.2}% of {})",

@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use smallvec::{smallvec, SmallVec};
 
 use crate::cost::Cost;
@@ -32,23 +33,40 @@ pub fn top_down<'d, Tgt, D>(
     db: &'d D,
     goal: &Spec<Tgt>,
     top_k: usize,
+    parallel: bool,
 ) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64)
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    D: Database<'d>,
+    D: Database<'d> + Send + Sync,
 {
     assert!(db.max_k().map_or(true, |k| k >= top_k));
-    top_down_inner(db, goal, top_k, 0, &ParentSummary::new(goal))
+
+    if !parallel {
+        return top_down_inner(db, goal, top_k, &ParentSummary::new(goal), 0, 1);
+    }
+
+    let thread_count = rayon::current_num_threads();
+    let tasks = (0..thread_count)
+        .zip(std::iter::repeat(goal.clone()))
+        .collect::<Vec<_>>();
+    tasks
+        .into_par_iter()
+        .map(|(i, g)| top_down_inner(db, &g, top_k, &ParentSummary::new(&g), i, thread_count))
+        .take(1)
+        .collect::<Vec<_>>()
+        .pop()
+        .unwrap()
 }
 
 fn top_down_inner<'d, Tgt, D>(
     db: &'d D,
     goal: &Spec<Tgt>,
     top_k: usize,
-    depth: usize,
     parent_summary: &ParentSummary<Tgt>,
+    thread_idx: usize,
+    thread_count: usize,
 ) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64)
 where
     Tgt: Target,
@@ -71,7 +89,10 @@ where
     // Enumerate action applications, computing their costs from their childrens' costs.
     let mut reducer = ImplReducer::new(top_k);
 
-    for (action_idx, action) in goal.0.actions().into_iter().enumerate() {
+    let all_actions = goal.0.actions().into_iter().collect::<Vec<_>>();
+    let initial_skip = thread_idx * (all_actions.len() / thread_count);
+    for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
+        let action = &all_actions[action_idx];
         let Ok(partial_impl) = action.apply(goal) else {
             continue;
         };
@@ -98,8 +119,14 @@ where
                 }
                 ParentSummaryTransitionResult::NewSummary(new_summary) => new_summary,
             };
-            let (child_results, subhits, submisses) =
-                top_down_inner(db, nested_spec, top_k, depth + 1, &summary_to_forward);
+            let (child_results, subhits, submisses) = top_down_inner(
+                db,
+                nested_spec,
+                top_k,
+                &summary_to_forward,
+                thread_idx,
+                thread_count,
+            );
             hits += subhits;
             misses += submisses;
             if child_results.as_ref().is_empty() {
@@ -268,14 +295,14 @@ mod tests {
             let db = DashmapDiskDatabase::new(None, false, 1);
 
             // Solve the first, lower Spec.
-            let (lower_result_vec, _, _) = top_down(&db, &spec, 1);
+            let (lower_result_vec, _, _) = top_down(&db, &spec, 1, false);
 
             // If the lower spec can't be solved, then there is no way for the raised Spec to have
             // a worse solution, so we can return here.
             if let Some((_, lower_cost)) = lower_result_vec.first() {
                 // Check that the raised result has no lower cost and does not move from being
                 // possible to impossible.
-                let (raised_result, _, _) = top_down(&db, &raised_spec, 1);
+                let (raised_result, _, _) = top_down(&db, &raised_spec, 1, false);
                 let (_, raised_cost) = raised_result
                     .first()
                     .expect("raised result should be possible");
