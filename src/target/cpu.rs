@@ -57,10 +57,12 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn levels() -> [Self::Level; LEVEL_COUNT] {
-        enum_iterator::all::<Self::Level>()
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
+        [
+            CpuMemoryLevel::RF,
+            CpuMemoryLevel::VRF,
+            CpuMemoryLevel::L1,
+            CpuMemoryLevel::GL,
+        ]
     }
 
     fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level> {

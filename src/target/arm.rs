@@ -52,3 +52,16 @@ impl CpuTarget for ArmTarget {
         &ARM_VEC_TYPES
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ArmTarget;
+    use crate::target::Target;
+
+    #[test]
+    fn test_arm_levels_equals_all_enum_cases() {
+        let enum_levels = enum_iterator::all::<<ArmTarget as Target>::Level>().collect::<Vec<_>>();
+        let listed_levels = ArmTarget::levels();
+        assert_eq!(&enum_levels, &listed_levels);
+    }
+}

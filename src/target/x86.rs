@@ -52,3 +52,16 @@ impl CpuTarget for X86Target {
         &X86_VEC_TYPES
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::X86Target;
+    use crate::target::Target;
+
+    #[test]
+    fn test_x86_levels_equals_all_enum_cases() {
+        let enum_levels = enum_iterator::all::<<X86Target as Target>::Level>().collect::<Vec<_>>();
+        let listed_levels = X86Target::levels();
+        assert_eq!(&enum_levels, &listed_levels);
+    }
+}
