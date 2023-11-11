@@ -227,12 +227,13 @@ where
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        let (table_key, global_pt) = self.spec_bimap().apply(query);
-        let (block_pt, _) = blockify_point(global_pt);
+        let bimap = self.spec_bimap();
+        let (table_key, global_pt) = bimap.apply(query);
+        let (block_pt, inner_pt) = blockify_point(global_pt);
         let Some(group) = self.blocks.get(&(table_key, block_pt)) else {
             return None;
         };
-        group.get(query, &self.spec_bimap())
+        group.get(&inner_pt)
     }
 
     fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
@@ -405,18 +406,13 @@ impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
 }
 
 impl DbBlock {
-    fn get<Tgt: Target, B>(&self, query: &Spec<Tgt>, bimap: &B) -> Option<ActionCostVec>
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-        B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
-    {
+    fn get(&self, inner_pt: &[u8]) -> Option<ActionCostVec> {
         match self {
             DbBlock::Rle(e) => {
-                let (_, global_pt) = bimap.apply(query);
-                let (_, inner_pt) = blockify_point(global_pt);
-                let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
+                let inner_pt_usize = inner_pt
+                    .iter()
+                    .map(|v| *v as usize)
+                    .collect::<SmallVec<[_; 10]>>();
                 e.get(&inner_pt_usize)
             }
         }
