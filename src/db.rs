@@ -36,8 +36,6 @@ type DbKey = (
 );
 pub type ActionIdx = u16;
 
-const INITIAL_HASHMAP_CAPACITY: usize = 100_000_000;
-
 pub trait Database<'a> {
     fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<ActionCostVec>
     where
@@ -158,18 +156,14 @@ impl DashmapDiskDatabase {
         Self::new_with_dashmap_constructor(file_path, binary_scale_shapes, k, &DashMap::new)
     }
 
-    pub fn new_with_shard_count(
+    pub fn with_capacity(
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
-        shard_count: usize,
         k: u8,
+        capacity: usize,
     ) -> Self {
         Self::new_with_dashmap_constructor(file_path, binary_scale_shapes, k, &|| {
-            DashMap::with_capacity_and_hasher_and_shard_amount(
-                INITIAL_HASHMAP_CAPACITY,
-                RandomState::default(),
-                shard_count,
-            )
+            DashMap::with_capacity(capacity)
         })
     }
 
