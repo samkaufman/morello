@@ -51,10 +51,11 @@ where
     let tasks = (0..thread_count)
         .zip(std::iter::repeat(goal.clone()))
         .collect::<Vec<_>>();
+    // Collect all and take the result from the first call so that we get
+    // deterministic results.
     tasks
         .into_par_iter()
         .map(|(i, g)| top_down_inner(db, &g, top_k, &ParentSummary::new(&g), i, thread_count))
-        .take(1)
         .collect::<Vec<_>>()
         .pop()
         .unwrap()
@@ -90,7 +91,7 @@ where
     let mut reducer = ImplReducer::new(top_k);
 
     let all_actions = goal.0.actions().into_iter().collect::<Vec<_>>();
-    let initial_skip = thread_idx * (all_actions.len() / thread_count);
+    let initial_skip = thread_idx * all_actions.len() / thread_count;
     for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
         let action = &all_actions[action_idx];
         let Ok(partial_impl) = action.apply(goal) else {
