@@ -201,7 +201,8 @@ impl MemoryLevel for CpuMemoryLevel {
 
     fn vector_bytes(&self) -> &'static [u32] {
         match &self {
-            CpuMemoryLevel::VRF => &[16, 32],
+            // CpuMemoryLevel::VRF => &[16, 32],
+            CpuMemoryLevel::VRF => &[16],
             _ => &[],
         }
     }
