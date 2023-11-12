@@ -108,7 +108,6 @@ pub struct RleBlock {
     pub depths_actions: crate::ndarray::NDArray<(u8, ActionIdx)>,
     shape: SmallVec<[usize; 10]>,
     volume: NonZeroU32,
-    infilled: bool,
 }
 
 // TODO: Storing Spec and usize is too expensive.
@@ -454,7 +453,6 @@ impl RleBlock {
                 .product::<u32>()
                 .try_into()
                 .unwrap(),
-            infilled: false,
         }
     }
 
@@ -475,7 +473,6 @@ impl RleBlock {
         dim_ranges: &[Range<BimapInt>],
         value: &ActionCostVec,
     ) {
-        self.infilled = false;
         self.fill_region_without_updating_match(k, dim_ranges, value);
     }
 
@@ -485,8 +482,6 @@ impl RleBlock {
         dim_ranges: &[Range<BimapInt>],
         value: &ActionCostVec,
     ) {
-        self.infilled = false;
-
         let shape = self.filled.shape();
         debug_assert_eq!(dim_ranges.len(), shape.len());
 
@@ -496,12 +491,21 @@ impl RleBlock {
 
         self.filled
             .fill_region(dim_ranges, &(u8::try_from(value.len()).unwrap() + 1));
-        self.main_costs
-            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| c.main));
-        self.peaks
-            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(_, c)| c.peaks.clone()));
-        self.depths_actions
-            .fill_broadcast_1d(dim_ranges, value.0.iter().map(|(a, c)| (c.depth, *a)));
+        self.main_costs.fill_broadcast_1d(
+            dim_ranges,
+            value.0.iter().map(|(_, c)| c.main),
+            Some(&self.filled),
+        );
+        self.peaks.fill_broadcast_1d(
+            dim_ranges,
+            value.0.iter().map(|(_, c)| c.peaks.clone()),
+            Some(&self.filled),
+        );
+        self.depths_actions.fill_broadcast_1d(
+            dim_ranges,
+            value.0.iter().map(|(a, c)| (c.depth, *a)),
+            Some(&self.filled),
+        );
     }
 
     pub(crate) fn get(&self, pt: &[usize]) -> Option<ActionCostVec> {
@@ -533,14 +537,6 @@ impl RleBlock {
 
     pub(crate) fn compact(&mut self) {
         self.filled.shrink_to_fit();
-
-        if !self.infilled {
-            self.main_costs.infill_empties(&self.filled);
-            self.peaks.infill_empties(&self.filled);
-            self.depths_actions.infill_empties(&self.filled);
-            self.infilled = true;
-        }
-
         self.main_costs.shrink_to_fit();
         self.peaks.shrink_to_fit();
         self.depths_actions.shrink_to_fit();
@@ -995,6 +991,7 @@ mod tests {
             .iter_binary_scaled()
             .map(|l| (0..=u32::from(l)).map(bit_length_inverse))
             .multi_cartesian_product();
+        let mut spec_to_check = spec_b.clone();
         for limit_to_check in filled_limits_iter {
             // Skip limits inside the put range
             if limit_to_check
@@ -1002,10 +999,8 @@ mod tests {
                 .zip(peaks.iter().zip(spec_limits.iter()))
                 .any(|(c, (p, l))| c < &p || c > &l)
             {
-                let spec_to_check = Spec(
-                    spec_b.0.clone(),
-                    MemoryLimits::Standard(MemVec::new(limit_to_check.try_into().unwrap())),
-                );
+                spec_to_check.1 =
+                    MemoryLimits::Standard(MemVec::new(limit_to_check.try_into().unwrap()));
                 assert!(db.get(&spec_to_check).is_none());
             }
         }
