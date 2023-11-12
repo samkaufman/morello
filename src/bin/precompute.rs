@@ -84,7 +84,7 @@ where
                 layout,
                 vector_size: None,
             }],
-            false,
+            true,
         )
     }));
     bounds.push({
@@ -103,7 +103,7 @@ where
                 dtype: Dtype::Uint32,
             },
             vec![a.clone(), a.clone(), a],
-            false,
+            true,
         )
     });
     if args.include_conv {
@@ -134,7 +134,7 @@ where
                             dtype: Dtype::Uint32,
                         },
                         vec![a.clone(), a.clone(), a.clone()],
-                        false,
+                        true,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -285,7 +285,7 @@ fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
                 vector_size: None,
             })
             .collect(),
-        false,
+        true,
     )
 }
 
