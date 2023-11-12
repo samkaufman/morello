@@ -212,31 +212,31 @@ where
 }
 
 fn print_stats(db: &DashmapDiskDatabase) {
-    let mut matmul_block_cnt = 0;
-    let mut matmul_entry_cnt = 0;
-    let mut conv_block_cnt = 0;
-    let mut conv_entry_cnt = 0;
-    let mut move_block_cnt = 0;
-    let mut move_entry_cnt = 0;
-    let mut zero_block_cnt = 0;
-    let mut zero_entry_cnt = 0;
+    let mut matmul_block_cnt = 0u64;
+    let mut matmul_entry_cnt = 0u64;
+    let mut conv_block_cnt = 0u64;
+    let mut conv_entry_cnt = 0u64;
+    let mut move_block_cnt = 0u64;
+    let mut move_entry_cnt = 0u64;
+    let mut zero_block_cnt = 0u64;
+    let mut zero_entry_cnt = 0u64;
     for iref in db.blocks.iter() {
         match iref.key().0 .0 {
             SpecKey::Matmul { .. } => {
                 matmul_block_cnt += 1;
-                matmul_entry_cnt += iref.value().storage_size();
+                matmul_entry_cnt += u64::try_from(iref.value().storage_size()).unwrap();
             }
             SpecKey::Conv { .. } => {
                 conv_block_cnt += 1;
-                conv_entry_cnt += iref.value().storage_size();
+                conv_entry_cnt += u64::try_from(iref.value().storage_size()).unwrap();
             }
             SpecKey::Move { .. } => {
                 move_block_cnt += 1;
-                move_entry_cnt += iref.value().storage_size();
+                move_entry_cnt += u64::try_from(iref.value().storage_size()).unwrap();
             }
             SpecKey::Zero { .. } => {
                 zero_block_cnt += 1;
-                zero_entry_cnt += iref.value().storage_size();
+                zero_entry_cnt += u64::try_from(iref.value().storage_size()).unwrap();
             }
         }
     }
