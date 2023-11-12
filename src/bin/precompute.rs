@@ -142,7 +142,7 @@ where
     }
 
     let mut rng = rand::thread_rng();
-    let mut last_save_completion: Option<Instant> = None;
+    let mut last_save_completion = std::time::Instant::now();
     let mut last_stage_results_saved = true;
     for (stage_idx, stage) in bounds.iter().flat_map(logical_specs_to_compute).enumerate() {
         info!(
@@ -185,12 +185,9 @@ where
         info!("Database stats: {}", db.stats_str());
 
         last_stage_results_saved = false;
-        if last_save_completion
-            .map(|t| t.elapsed() >= DB_SAVE_PERIOD)
-            .unwrap_or(false)
-        {
+        if last_save_completion.elapsed() >= DB_SAVE_PERIOD {
             save_db(db);
-            last_save_completion = Some(std::time::Instant::now());
+            last_save_completion = std::time::Instant::now();
             last_stage_results_saved = true;
         }
 
