@@ -236,7 +236,10 @@ impl<T> NDArray<T> {
         // could accomplish by moving the k dimension to the front of the shape.
         if k == 1 {
             if let Some(single_value) = inner_slice_iter.next() {
-                self.fill_region_ext(&dim_ranges_ext, &single_value, filled.map(|f| (0, f)));
+                // TODO: The following `1` should be a function of the index in the iterator, not
+                //   a constant. (It's okay to fill in parts of the table which are blocked by a
+                //   too-low `filled` value.)
+                self.fill_region_ext(&dim_ranges_ext, &single_value, filled.map(|f| (1, f)));
             }
             return;
         }

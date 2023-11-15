@@ -197,7 +197,7 @@ impl DashmapDiskDatabase {
         }
     }
 
-    fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
+    pub fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -405,7 +405,7 @@ impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
 }
 
 impl DbBlock {
-    fn get(&self, inner_pt: &[u8]) -> Option<ActionCostVec> {
+    pub fn get(&self, inner_pt: &[u8]) -> Option<ActionCostVec> {
         match self {
             DbBlock::Rle(e) => {
                 let inner_pt_usize = inner_pt
@@ -431,6 +431,12 @@ impl DbBlock {
             DbBlock::Rle(e) => {
                 e.compact();
             }
+        }
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        match self {
+            DbBlock::Rle(e) => e.shape(),
         }
     }
 }
@@ -541,6 +547,10 @@ impl RleBlock {
         self.peaks.shrink_to_fit();
         self.depths_actions.shrink_to_fit();
     }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
 }
 
 impl<'a, Tgt: Target> Deref for DashmapDbRef<'a, Tgt> {
@@ -596,10 +606,17 @@ where
 }
 
 fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
-    if dim >= dim_count - 4 {
-        4
-    } else {
+    if dim == 0 || dim == 1 || dim == dim_count - 5 {
+        // The last case here is the serial_only dimension. Setting this to 1 will avoid empty
+        // rows when computing serial_only, which is a common setting.
+        // The first is just a shape dimension.
+        1
+    } else if dim == dim_count - 1 {
+        31
+    } else if dim < dim_count - 5 {
         3
+    } else {
+        4
     }
 }
 
@@ -659,6 +676,18 @@ fn blockify_point(
         inner_pt.push(inner);
     }
     (pt, inner_pt)
+}
+
+pub fn deblockify_points(a: &[BimapInt], b: &[u8]) -> SmallVec<[BimapInt; 10]> {
+    debug_assert_eq!(a.len(), b.len());
+
+    let rank = a.len();
+    let mut result = SmallVec::with_capacity(rank);
+    for i in 0..rank {
+        let s = block_size_dim(i, rank);
+        result.push(s * a[i] + BimapInt::from(b[i]));
+    }
+    result
 }
 
 /// Compute the bottom and top points (inclusive) to fill in a database table.

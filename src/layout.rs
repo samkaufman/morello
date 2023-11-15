@@ -10,7 +10,7 @@ use crate::{
     target::Target,
 };
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
 pub enum Layout {
     Standard {
         dim_order: SmallVec<[u8; 5]>,
