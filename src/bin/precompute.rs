@@ -7,8 +7,8 @@ use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::{smallvec, SmallVec};
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
-use std::{iter, path, thread};
+use std::time::Duration;
+use std::{iter, path};
 
 use morello::common::{DimSize, Dtype};
 use morello::datadeps::SpecKey;
@@ -56,7 +56,6 @@ fn main() {
     let db =
         DashmapDiskDatabase::with_capacity(args.db.as_deref(), true, K, INITIAL_HASHMAP_CAPACITY);
     main_per_db(&args, &db);
-    print_stats(&db);
 }
 
 fn main_per_db<'a, D>(args: &Args, db: &'a D)
@@ -68,8 +67,9 @@ where
     // TODO: Most of the following details aren't used in computing the bound.
     // It could be simplified.
     let mut bounds = vec![];
-    bounds.extend((1..5).flat_map(|rank| [move_top(args.size, rank)]));
-    bounds.extend((1..5).map(|rank| {
+    let move_needed_rank = if args.include_conv { 4 } else { 2 };
+    bounds.extend((1..=move_needed_rank).flat_map(|rank| [move_top(args.size, rank)]));
+    bounds.extend((1..=move_needed_rank).map(|rank| {
         let layout = morello::layout::row_major(rank);
         LogicalSpec::Primitive(
             PrimitiveBasics {
@@ -209,61 +209,6 @@ where
     let save_start = std::time::Instant::now();
     db.save().unwrap();
     info!("Saving took {:?}", save_start.elapsed());
-}
-
-fn print_stats(db: &DashmapDiskDatabase) {
-    let mut matmul_block_cnt = 0u64;
-    let mut matmul_entry_cnt = 0u64;
-    let mut conv_block_cnt = 0u64;
-    let mut conv_entry_cnt = 0u64;
-    let mut move_block_cnt = 0u64;
-    let mut move_entry_cnt = 0u64;
-    let mut zero_block_cnt = 0u64;
-    let mut zero_entry_cnt = 0u64;
-    for iref in db.blocks.iter() {
-        match iref.key().0 .0 {
-            SpecKey::Matmul { .. } => {
-                matmul_block_cnt += 1;
-                matmul_entry_cnt += u64::try_from(iref.value().storage_size()).unwrap();
-            }
-            SpecKey::Conv { .. } => {
-                conv_block_cnt += 1;
-                conv_entry_cnt += u64::try_from(iref.value().storage_size()).unwrap();
-            }
-            SpecKey::Move { .. } => {
-                move_block_cnt += 1;
-                move_entry_cnt += u64::try_from(iref.value().storage_size()).unwrap();
-            }
-            SpecKey::Zero { .. } => {
-                zero_block_cnt += 1;
-                zero_entry_cnt += u64::try_from(iref.value().storage_size()).unwrap();
-            }
-        }
-    }
-    println!(
-        "Matmul ratio: {}/{} = {:.2}",
-        matmul_entry_cnt,
-        matmul_block_cnt,
-        matmul_entry_cnt as f64 / matmul_block_cnt as f64
-    );
-    println!(
-        "Conv ratio: {}/{} = {:.2}",
-        conv_entry_cnt,
-        conv_block_cnt,
-        conv_entry_cnt as f64 / conv_block_cnt as f64
-    );
-    println!(
-        "Move ratio: {}/{} = {:.2}",
-        move_entry_cnt,
-        move_block_cnt,
-        move_entry_cnt as f64 / move_block_cnt as f64
-    );
-    println!(
-        "Zero ratio: {}/{} = {:.2}",
-        zero_entry_cnt,
-        zero_block_cnt,
-        zero_entry_cnt as f64 / zero_block_cnt as f64
-    );
 }
 
 /// Returns a logical Move Spec of given size and rank.
