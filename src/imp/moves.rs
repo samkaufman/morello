@@ -116,7 +116,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
         let cost = move_cost(&self.source_spec, self.introduced.spec());
-        child_costs.iter().sum::<MainCost>() + cost
+        child_costs.iter().fold(cost, |a, &b| a.saturating_add(b))
     }
 
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {

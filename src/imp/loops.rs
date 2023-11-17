@@ -12,8 +12,6 @@ use std::collections::HashMap;
 
 use std::{cmp, iter, slice};
 
-const MAX_COST: MainCost = u32::MAX;
-
 /// An Impl representing a loop over a set of zipped [`Tile`]s.
 ///
 /// It has a form like:
@@ -94,7 +92,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
         } else {
             self.steps()
         };
-        cmp::min(child_costs[0] * MainCost::from(factor), MAX_COST)
+        child_costs[0].saturating_mul(factor)
     }
 
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {

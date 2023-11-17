@@ -44,7 +44,11 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        child_costs.iter().sum()
+        child_costs
+            .iter()
+            .copied()
+            .reduce(|a, b| a.saturating_add(b))
+            .expect("Pipeline should be given at least one child cost")
     }
 
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
