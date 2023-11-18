@@ -101,8 +101,7 @@ impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
                         peak.set_unscaled(
                             i,
                             next_binary_power(
-                                peak.get_unscaled(i)
-                                    .max(child_peak.get_unscaled(i) + *o),
+                                peak.get_unscaled(i).max(child_peak.get_unscaled(i) + *o),
                             ),
                         )
                     }
@@ -154,29 +153,5 @@ where
             any::<SpecApp<Tgt, Spec<Tgt>, Aux>>().prop_map(ImplNode::SpecApp)
         ];
         return impl_leaf_strategy.boxed();
-    }
-}
-
-/// Calls the given function on all leaves of an Impl.
-///
-/// The given may return `false` to short-circuit, which will be propogated to the caller of this
-/// function.
-pub fn visit_leaves<Tgt, Aux: Clone, F>(imp: &ImplNode<Tgt, Aux>, f: &mut F) -> bool
-where
-    Tgt: Target,
-    F: FnMut(&ImplNode<Tgt, Aux>) -> bool,
-{
-    let children = imp.children();
-    if children.is_empty() {
-        f(imp)
-    } else {
-        let c = imp.children();
-        for child in c {
-            let should_complete = visit_leaves(child, f);
-            if !should_complete {
-                return false;
-            }
-        }
-        true
     }
 }
