@@ -16,7 +16,7 @@ use crate::utils::ToWriteFmt;
 use crate::views::Tensor;
 
 use anyhow::{bail, Error, Result};
-use log::info;
+use log::{debug, info};
 use std::cmp::max;
 use std::fmt;
 use std::fmt::Debug;
