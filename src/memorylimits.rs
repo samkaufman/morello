@@ -10,6 +10,7 @@ use itertools::Itertools;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::{iter, ops::Sub};
 
@@ -45,7 +46,7 @@ pub enum MemoryAllocation {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Deserialize, Serialize)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub struct MemVec([u8; LEVEL_COUNT]);
 
@@ -112,9 +113,29 @@ impl MemoryLimits {
     }
 }
 
-impl MemoryAllocation {
-    pub fn none<Tgt: Target>() -> Self {
-        MemoryAllocation::Simple([0; LEVEL_COUNT])
+impl PartialOrd for MemoryLimits {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (MemoryLimits::Standard(limits_vec), MemoryLimits::Standard(other_limits_vec)) => {
+                limits_vec.partial_cmp(other_limits_vec)
+            }
+        }
+    }
+
+    fn ge(&self, other: &Self) -> bool {
+        match (self, other) {
+            (MemoryLimits::Standard(limits_vec), MemoryLimits::Standard(other_limits_vec)) => {
+                limits_vec.ge(other_limits_vec)
+            }
+        }
+    }
+
+    fn le(&self, other: &Self) -> bool {
+        match (self, other) {
+            (MemoryLimits::Standard(limits_vec), MemoryLimits::Standard(other_limits_vec)) => {
+                limits_vec.le(other_limits_vec)
+            }
+        }
     }
 }
 
@@ -123,6 +144,11 @@ impl Display for MemoryLimits {
         match self {
             MemoryLimits::Standard(mem_vec) => mem_vec.fmt(f),
         }
+    }
+}
+impl MemoryAllocation {
+    pub fn none<Tgt: Target>() -> Self {
+        MemoryAllocation::Simple([0; LEVEL_COUNT])
     }
 }
 
@@ -215,6 +241,30 @@ impl MemVec {
             .map(|t| (0..=t).rev())
             .multi_cartesian_product()
             .map(|prod| MemVec::new_from_binary_scaled(prod.try_into().unwrap()))
+    }
+}
+
+impl PartialOrd for MemVec {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        debug_assert_eq!(self.0.len(), other.0.len());
+        let first_cmp = self.0[0].partial_cmp(&other.0[0]);
+        debug_assert!(first_cmp.is_some());
+        for idx in 1..self.0.len() {
+            if self.0[idx].partial_cmp(&other.0[idx]) != first_cmp {
+                return None;
+            }
+        }
+        first_cmp
+    }
+
+    fn le(&self, other: &Self) -> bool {
+        debug_assert_eq!(self.0.len(), other.0.len());
+        self.0.iter().zip(&other.0).all(|(a, b)| a <= b)
+    }
+
+    fn ge(&self, other: &Self) -> bool {
+        debug_assert_eq!(self.0.len(), other.0.len());
+        self.0.iter().zip(&other.0).all(|(a, b)| a >= b)
     }
 }
 

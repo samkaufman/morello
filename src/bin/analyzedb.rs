@@ -33,6 +33,8 @@ struct Args {
 
 fn block_stats(block: &DbBlock) -> String {
     match block {
+        DbBlock::ActionOnly(b) => format!("runs_actiononly={}", b.0.runs_len()),
+        DbBlock::Structured(b) => format!("runs_structured={}", b.0.runs_len()),
         DbBlock::Rle(rle_block) => {
             format!(
                 "filled_runs={}, main_costs_runs={} peaks_runs={} depthsactions_runs={} peaks=[{}]",
@@ -107,7 +109,7 @@ fn main() {
             .map(|&d| 0..u8::try_from(d).unwrap())
             .multi_cartesian_product()
         {
-            let value_description = match block.get(&inner_pt) {
+            let value_description = match block.get::<X86Target>(&db, todo!(), &inner_pt) {
                 Some(ActionCostVec(v)) => {
                     if args.no_unsat && v.is_empty() {
                         continue;

@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::imp::{Impl, ImplExt};
 use crate::memorylimits::MemVec;
 use crate::target::Target;
@@ -6,7 +8,7 @@ use crate::utils::snap_memvec_up;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Deserialize, Serialize)]
+#[derive(Clone, Eq, PartialEq, Debug, Deserialize, Serialize)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub struct Cost {
     pub main: MainCost,
@@ -44,5 +46,35 @@ impl Cost {
                 .unwrap_or(0)
                 .saturating_add(1),
         }
+    }
+}
+
+impl PartialOrd for Cost {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Cost {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let main_cmp = self.main.cmp(&other.main);
+        if main_cmp != Ordering::Equal {
+            return main_cmp;
+        }
+
+        // Define memory consumption ordering lexicographically, just so we have some total
+        // order for Costs.
+        debug_assert_eq!(self.peaks.len(), other.peaks.len());
+        for i in 0..self.peaks.len() {
+            let peaks_cmp = self
+                .peaks
+                .get_binary_scaled(i)
+                .cmp(&other.peaks.get_binary_scaled(i));
+            if peaks_cmp != Ordering::Equal {
+                return peaks_cmp;
+            }
+        }
+
+        self.depth.cmp(&other.depth)
     }
 }

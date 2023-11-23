@@ -1,9 +1,9 @@
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
-use crate::memorylimits::MemoryAllocation;
+use crate::memorylimits::{MemVec, MemoryAllocation};
 use crate::nameenv::NameEnv;
 use crate::spec::Spec;
-use crate::target::Target;
+use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
 
@@ -85,7 +85,7 @@ where
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
-        todo!()
+        MemoryAllocation::Simple([0; LEVEL_COUNT])
     }
 
     fn compute_main_cost(&self, _child_costs: &[MainCost]) -> MainCost {

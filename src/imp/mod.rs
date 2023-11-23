@@ -1,4 +1,5 @@
 use enum_dispatch::enum_dispatch;
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
@@ -35,6 +36,9 @@ pub trait Impl<Tgt: Target, Aux: Clone> {
 
     fn children(&self) -> &[ImplNode<Tgt, Aux>];
 
+    /// Returns the amount of memory allocated by this Impl node alone.
+    ///
+    /// Spec applications allocate no memory.
     fn memory_allocated(&self) -> MemoryAllocation;
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost;
@@ -58,6 +62,12 @@ pub trait Impl<Tgt: Target, Aux: Clone> {
 }
 
 pub trait ImplExt<Tgt: Target, Aux: Clone>: Impl<Tgt, Aux> {
+    /// Returns the peak memory for the Impl.
+    ///
+    /// This traverses the Impl tree. Spec applications are treated as allocating no
+    /// memory.
+    fn peak_memory(&self) -> MemVec;
+
     fn peak_memory_from_child_peaks(&self, child_peaks: &[MemVec]) -> MemVec;
 }
 
@@ -79,6 +89,15 @@ pub enum ImplNode<Tgt: Target, Aux: Clone> {
 }
 
 impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
+    fn peak_memory(&self) -> MemVec {
+        let children = self.children();
+        let mut child_peaks = SmallVec::<[MemVec; 1]>::with_capacity(children.len());
+        for child in children {
+            child_peaks.push(child.peak_memory());
+        }
+        self.peak_memory_from_child_peaks(&child_peaks)
+    }
+
     fn peak_memory_from_child_peaks(&self, child_peaks: &[MemVec]) -> MemVec {
         let mut peak = MemVec::zero::<Tgt>();
         match self.memory_allocated() {
@@ -153,5 +172,29 @@ where
             any::<SpecApp<Tgt, Spec<Tgt>, Aux>>().prop_map(ImplNode::SpecApp)
         ];
         return impl_leaf_strategy.boxed();
+    }
+}
+
+/// Calls the given function on all leaves of an Impl.
+///
+/// The given may return `false` to short-circuit, which will be propogated to the caller of this
+/// function.
+pub fn visit_leaves<Tgt, Aux: Clone, F>(imp: &ImplNode<Tgt, Aux>, f: &mut F) -> bool
+where
+    Tgt: Target,
+    F: FnMut(&ImplNode<Tgt, Aux>) -> bool,
+{
+    let children = imp.children();
+    if children.is_empty() {
+        f(imp)
+    } else {
+        let c = imp.children();
+        for child in c {
+            let should_complete = visit_leaves(child, f);
+            if !should_complete {
+                return false;
+            }
+        }
+        true
     }
 }

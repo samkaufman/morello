@@ -8,24 +8,12 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryLimits;
-use crate::spec::{LogicalSpec, Spec};
+use crate::spec::Spec;
 use crate::target::Target;
 
 struct ImplReducer {
     results: SmallVec<[(ActionIdx, Cost); 1]>,
     top_k: usize,
-}
-
-/// A summary of a sequence of Specs to determine whether a sub-Spec should be pruned during search.
-#[derive(Clone)]
-struct ParentSummary<'a, Tgt: Target> {
-    seen: &'a LogicalSpec<Tgt>,
-    tail: Option<&'a ParentSummary<'a, Tgt>>,
-}
-
-enum ParentSummaryTransitionResult<'a, Tgt: Target> {
-    PruneAction,
-    NewSummary(ParentSummary<'a, Tgt>),
 }
 
 /// Computes an optimal Impl for `goal` and stores it in `db`.
@@ -44,7 +32,7 @@ where
     assert!(db.max_k().map_or(true, |k| k >= top_k));
 
     if !parallel {
-        return top_down_spec(db, goal, top_k, &ParentSummary::new(goal), 0, 1);
+        return top_down_spec(db, goal, top_k, 0, 1);
     }
 
     let thread_count = rayon::current_num_threads();
@@ -55,7 +43,7 @@ where
     // deterministic results.
     tasks
         .into_par_iter()
-        .map(|(i, g)| top_down_spec(db, &g, top_k, &ParentSummary::new(&g), i, thread_count))
+        .map(|(i, g)| top_down_spec(db, &g, top_k, i, thread_count))
         .collect::<Vec<_>>()
         .pop()
         .unwrap()
@@ -65,7 +53,6 @@ fn top_down_spec<'d, Tgt, D>(
     db: &'d D,
     goal: &Spec<Tgt>,
     top_k: usize,
-    parent_summary: &ParentSummary<Tgt>,
     thread_idx: usize,
     thread_count: usize,
 ) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64)
@@ -91,6 +78,7 @@ where
     let mut reducer = ImplReducer::new(top_k);
 
     let all_actions = goal.0.actions().into_iter().collect::<Vec<_>>();
+
     let initial_skip = thread_idx * all_actions.len() / thread_count;
     for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
         let action = &all_actions[action_idx];
@@ -99,14 +87,8 @@ where
         };
 
         // Let top_down_impl compute the final cost of completing this Impl.
-        let (costs, action_impl_hits, action_impl_misses) = top_down_impl(
-            db,
-            &partial_impl,
-            top_k,
-            parent_summary,
-            thread_idx,
-            thread_count,
-        );
+        let (costs, action_impl_hits, action_impl_misses) =
+            top_down_impl(db, &partial_impl, top_k, thread_idx, thread_count);
         hits += action_impl_hits;
         misses += action_impl_misses;
         if costs.is_empty() {
@@ -142,7 +124,6 @@ fn top_down_impl<'d, Tgt, D, Aux>(
     db: &'d D,
     partial_impl: &ImplNode<Tgt, Aux>,
     top_k: usize,
-    parent_summary: &ParentSummary<Tgt>,
     thread_idx: usize,
     thread_count: usize,
 ) -> (SmallVec<[Cost; 1]>, u64, u64)
@@ -154,18 +135,8 @@ where
     Aux: Clone,
 {
     if let ImplNode::SpecApp(spec_app) = partial_impl {
-        let summary_to_forward = match parent_summary.transition(&spec_app.0) {
-            ParentSummaryTransitionResult::PruneAction => return (smallvec![], 0, 0),
-            ParentSummaryTransitionResult::NewSummary(new_summary) => new_summary,
-        };
-        let (action_costs, hits, misses) = top_down_spec(
-            db,
-            &spec_app.0,
-            top_k,
-            &summary_to_forward,
-            thread_idx,
-            thread_count,
-        );
+        let (action_costs, hits, misses) =
+            top_down_spec(db, &spec_app.0, top_k, thread_idx, thread_count);
         (
             action_costs.into_iter().map(|(_, c)| c).collect(),
             hits,
@@ -177,14 +148,8 @@ where
         let mut child_costs: SmallVec<[Cost; 3]> =
             SmallVec::with_capacity(partial_impl.children().len());
         for child_node in partial_impl.children() {
-            let (mut child_results, subhits, submisses) = top_down_impl(
-                db,
-                child_node,
-                top_k,
-                parent_summary,
-                thread_idx,
-                thread_count,
-            );
+            let (mut child_results, subhits, submisses) =
+                top_down_impl(db, child_node, top_k, thread_idx, thread_count);
             hits += subhits;
             misses += submisses;
             if child_results.is_empty() {
@@ -198,37 +163,6 @@ where
         }
         let partial_impl_cost = Cost::from_child_costs(partial_impl, &child_costs);
         (smallvec![partial_impl_cost], hits, misses)
-    }
-}
-
-impl<'a, Tgt: Target> ParentSummary<'a, Tgt> {
-    fn new(initial_spec: &'a Spec<Tgt>) -> Self {
-        ParentSummary {
-            seen: &initial_spec.0,
-            tail: None,
-        }
-    }
-
-    /// Determine whether the given sub-Spec should be pruned during search.
-    ///
-    /// If this method returns [ParentSummaryTransitionResult::PruneAction], the caller should
-    /// prune the given sub-Spec. If [ParentSummaryTransitionResult::NewSummary] is returned,
-    /// the wrapped [ParentSummary] should be used for nested children.
-    fn transition(&'a self, nested_spec: &'a Spec<Tgt>) -> ParentSummaryTransitionResult<'a, Tgt> {
-        // Prune any cycles. These can result from within-level cycles between layouts, not just in
-        // terms of introduced Move Specs, but the non-Move/moved "body" Specs as well.
-        let mut cur_option = Some(self);
-        while let Some(cur) = cur_option {
-            if cur.seen == &nested_spec.0 {
-                return ParentSummaryTransitionResult::PruneAction;
-            }
-            cur_option = cur.tail;
-        }
-
-        ParentSummaryTransitionResult::NewSummary(ParentSummary {
-            seen: &nested_spec.0,
-            tail: Some(self),
-        })
     }
 }
 
@@ -266,6 +200,7 @@ mod tests {
     use crate::common::{DimSize, Dtype};
     use crate::db::DashmapDiskDatabase;
     use crate::layout::{row_major, Layout};
+    use crate::memorylimits::MemVec;
     use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
@@ -275,60 +210,18 @@ mod tests {
     use smallvec::smallvec;
     use std::rc::Rc;
 
-    const TEST_LOWER_SIZE_MAX: DimSize = 2;
-    const TEST_LOWER_MEMORY_MAX: u64 = 2048;
-
-    #[test]
-    fn test_parentsummary_doesnt_prune_rm_to_cm_relayout() {
-        let cm = Layout::Standard {
-            dim_order: smallvec![1, 0],
-        };
-        let spec1 = example_zero_spec(CpuMemoryLevel::GL, row_major(2));
-        let spec2 = example_zero_spec(CpuMemoryLevel::GL, cm);
-        let s1 = ParentSummary::new(&spec1);
-        assert!(matches!(
-            s1.transition(&spec2),
-            ParentSummaryTransitionResult::NewSummary(_)
-        ));
-    }
-
-    #[test]
-    fn test_parentsummary_prunes_immediate_move_cycles() {
-        let cm = Layout::Standard {
-            dim_order: smallvec![1, 0],
-        };
-        let initial_spec =
-            example_move_spec(CpuMemoryLevel::GL, row_major(2), CpuMemoryLevel::GL, cm);
-        let s1 = ParentSummary::new(&initial_spec);
-        assert!(matches!(
-            s1.transition(&initial_spec),
-            ParentSummaryTransitionResult::PruneAction
-        ));
-    }
-
-    #[test]
-    fn test_parentsummary_prunes_one_step_cycle() {
-        let cm = Layout::Standard {
-            dim_order: smallvec![1, 0],
-        };
-        let spec1 = example_move_spec(
-            CpuMemoryLevel::GL,
-            row_major(2),
-            CpuMemoryLevel::GL,
-            cm.clone(),
-        );
-        let spec2 = example_move_spec(CpuMemoryLevel::GL, cm, CpuMemoryLevel::GL, row_major(2));
-        let s1 = ParentSummary::new(&spec1);
-        let ParentSummaryTransitionResult::NewSummary(s2) = s1.transition(&spec2) else {
-            panic!();
-        };
-        assert!(matches!(
-            s2.transition(&spec1),
-            ParentSummaryTransitionResult::PruneAction
-        ));
-    }
+    const TEST_SMALL_SIZE: DimSize = 2;
+    const TEST_SMALL_MEM: u64 = 2048;
 
     proptest! {
+        #[test]
+        fn test_can_synthesize_any_spec(
+            spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
+        ) {
+            let db = DashmapDiskDatabase::new(None, false, 1);
+            top_down(&db, &spec, 1, false);
+        }
+
         #[test]
         fn test_more_memory_never_worsens_solution_with_shared_db(
             spec_pair in lower_and_higher_spec::<X86Target>()
@@ -351,6 +244,55 @@ mod tests {
                 assert!(raised_cost <= lower_cost);
             }
         }
+
+        #[test]
+        fn test_synthesis_at_peak_memory_yields_same_decision(
+            spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
+        ) {
+            let db = DashmapDiskDatabase::new(None, false, 1);
+            let (first_solutions, _, _) = top_down(&db, &spec, 1, false);
+            let first_peak = if let Some(first_sol) = first_solutions.first() {
+                first_sol.1.peaks.clone()
+            } else {
+                MemVec::zero::<X86Target>()
+            };
+            let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
+            let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, false);
+            assert_eq!(first_solutions, lower_solutions);
+        }
+    }
+
+    #[test]
+    fn test_synthesis_at_peak_memory_yields_same_decision_1() {
+        let spec = Spec(
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Zero,
+                    spec_shape: smallvec![2, 2, 2, 2],
+                    dtype: Dtype::Uint8,
+                },
+                vec![TensorSpecAux::<X86Target> {
+                    contig: 0,
+                    aligned: false,
+                    level: CpuMemoryLevel::GL,
+                    layout: row_major(4),
+                    vector_size: None,
+                }],
+                false,
+            ),
+            MemoryLimits::Standard(MemVec::new_from_binary_scaled([0, 5, 7, 6])),
+        );
+
+        let db = DashmapDiskDatabase::new(None, false, 1);
+        let (first_solutions, _, _) = top_down(&db, &spec, 1, false);
+        let first_peak = if let Some(first_sol) = first_solutions.first() {
+            first_sol.1.peaks.clone()
+        } else {
+            MemVec::zero::<X86Target>()
+        };
+        let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
+        let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, false);
+        assert_eq!(first_solutions, lower_solutions);
     }
 
     fn example_move_spec(
@@ -411,13 +353,13 @@ mod tests {
 
     fn lower_and_higher_spec<Tgt: Target>() -> impl Strategy<Value = (Spec<Tgt>, Spec<Tgt>)> {
         let MemoryLimits::Standard(mut top_memvec) = X86Target::max_mem();
-        top_memvec = top_memvec.map(|v| v.min(TEST_LOWER_MEMORY_MAX));
+        top_memvec = top_memvec.map(|v| v.min(TEST_SMALL_MEM));
 
         let top_memory_a = Rc::new(MemoryLimits::Standard(top_memvec));
         let top_memory_b = Rc::clone(&top_memory_a);
         let top_memory_c = Rc::clone(&top_memory_a);
 
-        any_with::<Spec<Tgt>>((Some(TEST_LOWER_SIZE_MAX), Some(TEST_LOWER_MEMORY_MAX)))
+        any_with::<Spec<Tgt>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
             .prop_filter("limits should not be max", move |s| &s.1 != &*top_memory_a)
             .prop_flat_map(move |spec| {
                 let MemoryLimits::Standard(top_memvec) = top_memory_b.as_ref();

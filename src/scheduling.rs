@@ -538,6 +538,7 @@ impl<Tgt: Target> Action<Tgt> {
                                 .get_unscaled(updated_level_idx)
                                 .checked_sub(additional)
                             else {
+                                // eprintln!("Dropping {:?} because out of memory. Used {} additional bytes and limit was {}", self, additional, new_limits.get_unscaled(updated_level_idx));
                                 return Err(ApplyError::OutOfMemory);
                             };
                             new_limits

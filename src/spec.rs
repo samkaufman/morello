@@ -746,10 +746,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         Box::new(
             dim_range(orig_k, false)
                 .filter(move |&new_k| {
-                    let r = operands[0].is_valid_tile_shape(&[m, new_k])
-                        && operands[1].is_valid_tile_shape(&[new_k, n]);
-                    debug_assert!(m > 1 || new_k > 1 || n > 1 || r); // TODO: Remove
-                    r
+                    operands[0].is_valid_tile_shape(&[m, new_k])
+                        && operands[1].is_valid_tile_shape(&[new_k, n])
                 })
                 .map(|k| Action::Split { k }),
         )
@@ -1547,16 +1545,13 @@ pub fn conv_infer_output_shape(image_shape: &[u32], filters_shape: &[u32]) -> Sh
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::imp::ImplNode;
-    use crate::memorylimits::arb_memorylimits_ext;
+    use crate::imp::subspecs::SpecApp;
+    use crate::imp::{visit_leaves, Impl, ImplExt, ImplNode};
+    use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
     use crate::scheduling_sugar::SchedulingSugar;
+    use crate::target::{ArmTarget, Target, X86Target};
     use crate::tensorspec::TensorSpecArbMaxShape;
-    use crate::{
-        imp::Impl,
-        memorylimits::{MemVec, MemoryAllocation},
-        target::{Target, X86Target},
-        utils::next_binary_power,
-    };
+    use crate::utils::{next_binary_power, sum_seqs};
     use proptest::prelude::*;
 
     #[test]
@@ -1613,6 +1608,20 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn test_actions_are_valid_through_consumed_memory_x86(
+            logical_spec in any::<LogicalSpec<X86Target>>(),
+        ) {
+            shared_test_actions_are_valid_through_consumed_memory(logical_spec)
+        }
+
+        #[test]
+        fn test_actions_are_valid_through_consumed_memory_arm(
+            logical_spec in any::<LogicalSpec<ArmTarget>>(),
+        ) {
+            shared_test_actions_are_valid_through_consumed_memory(logical_spec)
+        }
+
         #[test]
         fn test_canonicalizing_specs_canonicalizes_parameters(
             logical_spec in any::<LogicalSpec<X86Target>>()
@@ -1678,12 +1687,97 @@ mod tests {
 
         #[test]
         fn test_action_applies_everywhere_down_through_peak_memory(
-            (spec, action, applied, lower_limit) in arb_spec_action_and_lower_limit::<X86Target>()
+            (spec, action, _, lower_limit) in arb_spec_action_and_lower_limit::<X86Target>()
         ) {
             let lower_spec = Spec(spec.0.clone(), lower_limit);
             assert!(lower_spec.0.actions().into_iter().contains(&action),
                 "Action {:?} was not present in lower-limits Spec {:?}",
                 action, lower_spec);
+        }
+
+        #[test]
+        fn test_no_action_produces_same_spec_with_higher_memory_limit_x86(
+            spec in any::<Spec<X86Target>>()
+        ) {
+            shared_test_no_action_produces_same_spec_with_higher_memory_limit(&spec)
+        }
+
+        #[test]
+        fn test_no_action_produces_same_spec_with_higher_memory_limit_arm(
+            spec in any::<Spec<ArmTarget>>()
+        ) {
+            shared_test_no_action_produces_same_spec_with_higher_memory_limit(&spec)
+        }
+    }
+
+    fn shared_test_no_action_produces_same_spec_with_higher_memory_limit<Tgt: Target>(
+        spec: &Spec<Tgt>,
+    ) {
+        spec.0.actions().into_iter().for_each(|action| {
+            let Ok(applied) = action.apply(spec) else {
+                return;
+            };
+            visit_leaves(&applied, &mut |leaf| {
+                if let ImplNode::SpecApp(spec_app) = leaf {
+                    assert!(
+                        spec.0 != spec_app.0 .0 || spec_app.0 .1 <= spec.1,
+                        "Action {:?} produced the same Spec {} with higher memory limit {}",
+                        action,
+                        spec,
+                        spec_app.0 .1
+                    );
+                }
+                true
+            });
+        });
+    }
+
+    fn shared_test_actions_are_valid_through_consumed_memory<Tgt: Target>(
+        logical_spec: LogicalSpec<Tgt>,
+    ) {
+        // If an action consumes x bytes, then it should be valid for any Spec with the same logical
+        // Spec at that memory limit and up.
+        let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem();
+        let maxes = maxes_vec
+            .iter_binary_scaled()
+            .map(u32::from)
+            .collect::<Vec<_>>();
+
+        // The list of actions depends only on the logical Spec. Filtering by memory limit happens
+        // at application. So it's safe to just collect the list of actions once, up front.
+        let mut unseen_actions = logical_spec.actions().into_iter().collect::<Vec<_>>();
+
+        let mut shared_spec = Spec(logical_spec, MemoryLimits::Standard(MemVec::zero::<Tgt>()));
+        let mut diagonal_idx = 0;
+        loop {
+            let mut empty = true;
+            for pt in sum_seqs(&maxes, diagonal_idx) {
+                empty = false;
+                shared_spec.1 = MemoryLimits::Standard(MemVec::new_from_binary_scaled(
+                    pt.iter()
+                        .map(|&p| u8::try_from(p).unwrap())
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap(),
+                ));
+                let MemoryLimits::Standard(limits_memvec) = &shared_spec.1;
+                // TODO: Assert that nothing disappears?
+                for i in (0..unseen_actions.len()).rev() {
+                    if let Ok(applied) = unseen_actions[i].apply(&shared_spec) {
+                        unseen_actions.swap_remove(i);
+                        // TODO: Should we also assert that applying the same action at each level
+                        //   doesn't actually accumulate additional memory?.
+                        // TODO: Can we asssert that the change in peak memory is exactly the
+                        //   additional amount at the limit?.
+                        // TODO: Assert here that the min of each level-wise limit is zero.
+                        assert_eq!(&applied.peak_memory(), limits_memvec);
+                    }
+                }
+            }
+            if empty {
+                break;
+            }
+            diagonal_idx += 1;
         }
     }
 

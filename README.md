@@ -29,6 +29,10 @@ Morello to compute a 2x2x2 matrix multiplication, it will be near-instantaneous,
 also, if synthesizing a 4x4x4 matrix multiplication or a pipeline of matrix
 multiplications, you'll have a head-start by reusing that database.
 
+Additionally, if you're willing to store (both on disk and in memory) a larger
+database, you can speed up synthesis by setting the environment variable
+`MORELLO_USE_RLE_BLOCKS=1`.
+
 ## Logging
 
 Morello logs useful, additional information via the [log](https://docs.rs/log/latest/log/) crate. Consider setting `RUST_LOG=info` in your shell environment to see these logs.
