@@ -43,6 +43,24 @@ impl<T> NDArray<T> {
     pub fn runs_len(&self) -> usize {
         self.data.runs_len()
     }
+
+    pub fn get_with_neighbor(&self, pt: &[usize]) -> (&T, Option<&T>) {
+        let data_idx = self.data_offset(pt);
+        let run_idx: usize = self
+            .data
+            .run_index(data_idx.try_into().unwrap())
+            .try_into()
+            .unwrap();
+        let center_run = rle_vec_get_run(&self.data, run_idx);
+        let center_value = center_run.value;
+        if self.data.runs_len() == 1 {
+            (center_value, None)
+        } else if (run_idx == 0) {
+            (center_value, Some(rle_vec_get_run(&self.data, run_idx + 1).value))
+        } else {
+            (center_value, Some(rle_vec_get_run(&self.data, run_idx - 1).value))
+        }
+    }
 }
 
 impl<T: Clone + Eq> NDArray<T> {
@@ -280,6 +298,11 @@ fn calculate_strides(shape: &[usize]) -> SmallVec<[usize; NDARRAY_DEFAULT_RANK]>
     }
     strides.reverse();
     strides
+}
+
+// TODO: This should be in the rle_vec crate
+fn rle_vec_get_run<T>(v: &RleVec<T>, run_idx: usize) -> rle_vec::Run<&T> {
+    v.runs().nth(run_idx).unwrap()
 }
 
 #[cfg(test)]

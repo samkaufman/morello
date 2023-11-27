@@ -9,7 +9,7 @@ use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::ndarray::NDArray;
-use crate::pprint::{pprint, PrintableAux};
+use crate::pprint::PrintableAux;
 use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
@@ -40,6 +40,15 @@ pub type ActionIdx = u16;
 
 pub trait Database<'a> {
     fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<ActionCostVec>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
+
+    fn get_with_preference<Tgt>(
+        &'a self,
+        query: &Spec<Tgt>,
+    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -128,6 +137,11 @@ pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionCostVec(pub SmallVec<[(ActionIdx, Cost); 1]>);
+
+pub enum GetPreference<T, V> {
+    Hit(T),
+    Miss(Option<V>),
+}
 
 impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
     fn extra_column_titles(&self) -> Vec<String> {
@@ -237,13 +251,28 @@ where
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        match self.get_with_preference(query) {
+            GetPreference::Hit(v) => Some(v),
+            GetPreference::Miss(_) => None,
+        }
+    }
+
+    fn get_with_preference<Tgt>(
+        &'a self,
+        query: &Spec<Tgt>,
+    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
         let (block_pt, inner_pt) = blockify_point(global_pt);
         let Some(group) = self.blocks.get(&(table_key, block_pt)) else {
-            return None;
+            return GetPreference::Miss(None);
         };
-        group.get(self, query, &inner_pt)
+        group.get_with_preference(self, query, &inner_pt)
     }
 
     fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
@@ -452,12 +481,12 @@ impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
 }
 
 impl DbBlock {
-    pub fn get<Tgt>(
+    pub fn get_with_preference<Tgt>(
         &self,
         containing_db: &DashmapDiskDatabase,
         query: &Spec<Tgt>,
         inner_pt: &[u8],
-    ) -> Option<ActionCostVec>
+    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -469,43 +498,63 @@ impl DbBlock {
             .collect::<SmallVec<[_; 10]>>();
         match self {
             DbBlock::ActionOnly(v) => {
-                v.0[&inner_pt_usize].as_ref().map(|inner| {
-                    ActionCostVec(
-                    inner
-                        .iter()
-                        .map(|&action_idx| {
-                            let action = query
-                                .0
-                                .actions()
-                                .into_iter()
-                                .nth(action_idx.into())
-                                .unwrap();
-                            let imp = action.apply(query).unwrap();
-                            let recomputed_cost = compute_cost(&imp, &|s| {
-                                let Some(ActionCostVec(inner_decisions)) = containing_db.get(&s.0)
-                                else {
-                                    panic!(
-                                        "Missed sub-Impl {} while computing cost for {}",
-                                        s.0, query
-                                    );
-                                };
-                                if inner_decisions.is_empty() {
-                                    panic!("No actions for sub-Impl {} while computing cost for {}",
-                                           s.0, query);
-                                } else if inner_decisions.len() == 1 {
-                                    inner_decisions[0].1.clone()
-                                } else {
-                                    todo!();
-                                }
-                            });
-                            (action_idx, recomputed_cost)
-                        })
-                        .collect(),
-                )
-                })
+                let (inner_result, neighbor) = v.0.get_with_neighbor(&inner_pt_usize);
+                match inner_result {
+                    Some(inner) => {
+                        GetPreference::Hit(ActionCostVec(
+                            inner
+                                .iter()
+                                .map(|&action_idx| {
+                                    let action = query
+                                        .0
+                                        .actions()
+                                        .into_iter()
+                                        .nth(action_idx.into())
+                                        .unwrap();
+                                    let imp = action.apply(query).unwrap();
+                                    let recomputed_cost = compute_cost(&imp, &|s| {
+                                        let Some(ActionCostVec(inner_decisions)) = containing_db.get(&s.0)
+                                        else {
+                                            panic!(
+                                                "Missed sub-Impl {} while computing cost for {}",
+                                                s.0, query
+                                            );
+                                        };
+                                        if inner_decisions.is_empty() {
+                                            panic!(
+                                                "No actions for sub-Impl {} while computing cost for {}",
+                                                s.0, query
+                                            );
+                                        } else if inner_decisions.len() == 1 {
+                                            inner_decisions[0].1.clone()
+                                        } else {
+                                            todo!();
+                                        }
+                                    });
+                                    (action_idx, recomputed_cost)
+                                })
+                                .collect(),
+                        ))
+                    },
+                    None => {
+                        GetPreference::Miss(neighbor.map(|v| v.clone().expect("neighbor of a miss should be a hit")))
+                    }
+                }
             }
-            DbBlock::Structured(v) => v.0[&inner_pt_usize].clone(),
-            DbBlock::Rle(e) => e.get(&inner_pt_usize),
+            DbBlock::Structured(b) => {
+                // TODO: Propogate an action index preference.
+                match b.0.get_with_neighbor(&inner_pt_usize).0 {
+                    Some(r) => GetPreference::Hit(r.clone()),
+                    None => GetPreference::Miss(None),
+                }
+            }
+            DbBlock::Rle(b) => {
+                // TODO: Propogate an action index preference.
+                match b.get(&inner_pt_usize) {
+                    Some(r) => GetPreference::Hit(r),
+                    None => GetPreference::Miss(None),
+                }
+            }
         }
     }
 
