@@ -3,7 +3,7 @@ use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use smallvec::{smallvec, SmallVec};
 
 use crate::cost::Cost;
-use crate::db::{ActionIdx, Database};
+use crate::db::{ActionIdx, Database, GetPreference};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
@@ -11,9 +11,10 @@ use crate::memorylimits::MemoryLimits;
 use crate::spec::Spec;
 use crate::target::Target;
 
-struct ImplReducer {
+struct ImplReducer<'a> {
     results: SmallVec<[(ActionIdx, Cost); 1]>,
     top_k: usize,
+    preferences: &'a [ActionIdx],
 }
 
 /// Computes an optimal Impl for `goal` and stores it in `db`.
@@ -67,15 +68,20 @@ where
     }
 
     // First, check if the Spec is already in the database.
-    if let Some(stored) = db.get(goal) {
-        return (stored.0, 1, 0);
+    let get_result = db.get_with_preference(goal);
+    let mut preferences: &[_] = &[];
+    if let GetPreference::Hit(v) = get_result {
+        return (v.0, 1, 0);
+    }
+    if let GetPreference::Miss(Some(p)) = &get_result {
+        preferences = p;
     }
 
     let mut hits = 0u64;
     let mut misses = 1u64;
 
     // Enumerate action applications, computing their costs from their childrens' costs.
-    let mut reducer = ImplReducer::new(top_k);
+    let mut reducer = ImplReducer::new(top_k, preferences);
 
     let all_actions = goal.0.actions().into_iter().collect::<Vec<_>>();
 
@@ -166,31 +172,72 @@ where
     }
 }
 
-impl ImplReducer {
-    fn new(top_k: usize) -> Self {
+impl<'a> ImplReducer<'a> {
+    fn new(top_k: usize, preferences: &'a [ActionIdx]) -> Self {
         ImplReducer {
             results: smallvec![],
             top_k,
+            preferences,
         }
     }
 
-    fn insert(&mut self, new_impl: ActionIdx, cost: Cost) {
+    fn insert(&mut self, new_action_idx: ActionIdx, cost: Cost) {
         match self.results.binary_search_by_key(&&cost, |imp| &imp.1) {
-            Ok(idx) | Err(idx) => {
-                if idx < self.top_k {
-                    if self.results.len() == self.top_k {
-                        self.results.pop();
+            Ok(idx) => {
+                debug_assert!(idx < self.top_k);
+                // Replace something if it improves preference count, and do
+                //   nothing if not.
+                let mut to_set = None;
+                for i in self.iter_surrounding_matching_cost_indices(idx, &cost) {
+                    // TODO: Instead of filtering here, just push down the length.
+                    if i >= self.preferences.len() {
+                        continue;
                     }
-                    self.results.insert(idx, (new_impl, cost));
+
+                    if new_action_idx == self.preferences[i] {
+                        to_set = Some(i);
+                        break;
+                    }
                 }
+                if let Some(i) = to_set {
+                    self.results[i].0 = new_action_idx;
+                }
+
+                debug_assert!(self.results.len() <= self.top_k);
             }
+            Err(idx) if idx < self.top_k => {
+                if self.results.len() == self.top_k {
+                    self.results.pop();
+                }
+                self.results.insert(idx, (new_action_idx, cost));
+            }
+            Err(_) => {}
         }
         debug_assert!(self.results.iter().tuple_windows().all(|(a, b)| a.1 < b.1));
         debug_assert!(self.results.len() <= self.top_k);
+        debug_assert!(self.results.iter().map(|(a, _)| a).all_unique());
     }
 
     fn finalize(self) -> SmallVec<[(ActionIdx, Cost); 1]> {
         self.results
+    }
+
+    fn iter_surrounding_matching_cost_indices<'s>(
+        &'s self,
+        initial_idx: usize,
+        cost: &'s Cost,
+    ) -> impl Iterator<Item = usize> + 's {
+        debug_assert_eq!(&self.results[initial_idx].1, cost);
+        std::iter::once(initial_idx)
+            .chain(
+                ((initial_idx + 1)..self.results.len())
+                    .take_while(move |idx| &self.results[*idx].1 == cost),
+            )
+            .chain(
+                (0..initial_idx)
+                    .rev()
+                    .take_while(move |idx| &self.results[*idx].1 == cost),
+            )
     }
 }
 
@@ -260,6 +307,11 @@ mod tests {
             let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, false);
             assert_eq!(first_solutions, lower_solutions);
         }
+    }
+
+    #[test]
+    fn test_reducer_always_returns_minimum_cost_actions() {
+        todo!()
     }
 
     #[test]
