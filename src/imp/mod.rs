@@ -59,6 +59,8 @@ pub trait Impl<Tgt: Target, Aux: Clone> {
     ) -> Option<String>;
 
     fn aux(&self) -> &Aux;
+
+    fn drop_aux(self) -> ImplNode<Tgt, ()>;
 }
 
 pub trait ImplExt<Tgt: Target, Aux: Clone>: Impl<Tgt, Aux> {

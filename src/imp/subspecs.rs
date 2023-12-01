@@ -125,6 +125,10 @@ where
     fn aux(&self) -> &Aux {
         &self.2
     }
+
+    fn drop_aux(self) -> ImplNode<Tgt, ()> {
+        todo!()
+    }
 }
 
 #[cfg(test)]

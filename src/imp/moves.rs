@@ -183,6 +183,18 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
     fn aux(&self) -> &Aux {
         &self.aux
     }
+
+    fn drop_aux(self) -> ImplNode<Tgt, ()> {
+        ImplNode::MoveLet(MoveLet {
+            parameter_idx: self.parameter_idx,
+            source_spec: self.source_spec,
+            introduced: self.introduced,
+            has_prologue: self.has_prologue,
+            has_epilogue: self.has_epilogue,
+            children: self.children.into_iter().map(|c| c.drop_aux()).collect(),
+            aux: (),
+        })
+    }
 }
 
 impl<V: View + 'static> TensorOrCacheView<V> {

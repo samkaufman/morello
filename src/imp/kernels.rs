@@ -106,6 +106,14 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
     fn aux(&self) -> &Aux {
         &self.aux
     }
+
+    fn drop_aux(self) -> ImplNode<Tgt, ()> {
+        ImplNode::Kernel(Kernel {
+            kernel_type: self.kernel_type,
+            arguments: self.arguments,
+            aux: (),
+        })
+    }
 }
 
 impl KernelType {

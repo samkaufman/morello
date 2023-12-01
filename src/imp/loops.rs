@@ -149,6 +149,15 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
     fn aux(&self) -> &Aux {
         &self.aux
     }
+
+    fn drop_aux(self) -> ImplNode<Tgt, ()> {
+        ImplNode::Loop(Loop {
+            tiles: self.tiles,
+            body: Box::new(self.body.drop_aux()),
+            parallel: self.parallel,
+            aux: (),
+        })
+    }
 }
 
 impl<Tgt: Target, Aux: Clone> Loop<Tgt, Aux> {

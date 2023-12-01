@@ -75,4 +75,13 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Block<Tgt, Aux> {
     fn aux(&self) -> &Aux {
         &self.aux
     }
+
+    fn drop_aux(self) -> ImplNode<Tgt, ()> {
+        ImplNode::Block(Block {
+            stages: self.stages.into_iter().map(|s| s.drop_aux()).collect(),
+            bindings: self.bindings,
+            parameters: self.parameters,
+            aux: (),
+        })
+    }
 }

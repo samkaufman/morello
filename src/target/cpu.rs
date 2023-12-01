@@ -89,6 +89,8 @@ impl<T: CpuTarget> Target for T {
         let non_one_dims = shape.iter().filter(|&d| *d > 1).count();
 
         let it = iter::once(row_major(rank));
+
+        // If any dimension is one, then the row-major layout is the only layout.
         if shape.len() != non_one_dims {
             return it.collect();
         }

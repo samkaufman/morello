@@ -85,4 +85,12 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
     fn aux(&self) -> &Aux {
         &self.aux
     }
+
+    fn drop_aux(self) -> ImplNode<Tgt, ()> {
+        ImplNode::Pipeline(Pipeline {
+            intermediates: self.intermediates,
+            stages: self.stages.into_iter().map(|s| s.drop_aux()).collect(),
+            aux: (),
+        })
+    }
 }
