@@ -233,6 +233,11 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     // TODO: Shouldn't need this method. Should be implicit in Spec validity.
     pub fn can_move_to(&self, dest_layout: &Layout, dest_level: &Tgt::Level) -> bool {
+        // If the destination is into a cache ("non-addressed"), then it must have the same layout.
+        if !dest_level.is_addressed() && dest_layout != &self.layout() {
+            return false;
+        }
+
         // If the destination is in VRF, then the operand volume must be a multiple of at least one
         // of the vector sizes.
         let vector_bytes = dest_level.vector_bytes();
