@@ -647,7 +647,13 @@ class MatmulTorch(BaseTorchBackend):
 
 
 class TorchScriptBackend(BaseTorchBackend):
-    def __init__(self, torch_backend: BenchmarkBackend, extras_dir, print_graphs=True, trace=False):
+    def __init__(
+        self,
+        torch_backend: BenchmarkBackend,
+        extras_dir,
+        print_graphs=True,
+        trace=False,
+    ):
         super().__init__(extras_dir)
         self.torch_backend = torch_backend
         self.print_graphs = print_graphs
@@ -758,11 +764,9 @@ class RelayBackend(_RelayBase):
         shape_list = [(n, v.shape) for n, v in backend.data_deps]
         traced = torch.jit.trace(
             backend.jittable,
-            tuple(torch.rand(shp) for _, shp in shape_list)
+            tuple(torch.randint(0, 9, shp, dtype=TORCH_DTYPE) for _, shp in shape_list),
         )
-        relay_mod, relay_params = relay.frontend.from_pytorch(
-            traced, shape_list
-        )
+        relay_mod, relay_params = relay.frontend.from_pytorch(traced, shape_list)
 
         tvm_mod_text = None
 
