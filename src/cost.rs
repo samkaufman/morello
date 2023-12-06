@@ -19,6 +19,26 @@ pub struct Cost {
 pub type MainCost = u32;
 
 impl Cost {
+    /// Compute the cost an [Impl].
+    ///
+    /// This will traverse the entire [Impl] and have a runtime proportion to the number of nodes.
+    pub fn from_impl<Tgt, Aux, I>(imp: &I) -> Cost
+    where
+        Tgt: Target,
+        Aux: Clone,
+        I: Impl<Tgt, Aux>,
+    {
+        let child_costs = imp
+            .children()
+            .iter()
+            .map(|k| Cost::from_impl(k))
+            .collect::<SmallVec<[_; 3]>>();
+        Cost::from_child_costs(imp, &child_costs)
+    }
+
+    /// Compute the cost of an [Impl], given the costs of its children.
+    ///
+    /// Unlike [Cost::from_impl], this has constant time.
     pub fn from_child_costs<Tgt, Aux, I>(imp: &I, child_costs: &[Cost]) -> Cost
     where
         Tgt: Target,
