@@ -11,8 +11,7 @@ use morello::codegen::CodeGen;
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
 use morello::db::{DashmapDiskDatabase, Database, DatabaseExt};
-use morello::layout::row_major;
-use morello::layout::Layout;
+use morello::layout::{col_major, row_major};
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
@@ -140,9 +139,7 @@ where
     let logical_spec = match query_spec {
         QuerySpec::Transpose { size } => {
             let rm2 = row_major(2);
-            let cm2 = Layout::Standard {
-                dim_order: smallvec![1, 0],
-            };
+            let cm2 = col_major(2);
             LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Move,
