@@ -1,6 +1,6 @@
 use std::{
     fmt::Display,
-    ops::{Add, AddAssign, Mul, Sub},
+    ops::{Add, AddAssign, Mul, MulAssign, Sub},
 };
 
 pub type NonAffineExpr<T> = AffineForm<NonAffine<T>>;
@@ -154,7 +154,7 @@ where
             NonAffine::FloorDiv(v, d) => {
                 let subbed = v.map_vars(mapper);
                 if let Some(c) = subbed.as_constant() {
-                    NonAffineExpr::constant(c)
+                    NonAffineExpr::constant(c / i32::try_from(d).unwrap())
                 } else {
                     AffineForm::from(NonAffine::FloorDiv(Box::new(subbed), d))
                 }
@@ -162,7 +162,7 @@ where
             NonAffine::Mod(v, m) => {
                 let subbed = v.map_vars(mapper);
                 if let Some(c) = subbed.as_constant() {
-                    NonAffineExpr::constant(c)
+                    NonAffineExpr::constant(c % i32::try_from(m).unwrap())
                 } else {
                     AffineForm::from(NonAffine::Mod(Box::new(subbed), m))
                 }
@@ -282,9 +282,15 @@ impl<T> Mul<i32> for AffineForm<T> {
     type Output = Self;
 
     fn mul(mut self, rhs: i32) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl<T> MulAssign<i32> for AffineForm<T> {
+    fn mul_assign(&mut self, rhs: i32) {
         self.0.iter_mut().for_each(|Term(c, _)| *c *= rhs);
         self.1 *= rhs;
-        self
     }
 }
 
@@ -467,5 +473,32 @@ mod tests {
                 1,
             )
         );
+    }
+
+    #[test]
+    fn test_subs_div() {
+        let x = NonAffine::Leaf("x");
+        let original_expr = AffineForm(
+            vec![Term(1, NonAffine::FloorDiv(Box::new(x.into()), 16))],
+            0,
+        );
+
+        let result_1 = original_expr.clone().subs(&"x", &AffineForm::constant(1));
+        assert_eq!(result_1, AffineForm::constant(0));
+
+        let result_2 = original_expr.subs(&"x", &AffineForm::constant(16));
+        assert_eq!(result_2, AffineForm::constant(1));
+    }
+
+    #[test]
+    fn test_subs_mod() {
+        let x = NonAffine::Leaf("x");
+        let original_expr = AffineForm(vec![Term(1, NonAffine::Mod(Box::new(x.into()), 16))], 0);
+
+        let result_1 = original_expr.clone().subs(&"x", &AffineForm::constant(1));
+        assert_eq!(result_1, AffineForm::constant(1));
+
+        let result_2 = original_expr.subs(&"x", &AffineForm::constant(16));
+        assert_eq!(result_2, AffineForm::constant(0));
     }
 }
