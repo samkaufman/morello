@@ -14,6 +14,7 @@ use morello::common::{DimSize, Dtype};
 use morello::datadeps::SpecKey;
 use morello::db::{DashmapDiskDatabase, Database};
 use morello::grid::general::SurMap;
+use morello::layout::row_major;
 use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
@@ -70,7 +71,7 @@ where
     let move_needed_rank = if args.include_conv { 4 } else { 2 };
     bounds.extend((1..=move_needed_rank).flat_map(|rank| [move_top(args.size, rank)]));
     bounds.extend((1..=move_needed_rank).map(|rank| {
-        let layout = morello::layout::row_major(rank);
+        let layout = row_major(rank);
         LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Zero,
@@ -88,7 +89,7 @@ where
         )
     }));
     bounds.push({
-        let layout = morello::layout::row_major(2);
+        let layout = row_major(2);
         let a = TensorSpecAux {
             contig: layout.contiguous_full(),
             aligned: true,
@@ -108,7 +109,7 @@ where
     });
     if args.include_conv {
         bounds.extend({
-            let layout = morello::layout::row_major(4);
+            let layout = row_major(4);
             let a = TensorSpecAux {
                 contig: layout.contiguous_full(),
                 aligned: true,
@@ -213,7 +214,7 @@ where
 
 /// Returns a logical Move Spec of given size and rank.
 fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
-    let layout = morello::layout::row_major(rank);
+    let layout = row_major(rank);
     LogicalSpec::Primitive(
         PrimitiveBasics {
             typ: PrimitiveSpecType::Move,

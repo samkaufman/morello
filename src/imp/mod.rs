@@ -173,7 +173,7 @@ where
             any::<Kernel<Tgt, Aux>>().prop_map(ImplNode::Kernel),
             any::<SpecApp<Tgt, Spec<Tgt>, Aux>>().prop_map(ImplNode::SpecApp)
         ];
-        return impl_leaf_strategy.boxed();
+        impl_leaf_strategy.boxed()
     }
 }
 
