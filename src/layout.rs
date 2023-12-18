@@ -505,7 +505,12 @@ pub fn nhwc() -> Layout {
 
 #[cfg(test)]
 mod tests {
-    use super::col_major;
+    use super::{col_major, row_major};
+    use crate::{
+        expr::{NonAffine, NonAffineExpr, Term},
+        layout::BufferVar,
+        opaque_symbol::OpaqueSymbol,
+    };
 
     #[test]
     fn test_col_major_slices_are_non_contiguous() {
@@ -513,5 +518,16 @@ mod tests {
         let inner_contig =
             col_major.tile_contiguity(&[1, 8], &[128, 128], col_major.contiguous_full());
         assert_eq!(inner_contig, 1);
+    }
+
+    #[test]
+    fn test_row_major_indexing_expression() {
+        let rm = row_major(2);
+        let expr_id = OpaqueSymbol::new();
+        let iexpr = rm.buffer_indexing_expr(&expr_id, &[16, 4]);
+        let expected = NonAffineExpr::constant(0)
+            + Term(4, NonAffine::Leaf(BufferVar::Pt(0, expr_id.clone())))
+            + Term(1, NonAffine::Leaf(BufferVar::Pt(1, expr_id.clone())));
+        assert_eq!(iexpr, expected);
     }
 }
