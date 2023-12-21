@@ -89,7 +89,8 @@ where
     }
 
     fn compute_main_cost(&self, _child_costs: &[MainCost]) -> MainCost {
-        todo!("What cost should we have for Spec applications?")
+        log::warn!("Computed cost=0 for Spec");
+        0
     }
 
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
