@@ -261,6 +261,7 @@ mod tests {
     const TEST_SMALL_MEM: u64 = 2048;
 
     proptest! {
+        // TODO: Add an ARM variant!
         #[test]
         fn test_can_synthesize_any_spec(
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
@@ -307,11 +308,6 @@ mod tests {
             let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, false);
             assert_eq!(first_solutions, lower_solutions);
         }
-    }
-
-    #[test]
-    fn test_reducer_always_returns_minimum_cost_actions() {
-        todo!()
     }
 
     #[test]

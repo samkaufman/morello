@@ -576,14 +576,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             ) => match typ {
                 PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
                     for i in 0..primitive_aux.len() {
-                        primitive_aux[i].contig = primitive_aux[i].layout.tile_contiguity(
-                            operands[i].shape(),
-                            operands[i].shape(),
-                            primitive_aux[i].contig,
-                        );
-                        primitive_aux[i].layout = primitive_aux[i]
+                        let (new_layout, new_contig) = primitive_aux[i]
                             .layout
-                            .canonicalize_for_shape(operands[i].shape());
+                            .update_for_tiling(
+                                operands[i].shape(),
+                                operands[i].shape(),
+                                primitive_aux[i].contig,
+                            )
+                            .unwrap();
+                        primitive_aux[i].layout = new_layout;
+                        primitive_aux[i].contig = new_contig;
                     }
                 }
                 PrimitiveSpecType::Move => {
@@ -591,12 +593,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         unreachable!();
                     };
                     outer_aux.canonicalize(spec_shape, outer_aux.aligned);
-                    inner_aux.contig = inner_aux.layout.tile_contiguity(
-                        operands[1].shape(),
-                        operands[1].shape(),
-                        inner_aux.contig,
-                    );
-                    inner_aux.layout = inner_aux.layout.canonicalize_for_shape(spec_shape);
+                    let (new_inner_layout, new_inner_contig) = inner_aux
+                        .layout
+                        .update_for_tiling(
+                            operands[1].shape(),
+                            operands[1].shape(),
+                            inner_aux.contig,
+                        )
+                        .unwrap();
+                    inner_aux.layout = new_inner_layout;
+                    inner_aux.contig = new_inner_contig;
                 }
                 PrimitiveSpecType::Zero => {
                     let aligned = primitive_aux[0].aligned;
@@ -1545,7 +1551,6 @@ pub fn conv_infer_output_shape(image_shape: &[u32], filters_shape: &[u32]) -> Sh
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::imp::subspecs::SpecApp;
     use crate::imp::{visit_leaves, Impl, ImplExt, ImplNode};
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
     use crate::scheduling_sugar::SchedulingSugar;
@@ -1628,11 +1633,11 @@ mod tests {
         ) {
             let mut logical_spec = logical_spec;
             logical_spec.canonicalize();
-            assert!(logical_spec.parameters().iter().all(|p| {
-                let mut c = p.clone();
-                c.canonicalize();
-                p == &c
-            }));
+            for p in logical_spec.parameters() {
+                let mut recanonicalized = p.clone();
+                recanonicalized.canonicalize();
+                assert_eq!(p, recanonicalized);
+            }
         }
 
         #[test]

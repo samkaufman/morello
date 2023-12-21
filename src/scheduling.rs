@@ -19,7 +19,7 @@ use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
 use crate::utils::prev_power_of_two;
-use crate::views::{CacheView, Param, Tensor, Tile, View, ViewExt};
+use crate::views::{CacheView, Param, Tensor, Tile, TileError, View, ViewExt};
 
 /// A scheduling decision which can be applied to a Spec to produce an Impl.
 ///
@@ -135,7 +135,8 @@ impl<Tgt: Target> Action<Tgt> {
                                     .map(|d| d.try_into().unwrap())
                                     .collect(),
                                 tile: smaller_output_tiling
-                                    .apply(Param::new(out_idx, current_output.clone())),
+                                    .apply(Param::new(out_idx, current_output.clone()))
+                                    .map_err(tile_to_apply_err)?,
                             };
 
                             // 2. Construct tilings which respect the data deps. of the new output tile.
@@ -186,10 +187,12 @@ impl<Tgt: Target> Action<Tgt> {
                                 if original_input.shape() != &tiling_shape[..] {
                                     new_tiles.push(LoopTile {
                                         axes,
-                                        tile: updated_input_tiling.apply(Param::new(
-                                            operand_idx.try_into().unwrap(),
-                                            original_input.clone(),
-                                        )),
+                                        tile: updated_input_tiling
+                                            .apply(Param::new(
+                                                operand_idx.try_into().unwrap(),
+                                                original_input.clone(),
+                                            ))
+                                            .map_err(tile_to_apply_err)?,
                                     });
                                 }
                             }
@@ -214,7 +217,8 @@ impl<Tgt: Target> Action<Tgt> {
                                                         smallvec![lhs.shape()[0], *k],
                                                         smallvec![lhs.shape()[0], *k],
                                                         Param::new(0, lhs.clone()),
-                                                    ),
+                                                    )
+                                                    .map_err(tile_to_apply_err)?,
                                                 },
                                                 LoopTile {
                                                     axes: smallvec![1, 2],
@@ -222,7 +226,8 @@ impl<Tgt: Target> Action<Tgt> {
                                                         smallvec![*k, rhs.shape()[1]],
                                                         smallvec![*k, rhs.shape()[1]],
                                                         Param::new(1, rhs.clone()),
-                                                    ),
+                                                    )
+                                                    .map_err(tile_to_apply_err)?,
                                                 },
                                             ];
                                             (tiles, false)
@@ -242,7 +247,7 @@ impl<Tgt: Target> Action<Tgt> {
                     let ref_op = &mut new_operands[usize::from(loop_tile.tile.view.0)];
                     let aligned =
                         aligned_approx(loop_tile.tile.shape(), loop_tile.tile.step_sizes(), ref_op);
-                    ref_op.shrink(loop_tile.tile.shape(), aligned);
+                    ref_op.shrink(loop_tile.tile.shape(), aligned).unwrap();
                 }
 
                 let mut inner_spec = node_spec.clone();
@@ -449,6 +454,10 @@ impl<Tgt: Target> Action<Tgt> {
                         Param::new(idx.try_into().unwrap(), operands[idx].clone()),
                     )
                 });
+                let [outer_image_tile, outer_filters_tile] = [
+                    outer_image_tile.map_err(tile_to_apply_err)?,
+                    outer_filters_tile.map_err(tile_to_apply_err)?,
+                ];
 
                 // Make views over the tiles we'll pass to the body of the loop. These are
                 // tiles reshaped to drop the size-one dimensions and, in the case of the filters
@@ -510,12 +519,21 @@ impl<Tgt: Target> Action<Tgt> {
                 destination_vector_size,
             } => {
                 let outer_moved_operand_spec = &operands[usize::from(*source_idx)];
+
                 let new_spec = movelet_inner_tensorspec(
                     outer_moved_operand_spec,
                     destination_level,
-                    &destination_layout.canonicalize_for_shape(outer_moved_operand_spec.shape()),
+                    destination_layout,
                     *destination_vector_size,
                 );
+
+                assert!(
+                    destination_layout.applies_to_shape(new_spec.shape()),
+                    "Destination layout {:?} does not apply to shape {:?}",
+                    destination_layout,
+                    new_spec.shape()
+                );
+
                 let inner_moved_operand = if new_spec.level().is_addressed() {
                     TensorOrCacheView::Tensor(Rc::new(Tensor::new(new_spec)))
                 } else {
@@ -736,4 +754,10 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
         destination_layout.clone(),
         destination_vector_size,
     )
+}
+
+fn tile_to_apply_err(err: TileError) -> ApplyError {
+    match err {
+        TileError::InvalidShape(shape) => ApplyError::InvalidTileShape(shape),
+    }
 }

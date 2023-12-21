@@ -1201,6 +1201,7 @@ mod tests {
                 (Just(spec), action_idx_strategy)
             })
             .prop_map(|(spec, action_opt)| {
+                println!("Spec: {}", spec);
                 if let Some((action_idx, imp)) = action_opt {
                     recursively_decide_with_action(&spec, action_idx, &imp)
                 } else {
@@ -1276,6 +1277,10 @@ mod tests {
             .filter_map(|(i, a)| a.apply(spec).map(|imp| (i, imp)).ok())
             .next()
         {
+            println!(
+                "Taking action {:?}",
+                spec.0.actions().into_iter().nth(action_idx).unwrap()
+            );
             recursively_decide_with_action(spec, action_idx.try_into().unwrap(), &partial_impl)
         } else {
             Decision {
@@ -1312,6 +1317,7 @@ mod tests {
             };
         }
 
+        println!("Computing cost of Impl: {:?}", partial_impl);
         let cost = Cost::from_child_costs(
             partial_impl,
             &children

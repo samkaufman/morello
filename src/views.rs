@@ -62,6 +62,11 @@ pub trait ViewExt: View {
         }
     }
 
+    /// Yields a view of the matrix with its two logical dimensions swapped.
+    ///
+    /// The underlying data is not modified. Instead, both the dimension sizes and the
+    /// logical dimensions of the layout are swapped to be consistent with the new
+    /// dimension ordering.
     fn transpose(self) -> TransposeView<Self>
     where
         Self: Sized,
@@ -74,7 +79,7 @@ pub trait ViewExt: View {
         let (transposed_layout, new_contig) = self
             .spec()
             .layout()
-            .transpose((0, 1), self.spec().contiguous_abs());
+            .swap_dims((0, 1), self.spec().contiguous_abs());
         let spec = TensorSpec::new_canon(
             shape,
             self.spec().dtype(),
@@ -89,6 +94,12 @@ pub trait ViewExt: View {
 }
 
 impl<V: View> ViewExt for V {}
+
+#[derive(thiserror::Error, Debug)]
+pub enum TileError {
+    #[error("Invalid shape {0:?}")]
+    InvalidShape(Shape),
+}
 
 /// A reference to an Impl node parameter.
 ///
@@ -265,17 +276,23 @@ impl<V: View> View for CacheView<V> {
 }
 
 impl<V: View> Tile<V> {
-    pub fn new(shape: Shape, step_sizes: Shape, view: V) -> Self {
+    pub fn new(shape: Shape, step_sizes: Shape, view: V) -> Result<Self, TileError> {
         let expr_term_id = OpaqueSymbol::new();
         let mut spec = view.spec().clone();
-        spec.shrink(&shape, aligned_approx(&shape, &step_sizes, view.spec()));
-        Self {
-            shape,
-            step_sizes,
-            view,
-            expr_term_id,
-            spec,
+        match spec.shrink(&shape, aligned_approx(&shape, &step_sizes, view.spec())) {
+            Ok(()) => Ok(Self {
+                shape,
+                step_sizes,
+                view,
+                expr_term_id,
+                spec,
+            }),
+            Err(anyhow::Error { .. }) => Err(TileError::InvalidShape(shape)),
         }
+    }
+
+    pub fn shape(&self) -> &[DimSize] {
+        &self.shape
     }
 
     pub fn step_sizes(&self) -> &[DimSize] {
@@ -302,6 +319,39 @@ impl<V: View> Tile<V> {
         let origin_size = self.view.shape()[usize::from(dim)];
         divrem::DivCeil::div_ceil(origin_size, self.step_sizes[usize::from(dim)])
     }
+
+    pub fn compose_buffer_indexing_expr(
+        &self,
+        inner_expr: NonAffineExpr<BufferVar>,
+    ) -> NonAffineExpr<BufferVar> {
+        if self
+            .shape()
+            .iter()
+            .zip(&self.step_sizes)
+            .any(|(a, b)| *a != *b)
+        {
+            todo!(
+                "Implement support for sliding tilings. (Shape was {:?} and step sizes were {:?}.)",
+                self.shape(),
+                self.step_sizes
+            );
+        }
+        inner_expr.map_vars(&mut |term_var| match term_var {
+            BufferVar::Pt(dim, _) => {
+                let e = &self.expr_term_id;
+                let size_in_dim = self.shape()[usize::from(dim)];
+                let mut terms = vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e.clone())))];
+                if size_in_dim != self.view.shape()[usize::from(dim)] {
+                    terms.push(Term(
+                        size_in_dim.try_into().unwrap(),
+                        NonAffine::Leaf(BufferVar::TileIdx(dim, e.clone())),
+                    ));
+                }
+                AffineForm(terms, 0)
+            }
+            BufferVar::TileIdx(_, _) => AffineForm(vec![Term(1, NonAffine::Leaf(term_var))], 0),
+        })
+    }
 }
 
 impl<T: View> View for Tile<T> {
@@ -322,34 +372,7 @@ impl<T: View> View for Tile<T> {
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
     ) -> NonAffineExpr<BufferVar> {
-        let expr = self.view.make_buffer_indexing_expr(env);
-        if self
-            .shape()
-            .iter()
-            .zip(&self.step_sizes)
-            .any(|(a, b)| *a != *b)
-        {
-            todo!(
-                "Implement support for sliding tilings. (Shape was {:?} and step sizes were {:?}.)",
-                self.shape(),
-                self.step_sizes
-            );
-        }
-        expr.map_vars(&mut |term_var| match term_var {
-            BufferVar::Pt(dim, _) => {
-                let e = &self.expr_term_id;
-                let size_in_dim = self.shape()[usize::from(dim)];
-                let mut terms = vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e.clone())))];
-                if size_in_dim != self.view.shape()[usize::from(dim)] {
-                    terms.push(Term(
-                        size_in_dim.try_into().unwrap(),
-                        NonAffine::Leaf(BufferVar::TileIdx(dim, e.clone())),
-                    ));
-                }
-                AffineForm(terms, 0)
-            }
-            BufferVar::TileIdx(_, _) => AffineForm(vec![Term(1, NonAffine::Leaf(term_var))], 0),
-        })
+        self.compose_buffer_indexing_expr(self.view.make_buffer_indexing_expr(env))
     }
 
     fn bind<'i>(

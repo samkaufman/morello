@@ -4,6 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc a4636eb0a31b30cec72b22b2d30f6a495e1973831abfa0640112557fdd958d20 # shrinks to shape = [1, 2]
-cc 76847f1d4bdfe833e02cba6dcb368e071f61b1cc143b5a0c8f3569d9c006030e # shrinks to shape = [1, 1]
-cc 27f75a39663c5d866556855881c10c8b9bcc94f6a5330a33d9315afb63cdc618 # shrinks to shape = [1, 2, 1]
+cc 048bbbd014acfcdc9918f879453ded60a3ba5606e6cc9c6100fc5a792ab0efc9 # shrinks to tspec = TensorSpec { shape: [4, 4, 2, 4], dtype: Uint8, aux: TensorSpecAux { contig: 3, aligned: false, level: GL, layout: New([(0, None), (2, None), (3, None), (1, None), (3, Some(2))]), vector_size: None } }

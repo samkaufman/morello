@@ -84,49 +84,22 @@ impl<T: CpuTarget> Target for T {
         results
     }
 
+    /// Return layouts that are valid destinations for a move of the given shape.
+    ///
+    /// All returned layouts are applicable to the given shape.
+    /// ([Layout::applies_to_shape] returns `true`.)
     fn move_destination_layouts(shape: &[DimSize]) -> Vec<Layout> {
         let rank = u8::try_from(shape.len()).unwrap();
         let non_one_dims = shape.iter().filter(|&d| *d > 1).count();
-
         let it = iter::once(row_major(rank));
-
-        // If any dimension is one, then the row-major layout is the only layout.
-        if shape.len() != non_one_dims {
-            return it.collect();
-        }
-
-        let it = it.chain({
-            shape
-                .iter()
-                .take(shape.len() - 1)
-                .copied()
-                .enumerate()
-                .flat_map(|(dim, dim_size)| {
-                    let dim_u8 = u8::try_from(dim).unwrap();
-                    dim_range(dim_size, false).filter_map(move |strip_size| {
-                        debug_assert!(
-                            strip_size < dim_size,
-                            "strip_size {strip_size} >= dim_size {dim_size}"
-                        );
-                        if strip_size == 1 {
-                            None
-                        } else {
-                            Some(Layout::new_packed(rank, dim_u8, strip_size))
-                        }
-                    })
-                })
-        });
-
         match rank {
-            2 => {
-                if non_one_dims == 2 {
-                    return iter::once(col_major(2)).chain(it).collect();
-                } else {
-                    return it.collect();
-                }
+            2 if non_one_dims == 2 => {
+                extend_move_actions_with_packed(shape, it.chain(iter::once(col_major(2)))).collect()
             }
-            4 => iter::once(nhwc()).chain(it).collect(),
-            _ => it.collect(),
+            4 => {
+                extend_move_actions_with_packed(shape, it.chain(iter::once(nhwc(shape)))).collect()
+            }
+            _ => extend_move_actions_with_packed(shape, it).collect(),
         }
     }
 
@@ -427,6 +400,47 @@ pub fn mult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
         .all(|o| o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == 1))
 }
 
+fn extend_move_actions_with_packed(
+    shape: &[DimSize],
+    it: impl Iterator<Item = Layout> + 'static,
+) -> impl Iterator<Item = Layout> + '_ {
+    it.flat_map(move |original_layout| {
+        let Layout::New(dims) = &original_layout;
+        debug_assert!(dims.iter().all(|(_, s)| s.is_none()));
+        let more_iter = dims[..dims.len() - 1].iter().flat_map(move |&(dim, _)| {
+            let dims = dims.clone();
+
+            let mut it_a = None;
+            let mut it_b = None;
+            if shape[usize::from(dim)] == 1 {
+                it_a = Some(iter::empty());
+            } else {
+                it_b = Some(pack_sizes(shape[usize::from(dim)]).map(move |strip_size| {
+                    Layout::new(
+                        dims.iter()
+                            .cloned()
+                            .chain(iter::once((dim, Some(strip_size))))
+                            .collect(),
+                    )
+                }));
+            }
+            it_a.into_iter().flatten().chain(it_b.into_iter().flatten())
+        });
+        // TODO: Avoid following `clone` and `collect`
+        iter::once(original_layout.clone())
+            .chain(more_iter)
+            .collect::<Vec<_>>()
+            .into_iter()
+    })
+}
+
+fn pack_sizes(max_size: DimSize) -> impl Iterator<Item = DimSize> {
+    let mut inner_iter = dim_range(max_size, true);
+    let first_value = inner_iter.next();
+    debug_assert_eq!(first_value, Some(1));
+    inner_iter.filter(move |&s| max_size % s == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -496,15 +510,13 @@ mod tests {
             let (shape, strip_dim) = example;
             let expr_id = OpaqueSymbol::new();
 
-            let packed_layout = Layout::Packed {
-                dim_count: shape.len().try_into().unwrap(),
-                strip_dim,
-                strip_size: 1,
-            };
+            let packed_layout = Layout::new_packed(shape.len().try_into().unwrap(), strip_dim, 1);
             let packed_ie = packed_layout.buffer_indexing_expr(&expr_id, &shape);
             let packed_pts = eval_all_index_expr_points(&packed_ie, &shape);
 
-            let rm_layout = Layout::new_standard((0..u8::try_from(shape.len()).unwrap()).collect());
+            let rm_layout = Layout::new_standard(
+                (0..u8::try_from(shape.len()).unwrap()).collect(),
+                &shape);
             let rm_ie = rm_layout.buffer_indexing_expr(&expr_id, &shape);
             let rm_pts = eval_all_index_expr_points(&rm_ie, &shape);
 

@@ -4,6 +4,5 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc a4636eb0a31b30cec72b22b2d30f6a495e1973831abfa0640112557fdd958d20 # shrinks to shape = [1, 2]
-cc 76847f1d4bdfe833e02cba6dcb368e071f61b1cc143b5a0c8f3569d9c006030e # shrinks to shape = [1, 1]
-cc 27f75a39663c5d866556855881c10c8b9bcc94f6a5330a33d9315afb63cdc618 # shrinks to shape = [1, 2, 1]
+cc e18e8f46b29c30f02e9d833e1bdff87cecf47ce5b7f1ffb1f56c4b72aa6f6f21 # shrinks to test_input = ([1], [0], [1], [0]), first_int = 0
+cc 91b76cc15cfcd64d3a1bee58bbe471ae47692d65bdabc6300d1a7534ba349828 # shrinks to test_input = ([1], [0], [1], [1]), first_int = 0

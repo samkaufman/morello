@@ -227,19 +227,19 @@ pub fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tgt>) -> 
     let src_cache_lines = MainCost::from(src.layout().estimate_cache_lines::<Tgt>(
         src.shape(),
         src.dtype(),
-        src.is_contiguous(),
+        src.contiguous_abs(),
     ));
     let dest_cache_lines = MainCost::from(dest.layout().estimate_cache_lines::<Tgt>(
         dest.shape(),
         dest.dtype(),
-        dest.is_contiguous(),
+        dest.contiguous_abs(),
     ));
 
     let src_cost = src_hit_cost * src_cache_lines;
     let dest_cost = dest_hit_cost * dest_cache_lines;
 
     let mut cost: MainCost = src_cost + dest_cost;
-    if !src.is_contiguous() || src.layout() != dest.layout() {
+    if !src.is_contiguous() {
         cost *= 2;
     }
     cost
