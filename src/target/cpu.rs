@@ -306,27 +306,6 @@ pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>
     has_vrf
 }
 
-pub fn cacheaccess_applies_to_operands<Tgt: Target>(_operands: &[TensorSpec<Tgt>]) -> bool {
-    false
-
-    // if operands.iter().all(|o| o.level().is_addressed()) {
-    //     return false;
-    // }
-    // if operands.iter().any(|o| !o.is_contiguous()) {
-    //     return false;
-    // }
-    // if operands[0].dtype() != operands[1].dtype() {
-    //     return false;
-    // }
-    // if operands[0].shape() != operands[1].shape() {
-    //     return false;
-    // }
-    // if operands[0].layout() != operands[1].layout() {
-    //     return false;
-    // }
-    // true
-}
-
 pub fn memsetzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
@@ -515,8 +494,7 @@ mod tests {
             let packed_pts = eval_all_index_expr_points(&packed_ie, &shape);
 
             let rm_layout = Layout::new_standard(
-                (0..u8::try_from(shape.len()).unwrap()).collect(),
-                &shape);
+                (0..u8::try_from(shape.len()).unwrap()).collect());
             let rm_ie = rm_layout.buffer_indexing_expr(&expr_id, &shape);
             let rm_pts = eval_all_index_expr_points(&rm_ie, &shape);
 

@@ -281,12 +281,8 @@ where
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        #[cfg(debug_assertions)]
-        let original_spec = spec.clone();
-
         let bimap = self.spec_bimap();
         let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
-        let spec_b = spec.clone();
 
         // Construct an iterator over all blocks to fill.
         let rank = bottom.len();
@@ -299,7 +295,6 @@ where
 
         for joined_row in blocks_iter {
             let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
-            let block_pt_b = block_pt.clone();
 
             let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
             match block_entry {
@@ -995,19 +990,19 @@ mod tests {
             .map(|v| Some(v.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(
-            block_shape(&[0, 0], &db_shape, |i, _| 2)
+            block_shape(&[0, 0], &db_shape, |_, _| 2)
                 .collect_vec()
                 .as_slice(),
             &[2, 2]
         );
         assert_eq!(
-            block_shape(&[1, 1], &db_shape, |i, _| 2)
+            block_shape(&[1, 1], &db_shape, |_, _| 2)
                 .collect_vec()
                 .as_slice(),
             &[2, 2]
         );
         assert_eq!(
-            block_shape(&[1, 3], &db_shape, |i, _| 2)
+            block_shape(&[1, 3], &db_shape, |_, _| 2)
                 .collect_vec()
                 .as_slice(),
             &[2, 1]

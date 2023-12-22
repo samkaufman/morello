@@ -34,9 +34,8 @@ const MULTI_DIM_TILING: bool = false;
 /// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
 const MOVE_RESULTS_CAPACITY: usize = 12;
 
+#[cfg(test)]
 const ARBITRARY_SPEC_MAX_SIZE: DimSize = 8;
-
-const LOG_SCALE_SHAPES_BIMAP: bool = true;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
 #[serde(bound = "")]
@@ -273,7 +272,7 @@ impl PrimitiveBasics {
                 // Compute the new filters Tiling.
                 let new_filters_shape: Shape = [smaller_output.shape()[1], channels]
                     .into_iter()
-                    .chain([fh, fw].into_iter())
+                    .chain([fh, fw])
                     .collect();
                 let mut new_filters_steps: Shape = new_filters_shape.clone();
                 new_filters_steps[0] = smaller_output.step_sizes()[1];
@@ -724,7 +723,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     parallel: true,
                 });
             }
-            left.into_iter().chain(right.into_iter())
+            left.into_iter().chain(right)
         })
     }
 

@@ -44,7 +44,7 @@ impl<Tgt: Target, Aux: Clone> MoveLet<Tgt, Aux> {
         let children = prologue
             .into_iter()
             .chain(iter::once(main_stage))
-            .chain(epilogue.into_iter())
+            .chain(epilogue)
             .collect();
         Self {
             parameter_idx,

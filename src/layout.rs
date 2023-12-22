@@ -2,12 +2,7 @@ use anyhow::anyhow;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::{
-    collections::HashSet,
-    fmt::Display,
-    hash::Hash,
-    iter,
-};
+use std::{collections::HashSet, fmt::Display, hash::Hash, iter};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
@@ -62,7 +57,7 @@ impl Layout {
         l.merge_consecutive_dimensions(l.contiguous_full()).0
     }
 
-    pub fn new_standard(dim_order: SmallVec<[u8; 5]>, shape: &[DimSize]) -> Layout {
+    pub fn new_standard(dim_order: SmallVec<[u8; 5]>) -> Layout {
         Layout::new(dim_order.iter().map(|&dim| (dim, None)).collect())
     }
 
@@ -291,41 +286,6 @@ impl Layout {
                 }
             }
         }
-    }
-
-    /// Move ones to the inside, sorting the size-one dims., updating Contig as appropriate.
-    fn move_ones_to_inside(
-        &self,
-        parent_shape: &[DimSize],
-        tile_shape: &[DimSize],
-        source_contig: Contig,
-    ) -> (Layout, Contig) {
-        let Layout::New(dims) = self;
-
-        let first_contig_idx = dims.len() - usize::from(source_contig);
-
-        let mut new_dims = Vec::with_capacity(dims.len());
-        let mut new_dims_back = Vec::new();
-        let mut new_contig = source_contig;
-        for (idx, (dim, packing_size)) in dims.iter().enumerate() {
-            if tile_shape[usize::from(*dim)] != 1 {
-                new_dims.push((*dim, *packing_size));
-                continue;
-            }
-            if new_dims_back.iter().any(|(d, _)| d == dim) {
-                if idx >= first_contig_idx {
-                    new_contig -= 1;
-                }
-            } else {
-                new_dims_back.push((*dim, None));
-                if idx < first_contig_idx {
-                    new_contig += 1;
-                }
-            }
-        }
-        new_dims_back.sort_by_key(|&(d, _)| d);
-        new_dims.extend_from_slice(&new_dims_back);
-        (Layout::new(new_dims), new_contig)
     }
 
     /// Merge matching, consecutive dimensions.

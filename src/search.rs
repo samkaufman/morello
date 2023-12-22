@@ -246,7 +246,7 @@ mod tests {
     use super::*;
     use crate::common::{DimSize, Dtype};
     use crate::db::DashmapDiskDatabase;
-    use crate::layout::{row_major, Layout};
+    use crate::layout::row_major;
     use crate::memorylimits::MemVec;
     use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{CpuMemoryLevel, X86Target};
@@ -343,62 +343,6 @@ mod tests {
         assert_eq!(first_solutions, lower_solutions);
     }
 
-    fn example_move_spec(
-        from_level: CpuMemoryLevel,
-        from_layout: Layout,
-        to_level: CpuMemoryLevel,
-        to_layout: Layout,
-    ) -> Spec<X86Target> {
-        Spec(
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Move,
-                    spec_shape: smallvec![4, 4],
-                    dtype: Dtype::Uint8,
-                },
-                vec![
-                    TensorSpecAux {
-                        contig: from_layout.contiguous_full(),
-                        aligned: false,
-                        level: from_level,
-                        layout: from_layout,
-                        vector_size: None,
-                    },
-                    TensorSpecAux {
-                        contig: to_layout.contiguous_full(),
-                        aligned: false,
-                        level: to_level,
-                        layout: to_layout,
-                        vector_size: None,
-                    },
-                ],
-                false,
-            ),
-            X86Target::max_mem(),
-        )
-    }
-
-    fn example_zero_spec(level: CpuMemoryLevel, layout: Layout) -> Spec<X86Target> {
-        Spec(
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Zero,
-                    spec_shape: smallvec![4, 4],
-                    dtype: Dtype::Uint8,
-                },
-                vec![TensorSpecAux {
-                    contig: layout.contiguous_full(),
-                    aligned: false,
-                    level,
-                    layout,
-                    vector_size: None,
-                }],
-                false,
-            ),
-            X86Target::max_mem(),
-        )
-    }
-
     fn lower_and_higher_spec<Tgt: Target>() -> impl Strategy<Value = (Spec<Tgt>, Spec<Tgt>)> {
         let MemoryLimits::Standard(mut top_memvec) = X86Target::max_mem();
         top_memvec = top_memvec.map(|v| v.min(TEST_SMALL_MEM));
@@ -408,7 +352,7 @@ mod tests {
         let top_memory_c = Rc::clone(&top_memory_a);
 
         any_with::<Spec<Tgt>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
-            .prop_filter("limits should not be max", move |s| &s.1 != &*top_memory_a)
+            .prop_filter("limits should not be max", move |s| s.1 != *top_memory_a)
             .prop_flat_map(move |spec| {
                 let MemoryLimits::Standard(top_memvec) = top_memory_b.as_ref();
                 let MemoryLimits::Standard(raised_memory) = &spec.1;

@@ -134,7 +134,7 @@ impl<Tgt: Target, Aux: Debug + proptest::arbitrary::Arbitrary> proptest::arbitra
     type Parameters = ();
     type Strategy = proptest::strategy::BoxedStrategy<Self>;
 
-    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
         use proptest::prelude::*;
 
         any::<KernelType>()

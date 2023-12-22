@@ -119,7 +119,7 @@ mod tests {
         // TODO: The buffer indexing exporession should be tiled.
 
         let is_aligned = {
-            let mut tile_coordinates = (0..tile.shape().len())
+            let tile_coordinates = (0..tile.shape().len())
                 .map(|dim| 0..tile.steps_dim(dim.try_into().unwrap()))
                 .multi_cartesian_product();
             let mut per_tile_index_expressions =
