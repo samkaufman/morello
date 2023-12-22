@@ -243,13 +243,9 @@ impl Layout {
             let new_contig = new_layout.drop_unneeded_packings(tile_shape, new_contig);
             // println!("layout after phase 3: {:?}", new_layout);
             // println!("contig after phase 3: {}", new_contig);
-            // let (new_layout, new_contig) =
-            //     new_layout.move_ones_to_inside(parent_shape, tile_shape, new_contig);
+            let new_contig = new_layout.increase_contig_through_ones(tile_shape, new_contig);
             // println!("layout after phase 4: {:?}", new_layout);
             // println!("contig after phase 4: {}", new_contig);
-            let new_contig = new_layout.increase_contig_through_ones(tile_shape, new_contig);
-            // println!("layout after phase 5: {:?}", new_layout);
-            // println!("contig after phase 5: {}", new_contig);
             Ok((new_layout, new_contig))
         }
     }
