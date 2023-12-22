@@ -7,7 +7,6 @@ use std::{
     fmt::Display,
     hash::Hash,
     iter,
-    ops::{Add, Sub},
 };
 
 use crate::{
@@ -530,31 +529,6 @@ pub fn col_major(rank: u8) -> Layout {
 pub fn nhwc(tensor_shape: &[DimSize]) -> Layout {
     assert_eq!(tensor_shape.len(), 4);
     Layout::new(vec![(0, None), (2, None), (3, None), (1, None)])
-}
-
-fn drop_and_shift<'a, T>(arr: &'a [T], to_drop: &'a [T]) -> impl Iterator<Item = T> + 'a
-where
-    T: Eq + Ord + Add + Sub<Output = T> + Copy + num_traits::Zero + num_traits::One,
-{
-    drop_and_shift_ext(arr, to_drop).flatten()
-}
-
-fn drop_and_shift_ext<'a, T>(arr: &'a [T], to_drop: &'a [T]) -> impl Iterator<Item = Option<T>> + 'a
-where
-    T: Eq + Ord + Add + Sub<Output = T> + Copy + num_traits::Zero + num_traits::One,
-{
-    arr.iter().map(|&logical_dim| {
-        if !to_drop.contains(&logical_dim) {
-            let offset =
-                to_drop.iter().fold(
-                    T::zero(),
-                    |p, &d| if d < logical_dim { p + T::one() } else { p },
-                );
-            Some(logical_dim - offset)
-        } else {
-            None
-        }
-    })
 }
 
 #[cfg(test)]

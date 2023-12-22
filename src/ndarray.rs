@@ -55,10 +55,16 @@ impl<T> NDArray<T> {
         let center_value = center_run.value;
         if self.data.runs_len() == 1 {
             (center_value, None)
-        } else if (run_idx == 0) {
-            (center_value, Some(rle_vec_get_run(&self.data, run_idx + 1).value))
+        } else if run_idx == 0 {
+            (
+                center_value,
+                Some(rle_vec_get_run(&self.data, run_idx + 1).value),
+            )
         } else {
-            (center_value, Some(rle_vec_get_run(&self.data, run_idx - 1).value))
+            (
+                center_value,
+                Some(rle_vec_get_run(&self.data, run_idx - 1).value),
+            )
         }
     }
 }

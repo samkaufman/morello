@@ -57,8 +57,6 @@ pub fn aligned_approx<Tgt: Target>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::{
         alignment::aligned_approx,
         common::Dtype,
