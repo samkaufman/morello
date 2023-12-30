@@ -113,15 +113,10 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     color::set_color_mode(args.color);
+    let db = DashmapDiskDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES, K.into());
     match &args.target {
-        TargetId::X86 => main_per_db::<_, X86Target>(
-            &args,
-            &DashmapDiskDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES, K),
-        ),
-        TargetId::Arm => main_per_db::<_, ArmTarget>(
-            &args,
-            &DashmapDiskDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES, K),
-        ),
+        TargetId::X86 => main_per_db::<_, X86Target>(&args, &db),
+        TargetId::Arm => main_per_db::<_, ArmTarget>(&args, &db),
     }
 }
 
