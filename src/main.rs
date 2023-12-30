@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::info;
 use smallvec::smallvec;
+use std::num::NonZeroUsize;
 use std::{io, path};
 
 use morello::codegen::CodeGen;
@@ -50,6 +51,10 @@ struct Args {
     /// Target architecture
     #[arg(long, value_enum, default_value_t = TargetId::X86)]
     target: TargetId,
+
+    /// Number of parallel jobs for top-down search
+    #[arg(long, short)]
+    jobs: Option<usize>,
 
     #[command(subcommand)]
     subcmd: Subcommand,
@@ -221,7 +226,8 @@ where
     let spec = Spec(logical_spec, Tgt::max_mem());
 
     let start_time = std::time::Instant::now();
-    let (_, hits, misses) = morello::search::top_down(db, &spec, K.into(), true);
+    let (_, hits, misses) =
+        morello::search::top_down(db, &spec, K.into(), args.jobs.and_then(NonZeroUsize::new));
     info!("top_down took {:?}", start_time.elapsed());
     info!(
         "top_down missed {} times ({:.2}% of {})",
