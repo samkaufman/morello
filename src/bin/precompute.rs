@@ -14,6 +14,7 @@ use morello::common::{DimSize, Dtype};
 use morello::db::{DashmapDiskDatabase, Database};
 use morello::grid::general::SurMap;
 use morello::memorylimits::{MemVec, MemoryLimits};
+use morello::search::SINGLE_JOB;
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
 };
@@ -168,7 +169,7 @@ where
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
                     let spec = Spec(logical_spec.clone(), MemoryLimits::Standard(job));
-                    let result = morello::search::top_down(db, &spec, 1, false);
+                    let result = morello::search::top_down(db, &spec, 1, SINGLE_JOB);
                     if let [(_, only_result_cost)] = &result.0[..] {
                         worklist.extend(next_limits(&spec.1, &only_result_cost.peaks));
                     }
