@@ -105,20 +105,20 @@ pub enum DbBlock {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RleBlock {
-    pub filled: crate::ndarray::NDArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
-    pub main_costs: crate::ndarray::NDArray<MainCost>,
-    pub peaks: crate::ndarray::NDArray<MemVec>,
-    pub depths_actions: crate::ndarray::NDArray<(u8, ActionIdx)>,
+    pub filled: NDArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
+    pub main_costs: NDArray<MainCost>,
+    pub peaks: NDArray<MemVec>,
+    pub depths_actions: NDArray<(u8, ActionIdx)>,
     shape: SmallVec<[usize; 10]>,
     volume: NonZeroU32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct StructuredBlock(pub crate::ndarray::NDArray<Option<ActionCostVec>>);
+pub struct StructuredBlock(pub NDArray<Option<ActionCostVec>>);
 
 // TODO: Replace [Option<u16>] with just [u16] offset by one.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ActionOnlyBlock(pub crate::ndarray::NDArray<Option<SmallVec<[u16; 1]>>>);
+pub struct ActionOnlyBlock(pub NDArray<Option<SmallVec<[u16; 1]>>>);
 
 // TODO: Storing Spec and usize is too expensive.
 pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
@@ -535,10 +535,10 @@ impl RleBlock {
         shape_with_k.push(k.into());
 
         RleBlock {
-            filled: crate::ndarray::NDArray::new_with_value(shape, 0),
-            main_costs: crate::ndarray::NDArray::new(&shape_with_k),
-            peaks: crate::ndarray::NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
-            depths_actions: crate::ndarray::NDArray::new(&shape_with_k),
+            filled: NDArray::new_with_value(shape, 0),
+            main_costs: NDArray::new(&shape_with_k),
+            peaks: NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
+            depths_actions: NDArray::new(&shape_with_k),
             shape: shape.into(),
             volume: shape
                 .iter()
