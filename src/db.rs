@@ -14,7 +14,7 @@ use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Result};
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use divrem::DivRem;
@@ -160,28 +160,31 @@ impl<Tgt: Target> Default for DbImplAux<Tgt> {
 }
 
 impl DashmapDiskDatabase {
-    pub fn new(file_path: Option<&path::Path>, binary_scale_shapes: bool, k: u8) -> Self {
-        Self::new_with_dashmap_constructor(file_path, binary_scale_shapes, k, &DashMap::new)
+    pub fn try_new(
+        file_path: Option<&path::Path>,
+        binary_scale_shapes: bool,
+        k: u8,
+    ) -> Result<Self> {
+        Self::try_new_with_dashmap_constructor(file_path, binary_scale_shapes, k, &DashMap::new)
     }
 
-    pub fn with_capacity(
+    pub fn try_with_capacity(
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
         k: u8,
         capacity: usize,
-    ) -> Self {
-        Self::new_with_dashmap_constructor(file_path, binary_scale_shapes, k, &|| {
+    ) -> Result<Self> {
+        Self::try_new_with_dashmap_constructor(file_path, binary_scale_shapes, k, &|| {
             DashMap::with_capacity(capacity)
         })
     }
 
-    // TODO: This does I/O; it (and the pub constructors) should return errors, not panic.
-    fn new_with_dashmap_constructor(
+    fn try_new_with_dashmap_constructor(
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
         k: u8,
         dashmap_constructor: &dyn Fn() -> DashMap<DbKey, DbBlock>,
-    ) -> Self {
+    ) -> Result<Self> {
         let use_rle_blocks = std::env::var("MORELLO_STORE_COSTS").is_ok();
         let grouped_entries = match file_path {
             Some(path) => match std::fs::File::open(path) {
@@ -194,18 +197,18 @@ impl DashmapDiskDatabase {
                 }
                 Err(err) => match err.kind() {
                     std::io::ErrorKind::NotFound => dashmap_constructor(),
-                    _ => todo!("Handle other file errors"),
+                    _ => return Err(err.into()),
                 },
             },
             None => Default::default(),
         };
-        Self {
+        Ok(Self {
             file_path: file_path.map(|p| p.to_owned()),
             blocks: grouped_entries,
             binary_scale_shapes,
             k,
             use_rle_blocks,
-        }
+        })
     }
 
     pub fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
@@ -1001,7 +1004,7 @@ mod tests {
         #[test]
         fn test_put_then_get_fills_across_memory_limits(decision in arb_spec_and_decision::<X86Target>()) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = DashmapDiskDatabase::new(None, false, 1);
+            let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
 
             // Put all decisions into database.
             println!("Decisions-to-visit are: {:?}", decision.visit_decisions().collect::<Vec<_>>());
@@ -1038,7 +1041,7 @@ mod tests {
         // fn test_two_puts_return_correct_gets_for_second_put(
         //     decision_pair in arb_spec_and_decision_pair::<X86Target>()
         // ) {
-        //     let db = DashmapDiskDatabase::new(None, false, 1);
+        //     let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
         //     let (decision_a, decision_b) = decision_pair;
         //     assert!(decision_a.actions_costs.len() < 2 && decision_b.actions_costs.len() < 2);
         //     let logical_specs_match = decision_a.spec.0 == decision_b.spec.0;

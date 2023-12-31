@@ -1,6 +1,7 @@
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 
+use anyhow::Result;
 use clap::Parser;
 use log::{debug, info};
 use rand::seq::SliceRandom;
@@ -50,12 +51,18 @@ struct Args {
     size: DimSize,
 }
 
-fn main() {
+fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
-    let db =
-        DashmapDiskDatabase::with_capacity(args.db.as_deref(), true, K, INITIAL_HASHMAP_CAPACITY);
+    let db = DashmapDiskDatabase::try_with_capacity(
+        args.db.as_deref(),
+        true,
+        K,
+        INITIAL_HASHMAP_CAPACITY,
+    )?;
     main_per_db(&args, &db);
+
+    Ok(())
 }
 
 fn main_per_db<'a, D>(args: &Args, db: &'a D)

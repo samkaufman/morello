@@ -218,7 +218,7 @@ mod tests {
         fn test_can_synthesize_any_spec(
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
         ) {
-            let db = DashmapDiskDatabase::new(None, false, 1);
+            let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
             top_down(&db, &spec, 1, false);
         }
 
@@ -227,7 +227,7 @@ mod tests {
             spec_pair in lower_and_higher_spec::<X86Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
-            let db = DashmapDiskDatabase::new(None, false, 1);
+            let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
 
             // Solve the first, lower Spec.
             let (lower_result_vec, _, _) = top_down(&db, &spec, 1, false);
@@ -249,7 +249,7 @@ mod tests {
         fn test_synthesis_at_peak_memory_yields_same_decision(
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
         ) {
-            let db = DashmapDiskDatabase::new(None, false, 1);
+            let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
             let (first_solutions, _, _) = top_down(&db, &spec, 1, false);
             let first_peak = if let Some(first_sol) = first_solutions.first() {
                 first_sol.1.peaks.clone()
@@ -283,7 +283,7 @@ mod tests {
             MemoryLimits::Standard(MemVec::new_from_binary_scaled([0, 5, 7, 6])),
         );
 
-        let db = DashmapDiskDatabase::new(None, false, 1);
+        let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
         let (first_solutions, _, _) = top_down(&db, &spec, 1, false);
         let first_peak = if let Some(first_sol) = first_solutions.first() {
             first_sol.1.peaks.clone()
