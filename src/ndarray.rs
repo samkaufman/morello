@@ -16,9 +16,8 @@ pub struct NDArray<T> {
 }
 
 impl<T> NDArray<T> {
-    // TODO: Use the standard Rust name for this method.
     /// Return the index of an arbitrary value which matches `predicate`.
-    pub fn find_index<P>(&self, mut predicate: P) -> Option<Vec<usize>>
+    pub fn position<P>(&self, mut predicate: P) -> Option<Vec<usize>>
     where
         Self: Sized,
         P: FnMut(&T) -> bool,
@@ -292,7 +291,7 @@ mod tests {
         let insertion_point = vec![1, 1];
         let mut arr = NDArray::new_with_value(&[4, 4], false);
         arr.set_pt(&insertion_point, true);
-        let retrieved_idx = arr.find_index(|&v| v);
+        let retrieved_idx = arr.position(|&v| v);
         assert_eq!(retrieved_idx, Some(insertion_point));
     }
 
