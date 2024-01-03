@@ -34,7 +34,7 @@ where
 
     let thread_count = jobs
         .map(|j| j.get())
-        .unwrap_or_else(|| rayon::current_num_threads());
+        .unwrap_or_else(rayon::current_num_threads);
     if thread_count == 1 {
         return top_down_spec(db, goal, top_k, 0, 1);
     }
