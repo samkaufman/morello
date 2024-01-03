@@ -4,7 +4,7 @@ use tikv_jemallocator::Jemalloc;
 
 use anyhow::Result;
 use clap::Parser;
-use std::{iter, path, thread};
+use std::path;
 
 use morello::common::Dtype;
 use morello::datadeps::SpecKey;

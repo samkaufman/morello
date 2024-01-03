@@ -40,6 +40,7 @@ snap = "1.1.0"
 tempfile = "3"
 thiserror = "1.0.47"
 thread_local = "1.1.7"
+nonzero = "0.2.0"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"

@@ -1,5 +1,6 @@
 use iai_callgrind::{black_box, main};
 use morello::db::DashmapDiskDatabase;
+use nonzero::nonzero as nz;
 use smallvec::smallvec;
 
 use morello::common::{DimSize, Dtype};
@@ -34,7 +35,7 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> Spec<Tgt> {
 
 fn synth(goal: &Spec<X86Target>) {
     let db = DashmapDiskDatabase::try_new(None, true, 1).unwrap();
-    morello::search::top_down(&db, black_box(goal), 1, false);
+    morello::search::top_down(&db, black_box(goal), 1, Some(nz!(1usize)));
 }
 
 #[inline(never)]

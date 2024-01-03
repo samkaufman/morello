@@ -1,6 +1,7 @@
 use itertools::Itertools;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use smallvec::{smallvec, SmallVec};
+use std::num::NonZeroUsize;
 
 use crate::cost::Cost;
 use crate::db::{ActionIdx, Database};
@@ -21,7 +22,7 @@ pub fn top_down<'d, Tgt, D>(
     db: &'d D,
     goal: &Spec<Tgt>,
     top_k: usize,
-    parallel: bool,
+    jobs: Option<NonZeroUsize>,
 ) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64)
 where
     Tgt: Target,
@@ -31,11 +32,13 @@ where
 {
     assert!(db.max_k().map_or(true, |k| k >= top_k));
 
-    if !parallel {
+    let thread_count = jobs
+        .map(|j| j.get())
+        .unwrap_or_else(rayon::current_num_threads);
+    if thread_count == 1 {
         return top_down_spec(db, goal, top_k, 0, 1);
     }
 
-    let thread_count = rayon::current_num_threads();
     let tasks = (0..thread_count)
         .zip(std::iter::repeat(goal.clone()))
         .collect::<Vec<_>>();
@@ -205,6 +208,7 @@ mod tests {
     use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use crate::utils::{bit_length, bit_length_inverse};
+    use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::sample::select;
     use smallvec::smallvec;
@@ -219,7 +223,7 @@ mod tests {
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
         ) {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
-            top_down(&db, &spec, 1, false);
+            top_down(&db, &spec, 1, Some(nz!(1usize)));
         }
 
         #[test]
@@ -230,14 +234,14 @@ mod tests {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
 
             // Solve the first, lower Spec.
-            let (lower_result_vec, _, _) = top_down(&db, &spec, 1, false);
+            let (lower_result_vec, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
 
             // If the lower spec can't be solved, then there is no way for the raised Spec to have
             // a worse solution, so we can return here.
             if let Some((_, lower_cost)) = lower_result_vec.first() {
                 // Check that the raised result has no lower cost and does not move from being
                 // possible to impossible.
-                let (raised_result, _, _) = top_down(&db, &raised_spec, 1, false);
+                let (raised_result, _, _) = top_down(&db, &raised_spec, 1, Some(nz!(1usize)));
                 let (_, raised_cost) = raised_result
                     .first()
                     .expect("raised result should be possible");
@@ -250,14 +254,14 @@ mod tests {
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
         ) {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
-            let (first_solutions, _, _) = top_down(&db, &spec, 1, false);
+            let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
             let first_peak = if let Some(first_sol) = first_solutions.first() {
                 first_sol.1.peaks.clone()
             } else {
                 MemVec::zero::<X86Target>()
             };
             let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
-            let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, false);
+            let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, Some(nz!(1usize)));
             assert_eq!(first_solutions, lower_solutions);
         }
     }
@@ -284,14 +288,14 @@ mod tests {
         );
 
         let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
-        let (first_solutions, _, _) = top_down(&db, &spec, 1, false);
+        let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
         let first_peak = if let Some(first_sol) = first_solutions.first() {
             first_sol.1.peaks.clone()
         } else {
             MemVec::zero::<X86Target>()
         };
         let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
-        let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, false);
+        let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, Some(nz!(1usize)));
         assert_eq!(first_solutions, lower_solutions);
     }
 
