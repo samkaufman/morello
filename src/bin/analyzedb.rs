@@ -2,6 +2,7 @@ use itertools::Itertools;
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 
+use anyhow::Result;
 use clap::Parser;
 use std::path;
 
@@ -53,9 +54,9 @@ fn block_stats(block: &DbBlock) -> String {
     }
 }
 
-fn main() {
+fn main() -> Result<()> {
     let args = Args::parse();
-    let db = DashmapDiskDatabase::new(args.db.as_deref(), true, 1);
+    let db = DashmapDiskDatabase::try_new(args.db.as_deref(), true, 1)?;
     let bimap = db.spec_bimap();
     let p = if args.group { "      " } else { "" };
 
@@ -148,4 +149,6 @@ fn main() {
             }
         }
     }
+
+    Ok(())
 }
