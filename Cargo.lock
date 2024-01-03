@@ -610,6 +610,7 @@ dependencies = [
  "log",
  "ndarray",
  "ndarray-conv",
+ "nonzero",
  "num-traits",
  "prettytable-rs",
  "proptest",
@@ -664,6 +665,18 @@ dependencies = [
  "ndarray",
  "rand",
  "rand_distr",
+]
+
+[[package]]
+name = "nonzero"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d9b9acd66930a3f7754cac98e17dbb17eb8018ad2c0b2e9ccccfbf23330127e"
+dependencies = [
+ "num-traits",
+ "proc-macro2 1.0.69",
+ "quote 1.0.33",
+ "syn 2.0.39",
 ]
 
 [[package]]

@@ -12,8 +12,6 @@ use crate::memorylimits::MemoryLimits;
 use crate::spec::Spec;
 use crate::target::Target;
 
-pub const SINGLE_JOB: Option<NonZeroUsize> = NonZeroUsize::new(1);
-
 struct ImplReducer {
     results: SmallVec<[(ActionIdx, Cost); 1]>,
     top_k: usize,
@@ -210,6 +208,7 @@ mod tests {
     use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use crate::utils::{bit_length, bit_length_inverse};
+    use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::sample::select;
     use smallvec::smallvec;
@@ -224,7 +223,7 @@ mod tests {
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
         ) {
             let db = DashmapDiskDatabase::new(None, false, 1);
-            top_down(&db, &spec, 1, SINGLE_JOB);
+            top_down(&db, &spec, 1, Some(nz!(1usize)));
         }
 
         #[test]
@@ -235,14 +234,14 @@ mod tests {
             let db = DashmapDiskDatabase::new(None, false, 1);
 
             // Solve the first, lower Spec.
-            let (lower_result_vec, _, _) = top_down(&db, &spec, 1, SINGLE_JOB);
+            let (lower_result_vec, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
 
             // If the lower spec can't be solved, then there is no way for the raised Spec to have
             // a worse solution, so we can return here.
             if let Some((_, lower_cost)) = lower_result_vec.first() {
                 // Check that the raised result has no lower cost and does not move from being
                 // possible to impossible.
-                let (raised_result, _, _) = top_down(&db, &raised_spec, 1, SINGLE_JOB);
+                let (raised_result, _, _) = top_down(&db, &raised_spec, 1, Some(nz!(1usize)));
                 let (_, raised_cost) = raised_result
                     .first()
                     .expect("raised result should be possible");
@@ -255,14 +254,14 @@ mod tests {
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
         ) {
             let db = DashmapDiskDatabase::new(None, false, 1);
-            let (first_solutions, _, _) = top_down(&db, &spec, 1, SINGLE_JOB);
+            let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
             let first_peak = if let Some(first_sol) = first_solutions.first() {
                 first_sol.1.peaks.clone()
             } else {
                 MemVec::zero::<X86Target>()
             };
             let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
-            let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, SINGLE_JOB);
+            let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, Some(nz!(1usize)));
             assert_eq!(first_solutions, lower_solutions);
         }
     }
@@ -289,14 +288,14 @@ mod tests {
         );
 
         let db = DashmapDiskDatabase::new(None, false, 1);
-        let (first_solutions, _, _) = top_down(&db, &spec, 1, SINGLE_JOB);
+        let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
         let first_peak = if let Some(first_sol) = first_solutions.first() {
             first_sol.1.peaks.clone()
         } else {
             MemVec::zero::<X86Target>()
         };
         let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
-        let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, SINGLE_JOB);
+        let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, Some(nz!(1usize)));
         assert_eq!(first_solutions, lower_solutions);
     }
 
