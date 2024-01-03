@@ -10,7 +10,7 @@ use itertools::Itertools;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
-use std::{cmp, iter, slice};
+use std::{iter, slice};
 
 /// An Impl representing a loop over a set of zipped [`Tile`]s.
 ///
