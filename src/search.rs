@@ -1,6 +1,7 @@
 use itertools::Itertools;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use smallvec::{smallvec, SmallVec};
+use std::panic::{self, AssertUnwindSafe};
 
 use crate::cost::Cost;
 use crate::db::{ActionIdx, Database};
@@ -43,7 +44,20 @@ where
     // deterministic results.
     tasks
         .into_par_iter()
-        .map(|(i, g)| top_down_spec(db, &g, top_k, i, thread_count))
+        .map(|(i, g)| {
+            // Exit immediately if any thread panics.  Since the type `D` (db)
+            // in top_down_spec contains interior mutability, we need to wrap
+            // it in AssertUnwindSafe to ensure that it is safe to transfer
+            // across threads.  Because we are exiting immediately on panic,
+            // we can safely use AssertUnwindSafe.
+            let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                top_down_spec(db, &g, top_k, i, thread_count)
+            }));
+            match result {
+                Ok(val) => val,
+                Err(_) => std::process::exit(1),
+            }
+        })
         .collect::<Vec<_>>()
         .pop()
         .unwrap()
