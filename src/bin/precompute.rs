@@ -12,7 +12,6 @@ use std::time::Duration;
 use std::{iter, path};
 
 use morello::common::{DimSize, Dtype};
-use morello::datadeps::SpecKey;
 use morello::db::{DashmapDiskDatabase, Database};
 use morello::grid::general::SurMap;
 use morello::memorylimits::{MemVec, MemoryLimits};
