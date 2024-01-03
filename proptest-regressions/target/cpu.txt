@@ -7,3 +7,7 @@
 cc a4636eb0a31b30cec72b22b2d30f6a495e1973831abfa0640112557fdd958d20 # shrinks to shape = [1, 2]
 cc 76847f1d4bdfe833e02cba6dcb368e071f61b1cc143b5a0c8f3569d9c006030e # shrinks to shape = [1, 1]
 cc 27f75a39663c5d866556855881c10c8b9bcc94f6a5330a33d9315afb63cdc618 # shrinks to shape = [1, 2, 1]
+cc 229f03e614b6938e35d9dbfb4f640d5a21e83f4e23ccd7bf59c9c4b2b839851d # shrinks to shape = [4, 1]
+cc a71be57ca168b04ae1a43388bcad9d966e91d981e0798a8472b6d36c93071b21 # shrinks to shape = [1, 1, 1, 1]
+cc dc9b91d7ddc3a243a2bf29616f5e8bd5e551f4d56e38839ebdf77f7cea88d5ae # shrinks to shape = [1, 2], dtype = Uint8
+cc 6626b87b058429c62eed5d79471fd608cd66fa306bf9b048edff177a5049edbb # shrinks to shape = [1, 2], dtype = Uint8
