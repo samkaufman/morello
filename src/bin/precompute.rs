@@ -3,6 +3,7 @@ use tikv_jemallocator::Jemalloc;
 
 use clap::Parser;
 use log::{debug, info};
+use nonzero::nonzero as nz;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::{smallvec, SmallVec};
@@ -15,7 +16,6 @@ use morello::datadeps::SpecKey;
 use morello::db::{DashmapDiskDatabase, Database};
 use morello::grid::general::SurMap;
 use morello::memorylimits::{MemVec, MemoryLimits};
-use morello::search::SINGLE_JOB;
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
 };
@@ -170,7 +170,7 @@ where
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
                     let spec = Spec(logical_spec.clone(), MemoryLimits::Standard(job));
-                    let result = morello::search::top_down(db, &spec, 1, SINGLE_JOB);
+                    let result = morello::search::top_down(db, &spec, 1, Some(nz!(1usize)));
                     if let [(_, only_result_cost)] = &result.0[..] {
                         worklist.extend(next_limits(&spec.1, &only_result_cost.peaks));
                     }
