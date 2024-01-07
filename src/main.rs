@@ -280,7 +280,7 @@ where
         Subcommand::Bench(_) => {
             // TODO: Test correctness (allow disabling with flag)
             let result = synthesized_impl.bench(bench_samples.unwrap(), None)?;
-            println!("\nImpl Runtime: {:.4}s", result.result.as_secs_f32());
+            println!("\nImpl Runtime: {:.8}s", result.result.as_secs_f32());
         }
         _ => {}
     }
