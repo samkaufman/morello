@@ -14,6 +14,7 @@ use crate::tiling::Tiling;
 use crate::utils::{bit_length_inverse, join_into_string};
 use crate::utils::{bit_length_u32, is_power_of_two_u32, prev_power_of_two_u32};
 
+use anyhow::Context;
 use itertools::Either;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -77,7 +78,7 @@ pub enum PrimitiveSpecType {
 /// Each dimension of an input tensor/tiling may have a binding to an output
 /// tensor dimension. This means that loops should zip those dimensions of each
 /// tensor to ensure data dependencies are correct. As an example, a matrix
-/// multiplicaton will give the bindings `smallvec![Some(0), None]` and
+/// multiplication will give the bindings `smallvec![Some(0), None]` and
 /// `smallvec![None, Some(1)]` for each of its inputs, indicating that the first
 /// dimension of the first input (the m dimension) is bound to the m dimension
 /// of the output, and so on for the n dimension.
@@ -101,6 +102,16 @@ pub struct LogicalSpecSurMap<Tgt, F, A, Aa> {
 
 pub struct PrimitiveBasicsBimap {
     pub binary_scale_shapes: bool,
+}
+
+impl<Tgt: Target> Spec<Tgt> {
+    pub fn canonicalize(&mut self) -> anyhow::Result<()> {
+        self.0.canonicalize()
+    }
+
+    pub fn is_canonical(&self) -> bool {
+        self.0.is_canonical()
+    }
 }
 
 impl<Tgt: Target> Display for Spec<Tgt> {
@@ -217,6 +228,10 @@ impl PrimitiveBasics {
             }
             PrimitiveSpecType::Zero => smallvec![self.spec_shape.clone()],
         }
+    }
+
+    pub fn parameter_dtypes(&self) -> SmallVec<[Dtype; 3]> {
+        smallvec![self.dtype; self.typ.operand_count()]
     }
 
     pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> TilingInference {
@@ -556,7 +571,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    pub fn canonicalize(&mut self) {
+    pub fn canonicalize(&mut self) -> anyhow::Result<()> {
         // TODO: This is expensive. Make an operand_shapes() method instead.
         let operands = self.parameters();
 
@@ -575,14 +590,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             ) => match typ {
                 PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
                     for i in 0..primitive_aux.len() {
-                        let (new_layout, new_contig) = primitive_aux[i]
-                            .layout
-                            .update_for_tiling(
-                                operands[i].shape(),
-                                operands[i].shape(),
-                                primitive_aux[i].contig,
-                            )
-                            .unwrap();
+                        let (new_layout, new_contig) = primitive_aux[i].layout.update_for_tiling(
+                            operands[i].shape(),
+                            operands[i].shape(),
+                            primitive_aux[i].contig,
+                        )?;
                         primitive_aux[i].layout = new_layout;
                         primitive_aux[i].contig = new_contig;
                     }
@@ -591,21 +603,22 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let [outer_aux, inner_aux] = &mut primitive_aux[..] else {
                         unreachable!();
                     };
-                    outer_aux.canonicalize(spec_shape, outer_aux.aligned);
-                    let (new_inner_layout, new_inner_contig) = inner_aux
-                        .layout
-                        .update_for_tiling(
-                            operands[1].shape(),
-                            operands[1].shape(),
-                            inner_aux.contig,
-                        )
-                        .unwrap();
+                    outer_aux
+                        .canonicalize(spec_shape, outer_aux.aligned)
+                        .context("Failed to canonicalize the outer TensorSpecAux")?;
+                    let (new_inner_layout, new_inner_contig) = inner_aux.layout.update_for_tiling(
+                        operands[1].shape(),
+                        operands[1].shape(),
+                        inner_aux.contig,
+                    )?;
                     inner_aux.layout = new_inner_layout;
                     inner_aux.contig = new_inner_contig;
                 }
                 PrimitiveSpecType::Zero => {
                     let aligned = primitive_aux[0].aligned;
-                    primitive_aux[0].canonicalize(spec_shape, aligned);
+                    primitive_aux[0]
+                        .canonicalize(spec_shape, aligned)
+                        .context("Failed to canonicalize the TensorSpecAux")?;
                 }
             },
             LogicalSpec::Compose { .. } => todo!(),
@@ -618,20 +631,24 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 .iter()
                 .map(|o| {
                     let mut o = o.clone();
-                    o.canonicalize();
+                    o.canonicalize().unwrap();
                     o
                 })
                 .collect::<Vec<_>>(),
             "Parameters were not canonical after canonicalizing {}",
             orig_str
         );
+
+        Ok(())
     }
 
     pub fn is_canonical(&self) -> bool {
         // TODO: Probably slow.
         let mut c = self.clone();
-        c.canonicalize();
-        self == &c
+        match c.canonicalize() {
+            Ok(()) => self == &c,
+            Err(_) => false,
+        }
     }
 
     pub fn actions(&self) -> impl ActionSeq<Tgt> + '_ {
@@ -771,13 +788,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let mut results = vec![];
 
         let o = components[1].parameter_shapes();
-        let intermediate_shape = &o[components[1].typ.output_idx()];
+        let comp_out_idx = components[1].typ.output_idx();
+        let intermediate_shape = &o[comp_out_idx];
+        let dtype = components[1].parameter_dtypes()[comp_out_idx];
 
-        for layout in Tgt::move_destination_layouts(intermediate_shape) {
-            for level in Tgt::levels() {
+        for level in Tgt::levels() {
+            let vector_bytes = level.vector_bytes();
+
+            for layout in Tgt::move_destination_layouts(intermediate_shape, dtype) {
                 // TODO: Need to implement `can_move_to`-style logic here.
 
-                let vector_bytes = level.vector_bytes();
                 if !vector_bytes.is_empty() {
                     for vector_size in gen_vector_sizes(
                         Some(intermediate_shape),
@@ -811,7 +831,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             // Yield actions for movement with register file destination, which
             // includes relayouts in registers and movements from level 1 to RF.
             let i = u8::try_from(i).unwrap();
-            for layout in Tgt::move_destination_layouts(operand.shape()) {
+            for layout in Tgt::move_destination_layouts(operand.shape(), operand.dtype()) {
                 // TODO: Prevent moving into packed layouts where strip size equals the whole dim.
                 for level in Tgt::possible_destination_levels(operand.level()) {
                     if !operand.can_move_to(&layout, &level) {
@@ -1552,7 +1572,7 @@ mod tests {
     use super::*;
     use crate::imp::{visit_leaves, Impl, ImplExt, ImplNode};
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
-    use crate::scheduling_sugar::SchedulingSugar;
+    use crate::scheduling::ApplyError;
     use crate::target::{ArmTarget, Target, X86Target};
     use crate::tensorspec::TensorSpecArbMaxShape;
     use crate::utils::{next_binary_power, sum_seqs};
@@ -1613,6 +1633,16 @@ mod tests {
 
     proptest! {
         #[test]
+        fn test_no_action_panics_x86(spec in any::<Spec<X86Target>>()) {
+            shared_test_no_action_panics(spec);
+        }
+
+        #[test]
+        fn test_no_action_panics_arm(spec in any::<Spec<ArmTarget>>()) {
+            shared_test_no_action_panics(spec);
+        }
+
+        #[test]
         fn test_actions_are_valid_through_consumed_memory_x86(
             logical_spec in any::<LogicalSpec<X86Target>>(),
         ) {
@@ -1631,17 +1661,23 @@ mod tests {
             logical_spec in any::<LogicalSpec<X86Target>>()
         ) {
             let mut logical_spec = logical_spec;
-            logical_spec.canonicalize();
-            for p in logical_spec.parameters() {
-                let mut recanonicalized = p.clone();
-                recanonicalized.canonicalize();
-                assert_eq!(p, recanonicalized);
+            match logical_spec.canonicalize() {
+                Ok(()) => {
+                    for p in logical_spec.parameters() {
+                        let mut recanonicalized = p.clone();
+                        recanonicalized.canonicalize().unwrap();
+                        assert_eq!(p, recanonicalized);
+                    }
+                }
+                Err(_) => {
+                    // If we can't canonicalize, there's nothing to test.
+                }
             }
         }
 
         #[test]
         fn test_canonicalizing_move_tiled_to_one_canonicalizes_parameters(
-            logical_spec in
+            spec in
                 (1usize..=4)
                     .prop_flat_map(|rank| (Just(rank), 0..rank))
                     .prop_flat_map(|(rank, nonone_idx)| {
@@ -1665,26 +1701,31 @@ mod tests {
                             .collect::<Vec<_>>();
                         (Just(basics), auxes_strategy, any::<bool>())
                     })
-                    .prop_map(|(basics, auxes, serial_only)| {
-                        LogicalSpec::Primitive(basics, auxes, serial_only)
+                    .prop_filter_map("Spec should be canonical", |(basics, auxes, serial_only)| {
+                        let s = Spec(LogicalSpec::Primitive(basics, auxes, serial_only), X86Target::max_mem());
+                        if s.is_canonical() {
+                            Some(s)
+                        } else {
+                            None
+                        }
                     })
         ) {
-            let spec = Spec(logical_spec, X86Target::max_mem());
             let LogicalSpec::Primitive(PrimitiveBasics { spec_shape, ..}, _, _) = &spec.0 else {
                 unreachable!();
             };
-            let tile_out_result = spec.tile_out(&vec![1; spec_shape.len()], false);
+            let tile_out_result = Action::TileOut { output_shape: smallvec![1; spec_shape.len()], parallel: false }
+                .apply(&spec).unwrap_or_else(|_| panic!("Couldn't tile Spec {} to single value", spec));
             let ImplNode::SpecApp(child_spec_app) = &tile_out_result.children()[0] else {
                 panic!("First child was not a SpecApp; was: {:?}", tile_out_result.children()[0]);
             };
             let mut tiled_logical_spec = child_spec_app.0.0.clone();
-            tiled_logical_spec.canonicalize();
+            tiled_logical_spec.canonicalize().unwrap();
             assert!(tiled_logical_spec.parameters().iter().all(|p| {
                 p.shape().iter().all(|&d| d == 1)
             }));
             assert!(tiled_logical_spec.parameters().iter().all(|p| {
                 let mut c = p.clone();
-                c.canonicalize();
+                c.canonicalize().unwrap();
                 p == &c
             }));
         }
@@ -1714,6 +1755,12 @@ mod tests {
         }
     }
 
+    fn shared_test_no_action_panics<Tgt: Target>(spec: Spec<Tgt>) {
+        for action in spec.0.actions() {
+            let _ = action.apply(&spec);
+        }
+    }
+
     fn shared_test_no_action_produces_same_spec_with_higher_memory_limit<Tgt: Target>(
         spec: &Spec<Tgt>,
     ) {
@@ -1736,6 +1783,7 @@ mod tests {
         });
     }
 
+    /// Asserts that actions appear at all memory limits at and above memory consumed.
     fn shared_test_actions_are_valid_through_consumed_memory<Tgt: Target>(
         logical_spec: LogicalSpec<Tgt>,
     ) {
@@ -1767,14 +1815,18 @@ mod tests {
                 let MemoryLimits::Standard(limits_memvec) = &shared_spec.1;
                 // TODO: Assert that nothing disappears?
                 for i in (0..unseen_actions.len()).rev() {
-                    if let Ok(applied) = unseen_actions[i].apply(&shared_spec) {
-                        unseen_actions.swap_remove(i);
-                        // TODO: Should we also assert that applying the same action at each level
-                        //   doesn't actually accumulate additional memory?.
-                        // TODO: Can we asssert that the change in peak memory is exactly the
-                        //   additional amount at the limit?.
-                        // TODO: Assert here that the min of each level-wise limit is zero.
-                        assert_eq!(&applied.peak_memory(), limits_memvec);
+                    match unseen_actions[i].apply(&shared_spec) {
+                        Ok(applied) => {
+                            unseen_actions.swap_remove(i);
+                            // TODO: Should we also assert that applying the same action at each level
+                            //   doesn't actually accumulate additional memory?.
+                            // TODO: Can we asssert that the change in peak memory is exactly the
+                            //   additional amount at the limit?.
+                            // TODO: Assert here that the min of each level-wise limit is zero.
+                            assert_eq!(&applied.peak_memory(), limits_memvec);
+                        }
+                        Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => {}
+                        Err(ApplyError::SpecNotCanonical) => panic!(),
                     }
                 }
             }
@@ -1788,12 +1840,17 @@ mod tests {
     fn arb_spec_action_and_lower_limit<Tgt: Target>(
     ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt, ()>, MemoryLimits)> {
         any::<Spec<Tgt>>()
+            .prop_filter("Spec was not canonical", |spec| spec.is_canonical())
             .prop_filter_map("Spec had zero applicable actions", |spec| {
                 let applied_actions = spec
                     .0
                     .actions()
                     .into_iter()
-                    .filter_map(|a| a.apply(&spec).ok().map(|applied| (a, applied)))
+                    .filter_map(|a| match a.apply(&spec) {
+                        Ok(applied) => Some((a, applied)),
+                        Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => None,
+                        Err(ApplyError::SpecNotCanonical) => unreachable!(),
+                    })
                     .collect::<Vec<_>>();
                 if applied_actions.is_empty() {
                     None

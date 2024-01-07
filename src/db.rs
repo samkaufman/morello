@@ -957,6 +957,7 @@ mod tests {
     use crate::{
         imp::visit_leaves,
         memorylimits::{MemVec, MemoryLimits},
+        scheduling::ApplyError,
         target::X86Target,
         utils::{bit_length, bit_length_inverse},
     };
@@ -1170,17 +1171,19 @@ mod tests {
 
     fn arb_spec_and_decision<Tgt: Target>() -> impl Strategy<Value = Decision<Tgt>> {
         any::<Spec<Tgt>>()
+            .prop_filter("Spec was not canonical", |spec| spec.is_canonical())
             .prop_flat_map(|spec| {
                 let valid_actions = spec
                     .0
                     .actions()
                     .into_iter()
                     .enumerate()
-                    .filter_map(|(i, a)| {
-                        if let Ok(applied) = a.apply(&spec) {
-                            Some((ActionIdx::from(u16::try_from(i).unwrap()), applied))
-                        } else {
-                            None
+                    .filter_map(|(i, a)| match a.apply(&spec) {
+                        Ok(applied) => Some((ActionIdx::from(u16::try_from(i).unwrap()), applied)),
+                        Err(ApplyError::ActionNotApplicable) => None,
+                        Err(ApplyError::OutOfMemory) => None,
+                        Err(ApplyError::SpecNotCanonical) => {
+                            unreachable!("Non-canonical Specs should be filtered")
                         }
                     })
                     .collect::<Vec<_>>();
@@ -1236,9 +1239,15 @@ mod tests {
         match partial_impl {
             ImplNode::SpecApp(spec_app) => {
                 for action in spec_app.0 .0.actions() {
-                    if let Ok(applied) = action.apply(&spec_app.0) {
-                        if let Some(completed) = complete_impl(&applied) {
-                            return Some(completed);
+                    match action.apply(&spec_app.0) {
+                        Ok(applied) => {
+                            if let Some(completed) = complete_impl(&applied) {
+                                return Some(completed);
+                            }
+                        }
+                        Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => {}
+                        Err(ApplyError::SpecNotCanonical) => {
+                            panic!("Spec-to-complete must be canon")
                         }
                     }
                 }
@@ -1269,7 +1278,11 @@ mod tests {
             .actions()
             .into_iter()
             .enumerate()
-            .filter_map(|(i, a)| a.apply(spec).map(|imp| (i, imp)).ok())
+            .filter_map(|(i, a)| match a.apply(spec) {
+                Ok(imp) => Some((i, imp)),
+                Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => None,
+                Err(ApplyError::SpecNotCanonical) => panic!(),
+            })
             .next()
         {
             println!(

@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -21,6 +20,12 @@ pub enum BufferVar {
     TileIdx(u8, OpaqueSymbol),
     // TODO: *Safely* remove OpaqueSymbol from Pt, if possible
     Pt(u8, OpaqueSymbol),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum LayoutError {
+    #[error("Layout does not apply to shape {0:?}")]
+    InvalidShape(Shape),
 }
 
 impl Layout {
@@ -216,42 +221,30 @@ impl Layout {
         parent_shape: &[DimSize],
         tile_shape: &[DimSize],
         contig: Contig,
-    ) -> anyhow::Result<(Layout, Contig)> {
+    ) -> Result<(Layout, Contig), LayoutError> {
         // TODO: Can we remove this case without affecting behavior?
         if tile_shape.iter().all(|d| *d == 1) {
             let rm_layout = row_major(tile_shape.len().try_into().unwrap());
             let new_contig = rm_layout.contiguous_full();
             Ok((rm_layout, new_contig))
         } else {
-            // println!("shapes first: {:?} and {:?}", parent_shape, tile_shape);
-            // println!("layout first: {}", self);
-            // println!("contig first: {}", contig);
-            let new_layout = self;
-            let new_contig = new_layout.drop_contig_for_tiling(parent_shape, tile_shape, contig)?;
-            // println!("layout after phase 1: {:?}", new_layout);
-            // println!("contig after phase 1: {}", new_contig);
-            // let (mut new_layout, new_contig) = new_layout.merge_consecutive_dimensions(new_contig);
-            new_layout.assert_no_consecutive_dimensions();
-            // println!("layout after phase 2: {:?}", new_layout);
-            // println!("contig after phase 2: {}", new_contig);
-            let mut new_layout = new_layout.clone();
+            let new_contig =
+                self.lower_contig_to_first_broken_dimension(parent_shape, tile_shape, contig)?;
+            self.assert_no_consecutive_dimensions();
+            let mut new_layout = self.clone();
             let new_contig = new_layout.drop_unneeded_packings(tile_shape, new_contig);
-            // println!("layout after phase 3: {:?}", new_layout);
-            // println!("contig after phase 3: {}", new_contig);
             let new_contig = new_layout.increase_contig_through_ones(tile_shape, new_contig);
-            // println!("layout after phase 4: {:?}", new_layout);
-            // println!("contig after phase 4: {}", new_contig);
             Ok((new_layout, new_contig))
         }
     }
 
     /// Drop Contig to the first broken physical dimension.
-    fn drop_contig_for_tiling(
+    fn lower_contig_to_first_broken_dimension(
         &self,
         parent_shape: &[DimSize],
         tile_shape: &[DimSize],
         source_contig: Contig,
-    ) -> anyhow::Result<Contig> {
+    ) -> Result<Contig, LayoutError> {
         let Layout::New(dims) = self;
         let parent_physical_shape = self.expand_physical_shape(parent_shape)?;
         let tile_physical_shape = self.expand_physical_shape(tile_shape)?;
@@ -270,6 +263,9 @@ impl Layout {
             .unwrap())
     }
 
+    /// Asserts that there are no consecutive dimensions with the same logical dimension.
+    ///
+    /// This does nothing on release builds.
     fn assert_no_consecutive_dimensions(&self) {
         #[cfg(debug_assertions)]
         {
@@ -394,7 +390,7 @@ impl Layout {
     pub(crate) fn expand_physical_shape(
         &self,
         logical_shape: &[DimSize],
-    ) -> anyhow::Result<Vec<DimSize>> {
+    ) -> Result<Vec<DimSize>, LayoutError> {
         let Layout::New(dims) = self;
         let mut physical_shape = Vec::with_capacity(dims.len());
         let mut logical_shape_remaining = logical_shape.to_vec();
@@ -408,11 +404,7 @@ impl Layout {
             match fixed_size {
                 Some(s) => {
                     if *remaining_size % *s != 0 {
-                        return Err(anyhow!(
-                            "Cannot apply shape {:?} to {:?}",
-                            self,
-                            logical_shape
-                        ));
+                        return Err(LayoutError::InvalidShape(logical_shape.into()));
                     }
                     physical_shape.push(*s);
                     *remaining_size /= *s;
@@ -482,8 +474,7 @@ pub fn col_major(rank: u8) -> Layout {
     Layout::new((0..rank).rev().map(|d| (d, None)).collect())
 }
 
-pub fn nhwc(tensor_shape: &[DimSize]) -> Layout {
-    assert_eq!(tensor_shape.len(), 4);
+pub fn nhwc() -> Layout {
     Layout::new(vec![(0, None), (2, None), (3, None), (1, None)])
 }
 

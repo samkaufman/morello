@@ -2,7 +2,7 @@ use crate::{
     alignment::aligned_approx,
     common::{DimSize, Shape},
     expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term},
-    layout::BufferVar,
+    layout::{BufferVar, LayoutError},
     opaque_symbol::OpaqueSymbol,
     target::Target,
     tensorspec::TensorSpec,
@@ -97,8 +97,8 @@ impl<V: View> ViewExt for V {}
 
 #[derive(thiserror::Error, Debug)]
 pub enum TileError {
-    #[error("Invalid shape {0:?}")]
-    InvalidShape(Shape),
+    #[error("Layout does not apply to tile size")]
+    LayoutIncompatible(#[from] LayoutError),
 }
 
 /// A reference to an Impl node parameter.
@@ -279,16 +279,15 @@ impl<V: View> Tile<V> {
     pub fn new(shape: Shape, step_sizes: Shape, view: V) -> Result<Self, TileError> {
         let expr_term_id = OpaqueSymbol::new();
         let mut spec = view.spec().clone();
-        match spec.shrink(&shape, aligned_approx(&shape, &step_sizes, view.spec())) {
-            Ok(()) => Ok(Self {
-                shape,
-                step_sizes,
-                view,
-                expr_term_id,
-                spec,
-            }),
-            Err(anyhow::Error { .. }) => Err(TileError::InvalidShape(shape)),
-        }
+        let aligned = aligned_approx(&shape, &step_sizes, view.spec())?;
+        spec.shrink(&shape, aligned)?;
+        Ok(Self {
+            shape,
+            step_sizes,
+            view,
+            expr_term_id,
+            spec,
+        })
     }
 
     pub fn shape(&self) -> &[DimSize] {

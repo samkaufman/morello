@@ -1,3 +1,4 @@
+use anyhow::Context;
 use itertools::iproduct;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -9,7 +10,7 @@ use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
-use crate::layout::{row_major, Layout};
+use crate::layout::{row_major, Layout, LayoutError};
 use crate::target::{MemoryLevel, Target};
 use crate::utils::join_into_string;
 
@@ -66,7 +67,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             layout,
             vector_size,
         );
-        r.canonicalize();
+        // TODO: This should prop. the error, not unwrap, and be called try_new_canon.
+        r.canonicalize().unwrap();
         r
     }
 
@@ -171,8 +173,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     /// Returns a new TensorSpec with the given shape and alignment.
     ///
     /// The result's layout and contiguousness abstraction will have been
-    /// canoncialized for the given shape.
-    pub fn shrink(&mut self, shape: &[DimSize], aligned: bool) -> anyhow::Result<()> {
+    /// canonicalized for the given shape.
+    pub fn shrink(&mut self, shape: &[DimSize], aligned: bool) -> Result<(), LayoutError> {
         let (new_layout, new_contig) =
             self.aux
                 .layout
@@ -184,8 +186,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         Ok(())
     }
 
-    pub fn canonicalize(&mut self) {
-        self.aux.canonicalize(&self.shape, self.aux.aligned);
+    pub fn canonicalize(&mut self) -> anyhow::Result<()> {
+        self.aux.canonicalize(&self.shape, self.aux.aligned)
     }
 
     /// Returns a TensorSpec with given size-one dimensions dropped.
@@ -270,7 +272,7 @@ impl<Tgt: Target> Display for TensorSpec<Tgt> {
     }
 }
 
-/// Implements [`proptest::arbitrary::Arbitrary`] to yield valid [TensorSpec]s.
+/// Implements [`proptest::arbitrary::Arbitrary`] to yield canonical [TensorSpec]s.
 ///
 /// This generates [TensorSpec]s of varying shapes, dtypes, levels and, alignments.
 /// The [Layout], vector shape, and contiguousness abstraction are constrained to be valid together
@@ -291,30 +293,32 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
             .map(|m| 1..=m)
             .collect::<Vec<_>>()
             .prop_flat_map(|shp| {
-                let shp1 = TensorSpecArbMaxShape(Shape::from(shp));
-                let shp2 = shp1.clone();
-                let aux_strategy = TensorSpecAux::arbitrary_with(shp1);
+                let shp = TensorSpecArbMaxShape(Shape::from(shp));
+                let aux_strategy = TensorSpecAux::arbitrary_with(shp.clone());
                 let dtype_strategy = any::<Dtype>();
-                (Just(shp2), dtype_strategy, aux_strategy)
+                (Just(shp), dtype_strategy, aux_strategy)
             })
-            .prop_map(|(shp, dtype, aux)| {
+            .prop_filter_map("TensorSpec was not canonical", |(shp, dtype, aux)| {
                 let mut tensor_spec = TensorSpec::new_noncanon_with_aux(shp.0, dtype, aux);
-                tensor_spec.canonicalize();
-                tensor_spec
+                let canon_result = tensor_spec
+                    .canonicalize()
+                    .with_context(|| format!("Couldn't canonicalize {}", tensor_spec));
+                canon_result.ok().map(|_| tensor_spec)
             })
             .boxed()
     }
 }
 
 impl<Tgt: Target> TensorSpecAux<Tgt> {
-    pub fn canonicalize(&mut self, shape: &Shape, aligned: bool) {
+    pub fn canonicalize(&mut self, shape: &Shape, aligned: bool) -> anyhow::Result<()> {
         let (new_layout, new_contig) = self
             .layout
             .update_for_tiling(shape, shape, self.contig)
-            .expect("updating with no-op tiling should never fail");
+            .context("Updating with no-op tiling should never fail")?;
         self.layout = new_layout;
         self.contig = new_contig;
         self.aligned = aligned;
+        Ok(())
     }
 }
 
@@ -381,8 +385,8 @@ where
         let ((), [level_int]) = i;
         let level = BiMap::apply_inverse(&Tgt::Level::bimap(), &(*level_int).try_into().unwrap());
         let dtype_bytes = u32::from(self.tensor_dtype.size());
-        let mut vector_options = level
-            .vector_bytes()
+        let vector_bytes = level.vector_bytes();
+        let mut vector_options = vector_bytes
             .iter()
             .map(|&vb| Some(vb / dtype_bytes))
             .collect::<Vec<_>>();
@@ -392,7 +396,10 @@ where
         Box::new(
             iproduct!(
                 [true, false],
-                Tgt::all_layouts_for_shape(&self.tensor_shape),
+                Tgt::all_layouts_for_shape(
+                    self.tensor_shape.len().try_into().unwrap(),
+                    self.tensor_dtype
+                ),
                 vector_options
             )
             .flat_map(move |(aligned, layout, vector_size)| {
@@ -481,9 +488,10 @@ fn arb_tensorspecaux<Tgt: Target>(
     use proptest::sample::select;
 
     let max_shape = Shape::from(max_shape);
+    let rank = max_shape.len().try_into().unwrap();
 
     (
-        select(Tgt::all_layouts_for_shape(&max_shape)),
+        select(Tgt::all_layouts_for_shape(rank, dtype)),
         select(Tgt::levels().to_vec()),
     )
         .prop_flat_map(move |(layout, level)| {
@@ -568,16 +576,16 @@ mod tests {
                 vector_size: None,
             },
         };
-        tspec.canonicalize();
+        tspec.canonicalize().unwrap();
         assert_eq!(tspec.aux.contig, 3);
     }
 
     fn shared_tensorspec_canonicalize_should_be_idempodent<Tgt: Target>(
         mut tspec: TensorSpec<Tgt>,
     ) {
-        tspec.canonicalize();
+        tspec.canonicalize().unwrap();
         let mut second = tspec.clone();
-        second.canonicalize();
+        second.canonicalize().unwrap();
         assert_eq!(tspec, second);
     }
 
@@ -585,7 +593,7 @@ mod tests {
         tspec: TensorSpec<Tgt>,
     ) {
         let mut second = tspec.clone();
-        second.canonicalize();
+        second.canonicalize().unwrap();
 
         let Layout::New(dims_a) = tspec.layout();
         let Layout::New(dims_b) = second.layout();

@@ -8,6 +8,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryLimits;
+use crate::scheduling::ApplyError;
 use crate::spec::Spec;
 use crate::target::Target;
 
@@ -32,13 +33,18 @@ where
 {
     assert!(db.max_k().map_or(true, |k| k >= top_k));
 
+    let mut canonical_goal = goal.clone();
+    canonical_goal
+        .canonicalize()
+        .expect("should be possible to canonicalize goal Spec");
+
     if !parallel {
-        return top_down_spec(db, goal, top_k, 0, 1);
+        return top_down_spec(db, &canonical_goal, top_k, 0, 1);
     }
 
     let thread_count = rayon::current_num_threads();
     let tasks = (0..thread_count)
-        .zip(std::iter::repeat(goal.clone()))
+        .zip(std::iter::repeat(canonical_goal.clone()))
         .collect::<Vec<_>>();
     // Collect all and take the result from the first call so that we get
     // deterministic results.
@@ -88,8 +94,10 @@ where
     let initial_skip = thread_idx * all_actions.len() / thread_count;
     for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
         let action = &all_actions[action_idx];
-        let Ok(partial_impl) = action.apply(goal) else {
-            continue;
+        let partial_impl = match action.apply(goal) {
+            Ok(imp) => imp,
+            Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => continue,
+            Err(ApplyError::SpecNotCanonical) => panic!(),
         };
 
         // Let top_down_impl compute the final cost of completing this Impl.
@@ -272,7 +280,7 @@ mod tests {
 
         #[test]
         fn test_more_memory_never_worsens_solution_with_shared_db(
-            spec_pair in lower_and_higher_spec::<X86Target>()
+            spec_pair in lower_and_higher_canonical_specs::<X86Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
             let db = DashmapDiskDatabase::new(None, false, 1);
@@ -343,7 +351,8 @@ mod tests {
         assert_eq!(first_solutions, lower_solutions);
     }
 
-    fn lower_and_higher_spec<Tgt: Target>() -> impl Strategy<Value = (Spec<Tgt>, Spec<Tgt>)> {
+    fn lower_and_higher_canonical_specs<Tgt: Target>(
+    ) -> impl Strategy<Value = (Spec<Tgt>, Spec<Tgt>)> {
         let MemoryLimits::Standard(mut top_memvec) = X86Target::max_mem();
         top_memvec = top_memvec.map(|v| v.min(TEST_SMALL_MEM));
 
@@ -352,6 +361,7 @@ mod tests {
         let top_memory_c = Rc::clone(&top_memory_a);
 
         any_with::<Spec<Tgt>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
+            .prop_filter("Spec should be canonical", |s| s.is_canonical())
             .prop_filter("limits should not be max", move |s| s.1 != *top_memory_a)
             .prop_flat_map(move |spec| {
                 let MemoryLimits::Standard(top_memvec) = top_memory_b.as_ref();

@@ -1,10 +1,11 @@
 use crate::common::DimSize;
+use crate::layout::LayoutError;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 
 use log::warn;
 
-/// Returns `true` if a tensor tiling is aligned to a target's "alignment size".
+/// Checks if each tile of a tiling's earliest value is a multiple of the target's alignment size.
 ///
 /// This current implementation of this function will say a tile aligned if the source tensor is
 /// itself aligned and contiguous and the tile stride is a multiple of the target's alignment size.
@@ -15,12 +16,12 @@ pub fn aligned_approx<Tgt: Target>(
     tile_shape: &[DimSize],
     tile_step_sizes: &[DimSize],
     parent: &TensorSpec<Tgt>,
-) -> bool {
+) -> Result<bool, LayoutError> {
     debug_assert_eq!(tile_shape.len(), tile_step_sizes.len());
 
     // If the tile source is unaligned or not contiguous, we assume the tile is also un-aligned.
     if !parent.is_contiguous() || !parent.aligned() {
-        return false;
+        return Ok(false);
     }
 
     // Check if the tile evenly divides each tensor dimension (i.e., that tile step sizes are the
@@ -31,28 +32,18 @@ pub fn aligned_approx<Tgt: Target>(
         .all(|(s, t)| *s == *t);
     if !is_simple {
         warn!("No alignment analysis for sliding layouts");
-        return false;
+        return Ok(false);
     }
 
-    let parent_physical_shape = parent
-        .layout()
-        .expand_physical_shape(parent.shape())
-        .unwrap();
-    let tile_physical_shape = parent.layout().expand_physical_shape(tile_shape).unwrap();
+    let parent_physical_shape = parent.layout().expand_physical_shape(parent.shape())?;
     let mut stride_bytes = u32::from(parent.dtype().size());
-    for idx in (0..tile_physical_shape.len()).rev() {
-        if stride_bytes % Tgt::line_size() == 0 {
-            println!(
-                "idx = {}, stride_bytes = {}, line_size = {}",
-                idx,
-                stride_bytes,
-                Tgt::line_size()
-            );
-            return true;
+    for phys_dim_size in parent_physical_shape.iter().rev() {
+        stride_bytes *= phys_dim_size;
+        if stride_bytes % Tgt::line_size() != 0 {
+            return Ok(false);
         }
-        stride_bytes *= parent_physical_shape[idx];
     }
-    false
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -140,7 +131,7 @@ mod tests {
             })
         };
 
-        let analysis = aligned_approx(tile.shape(), tile.step_sizes(), parent);
+        let analysis = aligned_approx(tile.shape(), tile.step_sizes(), parent).unwrap();
         assert_eq!(
             is_aligned,
             analysis,
