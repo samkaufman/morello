@@ -43,14 +43,9 @@ fn synth_matmul_benchmark_1() {
     synth(&matmul_spec(1));
 }
 
-#[inline(never)]
-fn synth_matmul_benchmark_2() {
-    synth(&matmul_spec(2));
-}
-
 main!(
     callgrind_args = "toggle-collect=morello_bench_synth::matmul_spec",
         "--simulate-wb=no", "--simulate-hwpref=yes",
         "--I1=32768,8,64", "--D1=32768,8,64", "--LL=8388608,16,64";
-    functions = synth_matmul_benchmark_1, synth_matmul_benchmark_2
+    functions = synth_matmul_benchmark_1
 );
