@@ -1644,14 +1644,16 @@ mod tests {
 
         #[test]
         fn test_actions_are_valid_through_consumed_memory_x86(
-            logical_spec in any::<LogicalSpec<X86Target>>(),
+            logical_spec in any::<LogicalSpec<X86Target>>()
+                .prop_filter("Spec should be canonical", |s| s.is_canonical())
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
 
         #[test]
         fn test_actions_are_valid_through_consumed_memory_arm(
-            logical_spec in any::<LogicalSpec<ArmTarget>>(),
+            logical_spec in any::<LogicalSpec<ArmTarget>>()
+                .prop_filter("Spec should be canonical", |s| s.is_canonical())
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }

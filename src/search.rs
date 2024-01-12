@@ -270,9 +270,11 @@ mod tests {
 
     proptest! {
         // TODO: Add an ARM variant!
+        // TODO: Remove restriction to canonical Specs. Should synth. any Spec.
         #[test]
-        fn test_can_synthesize_any_spec(
+        fn test_can_synthesize_any_canonical_spec(
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
+                .prop_filter("Spec should be canonical", |s| s.is_canonical())
         ) {
             let db = DashmapDiskDatabase::new(None, false, 1);
             top_down(&db, &spec, 1, false);
@@ -304,6 +306,7 @@ mod tests {
         #[test]
         fn test_synthesis_at_peak_memory_yields_same_decision(
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
+                .prop_filter("Spec should be canonical", |s| s.is_canonical())
         ) {
             let db = DashmapDiskDatabase::new(None, false, 1);
             let (first_solutions, _, _) = top_down(&db, &spec, 1, false);

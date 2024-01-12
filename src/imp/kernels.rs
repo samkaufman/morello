@@ -48,12 +48,33 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
-        MemoryAllocation::none::<Tgt>()
+        match self.kernel_type {
+            KernelType::BroadcastVecMult => {
+                let vec_tensor_spec = self.arguments[1].spec();
+                let vb = u64::from(vec_tensor_spec.vector_size().unwrap())
+                    * u64::from(vec_tensor_spec.dtype().size());
+                MemoryAllocation::Simple(Tgt::levels().map(|level| {
+                    if vec_tensor_spec.level() == level {
+                        vb * 2
+                    } else {
+                        0
+                    }
+                }))
+            }
+            _ => MemoryAllocation::none::<Tgt>(),
+        }
     }
 
     fn compute_main_cost(&self, _child_costs: &[MainCost]) -> MainCost {
         match self.kernel_type {
-            KernelType::Mult | KernelType::BroadcastVecMult => INST_COST,
+            KernelType::BroadcastVecMult => {
+                let vector_size = self.arguments[1].spec().vector_size().unwrap();
+                let volume = self.arguments[1].shape().iter().product::<u32>();
+                debug_assert_eq!(volume % vector_size, 0);
+                let vector_count = volume / vector_size;
+                INST_COST * ((vector_count * 2) + 1)
+            }
+            KernelType::Mult => INST_COST,
             KernelType::ValueAssign
             | KernelType::VectorAssign
             | KernelType::MemsetZero
