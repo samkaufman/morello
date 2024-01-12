@@ -598,25 +598,32 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                     }
                     KernelType::BroadcastVecMult => {
-                        let shape = arguments[2].shape();
-                        let dtype = arguments[2].spec().dtype();
-                        let volume = shape.iter().product::<DimSize>();
-                        let itype = get_vector(Tgt::vec_types(), dtype, volume).native_type_name;
-                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                            0 => self.c_index(a, b, None),
-                            1 | 2 => self.c_index_ptr(a, b, None),
-                            _ => unreachable!(),
-                        });
-                        writeln!(
-                            w,
-                            "{}*({} *)({}) += {} * (*({} *)({})); /* BroadcastVecMult */",
-                            indent(depth),
-                            itype,
-                            exprs[2],
-                            exprs[0],
-                            itype,
-                            exprs[1]
-                        )
+                        let vector_size = arguments[2].spec().vector_size().unwrap();
+                        let volume = arguments[2].spec().shape().iter().product::<u32>();
+                        debug_assert_eq!(volume % vector_size, 0);
+                        let vector_count = volume / vector_size;
+                        for vector_idx in 0..vector_count {
+                            let exprs =
+                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                                    0 => self.c_index(a, b, None),
+                                    1 | 2 => self.c_index_vec(
+                                        a,
+                                        &(b.clone()
+                                            + i32::try_from(vector_idx * vector_size).unwrap()),
+                                        None,
+                                    ),
+                                    _ => unreachable!(),
+                                });
+                            writeln!(
+                                w,
+                                "{}{} += {} * {}; /* BroadcastVecMult */",
+                                indent(depth),
+                                exprs[2],
+                                exprs[0],
+                                exprs[1]
+                            )?;
+                        }
+                        Ok(())
                     }
                     KernelType::CacheAccess => Ok(()),
                 }

@@ -1,17 +1,17 @@
-use itertools::Itertools;
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
-
 use anyhow::Result;
 use clap::Parser;
-use std::path;
+use itertools::Itertools;
+use std::{iter, path, thread};
 
 use morello::common::Dtype;
 use morello::datadeps::SpecKey;
-use morello::db::{deblockify_points, ActionCostVec, DashmapDiskDatabase, DbBlock};
+use morello::db::{deblockify_points, ActionCostVec, DashmapDiskDatabase, DbBlock, GetPreference};
 use morello::grid::general::BiMap;
 use morello::spec::Spec;
 use morello::target::X86Target;
+
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -110,20 +110,21 @@ fn main() -> Result<()> {
             .map(|&d| 0..u8::try_from(d).unwrap())
             .multi_cartesian_product()
         {
-            let value_description = match block.get::<X86Target>(&db, todo!(), &inner_pt) {
-                Some(ActionCostVec(v)) => {
-                    if args.no_unsat && v.is_empty() {
-                        continue;
+            let value_description =
+                match block.get_with_preference::<X86Target>(&db, todo!(), &inner_pt) {
+                    GetPreference::Hit(ActionCostVec(v)) => {
+                        if args.no_unsat && v.is_empty() {
+                            continue;
+                        }
+                        format!("{:?}", v)
                     }
-                    format!("{:?}", v)
-                }
-                None => {
-                    if args.no_empty {
-                        continue;
+                    GetPreference::Miss(_) => {
+                        if args.no_empty {
+                            continue;
+                        }
+                        "empty".to_string()
                     }
-                    "empty".to_string()
-                }
-            };
+                };
 
             let (table_key_part, value_part) = if args.group {
                 (String::from(""), String::from(""))

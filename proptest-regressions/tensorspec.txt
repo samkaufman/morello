@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 048bbbd014acfcdc9918f879453ded60a3ba5606e6cc9c6100fc5a792ab0efc9 # shrinks to tspec = TensorSpec { shape: [4, 4, 2, 4], dtype: Uint8, aux: TensorSpecAux { contig: 3, aligned: false, level: GL, layout: New([(0, None), (2, None), (3, None), (1, None), (3, Some(2))]), vector_size: None } }

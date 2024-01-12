@@ -9,8 +9,7 @@ use crate::views::{Param, Tile, View};
 use itertools::Itertools;
 use smallvec::SmallVec;
 use std::collections::HashMap;
-
-use std::{iter, slice};
+use std::{cmp, iter, slice};
 
 /// An Impl representing a loop over a set of zipped [`Tile`]s.
 ///

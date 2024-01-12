@@ -4,17 +4,19 @@ use smallvec::{smallvec, SmallVec};
 use std::num::NonZeroUsize;
 
 use crate::cost::Cost;
-use crate::db::{ActionIdx, Database};
+use crate::db::{ActionIdx, Database, GetPreference};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryLimits;
+use crate::scheduling::ApplyError;
 use crate::spec::Spec;
 use crate::target::Target;
 
-struct ImplReducer {
+struct ImplReducer<'a> {
     results: SmallVec<[(ActionIdx, Cost); 1]>,
     top_k: usize,
+    preferences: &'a [ActionIdx],
 }
 
 /// Computes an optimal Impl for `goal` and stores it in `db`.
@@ -32,15 +34,20 @@ where
 {
     assert!(db.max_k().map_or(true, |k| k >= top_k));
 
+    let mut canonical_goal = goal.clone();
+    canonical_goal
+        .canonicalize()
+        .expect("should be possible to canonicalize goal Spec");
+
     let thread_count = jobs
         .map(|j| j.get())
         .unwrap_or_else(rayon::current_num_threads);
     if thread_count == 1 {
-        return top_down_spec(db, goal, top_k, 0, 1);
+        return top_down_spec(db, &canonical_goal, top_k, 0, 1);
     }
 
     let tasks = (0..thread_count)
-        .zip(std::iter::repeat(goal.clone()))
+        .zip(std::iter::repeat(canonical_goal.clone()))
         .collect::<Vec<_>>();
     // Collect all and take the result from the first call so that we get
     // deterministic results.
@@ -70,23 +77,30 @@ where
     }
 
     // First, check if the Spec is already in the database.
-    if let Some(stored) = db.get(goal) {
-        return (stored.0, 1, 0);
+    let get_result = db.get_with_preference(goal);
+    let mut preferences: &[_] = &[];
+    if let GetPreference::Hit(v) = get_result {
+        return (v.0, 1, 0);
+    }
+    if let GetPreference::Miss(Some(p)) = &get_result {
+        preferences = p;
     }
 
     let mut hits = 0u64;
     let mut misses = 1u64;
 
     // Enumerate action applications, computing their costs from their childrens' costs.
-    let mut reducer = ImplReducer::new(top_k);
+    let mut reducer = ImplReducer::new(top_k, preferences);
 
     let all_actions = goal.0.actions().into_iter().collect::<Vec<_>>();
 
     let initial_skip = thread_idx * all_actions.len() / thread_count;
     for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
         let action = &all_actions[action_idx];
-        let Ok(partial_impl) = action.apply(goal) else {
-            continue;
+        let partial_impl = match action.apply(goal) {
+            Ok(imp) => imp,
+            Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => continue,
+            Err(ApplyError::SpecNotCanonical) => panic!(),
         };
 
         // Let top_down_impl compute the final cost of completing this Impl.
@@ -169,31 +183,72 @@ where
     }
 }
 
-impl ImplReducer {
-    fn new(top_k: usize) -> Self {
+impl<'a> ImplReducer<'a> {
+    fn new(top_k: usize, preferences: &'a [ActionIdx]) -> Self {
         ImplReducer {
             results: smallvec![],
             top_k,
+            preferences,
         }
     }
 
-    fn insert(&mut self, new_impl: ActionIdx, cost: Cost) {
+    fn insert(&mut self, new_action_idx: ActionIdx, cost: Cost) {
         match self.results.binary_search_by_key(&&cost, |imp| &imp.1) {
-            Ok(idx) | Err(idx) => {
-                if idx < self.top_k {
-                    if self.results.len() == self.top_k {
-                        self.results.pop();
+            Ok(idx) => {
+                debug_assert!(idx < self.top_k);
+                // Replace something if it improves preference count, and do
+                //   nothing if not.
+                let mut to_set = None;
+                for i in self.iter_surrounding_matching_cost_indices(idx, &cost) {
+                    // TODO: Instead of filtering here, just push down the length.
+                    if i >= self.preferences.len() {
+                        continue;
                     }
-                    self.results.insert(idx, (new_impl, cost));
+
+                    if new_action_idx == self.preferences[i] {
+                        to_set = Some(i);
+                        break;
+                    }
                 }
+                if let Some(i) = to_set {
+                    self.results[i].0 = new_action_idx;
+                }
+
+                debug_assert!(self.results.len() <= self.top_k);
             }
+            Err(idx) if idx < self.top_k => {
+                if self.results.len() == self.top_k {
+                    self.results.pop();
+                }
+                self.results.insert(idx, (new_action_idx, cost));
+            }
+            Err(_) => {}
         }
         debug_assert!(self.results.iter().tuple_windows().all(|(a, b)| a.1 < b.1));
         debug_assert!(self.results.len() <= self.top_k);
+        debug_assert!(self.results.iter().map(|(a, _)| a).all_unique());
     }
 
     fn finalize(self) -> SmallVec<[(ActionIdx, Cost); 1]> {
         self.results
+    }
+
+    fn iter_surrounding_matching_cost_indices<'s>(
+        &'s self,
+        initial_idx: usize,
+        cost: &'s Cost,
+    ) -> impl Iterator<Item = usize> + 's {
+        debug_assert_eq!(&self.results[initial_idx].1, cost);
+        std::iter::once(initial_idx)
+            .chain(
+                ((initial_idx + 1)..self.results.len())
+                    .take_while(move |idx| &self.results[*idx].1 == cost),
+            )
+            .chain(
+                (0..initial_idx)
+                    .rev()
+                    .take_while(move |idx| &self.results[*idx].1 == cost),
+            )
     }
 }
 
@@ -202,7 +257,7 @@ mod tests {
     use super::*;
     use crate::common::{DimSize, Dtype};
     use crate::db::DashmapDiskDatabase;
-    use crate::layout::{row_major, Layout};
+    use crate::layout::row_major;
     use crate::memorylimits::MemVec;
     use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{CpuMemoryLevel, X86Target};
@@ -218,9 +273,12 @@ mod tests {
     const TEST_SMALL_MEM: u64 = 2048;
 
     proptest! {
+        // TODO: Add an ARM variant!
+        // TODO: Remove restriction to canonical Specs. Should synth. any Spec.
         #[test]
-        fn test_can_synthesize_any_spec(
+        fn test_can_synthesize_any_canonical_spec(
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
+                .prop_filter("Spec should be canonical", |s| s.is_canonical())
         ) {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
             top_down(&db, &spec, 1, Some(nz!(1usize)));
@@ -228,7 +286,7 @@ mod tests {
 
         #[test]
         fn test_more_memory_never_worsens_solution_with_shared_db(
-            spec_pair in lower_and_higher_spec::<X86Target>()
+            spec_pair in lower_and_higher_canonical_specs::<X86Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
@@ -252,6 +310,7 @@ mod tests {
         #[test]
         fn test_synthesis_at_peak_memory_yields_same_decision(
             spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
+                .prop_filter("Spec should be canonical", |s| s.is_canonical())
         ) {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
             let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
@@ -299,63 +358,8 @@ mod tests {
         assert_eq!(first_solutions, lower_solutions);
     }
 
-    fn example_move_spec(
-        from_level: CpuMemoryLevel,
-        from_layout: Layout,
-        to_level: CpuMemoryLevel,
-        to_layout: Layout,
-    ) -> Spec<X86Target> {
-        Spec(
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Move,
-                    spec_shape: smallvec![4, 4],
-                    dtype: Dtype::Uint8,
-                },
-                vec![
-                    TensorSpecAux {
-                        contig: from_layout.contiguous_full(),
-                        aligned: false,
-                        level: from_level,
-                        layout: from_layout,
-                        vector_size: None,
-                    },
-                    TensorSpecAux {
-                        contig: to_layout.contiguous_full(),
-                        aligned: false,
-                        level: to_level,
-                        layout: to_layout,
-                        vector_size: None,
-                    },
-                ],
-                false,
-            ),
-            X86Target::max_mem(),
-        )
-    }
-
-    fn example_zero_spec(level: CpuMemoryLevel, layout: Layout) -> Spec<X86Target> {
-        Spec(
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Zero,
-                    spec_shape: smallvec![4, 4],
-                    dtype: Dtype::Uint8,
-                },
-                vec![TensorSpecAux {
-                    contig: layout.contiguous_full(),
-                    aligned: false,
-                    level,
-                    layout,
-                    vector_size: None,
-                }],
-                false,
-            ),
-            X86Target::max_mem(),
-        )
-    }
-
-    fn lower_and_higher_spec<Tgt: Target>() -> impl Strategy<Value = (Spec<Tgt>, Spec<Tgt>)> {
+    fn lower_and_higher_canonical_specs<Tgt: Target>(
+    ) -> impl Strategy<Value = (Spec<Tgt>, Spec<Tgt>)> {
         let MemoryLimits::Standard(mut top_memvec) = X86Target::max_mem();
         top_memvec = top_memvec.map(|v| v.min(TEST_SMALL_MEM));
 
@@ -364,7 +368,8 @@ mod tests {
         let top_memory_c = Rc::clone(&top_memory_a);
 
         any_with::<Spec<Tgt>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
-            .prop_filter("limits should not be max", move |s| &s.1 != &*top_memory_a)
+            .prop_filter("Spec should be canonical", |s| s.is_canonical())
+            .prop_filter("limits should not be max", move |s| s.1 != *top_memory_a)
             .prop_flat_map(move |spec| {
                 let MemoryLimits::Standard(top_memvec) = top_memory_b.as_ref();
                 let MemoryLimits::Standard(raised_memory) = &spec.1;

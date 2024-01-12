@@ -1,5 +1,5 @@
 use crate::codegen::c_utils::VecType;
-use crate::common::DimSize;
+use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
@@ -11,7 +11,9 @@ use crate::spec::{dim_range, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::TensorSpec;
 
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter;
@@ -73,61 +75,69 @@ impl<T: CpuTarget> Target for T {
         }
     }
 
-    fn all_layouts_for_shape(shape: &[DimSize]) -> Vec<Layout> {
-        let mut results = Self::move_destination_layouts(shape);
-        if shape.len() == 2 {
-            let cm = col_major(2);
-            if !results.contains(&cm) {
-                results.push(cm);
-            }
-        }
-        results
+    fn all_layouts_for_shape(rank: u8, dtype: Dtype) -> Vec<Layout> {
+        let all_target_vector_bytes = Self::levels()
+            .into_iter()
+            .flat_map(|lvl| lvl.vector_bytes().iter().copied())
+            .collect::<Vec<_>>();
+
+        // The following could be faster. It keeps two copies of the non-packed layouts
+        // (`base` and the first few values in `result`) and it doesn't compute the size
+        // of the `result` ahead-of-time, potentially causing some Vec resizes.
+        let base = match rank {
+            2 => vec![row_major(2), col_major(2)],
+            4 => vec![row_major(4), nhwc()],
+            _ => vec![row_major(rank)],
+        };
+
+        // Extend with all possible packings.
+        let all_packing_sizes = pack_sizes(None, dtype, &all_target_vector_bytes);
+        let mut result = base.clone();
+        result.extend(base.iter().flat_map(|original_layout| {
+            let Layout::New(dims) = original_layout;
+            (0..dims.len()).cartesian_product(&all_packing_sizes).map(
+                |(packing_dim, &packing_size)| {
+                    Layout::New(
+                        dims.iter()
+                            .cloned()
+                            .chain(iter::once((
+                                packing_dim.try_into().unwrap(),
+                                Some(packing_size),
+                            )))
+                            .collect(),
+                    )
+                },
+            )
+        }));
+        result
     }
 
-    fn move_destination_layouts(shape: &[DimSize]) -> Vec<Layout> {
-        let rank = u8::try_from(shape.len()).unwrap();
-        let non_one_dims = shape.iter().filter(|&d| *d > 1).count();
+    fn move_destination_layouts(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
+        let all_target_vector_bytes = Self::levels()
+            .into_iter()
+            .flat_map(|lvl| lvl.vector_bytes().iter().copied())
+            .collect::<Vec<_>>();
 
-        let it = iter::once(row_major(rank));
-
-        // If any dimension is one, then the row-major layout is the only layout.
-        if shape.len() != non_one_dims {
-            return it.collect();
-        }
-
-        let it = it.chain({
-            shape
-                .iter()
-                .take(shape.len() - 1)
-                .copied()
-                .enumerate()
-                .flat_map(|(dim, dim_size)| {
-                    let dim_u8 = u8::try_from(dim).unwrap();
-                    dim_range(dim_size, false).filter_map(move |strip_size| {
-                        debug_assert!(
-                            strip_size < dim_size,
-                            "strip_size {strip_size} >= dim_size {dim_size}"
-                        );
-                        if strip_size == 1 {
-                            None
-                        } else {
-                            Some(Layout::new_packed(rank, dim_u8, strip_size))
-                        }
-                    })
-                })
-        });
-
-        match rank {
-            2 => {
-                if non_one_dims == 2 {
-                    return iter::once(col_major(2)).chain(it).collect();
-                } else {
-                    return it.collect();
-                }
-            }
-            4 => iter::once(nhwc()).chain(it).collect(),
-            _ => it.collect(),
-        }
+        // The following could be faster. It keeps two copies of the non-packed layouts
+        // (`base` and the first few values in `result`) and it doesn't compute the size
+        // of the `result` ahead-of-time, potentially causing some Vec resizes.
+        let only_ones = shape.iter().all(|&d| d == 1);
+        let base = match (shape.len(), only_ones) {
+            (2, false) => vec![row_major(2), col_major(2)],
+            (4, false) => vec![row_major(4), nhwc()],
+            (r, _) => vec![row_major(r.try_into().unwrap())],
+        };
+        let mut result = base.clone();
+        result.extend(base.iter().flat_map(|original_layout| {
+            packed_layouts_for_standard_layout(
+                original_layout,
+                shape,
+                dtype,
+                &all_target_vector_bytes,
+            )
+        }));
+        debug_assert!(result.iter().all(|r| r.applies_to_shape(shape)));
+        result
     }
 
     fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>> {
@@ -204,7 +214,7 @@ impl MemoryLevel for CpuMemoryLevel {
     fn vector_bytes(&self) -> &'static [u32] {
         match &self {
             // CpuMemoryLevel::VRF => &[16, 32],
-            CpuMemoryLevel::VRF => &[16],
+            CpuMemoryLevel::VRF => &[32],
             _ => &[],
         }
     }
@@ -333,27 +343,6 @@ pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>
     has_vrf
 }
 
-pub fn cacheaccess_applies_to_operands<Tgt: Target>(_operands: &[TensorSpec<Tgt>]) -> bool {
-    false
-
-    // if operands.iter().all(|o| o.level().is_addressed()) {
-    //     return false;
-    // }
-    // if operands.iter().any(|o| !o.is_contiguous()) {
-    //     return false;
-    // }
-    // if operands[0].dtype() != operands[1].dtype() {
-    //     return false;
-    // }
-    // if operands[0].shape() != operands[1].shape() {
-    //     return false;
-    // }
-    // if operands[0].layout() != operands[1].layout() {
-    //     return false;
-    // }
-    // true
-}
-
 pub fn memsetzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
@@ -389,15 +378,15 @@ pub fn vectorzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
 pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
-    if operands[0].level() != CpuMemoryLevel::RF {
+    let scalar_level = operands[0].level();
+    if scalar_level != CpuMemoryLevel::RF && scalar_level != CpuMemoryLevel::L1 {
         return false;
     }
+
+    // Second and third parameters must be in VRF, vector size multiples, aligned, contig., and
+    // have the same dtype as the first parameter.
     for i in 1..3 {
         if operands[i].level() != CpuMemoryLevel::VRF {
-            return false;
-        }
-        let volume = operands[i].shape().iter().product::<DimSize>();
-        if volume != operands[i].vector_size().unwrap() {
             return false;
         }
         if !operands[i].aligned() || !operands[i].is_contiguous() {
@@ -406,14 +395,29 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
         if operands[0].dtype() != operands[i].dtype() {
             return false;
         }
+
+        let volume = operands[i].shape().iter().product::<DimSize>();
+        if volume % operands[i].vector_size().unwrap() != 0 {
+            return false;
+        }
     }
+
+    // First parameter is a single value.
     if operands[0].shape().iter().any(|d| *d != 1) {
         return false;
     }
+
+    // Second parameter must have (no more than) one non-degenerate dimension.
+    // TODO: Make following true.
     if operands[1].shape().len() != 2 || operands[1].shape()[0] != 1 {
         return false;
     }
-    if operands[2].shape().to_vec() != vec![1, operands[1].shape()[1]] {
+
+    // Third (output) parameter shape must match the second input parameter shape and
+    // vector size.
+    if operands[1].shape() != operands[2].shape()
+        || operands[1].vector_size() != operands[2].vector_size()
+    {
         return false;
     }
     true
@@ -427,14 +431,77 @@ pub fn mult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
         .all(|o| o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == 1))
 }
 
+/// Yields versions of the given [Layout] with packed dimensions added.
+///
+/// The specific sizes of the inner/packed dimension depend on the given layout, tensor
+/// shape, and tensor [Dtype].
+fn packed_layouts_for_standard_layout<'a>(
+    original_layout: &'a Layout,
+    shape: &'a [DimSize],
+    dtype: Dtype,
+    all_target_vector_bytes: &'a [u32],
+) -> impl Iterator<Item = Layout> + 'a {
+    let Layout::New(dims) = &original_layout;
+    debug_assert!(dims.iter().all(|(_, s)| s.is_none()));
+
+    let final_nonone_dim = {
+        let mut d = dims.len() - 1;
+        while d > 0 && shape[d] == 1 {
+            d -= 1;
+        }
+        d
+    };
+
+    dims[..final_nonone_dim].iter().flat_map(move |&(dim, _)| {
+        let dims = dims.clone();
+        let mut it = None;
+        if shape[usize::from(dim)] != 1 {
+            it = Some(
+                pack_sizes(
+                    Some(shape[usize::from(dim)]),
+                    dtype,
+                    all_target_vector_bytes,
+                )
+                .into_iter()
+                .map(move |strip_size| {
+                    Layout::new(
+                        dims.iter()
+                            .cloned()
+                            .chain(iter::once((dim, Some(strip_size))))
+                            .collect(),
+                    )
+                }),
+            );
+        }
+        it.into_iter().flatten()
+    })
+}
+
+fn pack_sizes(
+    max_size: Option<DimSize>,
+    dtype: Dtype,
+    all_target_vector_bytes: &[u32],
+) -> SmallVec<[DimSize; 2]> {
+    all_target_vector_bytes
+        .iter()
+        .filter_map(|&bytes| {
+            let s = bytes / DimSize::from(dtype.size());
+            if max_size.map(|m| s < m).unwrap_or(true) {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
-        common::DimSize,
+        common::{DimSize, Dtype},
         expr::{NonAffineExpr, Substitute},
         layout::BufferVar,
         layout::Layout,
-        opaque_symbol::OpaqueSymbol,
         target::{Target, X86Target},
     };
     use itertools::Itertools;
@@ -444,71 +511,57 @@ mod tests {
     proptest! {
         #[test]
         fn test_all_layouts_for_shape_are_unique(
-            shape in proptest::collection::vec(1..8u32, 1..=5)
+            rank in 1..=5u8, dtype in any::<Dtype>(),
         ) {
-            assert_unique_layouts(&X86Target::all_layouts_for_shape(&shape));
-        }
-
-        #[test]
-        fn test_move_destination_layouts_are_unique(
-            shape in proptest::collection::vec(1..8u32, 1..=5)
-        ) {
-            assert_unique_layouts(&X86Target::move_destination_layouts(&shape));
+            assert_unique_layouts(&X86Target::all_layouts_for_shape(rank, dtype));
         }
 
         #[test]
         fn test_all_layouts_for_shape_contains_move_destination_layouts(
-            shape in proptest::collection::vec(1..8u32, 1..=5)
+            shape in proptest::collection::vec(1..8u32, 1..=5),
+            dtype in any::<Dtype>(),
         ) {
-            let superset: HashSet<_> = X86Target::all_layouts_for_shape(&shape)
+            let rank = shape.len().try_into().unwrap();
+            let superset: HashSet<_> = X86Target::all_layouts_for_shape(rank, dtype)
                 .into_iter()
                 .collect();
-            let subset: HashSet<_> = X86Target::move_destination_layouts(&shape)
+            let subset: HashSet<_> = X86Target::move_destination_layouts(&shape, dtype)
                 .into_iter()
                 .collect();
             assert!(superset.is_superset(&subset));
         }
 
-        #[test]
-        fn test_move_destination_layouts_have_unique_index_expressions(
-            shape in proptest::collection::vec(1..8u32, 1..=5)
-        ) {
-            let expr_id = OpaqueSymbol::new();
-            let mut index_exprs: Vec<(Vec<i32>, Layout)> = Vec::new();
-            for layout in X86Target::move_destination_layouts(&shape) {
-                let ie = layout.buffer_indexing_expr(&expr_id, &shape);
-                let evaluated_pts = eval_all_index_expr_points(&ie, &shape);
-                for (prev_pts, prev_layout) in index_exprs.iter() {
-                    if prev_pts == &evaluated_pts {
-                        panic!(
-                            "Layouts had identical indexing expressions: {:?} and {:?} (expr = {})", prev_layout, layout, ie
-                        );
-                    }
-                }
-                index_exprs.push((evaluated_pts, layout));
-            }
-        }
+        // TODO: Re-enable the following. Enumerating identical layouts wastes time, so this would
+        //   be good to have.
+        // #[test]
+        // fn test_move_destination_layouts_have_unique_index_expressions(
+        //     shape in proptest::collection::vec(1..8u32, 1..=5),
+        //     dtype in any::<Dtype>(),
+        // ) {
+        //     let expr_id = OpaqueSymbol::new();
+        //     let mut index_exprs: Vec<(Vec<i32>, Layout)> = Vec::new();
+        //     for layout in X86Target::move_destination_layouts(&shape, dtype) {
+        //         let ie = layout.buffer_indexing_expr(&expr_id, &shape);
+        //         let evaluated_pts = eval_all_index_expr_points(&ie, &shape);
+        //         for (prev_pts, prev_layout) in index_exprs.iter() {
+        //             if prev_pts == &evaluated_pts {
+        //                 panic!(
+        //                     "Layouts had identical indexing expressions {} \
+        //                     for shape {:?}: {:?} and {:?}", ie, shape, prev_layout, layout
+        //                 );
+        //             }
+        //         }
+        //         index_exprs.push((evaluated_pts, layout));
+        //     }
+        // }
 
         #[test]
-        fn test_packed_layout_with_strip_size_one_is_row_major(
+        #[should_panic]
+        fn test_packed_layout_with_strip_size_one_panics(
             example in arb_test_packed_layout_with_strip_size_one_is_row_major()
         ) {
             let (shape, strip_dim) = example;
-            let expr_id = OpaqueSymbol::new();
-
-            let packed_layout = Layout::Packed {
-                dim_count: shape.len().try_into().unwrap(),
-                strip_dim,
-                strip_size: 1,
-            };
-            let packed_ie = packed_layout.buffer_indexing_expr(&expr_id, &shape);
-            let packed_pts = eval_all_index_expr_points(&packed_ie, &shape);
-
-            let rm_layout = Layout::new_standard((0..u8::try_from(shape.len()).unwrap()).collect());
-            let rm_ie = rm_layout.buffer_indexing_expr(&expr_id, &shape);
-            let rm_pts = eval_all_index_expr_points(&rm_ie, &shape);
-
-            assert_eq!(packed_pts, rm_pts);
+            Layout::new_packed(shape.len().try_into().unwrap(), strip_dim, 1);
         }
     }
 

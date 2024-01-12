@@ -1,3 +1,4 @@
+use anyhow::Context;
 use itertools::iproduct;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -9,7 +10,7 @@ use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
-use crate::layout::{row_major, Layout};
+use crate::layout::{row_major, Layout, LayoutError};
 use crate::target::{MemoryLevel, Target};
 use crate::utils::join_into_string;
 
@@ -66,7 +67,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             layout,
             vector_size,
         );
-        r.canonicalize();
+        // TODO: This should prop. the error, not unwrap, and be called try_new_canon.
+        r.canonicalize().unwrap();
         r
     }
 
@@ -96,13 +98,11 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         if shape.is_empty() || shape.iter().any(|&d| d < 1) {
             panic!("Invalid shape: {:?}", shape);
         }
-
         if aux.vector_size.is_some() != aux.level.vector_rf() {
             panic!(
                 "vector_size must be specified if and only if the bank ({:?}) is a vector register file", aux.level
             )
         }
-
         TensorSpec { shape, dtype, aux }
     }
 
@@ -173,20 +173,21 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     /// Returns a new TensorSpec with the given shape and alignment.
     ///
     /// The result's layout and contiguousness abstraction will have been
-    /// canoncialized for the given shape.
-    pub fn shrink(&mut self, shape: &[DimSize], aligned: bool) {
-        // This implementation is similar to `canonicalize`, but the tile
-        // contiguousness is computed from both old and new shapes.
-        self.aux.contig = self
-            .layout()
-            .tile_contiguity(shape, &self.shape, self.aux.contig);
+    /// canonicalized for the given shape.
+    pub fn shrink(&mut self, shape: &[DimSize], aligned: bool) -> Result<(), LayoutError> {
+        let (new_layout, new_contig) =
+            self.aux
+                .layout
+                .update_for_tiling(self.shape(), shape, self.aux.contig)?;
         self.shape = Shape::from(shape);
-        self.aux.layout = self.aux.layout.canonicalize_for_shape(&self.shape);
+        self.aux.layout = new_layout;
+        self.aux.contig = new_contig;
         self.aux.aligned = aligned;
+        Ok(())
     }
 
-    pub fn canonicalize(&mut self) {
-        self.aux.canonicalize(&self.shape, self.aux.aligned);
+    pub fn canonicalize(&mut self) -> anyhow::Result<()> {
+        self.aux.canonicalize(&self.shape, self.aux.aligned)
     }
 
     /// Returns a TensorSpec with given size-one dimensions dropped.
@@ -233,6 +234,11 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     // TODO: Shouldn't need this method. Should be implicit in Spec validity.
     pub fn can_move_to(&self, dest_layout: &Layout, dest_level: &Tgt::Level) -> bool {
+        // If the destination is into a cache ("non-addressed"), then it must have the same layout.
+        if !dest_level.is_addressed() && dest_layout != &self.layout() {
+            return false;
+        }
+
         // If the destination is in VRF, then the operand volume must be a multiple of at least one
         // of the vector sizes.
         let vector_bytes = dest_level.vector_bytes();
@@ -266,7 +272,7 @@ impl<Tgt: Target> Display for TensorSpec<Tgt> {
     }
 }
 
-/// Implements [`proptest::arbitrary::Arbitrary`] to yield valid [TensorSpec]s.
+/// Implements [`proptest::arbitrary::Arbitrary`] to yield canonical [TensorSpec]s.
 ///
 /// This generates [TensorSpec]s of varying shapes, dtypes, levels and, alignments.
 /// The [Layout], vector shape, and contiguousness abstraction are constrained to be valid together
@@ -287,26 +293,32 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
             .map(|m| 1..=m)
             .collect::<Vec<_>>()
             .prop_flat_map(|shp| {
-                let shp1 = TensorSpecArbMaxShape(Shape::from(shp));
-                let shp2 = shp1.clone();
-                let aux_strategy = TensorSpecAux::arbitrary_with(shp1);
+                let shp = TensorSpecArbMaxShape(Shape::from(shp));
+                let aux_strategy = TensorSpecAux::arbitrary_with(shp.clone());
                 let dtype_strategy = any::<Dtype>();
-                (Just(shp2), dtype_strategy, aux_strategy)
+                (Just(shp), dtype_strategy, aux_strategy)
             })
-            .prop_map(|(shp, dtype, aux)| {
+            .prop_filter_map("TensorSpec was not canonical", |(shp, dtype, aux)| {
                 let mut tensor_spec = TensorSpec::new_noncanon_with_aux(shp.0, dtype, aux);
-                tensor_spec.canonicalize();
-                tensor_spec
+                let canon_result = tensor_spec
+                    .canonicalize()
+                    .with_context(|| format!("Couldn't canonicalize {}", tensor_spec));
+                canon_result.ok().map(|_| tensor_spec)
             })
             .boxed()
     }
 }
 
 impl<Tgt: Target> TensorSpecAux<Tgt> {
-    pub fn canonicalize(&mut self, shape: &Shape, aligned: bool) {
-        self.contig = self.layout.tile_contiguity(shape, shape, self.contig);
-        self.layout = self.layout.canonicalize_for_shape(shape);
+    pub fn canonicalize(&mut self, shape: &Shape, aligned: bool) -> anyhow::Result<()> {
+        let (new_layout, new_contig) = self
+            .layout
+            .update_for_tiling(shape, shape, self.contig)
+            .context("Updating with no-op tiling should never fail")?;
+        self.layout = new_layout;
+        self.contig = new_contig;
         self.aligned = aligned;
+        Ok(())
     }
 }
 
@@ -373,8 +385,8 @@ where
         let ((), [level_int]) = i;
         let level = BiMap::apply_inverse(&Tgt::Level::bimap(), &(*level_int).try_into().unwrap());
         let dtype_bytes = u32::from(self.tensor_dtype.size());
-        let mut vector_options = level
-            .vector_bytes()
+        let vector_bytes = level.vector_bytes();
+        let mut vector_options = vector_bytes
             .iter()
             .map(|&vb| Some(vb / dtype_bytes))
             .collect::<Vec<_>>();
@@ -384,7 +396,10 @@ where
         Box::new(
             iproduct!(
                 [true, false],
-                Tgt::all_layouts_for_shape(&self.tensor_shape),
+                Tgt::all_layouts_for_shape(
+                    self.tensor_shape.len().try_into().unwrap(),
+                    self.tensor_dtype
+                ),
                 vector_options
             )
             .flat_map(move |(aligned, layout, vector_size)| {
@@ -473,9 +488,10 @@ fn arb_tensorspecaux<Tgt: Target>(
     use proptest::sample::select;
 
     let max_shape = Shape::from(max_shape);
+    let rank = max_shape.len().try_into().unwrap();
 
     (
-        select(Tgt::all_layouts_for_shape(&max_shape)),
+        select(Tgt::all_layouts_for_shape(rank, dtype)),
         select(Tgt::levels().to_vec()),
     )
         .prop_flat_map(move |(layout, level)| {
@@ -501,4 +517,91 @@ fn arb_tensorspecaux<Tgt: Target>(
             },
         )
         .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::layout::Layout;
+    use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
+    use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape};
+    use proptest::prelude::*;
+    use proptest::proptest;
+    use smallvec::smallvec;
+
+    proptest! {
+        // TODO: Modify `any::<TensorSpec<_>>` to generate multiple ranks and dtypes.
+        #[test]
+        fn tensorspec_canonicalize_should_be_idempodent_x86(tspec in any::<TensorSpec<X86Target>>()) {
+            shared_tensorspec_canonicalize_should_be_idempodent(tspec)
+        }
+
+        // TODO: Modify `any::<TensorSpec<_>>` to generate multiple ranks and dtypes.
+        #[test]
+        fn tensorspec_canonicalize_should_be_idempodent_arm(tspec in any::<TensorSpec<ArmTarget>>()) {
+            shared_tensorspec_canonicalize_should_be_idempodent(tspec)
+        }
+
+        #[test]
+        fn tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_x86(
+            tspec in any_with::<TensorSpec<X86Target>>(TensorSpecArbMaxShape(smallvec![4, 4, 4, 4]))
+        ) {
+            shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
+        }
+
+        #[test]
+        fn tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_arm(
+            tspec in any_with::<TensorSpec<ArmTarget>>(TensorSpecArbMaxShape(smallvec![4, 4, 4, 4]))
+        ) {
+            shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
+        }
+    }
+
+    // TODO: Rename
+    #[test]
+    fn test_1() {
+        let mut tspec = TensorSpec::<X86Target> {
+            shape: smallvec::smallvec![5, 2, 8, 4],
+            dtype: crate::common::Dtype::Uint8,
+            aux: crate::tensorspec::TensorSpecAux {
+                contig: 3,
+                aligned: false,
+                level: CpuMemoryLevel::GL,
+                layout: Layout::New(vec![
+                    (0, None),
+                    (2, None),
+                    (3, None),
+                    (1, None),
+                    (2, Some(4)),
+                ]),
+                vector_size: None,
+            },
+        };
+        tspec.canonicalize().unwrap();
+        assert_eq!(tspec.aux.contig, 3);
+    }
+
+    fn shared_tensorspec_canonicalize_should_be_idempodent<Tgt: Target>(
+        mut tspec: TensorSpec<Tgt>,
+    ) {
+        tspec.canonicalize().unwrap();
+        let mut second = tspec.clone();
+        second.canonicalize().unwrap();
+        assert_eq!(tspec, second);
+    }
+
+    fn shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change<Tgt: Target>(
+        tspec: TensorSpec<Tgt>,
+    ) {
+        let mut second = tspec.clone();
+        second.canonicalize().unwrap();
+
+        let Layout::New(dims_a) = tspec.layout();
+        let Layout::New(dims_b) = second.layout();
+        assert!(
+            dims_a != dims_b || tspec.aux.contig == second.aux.contig,
+            "Dims were unchanged, but contig. changed from {:?} to {:?}",
+            tspec.aux.contig,
+            second.aux.contig
+        );
+    }
 }

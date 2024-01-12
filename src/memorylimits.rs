@@ -188,14 +188,12 @@ impl MemVec {
 
     pub fn checked_sub_snap_down(self, rhs: &[u64; LEVEL_COUNT]) -> Option<MemVec> {
         let mut result = self;
-        for idx in 0..result.len() {
-            let cur = bit_length_inverse(result.0[idx].into());
-            if cur < rhs[idx] {
+        for (result_entry, &r) in result.0.iter_mut().zip(rhs) {
+            let cur = bit_length_inverse((*result_entry).into());
+            if cur < r {
                 return None;
             }
-            result.0[idx] = bit_length(prev_power_of_two(cur - rhs[idx]))
-                .try_into()
-                .unwrap();
+            *result_entry = bit_length(prev_power_of_two(cur - r)).try_into().unwrap();
         }
         Some(result)
     }
@@ -272,7 +270,7 @@ impl Sub for MemVec {
     type Output = Self;
 
     // TODO: Implement this without converting to linear space. (And add test!)
-    fn sub(self, rhs: Self) -> Self::Output {
+    fn sub(self, _rhs: Self) -> Self::Output {
         todo!()
     }
 }

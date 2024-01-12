@@ -45,6 +45,15 @@ pub trait Database<'a> {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
 
+    fn get_with_preference<Tgt>(
+        &'a self,
+        query: &Spec<Tgt>,
+    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
+
     // TODO: Document interior mutability of put.
     fn put<Tgt>(&'a self, problem: Spec<Tgt>, impls: SmallVec<[(ActionIdx, Cost); 1]>)
     where
@@ -128,6 +137,11 @@ pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionCostVec(pub SmallVec<[(ActionIdx, Cost); 1]>);
+
+pub enum GetPreference<T, V> {
+    Hit(T),
+    Miss(Option<V>),
+}
 
 impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
     fn extra_column_titles(&self) -> Vec<String> {
@@ -240,13 +254,28 @@ where
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        match self.get_with_preference(query) {
+            GetPreference::Hit(v) => Some(v),
+            GetPreference::Miss(_) => None,
+        }
+    }
+
+    fn get_with_preference<Tgt>(
+        &'a self,
+        query: &Spec<Tgt>,
+    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
         let (block_pt, inner_pt) = blockify_point(global_pt);
         let Some(group) = self.blocks.get(&(table_key, block_pt)) else {
-            return None;
+            return GetPreference::Miss(None);
         };
-        group.get(self, query, &inner_pt)
+        group.get_with_preference(self, query, &inner_pt)
     }
 
     fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
@@ -255,12 +284,8 @@ where
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        #[cfg(debug_assertions)]
-        let original_spec = spec.clone();
-
         let bimap = self.spec_bimap();
         let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
-        let spec_b = spec.clone();
 
         // Construct an iterator over all blocks to fill.
         let rank = bottom.len();
@@ -273,7 +298,6 @@ where
 
         for joined_row in blocks_iter {
             let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
-            let block_pt_b = block_pt.clone();
 
             let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
             match block_entry {
@@ -455,12 +479,12 @@ impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
 }
 
 impl DbBlock {
-    pub fn get<Tgt>(
+    pub fn get_with_preference<Tgt>(
         &self,
         containing_db: &DashmapDiskDatabase,
         query: &Spec<Tgt>,
         inner_pt: &[u8],
-    ) -> Option<ActionCostVec>
+    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -472,43 +496,63 @@ impl DbBlock {
             .collect::<SmallVec<[_; 10]>>();
         match self {
             DbBlock::ActionOnly(v) => {
-                v.0[&inner_pt_usize].as_ref().map(|inner| {
-                    ActionCostVec(
-                    inner
-                        .iter()
-                        .map(|&action_idx| {
-                            let action = query
-                                .0
-                                .actions()
-                                .into_iter()
-                                .nth(action_idx.into())
-                                .unwrap();
-                            let imp = action.apply(query).unwrap();
-                            let recomputed_cost = compute_cost(&imp, &|s| {
-                                let Some(ActionCostVec(inner_decisions)) = containing_db.get(&s.0)
-                                else {
-                                    panic!(
-                                        "Missed sub-Impl {} while computing cost for {}",
-                                        s.0, query
-                                    );
-                                };
-                                if inner_decisions.is_empty() {
-                                    panic!("No actions for sub-Impl {} while computing cost for {}",
-                                           s.0, query);
-                                } else if inner_decisions.len() == 1 {
-                                    inner_decisions[0].1.clone()
-                                } else {
-                                    todo!();
-                                }
-                            });
-                            (action_idx, recomputed_cost)
-                        })
-                        .collect(),
-                )
-                })
+                let (inner_result, neighbor) = v.0.get_with_neighbor(&inner_pt_usize);
+                match inner_result {
+                    Some(inner) => {
+                        GetPreference::Hit(ActionCostVec(
+                            inner
+                                .iter()
+                                .map(|&action_idx| {
+                                    let action = query
+                                        .0
+                                        .actions()
+                                        .into_iter()
+                                        .nth(action_idx.into())
+                                        .unwrap();
+                                    let imp = action.apply(query).unwrap();
+                                    let recomputed_cost = compute_cost(&imp, &|s| {
+                                        let Some(ActionCostVec(inner_decisions)) = containing_db.get(&s.0)
+                                        else {
+                                            panic!(
+                                                "Missed sub-Impl {} while computing cost for {}",
+                                                s.0, query
+                                            );
+                                        };
+                                        if inner_decisions.is_empty() {
+                                            panic!(
+                                                "No actions for sub-Impl {} while computing cost for {}",
+                                                s.0, query
+                                            );
+                                        } else if inner_decisions.len() == 1 {
+                                            inner_decisions[0].1.clone()
+                                        } else {
+                                            todo!();
+                                        }
+                                    });
+                                    (action_idx, recomputed_cost)
+                                })
+                                .collect(),
+                        ))
+                    },
+                    None => {
+                        GetPreference::Miss(neighbor.map(|v| v.clone().expect("neighbor of a miss should be a hit")))
+                    }
+                }
             }
-            DbBlock::Structured(v) => v.0[&inner_pt_usize].clone(),
-            DbBlock::Rle(e) => e.get(&inner_pt_usize),
+            DbBlock::Structured(b) => {
+                // TODO: Propogate an action index preference.
+                match b.0.get_with_neighbor(&inner_pt_usize).0 {
+                    Some(r) => GetPreference::Hit(r.clone()),
+                    None => GetPreference::Miss(None),
+                }
+            }
+            DbBlock::Rle(b) => {
+                // TODO: Propogate an action index preference.
+                match b.get(&inner_pt_usize) {
+                    Some(r) => GetPreference::Hit(r),
+                    None => GetPreference::Miss(None),
+                }
+            }
         }
     }
 
@@ -916,6 +960,7 @@ mod tests {
     use crate::{
         imp::visit_leaves,
         memorylimits::{MemVec, MemoryLimits},
+        scheduling::ApplyError,
         target::X86Target,
         utils::{bit_length, bit_length_inverse},
     };
@@ -949,19 +994,19 @@ mod tests {
             .map(|v| Some(v.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(
-            block_shape(&[0, 0], &db_shape, |i, _| 2)
+            block_shape(&[0, 0], &db_shape, |_, _| 2)
                 .collect_vec()
                 .as_slice(),
             &[2, 2]
         );
         assert_eq!(
-            block_shape(&[1, 1], &db_shape, |i, _| 2)
+            block_shape(&[1, 1], &db_shape, |_, _| 2)
                 .collect_vec()
                 .as_slice(),
             &[2, 2]
         );
         assert_eq!(
-            block_shape(&[1, 3], &db_shape, |i, _| 2)
+            block_shape(&[1, 3], &db_shape, |_, _| 2)
                 .collect_vec()
                 .as_slice(),
             &[2, 1]
@@ -1129,17 +1174,19 @@ mod tests {
 
     fn arb_spec_and_decision<Tgt: Target>() -> impl Strategy<Value = Decision<Tgt>> {
         any::<Spec<Tgt>>()
+            .prop_filter("Spec was not canonical", |spec| spec.is_canonical())
             .prop_flat_map(|spec| {
                 let valid_actions = spec
                     .0
                     .actions()
                     .into_iter()
                     .enumerate()
-                    .filter_map(|(i, a)| {
-                        if let Ok(applied) = a.apply(&spec) {
-                            Some((ActionIdx::from(u16::try_from(i).unwrap()), applied))
-                        } else {
-                            None
+                    .filter_map(|(i, a)| match a.apply(&spec) {
+                        Ok(applied) => Some((ActionIdx::from(u16::try_from(i).unwrap()), applied)),
+                        Err(ApplyError::ActionNotApplicable) => None,
+                        Err(ApplyError::OutOfMemory) => None,
+                        Err(ApplyError::SpecNotCanonical) => {
+                            unreachable!("Non-canonical Specs should be filtered")
                         }
                     })
                     .collect::<Vec<_>>();
@@ -1155,6 +1202,7 @@ mod tests {
                 (Just(spec), action_idx_strategy)
             })
             .prop_map(|(spec, action_opt)| {
+                println!("Spec: {}", spec);
                 if let Some((action_idx, imp)) = action_opt {
                     recursively_decide_with_action(&spec, action_idx, &imp)
                 } else {
@@ -1194,9 +1242,15 @@ mod tests {
         match partial_impl {
             ImplNode::SpecApp(spec_app) => {
                 for action in spec_app.0 .0.actions() {
-                    if let Ok(applied) = action.apply(&spec_app.0) {
-                        if let Some(completed) = complete_impl(&applied) {
-                            return Some(completed);
+                    match action.apply(&spec_app.0) {
+                        Ok(applied) => {
+                            if let Some(completed) = complete_impl(&applied) {
+                                return Some(completed);
+                            }
+                        }
+                        Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => {}
+                        Err(ApplyError::SpecNotCanonical) => {
+                            panic!("Spec-to-complete must be canon")
                         }
                     }
                 }
@@ -1227,9 +1281,17 @@ mod tests {
             .actions()
             .into_iter()
             .enumerate()
-            .filter_map(|(i, a)| a.apply(spec).map(|imp| (i, imp)).ok())
+            .filter_map(|(i, a)| match a.apply(spec) {
+                Ok(imp) => Some((i, imp)),
+                Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => None,
+                Err(ApplyError::SpecNotCanonical) => panic!(),
+            })
             .next()
         {
+            println!(
+                "Taking action {:?}",
+                spec.0.actions().into_iter().nth(action_idx).unwrap()
+            );
             recursively_decide_with_action(spec, action_idx.try_into().unwrap(), &partial_impl)
         } else {
             Decision {
@@ -1266,6 +1328,7 @@ mod tests {
             };
         }
 
+        println!("Computing cost of Impl: {:?}", partial_impl);
         let cost = Cost::from_child_costs(
             partial_impl,
             &children

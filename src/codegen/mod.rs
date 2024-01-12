@@ -167,22 +167,19 @@ where
 
 pub struct BuiltArtifact {
     binary_path: PathBuf,
-    source_path: PathBuf,
-    whole_dir: PathBuf,
     bench_samples: Option<u32>,
 }
 
 impl BuiltArtifact {
     pub fn new(
         binary_path: PathBuf,
-        source_path: PathBuf,
-        whole_dir: PathBuf,
+        _source_path: PathBuf,
+        _whole_dir: PathBuf,
         bench_samples: Option<u32>,
     ) -> Self {
+        // While we accept `source_path` and `whole_dir`, we don't do anything with them.
         Self {
             binary_path,
-            source_path,
-            whole_dir,
             bench_samples,
         }
     }

@@ -12,6 +12,9 @@ impl NameGenerator {
     pub fn fresh_name(&mut self) -> String {
         let new_name = String::from_iter(ASCII_PAIRS[self.names_generated]);
         self.names_generated += 1;
+        if new_name == "do" {
+            return self.fresh_name();
+        }
         new_name
     }
 }
