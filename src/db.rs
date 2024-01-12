@@ -731,7 +731,8 @@ where
     match imp {
         ImplNode::SpecApp(p) => db
             .get_impl(&p.0)
-            .expect("Database should have the sub-Spec entry").first()
+            .expect("Database should have the sub-Spec entry")
+            .first()
             .expect("Database sub-Spec should be satisfiable")
             .clone(),
         _ => imp.replace_children(imp.children().iter().map(|c| construct_impl(db, c))),
