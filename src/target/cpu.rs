@@ -7,7 +7,7 @@ use crate::imp::kernels::KernelType;
 use crate::layout::{col_major, nhwc, row_major, Layout};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
-use crate::spec::{dim_range, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::TensorSpec;
 

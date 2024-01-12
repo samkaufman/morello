@@ -80,7 +80,7 @@ mod tests {
         // In the following, we'll index `buffer` with byte offsets, not element offsets.
         // TODO: We don't really need to allocate the buffer, do we? We just need the indices,
         //   shifted if parent is unaligned.
-        let buffer = {
+        let _buffer = {
             let volume = parent
                 .shape()
                 .iter()

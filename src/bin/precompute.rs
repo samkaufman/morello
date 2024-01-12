@@ -173,7 +173,7 @@ where
         let stage_start = std::time::Instant::now();
         nonempty_tasks.into_par_iter().for_each(|task| {
             let mut worklist = VecDeque::new();
-            for (_, logical_spec) in task.iter().enumerate() {
+            for logical_spec in task.iter() {
                 worklist.push_back(top.clone());
                 while let Some(job) = worklist.pop_front() {
                     let spec = Spec(logical_spec.clone(), MemoryLimits::Standard(job));

@@ -218,7 +218,7 @@ impl CBuffer {
             linear_terms
         );
         let expr_constant = usize::try_from(expr_constant).unwrap();
-        let vector_size = usize::try_from(vec_type.value_cnt).unwrap();
+        let vector_size = usize::from(vec_type.value_cnt);
         let inner_vec_idx = expr_constant / vector_size;
         let inside_vec_offset = expr_constant % vector_size;
         (&inner_vecs[inner_vec_idx], inside_vec_offset)

@@ -297,10 +297,7 @@ impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
         match t {
             MemoryLimits::Standard(limits_vec) => {
                 debug_assert_eq!(limits_vec.len(), Tgt::levels().len());
-                limits_vec
-                    .iter_binary_scaled()
-                    .map(|v| BimapInt::try_from(v).unwrap())
-                    .collect()
+                limits_vec.iter_binary_scaled().map_into().collect()
             }
         }
     }

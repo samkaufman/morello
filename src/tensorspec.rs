@@ -447,7 +447,7 @@ where
             contig: (*contig).try_into().unwrap(),
             aligned: *aligned_val != 0,
             level,
-            vector_size: vector_size.map(|v| v.try_into().unwrap()),
+            vector_size: vector_size.map(|v| v.into()),
         }
     }
 }
