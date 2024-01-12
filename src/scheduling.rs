@@ -673,10 +673,7 @@ impl<Tgt: Target> Action<Tgt> {
                         .canonicalize()
                         .expect("ToAccum's introduced Zero should be canonicalizable");
                     let spec = Spec(subspec, spec.1.clone());
-                    let app_arguments = [Param::new(
-                        node_spec.output_idx().try_into().unwrap(),
-                        node_spec.output(),
-                    )];
+                    let app_arguments = [Param::new(0, node_spec.output())];
                     SpecApp::new(spec, app_arguments).into()
                 };
                 let accum_app = {
