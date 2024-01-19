@@ -108,7 +108,6 @@ pub struct DashmapDiskDatabase {
 #[serde(bound = "")]
 pub enum DbBlock {
     Rle(Box<RleBlock>),
-    Structured(StructuredBlock),
     ActionOnly(ActionOnlyBlock),
 }
 
@@ -121,9 +120,6 @@ pub struct RleBlock {
     shape: SmallVec<[usize; 10]>,
     volume: NonZeroU32,
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct StructuredBlock(pub NDArray<Option<ActionCostVec>>);
 
 // TODO: Replace [Option<u16>] with just [u16] offset by one.
 #[derive(Debug, Serialize, Deserialize)]
@@ -315,9 +311,6 @@ where
                                 &Some(decisions.iter().map(|d| d.0).collect()),
                             )
                         }
-                        DbBlock::Structured(b) => {
-                            b.0.fill_region(&dim_ranges, &Some(ActionCostVec(decisions.clone())))
-                        }
                         DbBlock::Rle(e) => {
                             // Examine the table before updating.
                             e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
@@ -400,10 +393,6 @@ where
                 DbBlock::ActionOnly(b) => {
                     runs_actiononly += b.0.runs_len();
                     lens_actiononly += b.0.len();
-                }
-                DbBlock::Structured(b) => {
-                    runs_structured += b.0.runs_len();
-                    lens_structured += b.0.len();
                 }
                 DbBlock::Rle(e) => {
                     runs_filled += e.filled.runs_len();
@@ -539,13 +528,6 @@ impl DbBlock {
                     }
                 }
             }
-            DbBlock::Structured(b) => {
-                // TODO: Propogate an action index preference.
-                match b.0.get_with_neighbor(&inner_pt_usize).0 {
-                    Some(r) => GetPreference::Hit(r.clone()),
-                    None => GetPreference::Miss(None),
-                }
-            }
             DbBlock::Rle(b) => {
                 // TODO: Propogate an action index preference.
                 match b.get(&inner_pt_usize) {
@@ -559,7 +541,6 @@ impl DbBlock {
     pub fn compact(&mut self) {
         match self {
             DbBlock::ActionOnly(b) => b.0.shrink_to_fit(),
-            DbBlock::Structured(b) => b.0.shrink_to_fit(),
             DbBlock::Rle(e) => {
                 e.compact();
             }
@@ -569,7 +550,6 @@ impl DbBlock {
     pub fn shape(&self) -> &[usize] {
         match self {
             DbBlock::ActionOnly(b) => b.0.shape(),
-            DbBlock::Structured(b) => b.0.shape(),
             DbBlock::Rle(e) => e.shape(),
         }
     }

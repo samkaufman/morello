@@ -35,7 +35,6 @@ struct Args {
 fn block_stats(block: &DbBlock) -> String {
     match block {
         DbBlock::ActionOnly(b) => format!("runs_actiononly={}", b.0.runs_len()),
-        DbBlock::Structured(b) => format!("runs_structured={}", b.0.runs_len()),
         DbBlock::Rle(rle_block) => {
             format!(
                 "filled_runs={}, main_costs_runs={} peaks_runs={} depthsactions_runs={} peaks=[{}]",
