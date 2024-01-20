@@ -379,8 +379,6 @@ where
         let mut lens_filled = 0;
         let mut runs_actiononly = 0;
         let mut lens_actiononly = 0;
-        let mut runs_structured = 0;
-        let mut lens_structured = 0;
         let mut runs_main_costs = 0;
         let mut lens_main_costs = 0;
         let mut runs_peaks = 0;
@@ -408,18 +406,16 @@ where
         let stat_duration = start.elapsed();
         format!(
             "blocks={} \
-            runs_actiononly={} runs_structured={} runs_filled={} runs_main_costs={} runs_peaks={} \
-            runs_depthsactions={} cr_actiononly={} cr_structured={} cr_filled={:.5} \
+            runs_actiononly={} runs_filled={} runs_main_costs={} runs_peaks={} \
+            runs_depthsactions={} cr_actiononly={} cr_filled={:.5} \
             cr_main_costs={:.5} cr_peaks={:.5} cr_depthsactions={:.5} statms={}",
             self.blocks.len(),
             runs_actiononly,
-            runs_structured,
             runs_filled,
             runs_main_costs,
             runs_peaks,
             runs_depths_actions,
             runs_actiononly as f32 / lens_actiononly as f32,
-            runs_structured as f32 / lens_structured as f32,
             runs_filled as f32 / lens_filled as f32,
             runs_main_costs as f32 / lens_main_costs as f32,
             runs_peaks as f32 / lens_peaks as f32,
