@@ -6,7 +6,7 @@ use crate::grid::linear::BimapInt;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemVec;
-use crate::ndarray::NDArray;
+use crate::ndarray::RleNdArray;
 use crate::spec::Spec;
 use crate::target::Target;
 use serde::{Deserialize, Serialize};
@@ -30,16 +30,16 @@ pub enum DbBlock {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RleBlock {
-    pub filled: NDArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
-    pub main_costs: NDArray<MainCost>,
-    pub peaks: NDArray<MemVec>,
-    pub depths_actions: NDArray<(u8, ActionIdx)>,
+    pub filled: RleNdArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
+    pub main_costs: RleNdArray<MainCost>,
+    pub peaks: RleNdArray<MemVec>,
+    pub depths_actions: RleNdArray<(u8, ActionIdx)>,
     shape: SmallVec<[usize; 10]>,
 }
 
 // TODO: Replace [Option<u16>] with just [u16] offset by one.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ActionOnlyBlock(pub NDArray<Option<SmallVec<[u16; 1]>>>);
+pub struct ActionOnlyBlock(pub RleNdArray<Option<SmallVec<[u16; 1]>>>);
 
 impl DbBlock {
     pub fn get_with_preference<Tgt>(
@@ -136,10 +136,10 @@ impl RleBlock {
         shape_with_k.push(k.into());
 
         RleBlock {
-            filled: NDArray::new_with_value(shape, 0),
-            main_costs: NDArray::new(&shape_with_k),
-            peaks: NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
-            depths_actions: NDArray::new(&shape_with_k),
+            filled: RleNdArray::new_with_value(shape, 0),
+            main_costs: RleNdArray::new(&shape_with_k),
+            peaks: RleNdArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
+            depths_actions: RleNdArray::new(&shape_with_k),
             shape: shape.into(),
         }
     }

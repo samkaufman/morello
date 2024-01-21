@@ -5,17 +5,17 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::ops::{Index, Range};
 
-const NDARRAY_DEFAULT_RANK: usize = 16;
+const RLENDARRAY_DEFAULT_RANK: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NDArray<T> {
+pub struct RleNdArray<T> {
     pub data: RleVec<T>,
     // TODO: Not necessary to store shape or strides, which can be stored externally in database.
-    shape: SmallVec<[usize; NDARRAY_DEFAULT_RANK]>,
-    strides: SmallVec<[usize; NDARRAY_DEFAULT_RANK]>,
+    shape: SmallVec<[usize; RLENDARRAY_DEFAULT_RANK]>,
+    strides: SmallVec<[usize; RLENDARRAY_DEFAULT_RANK]>,
 }
 
-impl<T> NDArray<T> {
+impl<T> RleNdArray<T> {
     /// Return the index of an arbitrary value which matches `predicate`.
     pub fn position<P>(&self, mut predicate: P) -> Option<Vec<usize>>
     where
@@ -68,7 +68,7 @@ impl<T> NDArray<T> {
     }
 }
 
-impl<T: Clone + Eq> NDArray<T> {
+impl<T: Clone + Eq> RleNdArray<T> {
     pub fn new_with_value(shape: &[usize], value: T) -> Self {
         let volume = shape.iter().product::<usize>();
         let mut buffer = RleVec::new();
@@ -91,19 +91,19 @@ impl<T: Clone + Eq> NDArray<T> {
         }
     }
 
-    pub fn set_pt(&mut self, pt: &[usize], value: T) {
+    pub fn set(&mut self, pt: &[usize], value: T) {
         let index = self.data_offset(pt);
         self.data.set(index, value);
     }
 }
 
-impl<T: Default + Clone + Eq> NDArray<T> {
+impl<T: Default + Clone + Eq> RleNdArray<T> {
     pub fn new(shape: &[usize]) -> Self {
         Self::new_with_value(shape, T::default())
     }
 }
 
-impl<T> NDArray<T> {
+impl<T> RleNdArray<T> {
     /// Convert a multi-dimensional index into an offset into `self.data`.
     fn data_offset(&self, indices: &[usize]) -> usize {
         assert_eq!(
@@ -141,7 +141,7 @@ impl<T> NDArray<T> {
         &mut self,
         dim_ranges: &[Range<u32>],
         value: &T,
-        through_unfilled: Option<(u8, &NDArray<u8>)>,
+        through_unfilled: Option<(u8, &RleNdArray<u8>)>,
     ) where
         T: Clone + Eq,
     {
@@ -198,7 +198,7 @@ impl<T> NDArray<T> {
         offset: u32,
         step_size: u32,
         value: &T,
-        through_unfilled: Option<(u8, &NDArray<u8>)>,
+        through_unfilled: Option<(u8, &RleNdArray<u8>)>,
     ) where
         T: Clone + Eq,
     {
@@ -242,7 +242,7 @@ impl<T> NDArray<T> {
         &mut self,
         dim_ranges: &[Range<u32>],
         mut inner_slice_iter: I,
-        filled: Option<&NDArray<u8>>,
+        filled: Option<&RleNdArray<u8>>,
     ) where
         T: Clone + Eq,
         I: Clone + Iterator<Item = T>,
@@ -286,7 +286,7 @@ impl<T> NDArray<T> {
     }
 }
 
-impl<T> Index<&[usize]> for NDArray<T> {
+impl<T> Index<&[usize]> for RleNdArray<T> {
     type Output = T;
 
     fn index(&self, pt: &[usize]) -> &Self::Output {
@@ -294,7 +294,7 @@ impl<T> Index<&[usize]> for NDArray<T> {
     }
 }
 
-fn calculate_strides(shape: &[usize]) -> SmallVec<[usize; NDARRAY_DEFAULT_RANK]> {
+fn calculate_strides(shape: &[usize]) -> SmallVec<[usize; RLENDARRAY_DEFAULT_RANK]> {
     let mut strides = SmallVec::with_capacity(shape.len());
     let mut stride = 1;
     for &dim in shape.iter().rev() {
@@ -318,8 +318,8 @@ mod tests {
     #[test]
     fn test_insert_single_value_and_retrieve_with_get_arbitrary() {
         let insertion_point = vec![1, 1];
-        let mut arr = NDArray::new_with_value(&[4, 4], false);
-        arr.set_pt(&insertion_point, true);
+        let mut arr = RleNdArray::new_with_value(&[4, 4], false);
+        arr.set(&insertion_point, true);
         let retrieved_idx = arr.position(|&v| v);
         assert_eq!(retrieved_idx, Some(insertion_point));
     }
@@ -327,7 +327,7 @@ mod tests {
     // TODO: proptest-ize this test, and test with non-None filled.
     #[test]
     fn test_fill_subarray() {
-        let mut arr = NDArray::new_with_value(&[3, 2], false);
+        let mut arr = RleNdArray::new_with_value(&[3, 2], false);
         #[allow(clippy::single_range_in_vec_init)]
         arr.fill_broadcast_1d(&[0..2], std::iter::once(true), None);
         assert!(arr[&[0, 0]]);
@@ -340,32 +340,32 @@ mod tests {
 
     #[test]
     fn test_fill_subarray_with_infill_1() {
-        let filled = NDArray::new_with_value(&[3, 3], 0);
-        let mut arr = NDArray::new_with_value(&[3, 3, 1], 0);
+        let filled = RleNdArray::new_with_value(&[3, 3], 0);
+        let mut arr = RleNdArray::new_with_value(&[3, 3, 1], 0);
         arr.fill_region_ext(&[0..1, 0..3, 0..1], &1, Some((0, &filled)));
         assert_eq!(arr.data.to_vec(), vec![1, 1, 1, 1, 1, 1, 1, 1, 1]);
     }
 
     #[test]
     fn test_fill_subarray_with_infill_2() {
-        let filled = NDArray::new_with_value(&[3, 3], 1);
-        let mut arr = NDArray::new_with_value(&[3, 3, 1], 0);
+        let filled = RleNdArray::new_with_value(&[3, 3], 1);
+        let mut arr = RleNdArray::new_with_value(&[3, 3, 1], 0);
         arr.fill_region_ext(&[1..2, 0..3, 0..1], &1, Some((0, &filled)));
         assert_eq!(arr.data.to_vec(), vec![0, 0, 0, 1, 1, 1, 0, 0, 0]);
     }
 
     #[test]
     fn test_fill_subarray_with_infill_3() {
-        let filled = NDArray::new_with_value(&[3, 3], 1);
-        let mut arr = NDArray::new_with_value(&[3, 3, 1], 0);
+        let filled = RleNdArray::new_with_value(&[3, 3], 1);
+        let mut arr = RleNdArray::new_with_value(&[3, 3, 1], 0);
         arr.fill_region_ext(&[0..3, 0..3, 0..1], &1, Some((0, &filled)));
         assert_eq!(arr.data.to_vec(), vec![1; 9]);
     }
 
     #[test]
     fn test_fill_subarray_with_infill_4() {
-        let filled = NDArray::new_from_buffer(&[3, 3], vec![1, 1, 1, 1, 1, 0, 1, 0, 0]);
-        let mut arr = NDArray::new_with_value(&[3, 3, 1], 0);
+        let filled = RleNdArray::new_from_buffer(&[3, 3], vec![1, 1, 1, 1, 1, 0, 1, 0, 0]);
+        let mut arr = RleNdArray::new_with_value(&[3, 3, 1], 0);
         arr.fill_region_ext(&[0..3, 1..2, 0..1], &1, Some((0, &filled)));
         assert_eq!(arr.data.to_vec(), vec![0, 1, 0, 0, 1, 1, 0, 1, 1]);
     }

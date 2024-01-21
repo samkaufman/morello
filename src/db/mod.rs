@@ -8,7 +8,7 @@ use crate::grid::linear::BimapInt;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
-use crate::ndarray::NDArray;
+use crate::ndarray::RleNdArray;
 use crate::pprint::PrintableAux;
 use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
@@ -306,7 +306,7 @@ where
                         ))));
                     } else {
                         // TODO: Don't need to initialize with `None` if the whole block is going to
-                        let mut aob_nd = NDArray::new(&block_shape_usize);
+                        let mut aob_nd = RleNdArray::new(&block_shape_usize);
                         aob_nd.fill_region(
                             &dim_ranges,
                             &Some(decisions.iter().map(|&(a, _)| a).collect()),
