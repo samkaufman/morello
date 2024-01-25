@@ -1,14 +1,13 @@
 use crate::common::DimSize;
 use crate::cost::Cost;
 use crate::datadeps::SpecKey;
-use crate::db::blocks::{ActionOnlyBlock, DbBlock, RleBlock};
+use crate::db::blocks::DbBlock;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap};
 use crate::grid::linear::BimapInt;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
-use crate::ndarray::RleNdArray;
 use crate::pprint::PrintableAux;
 use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
@@ -168,7 +167,7 @@ impl DashmapDiskDatabase {
         dashmap_constructor: &impl Fn() -> DashMap<DbKey, DbBlock>,
     ) -> Result<Self> {
         let use_rle_blocks = std::env::var("MORELLO_STORE_COSTS").is_ok();
-        let grouped_entries = match file_path {
+        let blocks = match file_path {
             Some(path) => match std::fs::File::open(path) {
                 Ok(f) => {
                     let start = Instant::now();
@@ -186,7 +185,7 @@ impl DashmapDiskDatabase {
         };
         Ok(Self {
             file_path: file_path.map(|p| p.to_owned()),
-            blocks: grouped_entries,
+            blocks,
             binary_scale_shapes,
             k,
             use_rle_blocks,
@@ -266,53 +265,28 @@ where
 
         for joined_row in blocks_iter {
             let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
+            let dim_ranges = joined_row
+                .iter()
+                .map(|(_, r)| r.clone())
+                .collect::<Vec<_>>();
 
-            let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
-            match block_entry {
+            match self.blocks.entry((db_key.clone(), block_pt.clone())) {
                 Entry::Occupied(mut existing_block) => {
-                    let r = existing_block.get_mut();
-                    let dim_ranges = joined_row
-                        .iter()
-                        .map(|(_, r)| r.clone())
-                        .collect::<Vec<_>>();
-                    match r {
-                        DbBlock::ActionOnly(b) => {
-                            // Drop the given cost. This will need to be recomputed.
-                            b.0.fill_region(
-                                &dim_ranges,
-                                &Some(decisions.iter().map(|d| d.0).collect()),
-                            )
-                        }
-                        DbBlock::Rle(e) => {
-                            // Examine the table before updating.
-                            e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
-                        }
-                    }
+                    existing_block
+                        .get_mut()
+                        .fill_region(&dim_ranges, &decisions);
                 }
                 Entry::Vacant(entry) => {
                     let db_shape = db_shape::<Tgt>(rank);
                     let bs = block_shape(&block_pt, &db_shape, block_size_dim);
                     let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
-                    let dim_ranges = joined_row
-                        .iter()
-                        .map(|(_, r)| r.clone())
-                        .collect::<Vec<_>>();
-                    if self.use_rle_blocks {
-                        entry.insert(DbBlock::Rle(Box::new(RleBlock::partially_filled::<Tgt>(
-                            self.k,
-                            &block_shape_usize,
-                            &dim_ranges,
-                            &ActionCostVec(decisions.clone()),
-                        ))));
-                    } else {
-                        // TODO: Don't need to initialize with `None` if the whole block is going to
-                        let mut aob_nd = RleNdArray::new(&block_shape_usize);
-                        aob_nd.fill_region(
-                            &dim_ranges,
-                            &Some(decisions.iter().map(|&(a, _)| a).collect()),
-                        );
-                        entry.insert(DbBlock::ActionOnly(ActionOnlyBlock(aob_nd)));
-                    }
+                    entry.insert(DbBlock::partially_filled::<Tgt>(
+                        self.use_rle_blocks,
+                        self.k,
+                        &block_shape_usize,
+                        &dim_ranges,
+                        &decisions,
+                    ));
                 }
             }
         }
@@ -1004,17 +978,16 @@ mod tests {
     /// Will return a [Decision] by choosing the first action for the Spec (if any) and recursively
     /// choosing the first action for all child Specs in the resulting partial Impl.
     fn recursively_decide_actions<Tgt: Target>(spec: &Spec<Tgt>) -> Decision<Tgt> {
-        if let Some((action_idx, partial_impl)) = spec
-            .0
-            .actions()
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, a)| match a.apply(spec) {
-                Ok(imp) => Some((i, imp)),
-                Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => None,
-                Err(ApplyError::SpecNotCanonical) => panic!(),
-            })
-            .next()
+        if let Some((action_idx, partial_impl)) =
+            spec.0
+                .actions()
+                .into_iter()
+                .enumerate()
+                .find_map(|(i, a)| match a.apply(spec) {
+                    Ok(imp) => Some((i, imp)),
+                    Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => None,
+                    Err(ApplyError::SpecNotCanonical) => panic!(),
+                })
         {
             println!(
                 "Taking action {:?}",

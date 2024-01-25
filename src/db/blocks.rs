@@ -42,6 +42,30 @@ pub struct RleBlock {
 pub struct ActionOnlyBlock(pub RleNdArray<Option<SmallVec<[u16; 1]>>>);
 
 impl DbBlock {
+    pub fn partially_filled<Tgt: Target>(
+        use_rle_blocks: bool,
+        k: u8,
+        shape: &[usize],
+        dim_ranges: &[Range<BimapInt>],
+        decisions: &[(ActionIdx, Cost)],
+    ) -> Self {
+        if use_rle_blocks {
+            DbBlock::Rle(Box::new(RleBlock::partially_filled::<Tgt>(
+                k,
+                shape,
+                dim_ranges,
+                &ActionCostVec(decisions.into()),
+            )))
+        } else {
+            let mut aob_nd = RleNdArray::new(shape);
+            aob_nd.fill_region(
+                dim_ranges,
+                &Some(decisions.iter().map(|&(a, _)| a).collect()),
+            );
+            DbBlock::ActionOnly(ActionOnlyBlock(aob_nd))
+        }
+    }
+
     pub fn get_with_preference<Tgt>(
         &self,
         containing_db: &DashmapDiskDatabase,
@@ -127,6 +151,17 @@ impl DbBlock {
             DbBlock::Rle(e) => e.shape(),
         }
     }
+
+    pub fn fill_region(&mut self, dim_ranges: &[Range<BimapInt>], value: &[(ActionIdx, Cost)]) {
+        match self {
+            DbBlock::ActionOnly(b) => {
+                b.0.fill_region(dim_ranges, &Some(value.iter().map(|d| d.0).collect()))
+            }
+            DbBlock::Rle(e) => {
+                e.fill_region_without_updating_match(dim_ranges, &ActionCostVec(value.into()))
+            }
+        }
+    }
 }
 
 impl RleBlock {
@@ -144,38 +179,23 @@ impl RleBlock {
         }
     }
 
-    pub(crate) fn partially_filled<Tgt: Target>(
+    pub fn partially_filled<Tgt: Target>(
         k: u8,
         shape: &[usize],
         dim_ranges: &[Range<BimapInt>],
         value: &ActionCostVec,
     ) -> Self {
         let mut e = Self::empty::<Tgt>(k, shape);
-        e.fill_region_without_updating_match(k, dim_ranges, value);
+        e.fill_region_without_updating_match(dim_ranges, value);
         e
-    }
-
-    pub(crate) fn fill_region(
-        &mut self,
-        k: u8,
-        dim_ranges: &[Range<BimapInt>],
-        value: &ActionCostVec,
-    ) {
-        self.fill_region_without_updating_match(k, dim_ranges, value);
     }
 
     fn fill_region_without_updating_match(
         &mut self,
-        k: u8,
         dim_ranges: &[Range<BimapInt>],
         value: &ActionCostVec,
     ) {
-        let shape = self.filled.shape();
-        debug_assert_eq!(dim_ranges.len(), shape.len());
-
-        let mut shape_with_k = Vec::with_capacity(shape.len() + 1);
-        shape_with_k.extend_from_slice(shape);
-        shape_with_k.push(k.into());
+        debug_assert_eq!(dim_ranges.len(), self.filled.shape().len());
 
         self.filled
             .fill_region(dim_ranges, &(u8::try_from(value.len()).unwrap() + 1));
@@ -196,7 +216,7 @@ impl RleBlock {
         );
     }
 
-    pub(crate) fn get(&self, pt: &[usize]) -> Option<ActionCostVec> {
+    pub fn get(&self, pt: &[usize]) -> Option<ActionCostVec> {
         let f = self.filled[pt];
         if f == 0 {
             return None;
@@ -223,7 +243,7 @@ impl RleBlock {
         ))
     }
 
-    pub(crate) fn compact(&mut self) {
+    pub fn compact(&mut self) {
         self.filled.shrink_to_fit();
         self.main_costs.shrink_to_fit();
         self.peaks.shrink_to_fit();
