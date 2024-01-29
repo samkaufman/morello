@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bf14bd5114cbd690d60c96562934e25ec1737439a012160a5c87c42b0875c3cb # shrinks to spec = Spec(Primitive(PrimitiveBasics { typ: Conv { accum: true }, spec_shape: [5, 2, 1, 1, 4, 1, 4], dtype: Uint32 }, [TensorSpecAux { contig: 0, aligned: false, level: RF, layout: New([(0, None), (1, None), (2, None), (3, None)]), vector_size: None }, TensorSpecAux { contig: 0, aligned: false, level: RF, layout: New([(0, None), (1, None), (2, None), (3, None)]), vector_size: None }, TensorSpecAux { contig: 4, aligned: true, level: RF, layout: New([(0, None), (1, None), (2, None), (3, None)]), vector_size: None }], false), Standard(MemVec([4, 5, 4, 12])))

@@ -257,6 +257,9 @@ impl<Tgt: Target> Action<Tgt> {
 
                 let mut inner_spec = node_spec.clone();
                 inner_spec.replace_io(&new_operands);
+                if parallel {
+                    inner_spec.set_serial_only(true);
+                }
                 match self {
                     Action::TileOut { .. } => {}
                     Action::Split { .. } => {
@@ -766,5 +769,37 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
 fn tile_to_apply_err(err: TileError) -> ApplyError {
     match err {
         TileError::LayoutIncompatible(_) => ApplyError::ActionNotApplicable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{imp::ImplNode, spec::Spec, target::X86Target};
+    use itertools::Itertools;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_parallel_tile_outs_have_serial_only_subspecs(
+            spec in any::<Spec<X86Target>>()
+                .prop_filter("Spec should be canonical", |s| s.is_canonical())
+                .prop_filter("Spec must not be serial-only", |s| !s.0.serial_only())
+        ) {
+            let shapes = spec.0.output().shape().iter().map(|&d| 1..d).multi_cartesian_product();
+            for tile_shape in shapes {
+                let action = super::Action::TileOut {
+                    output_shape: tile_shape.into(),
+                    parallel: true,
+                };
+                let new_spec = action.apply(&spec).unwrap();
+                let ImplNode::Loop(loop_node) = new_spec else {
+                    panic!();
+                };
+                let ImplNode::SpecApp(body_application) = loop_node.body.as_ref() else {
+                    panic!();
+                };
+                assert!(body_application.0.0.serial_only());
+            }
+        }
     }
 }
