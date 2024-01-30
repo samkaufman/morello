@@ -481,8 +481,15 @@ impl Display for PrimitiveSpecType {
 impl<Tgt: Target> LogicalSpec<Tgt> {
     pub fn serial_only(&self) -> bool {
         match self {
-            LogicalSpec::Primitive(_, _, serial_only) => *serial_only,
-            LogicalSpec::Compose { serial_only, .. } => *serial_only,
+            LogicalSpec::Primitive(_, _, serial_only)
+            | LogicalSpec::Compose { serial_only, .. } => *serial_only,
+        }
+    }
+
+    pub(crate) fn set_serial_only(&mut self, value: bool) {
+        match self {
+            LogicalSpec::Primitive(_, _, serial_only)
+            | LogicalSpec::Compose { serial_only, .. } => *serial_only = value,
         }
     }
 
