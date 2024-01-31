@@ -21,7 +21,6 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> Spec<Tgt> {
         vec![
             TensorSpecAux {
                 contig: rm2.contiguous_full(),
-                aligned: true,
                 level: Tgt::default_level(),
                 layout: rm2,
                 vector_size: None,

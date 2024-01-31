@@ -611,7 +611,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         unreachable!();
                     };
                     outer_aux
-                        .canonicalize(spec_shape, outer_aux.aligned)
+                        .canonicalize(spec_shape)
                         .context("Failed to canonicalize the outer TensorSpecAux")?;
                     let (new_inner_layout, new_inner_contig) = inner_aux.layout.update_for_tiling(
                         operands[1].shape(),
@@ -622,9 +622,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     inner_aux.contig = new_inner_contig;
                 }
                 PrimitiveSpecType::Zero => {
-                    let aligned = primitive_aux[0].aligned;
                     primitive_aux[0]
-                        .canonicalize(spec_shape, aligned)
+                        .canonicalize(spec_shape)
                         .context("Failed to canonicalize the TensorSpecAux")?;
                 }
             },

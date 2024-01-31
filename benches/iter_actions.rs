@@ -19,7 +19,6 @@ fn copy_actions_into_vec() {
         vec![
             TensorSpecAux {
                 contig: rm2.contiguous_full(),
-                aligned: true,
                 level: CpuMemoryLevel::GL,
                 layout: rm2,
                 vector_size: None,

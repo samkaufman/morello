@@ -21,9 +21,9 @@ fn main() {
     // This is a non-accumulating Spec (notice the `accum: false` below), which means that the
     // implementation will set rather then add values to the output tensor. Additionally, extra
     // details about each tensor are included in the `PrimitiveAux` structure: that the memory is
-    // assumed to be fully contiguous, aligned, in global memory (not a cache or registers), and
-    // laid out row-major. The `vector_size` field applies only to tensors in vector registers
-    // (VRF), so it is `None` below.
+    // assumed to be fully contiguous, in global memory (not a cache or registers), and laid out
+    // row-major. The `vector_size` field applies only to tensors in vector registers (VRF), so it
+    // is `None` below.
     let layout = row_major(2);
     let spec = Spec::<X86Target>(
         LogicalSpec::Primitive(
@@ -35,7 +35,6 @@ fn main() {
             vec![
                 TensorSpecAux {
                     contig: layout.contiguous_full(),
-                    aligned: true,
                     level: CpuMemoryLevel::GL,
                     layout,
                     vector_size: None,

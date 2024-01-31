@@ -3,7 +3,6 @@ use smallvec::{smallvec, SmallVec};
 use std::rc::Rc;
 use std::{iter, mem};
 
-use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Shape};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::{Kernel, KernelType};
@@ -249,10 +248,7 @@ impl<Tgt: Target> Action<Tgt> {
                 let mut new_operands = operands;
                 for loop_tile in &tiles {
                     let ref_op = &mut new_operands[usize::from(loop_tile.tile.view.0)];
-                    let aligned =
-                        aligned_approx(loop_tile.tile.shape(), loop_tile.tile.step_sizes(), ref_op)
-                            .unwrap();
-                    ref_op.shrink(loop_tile.tile.shape(), aligned).unwrap();
+                    ref_op.shrink(loop_tile.tile.shape()).unwrap();
                 }
 
                 let mut inner_spec = node_spec.clone();
@@ -313,7 +309,6 @@ impl<Tgt: Target> Action<Tgt> {
                         .swap_remove(next_to_outer_basics.typ.output_idx()),
                     next_to_outer_basics.dtype,
                     layout.contiguous_full(),
-                    true,
                     *level,
                     layout.clone(),
                     *vector_size,
@@ -738,14 +733,6 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
     destination_layout: &Layout,
     destination_vector_size: Option<DimSize>,
 ) -> TensorSpec<Tgt> {
-    // When moving into an addressed bank, we'll generate an aligned destination.
-    // If it's into a cache level, alignment won't change.
-    let aligned = if destination_level.is_addressed() {
-        true
-    } else {
-        operand.aligned()
-    };
-
     // Will the result be contiguous? If the move is into a cache, it might be.
     // If it's into memory bank with its own address space, then yes.
     let contiguous_abs = if destination_level.is_addressed() {
@@ -758,7 +745,6 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
         operand.shape().into(),
         operand.dtype(),
         contiguous_abs,
-        aligned,
         *destination_level,
         destination_layout.clone(),
         destination_vector_size,

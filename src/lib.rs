@@ -1,5 +1,4 @@
 pub mod action_seq;
-pub mod alignment;
 pub mod codegen;
 pub mod color;
 pub mod common;

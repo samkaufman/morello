@@ -1,5 +1,4 @@
 use crate::{
-    alignment::aligned_approx,
     common::{DimSize, Shape},
     expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term},
     layout::{BufferVar, LayoutError},
@@ -84,7 +83,6 @@ pub trait ViewExt: View {
             shape,
             self.spec().dtype(),
             new_contig,
-            self.spec().aligned(),
             self.spec().level(),
             transposed_layout,
             self.spec().vector_size(),
@@ -279,8 +277,7 @@ impl<V: View> Tile<V> {
     pub fn new(shape: Shape, step_sizes: Shape, view: V) -> Result<Self, TileError> {
         let expr_term_id = OpaqueSymbol::new();
         let mut spec = view.spec().clone();
-        let aligned = aligned_approx(&shape, &step_sizes, view.spec())?;
-        spec.shrink(&shape, aligned)?;
+        spec.shrink(&shape)?;
         Ok(Self {
             shape,
             step_sizes,

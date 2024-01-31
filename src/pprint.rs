@@ -169,14 +169,12 @@ mod tests {
                 vec![
                     TensorSpecAux {
                         contig: rm1.contiguous_full(),
-                        aligned: true,
                         level: CpuMemoryLevel::GL,
                         layout: rm1.clone(),
                         vector_size: None,
                     },
                     TensorSpecAux {
                         contig: rm1.contiguous_full(),
-                        aligned: true,
                         level: CpuMemoryLevel::L1,
                         layout: rm1.clone(),
                         vector_size: None,

@@ -385,9 +385,8 @@ impl Layout {
         new_contig
     }
 
-    // TODO: Make function private. (aligned_approx needs this.)
     // TODO: Return iterator instead?
-    pub(crate) fn expand_physical_shape(
+    fn expand_physical_shape(
         &self,
         logical_shape: &[DimSize],
     ) -> Result<Vec<DimSize>, LayoutError> {

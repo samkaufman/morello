@@ -21,7 +21,6 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
         vec![
             TensorSpecAux {
                 contig: rm2.contiguous_full(),
-                aligned: true,
                 level: Tgt::default_level(),
                 layout: rm2,
                 vector_size: None,
@@ -44,7 +43,6 @@ fn conv_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
         vec![
             TensorSpecAux {
                 contig: rm4.contiguous_full(),
-                aligned: true,
                 level: Tgt::default_level(),
                 layout: rm4,
                 vector_size: None,
@@ -67,7 +65,6 @@ fn move_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
         vec![
             TensorSpecAux {
                 contig: rm2.contiguous_full(),
-                aligned: true,
                 level: Tgt::default_level(),
                 layout: rm2,
                 vector_size: None,

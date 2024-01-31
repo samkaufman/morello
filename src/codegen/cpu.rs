@@ -573,29 +573,17 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         });
                         let vtype = get_vector(Tgt::vec_types(), dtype, volume);
                         let itype = vtype.native_type_name;
-                        if arguments.iter().all(|a| a.1.aligned()) {
-                            writeln!(
-                                w,
-                                "{}*({} *)({}) = (*({} *)({}));  /* VectorAssign */",
-                                indent(depth),
-                                itype,
-                                exprs[1],
-                                itype,
-                                exprs[0]
-                            )
-                        } else {
-                            writeln!(
-                                w,
-                                "{}{}(({} *)({}), {}(({} *)({})));  /* VectorAssign */",
-                                indent(depth),
-                                vtype.store_fn,
-                                itype,
-                                exprs[1],
-                                vtype.load_fn,
-                                itype,
-                                exprs[0]
-                            )
-                        }
+                        writeln!(
+                            w,
+                            "{}{}(({} *)({}), {}(({} *)({})));  /* VectorAssign */",
+                            indent(depth),
+                            vtype.store_fn,
+                            itype,
+                            exprs[1],
+                            vtype.load_fn,
+                            itype,
+                            exprs[0]
+                        )
                     }
                     KernelType::BroadcastVecMult => {
                         let vector_size = arguments[2].spec().vector_size().unwrap();

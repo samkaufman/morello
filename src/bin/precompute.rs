@@ -87,7 +87,6 @@ where
             },
             vec![TensorSpecAux {
                 contig: layout.contiguous_full(),
-                aligned: true,
                 level: CpuMemoryLevel::GL,
                 layout,
                 vector_size: None,
@@ -99,7 +98,6 @@ where
         let layout = row_major(2);
         let a = TensorSpecAux {
             contig: layout.contiguous_full(),
-            aligned: true,
             level: CpuMemoryLevel::GL,
             layout,
             vector_size: None,
@@ -119,7 +117,6 @@ where
             let layout = row_major(4);
             let a = TensorSpecAux {
                 contig: layout.contiguous_full(),
-                aligned: true,
                 level: CpuMemoryLevel::GL,
                 layout,
                 vector_size: None,
@@ -232,7 +229,6 @@ fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
             .into_iter()
             .map(|level| TensorSpecAux {
                 contig: layout.contiguous_full(),
-                aligned: true,
                 level,
                 layout: layout.clone(),
                 vector_size: None,

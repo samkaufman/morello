@@ -383,13 +383,13 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
         return false;
     }
 
-    // Second and third parameters must be in VRF, vector size multiples, aligned, contig., and
+    // Second and third parameters must be in VRF, vector size multiples, contig., and
     // have the same dtype as the first parameter.
     for i in 1..3 {
         if operands[i].level() != CpuMemoryLevel::VRF {
             return false;
         }
-        if !operands[i].aligned() || !operands[i].is_contiguous() {
+        if !operands[i].is_contiguous() {
             return false;
         }
         if operands[0].dtype() != operands[i].dtype() {

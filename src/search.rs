@@ -336,7 +336,6 @@ mod tests {
                 },
                 vec![TensorSpecAux::<X86Target> {
                     contig: 0,
-                    aligned: false,
                     level: CpuMemoryLevel::GL,
                     layout: row_major(4),
                     vector_size: None,

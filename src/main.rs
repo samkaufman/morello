@@ -149,14 +149,12 @@ where
                 vec![
                     TensorSpecAux::<Tgt> {
                         contig: rm2.contiguous_full(),
-                        aligned: true,
                         level: CpuMemoryLevel::GL,
                         layout: rm2,
                         vector_size: None,
                     },
                     TensorSpecAux::<Tgt> {
                         contig: cm2.contiguous_full(),
-                        aligned: true,
                         level: CpuMemoryLevel::GL,
                         layout: cm2,
                         vector_size: None,
@@ -176,7 +174,6 @@ where
                 vec![
                     TensorSpecAux {
                         contig: rm2.contiguous_full(),
-                        aligned: true,
                         level: CpuMemoryLevel::GL,
                         layout: rm2,
                         vector_size: None,
@@ -211,7 +208,6 @@ where
                 vec![
                     TensorSpecAux {
                         contig: rm.contiguous_full(),
-                        aligned: true,
                         level: CpuMemoryLevel::GL,
                         layout: rm,
                         vector_size: None,
