@@ -192,7 +192,7 @@ impl DashmapDiskDatabase {
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
         k: u8,
-        dashmap_constructor: &dyn Fn() -> DashMap<DbKey, DbBlock>,
+        dashmap_constructor: &impl Fn() -> DashMap<DbKey, DbBlock>,
     ) -> Result<Self> {
         let use_rle_blocks = std::env::var("MORELLO_STORE_COSTS").is_ok();
         let grouped_entries = match file_path {

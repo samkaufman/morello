@@ -744,7 +744,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         })
     }
 
-    fn split_actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
+    fn split_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         let LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ, spec_shape, ..
@@ -765,17 +765,15 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         };
 
         let operands = self.parameters();
-        Box::new(
-            dim_range(orig_k, false)
-                .filter(move |&new_k| {
-                    operands[0].is_valid_tile_shape(&[m, new_k])
-                        && operands[1].is_valid_tile_shape(&[new_k, n])
-                })
-                .map(|k| Action::Split { k }),
-        )
+        dim_range(orig_k, false)
+            .filter(move |&new_k| {
+                operands[0].is_valid_tile_shape(&[m, new_k])
+                    && operands[1].is_valid_tile_shape(&[new_k, n])
+            })
+            .map(|k| Action::Split { k })
     }
 
-    fn peel_actions(&self) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
+    fn peel_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
         let LogicalSpec::Compose {
             components,
             operand_auxes: _,
@@ -820,7 +818,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             }
         }
 
-        Box::new(results.into_iter())
+        results.into_iter()
     }
 
     fn move_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {

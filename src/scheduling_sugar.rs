@@ -37,7 +37,7 @@ pub trait Subschedule<Tgt: Target> {
     fn subschedule(
         &self,
         path: &[usize],
-        f: &dyn Fn(&Spec<Tgt>) -> ImplNode<Tgt, ()>,
+        f: &impl Fn(&Spec<Tgt>) -> ImplNode<Tgt, ()>,
     ) -> ImplNode<Tgt, ()>;
 }
 
@@ -152,7 +152,7 @@ impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt, ()> {
     fn subschedule(
         &self,
         path: &[usize],
-        f: &dyn Fn(&Spec<Tgt>) -> ImplNode<Tgt, ()>,
+        f: &impl Fn(&Spec<Tgt>) -> ImplNode<Tgt, ()>,
     ) -> ImplNode<Tgt, ()> {
         let children = self.children();
         if children.is_empty() {
