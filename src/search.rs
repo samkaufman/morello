@@ -33,6 +33,7 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d> + Send + Sync,
 {
+    debug_assert!(top_k >= 1);
     assert!(db.max_k().map_or(true, |k| k >= top_k));
 
     let mut canonical_goal = goal.clone();
@@ -73,10 +74,6 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d>,
 {
-    if top_k > 1 {
-        unimplemented!("Search for top_k > 1 not yet implemented.");
-    }
-
     // First, check if the Spec is already in the database.
     let get_result = db.get_with_preference(goal);
     let mut preferences: &[_] = &[];
@@ -176,7 +173,8 @@ where
             } else if child_results.len() == 1 {
                 child_costs.append(&mut child_results);
             } else {
-                todo!("support k > 1");
+                // Pick the lowest cost by O(N) over N implementations.
+                child_costs.push(child_results.into_iter().min().unwrap());
             }
         }
         let partial_impl_cost = Cost::from_child_costs(partial_impl, &child_costs);
