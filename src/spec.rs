@@ -122,7 +122,7 @@ impl<Tgt: Target> Display for Spec<Tgt> {
 
 #[cfg(test)]
 impl<Tgt: Target> proptest::arbitrary::Arbitrary for Spec<Tgt> {
-    type Parameters = (Option<DimSize>, Option<u64>);
+    type Parameters = ((Option<DimSize>, Option<bool>), Option<u64>);
     type Strategy = proptest::strategy::BoxedStrategy<Spec<Tgt>>;
 
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
@@ -1411,7 +1411,7 @@ impl BiMap for PrimitiveBasicsBimap {
 
 #[cfg(test)]
 impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
-    type Parameters = Option<DimSize>;
+    type Parameters = (Option<DimSize>, Option<bool>);
     type Strategy = proptest::strategy::BoxedStrategy<LogicalSpec<Tgt>>;
 
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
@@ -1419,7 +1419,11 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
         use proptest::prelude::*;
 
         // TODO: Generate Compose as well.
-        (any_with::<PrimitiveBasics>(args), any::<bool>())
+        let (max_size, serial_only_constraint) = args;
+        let serial_only_arb = serial_only_constraint
+            .map(|s| Just(s).boxed())
+            .unwrap_or_else(|| any::<bool>().boxed());
+        (any_with::<PrimitiveBasics>(max_size), serial_only_arb)
             .prop_flat_map(|(basics, serial_only)| {
                 // TODO: These don't all make sense. Are they canonical for shapes?
                 let auxes_strategy = basics

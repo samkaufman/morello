@@ -767,9 +767,8 @@ mod tests {
     proptest! {
         #[test]
         fn test_parallel_tile_outs_have_serial_only_subspecs(
-            spec in any::<Spec<X86Target>>()
+            spec in any_with::<Spec<X86Target>>(((None, Some(false)), None))
                 .prop_filter("Spec should be canonical", |s| s.is_canonical())
-                .prop_filter("Spec must not be serial-only", |s| !s.0.serial_only())
         ) {
             let shapes = spec.0.output().shape().iter().map(|&d| 1..d).multi_cartesian_product();
             for tile_shape in shapes {

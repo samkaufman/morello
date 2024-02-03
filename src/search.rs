@@ -277,7 +277,7 @@ mod tests {
         // TODO: Remove restriction to canonical Specs. Should synth. any Spec.
         #[test]
         fn test_can_synthesize_any_canonical_spec(
-            spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
+            spec in any_with::<Spec<X86Target>>(((Some(TEST_SMALL_SIZE), None), Some(TEST_SMALL_MEM)))
                 .prop_filter("Spec should be canonical", |s| s.is_canonical())
         ) {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
@@ -309,7 +309,7 @@ mod tests {
 
         #[test]
         fn test_synthesis_at_peak_memory_yields_same_decision(
-            spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
+            spec in any_with::<Spec<X86Target>>(((Some(TEST_SMALL_SIZE), None), Some(TEST_SMALL_MEM)))
                 .prop_filter("Spec should be canonical", |s| s.is_canonical())
         ) {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
@@ -366,7 +366,7 @@ mod tests {
         let top_memory_b = Rc::clone(&top_memory_a);
         let top_memory_c = Rc::clone(&top_memory_a);
 
-        any_with::<Spec<Tgt>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
+        any_with::<Spec<Tgt>>(((Some(TEST_SMALL_SIZE), None), Some(TEST_SMALL_MEM)))
             .prop_filter("Spec should be canonical", |s| s.is_canonical())
             .prop_filter("limits should not be max", move |s| s.1 != *top_memory_a)
             .prop_flat_map(move |spec| {
