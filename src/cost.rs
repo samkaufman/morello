@@ -45,6 +45,13 @@ impl Cost {
         Aux: Clone,
         I: Impl<Tgt, Aux>,
     {
+        debug_assert_eq!(
+            imp.children().len(),
+            child_costs.len(),
+            "Impl has {} children, but given {} child costs",
+            imp.children().len(),
+            child_costs.len()
+        );
         let child_main_costs = child_costs
             .iter()
             .map(|k| k.main)

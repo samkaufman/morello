@@ -33,12 +33,11 @@ mod blocks;
 
 type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
-type DbKey = (
-    (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
-    SmallVec<[BimapInt; 10]>,
-);
+type DbOuterKey = (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>);
+type DbKey = (DbOuterKey, SmallVec<[BimapInt; 10]>);
 pub type ActionIdx = u16;
 
+/// A database relating [Spec]s to actions producing the lowest cost [Impl]s of that [Spec].
 pub trait Database<'a> {
     fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<ActionCostVec>
     where
@@ -105,6 +104,7 @@ pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionCostVec(pub SmallVec<[(ActionIdx, Cost); 1]>);
+
 pub enum GetPreference<T, V> {
     Hit(T),
     Miss(Option<V>),
@@ -546,15 +546,19 @@ pub fn deblockify_points(a: &[BimapInt], b: &[u8]) -> SmallVec<[BimapInt; 10]> {
     result
 }
 
-/// Compute the bottom and top points (inclusive) to fill in a database table.
+/// Compute the bottom and top points (inclusive) from memory peak to limit.
 ///
-/// Returned points are in global coordinates, not within-block coordinates.
+/// The optimal implementation is guaranteed to be the same within this region. This fact can be
+/// exploited to set many [Spec]s when the optimal action is determined for the given limit and has
+/// the given peak memory consumption.
+///
+/// Returned points are global, not within-block, coordinates.
 fn put_range_to_fill<Tgt, B>(
     bimap: &B,
     spec: &Spec<Tgt>,
-    impls: &SmallVec<[(ActionIdx, Cost); 1]>,
+    decisions: &[(ActionIdx, Cost)],
 ) -> (
-    (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
+    DbOuterKey,
     (SmallVec<[BimapInt; 10]>, SmallVec<[BimapInt; 10]>),
 )
 where
@@ -565,7 +569,7 @@ where
 {
     // Compute the per-level maximum limits of the solutions. This lower bounds the range.
     let mut per_level_peaks = [0; LEVEL_COUNT];
-    for (_, cost) in impls {
+    for (_, cost) in decisions {
         for (i, peak) in cost.peaks.iter().enumerate() {
             per_level_peaks[i] = per_level_peaks[i].max(peak);
         }
@@ -754,7 +758,6 @@ mod tests {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
 
             // Put all decisions into database.
-            println!("Decisions-to-visit are: {:?}", decision.visit_decisions().collect::<Vec<_>>());
             for d in decision.visit_decisions() {
                 db.put(d.spec.clone(), d.actions_costs.clone().into());
             }
@@ -904,7 +907,6 @@ mod tests {
                 (Just(spec), action_idx_strategy)
             })
             .prop_map(|(spec, action_opt)| {
-                println!("Spec: {}", spec);
                 if let Some((action_idx, imp)) = action_opt {
                     recursively_decide_with_action(&spec, action_idx, &imp)
                 } else {
