@@ -212,7 +212,7 @@ impl PrimitiveBasics {
                 };
                 debug_assert!(
                     h >= fh && w >= fw,
-                    "Conv spatial dims. {}x{} were larger than filter {}x{}",
+                    "Conv spatial dims. {}x{} were smaller than filter {}x{}",
                     h,
                     w,
                     fh,
