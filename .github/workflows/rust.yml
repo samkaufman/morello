@@ -25,6 +25,20 @@ jobs:
       - name: Smoke-test 1x1x1 matrix multiplication synthesis
         run: cargo run matmul 1
 
+  smoke-test-arm:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v3
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Install llvm & libomp
+        run: brew install llvm libomp
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+      - name: Smoke-test 1x1x1 matrix multiplication synthesis & run
+        run: cargo run -- --target arm run matmul 1
+        env:
+          CLANG: /opt/homebrew/opt/llvm/bin/clang
+
   build-without-verification:
     runs-on: ubuntu-latest
     steps:
