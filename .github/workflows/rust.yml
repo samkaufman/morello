@@ -22,8 +22,8 @@ jobs:
       - run: cargo test
       - run: cargo build
       - run: cargo run --example simple_matmul
-      - name: Smoke-test 1x1x1 matrix multiplication synthesis
-        run: cargo run matmul 1
+      - name: Smoke-test 1x1x1 matrix multiplication synthesis & run
+        run: cargo run run matmul 1
 
   build-without-verification:
     runs-on: ubuntu-latest
