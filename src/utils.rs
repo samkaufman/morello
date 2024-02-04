@@ -199,6 +199,36 @@ pub fn indent(depth: usize) -> String {
     " ".repeat(depth * INDENT_SIZE)
 }
 
+pub(crate) fn iter_product<F>(ranges: &[Range<u32>], mut callback: F) -> bool
+where
+    F: FnMut(&[u32]) -> bool,
+{
+    if ranges.is_empty() || ranges.iter().any(|rng| rng.is_empty()) {
+        return true;
+    }
+
+    let mut current_pt = ranges.iter().map(|rng| rng.start).collect::<Vec<_>>();
+    loop {
+        if !callback(&current_pt) {
+            return false;
+        }
+
+        let mut dimension = current_pt.len() - 1; // Start with the innermost dimension
+        loop {
+            current_pt[dimension] += 1;
+            if current_pt[dimension] < ranges[dimension].end {
+                break;
+            }
+            if dimension == 0 {
+                return true;
+            }
+
+            current_pt[dimension] = ranges[dimension].start;
+            dimension -= 1;
+        }
+    }
+}
+
 pub(crate) fn iter_multidim_range<F>(dim_ranges: &[Range<u32>], strides: &[usize], mut callback: F)
 where
     F: FnMut(usize, &[u32]),
@@ -238,12 +268,38 @@ where
     }
 }
 
+/// Enumerate integer points just below the low faces of a hyper-rectangle.
+///
+/// Faces at 0 or not listed in `faces` are ignored.
+pub(crate) fn iter_low_faces<F>(faces: &[usize], bottom: &[u32], top: &[u32], mut callback: F)
+where
+    F: FnMut(&[u32]) -> bool,
+{
+    debug_assert_eq!(bottom.len(), top.len());
+    let mut face_ranges = bottom
+        .iter()
+        .zip(top)
+        .map(|(&b, &t)| b..(t + 1))
+        .collect::<Vec<_>>();
+    for &face in faces {
+        if bottom[face] == 0 {
+            continue;
+        }
+        let below_face = bottom[face] - 1;
+        face_ranges[face] = below_face..(below_face + 1);
+        if !iter_product(&face_ranges, &mut callback) {
+            return;
+        }
+        face_ranges[face] = bottom[face]..(top[face] + 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use itertools::Itertools;
     use proptest::prelude::*;
-    use std::fmt::Write;
+    use std::{collections::HashSet, fmt::Write};
 
     #[test]
     fn test_lineprefixwrite_prefixes_1() {
@@ -290,9 +346,52 @@ mod tests {
         assert_eq!(write.0, "--\n");
     }
 
+    #[test]
+    fn test_iter_low_faces_1() {
+        let mut pts = HashSet::new();
+        iter_low_faces(&[0, 1], &[1, 1], &[3, 3], |p| {
+            pts.insert(Vec::from(p));
+            true
+        });
+        assert_eq!(
+            pts,
+            HashSet::from([
+                vec![1, 0],
+                vec![2, 0],
+                vec![3, 0],
+                vec![0, 1],
+                vec![0, 2],
+                vec![0, 3],
+            ])
+        );
+    }
+
     proptest! {
         #[test]
-        fn test_iter_multidim_range_matches_itertools_product(
+        fn test_iter_product_matches_itertools(
+            rngs in proptest::collection::vec((0u32..5, 0u32..5, 0u32..5), 1..4)
+        ) {
+            let dim_ranges: Vec<Range<u32>> = rngs
+                .iter()
+                .map(|(s, l, _)| *s..(*s + *l))
+                .collect::<Vec<_>>();
+
+            let mut fast_pts = Vec::new();
+            iter_product(&dim_ranges, |pt| {
+                fast_pts.push(pt.to_vec());
+                true
+            });
+
+            let itertools_product_pts = dim_ranges
+                .into_iter()
+                .multi_cartesian_product()
+                .collect::<Vec<_>>();
+
+            assert_eq!(fast_pts, itertools_product_pts);
+        }
+
+        #[test]
+        fn test_iter_multidim_range_matches_itertools(
             rngs in proptest::collection::vec((0u32..5, 0u32..5, 0u32..5), 1..4)
         ) {
             let dim_ranges: Vec<Range<u32>> = rngs

@@ -1,3 +1,4 @@
+use self::reduceblocks::ReduceBlock;
 use crate::common::DimSize;
 use crate::cost::Cost;
 use crate::datadeps::SpecKey;
@@ -12,6 +13,7 @@ use crate::pprint::PrintableAux;
 use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
+use crate::utils::iter_low_faces;
 
 use anyhow::{anyhow, Result};
 use dashmap::mapref::entry::Entry;
@@ -30,6 +32,7 @@ use std::time::Instant;
 use std::{iter, path};
 
 mod blocks;
+mod reduceblocks;
 
 type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
@@ -49,6 +52,12 @@ pub trait Database<'a> {
         &'a self,
         query: &Spec<Tgt>,
     ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
+
+    fn get_best_tile_body<Tgt>(&'a self, query: &Spec<Tgt>) -> BestTileResult<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -83,6 +92,12 @@ pub trait DatabaseExt<'a>: Database<'a> {
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
+
+    fn complete_impl<Tgt>(&'a self, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
 }
 
 #[derive(Clone, Debug)]
@@ -90,7 +105,7 @@ pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
 
 pub struct DashmapDiskDatabase {
     file_path: Option<path::PathBuf>,
-    pub blocks: DashMap<DbKey, DbBlock>,
+    pub blocks: DashMap<DbKey, (DbBlock, ReduceBlock)>,
     binary_scale_shapes: bool,
     k: u8,
     use_rle_blocks: bool,
@@ -108,6 +123,24 @@ pub struct ActionCostVec(pub SmallVec<[(ActionIdx, Cost); 1]>);
 pub enum GetPreference<T, V> {
     Hit(T),
     Miss(Option<V>),
+}
+
+pub enum BestTileResult<Tgt: Target> {
+    BestTileBody(Spec<Tgt>, Cost),
+    MissingDependency,
+    NoDependencies,
+}
+
+enum MinIntensityBelowRegionResult {
+    Value((f32, SmallVec<[BimapInt; 10]>)),
+    MissingDependency,
+    NoDependencies,
+}
+
+impl<Tgt: Target> DbImplAux<Tgt> {
+    pub fn cost(&self) -> Option<&Cost> {
+        self.0.as_ref().map(|(_, c)| c)
+    }
 }
 
 impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
@@ -164,7 +197,7 @@ impl DashmapDiskDatabase {
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
         k: u8,
-        dashmap_constructor: &impl Fn() -> DashMap<DbKey, DbBlock>,
+        dashmap_constructor: &impl Fn() -> DashMap<DbKey, (DbBlock, ReduceBlock)>,
     ) -> Result<Self> {
         let use_rle_blocks = std::env::var("MORELLO_STORE_COSTS").is_ok();
         let blocks = match file_path {
@@ -192,7 +225,89 @@ impl DashmapDiskDatabase {
         })
     }
 
-    pub fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
+    fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    {
+        Self::make_spec_bimap(self.binary_scale_shapes)
+    }
+
+    /// Returns the lowest-intensity entry below the given range in at least one dimension.
+    ///
+    /// This will follow non-canonical entries to their canonical equivalent. It will return the
+    /// cost intensity from the canonical entry but the coordinate of the non-canonical entry below
+    /// the given range.
+    fn min_intensity_below_region<Tgt>(
+        &self,
+        outer_key: &DbOuterKey,
+        bottom: &[u32],
+        top: &[u32],
+    ) -> MinIntensityBelowRegionResult
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    {
+        let tiling_faces = Self::tileable_shape_dims(outer_key, bottom).collect::<Vec<_>>();
+        let parallel_dim = Self::parallel_dim(bottom);
+
+        debug_assert!(bottom[parallel_dim] < 2);
+        let mut bottom_extruded = Vec::from(bottom);
+        bottom_extruded[parallel_dim] = 0;
+
+        let mut minimum_seen = MinIntensityBelowRegionResult::NoDependencies;
+        iter_low_faces(&tiling_faces, &bottom_extruded, top, |face_pt| {
+            match self.get_cost_intensity::<Tgt>(outer_key, face_pt) {
+                None => {
+                    minimum_seen = MinIntensityBelowRegionResult::MissingDependency;
+                    false
+                }
+                Some(v) => {
+                    match &mut minimum_seen {
+                        MinIntensityBelowRegionResult::MissingDependency => unreachable!(),
+                        MinIntensityBelowRegionResult::NoDependencies => {
+                            minimum_seen =
+                                MinIntensityBelowRegionResult::Value((v, face_pt.into()));
+                        }
+                        MinIntensityBelowRegionResult::Value(p) if v < p.0 => {
+                            *p = (v, face_pt.into());
+                        }
+                        MinIntensityBelowRegionResult::Value(_) => {}
+                    }
+                    true
+                }
+            }
+        });
+        minimum_seen
+    }
+
+    /// Returns cost intensity and coordinate of minimum [Spec].
+    ///
+    /// If the given coordinate corresponds to a non-canonical [Spec], this return the cost
+    /// intensity of the canonical [Spec] along with the coordinate of the non-canonical [Spec].
+    fn get_cost_intensity<Tgt>(&self, outer_key: &DbOuterKey, global_pt: &[u32]) -> Option<f32>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    {
+        let (canon_outer_key, canon_global_pt) =
+            self.canonicalize_table_key_and_pt::<Tgt>(outer_key, global_pt);
+
+        let (block_pt, inner_pt) = blockify_point(canon_global_pt);
+        let Some(canon_block_tuple) = self.blocks.get(&(canon_outer_key, block_pt)) else {
+            return None;
+        };
+        let intensity_block = &canon_block_tuple.1;
+        let inner_pt_usize = inner_pt.into_iter().map(usize::from).collect::<Vec<_>>();
+        intensity_block
+            .get(&inner_pt_usize)
+            .map(|(transitive_cost_intensity, _)| transitive_cost_intensity)
+    }
+
+    fn make_spec_bimap<Tgt>(binary_scale: bool) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -201,13 +316,58 @@ impl DashmapDiskDatabase {
         let surmap = SpecSurMap::<Tgt, _, _, _> {
             logical_spec_surmap: LogicalSpecSurMap::new(
                 PrimitiveBasicsBimap {
-                    binary_scale_shapes: self.binary_scale_shapes,
+                    binary_scale_shapes: binary_scale,
                 },
                 |_: &[DimSize], _| TensorSpecAuxNonDepBimap::<Tgt>::default(),
             ),
             memory_limits_bimap: MemoryLimitsBimap::default(),
         };
         surmap.into_bimap()
+    }
+
+    fn canonicalize_table_key_and_pt<Tgt>(
+        &self,
+        outer_key: &DbOuterKey,
+        pt: &[BimapInt],
+    ) -> (DbOuterKey, SmallVec<[BimapInt; 10]>)
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    {
+        let bimap = self.spec_bimap::<Tgt>();
+        let mut inverted = bimap.apply_inverse(&(outer_key.clone(), pt.into()));
+        inverted.canonicalize().unwrap();
+        let (inverted_outer_key, new_pt) = bimap.apply(&inverted);
+        (inverted_outer_key, new_pt)
+    }
+
+    // TODO: Do we need all three arguments here?
+    fn retain_shape_and_parallel_dims<'a>(
+        source: &'a [BimapInt],
+        outer_key: &DbOuterKey,
+        inner_key: &[BimapInt],
+    ) -> impl Iterator<Item = BimapInt> + 'a {
+        let shape_dims = Self::tileable_shape_dims(outer_key, inner_key);
+        let parallel_dim = Self::parallel_dim(inner_key);
+        shape_dims
+            .chain(iter::once(parallel_dim))
+            .map(move |idx| source[idx])
+    }
+
+    /// Returns the table dimensions corresponding to [Spec]s' tileable shapes (no filter sizes).
+    fn tileable_shape_dims(outer_key: &DbOuterKey, bottom: &[u32]) -> Range<usize> {
+        match &outer_key.0 {
+            SpecKey::Matmul { .. } => 1..bottom.len() - 4 - LEVEL_COUNT,
+            SpecKey::Conv { .. } => 1..bottom.len() - 6 - LEVEL_COUNT,
+            SpecKey::Move { .. } => 0..bottom.len() - 3 - LEVEL_COUNT,
+            SpecKey::Zero { .. } => 0..bottom.len() - 2 - LEVEL_COUNT,
+        }
+    }
+
+    /// Returns the table index corresponding to a [Spec]s' `serial_only` flags.
+    fn parallel_dim(inner_key: &[BimapInt]) -> usize {
+        inner_key.len() - 5
     }
 }
 
@@ -242,7 +402,93 @@ where
         let Some(group) = self.blocks.get(&(table_key, block_pt)) else {
             return GetPreference::Miss(None);
         };
-        group.get_with_preference(self, query, &inner_pt)
+        group.0.get_with_preference(self, query, &inner_pt)
+    }
+
+    fn get_best_tile_body<Tgt>(&'a self, query: &Spec<Tgt>) -> BestTileResult<Tgt>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        let (table_key, global_pt) = self.spec_bimap().apply(query);
+
+        // TODO: Below is duplicated, at least in min_cost_intensity_on_low_faces.
+        let tiling_faces = Self::tileable_shape_dims(&table_key, &global_pt);
+        let parallel_dim = Self::parallel_dim(&global_pt);
+
+        let mut shifted_pt = global_pt.clone();
+        let mut best_seen: Option<(f32, SmallVec<[u32; 10]>)> = None;
+        for face in tiling_faces {
+            if shifted_pt[face] == 0 {
+                continue;
+            }
+            shifted_pt[face] -= 1;
+
+            for extrude_parallel_dim in [true, false] {
+                if extrude_parallel_dim {
+                    if shifted_pt[parallel_dim] == 0 {
+                        continue;
+                    }
+                    debug_assert_eq!(shifted_pt[parallel_dim], 1);
+                    shifted_pt[parallel_dim] -= 1;
+                }
+
+                let (canon_table_key, canon_pt) =
+                    self.canonicalize_table_key_and_pt::<Tgt>(&table_key, &shifted_pt);
+                let (block_pt, inner_pt) = blockify_point(canon_pt);
+                let Some(block) = self.blocks.get(&(canon_table_key, block_pt)) else {
+                    return BestTileResult::MissingDependency;
+                };
+                let inner_pt_usize = inner_pt.into_iter().map(usize::from).collect::<Vec<_>>();
+                let Some((intensity, v_pt)) = block.1.get(&inner_pt_usize) else {
+                    return BestTileResult::MissingDependency;
+                };
+                match best_seen {
+                    Some((min_intensity, _)) if min_intensity >= intensity => {}
+                    _ => {
+                        best_seen = Some((intensity, v_pt.into()));
+                    }
+                }
+
+                if extrude_parallel_dim {
+                    shifted_pt[parallel_dim] += 1;
+                }
+            }
+
+            shifted_pt[face] += 1;
+        }
+
+        match best_seen {
+            None => BestTileResult::NoDependencies,
+            Some((_, best_pt)) => {
+                // TODO: Below is duplicated, at least in min_cost_intensity_on_low_faces.
+                let tiling_faces = Self::tileable_shape_dims(&table_key, &global_pt)
+                    .chain(iter::once(Self::parallel_dim(&global_pt)));
+                let mut reconstructed_pt = global_pt;
+                for (idx, b) in tiling_faces.zip(best_pt) {
+                    reconstructed_pt[idx] = b;
+                }
+
+                let mut best_spec = self
+                    .spec_bimap()
+                    .apply_inverse(&(table_key, reconstructed_pt));
+                best_spec.canonicalize().unwrap();
+
+                // TODO: Rather than needing a second lookup, compute from the intensity
+                //   or store a non-float cost.
+                let best_spec_cost = self
+                    .get(&best_spec)
+                    .unwrap()
+                    .0
+                    .into_iter()
+                    .next()
+                    .unwrap()
+                    .1;
+
+                BestTileResult::BestTileBody(best_spec, best_spec_cost)
+            }
+        }
     }
 
     fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
@@ -252,41 +498,74 @@ where
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let bimap = self.spec_bimap();
-        let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
 
-        // Construct an iterator over all blocks to fill.
+        // First, collect the minimum cost intensity along the outer faces of the region we are
+        // about to fill.
+        let (outer_key, (bottom, top)) = optimal_limits_region(&bimap, &spec, &decisions);
+
+        let best_neighbor_cost_intensity =
+            self.min_intensity_below_region::<Tgt>(&outer_key, &bottom, &top);
+        let intensity = if let Some((_, lowest_cost)) = decisions.first() {
+            lowest_cost.main as f32 / spec.0.shape_volume() as f32
+        } else {
+            f32::INFINITY
+        };
+        let best_intensity_pair: Option<(f32, SmallVec<_>)> = match best_neighbor_cost_intensity {
+            MinIntensityBelowRegionResult::Value((b, neighbor_pt)) if b < intensity => Some((
+                b,
+                Self::retain_shape_and_parallel_dims(&neighbor_pt, &outer_key, &bottom).collect(),
+            )),
+            MinIntensityBelowRegionResult::Value(_)
+            | MinIntensityBelowRegionResult::NoDependencies => Some((
+                intensity,
+                Self::retain_shape_and_parallel_dims(&bottom, &outer_key, &bottom).collect(),
+            )),
+            MinIntensityBelowRegionResult::MissingDependency => None,
+        };
+
+        // Construct an iterator over blocks and within-block coordinates to update. These will
+        // range over the memory limits dimensions; the other dimensions will be single-index
+        // ranges.
         let rank = bottom.len();
-        let blocks_iter = bottom
+        let memory_blocks_iter = bottom
             .into_iter()
             .zip(&top)
             .enumerate()
             .map(|(dim, (b, t))| iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank)))
             .multi_cartesian_product();
 
-        for joined_row in blocks_iter {
+        // Consume that iterator, filling the applicable region of each block in both the primary
+        // and min intensity table(s).
+        for joined_row in memory_blocks_iter {
             let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
             let dim_ranges = joined_row
                 .iter()
                 .map(|(_, r)| r.clone())
                 .collect::<Vec<_>>();
-
-            match self.blocks.entry((db_key.clone(), block_pt.clone())) {
+            match self.blocks.entry((outer_key.clone(), block_pt.clone())) {
                 Entry::Occupied(mut existing_block) => {
-                    existing_block
-                        .get_mut()
-                        .fill_region(&dim_ranges, &decisions);
+                    let (db_block, intensity_block) = existing_block.get_mut();
+                    db_block.fill_region(&dim_ranges, &decisions);
+                    intensity_block.fill_region(&dim_ranges, &best_intensity_pair);
                 }
                 Entry::Vacant(entry) => {
                     let db_shape = db_shape::<Tgt>(rank);
                     let bs = block_shape(&block_pt, &db_shape, block_size_dim);
                     let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
-                    entry.insert(DbBlock::partially_filled::<Tgt>(
+                    let db_block = DbBlock::partially_filled::<Tgt>(
                         self.use_rle_blocks,
                         self.k,
                         &block_shape_usize,
                         &dim_ranges,
                         &decisions,
-                    ));
+                    );
+                    let intensity_block = ReduceBlock::partially_filled(
+                        1,
+                        &block_shape_usize,
+                        &dim_ranges,
+                        &best_intensity_pair,
+                    );
+                    entry.insert((db_block, intensity_block));
                 }
             }
         }
@@ -312,7 +591,7 @@ where
 
     fn compact(&'a self) {
         self.blocks.par_iter_mut().for_each(|mut block| {
-            block.compact();
+            block.0.compact();
         });
     }
 
@@ -334,11 +613,11 @@ where
         let mut lens_depths_actions = 0;
         for block in &self.blocks {
             match block.value() {
-                DbBlock::ActionOnly(b) => {
+                (DbBlock::ActionOnly(b), _) => {
                     runs_actiononly += b.0.runs_len();
                     lens_actiononly += b.0.len();
                 }
-                DbBlock::Rle(e) => {
+                (DbBlock::Rle(e), _) => {
                     runs_filled += e.filled.runs_len();
                     lens_filled += e.filled.len();
                     runs_main_costs += e.main_costs.runs_len();
@@ -400,12 +679,29 @@ impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
                     let children = root.children();
                     let new_children = children
                         .iter()
-                        .map(|c| construct_impl(self, c))
+                        .map(|c| self.complete_impl(c))
                         .collect::<Vec<_>>();
                     root.replace_children(new_children.into_iter())
                 })
                 .collect::<SmallVec<_>>(),
         )
+    }
+
+    fn complete_impl<Tgt>(&'a self, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        match imp {
+            ImplNode::SpecApp(p) => self
+                .get_impl(&p.0)
+                .expect("Database should have the sub-Spec entry")
+                .first()
+                .expect("Database sub-Spec should be satisfiable")
+                .clone(),
+            _ => imp.replace_children(imp.children().iter().map(|c| self.complete_impl(c))),
+        }
     }
 }
 
@@ -440,24 +736,6 @@ impl Deref for ActionCostVec {
 impl AsRef<SmallVec<[(ActionIdx, Cost); 1]>> for ActionCostVec {
     fn as_ref(&self) -> &SmallVec<[(ActionIdx, Cost); 1]> {
         self.deref()
-    }
-}
-
-fn construct_impl<'a, Tgt, D>(db: &'a D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    D: Database<'a>,
-{
-    match imp {
-        ImplNode::SpecApp(p) => db
-            .get_impl(&p.0)
-            .expect("Database should have the sub-Spec entry")
-            .first()
-            .expect("Database sub-Spec should be satisfiable")
-            .clone(),
-        _ => imp.replace_children(imp.children().iter().map(|c| construct_impl(db, c))),
     }
 }
 
@@ -553,7 +831,7 @@ pub fn deblockify_points(a: &[BimapInt], b: &[u8]) -> SmallVec<[BimapInt; 10]> {
 /// the given peak memory consumption.
 ///
 /// Returned points are global, not within-block, coordinates.
-fn put_range_to_fill<Tgt, B>(
+fn optimal_limits_region<Tgt, B>(
     bimap: &B,
     spec: &Spec<Tgt>,
     decisions: &[(ActionIdx, Cost)],
@@ -667,6 +945,7 @@ mod tests {
         imp::visit_leaves,
         memorylimits::{MemVec, MemoryLimits},
         scheduling::ApplyError,
+        spec::{LogicalSpec, PrimitiveSpecType},
         target::X86Target,
         utils::{bit_length, bit_length_inverse},
     };
@@ -720,6 +999,86 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn test_shape_dims_rank(spec in any::<Spec<X86Target>>()) {
+            let tileable_shape_rank = match &spec.0 {
+                LogicalSpec::Primitive(b, _, _) => match b.typ {
+                    PrimitiveSpecType::Conv { .. } => b.spec_shape.len() - 2,
+                    _ => b.spec_shape.len(),
+                },
+                _ => unreachable!(),
+            };
+            let bimap = DashmapDiskDatabase::make_spec_bimap(false);
+            let mapped = bimap.apply(&spec);
+            assert_eq!(tileable_shape_rank, DashmapDiskDatabase::tileable_shape_dims(&mapped.0, &mapped.1).count());
+        }
+
+        #[test]
+        fn test_shape_dims_corresponds(spec in any::<Spec<X86Target>>()) {
+            let rank = match &spec.0 {
+                LogicalSpec::Primitive(b, _, _) => b.spec_shape.len(),
+                _ => unreachable!(),
+            };
+
+            let mut spec_varied = spec.clone();
+            match spec_varied.0 {
+                LogicalSpec::Primitive(ref mut b, _, _) => {
+                    let spec_rank = b.spec_shape.len();
+                    let tileable_shape =
+                        match b.typ {
+                            PrimitiveSpecType::Conv { .. } => &mut b.spec_shape[..spec_rank - 2],
+                            _ => &mut b.spec_shape[..],
+                        };
+                    for d in tileable_shape {
+                        *d += 1;
+                    }
+                },
+                _ => todo!(),
+            }
+
+            let bimap = DashmapDiskDatabase::make_spec_bimap(false);
+            let first_bimap_pt = bimap.apply(&spec);
+            let varied_bimap_pt = bimap.apply(&spec_varied);
+
+            let shape_dims = DashmapDiskDatabase::tileable_shape_dims(&first_bimap_pt.0, &first_bimap_pt.1).collect::<Vec<_>>();
+            assert_eq!(shape_dims, DashmapDiskDatabase::tileable_shape_dims(&varied_bimap_pt.0, &varied_bimap_pt.1).collect::<Vec<_>>());
+
+            assert_eq!(first_bimap_pt.0, varied_bimap_pt.0);
+
+            let first_without_shape = (0..rank).filter(|&d| !shape_dims.contains(&d)).map(|d| first_bimap_pt.1[d]).collect::<Vec<_>>();
+            let varied_without_shape = (0..rank).filter(|&d| !shape_dims.contains(&d)).map(|d| varied_bimap_pt.1[d]).collect::<Vec<_>>();
+            assert_eq!(first_without_shape, varied_without_shape);
+
+            for d in shape_dims {
+                assert_ne!(first_bimap_pt.1[d], varied_bimap_pt.1[d],
+                    "Shape dimension {} matched between {:?} and {:?} ({} and {})",
+                    d,
+                    first_bimap_pt.1,
+                    varied_bimap_pt.1,
+                    spec,
+                    spec_varied,
+                );
+            }
+        }
+
+        #[test]
+        fn test_parallel_dim_corresponds(spec in any::<Spec<X86Target>>()) {
+            let mut spec_varied = spec.clone();
+            spec_varied.0.set_serial_only(!spec_varied.0.serial_only());
+
+            let bimap = DashmapDiskDatabase::make_spec_bimap(false);
+            let first_bimap_pt = bimap.apply(&spec);
+            let varied_bimap_pt = bimap.apply(&spec_varied);
+
+            let parallel_dim = DashmapDiskDatabase::parallel_dim(&first_bimap_pt.1);
+            assert_eq!(parallel_dim, DashmapDiskDatabase::parallel_dim(&varied_bimap_pt.1));
+
+            assert_eq!(first_bimap_pt.0, varied_bimap_pt.0);
+            assert_eq!(first_bimap_pt.1[..parallel_dim], varied_bimap_pt.1[..parallel_dim]);
+            assert_ne!(first_bimap_pt.1[parallel_dim], varied_bimap_pt.1[parallel_dim]);
+            assert_eq!(first_bimap_pt.1[parallel_dim + 1..], varied_bimap_pt.1[parallel_dim + 1..]);
+        }
+
         #[test]
         fn test_iter_blocks_in_single_dim_range(
             start in 0..12u32, extent in 0..8u32, block_dim_size in 1..4u32
@@ -991,10 +1350,6 @@ mod tests {
                     Err(ApplyError::SpecNotCanonical) => panic!(),
                 })
         {
-            println!(
-                "Taking action {:?}",
-                spec.0.actions().into_iter().nth(action_idx).unwrap()
-            );
             recursively_decide_with_action(spec, action_idx.try_into().unwrap(), &partial_impl)
         } else {
             Decision {
@@ -1031,7 +1386,6 @@ mod tests {
             };
         }
 
-        println!("Computing cost of Impl: {:?}", partial_impl);
         let cost = Cost::from_child_costs(
             partial_impl,
             &children

@@ -256,9 +256,10 @@ impl<'a> ImplReducer<'a> {
 mod tests {
     use super::*;
     use crate::common::{DimSize, Dtype};
-    use crate::db::DashmapDiskDatabase;
+    use crate::db::{BestTileResult, DashmapDiskDatabase};
     use crate::layout::row_major;
     use crate::memorylimits::MemVec;
+    use crate::reverse_tiling::reverse_tile;
     use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
@@ -322,6 +323,92 @@ mod tests {
             let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
             let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, Some(nz!(1usize)));
             assert_eq!(first_solutions, lower_solutions);
+        }
+
+        #[test]
+        fn test_tiling_actions_reduce_to_same_as_minimum_intensity_table(
+            spec in any_with::<Spec<X86Target>>(((Some(8), Some(true)), Some(TEST_SMALL_MEM)))
+                .prop_filter("Spec should be canonical", |s| s.is_canonical())
+        ) {
+            // TODO: This test would be more efficient if it compared all Specs inserted into the
+            //  database, not just `spec`.
+            let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
+            let (solution, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
+            if !solution.is_empty() {
+                // Find the best tiling sub-Spec in the cost intensity table. (`None` if `spec` has
+                // no dependencies.)
+                let best_by_intensity =
+                    match db.get_best_tile_body(&spec) {
+                        BestTileResult::BestTileBody(subspec, cost) => {
+                            Some((subspec, cost))
+                        },
+                        BestTileResult::NoDependencies => None,
+                        BestTileResult::MissingDependency => {
+                            panic!("Intensity table dependency is missing");
+                        },
+                    };
+
+                // Find the best tiling sub-Spec by enumerating actions.
+                let mut best_by_enum = None;
+                for action in spec.0.tiling_and_to_serial_actions() {
+                    let loop_node = match action.apply(&spec) {
+                        Ok(a) => a,
+                        Err(ApplyError::SpecNotCanonical) => unreachable!(),
+                        Err(ApplyError::OutOfMemory | ApplyError::ActionNotApplicable) => {
+                            continue;
+                        },
+                    };
+                    let subspec_app = match &loop_node {
+                        ImplNode::Loop(l) => match l.body.as_ref() {
+                            ImplNode::SpecApp(spec_app) => spec_app.clone(),
+                            _ => panic!(),
+                        }
+                        _ => panic!()
+                    };
+
+                    let c = db
+                        .get(&subspec_app.0)
+                        .unwrap()
+                        .0
+                        .into_iter()
+                        .next()
+                        .unwrap()
+                        .1;
+
+                    if best_by_enum.as_ref().map(|(_, b, _)| &c < b).unwrap_or(true) {
+                        best_by_enum = Some((subspec_app.0, c, loop_node));
+                    }
+                }
+
+
+                // TODO: Instead, compare the costs when the tile is reverse-constructed.
+                //   Doing this for best_by_intensity requires a method to build ImplNode::Loop
+                //   from the outer and body Specs. The cost for that can then be calculated.
+                let final_cost_by_enum = best_by_enum.as_ref().map(|(_, c, loop_node)| {
+                    Cost::from_child_costs(loop_node, &[c.clone()])
+                });
+                let final_cost_by_intensity = best_by_intensity.as_ref().map(|(body, c)| {
+                    let reversed_tiled_loop = ImplNode::Loop(reverse_tile(&spec, body.clone()));
+                    Cost::from_child_costs(&reversed_tiled_loop, &[c.clone()])
+                });
+
+                // Compare the sub-Specs found with each lookup method have equal costs.
+                assert_eq!(
+                    final_cost_by_intensity,
+                    final_cost_by_enum,
+                    "Costs differ between intensity- and enum.-composed Specs {} and {}. (Body costs are {:?} and {:?}.)",
+                    best_by_intensity
+                        .as_ref()
+                        .map(|v| format!("{}", v.0))
+                        .unwrap_or(String::from("None")),
+                    best_by_enum
+                        .as_ref()
+                        .map(|v| format!("{}", v.0))
+                        .unwrap_or(String::from("None")),
+                    best_by_intensity.as_ref().map(|v| &v.1),
+                    best_by_enum.as_ref().map(|v| &v.1),
+                );
+            }
         }
     }
 

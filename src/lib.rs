@@ -14,6 +14,7 @@ pub mod nameenv;
 mod ndarray;
 pub mod opaque_symbol;
 pub mod pprint;
+mod reverse_tiling;
 pub mod scheduling;
 pub mod scheduling_sugar;
 pub mod search;

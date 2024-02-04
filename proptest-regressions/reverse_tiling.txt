@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b508ed5f48247d1395ff6d8b511490b0b861a88977d922e5a9da0e876f6c6ed5 # shrinks to spec = Spec(Primitive(PrimitiveBasics { typ: Matmul { accum: true }, spec_shape: [1, 2, 2], dtype: Uint8 }, [TensorSpecAux { contig: 0, level: RF, layout: New([(0, None), (1, None)]), vector_size: None }, TensorSpecAux { contig: 0, level: RF, layout: New([(0, None), (1, None)]), vector_size: None }, TensorSpecAux { contig: 0, level: RF, layout: New([(0, None), (1, None)]), vector_size: None }], true), Standard(MemVec([1, 4, 9, 14])))
+cc 938dfde9600824604169e05d259a3ea5548f3c6c51ab5ded2d62dcbc21e129d1 # shrinks to spec = Spec(Primitive(PrimitiveBasics { typ: Matmul { accum: true }, spec_shape: [1, 2, 1], dtype: Uint32 }, [TensorSpecAux { contig: 0, level: RF, layout: New([(0, None), (1, None)]), vector_size: None }, TensorSpecAux { contig: 1, level: RF, layout: New([(0, None), (1, None)]), vector_size: None }, TensorSpecAux { contig: 2, level: RF, layout: New([(0, None), (1, None)]), vector_size: None }], true), Standard(MemVec([5, 10, 15, 22])))

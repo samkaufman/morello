@@ -658,7 +658,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     pub fn actions(&self) -> impl ActionSeq<Tgt> + '_ {
-        let iter = self.tile_out_actions();
+        let iter = self.tiling_and_to_serial_actions().into_iter();
         let iter = iter.chain(self.move_actions());
         let iter = iter.chain(Tgt::actions(self));
 
@@ -675,9 +675,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Matmul { accum } if !*accum => {
                     iter.chain(once(Action::ToAccum)).collect::<Vec<_>>()
                 }
-                PrimitiveSpecType::Matmul { accum } if *accum => {
-                    iter.chain(self.split_actions()).collect::<Vec<_>>()
-                }
+                PrimitiveSpecType::Matmul { accum } if *accum => iter.collect::<Vec<_>>(),
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
                         if self.can_spatial_split() {
@@ -700,6 +698,23 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 iter.chain(self.peel_actions()).collect::<Vec<_>>()
             }
         }
+    }
+
+    pub fn tiling_and_to_serial_actions(&self) -> impl ActionSeq<Tgt> + '_ {
+        let mut actions = self.tile_out_actions().collect::<Vec<_>>();
+        match &self {
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, ..) => match typ {
+                PrimitiveSpecType::Matmul { accum } if *accum => {
+                    actions.extend(self.split_actions());
+                }
+                _ => {}
+            },
+            LogicalSpec::Compose { .. } => {}
+        };
+        // if !self.serial_only() {
+        //     actions.push(Action::ToSerialOnly);
+        // }
+        actions
     }
 
     fn can_spatial_split(&self) -> bool {
@@ -1165,6 +1180,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             LogicalSpec::Compose { .. } => todo!(),
         }
     }
+
+    pub(crate) fn shape_volume(&self) -> DimSize {
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => basics.spec_shape.iter().copied().product(),
+            LogicalSpec::Compose { .. } => todo!(),
+        }
+    }
 }
 
 impl<Tgt: Target> Display for LogicalSpec<Tgt> {
@@ -1353,7 +1375,15 @@ impl BiMap for PrimitiveBasicsBimap {
                 (SpecKey::Matmul { dtype: *dtype }, v)
             }
             PrimitiveSpecType::Conv { accum } => {
-                let v = once(!accum as _).chain(shifted_shape).collect();
+                let mut v: SmallVec<_> = once(!accum as _).chain(shifted_shape).collect();
+
+                // Conv's image dimensions must be larger than or equal to the corresponding filter
+                // dimensions (the final two dimensions in `v`/`shifted_shape`), so we'll subtract
+                // the the filter sizes from the image sizes, thereby normalizing the image dims. to
+                // zero.
+                v[4] -= v[6];
+                v[5] -= v[7];
+
                 (SpecKey::Conv { dtype: *dtype }, v)
             }
             PrimitiveSpecType::Move => (SpecKey::Move { dtype: *dtype }, shifted_shape.collect()),
@@ -1371,17 +1401,28 @@ impl BiMap for PrimitiveBasicsBimap {
                     SpecKey::Conv { .. } => PrimitiveSpecType::Conv { accum },
                     _ => unreachable!(),
                 };
-                let spec_shape = v.iter().skip(1);
-                let spec_shape = spec_shape.map(|&d| {
-                    if self.binary_scale_shapes {
-                        DimSize::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
-                    } else {
-                        d + 1
-                    }
-                });
+                let mut spec_shape = v
+                    .iter()
+                    .skip(1)
+                    .map(|&d| {
+                        if self.binary_scale_shapes {
+                            DimSize::try_from((bit_length_inverse(d) + 1).next_power_of_two())
+                                .unwrap()
+                        } else {
+                            d + 1
+                        }
+                    })
+                    .collect::<SmallVec<_>>();
+
+                // Reverse the normalization of image dimensions (see `apply`).
+                if matches!(key, SpecKey::Conv { .. }) {
+                    spec_shape[3] += spec_shape[5];
+                    spec_shape[4] += spec_shape[6];
+                }
+
                 PrimitiveBasics {
                     typ,
-                    spec_shape: spec_shape.collect(),
+                    spec_shape,
                     dtype: *dtype,
                 }
             }

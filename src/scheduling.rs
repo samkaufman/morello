@@ -42,6 +42,7 @@ pub enum Action<Tgt: Target> {
         destination_vector_size: Option<DimSize>,
     },
     ToAccum,
+    ToSerialOnly,
     Peel {
         layout: Layout,
         level: Tgt::Level,
@@ -62,18 +63,6 @@ pub enum ApplyError {
 }
 
 impl<Tgt: Target> Action<Tgt> {
-    pub fn child_count(&self) -> usize {
-        match self {
-            Action::TileOut { .. } => 1,
-            Action::Split { .. } => 1,
-            Action::ToAccum => 2,
-            Action::SpatialSplit => 1,
-            Action::Place(_) => 0,
-            Action::Move { .. } => unimplemented!(),
-            Action::Peel { .. } => 2,
-        }
-    }
-
     pub fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt, ()>, ApplyError> {
         self.apply_with_aux(spec, ())
     }
@@ -693,6 +682,14 @@ impl<Tgt: Target> Action<Tgt> {
                     parameters: operands,
                     aux,
                 }))
+            }
+            Action::ToSerialOnly => {
+                assert!(!node_spec.serial_only());
+                let mut new_spec = spec.clone();
+                new_spec.0.set_serial_only(true);
+                // TODO: Instead of `default_app`, do we need to do something with the
+                //   original operands?
+                Ok(ImplNode::SpecApp(SpecApp::default_app(new_spec)))
             }
             Action::Place(k) => Ok(ImplNode::Kernel(Kernel {
                 kernel_type: *k,
