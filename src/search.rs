@@ -13,6 +13,20 @@ use crate::scheduling::ApplyError;
 use crate::spec::Spec;
 use crate::target::Target;
 
+struct TopDownSearch<'d, Tgt, D>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    D: Database<'d> + Send + Sync,
+{
+    db: &'d D,
+    top_k: usize,
+    thread_idx: usize,
+    thread_count: usize,
+    _phantom: std::marker::PhantomData<Tgt>,
+}
+
 struct ImplReducer<'a> {
     results: SmallVec<[(ActionIdx, Cost); 1]>,
     top_k: usize,
@@ -43,7 +57,14 @@ where
         .map(|j| j.get())
         .unwrap_or_else(rayon::current_num_threads);
     if thread_count == 1 {
-        return top_down_spec(db, &canonical_goal, top_k, 0, 1);
+        let search = TopDownSearch::<'d, Tgt, D> {
+            db,
+            top_k,
+            thread_idx: 0,
+            thread_count: 1,
+            _phantom: std::marker::PhantomData,
+        };
+        return search.run_spec(&canonical_goal);
     }
 
     let tasks = (0..thread_count)
@@ -53,133 +74,125 @@ where
     // deterministic results.
     tasks
         .into_par_iter()
-        .map(|(i, g)| top_down_spec(db, &g, top_k, i, thread_count))
+        .map(|(i, g)| {
+            let search = TopDownSearch::<'d, Tgt, D> {
+                db,
+                top_k,
+                thread_idx: i,
+                thread_count,
+                _phantom: std::marker::PhantomData,
+            };
+            search.run_spec(&g)
+        })
         .collect::<Vec<_>>()
         .pop()
         .unwrap()
 }
 
-fn top_down_spec<'d, Tgt, D>(
-    db: &'d D,
-    goal: &Spec<Tgt>,
-    top_k: usize,
-    thread_idx: usize,
-    thread_count: usize,
-) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64)
+impl<'d, Tgt, D> TopDownSearch<'d, Tgt, D>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    D: Database<'d>,
+    D: Database<'d> + Send + Sync,
 {
-    if top_k > 1 {
-        unimplemented!("Search for top_k > 1 not yet implemented.");
-    }
-
-    // First, check if the Spec is already in the database.
-    let get_result = db.get_with_preference(goal);
-    let mut preferences: &[_] = &[];
-    if let GetPreference::Hit(v) = get_result {
-        return (v.0, 1, 0);
-    }
-    if let GetPreference::Miss(Some(p)) = &get_result {
-        preferences = p;
-    }
-
-    let mut hits = 0u64;
-    let mut misses = 1u64;
-
-    // Enumerate action applications, computing their costs from their childrens' costs.
-    let mut reducer = ImplReducer::new(top_k, preferences);
-
-    let all_actions = goal.0.actions().into_iter().collect::<Vec<_>>();
-
-    let initial_skip = thread_idx * all_actions.len() / thread_count;
-    for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
-        let action = &all_actions[action_idx];
-        let partial_impl = match action.apply(goal) {
-            Ok(imp) => imp,
-            Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => continue,
-            Err(ApplyError::SpecNotCanonical) => panic!("Goal was not canonical: {goal}"),
-        };
-
-        // Let top_down_impl compute the final cost of completing this Impl.
-        let (costs, action_impl_hits, action_impl_misses) =
-            top_down_impl(db, &partial_impl, top_k, thread_idx, thread_count);
-        hits += action_impl_hits;
-        misses += action_impl_misses;
-        if costs.is_empty() {
-            continue;
+    fn run_spec(&self, goal: &Spec<Tgt>) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64) {
+        if self.top_k > 1 {
+            unimplemented!("Search for top_k > 1 not yet implemented.");
         }
 
-        let MemoryLimits::Standard(goal_vec) = &goal.1;
-        debug_assert!(
-            costs[0]
-                .peaks
-                .iter()
-                .zip(goal_vec.iter())
-                .all(|(a, b)| a <= b),
-            "While synthesizing {:?}, action yielded memory \
-            bound-violating {:?} with peak memory {:?}",
-            goal,
-            partial_impl,
-            costs[0].peaks
-        );
-        reducer.insert(
-            action_idx.try_into().unwrap(),
-            costs.into_iter().exactly_one().unwrap(),
-        );
-    }
+        // First, check if the Spec is already in the database.
+        let get_result = self.db.get_with_preference(goal);
+        let mut preferences: &[_] = &[];
+        if let GetPreference::Hit(v) = get_result {
+            return (v.0, 1, 0);
+        }
+        if let GetPreference::Miss(Some(p)) = &get_result {
+            preferences = p;
+        }
 
-    // Copy into the memo. table and return.
-    let final_result = reducer.finalize();
-    db.put(goal.clone(), final_result.clone());
-    (final_result, hits, misses)
-}
+        let mut hits = 0u64;
+        let mut misses = 1u64;
 
-fn top_down_impl<'d, Tgt, D, Aux>(
-    db: &'d D,
-    partial_impl: &ImplNode<Tgt, Aux>,
-    top_k: usize,
-    thread_idx: usize,
-    thread_count: usize,
-) -> (SmallVec<[Cost; 1]>, u64, u64)
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    D: Database<'d>,
-    Aux: Clone,
-{
-    if let ImplNode::SpecApp(spec_app) = partial_impl {
-        let (action_costs, hits, misses) =
-            top_down_spec(db, &spec_app.0, top_k, thread_idx, thread_count);
-        (
-            action_costs.into_iter().map(|(_, c)| c).collect(),
-            hits,
-            misses,
-        )
-    } else {
-        let mut hits = 0;
-        let mut misses = 0;
-        let mut child_costs: SmallVec<[Cost; 3]> =
-            SmallVec::with_capacity(partial_impl.children().len());
-        for child_node in partial_impl.children() {
-            let (mut child_results, subhits, submisses) =
-                top_down_impl(db, child_node, top_k, thread_idx, thread_count);
-            hits += subhits;
-            misses += submisses;
-            if child_results.is_empty() {
-                // Unsatisfiable.
-                return (smallvec![], hits, misses);
-            } else if child_results.len() == 1 {
-                child_costs.append(&mut child_results);
-            } else {
-                todo!("support k > 1");
+        // Enumerate action applications, computing their costs from their childrens' costs.
+        let mut reducer = ImplReducer::new(self.top_k, preferences);
+
+        let all_actions = goal.0.actions().into_iter().collect::<Vec<_>>();
+
+        let initial_skip = self.thread_idx * all_actions.len() / self.thread_count;
+        for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
+            let action = &all_actions[action_idx];
+            let partial_impl = match action.apply(goal) {
+                Ok(imp) => imp,
+                Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => continue,
+                Err(ApplyError::SpecNotCanonical) => panic!("Goal was not canonical: {goal}"),
+            };
+
+            // Let top_down_impl compute the final cost of completing this Impl.
+            let (costs, action_impl_hits, action_impl_misses) = self.run_impl(&partial_impl);
+            hits += action_impl_hits;
+            misses += action_impl_misses;
+            if costs.is_empty() {
+                continue;
             }
+
+            let MemoryLimits::Standard(goal_vec) = &goal.1;
+            debug_assert!(
+                costs[0]
+                    .peaks
+                    .iter()
+                    .zip(goal_vec.iter())
+                    .all(|(a, b)| a <= b),
+                "While synthesizing {:?}, action yielded memory \
+                bound-violating {:?} with peak memory {:?}",
+                goal,
+                partial_impl,
+                costs[0].peaks
+            );
+            reducer.insert(
+                action_idx.try_into().unwrap(),
+                costs.into_iter().exactly_one().unwrap(),
+            );
         }
-        let partial_impl_cost = Cost::from_child_costs(partial_impl, &child_costs);
-        (smallvec![partial_impl_cost], hits, misses)
+
+        // Copy into the memo. table and return.
+        let final_result = reducer.finalize();
+        self.db.put(goal.clone(), final_result.clone());
+        (final_result, hits, misses)
+    }
+
+    fn run_impl<A>(&self, partial_impl: &ImplNode<Tgt, A>) -> (SmallVec<[Cost; 1]>, u64, u64)
+    where
+        A: Clone,
+    {
+        if let ImplNode::SpecApp(spec_app) = partial_impl {
+            let (action_costs, hits, misses) = self.run_spec(&spec_app.0);
+            (
+                action_costs.into_iter().map(|(_, c)| c).collect(),
+                hits,
+                misses,
+            )
+        } else {
+            let mut hits = 0;
+            let mut misses = 0;
+            let mut child_costs: SmallVec<[Cost; 3]> =
+                SmallVec::with_capacity(partial_impl.children().len());
+            for child_node in partial_impl.children() {
+                let (mut child_results, subhits, submisses) = self.run_impl(child_node);
+                hits += subhits;
+                misses += submisses;
+                if child_results.is_empty() {
+                    // Unsatisfiable.
+                    return (smallvec![], hits, misses);
+                } else if child_results.len() == 1 {
+                    child_costs.append(&mut child_results);
+                } else {
+                    todo!("support k > 1");
+                }
+            }
+            let partial_impl_cost = Cost::from_child_costs(partial_impl, &child_costs);
+            (smallvec![partial_impl_cost], hits, misses)
+        }
     }
 }
 
