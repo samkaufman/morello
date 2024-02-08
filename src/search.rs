@@ -24,6 +24,8 @@ where
     top_k: usize,
     thread_idx: usize,
     thread_count: usize,
+    hits: u64,
+    misses: u64,
     _phantom: std::marker::PhantomData<Tgt>,
 }
 
@@ -57,14 +59,16 @@ where
         .map(|j| j.get())
         .unwrap_or_else(rayon::current_num_threads);
     if thread_count == 1 {
-        let search = TopDownSearch::<'d, Tgt, D> {
+        let mut search = TopDownSearch::<'d, Tgt, D> {
             db,
             top_k,
             thread_idx: 0,
             thread_count: 1,
+            hits: 0,
+            misses: 1,
             _phantom: std::marker::PhantomData,
         };
-        return search.run_spec(&canonical_goal);
+        return (search.run_spec(&canonical_goal), search.hits, search.misses);
     }
 
     let tasks = (0..thread_count)
@@ -75,14 +79,16 @@ where
     tasks
         .into_par_iter()
         .map(|(i, g)| {
-            let search = TopDownSearch::<'d, Tgt, D> {
+            let mut search = TopDownSearch::<'d, Tgt, D> {
                 db,
                 top_k,
                 thread_idx: i,
                 thread_count,
+                hits: 0,
+                misses: 1,
                 _phantom: std::marker::PhantomData,
             };
-            search.run_spec(&g)
+            (search.run_spec(&g), search.hits, search.misses)
         })
         .collect::<Vec<_>>()
         .pop()
@@ -96,7 +102,7 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d> + Send + Sync,
 {
-    fn run_spec(&self, goal: &Spec<Tgt>) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64) {
+    fn run_spec(&mut self, goal: &Spec<Tgt>) -> SmallVec<[(ActionIdx, Cost); 1]> {
         if self.top_k > 1 {
             unimplemented!("Search for top_k > 1 not yet implemented.");
         }
@@ -105,14 +111,13 @@ where
         let get_result = self.db.get_with_preference(goal);
         let mut preferences: &[_] = &[];
         if let GetPreference::Hit(v) = get_result {
-            return (v.0, 1, 0);
+            self.hits += 1;
+            return v.0;
         }
+        self.misses += 1;
         if let GetPreference::Miss(Some(p)) = &get_result {
             preferences = p;
         }
-
-        let mut hits = 0u64;
-        let mut misses = 1u64;
 
         // Enumerate action applications, computing their costs from their childrens' costs.
         let mut reducer = ImplReducer::new(self.top_k, preferences);
@@ -129,9 +134,7 @@ where
             };
 
             // Let top_down_impl compute the final cost of completing this Impl.
-            let (costs, action_impl_hits, action_impl_misses) = self.run_impl(&partial_impl);
-            hits += action_impl_hits;
-            misses += action_impl_misses;
+            let costs = self.run_impl(&partial_impl);
             if costs.is_empty() {
                 continue;
             }
@@ -158,32 +161,24 @@ where
         // Copy into the memo. table and return.
         let final_result = reducer.finalize();
         self.db.put(goal.clone(), final_result.clone());
-        (final_result, hits, misses)
+        final_result
     }
 
-    fn run_impl<A>(&self, partial_impl: &ImplNode<Tgt, A>) -> (SmallVec<[Cost; 1]>, u64, u64)
+    fn run_impl<A>(&mut self, partial_impl: &ImplNode<Tgt, A>) -> SmallVec<[Cost; 1]>
     where
         A: Clone,
     {
         if let ImplNode::SpecApp(spec_app) = partial_impl {
-            let (action_costs, hits, misses) = self.run_spec(&spec_app.0);
-            (
-                action_costs.into_iter().map(|(_, c)| c).collect(),
-                hits,
-                misses,
-            )
+            let action_costs = self.run_spec(&spec_app.0);
+            action_costs.into_iter().map(|(_, c)| c).collect()
         } else {
-            let mut hits = 0;
-            let mut misses = 0;
             let mut child_costs: SmallVec<[Cost; 3]> =
                 SmallVec::with_capacity(partial_impl.children().len());
             for child_node in partial_impl.children() {
-                let (mut child_results, subhits, submisses) = self.run_impl(child_node);
-                hits += subhits;
-                misses += submisses;
+                let mut child_results = self.run_impl(child_node);
                 if child_results.is_empty() {
                     // Unsatisfiable.
-                    return (smallvec![], hits, misses);
+                    return smallvec![];
                 } else if child_results.len() == 1 {
                     child_costs.append(&mut child_results);
                 } else {
@@ -191,7 +186,7 @@ where
                 }
             }
             let partial_impl_cost = Cost::from_child_costs(partial_impl, &child_costs);
-            (smallvec![partial_impl_cost], hits, misses)
+            smallvec![partial_impl_cost]
         }
     }
 }
