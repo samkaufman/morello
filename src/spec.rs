@@ -1347,7 +1347,13 @@ impl BiMap for PrimitiveBasicsBimap {
                 (SpecKey::Matmul { dtype: *dtype }, v)
             }
             PrimitiveSpecType::Conv { accum } => {
-                let v = once(!accum as _).chain(shifted_shape).collect();
+                let mut v: SmallVec<_> = once(!accum as _).chain(shifted_shape).collect();
+                // Conv's image dimensions must be larger than or equal to the corresponding filter
+                // dimensions (the final two dimensions in `v`/`shifted_shape`), so we'll subtract
+                // the the filter sizes from the image sizes, thereby normalizing the image dims. to
+                // zero.
+                v[4] -= v[6];
+                v[5] -= v[7];
                 (SpecKey::Conv { dtype: *dtype }, v)
             }
             PrimitiveSpecType::Move => (SpecKey::Move { dtype: *dtype }, shifted_shape.collect()),
@@ -1365,17 +1371,25 @@ impl BiMap for PrimitiveBasicsBimap {
                     SpecKey::Conv { .. } => PrimitiveSpecType::Conv { accum },
                     _ => unreachable!(),
                 };
-                let spec_shape = v.iter().skip(1);
-                let spec_shape = spec_shape.map(|&d| {
+
+                let mut spec_shape = v.iter().skip(1).copied().collect::<SmallVec<_>>();
+                // Reverse the normalization of image dimensions (see `apply`).
+                if matches!(key, SpecKey::Conv { .. }) {
+                    spec_shape[3] += spec_shape[5];
+                    spec_shape[4] += spec_shape[6];
+                }
+                for d in &mut spec_shape[..] {
                     if self.binary_scale_shapes {
-                        DimSize::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
+                        *d = DimSize::try_from((bit_length_inverse(*d) + 1).next_power_of_two())
+                            .unwrap();
                     } else {
-                        d + 1
+                        *d += 1;
                     }
-                });
+                }
+
                 PrimitiveBasics {
                     typ,
-                    spec_shape: spec_shape.collect(),
+                    spec_shape,
                     dtype: *dtype,
                 }
             }
@@ -1752,6 +1766,17 @@ mod tests {
             spec in any::<Spec<ArmTarget>>()
         ) {
             shared_test_no_action_produces_same_spec_with_higher_memory_limit(&spec)
+        }
+
+        #[test]
+        fn test_primitivebasicsbimap_is_invertible(basics in any::<PrimitiveBasics>()) {
+            // TODO: Also test binary_scale_shapes = true
+            let bimap = PrimitiveBasicsBimap {
+                binary_scale_shapes: false,
+            };
+            let projection = BiMap::apply(&bimap, &basics);
+            let reversed = BiMap::apply_inverse(&bimap, &projection);
+            assert_eq!(basics, reversed);
         }
     }
 
