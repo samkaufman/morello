@@ -27,6 +27,7 @@ pub struct Kernel<Tgt: Target, Aux> {
 pub enum KernelType {
     Mult,
     BroadcastVecMult,
+    TwoVecBroadcastVecMult,
     ValueAssign,
     VectorAssign,
     MemsetZero,
@@ -49,7 +50,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
     fn memory_allocated(&self) -> MemoryAllocation {
         match self.kernel_type {
-            KernelType::BroadcastVecMult => {
+            KernelType::BroadcastVecMult | KernelType::TwoVecBroadcastVecMult => {
                 let vec_tensor_spec = self.arguments[1].spec();
                 let vb = u64::from(vec_tensor_spec.vector_size().unwrap())
                     * u64::from(vec_tensor_spec.dtype().size());
@@ -67,7 +68,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
     fn compute_main_cost(&self, _child_costs: &[MainCost]) -> MainCost {
         match self.kernel_type {
-            KernelType::BroadcastVecMult => {
+            KernelType::BroadcastVecMult | KernelType::TwoVecBroadcastVecMult => {
                 let vector_size = self.arguments[1].spec().vector_size().unwrap();
                 let volume = self.arguments[1].shape().iter().product::<u32>();
                 debug_assert_eq!(volume % vector_size, 0);
@@ -110,6 +111,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
         let name = match self.kernel_type {
             KernelType::Mult => "Mult",
             KernelType::BroadcastVecMult => "BroadcastVecMult",
+            KernelType::TwoVecBroadcastVecMult => "TwoVecBroadcastVecMult",
             KernelType::ValueAssign => "ValueAssign",
             KernelType::VectorAssign => "VectorAssign",
             KernelType::MemsetZero => "MemsetZero",
@@ -140,7 +142,9 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 impl KernelType {
     pub const fn argument_count(&self) -> u8 {
         match self {
-            KernelType::Mult | KernelType::BroadcastVecMult => 3,
+            KernelType::Mult
+            | KernelType::BroadcastVecMult
+            | KernelType::TwoVecBroadcastVecMult => 3,
             KernelType::ValueAssign | KernelType::VectorAssign => 2,
             KernelType::MemsetZero | KernelType::VectorZero => 1,
             KernelType::CacheAccess => todo!(),

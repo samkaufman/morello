@@ -625,6 +625,48 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
+                    KernelType::TwoVecBroadcastVecMult => {
+                        let vector_size = arguments[2].spec().vector_size().unwrap();
+                        let volume = arguments[2].spec().shape().iter().product::<u32>();
+                        debug_assert_eq!(volume % vector_size, 0);
+                        let vector_count = volume / vector_size;
+
+                        for vector_idx in 0..vector_count {
+                            let exprs =
+                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                                    0 => self.c_index_ptr(a, b, None),
+                                    1 | 2 => self.c_index_vec(
+                                        a,
+                                        &(b.clone()
+                                            + i32::try_from(vector_idx * vector_size).unwrap()),
+                                        None,
+                                    ),
+                                    _ => unreachable!(),
+                                });
+
+                            // TODO: Lift the broadcast out of this loop.
+                            let broadcast_name = self.namer.fresh_name();
+                            writeln!(
+                                w,
+                                "{}__m256i {} = _mm256_set1_epi16(*(int16_t *)({}));",
+                                indent(depth),
+                                broadcast_name,
+                                exprs[0]
+                            )?;
+
+                            // matmul (k=2) the broadcast vector with the rhs vectors.
+                            writeln!(
+                                w,
+                                "{}{} = _mm256_add_epi16({}, _mm256_maddubs_epi16({}, {}));",
+                                indent(depth),
+                                exprs[2],
+                                exprs[2],
+                                broadcast_name,
+                                exprs[1]
+                            )?;
+                        }
+                        Ok(())
+                    }
                     KernelType::CacheAccess => Ok(()),
                 }
             }

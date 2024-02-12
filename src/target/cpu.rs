@@ -152,6 +152,9 @@ impl<T: CpuTarget> Target for T {
                         if broadcastvecmult_applies_to_operands(&spec.parameters()) {
                             microkernels.push(Action::Place(KernelType::BroadcastVecMult));
                         }
+                        if twovecbroadcastvecmult_applies_to_operands(&spec.parameters()) {
+                            microkernels.push(Action::Place(KernelType::TwoVecBroadcastVecMult));
+                        }
                         Box::new(microkernels.into_iter())
                     } else {
                         Box::new(iter::empty())
@@ -420,6 +423,41 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
     {
         return false;
     }
+    true
+}
+
+pub fn twovecbroadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
+    operands: &[TensorSpec<Tgt>],
+) -> bool {
+    let lhs_volume = operands[1].shape().iter().product::<DimSize>();
+    let lhs_level = operands[0].level();
+    let lhs_contig = operands[0].is_contiguous();
+    if lhs_volume != 2 || lhs_level != CpuMemoryLevel::L1 || !lhs_contig {
+        return false;
+    }
+
+    let lhs_dt = operands[0].dtype();
+    let rhs_dtype = operands[1].dtype();
+    let out_dtype = operands[2].dtype();
+    if lhs_dt != Dtype::Uint8 || rhs_dtype != Dtype::Sint8 || out_dtype != Dtype::Sint16 {
+        return false;
+    }
+
+    // Second and third parameters must be in VRF, vector size multiples, aligned, and contig.
+    for i in 1..3 {
+        if operands[i].level() != CpuMemoryLevel::VRF {
+            return false;
+        }
+        if !operands[i].aligned() || !operands[i].is_contiguous() {
+            return false;
+        }
+
+        let volume = operands[i].shape().iter().product::<DimSize>();
+        if volume % operands[i].vector_size().unwrap() != 0 {
+            return false;
+        }
+    }
+
     true
 }
 
