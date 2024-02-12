@@ -5,7 +5,23 @@ use crate::target::{cpu::CpuTarget, TargetId};
 use serde::Serialize;
 use std::fmt::Debug;
 
-const X86_VEC_TYPES: [VecType; 4] = [
+const X86_VEC_TYPES: [VecType; 8] = [
+    VecType {
+        dtype: Dtype::Sint32,
+        value_cnt: 8,
+        name: "vsi8",
+        native_type_name: "__m256i",
+        load_fn: "_mm256_loadu_si256",
+        store_fn: "_mm256_storeu_si256",
+    },
+    VecType {
+        dtype: Dtype::Sint32,
+        value_cnt: 4,
+        name: "vsi4",
+        native_type_name: "__m128i",
+        load_fn: "_mm_loadu_si128",
+        store_fn: "_mm_storeu_si128",
+    },
     VecType {
         dtype: Dtype::Uint32,
         value_cnt: 8,
@@ -21,6 +37,22 @@ const X86_VEC_TYPES: [VecType; 4] = [
         native_type_name: "__m128i",
         load_fn: "_mm_loadu_si128",
         store_fn: "_mm_storeu_si128",
+    },
+    VecType {
+        dtype: Dtype::Sint8,
+        value_cnt: 32,
+        name: "vsb32",
+        native_type_name: "__m256i",
+        load_fn: "_mm_loadu_si128",
+        store_fn: "_mm_storeu_si128",
+    },
+    VecType {
+        dtype: Dtype::Sint8,
+        value_cnt: 16,
+        name: "vsb16",
+        native_type_name: "__m128i",
+        load_fn: "_mm256_loadu_si256",
+        store_fn: "_mm256_storeu_si256",
     },
     VecType {
         dtype: Dtype::Uint8,
@@ -48,7 +80,7 @@ impl CpuTarget for X86Target {
         TargetId::X86
     }
 
-    fn vec_types() -> &'static [VecType; 4] {
+    fn vec_types() -> &'static [VecType; 8] {
         &X86_VEC_TYPES
     }
 }

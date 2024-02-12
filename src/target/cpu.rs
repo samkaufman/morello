@@ -22,7 +22,7 @@ pub(super) trait CpuTarget:
     Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static
 {
     fn target_id() -> TargetId;
-    fn vec_types() -> &'static [VecType; 4];
+    fn vec_types() -> &'static [VecType; 8];
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -187,7 +187,7 @@ impl<T: CpuTarget> Target for T {
         <Self as CpuTarget>::target_id()
     }
 
-    fn vec_types() -> &'static [VecType; 4] {
+    fn vec_types() -> &'static [VecType; 8] {
         <Self as CpuTarget>::vec_types()
     }
 }

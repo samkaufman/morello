@@ -19,7 +19,9 @@ impl BuiltArtifact {
         let test_result = match &spec.0 {
             LogicalSpec::Primitive(PrimitiveBasics { dtype, .. }, _, _) => match dtype {
                 Dtype::Uint8 => test_artifact_correct_inner::<Tgt, u8>(spec, self),
+                Dtype::Sint8 => test_artifact_correct_inner::<Tgt, i8>(spec, self),
                 Dtype::Uint32 => test_artifact_correct_inner::<Tgt, u32>(spec, self),
+                Dtype::Sint32 => test_artifact_correct_inner::<Tgt, i32>(spec, self),
             },
             LogicalSpec::Compose { .. } => todo!(),
         };

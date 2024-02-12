@@ -67,26 +67,50 @@ fn main() -> Result<()> {
                     dtype: Dtype::Uint8,
                 } => 0,
                 SpecKey::Zero {
-                    dtype: Dtype::Uint32,
+                    dtype: Dtype::Sint8,
                 } => 1,
-                SpecKey::Move {
-                    dtype: Dtype::Uint8,
-                } => 2,
-                SpecKey::Move {
+                SpecKey::Zero {
                     dtype: Dtype::Uint32,
+                } => 2,
+                SpecKey::Zero {
+                    dtype: Dtype::Sint32,
                 } => 3,
-                SpecKey::Matmul {
+                SpecKey::Move {
                     dtype: Dtype::Uint8,
                 } => 4,
+                SpecKey::Move {
+                    dtype: Dtype::Sint8,
+                } => 5,
+                SpecKey::Move {
+                    dtype: Dtype::Uint32,
+                } => 6,
+                SpecKey::Move {
+                    dtype: Dtype::Sint32,
+                } => 7,
+                SpecKey::Matmul {
+                    dtype: Dtype::Uint8,
+                } => 8,
+                SpecKey::Matmul {
+                    dtype: Dtype::Sint8,
+                } => 9,
                 SpecKey::Matmul {
                     dtype: Dtype::Uint32,
-                } => 5,
+                } => 10,
+                SpecKey::Matmul {
+                    dtype: Dtype::Sint32,
+                } => 11,
                 SpecKey::Conv {
                     dtype: Dtype::Uint8,
-                } => 6,
+                } => 12,
+                SpecKey::Conv {
+                    dtype: Dtype::Sint8,
+                } => 13,
                 SpecKey::Conv {
                     dtype: Dtype::Uint32,
-                } => 7,
+                } => 14,
+                SpecKey::Conv {
+                    dtype: Dtype::Sint32,
+                } => 15,
             };
             (kind_int, factored_pt.clone(), block_key.clone())
         },
