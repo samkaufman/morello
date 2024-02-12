@@ -50,7 +50,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn target_id() -> TargetId;
 
     /// Get corresponding vector types
-    fn vec_types() -> &'static [VecType; 8];
+    fn vec_types() -> &'static [VecType; 12];
 }
 
 pub trait MemoryLevel:

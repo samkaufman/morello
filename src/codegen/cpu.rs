@@ -942,7 +942,7 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
 }
 
 fn get_vector(
-    vec_types: &'static [VecType; 8],
+    vec_types: &'static [VecType; 12],
     dtype: Dtype,
     vector_size: DimSize,
 ) -> &'static VecType {
@@ -1007,6 +1007,7 @@ fn zero_points(expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<BufferVar> {
 const fn endian_convert_fn(dtype: Dtype) -> &'static str {
     match dtype {
         Dtype::Uint8 | Dtype::Sint8 => "",
+        Dtype::Uint16 | Dtype::Sint16 => "LE_TO_CPU16",
         Dtype::Uint32 | Dtype::Sint32 => "LE_TO_CPU32",
     }
 }

@@ -5,7 +5,7 @@ use crate::target::{cpu::CpuTarget, TargetId};
 use serde::Serialize;
 use std::fmt::Debug;
 
-const ARM_VEC_TYPES: [VecType; 8] = [
+const ARM_VEC_TYPES: [VecType; 12] = [
     VecType {
         dtype: Dtype::Sint32,
         value_cnt: 8,
@@ -37,6 +37,38 @@ const ARM_VEC_TYPES: [VecType; 8] = [
         native_type_name: "uint32x4_t",
         load_fn: "vld1q_u32",
         store_fn: "vst1q_u32",
+    },
+    VecType {
+        dtype: Dtype::Sint16,
+        value_cnt: 8,
+        name: "vsi8",
+        native_type_name: "int16x4x2_t",
+        load_fn: "vld2q_s16",
+        store_fn: "vst2q_s16",
+    },
+    VecType {
+        dtype: Dtype::Sint16,
+        value_cnt: 4,
+        name: "vsi4",
+        native_type_name: "int16x4_t",
+        load_fn: "vld1q_s16",
+        store_fn: "vst1q_s16",
+    },
+    VecType {
+        dtype: Dtype::Uint16,
+        value_cnt: 8,
+        name: "vui8",
+        native_type_name: "uint16x4x2_t",
+        load_fn: "vld2q_u16",
+        store_fn: "vst2q_u16",
+    },
+    VecType {
+        dtype: Dtype::Uint16,
+        value_cnt: 4,
+        name: "vui4",
+        native_type_name: "uint16x4_t",
+        load_fn: "vld1q_u16",
+        store_fn: "vst1q_u16",
     },
     VecType {
         dtype: Dtype::Sint8,
@@ -80,7 +112,7 @@ impl CpuTarget for ArmTarget {
         TargetId::Arm
     }
 
-    fn vec_types() -> &'static [VecType; 8] {
+    fn vec_types() -> &'static [VecType; 12] {
         &ARM_VEC_TYPES
     }
 }

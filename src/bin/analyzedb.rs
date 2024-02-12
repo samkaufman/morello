@@ -62,56 +62,21 @@ fn main() -> Result<()> {
     // First, scan the blocks to sort them.
     let keys_sorted = db.blocks.iter().map(|b| b.key().clone()).sorted_by_key(
         |((spec_key, factored_pt), block_key)| {
-            let kind_int: u8 = match spec_key {
-                SpecKey::Zero {
-                    dtype: Dtype::Uint8,
-                } => 0,
-                SpecKey::Zero {
-                    dtype: Dtype::Sint8,
-                } => 1,
-                SpecKey::Zero {
-                    dtype: Dtype::Uint32,
-                } => 2,
-                SpecKey::Zero {
-                    dtype: Dtype::Sint32,
-                } => 3,
-                SpecKey::Move {
-                    dtype: Dtype::Uint8,
-                } => 4,
-                SpecKey::Move {
-                    dtype: Dtype::Sint8,
-                } => 5,
-                SpecKey::Move {
-                    dtype: Dtype::Uint32,
-                } => 6,
-                SpecKey::Move {
-                    dtype: Dtype::Sint32,
-                } => 7,
-                SpecKey::Matmul {
-                    dtype: Dtype::Uint8,
-                } => 8,
-                SpecKey::Matmul {
-                    dtype: Dtype::Sint8,
-                } => 9,
-                SpecKey::Matmul {
-                    dtype: Dtype::Uint32,
-                } => 10,
-                SpecKey::Matmul {
-                    dtype: Dtype::Sint32,
-                } => 11,
-                SpecKey::Conv {
-                    dtype: Dtype::Uint8,
-                } => 12,
-                SpecKey::Conv {
-                    dtype: Dtype::Sint8,
-                } => 13,
-                SpecKey::Conv {
-                    dtype: Dtype::Uint32,
-                } => 14,
-                SpecKey::Conv {
-                    dtype: Dtype::Sint32,
-                } => 15,
+            let coeff = match spec_key {
+                SpecKey::Zero { .. } => 0,
+                SpecKey::Move { .. } => 1,
+                SpecKey::Matmul { .. } => 2,
+                SpecKey::Conv { .. } => 3,
             };
+            let residual = match spec_key.dtype() {
+                Dtype::Uint8 => 0,
+                Dtype::Sint8 => 1,
+                Dtype::Uint16 => 2,
+                Dtype::Sint16 => 3,
+                Dtype::Uint32 => 4,
+                Dtype::Sint32 => 5,
+            };
+            let kind_int = 6 * coeff + residual;
             (kind_int, factored_pt.clone(), block_key.clone())
         },
     );
