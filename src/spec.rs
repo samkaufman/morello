@@ -575,9 +575,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         // TODO: This is expensive. Make an operand_shapes() method instead.
         let operands = self.parameters();
 
-        // TODO; Remove
-        let orig_str = format!("{}", self);
-
         match self {
             LogicalSpec::Primitive(
                 PrimitiveBasics {
@@ -635,8 +632,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     o
                 })
                 .collect::<Vec<_>>(),
-            "Parameters were not canonical after canonicalizing {}",
-            orig_str
+            "Parameters were not canonical after canonicalizing"
         );
 
         Ok(())
