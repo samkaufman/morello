@@ -11,9 +11,9 @@ use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
+use smallvec::smallvec;
 use std::io;
 use std::panic;
-use smallvec::smallvec;
 
 fn main() {
     // First, we'll define the Spec for the program we will implement: a 64x64x64 matrix
