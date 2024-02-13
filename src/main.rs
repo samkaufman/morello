@@ -81,9 +81,16 @@ enum Subcommand {
 #[derive(clap::Subcommand)]
 enum QuerySpec {
     #[command(about = "Synthesize a row- to column-major transpose")]
-    Transpose { size: DimSize },
+    Transpose {
+        size: DimSize,
+    },
     #[command(about = "Synthesize a matrix multiplication")]
-    Matmul { size: DimSize },
+    Matmul {
+        size: DimSize,
+    },
+    MatmulU8S8S16 {
+        size: DimSize,
+    },
     #[command(about = "Synthesize a convolution")]
     Conv {
         #[arg(long, short, default_value = "1")]
@@ -144,7 +151,7 @@ where
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Move,
                     spec_shape: smallvec![*size, *size],
-                    dtype: Dtype::Uint32,
+                    dtypes: smallvec![Dtype::Uint32; 2],
                 },
                 vec![
                     TensorSpecAux::<Tgt> {
@@ -165,13 +172,20 @@ where
                 true,
             )
         }
-        QuerySpec::Matmul { size } => {
+        QuerySpec::Matmul { size } | QuerySpec::MatmulU8S8S16 { size } => {
             let rm2 = row_major(2);
+            let dtypes = match query_spec {
+                QuerySpec::Matmul { .. } => smallvec![Dtype::Uint32; 3],
+                QuerySpec::MatmulU8S8S16 { .. } => {
+                    smallvec![Dtype::Uint8, Dtype::Sint8, Dtype::Sint16]
+                }
+                _ => unreachable!(),
+            };
             LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Matmul { accum: false },
-                    spec_shape: smallvec![*size, *size, *size],
-                    dtype: Dtype::Uint32,
+                    spec_shape: smallvec![*size; 3],
+                    dtypes,
                 },
                 vec![
                     TensorSpecAux {
@@ -206,7 +220,7 @@ where
                         *filters_size,
                         *filters_size,
                     ],
-                    dtype: Dtype::Uint32,
+                    dtypes: smallvec![Dtype::Uint32; 3],
                 },
                 vec![
                     TensorSpecAux {

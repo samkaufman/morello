@@ -332,7 +332,7 @@ mod tests {
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Zero,
                     spec_shape: smallvec![2, 2, 2, 2],
-                    dtype: Dtype::Uint8,
+                    dtypes: smallvec![Dtype::Uint8],
                 },
                 vec![TensorSpecAux::<X86Target> {
                     contig: 0,

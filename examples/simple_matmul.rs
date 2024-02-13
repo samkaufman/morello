@@ -13,6 +13,7 @@ use morello::utils::ToWriteFmt;
 
 use std::io;
 use std::panic;
+use smallvec::smallvec;
 
 fn main() {
     // First, we'll define the Spec for the program we will implement: a 64x64x64 matrix
@@ -30,7 +31,7 @@ fn main() {
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Matmul { accum: false },
                 spec_shape: Shape::from([64, 64, 64].as_slice()),
-                dtype: Dtype::Uint32,
+                dtypes: smallvec![Dtype::Uint32; 3],
             },
             vec![
                 TensorSpecAux {

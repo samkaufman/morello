@@ -304,11 +304,10 @@ impl<Tgt: Target> Action<Tgt> {
                 // Determine the output shape of the next-to-outermost component Spec.
                 // This is the shape of the intermediate tensor.
                 let next_to_outer_basics = &components[1];
+                let out_idx = next_to_outer_basics.typ.output_idx();
                 let intermediate_tensorspec = TensorSpec::<Tgt>::new_canon(
-                    next_to_outer_basics
-                        .parameter_shapes()
-                        .swap_remove(next_to_outer_basics.typ.output_idx()),
-                    next_to_outer_basics.dtype,
+                    next_to_outer_basics.parameter_shapes().swap_remove(out_idx),
+                    next_to_outer_basics.dtypes[out_idx],
                     layout.contiguous_full(),
                     true,
                     *level,
@@ -368,11 +367,11 @@ impl<Tgt: Target> Action<Tgt> {
                     // tensor.
                     // TODO: This shouldn't need to be both here and in `memory_allocated`.
                     let next_to_outer_basics = &components[1];
-                    let output_shape = &next_to_outer_basics.parameter_shapes()
-                        [next_to_outer_basics.typ.output_idx()];
+                    let ntob_out_idx = next_to_outer_basics.typ.output_idx();
+                    let output_shape = &next_to_outer_basics.parameter_shapes()[ntob_out_idx];
                     let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
                         if level == &l {
-                            u64::from(next_to_outer_basics.dtype.size())
+                            u64::from(next_to_outer_basics.dtypes[ntob_out_idx].size())
                                 * u64::from(output_shape.into_iter().product::<DimSize>())
                         } else {
                             0u64
@@ -425,7 +424,7 @@ impl<Tgt: Target> Action<Tgt> {
                     PrimitiveBasics {
                         typ: PrimitiveSpecType::Conv { accum: conv_accum },
                         spec_shape: _,
-                        dtype,
+                        dtypes,
                     },
                     _,
                     serial_only,
@@ -481,7 +480,7 @@ impl<Tgt: Target> Action<Tgt> {
                             .copied()
                             .chain(iter::once(operands[1].shape()[0]))
                             .collect(),
-                        dtype: *dtype,
+                        dtypes: dtypes.clone(),
                     },
                     vec![
                         inner_image_tile.spec().aux.clone(),
@@ -590,7 +589,7 @@ impl<Tgt: Target> Action<Tgt> {
                                     PrimitiveBasics {
                                         typ: PrimitiveSpecType::Move,
                                         spec_shape: left_spec.shape().into(),
-                                        dtype: left_spec.dtype(),
+                                        dtypes: smallvec![left_spec.dtype(), right_spec.dtype()],
                                     },
                                     vec![left_spec.aux.clone(), right_spec.aux.clone()],
                                     node_spec.serial_only(),
@@ -633,16 +632,7 @@ impl<Tgt: Target> Action<Tgt> {
                 )))
             }
             Action::ToAccum => {
-                let LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ,
-                        spec_shape: _,
-                        dtype: _,
-                    },
-                    _,
-                    _,
-                ) = node_spec
-                else {
+                let LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, ..) = node_spec else {
                     panic!();
                 };
                 let (PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum }) = typ
@@ -664,7 +654,7 @@ impl<Tgt: Target> Action<Tgt> {
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Zero,
                             spec_shape: output_shape,
-                            dtype: output_dtype,
+                            dtypes: smallvec![output_dtype],
                         },
                         vec![output_aux],
                         node_spec.serial_only(),

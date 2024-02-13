@@ -16,7 +16,7 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> Spec<Tgt> {
         PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
             spec_shape: smallvec![size, size, size],
-            dtype: Dtype::Uint32,
+            dtypes: smallvec![Dtype::Uint32; 3],
         },
         vec![
             TensorSpecAux {

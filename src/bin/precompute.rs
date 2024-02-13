@@ -83,7 +83,7 @@ where
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Zero,
                 spec_shape: smallvec![args.size; rank.into()],
-                dtype: Dtype::Uint32,
+                dtypes: smallvec![Dtype::Uint32],
             },
             vec![TensorSpecAux {
                 contig: layout.contiguous_full(),
@@ -108,7 +108,7 @@ where
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Matmul { accum: false },
                 spec_shape: smallvec![args.size, args.size, args.size],
-                dtype: Dtype::Uint32,
+                dtypes: smallvec![Dtype::Uint32; 3],
             },
             vec![a.clone(), a.clone(), a],
             true,
@@ -139,7 +139,7 @@ where
                                 fs,
                                 fs
                             ],
-                            dtype: Dtype::Uint32,
+                            dtypes: smallvec![Dtype::Uint32; 3],
                         },
                         vec![a.clone(), a.clone(), a.clone()],
                         true,
@@ -226,7 +226,7 @@ fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
         PrimitiveBasics {
             typ: PrimitiveSpecType::Move,
             spec_shape: smallvec![size; rank.into()],
-            dtype: Dtype::Uint32,
+            dtypes: smallvec![Dtype::Uint32; 2],
         },
         [CpuMemoryLevel::GL, CpuMemoryLevel::L1]
             .into_iter()

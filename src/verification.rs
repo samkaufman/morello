@@ -17,14 +17,19 @@ impl BuiltArtifact {
     /// C compiler.
     pub fn check_correctness<Tgt: Target>(&self, spec: &Spec<Tgt>) -> bool {
         let test_result = match &spec.0 {
-            LogicalSpec::Primitive(PrimitiveBasics { dtype, .. }, _, _) => match dtype {
-                Dtype::Uint8 => test_artifact_correct_inner::<Tgt, u8>(spec, self),
-                Dtype::Sint8 => test_artifact_correct_inner::<Tgt, i8>(spec, self),
-                Dtype::Uint16 => test_artifact_correct_inner::<Tgt, u16>(spec, self),
-                Dtype::Sint16 => test_artifact_correct_inner::<Tgt, i16>(spec, self),
-                Dtype::Uint32 => test_artifact_correct_inner::<Tgt, u32>(spec, self),
-                Dtype::Sint32 => test_artifact_correct_inner::<Tgt, i32>(spec, self),
-            },
+            LogicalSpec::Primitive(PrimitiveBasics { dtypes, .. }, _, _) => {
+                if dtypes.iter().skip(1).any(|&dt| dtypes[0] != dt) {
+                    todo!("Implement correctness check for non-homogeneous types");
+                }
+                match dtypes[0] {
+                    Dtype::Uint8 => test_artifact_correct_inner::<Tgt, u8>(spec, self),
+                    Dtype::Sint8 => test_artifact_correct_inner::<Tgt, i8>(spec, self),
+                    Dtype::Uint16 => test_artifact_correct_inner::<Tgt, u16>(spec, self),
+                    Dtype::Sint16 => test_artifact_correct_inner::<Tgt, i16>(spec, self),
+                    Dtype::Uint32 => test_artifact_correct_inner::<Tgt, u32>(spec, self),
+                    Dtype::Sint32 => test_artifact_correct_inner::<Tgt, i32>(spec, self),
+                }
+            }
             LogicalSpec::Compose { .. } => todo!(),
         };
         if test_result {

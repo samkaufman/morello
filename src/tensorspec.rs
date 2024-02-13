@@ -30,7 +30,7 @@ pub struct TensorSpecAux<Tgt: Target> {
     pub aligned: bool,
     pub level: Tgt::Level,
     pub layout: Layout,
-    pub vector_size: Option<DimSize>,
+    pub vector_size: Option<DimSize>, // # number of values in a vector register
 }
 
 pub struct TensorSpecAuxSurMap<Tgt: Target> {
