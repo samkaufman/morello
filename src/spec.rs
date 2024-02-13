@@ -572,52 +572,47 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     pub fn canonicalize(&mut self) -> anyhow::Result<()> {
-        // TODO: This is expensive. Make an operand_shapes() method instead.
-        let operands = self.parameters();
-
         match self {
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ,
-                    spec_shape,
-                    dtype: _,
-                },
-                primitive_aux,
-                _,
-            ) => match typ {
-                PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
-                    for i in 0..primitive_aux.len() {
-                        let (new_layout, new_contig) = primitive_aux[i].layout.update_for_tiling(
-                            operands[i].shape(),
-                            operands[i].shape(),
-                            primitive_aux[i].contig,
-                        )?;
-                        primitive_aux[i].layout = new_layout;
-                        primitive_aux[i].contig = new_contig;
+            LogicalSpec::Primitive(basics, primitive_aux, _) => {
+                let parameter_shapes = basics.parameter_shapes();
+                match &basics.typ {
+                    PrimitiveSpecType::Matmul { accum: _ }
+                    | PrimitiveSpecType::Conv { accum: _ } => {
+                        for i in 0..primitive_aux.len() {
+                            let (new_layout, new_contig) =
+                                primitive_aux[i].layout.update_for_tiling(
+                                    &parameter_shapes[i],
+                                    &parameter_shapes[i],
+                                    primitive_aux[i].contig,
+                                )?;
+                            primitive_aux[i].layout = new_layout;
+                            primitive_aux[i].contig = new_contig;
+                        }
+                    }
+                    PrimitiveSpecType::Move => {
+                        let [outer_aux, inner_aux] = &mut primitive_aux[..] else {
+                            unreachable!();
+                        };
+                        outer_aux
+                            .canonicalize(&basics.spec_shape, outer_aux.aligned)
+                            .context("Failed to canonicalize the outer TensorSpecAux")?;
+                        let (new_inner_layout, new_inner_contig) =
+                            inner_aux.layout.update_for_tiling(
+                                &parameter_shapes[1],
+                                &parameter_shapes[1],
+                                inner_aux.contig,
+                            )?;
+                        inner_aux.layout = new_inner_layout;
+                        inner_aux.contig = new_inner_contig;
+                    }
+                    PrimitiveSpecType::Zero => {
+                        let aligned = primitive_aux[0].aligned;
+                        primitive_aux[0]
+                            .canonicalize(&basics.spec_shape, aligned)
+                            .context("Failed to canonicalize the TensorSpecAux")?;
                     }
                 }
-                PrimitiveSpecType::Move => {
-                    let [outer_aux, inner_aux] = &mut primitive_aux[..] else {
-                        unreachable!();
-                    };
-                    outer_aux
-                        .canonicalize(spec_shape, outer_aux.aligned)
-                        .context("Failed to canonicalize the outer TensorSpecAux")?;
-                    let (new_inner_layout, new_inner_contig) = inner_aux.layout.update_for_tiling(
-                        operands[1].shape(),
-                        operands[1].shape(),
-                        inner_aux.contig,
-                    )?;
-                    inner_aux.layout = new_inner_layout;
-                    inner_aux.contig = new_inner_contig;
-                }
-                PrimitiveSpecType::Zero => {
-                    let aligned = primitive_aux[0].aligned;
-                    primitive_aux[0]
-                        .canonicalize(spec_shape, aligned)
-                        .context("Failed to canonicalize the TensorSpecAux")?;
-                }
-            },
+            }
             LogicalSpec::Compose { .. } => todo!(),
         }
 
