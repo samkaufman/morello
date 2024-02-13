@@ -390,9 +390,9 @@ impl Layout {
     pub(crate) fn expand_physical_shape(
         &self,
         logical_shape: &[DimSize],
-    ) -> Result<Vec<DimSize>, LayoutError> {
+    ) -> Result<Shape, LayoutError> {
         let Layout::New(dims) = self;
-        let mut physical_shape = Vec::with_capacity(dims.len());
+        let mut physical_shape = SmallVec::with_capacity(dims.len());
         let mut logical_shape_remaining = logical_shape.to_vec();
         for (dim, fixed_size) in dims.iter().rev() {
             let remaining_size = &mut logical_shape_remaining[usize::from(*dim)];
@@ -500,8 +500,8 @@ mod tests {
     fn test_expand_physical_shape() {
         let layout = Layout::new(vec![(0, None), (1, None), (0, Some(4))]);
         assert_eq!(
-            layout.expand_physical_shape(&[64, 64]).unwrap(),
-            vec![16, 64, 4]
+            &layout.expand_physical_shape(&[64, 64]).unwrap()[..],
+            &[16, 64, 4],
         );
     }
 
