@@ -118,7 +118,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         }
 
         write!(out, "int load_inputs(char *paths[]")?;
-        for i in 0..(top_arg_tensors.len() - 1) {
+        for i in 0..top_arg_tensors.len() {
             write!(out, ", void *restrict dest{i}")?;
         }
         writeln!(out, ") {{")?;
@@ -126,8 +126,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(out, "{}int fd;", indent(1))?;
         writeln!(out, "{}void *mapped;", indent(1))?;
 
-        let input_cnt = top_arg_tensors.len() - 1;
-        for (idx, input_tensor) in top_arg_tensors[..input_cnt].iter().enumerate() {
+        for (idx, input_tensor) in top_arg_tensors.iter().enumerate() {
             // Open and mmap the data.
             let input_shape = input_tensor.0.shape();
             let value_cnt = input_shape
@@ -179,7 +178,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
         // Allocate a buffer for each Impl parameter and re-bind to a CBuffer corresponding to the
         // local-scope buffer. It will have been previously bound by emit_kernel to a CBuffer::Ptr.
-        let mut input_buf_names = vec![];
+        let mut parameter_buf_names = vec![];
         for kernel_argument in top_arg_tensors {
             let spec = kernel_argument.spec();
             let buf =
@@ -193,25 +192,27 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 },
                 depth,
             )?;
-            input_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
+            parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
             self.name_env.insert(Rc::clone(kernel_argument), buf);
             writeln!(main_body_str)?;
         }
-        input_buf_names.pop(); // Remove output tensor buf.
 
         // Load data, if provided.
         writeln!(
             main_body_str,
             "{}if (argc == {}) {{",
             indent(depth),
-            top_arg_tensors.len()
+            top_arg_tensors.len() + 1
         )?;
         depth += 1;
         writeln!(
             main_body_str,
             "{}int load_result = load_inputs(&argv[1]{});",
             indent(depth),
-            input_buf_names.iter().map(|n| format!(", {}", n)).join("")
+            parameter_buf_names
+                .iter()
+                .map(|n| format!(", {}", n))
+                .join("")
         )?;
         writeln!(main_body_str, "{}if (load_result != 0) {{", indent(depth))?;
         depth += 1;
