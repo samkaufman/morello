@@ -10,7 +10,7 @@ use crate::{
 };
 use ndarray::prelude::*;
 use ndarray_conv::{Conv2DExt, PaddingMode, PaddingSize};
-use num_traits::{AsPrimitive, NumAssign};
+use num_traits::AsPrimitive;
 use std::process::Command;
 use std::{
     io::{self, BufWriter, Write},

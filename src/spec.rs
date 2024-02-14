@@ -999,7 +999,10 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         component.typ.infer_output_shape(&inp_shapes)
                     };
                     let mut new_operands = component_inputs.clone();
-                    new_operands.push((new_output_shape, todo!("was component.dtype; replace it")));
+                    new_operands.push((
+                        new_output_shape,
+                        component.dtypes[component.typ.output_idx()],
+                    ));
                     component.replace_io(
                         new_operands
                             .iter()
