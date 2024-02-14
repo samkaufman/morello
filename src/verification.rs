@@ -55,22 +55,22 @@ where
     T::Err: std::fmt::Debug,
 {
     // Generate arguments.
-    let mut concrete_tensors = vec![];
-    for input in spec.0.parameters() {
-        let value_cnt = input
-            .shape()
-            .iter()
-            .map(|v| usize::try_from(*v).unwrap())
-            .product::<_>();
-        let unshaped = Array::from_iter(cycle_int_values::<T>().take(value_cnt));
-        let shp_usize = input
-            .shape()
-            .iter()
-            .map(|v| usize::try_from(*v).unwrap())
-            .collect::<Vec<_>>();
-        let arr = unshaped.into_shape(IxDyn(&shp_usize)).unwrap();
-        concrete_tensors.push(arr);
-    }
+    let parameters = spec.0.parameters();
+    let mut concrete_tensors = parameters
+        .into_iter()
+        .map(|input| {
+            let mut value_cnt = 1;
+            let mut shp_usize = Vec::with_capacity(input.shape().len());
+            for v in input.shape() {
+                let vc = usize::try_from(*v).unwrap();
+                shp_usize.push(vc);
+                value_cnt *= vc;
+            }
+            Array::from_iter(cycle_int_values::<T>().take(value_cnt))
+                .into_shape(IxDyn(&shp_usize))
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
 
     // Compute expected output
     let out_idx = spec.0.output_idx();
