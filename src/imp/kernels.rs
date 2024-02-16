@@ -2,7 +2,7 @@ use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
-use crate::target::Target;
+use crate::target::{CpuMemoryLevel, MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
 
@@ -73,7 +73,19 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
                 let volume = self.arguments[1].shape().iter().product::<u32>();
                 debug_assert_eq!(volume % vector_size, 0);
                 let vector_count = volume / vector_size;
-                INST_COST * ((vector_count * 2) + 1)
+                let mut cost = INST_COST * ((vector_count * 2) + 1);
+
+                // TwoVecBroadcastVecMult takes an input from L1.
+                if matches!(self.kernel_type, KernelType::TwoVecBroadcastVecMult) {
+                    // TODO: Instead, call `move_cost`. Requires specializing kernel to X86/ARM.
+                    let mut l1_hit_cost = CpuMemoryLevel::L1.cache_hit_cost();
+                    if !self.arguments[0].spec().is_contiguous() {
+                        l1_hit_cost *= 2;
+                    }
+                    cost += l1_hit_cost;
+                }
+
+                cost
             }
             KernelType::Mult => INST_COST,
             KernelType::ValueAssign
