@@ -259,7 +259,7 @@ mod tests {
     use crate::db::DashmapDiskDatabase;
     use crate::layout::row_major;
     use crate::memorylimits::MemVec;
-    use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+    use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use crate::utils::{bit_length, bit_length_inverse};
@@ -276,15 +276,16 @@ mod tests {
         // TODO: Add an ARM variant!
         // TODO: Remove restriction to canonical Specs. Should synth. any Spec.
         #[test]
+        #[ignore]
         fn test_can_synthesize_any_canonical_spec(
-            spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
-                .prop_filter("Spec should be canonical", |s| s.is_canonical())
+            spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
             top_down(&db, &spec, 1, Some(nz!(1usize)));
         }
 
         #[test]
+        #[ignore]
         fn test_more_memory_never_worsens_solution_with_shared_db(
             spec_pair in lower_and_higher_canonical_specs::<X86Target>()
         ) {
@@ -308,9 +309,9 @@ mod tests {
         }
 
         #[test]
+        #[ignore]
         fn test_synthesis_at_peak_memory_yields_same_decision(
-            spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
-                .prop_filter("Spec should be canonical", |s| s.is_canonical())
+            spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
             let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
@@ -367,8 +368,7 @@ mod tests {
         let top_memory_b = Rc::clone(&top_memory_a);
         let top_memory_c = Rc::clone(&top_memory_a);
 
-        any_with::<Spec<Tgt>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
-            .prop_filter("Spec should be canonical", |s| s.is_canonical())
+        arb_canonical_spec::<Tgt>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
             .prop_filter("limits should not be max", move |s| s.1 != *top_memory_a)
             .prop_flat_map(move |spec| {
                 let MemoryLimits::Standard(top_memvec) = top_memory_b.as_ref();

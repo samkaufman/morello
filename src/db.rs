@@ -930,6 +930,7 @@ mod tests {
         imp::visit_leaves,
         memorylimits::{MemVec, MemoryLimits},
         scheduling::ApplyError,
+        spec::arb_canonical_spec,
         target::X86Target,
         utils::{bit_length, bit_length_inverse},
     };
@@ -1142,8 +1143,7 @@ mod tests {
     }
 
     fn arb_spec_and_decision<Tgt: Target>() -> impl Strategy<Value = Decision<Tgt>> {
-        any::<Spec<Tgt>>()
-            .prop_filter("Spec was not canonical", |spec| spec.is_canonical())
+        arb_canonical_spec::<Tgt>(None, None)
             .prop_flat_map(|spec| {
                 let valid_actions = spec
                     .0

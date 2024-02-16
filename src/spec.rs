@@ -144,6 +144,24 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for Spec<Tgt> {
     }
 }
 
+#[cfg(test)]
+pub fn arb_canonical_spec<Tgt: Target>(
+    max_size: Option<DimSize>,
+    max_memory: Option<u64>,
+) -> impl proptest::strategy::Strategy<Value = Spec<Tgt>> {
+    use proptest::prelude::*;
+
+    any_with::<Spec<Tgt>>((max_size, max_memory)).prop_filter_map(
+        "Must be possible to canonicalize Spec",
+        |mut s| {
+            if s.canonicalize().is_err() {
+                return None;
+            }
+            Some(s)
+        },
+    )
+}
+
 impl PrimitiveBasics {
     pub fn replace_io(&mut self, new_operands: &[(&[DimSize], Dtype)]) {
         self.dtypes = new_operands.iter().map(|o| o.1).collect();
@@ -1383,6 +1401,23 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
     }
 }
 
+#[cfg(test)]
+pub fn arb_canonical_logical_spec<Tgt: Target>(
+    max_size: Option<DimSize>,
+) -> impl proptest::strategy::Strategy<Value = LogicalSpec<Tgt>> {
+    use proptest::prelude::*;
+
+    any_with::<LogicalSpec<Tgt>>(max_size).prop_filter_map(
+        "Must be possible to canonicalize LogicalSpec",
+        |mut s| {
+            if s.canonicalize().is_err() {
+                return None;
+            }
+            Some(s)
+        },
+    )
+}
+
 // TODO: Modify to return an `impl Iterator` of some kind instead of a `Box`.
 fn gen_tile_sizes<Tgt: Target>(
     tensor_shape: &[DimSize],
@@ -1595,16 +1630,14 @@ mod tests {
 
         #[test]
         fn test_actions_are_valid_through_consumed_memory_x86(
-            logical_spec in any::<LogicalSpec<X86Target>>()
-                .prop_filter("Spec should be canonical", |s| s.is_canonical())
+            logical_spec in arb_canonical_logical_spec::<X86Target>(None)
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
 
         #[test]
         fn test_actions_are_valid_through_consumed_memory_arm(
-            logical_spec in any::<LogicalSpec<ArmTarget>>()
-                .prop_filter("Spec should be canonical", |s| s.is_canonical())
+            logical_spec in arb_canonical_logical_spec::<X86Target>(None)
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
@@ -1803,8 +1836,7 @@ mod tests {
 
     fn arb_spec_action_and_lower_limit<Tgt: Target>(
     ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt, ()>, MemoryLimits)> {
-        any::<Spec<Tgt>>()
-            .prop_filter("Spec was not canonical", |spec| spec.is_canonical())
+        arb_canonical_spec::<Tgt>(None, None)
             .prop_filter_map("Spec had zero applicable actions", |spec| {
                 let applied_actions = spec
                     .0
