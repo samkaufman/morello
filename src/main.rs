@@ -115,7 +115,7 @@ struct RunCmd {
 struct BenchCmd {
     /// Number of benchmark samples
     #[arg(long, short)]
-    bench_samples: Option<u32>,
+    inner_loop_iters: Option<u32>,
 
     #[command(subcommand)]
     query_spec: QuerySpec,
@@ -257,11 +257,14 @@ where
         panic!("No Impl found");
     };
 
-    let bench_samples = if let Subcommand::Bench(BenchCmd { bench_samples, .. }) = subcmd {
+    let bench_inner_loop_iters = if let Subcommand::Bench(BenchCmd {
+        inner_loop_iters, ..
+    }) = subcmd
+    {
         // We need an exact number of samples when benchmarking.
-        match *bench_samples {
+        match *inner_loop_iters {
             // The user specified a number of samples.
-            Some(bench_samples) => Some(bench_samples),
+            Some(s) => Some(s),
             // The user didn't specify a number of samples, so we estimate
             // a good number of samples.
             None => Some(synthesized_impl.estimate_optimal_iters()?),
@@ -294,7 +297,7 @@ where
         }
         Subcommand::Bench(_) => {
             // TODO: Test correctness (allow disabling with flag)
-            let result = synthesized_impl.bench(bench_samples.unwrap(), None)?;
+            let result = synthesized_impl.bench(bench_inner_loop_iters.unwrap(), None)?;
             let inner_loop_runtime = result.best_inner_loop_runtime();
             let kernel_runtime = inner_loop_runtime / result.inner_loop_iterations;
             println!("\nkernel runtime: {:.8}s", kernel_runtime.as_secs_f32());

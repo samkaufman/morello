@@ -72,27 +72,22 @@ pub trait CodeGen<Tgt: Target> {
     }
 
     /// Benchmark several times, returning the minimum of inner loop means.
-    ///
-    /// This will first estimate a good number of inner loop iterations, then
-    /// build an executable which loops that number of times, returning the mean.
-    /// The final `result` computed is the minimum of the means after running
-    /// that executable `repeat` times.
-    fn bench(&self, bench_samples: u32, repeat: Option<usize>) -> Result<RobustTimingResult> {
+    fn bench(&self, inner_loop_iters: u32, repeat: Option<usize>) -> Result<RobustTimingResult> {
         let repeat = repeat.unwrap_or(10); // default: 10
 
         // Run main benchmark loop.
-        info!("Goal iterations: {bench_samples}");
+        info!("Goal iterations: {inner_loop_iters}");
         let artifact = self.build(true)?;
         let mut inner_loop_runtimes = Vec::with_capacity(repeat);
         for _ in 0..repeat {
-            let time = artifact.measure_time(bench_samples)?;
+            let time = artifact.measure_time(inner_loop_iters)?;
             debug!("Sample runtime result {}s", time.as_secs_f32());
             inner_loop_runtimes.push(time);
         }
 
         Ok(RobustTimingResult {
             inner_loop_runtimes,
-            inner_loop_iterations: bench_samples,
+            inner_loop_iterations: inner_loop_iters,
             artifact,
         })
     }
