@@ -134,14 +134,14 @@ fn main() {
 
     println!("\nThe above Impl lowered to C:");
     implementation
-        .emit(None, None, &mut ToWriteFmt(io::stdout()))
+        .emit(false, None, &mut ToWriteFmt(io::stdout()))
         .unwrap();
 
     // If the verification flag is set, let's additionally double-check that the lowered
     // code builds and produces the correct results.
     #[cfg(feature = "verification")]
     {
-        let artifact = implementation.build(None).unwrap();
+        let artifact = implementation.build(false).unwrap();
         if !artifact.check_correctness(&spec) {
             panic!("Generated code returned incorrect output");
         }

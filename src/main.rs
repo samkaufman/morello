@@ -277,14 +277,14 @@ where
             } else {
                 None
             };
-            synthesized_impl.emit(bench_samples, impl_style, &mut ToWriteFmt(io::stdout()))?;
+            synthesized_impl.emit(true, impl_style, &mut ToWriteFmt(io::stdout()))?;
         }
         OutputFormat::Impl => pprint(synthesized_impl, args.impl_style),
     }
 
     match subcmd {
         Subcommand::Run(_) => {
-            let built_artifact = synthesized_impl.build(None)?;
+            let built_artifact = synthesized_impl.build(false)?;
             let output = built_artifact.run()?;
             println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
             #[cfg(feature = "verification")]
@@ -295,7 +295,10 @@ where
         Subcommand::Bench(_) => {
             // TODO: Test correctness (allow disabling with flag)
             let result = synthesized_impl.bench(bench_samples.unwrap(), None)?;
-            println!("\nImpl Runtime: {:.8}s", result.result.as_secs_f32());
+            let inner_loop_runtime = result.best_inner_loop_runtime();
+            let kernel_runtime = inner_loop_runtime / result.inner_loop_iterations;
+            println!("\nkernel runtime: {:.8}s", kernel_runtime.as_secs_f32());
+            println!("loop runtime: {}ns", inner_loop_runtime.as_nanos());
         }
         _ => {}
     }

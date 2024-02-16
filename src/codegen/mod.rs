@@ -23,7 +23,6 @@ use std::fmt;
 use std::fmt::Debug;
 use std::io;
 use std::io::Write;
-use std::ops::Div;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::rc::Rc;
@@ -52,18 +51,18 @@ pub trait CodeGen<Tgt: Target> {
 
     fn emit<W: fmt::Write>(
         &self,
-        bench_samples: Option<u32>,
+        benchmark: bool,
         include_impl: Option<ImplPrintStyle>,
         out: &mut W,
     ) -> fmt::Result;
 
-    fn build(&self, bench_samples: Option<u32>) -> Result<BuiltArtifact>;
+    fn build(&self, benchmark: bool) -> Result<BuiltArtifact>;
 
     /// Estimate a good number of inner loop iterations.
     fn estimate_optimal_iters(&self) -> Result<u32> {
         // Collect a single rough sample.
-        let time_check_artifact = self.build(Some(1))?;
-        let rough_secs = time_check_artifact.measure_time()?;
+        let time_check_artifact = self.build(true)?;
+        let rough_secs = time_check_artifact.measure_time(1)?;
 
         // Choose a good number of iterations for benchmarks' inner loop.
         Ok(max(
@@ -83,17 +82,16 @@ pub trait CodeGen<Tgt: Target> {
 
         // Run main benchmark loop.
         info!("Goal iterations: {bench_samples}");
-        let artifact = self.build(Some(bench_samples))?;
-        let mut means = Vec::with_capacity(repeat);
+        let artifact = self.build(true)?;
+        let mut inner_loop_runtimes = Vec::with_capacity(repeat);
         for _ in 0..repeat {
-            let time = artifact.measure_time()?;
+            let time = artifact.measure_time(bench_samples)?;
             debug!("Sample runtime result {}s", time.as_secs_f32());
-            means.push(time);
+            inner_loop_runtimes.push(time);
         }
 
         Ok(RobustTimingResult {
-            result: *means.iter().min_by(|a, b| a.cmp(b)).unwrap(),
-            outer_loop_samples: means,
+            inner_loop_runtimes,
             inner_loop_iterations: bench_samples,
             artifact,
         })
@@ -107,7 +105,7 @@ where
 {
     fn emit<W: fmt::Write>(
         &self,
-        bench_samples: Option<u32>,
+        benchmark: bool,
         include_impl: Option<ImplPrintStyle>,
         out: &mut W,
     ) -> fmt::Result {
@@ -120,21 +118,21 @@ where
             generator.emit_impl_comment(self, impl_style, out)?;
             writeln!(out)?;
         }
-        generator.emit_kernel(self, &top_arg_tensors, bench_samples.is_some(), out)?;
+        generator.emit_kernel(self, &top_arg_tensors, benchmark, out)?;
         out.write_char('\n')?;
         generator.emit_load_inputs(&top_arg_tensors, out)?;
         out.write_char('\n')?;
-        generator.emit_main(&top_arg_tensors, bench_samples, out)?;
+        generator.emit_main(&top_arg_tensors, benchmark, out)?;
         Ok(())
     }
 
-    fn build(&self, bench_samples: Option<u32>) -> Result<BuiltArtifact> {
+    fn build(&self, benchmark: bool) -> Result<BuiltArtifact> {
         let dirname = tempdir()?.into_path();
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
 
         let source_file = std::fs::File::create(&source_path)?;
-        self.emit(bench_samples, None, &mut ToWriteFmt(source_file))?;
+        self.emit(benchmark, None, &mut ToWriteFmt(source_file))?;
 
         let mut clang_cmd = Command::new(Self::compiler_path()?);
         if do_color() {
@@ -162,7 +160,6 @@ where
             binary_path,
             source_path,
             dirname,
-            bench_samples,
             self.parameters().map(|p| p.dtype()).collect(),
         ))
     }
@@ -170,7 +167,6 @@ where
 
 pub struct BuiltArtifact {
     pub(crate) binary_path: PathBuf,
-    bench_samples: Option<u32>,
     parameter_dtypes: Vec<Dtype>,
 }
 
@@ -179,13 +175,11 @@ impl BuiltArtifact {
         binary_path: PathBuf,
         _source_path: PathBuf,
         _whole_dir: PathBuf,
-        bench_samples: Option<u32>,
         parameter_dtypes: Vec<Dtype>,
     ) -> Self {
         // While we accept `source_path` and `whole_dir`, we don't do anything with them.
         Self {
             binary_path,
-            bench_samples,
             parameter_dtypes,
         }
     }
@@ -202,12 +196,12 @@ impl BuiltArtifact {
 
     /// Executes and benchmarks an Impl on the local machine using Clang.
     ///
-    /// Returns the time in seconds. Measured by executing `self.bench_samples`
-    /// times and returning the mean.
-    pub fn measure_time(&self) -> Result<Duration> {
-        assert!(self.bench_samples.is_some());
-
-        let output = self.run()?;
+    /// Measured by executing the kernel `steps` times and returning the total
+    /// runtime of the loop in seconds.
+    pub fn measure_time(&self, steps: u32) -> Result<Duration> {
+        let output = Command::new(&self.binary_path)
+            .arg(steps.to_string())
+            .output()?;
         if !output.status.success() {
             io::stderr().write_all(&output.stderr)?;
             bail!("Failed to run the generated code: {}", output.status);
@@ -216,15 +210,28 @@ impl BuiltArtifact {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut lines = stdout.lines();
         let first_line = lines.next().unwrap();
-        Ok(parse_benchmark_output(first_line)?.div(self.bench_samples.unwrap()))
+        parse_benchmark_output(first_line)
     }
 }
 
 pub struct RobustTimingResult {
-    pub result: Duration,
-    pub outer_loop_samples: Vec<Duration>,
+    pub inner_loop_runtimes: Vec<Duration>,
     pub inner_loop_iterations: u32,
     pub artifact: BuiltArtifact,
+}
+
+impl RobustTimingResult {
+    pub fn best_inner_loop_runtime(&self) -> Duration {
+        *self
+            .inner_loop_runtimes
+            .iter()
+            .min_by(|a, b| a.cmp(b))
+            .unwrap()
+    }
+
+    pub fn best_mean(&self) -> Duration {
+        self.best_inner_loop_runtime() / self.inner_loop_iterations
+    }
 }
 
 fn parse_benchmark_output(output: &str) -> Result<Duration> {
