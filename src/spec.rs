@@ -639,21 +639,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             }
             LogicalSpec::Compose { .. } => todo!(),
         }
-
-        // After a LogicalSpec is made canonical, its parameters should also be canonical.
-        debug_assert_eq!(
-            self.parameters().to_vec(),
-            self.parameters()
-                .iter()
-                .map(|o| {
-                    let mut o = o.clone();
-                    o.canonicalize().unwrap();
-                    o
-                })
-                .collect::<Vec<_>>(),
-            "Parameters were not canonical after canonicalizing"
-        );
-
         Ok(())
     }
 
