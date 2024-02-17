@@ -118,7 +118,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         }
 
         write!(out, "int load_inputs(char *paths[]")?;
-        for i in 0..(top_arg_tensors.len() - 1) {
+        for i in 0..top_arg_tensors.len() {
             write!(out, ", void *restrict dest{i}")?;
         }
         writeln!(out, ") {{")?;
@@ -126,8 +126,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(out, "{}int fd;", indent(1))?;
         writeln!(out, "{}void *mapped;", indent(1))?;
 
-        let input_cnt = top_arg_tensors.len() - 1;
-        for (idx, input_tensor) in top_arg_tensors[..input_cnt].iter().enumerate() {
+        for (idx, input_tensor) in top_arg_tensors.iter().enumerate() {
             // Open and mmap the data.
             let input_shape = input_tensor.0.shape();
             let value_cnt = input_shape
@@ -168,7 +167,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     pub fn emit_main<W: Write>(
         &mut self,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
-        bench_samples: Option<u32>,
+        benchmark: bool,
         out: &mut W,
     ) -> fmt::Result {
         let mut main_body_str = String::new();
@@ -179,90 +178,79 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
         // Allocate a buffer for each Impl parameter and re-bind to a CBuffer corresponding to the
         // local-scope buffer. It will have been previously bound by emit_kernel to a CBuffer::Ptr.
-        let mut input_buf_names = vec![];
+        let mut parameter_buf_names = vec![];
         for kernel_argument in top_arg_tensors {
             let spec = kernel_argument.spec();
             let buf =
                 self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
             buf.emit(
                 &mut main_body_str,
-                if bench_samples.is_some() {
+                if benchmark {
                     InitType::Random
                 } else {
                     InitType::Zero
                 },
                 depth,
             )?;
-            input_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
+            parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
             self.name_env.insert(Rc::clone(kernel_argument), buf);
             writeln!(main_body_str)?;
         }
-        input_buf_names.pop(); // Remove output tensor buf.
 
         // Load data, if provided.
+        let (bottom_argc, full_argc) = if benchmark {
+            (2, top_arg_tensors.len() + 2)
+        } else {
+            (1, top_arg_tensors.len() + 1)
+        };
         writeln!(
             main_body_str,
             "{}if (argc == {}) {{",
             indent(depth),
-            top_arg_tensors.len()
+            full_argc
         )?;
         depth += 1;
         writeln!(
             main_body_str,
-            "{}int load_result = load_inputs(&argv[1]{});",
+            "{}int load_result = load_inputs(&argv[{}]{});",
             indent(depth),
-            input_buf_names.iter().map(|n| format!(", {}", n)).join("")
+            bottom_argc,
+            parameter_buf_names
+                .iter()
+                .map(|n| format!(", {}", n))
+                .join("")
         )?;
         writeln!(main_body_str, "{}if (load_result != 0) {{", indent(depth))?;
         depth += 1;
         writeln!(
             main_body_str,
-            "{}fprintf(stderr, \"Error loading input tensors.\");",
+            "{}fprintf(stderr, \"Error loading input tensors.\\n\");",
             indent(depth)
         )?;
         writeln!(main_body_str, "{}return 2;", indent(depth))?;
         depth -= 1;
         writeln!(main_body_str, "{}}}", indent(depth))?;
         depth -= 1;
-        writeln!(main_body_str, "{}}} else if (argc != 1) {{", indent(depth))?;
+        writeln!(
+            main_body_str,
+            "{}}} else if (argc != {bottom_argc}) {{",
+            indent(depth)
+        )?;
         depth += 1;
         writeln!(
             main_body_str,
-            "{}fprintf(stderr, \"Unexpected number of arguments.\");",
+            "{}fprintf(stderr, \"Unexpected number of arguments.\\n\");",
             indent(depth)
         )?;
         writeln!(main_body_str, "{}return 1;", indent(depth))?;
         depth -= 1;
         writeln!(main_body_str, "{}}}", indent(depth))?;
 
-        // Emit the kernel call, passing pointers to the Impl function.
-        if bench_samples.is_some() {
-            writeln!(
-                main_body_str,
-                "\n{}// Inlined kernel follows. This is for warm-up.",
-                indent(depth)
-            )?;
-        }
         let kernel_call_str = self.make_kernel_call(top_arg_tensors)?;
-        writeln!(
-            main_body_str,
-            "{}{}{}",
-            if bench_samples.is_some() { "" } else { "\n" },
-            indent(depth),
-            kernel_call_str
-        )?;
-
-        writeln!(main_body_str)?;
-        if bench_samples.is_some() {
-            // Emit the benchmarking code.
-            self.emit_benchmarking(
-                &kernel_call_str,
-                depth,
-                bench_samples.unwrap(),
-                &mut main_body_str,
-            )?;
+        if benchmark {
+            self.emit_benchmarking(&kernel_call_str, depth, &mut main_body_str)?;
         } else {
-            // Print the output tensor
+            writeln!(main_body_str, "{}{}\n", indent(depth), kernel_call_str)?;
             self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
         }
         writeln!(main_body_str)?;
@@ -305,9 +293,21 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         &mut self,
         kernel_call_str: &str,
         mut depth: usize,
-        bench_samples: u32,
         out: &mut W,
     ) -> Result<(), fmt::Error> {
+        writeln!(
+            out,
+            "{}const long long bench_samples = atoll(argv[1]);\n",
+            indent(depth)
+        )?;
+
+        writeln!(
+            out,
+            "{}// Inlined kernel follows. This is for warm-up.",
+            indent(depth)
+        )?;
+        writeln!(out, "{}{}", indent(depth), kernel_call_str)?;
+
         writeln!(out, "{}struct timespec start, end;", indent(depth))?;
         writeln!(
             out,
@@ -317,9 +317,8 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(out, "#pragma clang loop unroll(disable)")?; // preprocessor directives should not have indentation.
         writeln!(
             out,
-            "{}for (unsigned long bench_itr = 0; bench_itr < {}UL; ++bench_itr) {{",
+            "{}for (long long bench_itr = 0; bench_itr < bench_samples; ++bench_itr) {{",
             indent(depth),
-            bench_samples
         )?;
         depth += 1;
         writeln!(out, "{}{}", indent(depth), kernel_call_str)?;
@@ -620,6 +619,48 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                                 indent(depth),
                                 exprs[2],
                                 exprs[0],
+                                exprs[1]
+                            )?;
+                        }
+                        Ok(())
+                    }
+                    KernelType::TwoVecBroadcastVecMult => {
+                        let vector_size = arguments[2].spec().vector_size().unwrap();
+                        let volume = arguments[2].spec().shape().iter().product::<u32>();
+                        debug_assert_eq!(volume % vector_size, 0);
+                        let vector_count = volume / vector_size;
+
+                        for vector_idx in 0..vector_count {
+                            let exprs =
+                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                                    0 => self.c_index_ptr(a, b, None),
+                                    1 | 2 => self.c_index_vec(
+                                        a,
+                                        &(b.clone()
+                                            + i32::try_from(vector_idx * vector_size).unwrap()),
+                                        None,
+                                    ),
+                                    _ => unreachable!(),
+                                });
+
+                            // TODO: Lift the broadcast out of this loop.
+                            let broadcast_name = self.namer.fresh_name();
+                            writeln!(
+                                w,
+                                "{}__m256i {} = _mm256_set1_epi16(*(int16_t *)({}));",
+                                indent(depth),
+                                broadcast_name,
+                                exprs[0]
+                            )?;
+
+                            // matmul (k=2) the broadcast vector with the rhs vectors.
+                            writeln!(
+                                w,
+                                "{}{} = _mm256_add_epi16({}, _mm256_maddubs_epi16({}, {}));",
+                                indent(depth),
+                                exprs[2],
+                                exprs[2],
+                                broadcast_name,
                                 exprs[1]
                             )?;
                         }
@@ -942,7 +983,7 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
 }
 
 fn get_vector(
-    vec_types: &'static [VecType; 4],
+    vec_types: &'static [VecType; 12],
     dtype: Dtype,
     vector_size: DimSize,
 ) -> &'static VecType {
@@ -1006,8 +1047,9 @@ fn zero_points(expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<BufferVar> {
 /// The functions/macros are included via `partials/cpu.c`.
 const fn endian_convert_fn(dtype: Dtype) -> &'static str {
     match dtype {
-        Dtype::Uint8 => "",
-        Dtype::Uint32 => "LE_TO_CPU32",
+        Dtype::Uint8 | Dtype::Sint8 => "",
+        Dtype::Uint16 | Dtype::Sint16 => "LE_TO_CPU16",
+        Dtype::Uint32 | Dtype::Sint32 => "LE_TO_CPU32",
     }
 }
 

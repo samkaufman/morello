@@ -22,7 +22,7 @@ pub(super) trait CpuTarget:
     Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static
 {
     fn target_id() -> TargetId;
-    fn vec_types() -> &'static [VecType; 4];
+    fn vec_types() -> &'static [VecType; 12];
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -136,7 +136,12 @@ impl<T: CpuTarget> Target for T {
                 &all_target_vector_bytes,
             )
         }));
-        debug_assert!(result.iter().all(|r| r.applies_to_shape(shape)));
+        debug_assert!(
+            result.iter().all(|r| r.applies_to_shape(shape)),
+            "Some layouts don't apply to shape {:?}: {:?}",
+            shape,
+            result
+        );
         result
     }
 
@@ -151,6 +156,9 @@ impl<T: CpuTarget> Target for T {
                         }
                         if broadcastvecmult_applies_to_operands(&spec.parameters()) {
                             microkernels.push(Action::Place(KernelType::BroadcastVecMult));
+                        }
+                        if twovecbroadcastvecmult_applies_to_operands(&spec.parameters()) {
+                            microkernels.push(Action::Place(KernelType::TwoVecBroadcastVecMult));
                         }
                         Box::new(microkernels.into_iter())
                     } else {
@@ -187,7 +195,7 @@ impl<T: CpuTarget> Target for T {
         <Self as CpuTarget>::target_id()
     }
 
-    fn vec_types() -> &'static [VecType; 4] {
+    fn vec_types() -> &'static [VecType; 12] {
         <Self as CpuTarget>::vec_types()
     }
 }
@@ -423,6 +431,64 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
     true
 }
 
+pub fn twovecbroadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
+    operands: &[TensorSpec<Tgt>],
+) -> bool {
+    // Check data types
+    let lhs_dt = operands[0].dtype();
+    let rhs_dt = operands[1].dtype();
+    let out_dt = operands[2].dtype();
+    if lhs_dt != Dtype::Uint8 || rhs_dt != Dtype::Sint8 || out_dt != Dtype::Sint16 {
+        return false;
+    }
+
+    // Check levels
+    let lhs_level = operands[0].level();
+    let rhs_level = operands[1].level();
+    let out_level = operands[2].level();
+    if lhs_level != CpuMemoryLevel::L1
+        || rhs_level != CpuMemoryLevel::VRF
+        || out_level != CpuMemoryLevel::VRF
+    {
+        return false;
+    }
+
+    // Check all parameters are contiguous
+    if !operands.iter().all(|o| o.is_contiguous()) {
+        return false;
+    }
+
+    // Check all shapes are rank 2.
+    for op in operands {
+        if op.shape().len() != 2 {
+            return false;
+        }
+    }
+
+    let Some(rhs_vector_size) = operands[1].vector_size() else {
+        return false;
+    };
+    if operands[1].shape()[0] == 2 {
+        if operands[1].shape()[1] * 2 != rhs_vector_size {
+            return false;
+        }
+        if operands[2].shape()[0] != 1 || operands[2].shape()[1] != operands[1].shape()[1] {
+            return false;
+        }
+        if operands[1].layout() != col_major(2) {
+            return false;
+        }
+        if operands[2].layout() != row_major(2) {
+            return false;
+        }
+    } else {
+        // TODO: Support the case where `operands[1].shape()[1] == 2`.
+        return false;
+    }
+
+    true
+}
+
 pub fn mult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
@@ -478,21 +544,23 @@ fn packed_layouts_for_standard_layout<'a>(
 }
 
 fn pack_sizes(
-    max_size: Option<DimSize>,
+    dim_size: Option<DimSize>,
     dtype: Dtype,
     all_target_vector_bytes: &[u32],
-) -> SmallVec<[DimSize; 2]> {
-    all_target_vector_bytes
-        .iter()
-        .filter_map(|&bytes| {
-            let s = bytes / DimSize::from(dtype.size());
-            if max_size.map(|m| s < m).unwrap_or(true) {
-                Some(s)
-            } else {
-                None
-            }
-        })
-        .collect()
+) -> SmallVec<[DimSize; 3]> {
+    let mut result = SmallVec::new();
+    if dim_size.map(|d| d % 2 == 0).unwrap_or(true) {
+        result.push(2);
+    }
+    result.extend(all_target_vector_bytes.iter().filter_map(|&bytes| {
+        let s = bytes / DimSize::from(dtype.size());
+        if dim_size.map(|m| s < m).unwrap_or(true) {
+            Some(s)
+        } else {
+            None
+        }
+    }));
+    result
 }
 
 #[cfg(test)]
@@ -500,12 +568,15 @@ mod tests {
     use crate::{
         common::{DimSize, Dtype},
         expr::{NonAffineExpr, Substitute},
-        layout::BufferVar,
-        layout::Layout,
-        target::{Target, X86Target},
+        layout::{col_major, row_major, BufferVar, Layout},
+        target::{
+            cpu::twovecbroadcastvecmult_applies_to_operands, CpuMemoryLevel, Target, X86Target,
+        },
+        tensorspec::TensorSpec,
     };
     use itertools::Itertools;
     use proptest::prelude::*;
+    use smallvec::smallvec;
     use std::collections::HashSet;
 
     proptest! {
@@ -573,6 +644,42 @@ mod tests {
         {
             (shape, strip_dim.try_into().unwrap())
         }
+    }
+
+    #[test]
+    fn test_twovecbroadcastvecmult_applies_to_operands_1() {
+        let rm2 = row_major(2);
+        let cm2 = col_major(2);
+        let operands = [
+            TensorSpec::<X86Target>::new_canon(
+                smallvec![1, 2],
+                Dtype::Uint8,
+                rm2.contiguous_full(),
+                true,
+                CpuMemoryLevel::L1,
+                rm2.clone(),
+                None,
+            ),
+            TensorSpec::<X86Target>::new_canon(
+                smallvec![2, 16],
+                Dtype::Sint8,
+                cm2.contiguous_full(),
+                true,
+                CpuMemoryLevel::VRF,
+                cm2,
+                Some(32),
+            ),
+            TensorSpec::<X86Target>::new_canon(
+                smallvec![1, 16],
+                Dtype::Sint16,
+                rm2.contiguous_full(),
+                true,
+                CpuMemoryLevel::VRF,
+                rm2.clone(),
+                Some(16),
+            ),
+        ];
+        assert!(twovecbroadcastvecmult_applies_to_operands(&operands))
     }
 
     fn assert_unique_layouts(layouts: &[Layout]) {

@@ -16,7 +16,7 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
         PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
             spec_shape: smallvec![size, size, size],
-            dtype: Dtype::Uint32,
+            dtypes: smallvec![Dtype::Uint32; 3],
         },
         vec![
             TensorSpecAux {
@@ -39,7 +39,7 @@ fn conv_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
         PrimitiveBasics {
             typ: PrimitiveSpecType::Conv { accum: false },
             spec_shape: smallvec![size; 7],
-            dtype: Dtype::Uint32,
+            dtypes: smallvec![Dtype::Uint32; 3],
         },
         vec![
             TensorSpecAux {
@@ -62,7 +62,7 @@ fn move_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
         PrimitiveBasics {
             typ: PrimitiveSpecType::Move,
             spec_shape: smallvec![size; 2],
-            dtype: Dtype::Uint32,
+            dtypes: smallvec![Dtype::Uint32; 2],
         },
         vec![
             TensorSpecAux {

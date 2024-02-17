@@ -33,7 +33,7 @@ use std::{assert_eq, debug_assert_eq};
 const MULTI_DIM_TILING: bool = false;
 
 /// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
-const MOVE_RESULTS_CAPACITY: usize = 12;
+const MOVE_RESULTS_CAPACITY: usize = 16;
 
 #[cfg(test)]
 const ARBITRARY_SPEC_MAX_SIZE: DimSize = 8;
@@ -61,7 +61,7 @@ pub enum LogicalSpec<Tgt: Target> {
 pub struct PrimitiveBasics {
     pub typ: PrimitiveSpecType,
     pub spec_shape: Shape,
-    pub dtype: Dtype,
+    pub dtypes: SmallVec<[Dtype; 3]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -144,8 +144,28 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for Spec<Tgt> {
     }
 }
 
+#[cfg(test)]
+pub fn arb_canonical_spec<Tgt: Target>(
+    max_size: Option<DimSize>,
+    max_memory: Option<u64>,
+) -> impl proptest::strategy::Strategy<Value = Spec<Tgt>> {
+    use proptest::prelude::*;
+
+    any_with::<Spec<Tgt>>((max_size, max_memory)).prop_filter_map(
+        "Must be possible to canonicalize Spec",
+        |mut s| {
+            if s.canonicalize().is_err() {
+                return None;
+            }
+            Some(s)
+        },
+    )
+}
+
 impl PrimitiveBasics {
     pub fn replace_io(&mut self, new_operands: &[(&[DimSize], Dtype)]) {
+        self.dtypes = new_operands.iter().map(|o| o.1).collect();
+
         match self.typ {
             PrimitiveSpecType::Matmul { accum: _ } => {
                 debug_assert_eq!(new_operands.len(), 3);
@@ -157,10 +177,8 @@ impl PrimitiveBasics {
                     new_operands[0].0[1],
                     new_operands[1].0[1],
                 ];
-                self.dtype = new_operands[0].1;
             }
             PrimitiveSpecType::Conv { accum: _ } => {
-                assert_eq!(self.dtype, new_operands[0].1);
                 let [b, c, h, w] = new_operands[0].0[..] else {
                     panic!();
                 };
@@ -169,23 +187,18 @@ impl PrimitiveBasics {
                 };
                 assert_eq!(c, alt_c);
                 self.spec_shape = smallvec![b, f, c, h, w, fh, fw];
-                self.dtype = new_operands[0].1;
-                assert_eq!(self.dtype, new_operands[1].1);
-                assert_eq!(self.dtype, new_operands[2].1);
                 // TODO: Assert output shape is expected.
             }
             PrimitiveSpecType::Move => {
                 let [src, dest] = new_operands else {
                     panic!("Move must have 2 operands");
                 };
-                assert_eq!(src, dest);
+                assert_eq!(src.0, dest.0);
                 self.spec_shape = src.0.into();
-                self.dtype = src.1;
             }
             PrimitiveSpecType::Zero => {
                 assert_eq!(new_operands.len(), 1);
                 self.spec_shape = new_operands[0].0.into();
-                self.dtype = new_operands[0].1;
             }
         }
     }
@@ -231,7 +244,7 @@ impl PrimitiveBasics {
     }
 
     pub fn parameter_dtypes(&self) -> SmallVec<[Dtype; 3]> {
-        smallvec![self.dtype; self.typ.operand_count()]
+        self.dtypes.clone()
     }
 
     pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> TilingInference {
@@ -360,7 +373,12 @@ impl PrimitiveBasics {
 impl Display for PrimitiveBasics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let shape_str = join_into_string(&self.spec_shape, "×");
-        write!(f, "{}({}, {})", self.typ, shape_str, self.dtype)
+        write!(f, "{}({}, ", self.typ, shape_str)?;
+        if self.dtypes.len() == 1 {
+            write!(f, "{})", self.dtypes[0])
+        } else {
+            write!(f, "[{}])", self.dtypes.iter().join(", "))
+        }
     }
 }
 
@@ -374,8 +392,12 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
 
         let max_size = args.unwrap_or(ARBITRARY_SPEC_MAX_SIZE);
 
-        (any::<PrimitiveSpecType>(), any::<Dtype>(), Just(max_size))
-            .prop_flat_map(|(typ, dtype, max_size)| {
+        any::<PrimitiveSpecType>()
+            .prop_flat_map(|typ| {
+                let cnt = typ.operand_count();
+                (Just(typ), proptest::collection::vec(any::<Dtype>(), cnt))
+            })
+            .prop_flat_map(move |(typ, dtypes)| {
                 let shape_strategy = match typ {
                     PrimitiveSpecType::Matmul { accum: _ } => {
                         proptest::collection::vec(1..=max_size, 3).boxed()
@@ -400,12 +422,12 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
                         })
                         .boxed(),
                 };
-                (Just(typ), Just(dtype), shape_strategy)
+                (Just(typ), Just(dtypes), shape_strategy)
             })
-            .prop_map(move |(typ, dtype, spec_shape)| PrimitiveBasics {
+            .prop_map(move |(typ, dtypes, spec_shape)| PrimitiveBasics {
                 typ,
                 spec_shape: spec_shape.into(),
-                dtype,
+                dtypes: dtypes.into(),
             })
             .boxed()
     }
@@ -507,15 +529,17 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => basics
                     .parameter_shapes()
                     .into_iter()
+                    .zip(&basics.dtypes)
                     .zip(auxes)
-                    .map(|(s, a)| TensorSpec::new_noncanon_with_aux(s, basics.dtype, a.clone()))
+                    .map(|((s, dt), a)| TensorSpec::new_noncanon_with_aux(s, *dt, a.clone()))
                     .collect(),
                 PrimitiveSpecType::Move | PrimitiveSpecType::Zero => auxes
                     .iter()
-                    .map(|a| {
+                    .zip(&basics.dtypes)
+                    .map(|(a, dtype)| {
                         TensorSpec::new_noncanon_with_aux(
                             basics.spec_shape.clone(),
-                            basics.dtype,
+                            *dtype,
                             a.clone(),
                         )
                     })
@@ -532,7 +556,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let mut operand_basics: Vec<(Shape, Dtype)> = c
                         .parameter_shapes()
                         .into_iter()
-                        .zip(iter::repeat(c.dtype))
+                        .zip(c.dtypes.iter().copied())
                         .collect::<Vec<_>>();
                     last_seen_output = operand_basics.pop();
                     debug_assert!(last_seen_output.is_some());
@@ -615,21 +639,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             }
             LogicalSpec::Compose { .. } => todo!(),
         }
-
-        // After a LogicalSpec is made canonical, its parameters should also be canonical.
-        debug_assert_eq!(
-            self.parameters().to_vec(),
-            self.parameters()
-                .iter()
-                .map(|o| {
-                    let mut o = o.clone();
-                    o.canonicalize().unwrap();
-                    o
-                })
-                .collect::<Vec<_>>(),
-            "Parameters were not canonical after canonicalizing"
-        );
-
         Ok(())
     }
 
@@ -652,7 +661,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveBasics {
                     typ,
                     spec_shape: _,
-                    dtype: _,
+                    dtypes: _,
                 },
                 _primitive_aux,
                 _serial_only,
@@ -779,20 +788,18 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let o = components[1].parameter_shapes();
         let comp_out_idx = components[1].typ.output_idx();
         let intermediate_shape = &o[comp_out_idx];
-        let dtype = components[1].parameter_dtypes()[comp_out_idx];
+        let intermediate_dtype = components[1].dtypes[comp_out_idx];
 
         for level in Tgt::levels() {
             let vector_bytes = level.vector_bytes();
 
-            for layout in Tgt::move_destination_layouts(intermediate_shape, dtype) {
+            for layout in Tgt::move_destination_layouts(intermediate_shape, intermediate_dtype) {
                 // TODO: Need to implement `can_move_to`-style logic here.
 
                 if !vector_bytes.is_empty() {
-                    for vector_size in gen_vector_sizes(
-                        Some(intermediate_shape),
-                        components[1].dtype,
-                        vector_bytes,
-                    ) {
+                    for vector_size in
+                        gen_vector_sizes(Some(intermediate_shape), intermediate_dtype, vector_bytes)
+                    {
                         results.push(Action::Peel {
                             layout: layout.clone(),
                             level,
@@ -833,21 +840,15 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                             operand.dtype(),
                             level.vector_bytes(),
                         )
-                        .filter_map(|vector_size| {
-                            // Don't yield moves which don't change anything. If yielded, it would be
-                            // pruned immediately, but this is a bit quicker.
-                            if operand.layout() == layout
-                                && operand.level() == level
-                                && operand.vector_size() == vector_size
-                            {
-                                None
-                            } else {
-                                Some(Action::Move {
-                                    source_idx: i,
-                                    destination_level: level,
-                                    destination_layout: layout.clone(),
-                                    destination_vector_size: vector_size,
-                                })
+                        .map(|vector_size| {
+                            // This may return Moves with identical source and destination
+                            // TensorSpecs (i.e., within-level copies). These will be filtered in
+                            // [apply_with_aux].
+                            Action::Move {
+                                source_idx: i,
+                                destination_level: level,
+                                destination_layout: layout.clone(),
+                                destination_vector_size: vector_size,
                             }
                         }),
                     )
@@ -978,7 +979,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     .map(|t| (t.shape(), t.dtype()))
                     .collect::<Vec<_>>();
                 let mut component_inputs: Vec<(Shape, Dtype)> = vec![];
-                for (_i, component) in components.iter_mut().enumerate().rev() {
+                for component in components.iter_mut().rev() {
                     // Any missing inputs? Gather them here.
                     let needed = component.typ.input_count() - component_inputs.len();
                     component_inputs.extend(
@@ -995,7 +996,10 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         component.typ.infer_output_shape(&inp_shapes)
                     };
                     let mut new_operands = component_inputs.clone();
-                    new_operands.push((new_output_shape, component.dtype));
+                    new_operands.push((
+                        new_output_shape,
+                        component.dtypes[component.typ.output_idx()],
+                    ));
                     component.replace_io(
                         new_operands
                             .iter()
@@ -1066,90 +1070,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
         cloned
     }
-
-    #[cfg(feature = "verification")]
-    pub fn execute<S>(&self, args: &mut [ndarray::ArrayViewMutD<S>])
-    where
-        S: num_traits::Zero
-            + num_traits::NumAssign
-            + ndarray::LinalgScalar
-            + Clone
-            + std::fmt::Debug,
-    {
-        use ndarray::{s, Ix2, Ix4};
-
-        match self {
-            LogicalSpec::Primitive(basics, _, _) => match basics.typ {
-                PrimitiveSpecType::Matmul { accum } => {
-                    let [lhs, rhs, out] = args else {
-                        panic!("Matmul requires 3 arguments");
-                    };
-                    // TODO: Check shapes and dtypes are correct for this Spec.
-                    if !accum {
-                        out.fill(S::zero());
-                    }
-                    let lhs = lhs
-                        .view_mut()
-                        .into_dimensionality::<Ix2>()
-                        .expect("lhs should be rank 2");
-                    let rhs = rhs
-                        .view_mut()
-                        .into_dimensionality::<Ix2>()
-                        .expect("rhs should be rank 2");
-                    out.assign(&lhs.dot(&rhs));
-                }
-                PrimitiveSpecType::Conv { accum } => {
-                    use ndarray_conv::*;
-
-                    let [lhs, rhs, out] = args else {
-                        panic!("Conv requires 3 arguments");
-                    };
-
-                    // TODO: Check shapes and dtypes are correct for this Spec.
-                    if !accum {
-                        out.fill(S::zero());
-                    }
-                    let lhs = lhs
-                        .view_mut()
-                        .into_dimensionality::<Ix4>()
-                        .expect("lhs should be rank 4");
-                    let rhs = rhs
-                        .view_mut()
-                        .into_dimensionality::<Ix4>()
-                        .expect("rhs should be rank 4");
-                    for b in 0..lhs.shape()[0] {
-                        for c in 0..lhs.shape()[1] {
-                            for f in 0..rhs.shape()[0] {
-                                let single_img_ch = lhs.slice(s![b, c, .., ..]);
-                                let filter_ch = rhs.slice(s![f, c, .., ..]);
-                                out.slice_mut(s![b, c, .., ..]).assign(
-                                    &Conv2DExt::conv_2d(
-                                        &single_img_ch,
-                                        &filter_ch,
-                                        PaddingSize::Valid,
-                                        PaddingMode::Zeros,
-                                    )
-                                    .unwrap(),
-                                );
-                            }
-                        }
-                    }
-                }
-                PrimitiveSpecType::Move => {
-                    let [inp, out] = args else {
-                        panic!("Move requires 2 arguments");
-                    };
-                    // TODO: Check shape and dtype match.
-                    out.assign(inp);
-                }
-                PrimitiveSpecType::Zero => {
-                    // TODO: Check shape and dtype are correct for this Spec.
-                    args[0].fill(S::zero());
-                }
-            },
-            LogicalSpec::Compose { .. } => todo!(),
-        }
-    }
 }
 
 impl<Tgt: Target> Display for LogicalSpec<Tgt> {
@@ -1165,11 +1085,10 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
             debug_assert_eq!(self.output_idx(), external_inputs.len());
             return write!(
                 f,
-                "Compose(({}), [{}, out={}], ({}){})",
+                "Compose(({}), [{}, out={}],{})",
                 join_into_string(components.iter().map(|c| c.typ), ", "),
                 join_into_string(external_inputs, ", "),
                 output,
-                join_into_string(components.iter().map(|c| c.dtype), ", "),
                 if *serial_only { ", serial" } else { "" }
             );
         }
@@ -1258,12 +1177,12 @@ where
         match spec {
             LogicalSpec::Primitive(basics, auxes, serial_only) => {
                 let (key, mut pt) = BiMap::apply(&self.primitive_basics_bimap, basics);
-                let dtype = key.dtype();
                 let aux_keys = auxes
                     .iter()
                     .zip(basics.parameter_shapes())
-                    .map(|(tensor_aux, tensor_shape)| {
-                        let aux_bimap = (self.aux_surmap_fn)(&tensor_shape, dtype);
+                    .zip(&basics.dtypes)
+                    .map(|((tensor_aux, tensor_shape), dtype)| {
+                        let aux_bimap = (self.aux_surmap_fn)(&tensor_shape, *dtype);
                         let (aux_key, aux_pt) = aux_bimap.apply(tensor_aux);
                         pt.extend(aux_pt);
                         aux_key
@@ -1278,7 +1197,7 @@ where
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let ((key, aux_keys), pt) = i;
-        let dtype = key.dtype();
+        let dtypes = key.dtypes();
         let operand_count = aux_keys.len();
 
         let pt_without_serial = &pt[..pt.len() - 1];
@@ -1298,7 +1217,7 @@ where
                     let Ok(tap) = (&tensor_aux_pts[i * N..(i + 1) * N]).try_into() else {
                         panic!("Couldn't reverse the TensorSpecAux pt.");
                     };
-                    let aux_surmap = (self.aux_surmap_fn)(&parameter_shapes[i], dtype);
+                    let aux_surmap = (self.aux_surmap_fn)(&parameter_shapes[i], dtypes[i]);
                     // TODO: Avoid collect, which is here to avoid needing the iter to be Clone
                     aux_surmap
                         .apply_inverse(&(aux_keys[i].clone(), tap))
@@ -1320,7 +1239,7 @@ impl BiMap for PrimitiveBasicsBimap {
         let PrimitiveBasics {
             typ,
             spec_shape,
-            dtype,
+            dtypes,
         } = basics;
         let shifted_shape = spec_shape.iter().map(|&d| {
             if self.binary_scale_shapes {
@@ -1335,7 +1254,12 @@ impl BiMap for PrimitiveBasicsBimap {
         match *typ {
             PrimitiveSpecType::Matmul { accum } => {
                 let v = once(!accum as _).chain(shifted_shape).collect();
-                (SpecKey::Matmul { dtype: *dtype }, v)
+                (
+                    SpecKey::Matmul {
+                        dtypes: dtypes.as_slice().try_into().unwrap(),
+                    },
+                    v,
+                )
             }
             PrimitiveSpecType::Conv { accum } => {
                 let mut v: SmallVec<_> = once(!accum as _).chain(shifted_shape).collect();
@@ -1345,17 +1269,29 @@ impl BiMap for PrimitiveBasicsBimap {
                 // zero.
                 v[4] -= v[6];
                 v[5] -= v[7];
-                (SpecKey::Conv { dtype: *dtype }, v)
+                (
+                    SpecKey::Conv {
+                        dtypes: dtypes.as_slice().try_into().unwrap(),
+                    },
+                    v,
+                )
             }
-            PrimitiveSpecType::Move => (SpecKey::Move { dtype: *dtype }, shifted_shape.collect()),
-            PrimitiveSpecType::Zero => (SpecKey::Zero { dtype: *dtype }, shifted_shape.collect()),
+            PrimitiveSpecType::Move => (
+                SpecKey::Move {
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                },
+                shifted_shape.collect(),
+            ),
+            PrimitiveSpecType::Zero => {
+                (SpecKey::Zero { dtype: dtypes[0] }, shifted_shape.collect())
+            }
         }
     }
 
     fn apply_inverse(&self, c: &Self::Codomain) -> Self::Domain {
         let (key, v) = c;
         let basics = match key {
-            SpecKey::Matmul { dtype } | SpecKey::Conv { dtype } => {
+            SpecKey::Matmul { dtypes } | SpecKey::Conv { dtypes } => {
                 let accum = v[0] == 0;
                 let typ = match key {
                     SpecKey::Matmul { .. } => PrimitiveSpecType::Matmul { accum },
@@ -1381,10 +1317,10 @@ impl BiMap for PrimitiveBasicsBimap {
                 PrimitiveBasics {
                     typ,
                     spec_shape,
-                    dtype: *dtype,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
                 }
             }
-            SpecKey::Move { dtype } | SpecKey::Zero { dtype } => {
+            SpecKey::Move { dtypes } => {
                 let unshifted_shape = v.iter().map(|&d| {
                     if self.binary_scale_shapes {
                         DimSize::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
@@ -1392,15 +1328,24 @@ impl BiMap for PrimitiveBasicsBimap {
                         d + 1
                     }
                 });
-                let typ = if matches!(key, SpecKey::Move { .. }) {
-                    PrimitiveSpecType::Move
-                } else {
-                    PrimitiveSpecType::Zero
-                };
                 PrimitiveBasics {
-                    typ,
+                    typ: PrimitiveSpecType::Move,
                     spec_shape: unshifted_shape.collect(),
-                    dtype: *dtype,
+                    dtypes: dtypes.as_slice().into(),
+                }
+            }
+            SpecKey::Zero { dtype } => {
+                let unshifted_shape = v.iter().map(|&d| {
+                    if self.binary_scale_shapes {
+                        DimSize::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
+                    } else {
+                        d + 1
+                    }
+                });
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Zero,
+                    spec_shape: unshifted_shape.collect(),
+                    dtypes: smallvec![*dtype],
                 }
             }
         };
@@ -1433,6 +1378,23 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
             })
             .boxed()
     }
+}
+
+#[cfg(test)]
+pub fn arb_canonical_logical_spec<Tgt: Target>(
+    max_size: Option<DimSize>,
+) -> impl proptest::strategy::Strategy<Value = LogicalSpec<Tgt>> {
+    use proptest::prelude::*;
+
+    any_with::<LogicalSpec<Tgt>>(max_size).prop_filter_map(
+        "Must be possible to canonicalize LogicalSpec",
+        |mut s| {
+            if s.canonicalize().is_err() {
+                return None;
+            }
+            Some(s)
+        },
+    )
 }
 
 // TODO: Modify to return an `impl Iterator` of some kind instead of a `Box`.
@@ -1647,16 +1609,14 @@ mod tests {
 
         #[test]
         fn test_actions_are_valid_through_consumed_memory_x86(
-            logical_spec in any::<LogicalSpec<X86Target>>()
-                .prop_filter("Spec should be canonical", |s| s.is_canonical())
+            logical_spec in arb_canonical_logical_spec::<X86Target>(None)
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
 
         #[test]
         fn test_actions_are_valid_through_consumed_memory_arm(
-            logical_spec in any::<LogicalSpec<ArmTarget>>()
-                .prop_filter("Spec should be canonical", |s| s.is_canonical())
+            logical_spec in arb_canonical_logical_spec::<X86Target>(None)
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
@@ -1697,7 +1657,7 @@ mod tests {
                         let basics = PrimitiveBasics {
                             typ: PrimitiveSpecType::Move,
                             spec_shape: Shape::from(shape),
-                            dtype
+                            dtypes: smallvec![dtype, dtype],
                         };
                         let auxes_strategy = basics
                             .parameter_shapes()
@@ -1733,6 +1693,16 @@ mod tests {
                 c.canonicalize().unwrap();
                 p == &c
             }));
+        }
+
+        #[test]
+        fn test_move_actions_never_returns_within_level_copy(spec in any::<Spec<X86Target>>()) {
+            for action in spec.0.actions() {
+                if let Ok(ImplNode::MoveLet(move_let)) = action.apply(&spec) {
+                    assert_ne!(&move_let.source_spec, move_let.introduced.spec(),
+                        "Copying MoveLet introduced by action {:?}", action);
+                }
+            }
         }
 
         #[test]
@@ -1855,8 +1825,7 @@ mod tests {
 
     fn arb_spec_action_and_lower_limit<Tgt: Target>(
     ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt, ()>, MemoryLimits)> {
-        any::<Spec<Tgt>>()
-            .prop_filter("Spec was not canonical", |spec| spec.is_canonical())
+        arb_canonical_spec::<Tgt>(None, None)
             .prop_filter_map("Spec had zero applicable actions", |spec| {
                 let applied_actions = spec
                     .0

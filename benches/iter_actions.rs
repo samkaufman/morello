@@ -14,7 +14,7 @@ fn copy_actions_into_vec() {
         PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
             spec_shape: smallvec![64, 64, 64],
-            dtype: Dtype::Uint32,
+            dtypes: smallvec![Dtype::Uint32; 3],
         },
         vec![
             TensorSpecAux {

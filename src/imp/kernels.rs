@@ -2,7 +2,7 @@ use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
-use crate::target::Target;
+use crate::target::{CpuMemoryLevel, MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
 
@@ -27,6 +27,7 @@ pub struct Kernel<Tgt: Target, Aux> {
 pub enum KernelType {
     Mult,
     BroadcastVecMult,
+    TwoVecBroadcastVecMult,
     ValueAssign,
     VectorAssign,
     MemsetZero,
@@ -49,7 +50,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
     fn memory_allocated(&self) -> MemoryAllocation {
         match self.kernel_type {
-            KernelType::BroadcastVecMult => {
+            KernelType::BroadcastVecMult | KernelType::TwoVecBroadcastVecMult => {
                 let vec_tensor_spec = self.arguments[1].spec();
                 let vb = u64::from(vec_tensor_spec.vector_size().unwrap())
                     * u64::from(vec_tensor_spec.dtype().size());
@@ -67,12 +68,24 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
     fn compute_main_cost(&self, _child_costs: &[MainCost]) -> MainCost {
         match self.kernel_type {
-            KernelType::BroadcastVecMult => {
+            KernelType::BroadcastVecMult | KernelType::TwoVecBroadcastVecMult => {
                 let vector_size = self.arguments[1].spec().vector_size().unwrap();
                 let volume = self.arguments[1].shape().iter().product::<u32>();
                 debug_assert_eq!(volume % vector_size, 0);
                 let vector_count = volume / vector_size;
-                INST_COST * ((vector_count * 2) + 1)
+                let mut cost = INST_COST * ((vector_count * 2) + 1);
+
+                // TwoVecBroadcastVecMult takes an input from L1.
+                if matches!(self.kernel_type, KernelType::TwoVecBroadcastVecMult) {
+                    // TODO: Instead, call `move_cost`. Requires specializing kernel to X86/ARM.
+                    let mut l1_hit_cost = CpuMemoryLevel::L1.cache_hit_cost();
+                    if !self.arguments[0].spec().is_contiguous() {
+                        l1_hit_cost *= 2;
+                    }
+                    cost += l1_hit_cost;
+                }
+
+                cost
             }
             KernelType::Mult => INST_COST,
             KernelType::ValueAssign
@@ -110,6 +123,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
         let name = match self.kernel_type {
             KernelType::Mult => "Mult",
             KernelType::BroadcastVecMult => "BroadcastVecMult",
+            KernelType::TwoVecBroadcastVecMult => "TwoVecBroadcastVecMult",
             KernelType::ValueAssign => "ValueAssign",
             KernelType::VectorAssign => "VectorAssign",
             KernelType::MemsetZero => "MemsetZero",
@@ -140,7 +154,9 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 impl KernelType {
     pub const fn argument_count(&self) -> u8 {
         match self {
-            KernelType::Mult | KernelType::BroadcastVecMult => 3,
+            KernelType::Mult
+            | KernelType::BroadcastVecMult
+            | KernelType::TwoVecBroadcastVecMult => 3,
             KernelType::ValueAssign | KernelType::VectorAssign => 2,
             KernelType::MemsetZero | KernelType::VectorZero => 1,
             KernelType::CacheAccess => todo!(),

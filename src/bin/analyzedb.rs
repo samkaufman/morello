@@ -62,33 +62,25 @@ fn main() -> Result<()> {
     // First, scan the blocks to sort them.
     let keys_sorted = db.blocks.iter().map(|b| b.key().clone()).sorted_by_key(
         |((spec_key, factored_pt), block_key)| {
-            let kind_int: u8 = match spec_key {
-                SpecKey::Zero {
-                    dtype: Dtype::Uint8,
-                } => 0,
-                SpecKey::Zero {
-                    dtype: Dtype::Uint32,
-                } => 1,
-                SpecKey::Move {
-                    dtype: Dtype::Uint8,
-                } => 2,
-                SpecKey::Move {
-                    dtype: Dtype::Uint32,
-                } => 3,
-                SpecKey::Matmul {
-                    dtype: Dtype::Uint8,
-                } => 4,
-                SpecKey::Matmul {
-                    dtype: Dtype::Uint32,
-                } => 5,
-                SpecKey::Conv {
-                    dtype: Dtype::Uint8,
-                } => 6,
-                SpecKey::Conv {
-                    dtype: Dtype::Uint32,
-                } => 7,
+            let key_int = match spec_key {
+                SpecKey::Zero { .. } => 0,
+                SpecKey::Move { .. } => 1,
+                SpecKey::Matmul { .. } => 2,
+                SpecKey::Conv { .. } => 3,
             };
-            (kind_int, factored_pt.clone(), block_key.clone())
+            let dtype_int = spec_key
+                .dtypes()
+                .iter()
+                .map(|dt| match dt {
+                    Dtype::Uint8 => 0,
+                    Dtype::Sint8 => 1,
+                    Dtype::Uint16 => 2,
+                    Dtype::Sint16 => 3,
+                    Dtype::Uint32 => 4,
+                    Dtype::Sint32 => 5,
+                })
+                .collect::<Vec<_>>();
+            ((key_int, dtype_int), factored_pt.clone(), block_key.clone())
         },
     );
 

@@ -164,7 +164,7 @@ mod tests {
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Move,
                     spec_shape: smallvec![4],
-                    dtype: Dtype::Uint8,
+                    dtypes: smallvec![Dtype::Uint8; 3],
                 },
                 vec![
                     TensorSpecAux {

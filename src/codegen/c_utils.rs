@@ -231,6 +231,10 @@ impl Bounds for CExprVar {}
 pub fn c_type(dtype: Dtype) -> &'static str {
     match dtype {
         Dtype::Uint8 => "uint8_t",
+        Dtype::Sint8 => "int8_t",
+        Dtype::Uint16 => "uint16_t",
+        Dtype::Sint16 => "int16_t",
         Dtype::Uint32 => "uint32_t",
+        Dtype::Sint32 => "int32_t",
     }
 }

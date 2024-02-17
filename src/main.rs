@@ -81,9 +81,16 @@ enum Subcommand {
 #[derive(clap::Subcommand)]
 enum QuerySpec {
     #[command(about = "Synthesize a row- to column-major transpose")]
-    Transpose { size: DimSize },
+    Transpose {
+        size: DimSize,
+    },
     #[command(about = "Synthesize a matrix multiplication")]
-    Matmul { size: DimSize },
+    Matmul {
+        size: DimSize,
+    },
+    MatmulU8S8S16 {
+        size: DimSize,
+    },
     #[command(about = "Synthesize a convolution")]
     Conv {
         #[arg(long, short, default_value = "1")]
@@ -108,7 +115,7 @@ struct RunCmd {
 struct BenchCmd {
     /// Number of benchmark samples
     #[arg(long, short)]
-    bench_samples: Option<u32>,
+    inner_loop_iters: Option<u32>,
 
     #[command(subcommand)]
     query_spec: QuerySpec,
@@ -144,7 +151,7 @@ where
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Move,
                     spec_shape: smallvec![*size, *size],
-                    dtype: Dtype::Uint32,
+                    dtypes: smallvec![Dtype::Uint32; 2],
                 },
                 vec![
                     TensorSpecAux::<Tgt> {
@@ -165,13 +172,20 @@ where
                 true,
             )
         }
-        QuerySpec::Matmul { size } => {
+        QuerySpec::Matmul { size } | QuerySpec::MatmulU8S8S16 { size } => {
             let rm2 = row_major(2);
+            let dtypes = match query_spec {
+                QuerySpec::Matmul { .. } => smallvec![Dtype::Uint32; 3],
+                QuerySpec::MatmulU8S8S16 { .. } => {
+                    smallvec![Dtype::Uint8, Dtype::Sint8, Dtype::Sint16]
+                }
+                _ => unreachable!(),
+            };
             LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Matmul { accum: false },
-                    spec_shape: smallvec![*size, *size, *size],
-                    dtype: Dtype::Uint32,
+                    spec_shape: smallvec![*size; 3],
+                    dtypes,
                 },
                 vec![
                     TensorSpecAux {
@@ -206,7 +220,7 @@ where
                         *filters_size,
                         *filters_size,
                     ],
-                    dtype: Dtype::Uint32,
+                    dtypes: smallvec![Dtype::Uint32; 3],
                 },
                 vec![
                     TensorSpecAux {
@@ -243,11 +257,14 @@ where
         panic!("No Impl found");
     };
 
-    let bench_samples = if let Subcommand::Bench(BenchCmd { bench_samples, .. }) = subcmd {
+    let bench_inner_loop_iters = if let Subcommand::Bench(BenchCmd {
+        inner_loop_iters, ..
+    }) = subcmd
+    {
         // We need an exact number of samples when benchmarking.
-        match *bench_samples {
+        match *inner_loop_iters {
             // The user specified a number of samples.
-            Some(bench_samples) => Some(bench_samples),
+            Some(s) => Some(s),
             // The user didn't specify a number of samples, so we estimate
             // a good number of samples.
             None => Some(synthesized_impl.estimate_optimal_iters()?),
@@ -263,14 +280,14 @@ where
             } else {
                 None
             };
-            synthesized_impl.emit(bench_samples, impl_style, &mut ToWriteFmt(io::stdout()))?;
+            synthesized_impl.emit(true, impl_style, &mut ToWriteFmt(io::stdout()))?;
         }
         OutputFormat::Impl => pprint(synthesized_impl, args.impl_style),
     }
 
     match subcmd {
         Subcommand::Run(_) => {
-            let built_artifact = synthesized_impl.build(None)?;
+            let built_artifact = synthesized_impl.build(false)?;
             let output = built_artifact.run()?;
             println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
             #[cfg(feature = "verification")]
@@ -280,8 +297,11 @@ where
         }
         Subcommand::Bench(_) => {
             // TODO: Test correctness (allow disabling with flag)
-            let result = synthesized_impl.bench(bench_samples.unwrap(), None)?;
-            println!("\nImpl Runtime: {:.8}s", result.result.as_secs_f32());
+            let result = synthesized_impl.bench(bench_inner_loop_iters.unwrap(), None)?;
+            let inner_loop_runtime = result.best_inner_loop_runtime();
+            let kernel_runtime = inner_loop_runtime / result.inner_loop_iterations;
+            println!("\nkernel runtime: {:.8}s", kernel_runtime.as_secs_f32());
+            println!("loop runtime: {}ns", inner_loop_runtime.as_nanos());
         }
         _ => {}
     }
