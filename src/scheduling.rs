@@ -538,6 +538,12 @@ impl<Tgt: Target> Action<Tgt> {
                     new_spec.shape()
                 );
 
+                // Filter cases where, after canonicalization, the source and destination
+                // TensorSpecs match (i.e., within-level copies).
+                if outer_moved_operand_spec == &new_spec {
+                    return Err(ApplyError::ActionNotApplicable);
+                }
+
                 let inner_moved_operand = if new_spec.level().is_addressed() {
                     TensorOrCacheView::Tensor(Rc::new(Tensor::new(new_spec)))
                 } else {

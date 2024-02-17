@@ -71,7 +71,7 @@ pub trait CodeGen<Tgt: Target> {
         ))
     }
 
-    /// Benchmark several times, returning the minimum of inner loop means.
+    /// Benchmark `repeat` times.
     fn bench(&self, inner_loop_iters: u32, repeat: Option<usize>) -> Result<RobustTimingResult> {
         let repeat = repeat.unwrap_or(10); // default: 10
 

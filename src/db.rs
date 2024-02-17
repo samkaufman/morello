@@ -1022,7 +1022,6 @@ mod tests {
             let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
 
             // Put all decisions into database.
-            println!("Decisions-to-visit are: {:?}", decision.visit_decisions().collect::<Vec<_>>());
             for d in decision.visit_decisions() {
                 db.put(d.spec.clone(), d.actions_costs.clone().into());
             }
@@ -1043,10 +1042,11 @@ mod tests {
                 .multi_cartesian_product();
             let expected = ActionCostVec(decision.actions_costs.into());
             for limit_to_check_bits in filled_limits_iter {
-                let limit_to_check = limit_to_check_bits.iter().copied().map(bit_length_inverse).collect::<Vec<_>>();
-                let spec_to_check = Spec(decision.spec.0.clone(), MemoryLimits::Standard(MemVec::new(limit_to_check.try_into().unwrap())));
+                let limit_to_check_vec = limit_to_check_bits.iter().copied().map(bit_length_inverse).collect::<Vec<_>>();
+                let limit_to_check = MemoryLimits::Standard(MemVec::new(limit_to_check_vec.try_into().unwrap()));
+                let spec_to_check = Spec(decision.spec.0.clone(), limit_to_check);
                 let get_result = db.get(&spec_to_check).expect("Spec should be in database");
-                assert_eq!(get_result, expected);
+                assert_eq!(get_result, expected, "Entries differed at {}", spec_to_check);
             }
         }
 
@@ -1171,7 +1171,6 @@ mod tests {
                 (Just(spec), action_idx_strategy)
             })
             .prop_map(|(spec, action_opt)| {
-                println!("Spec: {}", spec);
                 if let Some((action_idx, imp)) = action_opt {
                     recursively_decide_with_action(&spec, action_idx, &imp)
                 } else {
@@ -1297,7 +1296,6 @@ mod tests {
             };
         }
 
-        println!("Computing cost of Impl: {:?}", partial_impl);
         let cost = Cost::from_child_costs(
             partial_impl,
             &children

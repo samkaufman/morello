@@ -33,7 +33,7 @@ use std::{assert_eq, debug_assert_eq};
 const MULTI_DIM_TILING: bool = false;
 
 /// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
-const MOVE_RESULTS_CAPACITY: usize = 12;
+const MOVE_RESULTS_CAPACITY: usize = 16;
 
 #[cfg(test)]
 const ARBITRARY_SPEC_MAX_SIZE: DimSize = 8;
@@ -840,21 +840,15 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                             operand.dtype(),
                             level.vector_bytes(),
                         )
-                        .filter_map(|vector_size| {
-                            // Don't yield moves which don't change anything. If yielded, it would be
-                            // pruned immediately, but this is a bit quicker.
-                            if operand.layout() == layout
-                                && operand.level() == level
-                                && operand.vector_size() == vector_size
-                            {
-                                None
-                            } else {
-                                Some(Action::Move {
-                                    source_idx: i,
-                                    destination_level: level,
-                                    destination_layout: layout.clone(),
-                                    destination_vector_size: vector_size,
-                                })
+                        .map(|vector_size| {
+                            // This may return Moves with identical source and destination
+                            // TensorSpecs (i.e., within-level copies). These will be filtered in
+                            // [apply_with_aux].
+                            Action::Move {
+                                source_idx: i,
+                                destination_level: level,
+                                destination_layout: layout.clone(),
+                                destination_vector_size: vector_size,
                             }
                         }),
                     )
@@ -1699,6 +1693,16 @@ mod tests {
                 c.canonicalize().unwrap();
                 p == &c
             }));
+        }
+
+        #[test]
+        fn test_move_actions_never_returns_within_level_copy(spec in any::<Spec<X86Target>>()) {
+            for action in spec.0.actions() {
+                if let Ok(ImplNode::MoveLet(move_let)) = action.apply(&spec) {
+                    assert_ne!(&move_let.source_spec, move_let.introduced.spec(),
+                        "Copying MoveLet introduced by action {:?}", action);
+                }
+            }
         }
 
         #[test]
