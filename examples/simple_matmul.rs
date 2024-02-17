@@ -84,7 +84,7 @@ fn main() {
                     matmul_bb.move_param(2, CpuMemoryLevel::RF, row_major(2), None)
                 })
                 .subschedule(&[1, 1, 0], &|s| s.place(KernelType::ValueAssign))
-                .subschedule(&[1, 1, 1], &|s| s.split(1).place(KernelType::Mult))
+                .subschedule(&[1, 1, 1], &|s| s.split(1).place(KernelType::MultAdd))
                 .subschedule(&[1, 1, 2], &|s| s.place(KernelType::ValueAssign))
         });
 
@@ -107,7 +107,7 @@ fn main() {
     //                     alloc as: (1×1, u32, RF)
     //                       ValueAssign(ai, as)
     //                       tile (at: (1×1, u32, RF, ua) <-[0, 1]- am, au: (1×1, u32, RF, ua) <-[1, 2]- ap)
-    //                         Mult(at, au, as)
+    //                         MultAdd(at, au, as)
     //                       ValueAssign(as, ai)
     //
 
@@ -140,7 +140,7 @@ fn main() {
     //            uint32_t an;
     //            an = ac[(64 * af + 1024 * ad + ag + 16 * ae)];
     //            for (int ao = 0; ao < 4; ao++) {
-    //              an += aj[(ao)] * al[(ao)];  /* Mult */
+    //              an += aj[(ao)] * al[(ao)];  /* MultAdd */
     //            }
     //            ac[(64 * af + 1024 * ad + ag + 16 * ae)] = an;
     //          }
