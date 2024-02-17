@@ -519,13 +519,13 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 aux: _,
             }) => {
                 match kernel_type {
-                    KernelType::Mult => {
+                    KernelType::MultAdd => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
                         });
                         writeln!(
                             w,
-                            "{}{} += {} * {};  /* Mult */",
+                            "{}{} += {} * {};  /* MultAdd */",
                             indent(depth),
                             exprs[2],
                             exprs[0],
@@ -596,7 +596,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             )
                         }
                     }
-                    KernelType::BroadcastVecMult => {
+                    KernelType::BroadcastVecMultAdd => {
                         let vector_size = arguments[2].spec().vector_size().unwrap();
                         let volume = arguments[2].spec().shape().iter().product::<u32>();
                         debug_assert_eq!(volume % vector_size, 0);
@@ -615,7 +615,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                                 });
                             writeln!(
                                 w,
-                                "{}{} += {} * {}; /* BroadcastVecMult */",
+                                "{}{} += {} * {}; /* BroadcastVecMultAdd */",
                                 indent(depth),
                                 exprs[2],
                                 exprs[0],
@@ -624,7 +624,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
-                    KernelType::TwoVecBroadcastVecMult => {
+                    KernelType::TwoVecBroadcastVecMultAdd => {
                         let vector_size = arguments[2].spec().vector_size().unwrap();
                         let volume = arguments[2].spec().shape().iter().product::<u32>();
                         debug_assert_eq!(volume % vector_size, 0);
@@ -645,6 +645,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
                             // TODO: Lift the broadcast out of this loop.
                             let broadcast_name = self.namer.fresh_name();
+                            writeln!(w, "/* TwoVecBroadcastVecMultAdd */")?;
                             writeln!(
                                 w,
                                 "{}__m256i {} = _mm256_set1_epi16(*(int16_t *)({}));",

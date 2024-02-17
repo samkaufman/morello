@@ -152,13 +152,13 @@ impl<T: CpuTarget> Target for T {
                     if *accum {
                         let mut microkernels = vec![];
                         if mult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::Mult));
+                            microkernels.push(Action::Place(KernelType::MultAdd));
                         }
                         if broadcastvecmult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::BroadcastVecMult));
+                            microkernels.push(Action::Place(KernelType::BroadcastVecMultAdd));
                         }
                         if twovecbroadcastvecmult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::TwoVecBroadcastVecMult));
+                            microkernels.push(Action::Place(KernelType::TwoVecBroadcastVecMultAdd));
                         }
                         Box::new(microkernels.into_iter())
                     } else {

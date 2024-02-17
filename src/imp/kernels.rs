@@ -25,9 +25,9 @@ pub struct Kernel<Tgt: Target, Aux> {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(test, derive(Hash, proptest_derive::Arbitrary))]
 pub enum KernelType {
-    Mult,
-    BroadcastVecMult,
-    TwoVecBroadcastVecMult,
+    MultAdd,
+    BroadcastVecMultAdd,
+    TwoVecBroadcastVecMultAdd,
     ValueAssign,
     VectorAssign,
     MemsetZero,
@@ -50,7 +50,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
     fn memory_allocated(&self) -> MemoryAllocation {
         match self.kernel_type {
-            KernelType::BroadcastVecMult | KernelType::TwoVecBroadcastVecMult => {
+            KernelType::BroadcastVecMultAdd | KernelType::TwoVecBroadcastVecMultAdd => {
                 let vec_tensor_spec = self.arguments[1].spec();
                 let vb = u64::from(vec_tensor_spec.vector_size().unwrap())
                     * u64::from(vec_tensor_spec.dtype().size());
@@ -68,15 +68,15 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
     fn compute_main_cost(&self, _child_costs: &[MainCost]) -> MainCost {
         match self.kernel_type {
-            KernelType::BroadcastVecMult | KernelType::TwoVecBroadcastVecMult => {
+            KernelType::BroadcastVecMultAdd | KernelType::TwoVecBroadcastVecMultAdd => {
                 let vector_size = self.arguments[1].spec().vector_size().unwrap();
                 let volume = self.arguments[1].shape().iter().product::<u32>();
                 debug_assert_eq!(volume % vector_size, 0);
                 let vector_count = volume / vector_size;
                 let mut cost = INST_COST * ((vector_count * 2) + 1);
 
-                // TwoVecBroadcastVecMult takes an input from L1.
-                if matches!(self.kernel_type, KernelType::TwoVecBroadcastVecMult) {
+                // TwoVecBroadcastVecMultAdd takes an input from L1.
+                if matches!(self.kernel_type, KernelType::TwoVecBroadcastVecMultAdd) {
                     // TODO: Instead, call `move_cost`. Requires specializing kernel to X86/ARM.
                     let mut l1_hit_cost = CpuMemoryLevel::L1.cache_hit_cost();
                     if !self.arguments[0].spec().is_contiguous() {
@@ -87,7 +87,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
                 cost
             }
-            KernelType::Mult => INST_COST,
+            KernelType::MultAdd => INST_COST,
             KernelType::ValueAssign
             | KernelType::VectorAssign
             | KernelType::MemsetZero
@@ -121,9 +121,9 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
         param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         let name = match self.kernel_type {
-            KernelType::Mult => "Mult",
-            KernelType::BroadcastVecMult => "BroadcastVecMult",
-            KernelType::TwoVecBroadcastVecMult => "TwoVecBroadcastVecMult",
+            KernelType::MultAdd => "MultAdd",
+            KernelType::BroadcastVecMultAdd => "BroadcastVecMultAdd",
+            KernelType::TwoVecBroadcastVecMultAdd => "TwoVecBroadcastVecMultAdd",
             KernelType::ValueAssign => "ValueAssign",
             KernelType::VectorAssign => "VectorAssign",
             KernelType::MemsetZero => "MemsetZero",
@@ -154,9 +154,9 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 impl KernelType {
     pub const fn argument_count(&self) -> u8 {
         match self {
-            KernelType::Mult
-            | KernelType::BroadcastVecMult
-            | KernelType::TwoVecBroadcastVecMult => 3,
+            KernelType::MultAdd
+            | KernelType::BroadcastVecMultAdd
+            | KernelType::TwoVecBroadcastVecMultAdd => 3,
             KernelType::ValueAssign | KernelType::VectorAssign => 2,
             KernelType::MemsetZero | KernelType::VectorZero => 1,
             KernelType::CacheAccess => todo!(),
