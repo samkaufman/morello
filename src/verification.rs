@@ -89,52 +89,50 @@ impl BuiltArtifact {
 }
 
 impl<Tgt: Target> LogicalSpec<Tgt> {
-    pub fn execute(&self, args: &mut [DynArray<IxDyn>]) {
+    #[must_use]
+    pub fn execute(&self, mut args: Vec<DynArray<IxDyn>>) -> Vec<DynArray<IxDyn>> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => match basics.typ {
                 PrimitiveSpecType::Matmul { accum } => {
-                    let [lhs, rhs, out] = args else {
-                        panic!("Matmul requires 3 arguments");
-                    };
                     // TODO: Check shapes and dtypes are correct for this Spec.
-                    if !accum {
-                        out.zero();
-                    }
-                    // TODO: Implement views to avoid cloning below.
+                    let [lhs, rhs, out] = args
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("expected 3 args"));
                     let lhs = lhs
-                        .clone()
                         .into_dimensionality::<Ix2>()
                         .expect("lhs should be rank 2");
                     let rhs = rhs
-                        .clone()
                         .into_dimensionality::<Ix2>()
                         .expect("rhs should be rank 2");
                     let mut out = out
-                        .clone()
                         .into_dimensionality::<Ix2>()
                         .expect("out should be rank 2");
+                    if !accum {
+                        out.zero();
+                    }
                     lhs.dot_inplace(&rhs, &mut out);
+                    vec![lhs.into_dyn(), rhs.into_dyn(), out.into_dyn()]
                 }
                 PrimitiveSpecType::Conv { accum } => {
                     use ndarray_conv::*;
 
-                    let [lhs, rhs, out] = args else {
-                        panic!("Conv requires 3 arguments");
-                    };
+                    let [lhs, rhs, out] = args
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("expected 3 args"));
 
-                    // TODO: Check shapes and dtypes are correct for this Spec.
-                    if !accum {
-                        out.zero();
-                    }
                     // TODO: Implement views to avoid cloning below.
                     let lhs = lhs
-                        .clone()
                         .into_dimensionality::<Ix4>()
                         .expect("lhs should be rank 4");
                     let rhs = rhs
-                        .clone()
                         .into_dimensionality::<Ix4>()
                         .expect("rhs should be rank 4");
+                    let mut out = out
+                        .into_dimensionality::<Ix4>()
+                        .expect("out should be rank 4");
+                    if !accum {
+                        out.zero();
+                    }
                     for b in 0..lhs.shape()[0] {
                         for c in 0..lhs.shape()[1] {
                             for f in 0..rhs.shape()[0] {
@@ -148,17 +146,21 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                             }
                         }
                     }
+                    vec![lhs.into_dyn(), rhs.into_dyn(), out.into_dyn()]
                 }
                 PrimitiveSpecType::Move => {
-                    let [inp, out] = args else {
-                        panic!("Move requires 2 arguments");
-                    };
+                    let [inp, mut out] = args
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("expected 2 args"));
                     // TODO: Check shape and dtype match.
-                    out.assign(inp);
+                    out.assign(&inp);
+                    vec![inp, out]
                 }
                 PrimitiveSpecType::Zero => {
+                    assert_eq!(args.len(), 1);
                     // TODO: Check shape and dtype are correct for this Spec.
                     args[0].zero();
+                    args
                 }
             },
             LogicalSpec::Compose { .. } => todo!(),
@@ -218,6 +220,10 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Uint32(a) => a.into_dimensionality::<A>().map(DynArray::Uint32),
             DynArray::Sint32(a) => a.into_dimensionality::<A>().map(DynArray::Sint32),
         }
+    }
+
+    pub fn into_dyn(self) -> DynArray<IxDyn> {
+        self.into_dimensionality::<IxDyn>().unwrap()
     }
 
     pub fn zero(&mut self) {
@@ -407,16 +413,16 @@ where
         .map(make_array_input_dyn::<Tgt>)
         .collect::<Vec<_>>();
 
-    // Compute expected output
-    let output_idx = spec.0.output_idx();
-    spec.0.execute(&mut concrete_tensors);
-
-    // Evaluate output
+    // Gather output from program. Do this before execute so that the expected output
+    // isn't given to the generated program.
     let lowered_output = built_artifact
         .run_with_input_data(&concrete_tensors)
         .unwrap();
 
-    lowered_output == concrete_tensors[output_idx]
+    // Compute expected output
+    concrete_tensors = spec.0.execute(concrete_tensors);
+
+    lowered_output == concrete_tensors[spec.0.output_idx()]
 }
 
 fn make_array_input_dyn<Tgt: Target>(input: &TensorSpec<Tgt>) -> DynArray<IxDyn> {

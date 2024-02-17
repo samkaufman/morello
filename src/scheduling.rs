@@ -260,19 +260,18 @@ impl<Tgt: Target> Action<Tgt> {
                 match self {
                     Action::TileOut { .. } => {}
                     Action::Split { .. } => {
-                        if let LogicalSpec::Primitive(
-                            PrimitiveBasics {
-                                typ: PrimitiveSpecType::Matmul { accum },
+                        if !matches!(
+                            &inner_spec,
+                            LogicalSpec::Primitive(
+                                PrimitiveBasics {
+                                    typ: PrimitiveSpecType::Matmul { accum: true },
+                                    ..
+                                },
                                 ..
-                            },
-                            _,
-                            _,
-                        ) = &mut inner_spec
-                        {
-                            *accum = true;
-                        } else {
-                            // TODO: Should return `None` instead?
-                            panic!("Can only split a Matmul");
+                            )
+                        ) {
+                            // TODO: Should return an error instead?
+                            panic!("Can only split an accumulating Matmul");
                         };
                     }
                     _ => unreachable!(),
