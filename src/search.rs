@@ -33,7 +33,9 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d> + Send + Sync,
 {
-    debug_assert!(top_k >= 1);
+    if top_k == 0 {
+        return (smallvec![], 0, 0);
+    }
     assert!(db.max_k().map_or(true, |k| k >= top_k));
 
     let mut canonical_goal = goal.clone();
@@ -130,9 +132,18 @@ where
     }
 
     // Copy into the memo. table and return.
-    let final_result = reducer.finalize();
-    db.put(goal.clone(), final_result.clone());
-    (final_result, hits, misses)
+    let final_results = reducer.finalize();
+    if final_results.len() > 0
+        && format!("{}", goal.0) == "Move((1×2, u32, <[1,0], [None, None]>), (1×2, u32), serial)"
+    {
+        println!(
+            "put: {} -- down to [{}]",
+            goal,
+            final_results.iter().map(|r| &r.1.peaks).format(", ")
+        );
+    }
+    db.put(goal.clone(), final_results.clone());
+    (final_results, hits, misses)
 }
 
 fn top_down_impl<'d, Tgt, D, Aux>(
@@ -163,18 +174,16 @@ where
         let mut child_costs: SmallVec<[Cost; 3]> =
             SmallVec::with_capacity(partial_impl.children().len());
         for child_node in partial_impl.children() {
-            let (mut child_results, subhits, submisses) =
+            let (child_results, subhits, submisses) =
                 top_down_impl(db, child_node, top_k, thread_idx, thread_count);
             hits += subhits;
             misses += submisses;
             if child_results.is_empty() {
                 // Unsatisfiable.
                 return (smallvec![], hits, misses);
-            } else if child_results.len() == 1 {
-                child_costs.append(&mut child_results);
             } else {
                 // Pick the lowest cost by O(N) over N implementations.
-                child_costs.push(child_results.into_iter().min().unwrap());
+                child_costs.push(child_results[0].clone());
             }
         }
         let partial_impl_cost = Cost::from_child_costs(partial_impl, &child_costs);
