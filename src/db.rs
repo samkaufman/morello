@@ -122,7 +122,7 @@ pub struct RleBlock {
 
 // TODO: Replace [Option<u16>] with just [u16] offset by one.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ActionOnlyBlock(NDArray<u16>);
+pub struct ActionOnlyBlock(NDArray<ActionIdx>);
 
 // TODO: Storing Spec and usize is too expensive.
 pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
