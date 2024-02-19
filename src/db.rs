@@ -117,7 +117,6 @@ pub struct RleBlock {
     pub main_costs: NDArray<MainCost>,
     pub peaks: NDArray<MemVec>,
     pub depths_actions: NDArray<(u8, ActionIdx)>,
-    shape: SmallVec<[usize; 10]>,
 }
 
 // TODO: Replace [Option<u16>] with just [u16] offset by one.
@@ -562,7 +561,6 @@ impl RleBlock {
             main_costs: NDArray::new(&shape_with_k),
             peaks: NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
             depths_actions: NDArray::new(&shape_with_k),
-            shape: shape.into(),
         }
     }
 
@@ -653,7 +651,7 @@ impl RleBlock {
     }
 
     pub fn shape(&self) -> &[usize] {
-        &self.shape
+        self.filled.shape()
     }
 }
 
