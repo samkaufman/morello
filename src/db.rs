@@ -107,12 +107,12 @@ pub struct DashmapDiskDatabase {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub enum DbBlock {
-    Rle(Box<RleBlock>),
+    Whole(Box<WholeBlock>),
     ActionOnly(ActionOnlyBlock),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RleBlock {
+pub struct WholeBlock {
     pub filled: NDArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
     pub main_costs: NDArray<MainCost>,
     pub peaks: NDArray<MemVec>,
@@ -309,7 +309,7 @@ where
                                 Some(&decisions.iter().map(|d| d.0).collect::<SmallVec<[_; 1]>>()),
                             )
                         }
-                        DbBlock::Rle(e) => {
+                        DbBlock::Whole(e) => {
                             // Examine the table before updating.
                             e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
                         }
@@ -324,7 +324,7 @@ where
                         .map(|(_, r)| r.clone())
                         .collect::<Vec<_>>();
                     if self.use_rle_blocks {
-                        entry.insert(DbBlock::Rle(Box::new(RleBlock::partially_filled::<Tgt>(
+                        entry.insert(DbBlock::Whole(Box::new(WholeBlock::partially_filled::<Tgt>(
                             self.k,
                             &block_shape_usize,
                             &dim_ranges,
@@ -393,7 +393,7 @@ where
                     runs_actiononly += b.0.runs_len();
                     lens_actiononly += b.0.len();
                 }
-                DbBlock::Rle(e) => {
+                DbBlock::Whole(e) => {
                     runs_filled += e.filled.runs_len();
                     lens_filled += e.filled.len();
                     runs_main_costs += e.main_costs.runs_len();
@@ -521,7 +521,7 @@ impl DbBlock {
                     }
                 }
             }
-            DbBlock::Rle(b) => {
+            DbBlock::Whole(b) => {
                 // TODO: Propogate an action index preference.
                 let inner_pt_usize = inner_pt
                     .iter()
@@ -538,25 +538,25 @@ impl DbBlock {
     pub fn compact(&mut self) {
         match self {
             DbBlock::ActionOnly(b) => b.compact(),
-            DbBlock::Rle(e) => e.compact(),
+            DbBlock::Whole(e) => e.compact(),
         }
     }
 
     pub fn shape(&self) -> &[usize] {
         match self {
             DbBlock::ActionOnly(b) => b.shape(),
-            DbBlock::Rle(e) => e.shape(),
+            DbBlock::Whole(e) => e.shape(),
         }
     }
 }
 
-impl RleBlock {
+impl WholeBlock {
     fn empty<Tgt: Target>(k: u8, shape: &[usize]) -> Self {
         let mut shape_with_k = Vec::with_capacity(shape.len() + 1);
         shape_with_k.extend_from_slice(shape);
         shape_with_k.push(k.into());
 
-        RleBlock {
+        WholeBlock {
             filled: NDArray::new_with_value(shape, 0),
             main_costs: NDArray::new(&shape_with_k),
             peaks: NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
