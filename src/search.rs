@@ -77,6 +77,7 @@ where
     D: Database<'d>,
 {
     // First, check if the Spec is already in the database.
+    println!("get: {}", goal);
     let get_result = db.get_with_preference(goal);
     let mut preferences: &[_] = &[];
     if let GetPreference::Hit(v) = get_result {
@@ -132,16 +133,21 @@ where
     }
 
     // Copy into the memo. table and return.
-    let final_results = reducer.finalize();
-    if final_results.len() > 0
-        && format!("{}", goal.0) == "Move((1×2, u32, <[1,0], [None, None]>), (1×2, u32), serial)"
-    {
-        println!(
-            "put: {} -- down to [{}]",
-            goal,
-            final_results.iter().map(|r| &r.1.peaks).format(", ")
-        );
+    let mut final_results = reducer.finalize();
+    // if format!("{}", goal.0) == "Move((1×2, u32, <[1,0], [None, None]>), (1×2, u32), serial)" {
+    println!(
+        "put: {} -- down to [{}]",
+        goal,
+        final_results.iter().map(|r| &r.1.peaks).format(", ")
+    );
+    // }
+
+    // Pop until len > 1
+    while final_results.len() > 1 {
+        final_results.pop();
     }
+    debug_assert!(final_results.len() <= 1);
+
     db.put(goal.clone(), final_results.clone());
     (final_results, hits, misses)
 }
@@ -181,10 +187,10 @@ where
             if child_results.is_empty() {
                 // Unsatisfiable.
                 return (smallvec![], hits, misses);
-            } else {
-                // Pick the lowest cost by O(N) over N implementations.
-                child_costs.push(child_results[0].clone());
             }
+            // Pick the lowest cost.
+            debug_assert!(child_results.iter().tuple_windows().all(|(a, b)| a <= b));
+            child_costs.push(child_results[0].clone());
         }
         let partial_impl_cost = Cost::from_child_costs(partial_impl, &child_costs);
         (smallvec![partial_impl_cost], hits, misses)
