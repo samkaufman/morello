@@ -294,13 +294,13 @@ where
         let bimap = self.spec_bimap();
         let decision_iter = if decisions.is_empty() {
             // No Impl satisfies the Spec, so fill by the initial state.
-            Either::Left(std::iter::once(None::<Option<&(u16, Cost)>>))
+            Either::Left(std::iter::once(None::<&(u16, Cost)>))
         } else {
             Either::Right(decisions.iter().map(|d| Some(d)))
         };
 
-        if decisions.len() == 0 {
-            let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, None);
+        for decision in decision_iter {
+            let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, decision);
 
             // Construct an iterator over all blocks to fill.
             let rank = bottom.len();
@@ -379,90 +379,6 @@ where
                         }
                     }
                 }
-            }
-        } else {
-            // for decision in decisions.iter() {
-            let decision = &decisions[0];
-            let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, Some(&decision));
-
-            // Construct an iterator over all blocks to fill.
-            let rank = bottom.len();
-            let blocks_iter = bottom
-                .into_iter()
-                .zip(&top)
-                .enumerate()
-                .map(|(dim, (b, t))| {
-                    iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank))
-                })
-                .multi_cartesian_product();
-
-            for joined_row in blocks_iter {
-                let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
-
-                let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
-                match block_entry {
-                    Entry::Occupied(mut existing_block) => {
-                        let r = existing_block.get_mut();
-                        let dim_ranges = joined_row
-                            .iter()
-                            .map(|(_, r)| r.clone())
-                            .collect::<Vec<_>>();
-                        match r {
-                            DbBlock::ActionOnly(b) => {
-                                // Drop the given cost. This will need to be recomputed.
-                                b.fill_region(
-                                    &dim_ranges,
-                                    Some(
-                                        &decisions
-                                            .iter()
-                                            .map(|d| d.0)
-                                            .collect::<SmallVec<[_; 1]>>(),
-                                    ),
-                                )
-                            }
-                            DbBlock::Whole(e) => {
-                                // Examine the table before updating.
-                                e.fill_region(
-                                    self.k,
-                                    &dim_ranges,
-                                    &ActionCostVec(decisions.clone()),
-                                );
-                            }
-                        }
-                    }
-                    Entry::Vacant(entry) => {
-                        let db_shape = db_shape::<Tgt>(rank);
-                        let bs = block_shape(&block_pt, &db_shape, block_size_dim);
-                        let block_shape_usize =
-                            bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
-                        let dim_ranges = joined_row
-                            .iter()
-                            .map(|(_, r)| r.clone())
-                            .collect::<Vec<_>>();
-                        if self.use_rle_blocks {
-                            entry.insert(DbBlock::Whole(Box::new(WholeBlock::partially_filled::<
-                                Tgt,
-                            >(
-                                self.k,
-                                &block_shape_usize,
-                                &dim_ranges,
-                                &ActionCostVec(decisions.clone()),
-                            ))));
-                        } else {
-                            let actions_only = decisions
-                                .iter()
-                                .map(|&(a, _)| a)
-                                .collect::<SmallVec<[_; 1]>>();
-                            entry.insert(DbBlock::ActionOnly(ActionOnlyBlock::partially_filled(
-                                self.k,
-                                &block_shape_usize,
-                                &dim_ranges,
-                                Some(&actions_only),
-                            )));
-                        }
-                    }
-                }
-                // }
             }
         }
     }
