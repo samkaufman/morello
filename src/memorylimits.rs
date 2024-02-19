@@ -6,7 +6,7 @@ use crate::{
     utils::prev_power_of_two,
 };
 
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use log::warn;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -86,9 +86,9 @@ impl MemoryLimits {
     ) -> Option<Vec<MemoryLimits>> {
         warn!("Not transitioning to pipeline MemoryLimits yet");
 
-        let per_child_diffs: Box<dyn Iterator<Item = _>> = match allocated {
-            MemoryAllocation::Simple(v) => Box::new(iter::repeat(v)),
-            MemoryAllocation::Inner(during_children) => Box::new(during_children.iter()),
+        let per_child_diffs = match allocated {
+            MemoryAllocation::Simple(v) => Either::Left(iter::repeat(v)),
+            MemoryAllocation::Inner(during_children) => Either::Right(during_children.iter()),
             MemoryAllocation::Pipeline {
                 intermediate_consumption: _,
             } => todo!(),
