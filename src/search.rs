@@ -143,11 +143,14 @@ where
     // }
 
     // Pop until len > 1
-    while final_results.len() > 1 {
-        final_results.pop();
-    }
-    debug_assert!(final_results.len() <= 1);
+    // while final_results.len() > 1 {
+    //     final_results.pop();
+    // }
+    // debug_assert!(final_results.len() <= 1);
 
+    // TODO: Popping until len > 1 showed that any len > 1 has a bug in put.
+    // Iterations after the first one would be somehow incorrect, e.g.,
+    // incorrect overwrite.
     db.put(goal.clone(), final_results.clone());
     (final_results, hits, misses)
 }

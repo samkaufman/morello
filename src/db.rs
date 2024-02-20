@@ -277,14 +277,6 @@ where
         group.get_with_preference(self, query, &inner_pt)
     }
 
-    // fn put_impl<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
-    // where
-    //     Tgt: Target,
-    //     Tgt::Level: CanonicalBimap,
-    //     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    // {
-    // }
-
     fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
     where
         Tgt: Target,
@@ -294,12 +286,12 @@ where
         let bimap = self.spec_bimap();
         let decision_iter = if decisions.is_empty() {
             // No Impl satisfies the Spec, so fill by the initial state.
-            Either::Left(std::iter::once(None::<&(u16, Cost)>))
+            Either::Left(std::iter::once(None))
         } else {
             Either::Right(decisions.iter().map(|d| Some(d)))
         };
 
-        for decision in decision_iter {
+        for (i, decision) in decision_iter.enumerate() {
             let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, decision);
 
             // Construct an iterator over all blocks to fill.
@@ -319,6 +311,13 @@ where
                 let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
                 match block_entry {
                     Entry::Occupied(mut existing_block) => {
+                        // TODO: the second iteration and later should ignore this case so that we don't
+                        // overwrite the best action with a worse one?
+                        if i > 0 {
+                            println!("Ignoring decision {} because it's not the best one", i);
+                            continue;
+                        }
+
                         let r = existing_block.get_mut();
                         let dim_ranges = joined_row
                             .iter()
