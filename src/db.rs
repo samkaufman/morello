@@ -107,22 +107,21 @@ pub struct DashmapDiskDatabase {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub enum DbBlock {
-    Rle(Box<RleBlock>),
+    Whole(Box<WholeBlock>),
     ActionOnly(ActionOnlyBlock),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RleBlock {
+pub struct WholeBlock {
     pub filled: NDArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
     pub main_costs: NDArray<MainCost>,
     pub peaks: NDArray<MemVec>,
     pub depths_actions: NDArray<(u8, ActionIdx)>,
-    shape: SmallVec<[usize; 10]>,
 }
 
 // TODO: Replace [Option<u16>] with just [u16] offset by one.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ActionOnlyBlock(pub NDArray<Option<SmallVec<[u16; 1]>>>);
+pub struct ActionOnlyBlock(NDArray<ActionIdx>);
 
 // TODO: Storing Spec and usize is too expensive.
 pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
@@ -305,12 +304,12 @@ where
                     match r {
                         DbBlock::ActionOnly(b) => {
                             // Drop the given cost. This will need to be recomputed.
-                            b.0.fill_region(
+                            b.fill_region(
                                 &dim_ranges,
-                                &Some(decisions.iter().map(|d| d.0).collect()),
+                                Some(&decisions.iter().map(|d| d.0).collect::<SmallVec<[_; 1]>>()),
                             )
                         }
-                        DbBlock::Rle(e) => {
+                        DbBlock::Whole(e) => {
                             // Examine the table before updating.
                             e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
                         }
@@ -325,20 +324,23 @@ where
                         .map(|(_, r)| r.clone())
                         .collect::<Vec<_>>();
                     if self.use_rle_blocks {
-                        entry.insert(DbBlock::Rle(Box::new(RleBlock::partially_filled::<Tgt>(
+                        entry.insert(DbBlock::Whole(Box::new(WholeBlock::partially_filled::<Tgt>(
                             self.k,
                             &block_shape_usize,
                             &dim_ranges,
                             &ActionCostVec(decisions.clone()),
                         ))));
                     } else {
-                        // TODO: Don't need to initialize with `None` if the whole block is going to
-                        let mut aob_nd = NDArray::new(&block_shape_usize);
-                        aob_nd.fill_region(
+                        let actions_only = decisions
+                            .iter()
+                            .map(|&(a, _)| a)
+                            .collect::<SmallVec<[_; 1]>>();
+                        entry.insert(DbBlock::ActionOnly(ActionOnlyBlock::partially_filled(
+                            self.k,
+                            &block_shape_usize,
                             &dim_ranges,
-                            &Some(decisions.iter().map(|&(a, _)| a).collect()),
-                        );
-                        entry.insert(DbBlock::ActionOnly(ActionOnlyBlock(aob_nd)));
+                            Some(&actions_only),
+                        )));
                     }
                 }
             }
@@ -391,7 +393,7 @@ where
                     runs_actiononly += b.0.runs_len();
                     lens_actiononly += b.0.len();
                 }
-                DbBlock::Rle(e) => {
+                DbBlock::Whole(e) => {
                     runs_filled += e.filled.runs_len();
                     lens_filled += e.filled.len();
                     runs_main_costs += e.main_costs.runs_len();
@@ -474,14 +476,9 @@ impl DbBlock {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        let inner_pt_usize = inner_pt
-            .iter()
-            .map(|v| *v as usize)
-            .collect::<SmallVec<[_; 10]>>();
         match self {
             DbBlock::ActionOnly(v) => {
-                let (inner_result, neighbor) = v.0.get_with_neighbor(&inner_pt_usize);
-                match inner_result {
+                match v.get(inner_pt) {
                     Some(inner) => {
                         GetPreference::Hit(ActionCostVec(
                             inner
@@ -519,12 +516,17 @@ impl DbBlock {
                         ))
                     },
                     None => {
-                        GetPreference::Miss(neighbor.map(|v| v.clone().expect("neighbor of a miss should be a hit")))
+                        // TODO: Reintoduce returning `neighbor` as a preference.
+                        GetPreference::Miss(None)
                     }
                 }
             }
-            DbBlock::Rle(b) => {
+            DbBlock::Whole(b) => {
                 // TODO: Propogate an action index preference.
+                let inner_pt_usize = inner_pt
+                    .iter()
+                    .map(|v| *v as usize)
+                    .collect::<SmallVec<[_; 10]>>();
                 match b.get(&inner_pt_usize) {
                     Some(r) => GetPreference::Hit(r),
                     None => GetPreference::Miss(None),
@@ -535,33 +537,30 @@ impl DbBlock {
 
     pub fn compact(&mut self) {
         match self {
-            DbBlock::ActionOnly(b) => b.0.shrink_to_fit(),
-            DbBlock::Rle(e) => {
-                e.compact();
-            }
+            DbBlock::ActionOnly(b) => b.compact(),
+            DbBlock::Whole(e) => e.compact(),
         }
     }
 
     pub fn shape(&self) -> &[usize] {
         match self {
-            DbBlock::ActionOnly(b) => b.0.shape(),
-            DbBlock::Rle(e) => e.shape(),
+            DbBlock::ActionOnly(b) => b.shape(),
+            DbBlock::Whole(e) => e.shape(),
         }
     }
 }
 
-impl RleBlock {
+impl WholeBlock {
     fn empty<Tgt: Target>(k: u8, shape: &[usize]) -> Self {
         let mut shape_with_k = Vec::with_capacity(shape.len() + 1);
         shape_with_k.extend_from_slice(shape);
         shape_with_k.push(k.into());
 
-        RleBlock {
+        WholeBlock {
             filled: NDArray::new_with_value(shape, 0),
             main_costs: NDArray::new(&shape_with_k),
             peaks: NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
             depths_actions: NDArray::new(&shape_with_k),
-            shape: shape.into(),
         }
     }
 
@@ -652,7 +651,89 @@ impl RleBlock {
     }
 
     pub fn shape(&self) -> &[usize] {
-        &self.shape
+        self.filled.shape()
+    }
+}
+
+impl ActionOnlyBlock {
+    pub(crate) fn partially_filled(
+        k: u8,
+        shape: &[usize],
+        dim_ranges: &[Range<BimapInt>],
+        value: Option<&[ActionIdx]>,
+    ) -> Self {
+        assert!(value.map(|v| v.len() <= k.into()).unwrap_or(true));
+        let concatenated_shape: Vec<_> = iter::once(usize::from(k))
+            .chain(shape.iter().copied())
+            .collect();
+        let mut e = ActionOnlyBlock(NDArray::new_with_value(&concatenated_shape, 0));
+        e.fill_region(dim_ranges, value);
+        e
+    }
+
+    fn shape(&self) -> &[usize] {
+        &self.0.shape()[1..]
+    }
+
+    pub fn runs_len(&self) -> usize {
+        self.0.runs_len()
+    }
+
+    fn get(&self, pt: &[u8]) -> Option<SmallVec<[u16; 1]>> {
+        // Scan across the corresponding entries at each k to collec the result.
+        let k = u32::try_from(self.0.shape()[0]).unwrap();
+        let mut inner_pt = iter::once(0)
+            .chain(pt.iter().copied().map_into())
+            .collect::<Vec<_>>();
+
+        // If the first entry is a zero, then we're empty.
+        if self.0.get_with_neighbor(&inner_pt).0 == &0 {
+            return None;
+        }
+
+        let mut result = SmallVec::new();
+        for i in 0..usize::try_from(k).unwrap() {
+            inner_pt[0] = i;
+
+            let collected = self.0[&inner_pt];
+            if collected < 2 {
+                break;
+            }
+            // Shift returned values down by 2 because 0 and 1 are reserved.
+            result.push(collected - 2);
+        }
+        Some(result)
+    }
+
+    fn fill_region(&mut self, dim_ranges: &[Range<u32>], value: Option<&[ActionIdx]>) {
+        let k = u32::try_from(self.0.shape()[0]).unwrap();
+        let mut region: Vec<Range<BimapInt>> = iter::once(Range::default())
+            .chain(dim_ranges.iter().cloned())
+            .collect();
+        match value {
+            None => {
+                region[0] = 0..k;
+                self.0.fill_region(&region, &0);
+            }
+            Some(v) => {
+                for (i, &k_slice_value) in v.iter().enumerate() {
+                    let i = u32::try_from(i).unwrap();
+                    region[0] = i..(i + 1);
+                    // Shift values by 2 so that 0 and 1 can be reserved for empty and
+                    // end-of-sequence, respectively.
+                    self.0.fill_region(&region, &(k_slice_value + 2));
+                }
+                // Fill in a 1 after the above range to indicate the end of the sequence.
+                if v.len() < self.0.shape()[0] {
+                    region[0] = u32::try_from(v.len()).unwrap()..k;
+                    self.0.fill_region(&region, &1);
+                }
+            }
+        }
+    }
+
+    fn compact(&mut self) {
+        self.0.shrink_to_fit();
     }
 }
 
