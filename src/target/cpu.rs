@@ -337,8 +337,7 @@ pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>
             has_vrf = true;
             match o.vector_size() {
                 Some(vector_size) => {
-                    let volume = o.shape().iter().product::<DimSize>();
-                    if vector_size != volume {
+                    if vector_size != o.volume() {
                         return false;
                     }
                 }
@@ -366,10 +365,9 @@ pub fn vectorzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     if operands[0].level() != CpuMemoryLevel::VRF {
         return false;
     }
-    let volume = operands[0].shape().iter().product::<DimSize>();
     match operands[0].vector_size() {
         None => false,
-        Some(vector_size) if vector_size != volume => false,
+        Some(vector_size) if vector_size != operands[0].volume() => false,
         _ => true,
     }
 }
@@ -394,9 +392,7 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
         if operands[0].dtype() != operands[i].dtype() {
             return false;
         }
-
-        let volume = operands[i].shape().iter().product::<DimSize>();
-        if volume % operands[i].vector_size().unwrap() != 0 {
+        if operands[i].volume() % operands[i].vector_size().unwrap() != 0 {
             return false;
         }
     }

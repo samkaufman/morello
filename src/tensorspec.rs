@@ -131,11 +131,15 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub fn bytes_used(&self) -> u64 {
-        u64::from(self.dtype.size()) * self.shape.iter().copied().map(u64::from).product::<u64>()
+        u64::from(self.dtype.size()) * u64::from(self.volume())
     }
 
     pub fn shape(&self) -> &[DimSize] {
         &self.shape
+    }
+
+    pub fn volume(&self) -> DimSize {
+        self.shape.iter().product()
     }
 
     pub fn dtype(&self) -> Dtype {
@@ -243,8 +247,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         // of the vector sizes.
         let vector_bytes = dest_level.vector_bytes();
         if !vector_bytes.is_empty() {
-            let vol: DimSize = self.shape().iter().product();
-            let bytes = vol * DimSize::from(self.dtype.size());
+            let bytes = self.volume() * DimSize::from(self.dtype.size());
             if vector_bytes.iter().all(|&vb| bytes % vb != 0) {
                 return false;
             }

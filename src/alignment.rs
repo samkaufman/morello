@@ -81,11 +81,7 @@ mod tests {
         // TODO: We don't really need to allocate the buffer, do we? We just need the indices,
         //   shifted if parent is unaligned.
         let _buffer = {
-            let volume = parent
-                .shape()
-                .iter()
-                .map(|v| usize::try_from(*v).unwrap())
-                .product::<usize>();
+            let volume = usize::try_from(parent.volume()).unwrap();
             if parent.aligned() {
                 vec![0; volume]
             } else {

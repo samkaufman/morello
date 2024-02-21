@@ -128,12 +128,8 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
         for (idx, input_tensor) in top_arg_tensors.iter().enumerate() {
             // Open and mmap the data.
-            let input_shape = input_tensor.0.shape();
-            let value_cnt = input_shape
-                .iter()
-                .map(|v| usize::try_from(*v).unwrap())
-                .product::<usize>();
-            let byte_cnt = value_cnt * usize::from(input_tensor.spec().dtype().size());
+            let value_cnt = input_tensor.0.volume();
+            let byte_cnt = value_cnt * DimSize::from(input_tensor.spec().dtype().size());
             writeln!(out)?;
             writeln!(
                 out,
@@ -562,10 +558,8 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         writeln!(w, "{}{} *= 0;  /* VectorZero */", indent(depth), exprs[0])
                     }
                     KernelType::VectorAssign => {
-                        let shape = arguments[0].shape();
                         let dtype = arguments[0].spec().dtype();
-                        debug_assert_eq!(shape, arguments[1].shape());
-                        let volume = shape.iter().product::<DimSize>();
+                        let volume = arguments[0].spec().volume();
 
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_ptr(a, b, None)
@@ -598,7 +592,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                     }
                     KernelType::BroadcastVecMultAdd => {
                         let vector_size = arguments[2].spec().vector_size().unwrap();
-                        let volume = arguments[2].spec().shape().iter().product::<u32>();
+                        let volume = arguments[2].spec().volume();
                         debug_assert_eq!(volume % vector_size, 0);
                         let vector_count = volume / vector_size;
                         for vector_idx in 0..vector_count {
@@ -626,7 +620,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                     }
                     KernelType::TwoVecBroadcastVecMultAdd => {
                         let vector_size = arguments[2].spec().vector_size().unwrap();
-                        let volume = arguments[2].spec().shape().iter().product::<u32>();
+                        let volume = arguments[2].spec().volume();
                         debug_assert_eq!(volume % vector_size, 0);
                         let vector_count = volume / vector_size;
 

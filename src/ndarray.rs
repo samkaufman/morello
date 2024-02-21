@@ -126,6 +126,10 @@ impl<T> NDArray<T> {
         &self.shape
     }
 
+    pub fn volume(&self) -> usize {
+        self.shape.iter().product()
+    }
+
     pub fn len(&self) -> usize {
         self.data.len()
     }
@@ -184,10 +188,7 @@ impl<T> NDArray<T> {
                 });
             }
         } else {
-            debug_assert_eq!(
-                self.shape().iter().product::<usize>(),
-                usize::try_from(step_size).unwrap()
-            );
+            debug_assert_eq!(self.volume(), usize::try_from(step_size).unwrap());
             self.data.set_range(0, step_size, value.clone());
         }
     }

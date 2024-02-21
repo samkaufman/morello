@@ -70,7 +70,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
         match self.kernel_type {
             KernelType::BroadcastVecMultAdd | KernelType::TwoVecBroadcastVecMultAdd => {
                 let vector_size = self.arguments[1].spec().vector_size().unwrap();
-                let volume = self.arguments[1].shape().iter().product::<u32>();
+                let volume = self.arguments[1].spec().volume();
                 debug_assert_eq!(volume % vector_size, 0);
                 let vector_count = volume / vector_size;
                 let mut cost = INST_COST * ((vector_count * 2) + 1);
