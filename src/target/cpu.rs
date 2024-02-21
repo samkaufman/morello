@@ -354,13 +354,7 @@ pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>
 pub fn memsetzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
-    if !operands[0].is_contiguous() {
-        return false;
-    }
-    if operands[0].level() != CpuMemoryLevel::RF {
-        return false;
-    }
-    true
+    operands[0].level() == CpuMemoryLevel::RF && operands[0].is_contiguous()
 }
 
 pub fn vectorzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
@@ -374,13 +368,10 @@ pub fn vectorzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     }
     let volume = operands[0].shape().iter().product::<DimSize>();
     match operands[0].vector_size() {
-        Some(vector_size) if vector_size != volume => {
-            return false;
-        }
-        None => return false,
-        _ => (),
-    };
-    true
+        None => false,
+        Some(vector_size) if vector_size != volume => false,
+        _ => true,
+    }
 }
 
 pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
