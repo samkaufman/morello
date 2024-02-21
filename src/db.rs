@@ -324,12 +324,14 @@ where
                         .map(|(_, r)| r.clone())
                         .collect::<Vec<_>>();
                     if self.use_rle_blocks {
-                        entry.insert(DbBlock::Whole(Box::new(WholeBlock::partially_filled::<Tgt>(
-                            self.k,
-                            &block_shape_usize,
-                            &dim_ranges,
-                            &ActionCostVec(decisions.clone()),
-                        ))));
+                        entry.insert(DbBlock::Whole(Box::new(
+                            WholeBlock::partially_filled::<Tgt>(
+                                self.k,
+                                &block_shape_usize,
+                                &dim_ranges,
+                                &ActionCostVec(decisions.clone()),
+                            ),
+                        )));
                     } else {
                         let actions_only = decisions
                             .iter()
