@@ -1,8 +1,8 @@
 use iai_callgrind::{black_box, main};
-use smallvec::smallvec;
 
 use morello::common::{DimSize, Dtype};
 use morello::layout::row_major;
+use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use morello::target::{Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
@@ -12,70 +12,36 @@ use morello::tensorspec::TensorSpecAux;
 #[export_name = "morello_bench_logicalspec_parameters::matmul_spec"]
 fn matmul_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
     let rm2 = row_major(2);
-    LogicalSpec::Primitive(
-        PrimitiveBasics {
-            typ: PrimitiveSpecType::Matmul { accum: false },
-            spec_shape: smallvec![size, size, size],
-            dtypes: smallvec![Dtype::Uint32; 3],
-        },
-        vec![
-            TensorSpecAux {
-                contig: rm2.contiguous_full(),
-                aligned: true,
-                level: Tgt::default_level(),
-                layout: rm2,
-                vector_size: None,
-            };
-            3
-        ],
-        true,
-    )
+    lspec!(Matmul(
+        [size, size, size],
+        (u32, Tgt::default_level(), rm2.clone()),
+        (u32, Tgt::default_level(), rm2.clone()),
+        (u32, Tgt::default_level(), rm2),
+        serial
+    ))
 }
 
 #[export_name = "morello_bench_logicalspec_parameters::conv_spec"]
 fn conv_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
     let rm4 = row_major(4);
-    LogicalSpec::Primitive(
-        PrimitiveBasics {
-            typ: PrimitiveSpecType::Conv { accum: false },
-            spec_shape: smallvec![size; 7],
-            dtypes: smallvec![Dtype::Uint32; 3],
-        },
-        vec![
-            TensorSpecAux {
-                contig: rm4.contiguous_full(),
-                aligned: true,
-                level: Tgt::default_level(),
-                layout: rm4,
-                vector_size: None,
-            };
-            3
-        ],
-        true,
-    )
+    lspec!(Conv(
+        [size, size, size, size, size, size, size],
+        (u32, Tgt::default_level(), rm4.clone()),
+        (u32, Tgt::default_level(), rm4.clone()),
+        (u32, Tgt::default_level(), rm4),
+        serial
+    ))
 }
 
 #[export_name = "morello_bench_logicalspec_parameters::move_spec"]
 fn move_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
     let rm2 = row_major(2);
-    LogicalSpec::Primitive(
-        PrimitiveBasics {
-            typ: PrimitiveSpecType::Move,
-            spec_shape: smallvec![size; 2],
-            dtypes: smallvec![Dtype::Uint32; 2],
-        },
-        vec![
-            TensorSpecAux {
-                contig: rm2.contiguous_full(),
-                aligned: true,
-                level: Tgt::default_level(),
-                layout: rm2,
-                vector_size: None,
-            };
-            3
-        ],
-        true,
-    )
+    lspec!(Move(
+        [size, size],
+        (u32, Tgt::default_level(), rm2.clone()),
+        (u32, Tgt::default_level(), rm2),
+        serial
+    ))
 }
 
 #[inline(never)]

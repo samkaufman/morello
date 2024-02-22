@@ -1,10 +1,10 @@
 use iai_callgrind::{black_box, main};
-use morello::db::DashmapDiskDatabase;
 use nonzero::nonzero as nz;
-use smallvec::smallvec;
 
 use morello::common::{DimSize, Dtype};
+use morello::db::DashmapDiskDatabase;
 use morello::layout::row_major;
+use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
@@ -12,24 +12,13 @@ use morello::tensorspec::TensorSpecAux;
 #[export_name = "morello_bench_synth::matmul_spec"]
 fn matmul_spec<Tgt: Target>(size: DimSize) -> Spec<Tgt> {
     let rm2 = row_major(2);
-    let logical_spec = LogicalSpec::Primitive(
-        PrimitiveBasics {
-            typ: PrimitiveSpecType::Matmul { accum: false },
-            spec_shape: smallvec![size, size, size],
-            dtypes: smallvec![Dtype::Uint32; 3],
-        },
-        vec![
-            TensorSpecAux {
-                contig: rm2.contiguous_full(),
-                aligned: true,
-                level: Tgt::default_level(),
-                layout: rm2,
-                vector_size: None,
-            };
-            3
-        ],
-        true,
-    );
+    let logical_spec = lspec!(Matmul(
+        [size, size, size],
+        (u32, Tgt::default_level(), rm2.clone()),
+        (u32, Tgt::default_level(), rm2.clone()),
+        (u32, Tgt::default_level(), rm2),
+        serial
+    ));
     Spec(logical_spec, X86Target::max_mem())
 }
 

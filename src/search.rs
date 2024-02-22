@@ -258,15 +258,15 @@ mod tests {
     use crate::common::{DimSize, Dtype};
     use crate::db::DashmapDiskDatabase;
     use crate::layout::row_major;
+    use crate::lspec;
     use crate::memorylimits::MemVec;
     use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-    use crate::target::{CpuMemoryLevel, X86Target};
+    use crate::target::{CpuMemoryLevel::GL, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use crate::utils::{bit_length, bit_length_inverse};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::sample::select;
-    use smallvec::smallvec;
     use std::rc::Rc;
 
     const TEST_SMALL_SIZE: DimSize = 2;
@@ -328,22 +328,8 @@ mod tests {
 
     #[test]
     fn test_synthesis_at_peak_memory_yields_same_decision_1() {
-        let spec = Spec(
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Zero,
-                    spec_shape: smallvec![2, 2, 2, 2],
-                    dtypes: smallvec![Dtype::Uint8],
-                },
-                vec![TensorSpecAux::<X86Target> {
-                    contig: 0,
-                    aligned: false,
-                    level: CpuMemoryLevel::GL,
-                    layout: row_major(4),
-                    vector_size: None,
-                }],
-                false,
-            ),
+        let spec = Spec::<X86Target>(
+            lspec!(Zero([2, 2, 2, 2], (u8, GL, row_major(4), c0, ua))),
             MemoryLimits::Standard(MemVec::new_from_binary_scaled([0, 5, 7, 6])),
         );
 

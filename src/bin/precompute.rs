@@ -16,11 +16,15 @@ use morello::common::{DimSize, Dtype};
 use morello::db::{DashmapDiskDatabase, Database};
 use morello::grid::general::SurMap;
 use morello::layout::row_major;
+use morello::lspec;
 use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
 };
-use morello::target::{CpuMemoryLevel, Target, X86Target};
+use morello::target::{
+    CpuMemoryLevel::{self, GL},
+    Target, X86Target,
+};
 use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
 use morello::utils::bit_length;
 
@@ -78,42 +82,19 @@ where
     let move_needed_rank = if args.include_conv { 4 } else { 2 };
     bounds.extend((1..=move_needed_rank).flat_map(|rank| [move_top(args.size, rank)]));
     bounds.extend((1..=move_needed_rank).map(|rank| {
-        let layout = row_major(rank);
-        LogicalSpec::Primitive(
-            PrimitiveBasics {
-                typ: PrimitiveSpecType::Zero,
-                spec_shape: smallvec![args.size; rank.into()],
-                dtypes: smallvec![Dtype::Uint32],
-            },
-            vec![TensorSpecAux {
-                contig: layout.contiguous_full(),
-                aligned: true,
-                level: CpuMemoryLevel::GL,
-                layout,
-                vector_size: None,
-            }],
-            true,
-        )
+        lspec!(Zero(
+            iter::repeat(args.size).take(rank.into()),
+            (u32, GL, row_major(rank)),
+            serial
+        ))
     }));
-    bounds.push({
-        let layout = row_major(2);
-        let a = TensorSpecAux {
-            contig: layout.contiguous_full(),
-            aligned: true,
-            level: CpuMemoryLevel::GL,
-            layout,
-            vector_size: None,
-        };
-        LogicalSpec::Primitive(
-            PrimitiveBasics {
-                typ: PrimitiveSpecType::Matmul { accum: false },
-                spec_shape: smallvec![args.size, args.size, args.size],
-                dtypes: smallvec![Dtype::Uint32; 3],
-            },
-            vec![a.clone(), a.clone(), a],
-            true,
-        )
-    });
+    bounds.push(lspec!(Matmul(
+        [args.size, args.size, args.size],
+        (u32, CpuMemoryLevel::GL, row_major(2)),
+        (u32, CpuMemoryLevel::GL, row_major(2)),
+        (u32, CpuMemoryLevel::GL, row_major(2)),
+        serial
+    )));
     if args.include_conv {
         bounds.extend({
             let layout = row_major(4);
@@ -221,25 +202,12 @@ where
 
 /// Returns a logical Move Spec of given size and rank.
 fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
-    let layout = row_major(rank);
-    LogicalSpec::Primitive(
-        PrimitiveBasics {
-            typ: PrimitiveSpecType::Move,
-            spec_shape: smallvec![size; rank.into()],
-            dtypes: smallvec![Dtype::Uint32; 2],
-        },
-        [CpuMemoryLevel::GL, CpuMemoryLevel::L1]
-            .into_iter()
-            .map(|level| TensorSpecAux {
-                contig: layout.contiguous_full(),
-                aligned: true,
-                level,
-                layout: layout.clone(),
-                vector_size: None,
-            })
-            .collect(),
-        true,
-    )
+    lspec!(Move(
+        iter::repeat(size).take(rank.into()),
+        (u32, CpuMemoryLevel::GL, row_major(rank)),
+        (u32, CpuMemoryLevel::L1, row_major(rank)),
+        serial
+    ))
 }
 
 fn next_limits<'a>(

@@ -1532,16 +1532,197 @@ pub fn conv_infer_output_shape(image_shape: &[u32], filters_shape: &[u32]) -> Sh
         .collect()
 }
 
+pub mod macros {
+    // TODO: Rename to `lspec`
+    #[macro_export]
+    macro_rules! lspec {
+        ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),+, serial ) ) => {{
+            $crate::spec::macros::internal::spec_inner!($typ($shp, $( ($($opterms)*) ),* , true))
+        }};
+        ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),+ ) ) => {{
+            $crate::spec::macros::internal::spec_inner!($typ($shp, $( ($($opterms)*) ),* , false))
+        }};
+    }
+    pub use lspec;
+
+    pub mod internal {
+        // TODO: Make private.
+        #[macro_export]
+        macro_rules! __primitive_spec_type {
+            (Zero) => {
+                PrimitiveSpecType::Zero
+            };
+            (Move) => {
+                PrimitiveSpecType::Move
+            };
+            (Matmul) => {
+                PrimitiveSpecType::Matmul { accum: false }
+            };
+            (MatmulAccum) => {
+                PrimitiveSpecType::Matmul { accum: true }
+            };
+            (Conv) => {
+                PrimitiveSpecType::Conv { accum: false }
+            };
+            (ConvAccum) => {
+                PrimitiveSpecType::Conv { accum: true }
+            };
+        }
+        pub use __primitive_spec_type as primitive_spec_type;
+
+        #[macro_export]
+        macro_rules! __dt_convert {
+            (u8) => {
+                $crate::common::Dtype::Uint8
+            };
+            (i8) => {
+                $crate::common::Dtype::Sint8
+            };
+            (u16) => {
+                $crate::common::Dtype::Uint16
+            };
+            (i16) => {
+                $crate::common::Dtype::Sint16
+            };
+            (u32) => {
+                $crate::common::Dtype::Uint32
+            };
+            (i32) => {
+                $crate::common::Dtype::Sint32
+            };
+            ($val:expr) => {
+                $val
+            };
+        }
+        pub use __dt_convert as dt_convert;
+
+        // TODO: Accept contiguousnesses other than fully contig. or not at all.
+        #[macro_export]
+        macro_rules! __tensorspecaux_tup_inner {
+            ($dt:tt, $level:expr, $layout:expr, $c:literal, $a:literal) => {{
+                let layout: $crate::layout::Layout = $layout;
+                let contig = if $c {
+                    layout.contiguous_full()
+                } else {
+                    layout.contiguous_none()
+                };
+                (
+                    $crate::spec::macros::internal::dt_convert!($dt),
+                    TensorSpecAux {
+                        contig,
+                        aligned: $a,
+                        level: $level,
+                        layout,
+                        vector_size: None, // TODO: Fill in vector size!
+                    },
+                )
+            }};
+        }
+        pub use __tensorspecaux_tup_inner as tensorspecaux_tup_inner;
+
+        #[macro_export]
+        macro_rules! __tensorspecaux_tup {
+            ($dt:tt, $level:expr, $layout:expr, c0, ua) => {
+                $crate::spec::macros::internal::tensorspecaux_tup_inner!(
+                    $dt, $level, $layout, false, false
+                )
+            };
+            ($dt:tt, $level:expr, $layout:expr, c0) => {
+                $crate::spec::macros::internal::tensorspecaux_tup_inner!(
+                    $dt, $level, $layout, false, true
+                )
+            };
+            ($dt:tt, $level:expr, $layout:expr, ua) => {
+                $crate::spec::macros::internal::tensorspecaux_tup_inner!(
+                    $dt, $level, $layout, true, false
+                )
+            };
+            ($dt:tt, $level:expr, $layout:expr) => {
+                $crate::spec::macros::internal::tensorspecaux_tup_inner!(
+                    $dt, $level, $layout, true, true
+                )
+            };
+        }
+        pub use __tensorspecaux_tup as tensorspecaux_tup;
+
+        #[macro_export]
+        macro_rules! __spec_inner {
+            ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),*, $s:literal ) ) => {{
+                use $crate::spec::macros::internal::{primitive_spec_type, tensorspecaux_tup};
+
+                let auxes = [ $( tensorspecaux_tup!($($opterms)*) ),* ];
+                let dtypes = auxes.iter().map(|v| v.0.clone()).collect();
+                let basics = PrimitiveBasics {
+                    typ: primitive_spec_type!($typ),
+                    spec_shape: ($shp).into_iter().collect(),
+                    dtypes,
+                };
+                LogicalSpec::Primitive(
+                    basics,
+                    auxes.into_iter().map(|v| v.1).collect(),
+                    $s,
+                )
+            }};
+        }
+        pub use __spec_inner as spec_inner;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::imp::{visit_leaves, Impl, ImplExt, ImplNode};
+    use crate::lspec;
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
     use crate::scheduling::ApplyError;
     use crate::target::{ArmTarget, Target, X86Target};
     use crate::tensorspec::TensorSpecArbMaxShape;
     use crate::utils::{next_binary_power, sum_seqs};
+    use crate::{layout::row_major, target::CpuMemoryLevel::GL};
     use proptest::prelude::*;
+    use smallvec::smallvec;
+
+    #[test]
+    fn test_lspec_1() {
+        let spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+            [2, 3, 3],
+            (u8, GL, row_major(2)),
+            (i8, GL, row_major(2), c0),
+            (u16, GL, row_major(2), ua),
+            serial
+        ));
+        let lhs = TensorSpecAux {
+            contig: row_major(2).contiguous_full(),
+            aligned: true,
+            level: GL,
+            layout: row_major(2),
+            vector_size: None,
+        };
+        let rhs = TensorSpecAux {
+            contig: row_major(2).contiguous_none(),
+            aligned: true,
+            level: GL,
+            layout: row_major(2),
+            vector_size: None,
+        };
+        let out = TensorSpecAux {
+            contig: row_major(2).contiguous_full(),
+            aligned: false,
+            level: GL,
+            layout: row_major(2),
+            vector_size: None,
+        };
+        let expected = LogicalSpec::<X86Target>::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Matmul { accum: true },
+                spec_shape: smallvec![2, 3, 3],
+                dtypes: smallvec![Dtype::Uint8, Dtype::Sint8, Dtype::Uint16],
+            },
+            vec![lhs, rhs, out],
+            true,
+        );
+        assert_eq!(spec, expected);
+    }
 
     #[test]
     fn test_gen_tile_sizes_empty() {

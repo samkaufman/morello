@@ -151,40 +151,19 @@ mod tests {
     use crate::common::Dtype;
     use crate::imp::subspecs::SpecApp;
     use crate::layout::row_major;
+    use crate::lspec;
     use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-    use crate::target::{CpuMemoryLevel, X86Target};
+    use crate::target::{
+        CpuMemoryLevel::{GL, L1},
+        X86Target,
+    };
     use crate::tensorspec::TensorSpecAux;
-    use smallvec::smallvec;
 
     #[test]
     fn test_can_pprint_a_specapp_with_no_aux() {
         let rm1 = row_major(1);
-        let logical_spec: LogicalSpec<X86Target> = {
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Move,
-                    spec_shape: smallvec![4],
-                    dtypes: smallvec![Dtype::Uint8; 3],
-                },
-                vec![
-                    TensorSpecAux {
-                        contig: rm1.contiguous_full(),
-                        aligned: true,
-                        level: CpuMemoryLevel::GL,
-                        layout: rm1.clone(),
-                        vector_size: None,
-                    },
-                    TensorSpecAux {
-                        contig: rm1.contiguous_full(),
-                        aligned: true,
-                        level: CpuMemoryLevel::L1,
-                        layout: rm1.clone(),
-                        vector_size: None,
-                    },
-                ],
-                false,
-            )
-        };
+        let logical_spec: LogicalSpec<X86Target> =
+            lspec!(Move([4], (u8, GL, rm1.clone()), (u8, L1, rm1)));
         let args = logical_spec
             .parameters()
             .into_iter()

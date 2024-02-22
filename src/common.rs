@@ -53,11 +53,11 @@ impl Display for Dtype {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Dtype::Uint8 => write!(f, "u8"),
-            Dtype::Sint8 => write!(f, "s8"),
+            Dtype::Sint8 => write!(f, "i8"),
             Dtype::Uint16 => write!(f, "u16"),
-            Dtype::Sint16 => write!(f, "s16"),
+            Dtype::Sint16 => write!(f, "i16"),
             Dtype::Uint32 => write!(f, "u32"),
-            Dtype::Sint32 => write!(f, "s32"),
+            Dtype::Sint32 => write!(f, "i32"),
         }
     }
 }

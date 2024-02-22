@@ -14,10 +14,17 @@ use morello::common::{DimSize, Dtype};
 use morello::db::{DashmapDiskDatabase, Database, DatabaseExt};
 use morello::layout::{col_major, row_major};
 use morello::pprint::{pprint, ImplPrintStyle};
-use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use morello::target::{ArmTarget, CpuMemoryLevel, Target, TargetId, X86Target};
+use morello::target::{
+    ArmTarget,
+    CpuMemoryLevel::{self, GL},
+    Target, TargetId, X86Target,
+};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
+use morello::{
+    lspec,
+    spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},
+};
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -147,58 +154,22 @@ where
         QuerySpec::Transpose { size } => {
             let rm2 = row_major(2);
             let cm2 = col_major(2);
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Move,
-                    spec_shape: smallvec![*size, *size],
-                    dtypes: smallvec![Dtype::Uint32; 2],
-                },
-                vec![
-                    TensorSpecAux::<Tgt> {
-                        contig: rm2.contiguous_full(),
-                        aligned: true,
-                        level: CpuMemoryLevel::GL,
-                        layout: rm2,
-                        vector_size: None,
-                    },
-                    TensorSpecAux::<Tgt> {
-                        contig: cm2.contiguous_full(),
-                        aligned: true,
-                        level: CpuMemoryLevel::GL,
-                        layout: cm2,
-                        vector_size: None,
-                    },
-                ],
-                true,
-            )
+            lspec!(Move([*size, *size], (u32, GL, rm2), (u32, GL, cm2), serial))
         }
         QuerySpec::Matmul { size } | QuerySpec::MatmulU8S8S16 { size } => {
             let rm2 = row_major(2);
-            let dtypes = match query_spec {
-                QuerySpec::Matmul { .. } => smallvec![Dtype::Uint32; 3],
-                QuerySpec::MatmulU8S8S16 { .. } => {
-                    smallvec![Dtype::Uint8, Dtype::Sint8, Dtype::Sint16]
-                }
+            let [dt_a, dt_b, dt_c] = match query_spec {
+                QuerySpec::Matmul { .. } => [Dtype::Uint32; 3],
+                QuerySpec::MatmulU8S8S16 { .. } => [Dtype::Uint8, Dtype::Sint8, Dtype::Sint16],
                 _ => unreachable!(),
             };
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Matmul { accum: false },
-                    spec_shape: smallvec![*size; 3],
-                    dtypes,
-                },
-                vec![
-                    TensorSpecAux {
-                        contig: rm2.contiguous_full(),
-                        aligned: true,
-                        level: CpuMemoryLevel::GL,
-                        layout: rm2,
-                        vector_size: None,
-                    };
-                    3
-                ],
-                true,
-            )
+            lspec!(Matmul(
+                [*size, *size, *size],
+                (dt_a, GL, rm2.clone()),
+                (dt_b, GL, rm2.clone()),
+                (dt_c, GL, rm2),
+                serial
+            ))
         }
         QuerySpec::Conv {
             batch,
@@ -223,7 +194,7 @@ where
                     dtypes: smallvec![Dtype::Uint32; 3],
                 },
                 vec![
-                    TensorSpecAux {
+                    TensorSpecAux::<Tgt> {
                         contig: rm.contiguous_full(),
                         aligned: true,
                         level: CpuMemoryLevel::GL,

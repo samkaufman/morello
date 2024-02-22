@@ -1,17 +1,20 @@
 //! This example shows how to manually schedule a simple matrix multiplication for X86.
 
 use morello::codegen::CodeGen;
-use morello::common::{Dtype, Shape};
+use morello::common::Dtype;
 use morello::imp::kernels::KernelType;
 use morello::layout::row_major;
+use morello::lspec;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use morello::target::{CpuMemoryLevel, Target, X86Target};
+use morello::target::{
+    CpuMemoryLevel::{self, GL},
+    Target, X86Target,
+};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
-use smallvec::smallvec;
 use std::io;
 use std::panic;
 
@@ -26,25 +29,15 @@ fn main() {
     // laid out row-major. The `vector_size` field applies only to tensors in vector registers
     // (VRF), so it is `None` below.
     let layout = row_major(2);
+
     let spec = Spec::<X86Target>(
-        LogicalSpec::Primitive(
-            PrimitiveBasics {
-                typ: PrimitiveSpecType::Matmul { accum: false },
-                spec_shape: Shape::from([64, 64, 64].as_slice()),
-                dtypes: smallvec![Dtype::Uint32; 3],
-            },
-            vec![
-                TensorSpecAux {
-                    contig: layout.contiguous_full(),
-                    aligned: true,
-                    level: CpuMemoryLevel::GL,
-                    layout,
-                    vector_size: None,
-                };
-                3
-            ],
-            true,
-        ),
+        lspec!(Matmul(
+            [64, 64, 64],
+            (u32, GL, layout.clone()),
+            (u32, GL, layout.clone()),
+            (u32, GL, layout),
+            serial
+        )),
         X86Target::max_mem(),
     );
     println!("Logical Spec: {}", spec.0);

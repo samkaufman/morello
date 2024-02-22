@@ -122,6 +122,12 @@ impl Layout {
         }
     }
 
+    pub fn contiguous_none(&self) -> Contig {
+        match self {
+            Layout::New(_) => 0,
+        }
+    }
+
     pub fn all_contiguous_abs(&self) -> impl Iterator<Item = Contig> + Clone {
         match self {
             Layout::New(dims) => 0..=dims.len().try_into().unwrap(),
