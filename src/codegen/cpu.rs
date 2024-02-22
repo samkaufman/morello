@@ -661,6 +661,56 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
+                    KernelType::PhysicalTransposeByte128 => {
+                        use CpuMemoryLevel::VRF;
+                        use Dtype::Uint8;
+
+                        let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
+                            (&arguments[0], 0),
+                            (&arguments[0], 16),
+                            (&arguments[1], 0),
+                            (&arguments[1], 16),
+                        ]
+                        .into_iter()
+                        .map(|(arg, idx)| {
+                            let buffer = self
+                                .name_env
+                                .get(arg.backing_tensor(&self.param_bindings).unwrap())
+                                .unwrap();
+                            let buffer_indexing_expr =
+                                zero_points(arg.make_buffer_indexing_expr(&self.param_bindings))
+                                    + idx;
+                            println!("About to index with expr: {:?}", buffer_indexing_expr);
+                            self.c_index_vec(buffer, &buffer_indexing_expr, None)
+                        })
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap();
+
+                        let intermeds = (0..2)
+                            .map(|_| self.make_buffer(&[2, 32], Some(16), Uint8, VRF))
+                            .collect::<Vec<_>>();
+                        for b in &intermeds {
+                            b.emit(w, InitType::None, depth)?;
+                        }
+
+                        writeln!(
+                            w,
+                            "{}{} = _mm_unpacklo_epi8({}, {});",
+                            indent(depth),
+                            out_lower,
+                            in_lower,
+                            in_higher,
+                        )?;
+                        writeln!(
+                            w,
+                            "{}{} = _mm_unpackhi_epi8({}, {});",
+                            indent(depth),
+                            out_higher,
+                            in_lower,
+                            in_higher,
+                        )
+                    }
                 }
             }
         }

@@ -28,6 +28,7 @@ pub enum KernelType {
     MultAdd,
     BroadcastVecMultAdd,
     TwoVecBroadcastVecMultAdd,
+    PhysicalTransposeByte128,
     ValueAssign,
     VectorAssign,
     MemsetZero,
@@ -86,6 +87,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
                 cost
             }
+            KernelType::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
             KernelType::MultAdd => INST_COST,
             KernelType::ValueAssign
             | KernelType::VectorAssign
@@ -122,6 +124,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
             KernelType::MultAdd => "MultAdd",
             KernelType::BroadcastVecMultAdd => "BroadcastVecMultAdd",
             KernelType::TwoVecBroadcastVecMultAdd => "TwoVecBroadcastVecMultAdd",
+            KernelType::PhysicalTransposeByte128 => "PhysicalTransposeByte128",
             KernelType::ValueAssign => "ValueAssign",
             KernelType::VectorAssign => "VectorAssign",
             KernelType::MemsetZero => "MemsetZero",
@@ -154,7 +157,9 @@ impl KernelType {
             KernelType::MultAdd
             | KernelType::BroadcastVecMultAdd
             | KernelType::TwoVecBroadcastVecMultAdd => 3,
-            KernelType::ValueAssign | KernelType::VectorAssign => 2,
+            KernelType::PhysicalTransposeByte128
+            | KernelType::ValueAssign
+            | KernelType::VectorAssign => 2,
             KernelType::MemsetZero | KernelType::VectorZero => 1,
         }
     }

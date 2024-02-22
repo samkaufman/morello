@@ -9,7 +9,7 @@ use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target, TargetId, LEVEL_COUNT};
-use crate::tensorspec::TensorSpec;
+use crate::tensorspec::{TensorSpec, TensorSpecAux};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -174,6 +174,9 @@ impl<T: CpuTarget> Target for T {
                     if vectorassign_applies_to_operands(&spec.parameters()) {
                         microkernels.push(Action::Place(KernelType::VectorAssign));
                     }
+                    if physicaltransposebyte128_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(Action::Place(KernelType::PhysicalTransposeByte128));
+                    }
                     Box::new(microkernels.into_iter())
                 }
                 PrimitiveSpecType::Zero { .. } => {
@@ -222,7 +225,7 @@ impl MemoryLevel for CpuMemoryLevel {
     fn vector_bytes(&self) -> &'static [u32] {
         match &self {
             // CpuMemoryLevel::VRF => &[16, 32],
-            CpuMemoryLevel::VRF => &[32],
+            CpuMemoryLevel::VRF => &[16],
             _ => &[],
         }
     }
@@ -348,6 +351,46 @@ pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>
         }
     }
     has_vrf
+}
+
+pub fn physicaltransposebyte128_applies_to_operands<Tgt>(operands: &[TensorSpec<Tgt>]) -> bool
+where
+    Tgt: Target<Level = CpuMemoryLevel>,
+{
+    let cm2 = col_major(2);
+    match &operands[0] {
+        TensorSpec {
+            shape,
+            dtype: Dtype::Uint8 | Dtype::Sint8,
+            aux:
+                TensorSpecAux {
+                    contig,
+                    aligned: _,
+                    level: CpuMemoryLevel::VRF,
+                    layout,
+                    vector_size: Some(16),
+                },
+        } if shape[..] == [2, 16]
+            && layout.contiguous_full() == *contig
+            && layout.is_row_major() => {}
+        _ => return false,
+    };
+    match &operands[1] {
+        TensorSpec {
+            shape,
+            dtype: Dtype::Uint8 | Dtype::Sint8,
+            aux:
+                TensorSpecAux {
+                    contig,
+                    aligned: _,
+                    level: CpuMemoryLevel::VRF,
+                    layout,
+                    vector_size: Some(16),
+                },
+        } if shape[..] == [2, 16] && layout.contiguous_full() == *contig && layout == &cm2 => {}
+        _ => return false,
+    };
+    true
 }
 
 pub fn memsetzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(

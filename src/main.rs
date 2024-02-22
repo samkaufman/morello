@@ -209,6 +209,7 @@ where
     };
 
     let spec = Spec(logical_spec, Tgt::max_mem());
+    info!("Synthesizing {}", spec);
 
     let start_time = std::time::Instant::now();
     let (_, hits, misses) =
