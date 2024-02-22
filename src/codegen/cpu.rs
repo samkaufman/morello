@@ -661,7 +661,6 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
-                    KernelType::CacheAccess => Ok(()),
                 }
             }
         }

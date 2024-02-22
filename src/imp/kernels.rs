@@ -32,7 +32,6 @@ pub enum KernelType {
     VectorAssign,
     MemsetZero,
     VectorZero,
-    CacheAccess,
 }
 
 impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
@@ -92,7 +91,6 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
             | KernelType::VectorAssign
             | KernelType::MemsetZero
             | KernelType::VectorZero => ASSIGN_INST_COST,
-            KernelType::CacheAccess => todo!("Add a CacheAccess cost model"),
         }
     }
 
@@ -128,7 +126,6 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
             KernelType::VectorAssign => "VectorAssign",
             KernelType::MemsetZero => "MemsetZero",
             KernelType::VectorZero => "VectorZero",
-            KernelType::CacheAccess => "CacheAccess",
         };
         let args_str = self
             .arguments
@@ -159,7 +156,6 @@ impl KernelType {
             | KernelType::TwoVecBroadcastVecMultAdd => 3,
             KernelType::ValueAssign | KernelType::VectorAssign => 2,
             KernelType::MemsetZero | KernelType::VectorZero => 1,
-            KernelType::CacheAccess => todo!(),
         }
     }
 }
