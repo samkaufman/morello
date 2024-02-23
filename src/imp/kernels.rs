@@ -29,6 +29,7 @@ pub enum KernelType {
     BroadcastVecMultAdd,
     TwoVecBroadcastVecMultAdd,
     PhysicalTransposeByte128,
+    PhysicalTransposeByte256,
     ValueAssign,
     VectorAssign,
     MemsetZero,
@@ -62,6 +63,15 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
                     }
                 }))
             }
+            KernelType::PhysicalTransposeByte256 => MemoryAllocation::Simple(Tgt::levels().map(
+                |level| {
+                    if level.vector_rf() {
+                        64
+                    } else {
+                        0
+                    }
+                },
+            )),
             _ => MemoryAllocation::none::<Tgt>(),
         }
     }
@@ -88,6 +98,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
                 cost
             }
             KernelType::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
+            KernelType::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
             KernelType::MultAdd => INST_COST,
             KernelType::ValueAssign
             | KernelType::VectorAssign
@@ -125,6 +136,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
             KernelType::BroadcastVecMultAdd => "BroadcastVecMultAdd",
             KernelType::TwoVecBroadcastVecMultAdd => "TwoVecBroadcastVecMultAdd",
             KernelType::PhysicalTransposeByte128 => "PhysicalTransposeByte128",
+            KernelType::PhysicalTransposeByte256 => "PhysicalTransposeByte256",
             KernelType::ValueAssign => "ValueAssign",
             KernelType::VectorAssign => "VectorAssign",
             KernelType::MemsetZero => "MemsetZero",
@@ -158,6 +170,7 @@ impl KernelType {
             | KernelType::BroadcastVecMultAdd
             | KernelType::TwoVecBroadcastVecMultAdd => 3,
             KernelType::PhysicalTransposeByte128
+            | KernelType::PhysicalTransposeByte256
             | KernelType::ValueAssign
             | KernelType::VectorAssign => 2,
             KernelType::MemsetZero | KernelType::VectorZero => 1,

@@ -11,6 +11,7 @@ use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 
+use divrem::DivRem;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -141,6 +142,9 @@ impl<T: CpuTarget> Target for T {
             "Some layouts don't apply to shape {:?}: {:?}",
             shape,
             result
+                .iter()
+                .filter(|r| !r.applies_to_shape(shape))
+                .collect::<Vec<_>>(),
         );
         result
     }
@@ -176,6 +180,9 @@ impl<T: CpuTarget> Target for T {
                     }
                     if physicaltransposebyte128_applies_to_operands(&spec.parameters()) {
                         microkernels.push(Action::Place(KernelType::PhysicalTransposeByte128));
+                    }
+                    if physicaltransposebyte256_applies_to_operands(&spec.parameters()) {
+                        microkernels.push(Action::Place(KernelType::PhysicalTransposeByte256));
                     }
                     Box::new(microkernels.into_iter())
                 }
@@ -224,8 +231,7 @@ impl MemoryLevel for CpuMemoryLevel {
 
     fn vector_bytes(&self) -> &'static [u32] {
         match &self {
-            // CpuMemoryLevel::VRF => &[16, 32],
-            CpuMemoryLevel::VRF => &[16],
+            CpuMemoryLevel::VRF => &[16, 32],
             _ => &[],
         }
     }
@@ -357,39 +363,49 @@ pub fn physicaltransposebyte128_applies_to_operands<Tgt>(operands: &[TensorSpec<
 where
     Tgt: Target<Level = CpuMemoryLevel>,
 {
-    let cm2 = col_major(2);
-    match &operands[0] {
-        TensorSpec {
-            shape,
-            dtype: Dtype::Uint8 | Dtype::Sint8,
-            aux:
-                TensorSpecAux {
-                    contig,
-                    aligned: _,
-                    level: CpuMemoryLevel::VRF,
-                    layout,
-                    vector_size: Some(16),
-                },
-        } if shape[..] == [2, 16]
-            && layout.contiguous_full() == *contig
-            && layout.is_row_major() => {}
-        _ => return false,
-    };
-    match &operands[1] {
-        TensorSpec {
-            shape,
-            dtype: Dtype::Uint8 | Dtype::Sint8,
-            aux:
-                TensorSpecAux {
-                    contig,
-                    aligned: _,
-                    level: CpuMemoryLevel::VRF,
-                    layout,
-                    vector_size: Some(16),
-                },
-        } if shape[..] == [2, 16] && layout.contiguous_full() == *contig && layout == &cm2 => {}
-        _ => return false,
-    };
+    physicaltransposebyte_applies_to_operands(operands, 16)
+}
+
+pub fn physicaltransposebyte256_applies_to_operands<Tgt>(operands: &[TensorSpec<Tgt>]) -> bool
+where
+    Tgt: Target<Level = CpuMemoryLevel>,
+{
+    physicaltransposebyte_applies_to_operands(operands, 32)
+}
+
+fn physicaltransposebyte_applies_to_operands<Tgt>(
+    operands: &[TensorSpec<Tgt>],
+    vector_values: u32,
+) -> bool
+where
+    Tgt: Target<Level = CpuMemoryLevel>,
+{
+    for op in operands {
+        match op {
+            TensorSpec {
+                shape,
+                dtype: Dtype::Uint8 | Dtype::Sint8,
+                aux:
+                    TensorSpecAux {
+                        contig,
+                        aligned: _,
+                        level: CpuMemoryLevel::VRF,
+                        layout,
+                        vector_size: Some(v),
+                    },
+            } if shape[..] == [2, vector_values]
+                && *contig == layout.contiguous_full()
+                && *v == vector_values => {}
+            _ => return false,
+        };
+    }
+
+    if !operands[0].layout().is_row_major() {
+        return false;
+    }
+    if operands[1].layout() != col_major(2) {
+        return false;
+    }
     true
 }
 
@@ -583,11 +599,14 @@ fn pack_sizes(
         result.push(2);
     }
     result.extend(all_target_vector_bytes.iter().filter_map(|&bytes| {
-        let s = bytes / DimSize::from(dtype.size());
-        if dim_size.map(|m| s < m).unwrap_or(true) {
-            Some(s)
-        } else {
-            None
+        match (dim_size, bytes.div_rem(DimSize::from(dtype.size()))) {
+            (Some(m), (vector_value_count, 0))
+                if vector_value_count < m && m % vector_value_count == 0 =>
+            {
+                Some(vector_value_count)
+            }
+            (None, (vector_value_count, 0)) => Some(vector_value_count),
+            _ => None,
         }
     }));
     result

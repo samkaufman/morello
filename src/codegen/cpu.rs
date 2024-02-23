@@ -403,14 +403,19 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 self.headers.vector_type_defs.insert(vec_type);
 
                 debug_assert_eq!(size % vector_size, 0);
-                let inner_vecs = (0..(size / vector_size))
-                    .map(|_| CBuffer::SingleVecVar {
-                        name: self.namer.fresh_name(),
-                        vec_type,
-                    })
-                    .collect::<Vec<_>>();
+                let name = self.namer.fresh_name();
+                if size == vector_size {
+                    CBuffer::SingleVecVar { name, vec_type }
+                } else {
+                    let inner_vecs = (0..(size / vector_size))
+                        .map(|_| CBuffer::SingleVecVar {
+                            name: self.namer.fresh_name(),
+                            vec_type,
+                        })
+                        .collect::<Vec<_>>();
 
-                CBuffer::VecVars { inner_vecs }
+                    CBuffer::VecVars { inner_vecs }
+                }
             }
             CpuMemoryLevel::RF => {
                 if size > 1 {
@@ -662,9 +667,6 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         Ok(())
                     }
                     KernelType::PhysicalTransposeByte128 => {
-                        use CpuMemoryLevel::VRF;
-                        use Dtype::Uint8;
-
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
                             (&arguments[0], 0),
                             (&arguments[0], 16),
@@ -687,13 +689,6 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         .try_into()
                         .unwrap();
 
-                        let intermeds = (0..2)
-                            .map(|_| self.make_buffer(&[2, 32], Some(16), Uint8, VRF))
-                            .collect::<Vec<_>>();
-                        for b in &intermeds {
-                            b.emit(w, InitType::None, depth)?;
-                        }
-
                         writeln!(
                             w,
                             "{}{} = _mm_unpacklo_epi8({}, {});",
@@ -709,6 +704,71 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             out_higher,
                             in_lower,
                             in_higher,
+                        )
+                    }
+                    KernelType::PhysicalTransposeByte256 => {
+                        use CpuMemoryLevel::VRF;
+
+                        let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
+                            (&arguments[0], 0),
+                            (&arguments[0], 32),
+                            (&arguments[1], 0),
+                            (&arguments[1], 32),
+                        ]
+                        .into_iter()
+                        .map(|(arg, idx)| {
+                            let buffer = self
+                                .name_env
+                                .get(arg.backing_tensor(&self.param_bindings).unwrap())
+                                .unwrap();
+                            let buffer_indexing_expr =
+                                zero_points(arg.make_buffer_indexing_expr(&self.param_bindings))
+                                    + idx;
+                            self.c_index_vec(buffer, &buffer_indexing_expr, None)
+                        })
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap();
+
+                        let intermediate_dtype = arguments[0].spec().dtype();
+                        let intermediate_lower =
+                            self.make_buffer(&[1, 32], Some(32), intermediate_dtype, VRF);
+                        let intermediate_higher =
+                            self.make_buffer(&[1, 32], Some(32), intermediate_dtype, VRF);
+                        intermediate_lower.emit(w, InitType::None, depth)?;
+                        intermediate_higher.emit(w, InitType::None, depth)?;
+
+                        writeln!(
+                            w,
+                            "{}{} = _mm_unpacklo_epi8({}, {});",
+                            indent(depth),
+                            intermediate_lower.name().unwrap(),
+                            in_lower,
+                            in_higher,
+                        )?;
+                        writeln!(
+                            w,
+                            "{}{} = _mm_unpackhi_epi8({}, {});",
+                            indent(depth),
+                            intermediate_higher.name().unwrap(),
+                            in_lower,
+                            in_higher,
+                        )?;
+                        writeln!(
+                            w,
+                            "{}{} = _mm256_permute2f128_si256({}, {}, 0x20);",
+                            indent(depth),
+                            out_lower,
+                            intermediate_lower.name().unwrap(),
+                            intermediate_higher.name().unwrap(),
+                        )?;
+                        writeln!(
+                            w,
+                            "{}{} = _mm256_permute2f128_si256({}, {}, 0x31);",
+                            indent(depth),
+                            out_higher,
+                            intermediate_lower.name().unwrap(),
+                            intermediate_higher.name().unwrap(),
                         )
                     }
                 }
