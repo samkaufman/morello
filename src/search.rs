@@ -13,20 +13,13 @@ use crate::scheduling::ApplyError;
 use crate::spec::Spec;
 use crate::target::Target;
 
-struct TopDownSearch<'d, Tgt, D>
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    D: Database<'d> + Send + Sync,
-{
+struct TopDownSearch<'d, D> {
     db: &'d D,
     top_k: usize,
     thread_idx: usize,
     thread_count: usize,
     hits: u64,
     misses: u64,
-    _phantom: std::marker::PhantomData<Tgt>,
 }
 
 struct ImplReducer<'a> {
@@ -59,14 +52,13 @@ where
         .map(|j| j.get())
         .unwrap_or_else(rayon::current_num_threads);
     if thread_count == 1 {
-        let mut search = TopDownSearch::<'d, Tgt, D> {
+        let mut search = TopDownSearch::<'d, D> {
             db,
             top_k,
             thread_idx: 0,
             thread_count: 1,
             hits: 0,
             misses: 1,
-            _phantom: std::marker::PhantomData,
         };
         return (search.run_spec(&canonical_goal), search.hits, search.misses);
     }
@@ -79,14 +71,13 @@ where
     tasks
         .into_par_iter()
         .map(|(i, g)| {
-            let mut search = TopDownSearch::<'d, Tgt, D> {
+            let mut search = TopDownSearch::<'d, D> {
                 db,
                 top_k,
                 thread_idx: i,
                 thread_count,
                 hits: 0,
                 misses: 1,
-                _phantom: std::marker::PhantomData,
             };
             (search.run_spec(&g), search.hits, search.misses)
         })
@@ -95,14 +86,16 @@ where
         .unwrap()
 }
 
-impl<'d, Tgt, D> TopDownSearch<'d, Tgt, D>
+impl<'d, D> TopDownSearch<'d, D>
 where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d> + Send + Sync,
 {
-    fn run_spec(&mut self, goal: &Spec<Tgt>) -> SmallVec<[(ActionIdx, Cost); 1]> {
+    fn run_spec<Tgt>(&mut self, goal: &Spec<Tgt>) -> SmallVec<[(ActionIdx, Cost); 1]>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
         if self.top_k > 1 {
             unimplemented!("Search for top_k > 1 not yet implemented.");
         }
@@ -164,8 +157,11 @@ where
         final_result
     }
 
-    fn run_impl<A>(&mut self, partial_impl: &ImplNode<Tgt, A>) -> SmallVec<[Cost; 1]>
+    fn run_impl<Tgt, A>(&mut self, partial_impl: &ImplNode<Tgt, A>) -> SmallVec<[Cost; 1]>
     where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
         A: Clone,
     {
         if let ImplNode::SpecApp(spec_app) = partial_impl {
