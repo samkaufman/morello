@@ -8,7 +8,6 @@ use crate::db::{ActionIdx, Database, GetPreference};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
-use crate::memorylimits::MemoryLimits;
 use crate::scheduling::ApplyError;
 use crate::spec::Spec;
 use crate::target::Target;
@@ -22,10 +21,35 @@ struct TopDownSearch<'d, D> {
     misses: u64,
 }
 
-struct ImplReducer<'a> {
+/// On-going synthesis of a [Spec].
+///
+/// Synthesizing a [Spec] is a two-step process. First, the [Spec] expands all actions into [Impl]s
+/// and stores the incomplete [Impl]s. Seconds, the caller collects those dependencies from the
+/// database or recursively synthesizes them, providing them to this [SpecTask]. This struct stores
+/// state between those two steps.
+#[derive(Debug)]
+struct SpecTask<Tgt: Target> {
+    goal: Spec<Tgt>, // TODO: Do we really need to store the `goal`?
+    reducer: ImplReducer,
+    partial_impls: Vec<WorkingPartialImpl<Tgt>>,
+    partial_impls_remaining: usize,
+}
+
+#[derive(Debug)]
+enum WorkingPartialImpl<Tgt: Target> {
+    Constructing {
+        partial_impl: ImplNode<Tgt, ()>,
+        subspec_costs: Vec<Option<Cost>>, // empty = unsat
+        producing_action_idx: ActionIdx,
+    },
+    Unsat,
+}
+
+#[derive(Debug, Clone)] // TODO: Remove this Clone derive if not needed
+struct ImplReducer {
     results: SmallVec<[(ActionIdx, Cost); 1]>,
-    top_k: usize,
-    preferences: &'a [ActionIdx],
+    top_k: usize, // TODO: Shared between ImplReducers. Pull out?
+    preferences: SmallVec<[ActionIdx; 1]>,
 }
 
 /// Computes an optimal Impl for `goal` and stores it in `db`.
@@ -42,6 +66,9 @@ where
     D: Database<'d> + Send + Sync,
 {
     assert!(db.max_k().map_or(true, |k| k >= top_k));
+    if top_k > 1 {
+        unimplemented!("Search for top_k > 1 not yet implemented.");
+    }
 
     let mut canonical_goal = goal.clone();
     canonical_goal
@@ -96,99 +123,173 @@ where
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        if self.top_k > 1 {
-            unimplemented!("Search for top_k > 1 not yet implemented.");
-        }
-
-        // First, check if the Spec is already in the database.
-        let get_result = self.db.get_with_preference(goal);
-        let mut preferences: &[_] = &[];
-        if let GetPreference::Hit(v) = get_result {
-            self.hits += 1;
-            return v.0;
-        }
-        self.misses += 1;
-        if let GetPreference::Miss(Some(p)) = &get_result {
-            preferences = p;
-        }
-
-        // Enumerate action applications, computing their costs from their childrens' costs.
-        let mut reducer = ImplReducer::new(self.top_k, preferences);
-
-        let all_actions = goal.0.actions().into_iter().collect::<Vec<_>>();
-
-        let initial_skip = self.thread_idx * all_actions.len() / self.thread_count;
-        for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
-            let action = &all_actions[action_idx];
-            let partial_impl = match action.apply(goal) {
-                Ok(imp) => imp,
-                Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => continue,
-                Err(ApplyError::SpecNotCanonical) => panic!("Goal was not canonical: {goal}"),
-            };
-
-            // Let top_down_impl compute the final cost of completing this Impl.
-            let costs = self.run_impl(&partial_impl);
-            if costs.is_empty() {
-                continue;
+        // First, check if the initial goal Spec is already in the database.
+        let preferences = match self.db.get_with_preference(goal) {
+            GetPreference::Hit(v) => {
+                self.hits += 1;
+                return v.0;
             }
-
-            let MemoryLimits::Standard(goal_vec) = &goal.1;
-            debug_assert!(
-                costs[0]
-                    .peaks
-                    .iter()
-                    .zip(goal_vec.iter())
-                    .all(|(a, b)| a <= b),
-                "While synthesizing {:?}, action yielded memory \
-                bound-violating {:?} with peak memory {:?}",
-                goal,
-                partial_impl,
-                costs[0].peaks
-            );
-            reducer.insert(
-                action_idx.try_into().unwrap(),
-                costs.into_iter().exactly_one().unwrap(),
-            );
-        }
-
-        // Copy into the memo. table and return.
-        let final_result = reducer.finalize();
-        self.db.put(goal.clone(), final_result.clone());
-        final_result
-    }
-
-    fn run_impl<Tgt, A>(&mut self, partial_impl: &ImplNode<Tgt, A>) -> SmallVec<[Cost; 1]>
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-        A: Clone,
-    {
-        if let ImplNode::SpecApp(spec_app) = partial_impl {
-            let action_costs = self.run_spec(&spec_app.0);
-            action_costs.into_iter().map(|(_, c)| c).collect()
-        } else {
-            let mut child_costs: SmallVec<[Cost; 3]> =
-                SmallVec::with_capacity(partial_impl.children().len());
-            for child_node in partial_impl.children() {
-                let mut child_results = self.run_impl(child_node);
-                if child_results.is_empty() {
-                    // Unsatisfiable.
-                    return smallvec![];
-                } else if child_results.len() == 1 {
-                    child_costs.append(&mut child_results);
-                } else {
-                    todo!("support k > 1");
-                }
+            GetPreference::Miss(m) => {
+                self.misses += 1;
+                m.unwrap_or_else(SmallVec::new)
             }
-            let partial_impl_cost = Cost::from_child_costs(partial_impl, &child_costs);
-            smallvec![partial_impl_cost]
+        };
+
+        let mut spec_task = SpecTask::new(goal.clone(), preferences, self.top_k);
+        let requests = spec_task.start(self).collect::<Vec<_>>();
+        for (requested_spec, request_extra) in requests {
+            let subresult = self.run_spec(&requested_spec);
+            let to_provide = subresult.into_iter().next().map(|(_, c)| c);
+            spec_task.resolve_request(self, request_extra, to_provide);
         }
+        spec_task.complete(self)
     }
 }
 
-impl<'a> ImplReducer<'a> {
-    fn new(top_k: usize, preferences: &'a [ActionIdx]) -> Self {
+impl<Tgt: Target> SpecTask<Tgt> {
+    fn new(goal: Spec<Tgt>, preferences: SmallVec<[ActionIdx; 1]>, top_k: usize) -> Self {
+        SpecTask {
+            goal,
+            reducer: ImplReducer::new(top_k, preferences),
+            partial_impls: Vec::new(),
+            partial_impls_remaining: 0,
+        }
+    }
+
+    /// Build partial [Impl]s for all actions, returning [Spec]s needed to compute this [Spec].
+    ///
+    /// The yielded [Spec]s are paired with additional data which must be provided when the [Spec]
+    /// is resolved. If no [Spec]s are yielded, the task is immediately ready to be [complete]d.
+    ///
+    /// The caller should fully consume the returned iterator before calling [resolve_requests].
+    fn start<D>(
+        &mut self,
+        search: &TopDownSearch<D>,
+    ) -> impl Iterator<Item = (Spec<Tgt>, (usize, usize))> + '_ {
+        // TODO: Make sure that calls to this function (`start`) happen only
+        //   after the db is checked for the Spec
+
+        // TODO: Define behavior for and document returning duplicates from this function.
+
+        // TODO: How should the caller behave if there are no requirements?
+
+        let all_actions = self.goal.0.actions().into_iter().collect::<Vec<_>>();
+        let initial_skip = search.thread_idx * all_actions.len() / search.thread_count;
+        (initial_skip..all_actions.len())
+            .chain(0..initial_skip)
+            .flat_map(move |action_idx| {
+                let action = &all_actions[action_idx];
+                let partial_impl_idx = self.partial_impls.len();
+                let mut nested_specs = Vec::new();
+                match action.apply(&self.goal) {
+                    Ok(partial_impl) => {
+                        // TODO: Add partial Impl to a list for reduction, and yield its nested Specs.
+                        collect_nested_specs(&partial_impl, &mut nested_specs);
+
+                        // If the resulting Impl is already complete, update the reducer. If there
+                        // are nested sub-Specs, then store the partial Impl for resolution by the
+                        // caller.
+                        if nested_specs.is_empty() {
+                            // TODO: Avoid walking the Impl twice; once to collect nested Specs and
+                            //   once compute cost.
+                            self.reducer.insert(
+                                u16::try_from(action_idx).unwrap(),
+                                Cost::from_impl(&partial_impl),
+                            );
+                        } else {
+                            self.partial_impls.push(WorkingPartialImpl::Constructing {
+                                partial_impl,
+                                subspec_costs: vec![None; nested_specs.len()],
+                                producing_action_idx: action_idx.try_into().unwrap(),
+                            });
+                            self.partial_impls_remaining += 1;
+
+                            // Ensure that the Specs we return per partial_impl_idx are unique, which is
+                            // promised by the contract of this function. This should be fine: right
+                            // now, all actions expand to Impls with unique sub-Specs.
+                            // TODO: Future-proof by de-duplicating here and in broadcasting in
+                            //   `resolve_request`.
+                            debug_assert!(nested_specs.iter().all_unique());
+                        }
+                    }
+                    Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => {}
+                    Err(ApplyError::SpecNotCanonical) => panic!("Goal was not canonical: {}", self.goal),
+                };
+                nested_specs
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(i, spec)| (spec, (partial_impl_idx, i)))
+            })
+    }
+
+    // TODO: Do we actually need the `spec` at all, or can we just use the `extra` data?
+    fn resolve_request<'d, D>(
+        &mut self,
+        search: &TopDownSearch<'d, D>,
+        extra: (usize, usize),
+        cost: Option<Cost>, // `None` means that the Spec was unsat
+    ) where
+        D: Database<'d>,
+    {
+        if self.partial_impls_remaining == 0 {
+            return;
+        }
+
+        let (working_impl_idx, child_idx) = extra;
+        let mut became_unsat = false;
+        let entry = self.partial_impls.get_mut(working_impl_idx).unwrap();
+        match entry {
+            WorkingPartialImpl::Constructing {
+                partial_impl,
+                subspec_costs,
+                producing_action_idx,
+            } => {
+                if let Some(cost) = cost {
+                    let entry = &mut subspec_costs[child_idx];
+                    debug_assert!(entry.is_none(), "Spec was already resolved");
+                    *entry = Some(cost);
+
+                    if subspec_costs.iter().all(|c| c.is_some()) {
+                        self.partial_impls_remaining -= 1;
+
+                        // TODO: Move rather than clone the child_costs.
+                        let final_cost = compute_impl_cost(
+                            partial_impl,
+                            &mut subspec_costs.iter().map(|c| c.as_ref().unwrap().clone()),
+                        );
+                        self.reducer.insert(*producing_action_idx, final_cost);
+                    }
+                } else {
+                    self.partial_impls_remaining -= 1;
+                    became_unsat = true;
+                }
+            }
+            WorkingPartialImpl::Unsat => {}
+        };
+
+        if became_unsat {
+            *entry = WorkingPartialImpl::Unsat;
+        }
+    }
+
+    fn complete<'d, D>(self, search: &TopDownSearch<'d, D>) -> SmallVec<[(ActionIdx, Cost); 1]>
+    where
+        D: Database<'d>,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        debug_assert_eq!(self.partial_impls_remaining, 0);
+
+        // TODO: Avoid this clone
+        let final_result = self.reducer.clone().finalize();
+        // TODO: Check that the final costs are below `self.goal`'s peaks.
+        search.db.put(self.goal.clone(), final_result.clone());
+        final_result
+    }
+}
+
+impl ImplReducer {
+    fn new(top_k: usize, preferences: SmallVec<[ActionIdx; 1]>) -> Self {
         ImplReducer {
             results: smallvec![],
             top_k,
@@ -256,14 +357,45 @@ impl<'a> ImplReducer<'a> {
     }
 }
 
+/// Push all nested [Spec]s in an Impl into a given [Vec], left to right.
+fn collect_nested_specs<Tgt: Target, A: Clone>(imp: &ImplNode<Tgt, A>, out: &mut Vec<Spec<Tgt>>) {
+    match imp {
+        ImplNode::SpecApp(spec_app) => {
+            out.push(spec_app.0.clone());
+        }
+        _ => {
+            for child in imp.children() {
+                collect_nested_specs(child, out);
+            }
+        }
+    }
+}
+
+fn compute_impl_cost<Tgt: Target, A: Clone, I>(imp: &ImplNode<Tgt, A>, costs: &mut I) -> Cost
+where
+    I: Iterator<Item = Cost>,
+{
+    match imp {
+        ImplNode::SpecApp(_) => costs.next().unwrap(),
+        _ => {
+            let child_costs = imp
+                .children()
+                .iter()
+                .map(|child| compute_impl_cost(child, costs))
+                .collect::<SmallVec<[_; 1]>>();
+            Cost::from_child_costs(imp, &child_costs)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{DimSize, Dtype};
+    use crate::common::DimSize;
     use crate::db::DashmapDiskDatabase;
     use crate::layout::row_major;
     use crate::lspec;
-    use crate::memorylimits::MemVec;
+    use crate::memorylimits::{MemVec, MemoryLimits};
     use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{CpuMemoryLevel::GL, X86Target};
     use crate::tensorspec::TensorSpecAux;
