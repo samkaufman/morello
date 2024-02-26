@@ -740,7 +740,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
                         writeln!(
                             w,
-                            "{}{} = _mm_unpacklo_epi8({}, {});",
+                            "{}{} = _mm256_unpacklo_epi8({}, {});",
                             indent(depth),
                             intermediate_lower.name().unwrap(),
                             in_lower,
@@ -748,7 +748,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         )?;
                         writeln!(
                             w,
-                            "{}{} = _mm_unpackhi_epi8({}, {});",
+                            "{}{} = _mm256_unpackhi_epi8({}, {});",
                             indent(depth),
                             intermediate_higher.name().unwrap(),
                             in_lower,
