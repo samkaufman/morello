@@ -1,6 +1,7 @@
 use itertools::Itertools;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use smallvec::{smallvec, SmallVec};
+use std::mem::take;
 use std::num::NonZeroUsize;
 
 use crate::cost::Cost;
@@ -11,6 +12,10 @@ use crate::imp::{Impl, ImplNode};
 use crate::scheduling::ApplyError;
 use crate::spec::Spec;
 use crate::target::Target;
+
+/// If `true`, [SpecTask] will yield all [Spec] requests immediately, rather than accounting for
+/// partial [Impl]s made unsatisfiable by earlier request resolutions.
+const SINGLE_REQUEST_BATCH: bool = false;
 
 struct TopDownSearch<'d, D> {
     db: &'d D,
@@ -33,6 +38,8 @@ struct SpecTask<Tgt: Target> {
     reducer: ImplReducer,
     partial_impls: Vec<WorkingPartialImpl<Tgt>>,
     partial_impls_remaining: usize,
+    nested_specs_by_child_idx: SmallVec<[Vec<(Spec<Tgt>, usize)>; 3]>,
+    children_returned: usize,
 }
 
 #[derive(Debug)]
@@ -135,107 +142,135 @@ where
             }
         };
 
-        let mut spec_task = SpecTask::new(goal.clone(), preferences, self.top_k);
-        let requests = spec_task.start(self).collect::<Vec<_>>();
-        for (requested_spec, request_extra) in requests {
-            let subresult = self.run_spec(&requested_spec);
-            let to_provide = subresult.into_iter().next().map(|(_, c)| c);
-            spec_task.resolve_request(self, request_extra, to_provide);
+        let mut spec_task = SpecTask::start(goal.clone(), preferences, self.top_k, self);
+        loop {
+            let Some(request_batch) = spec_task.next_request_batch() else {
+                break;
+            };
+            let requests = request_batch.collect::<Vec<_>>();
+            for (requested_spec, request_id) in requests {
+                let subresult = self.run_spec(&requested_spec);
+                let to_provide = subresult.into_iter().next().map(|(_, c)| c);
+                spec_task.resolve_request(request_id, to_provide);
+            }
         }
         spec_task.complete(self)
     }
 }
 
 impl<Tgt: Target> SpecTask<Tgt> {
-    fn new(goal: Spec<Tgt>, preferences: SmallVec<[ActionIdx; 1]>, top_k: usize) -> Self {
-        SpecTask {
+    /// Begin computing the optimal implementation of a Spec.
+    ///
+    /// Internally, this will expand partial [Impl]s for all actions.
+    fn start<D>(
+        goal: Spec<Tgt>,
+        preferences: SmallVec<[ActionIdx; 1]>,
+        top_k: usize,
+        search: &TopDownSearch<D>,
+    ) -> Self {
+        let mut task = SpecTask {
             goal,
             reducer: ImplReducer::new(top_k, preferences),
             partial_impls: Vec::new(),
             partial_impls_remaining: 0,
+            nested_specs_by_child_idx: smallvec![vec![]],
+            children_returned: 0,
+        };
+
+        let all_actions = task.goal.0.actions().into_iter().collect::<Vec<_>>();
+        let initial_skip = search.thread_idx * all_actions.len() / search.thread_count;
+
+        for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
+            let action = &all_actions[action_idx];
+            let partial_impl_idx = task.partial_impls.len();
+            match action.apply(&task.goal) {
+                Ok(partial_impl) => {
+                    let mut nested_spec_count = 0;
+                    collect_nested_specs(
+                        &partial_impl,
+                        partial_impl_idx,
+                        &mut nested_spec_count,
+                        &mut task.nested_specs_by_child_idx,
+                    );
+
+                    // If the resulting Impl is already complete, update the reducer. If there
+                    // are nested sub-Specs, then store the partial Impl for resolution by the
+                    // caller.
+                    if nested_spec_count == 0 {
+                        task.reducer.insert(
+                            u16::try_from(action_idx).unwrap(),
+                            Cost::from_impl(&partial_impl),
+                        );
+                    } else {
+                        task.partial_impls.push(WorkingPartialImpl::Constructing {
+                            partial_impl,
+                            subspec_costs: vec![None; nested_spec_count],
+                            producing_action_idx: action_idx.try_into().unwrap(),
+                        });
+                        task.partial_impls_remaining += 1;
+
+                        // Ensure that the Specs we return per partial_impl_idx are unique, which is
+                        // promised by the contract of this function. This should be fine: right
+                        // now, all actions expand to Impls with unique sub-Specs.
+                        // TODO: Future-proof by de-duplicating here and in broadcasting in
+                        //   `resolve_request`.
+                        debug_assert!((0..nested_spec_count)
+                            .map(|child_idx| task.nested_specs_by_child_idx[child_idx]
+                                .last()
+                                .unwrap())
+                            .all_unique());
+                    }
+                }
+                Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => {}
+                Err(ApplyError::SpecNotCanonical) => panic!(),
+            };
         }
+
+        task
     }
 
-    /// Build partial [Impl]s for all actions, returning [Spec]s needed to compute this [Spec].
+    /// Return an iterator over a set of [Spec]s needed to compute this task's goal.
     ///
-    /// The yielded [Spec]s are paired with additional data which must be provided when the [Spec]
-    /// is resolved. If no [Spec]s are yielded, the task is immediately ready to be [complete]d.
-    ///
-    /// The caller should fully consume the returned iterator before calling [resolve_requests].
-    fn start<D>(
+    /// This will return `None` when all dependencies are resolved and the goal is computed.
+    fn next_request_batch(
         &mut self,
-        search: &TopDownSearch<D>,
-    ) -> impl Iterator<Item = (Spec<Tgt>, (usize, usize))> + '_ {
-        // TODO: Make sure that calls to this function (`start`) happen only
-        //   after the db is checked for the Spec
-
+    ) -> Option<impl Iterator<Item = (Spec<Tgt>, (usize, usize))> + '_> {
         // TODO: Define behavior for and document returning duplicates from this function.
 
-        // TODO: How should the caller behave if there are no requirements?
+        let Some(it) = self
+            .nested_specs_by_child_idx
+            .get_mut(self.children_returned)
+        else {
+            return None;
+        };
 
-        let all_actions = self.goal.0.actions().into_iter().collect::<Vec<_>>();
-        let initial_skip = search.thread_idx * all_actions.len() / search.thread_count;
-        (initial_skip..all_actions.len())
-            .chain(0..initial_skip)
-            .flat_map(move |action_idx| {
-                let action = &all_actions[action_idx];
-                let partial_impl_idx = self.partial_impls.len();
-                let mut nested_specs = Vec::new();
-                match action.apply(&self.goal) {
-                    Ok(partial_impl) => {
-                        // TODO: Add partial Impl to a list for reduction, and yield its nested Specs.
-                        collect_nested_specs(&partial_impl, &mut nested_specs);
-
-                        // If the resulting Impl is already complete, update the reducer. If there
-                        // are nested sub-Specs, then store the partial Impl for resolution by the
-                        // caller.
-                        if nested_specs.is_empty() {
-                            // TODO: Avoid walking the Impl twice; once to collect nested Specs and
-                            //   once compute cost.
-                            self.reducer.insert(
-                                u16::try_from(action_idx).unwrap(),
-                                Cost::from_impl(&partial_impl),
-                            );
-                        } else {
-                            self.partial_impls.push(WorkingPartialImpl::Constructing {
-                                partial_impl,
-                                subspec_costs: vec![None; nested_specs.len()],
-                                producing_action_idx: action_idx.try_into().unwrap(),
-                            });
-                            self.partial_impls_remaining += 1;
-
-                            // Ensure that the Specs we return per partial_impl_idx are unique, which is
-                            // promised by the contract of this function. This should be fine: right
-                            // now, all actions expand to Impls with unique sub-Specs.
-                            // TODO: Future-proof by de-duplicating here and in broadcasting in
-                            //   `resolve_request`.
-                            debug_assert!(nested_specs.iter().all_unique());
+        let child_idx = self.children_returned;
+        let child_idx_requests = take(it);
+        self.children_returned += 1;
+        Some(
+            child_idx_requests
+                .into_iter()
+                .filter_map(
+                    move |(spec, impl_idx)| match &self.partial_impls[impl_idx] {
+                        WorkingPartialImpl::Unsat => None,
+                        WorkingPartialImpl::Constructing { .. } => {
+                            Some((spec, (impl_idx, child_idx)))
                         }
-                    }
-                    Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => {}
-                    Err(ApplyError::SpecNotCanonical) => panic!("Goal was not canonical: {}", self.goal),
-                };
-                nested_specs
-                    .into_iter()
-                    .enumerate()
-                    .map(move |(i, spec)| (spec, (partial_impl_idx, i)))
-            })
+                    },
+                ),
+        )
     }
 
-    // TODO: Do we actually need the `spec` at all, or can we just use the `extra` data?
-    fn resolve_request<'d, D>(
+    fn resolve_request(
         &mut self,
-        search: &TopDownSearch<'d, D>,
-        extra: (usize, usize),
+        id: (usize, usize),
         cost: Option<Cost>, // `None` means that the Spec was unsat
-    ) where
-        D: Database<'d>,
-    {
+    ) {
         if self.partial_impls_remaining == 0 {
             return;
         }
 
-        let (working_impl_idx, child_idx) = extra;
+        let (working_impl_idx, child_idx) = id;
         let mut became_unsat = false;
         let entry = self.partial_impls.get_mut(working_impl_idx).unwrap();
         match entry {
@@ -358,14 +393,28 @@ impl ImplReducer {
 }
 
 /// Push all nested [Spec]s in an Impl into a given [Vec], left to right.
-fn collect_nested_specs<Tgt: Target, A: Clone>(imp: &ImplNode<Tgt, A>, out: &mut Vec<Spec<Tgt>>) {
+fn collect_nested_specs<Tgt: Target, A: Clone>(
+    imp: &ImplNode<Tgt, A>,
+    impl_idx: usize,
+    nested_specs_visited: &mut usize,
+    out: &mut SmallVec<[Vec<(Spec<Tgt>, usize)>; 3]>,
+) {
     match imp {
         ImplNode::SpecApp(spec_app) => {
-            out.push(spec_app.0.clone());
+            let batch = if SINGLE_REQUEST_BATCH {
+                &mut out[0]
+            } else {
+                while out.len() <= *nested_specs_visited {
+                    out.push(vec![]);
+                }
+                &mut out[*nested_specs_visited]
+            };
+            batch.push((spec_app.0.clone(), impl_idx));
+            *nested_specs_visited += 1;
         }
         _ => {
             for child in imp.children() {
-                collect_nested_specs(child, out);
+                collect_nested_specs(child, impl_idx, nested_specs_visited, out);
             }
         }
     }
