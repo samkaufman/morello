@@ -3,6 +3,7 @@ use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use smallvec::{smallvec, SmallVec};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::iter;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 
@@ -135,33 +136,34 @@ impl<'d, D> TopDownSearch<'d, D>
 where
     D: Database<'d> + Send + Sync,
 {
-    fn synth_specs<Tgt>(&mut self, goals: &[Spec<Tgt>]) -> Vec<SmallVec<[(ActionIdx, Cost); 1]>>
+    fn synth_specs<'a, Tgt, I>(&mut self, goals: I) -> Vec<SmallVec<[(ActionIdx, Cost); 1]>>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        I: IntoIterator<Item = &'a Spec<Tgt>> + 'a,
     {
-        let working_set_rep = &goals[0];
+        let mut goals = goals.into_iter();
+        // TODO: Add debug assert. that all goals are unique.
 
-        debug_assert!(goals.iter().all_unique());
-        debug_assert!(goals
-            .iter()
-            .skip(1)
-            .all(|g| specs_share_page(g, working_set_rep)));
-
-        // First, check if the initial goal Specs are already in the database. (And set up
-        // final_results and working_set.)
-        let mut final_results = Vec::with_capacity(goals.len());
-        let mut working_set = HashMap::with_capacity(goals.len());
+        let mut final_results = Vec::with_capacity(goals.size_hint().0);
+        let mut working_set = HashMap::with_capacity(goals.size_hint().0);
         let mut subblocks = Vec::new();
         let mut request_map = HashMap::<Rc<Spec<Tgt>>, Vec<_>>::new();
         let mut ready_to_complete = Vec::new();
 
-        for goal in goals {
+        let working_set_rep = goals.next().expect("goals must not be empty");
+
+        // First, check if the initial goal Specs are already in the database. (And set up
+        // final_results and working_set.)
+
+        for (idx, goal) in iter::once(working_set_rep).chain(goals).enumerate() {
             // TODO: Pay attention to what happens if final_results[i] computes final_results[i + 1]
             //   ahead of time.
+            debug_assert!(specs_share_page(working_set_rep, goal));
             final_results.push(self.search_within_working_block(
                 goal,
+                Some(idx),
                 working_set_rep,
                 &mut working_set,
                 &mut subblocks,
@@ -183,7 +185,6 @@ where
                 ready_to_complete,
                 &mut working_set,
                 &mut request_map,
-                goals,
                 &mut final_results,
             );
 
@@ -192,7 +193,7 @@ where
 
             // Produce more sub-block requests.
             let mut next_batches = Vec::with_capacity(working_set.len());
-            for (sp, task) in working_set.iter_mut() {
+            for (sp, (task, _)) in working_set.iter_mut() {
                 let batch = task.next_request_batch();
                 let req_iter = batch.map(|b| b.collect::<Vec<_>>().into_iter());
                 next_batches.push((Rc::clone(sp), req_iter));
@@ -214,7 +215,7 @@ where
             .into_iter()
             .map(|r| match r {
                 SearchFinalResult::Computed(v) => v,
-                _ => unreachable!("final_results should be fully computed",),
+                _ => unreachable!("final_results should be fully computed"),
             })
             .collect()
     }
@@ -223,7 +224,7 @@ where
     fn recurse_subblocks<Tgt>(
         &mut self,
         subblocks: &[HashSet<Rc<Spec<Tgt>>>],
-        working_set: &mut HashMap<Rc<Spec<Tgt>>, SpecTask<Tgt>>,
+        working_set: &mut HashMap<Rc<Spec<Tgt>>, (SpecTask<Tgt>, Option<usize>)>,
         request_map: &mut HashMap<Rc<Spec<Tgt>>, Vec<(Rc<Spec<Tgt>>, (usize, usize))>>,
     ) where
         Tgt: Target,
@@ -245,7 +246,7 @@ where
                 debug_assert!(working_set.get(sp).is_none());
                 debug_assert!(request_map.get(sp).is_some());
                 for (requesting_spec, request_id) in request_map.remove(sp).unwrap() {
-                    let Some(requesting_task) = working_set.get_mut(requesting_spec.as_ref())
+                    let Some((requesting_task, _)) = working_set.get_mut(requesting_spec.as_ref())
                     else {
                         panic!(
                             "working_set did not have {}\nworking_set is {}",
@@ -272,8 +273,9 @@ where
     fn search_within_working_block<Tgt>(
         &mut self,
         goal: &Spec<Tgt>,
+        final_result_idx: Option<usize>,
         working_set_representative: &Spec<Tgt>,
-        working_set: &mut HashMap<Rc<Spec<Tgt>>, SpecTask<Tgt>>,
+        working_set: &mut HashMap<Rc<Spec<Tgt>>, (SpecTask<Tgt>, Option<usize>)>,
         subblocks: &mut Vec<HashSet<Rc<Spec<Tgt>>>>,
         request_map: &mut HashMap<Rc<Spec<Tgt>>, Vec<(Rc<Spec<Tgt>>, (usize, usize))>>,
         ready_to_complete: &mut Vec<Rc<Spec<Tgt>>>,
@@ -302,10 +304,13 @@ where
         let task_goal = Rc::new(goal.clone());
         match working_set.entry(Rc::clone(&task_goal)) {
             Entry::Vacant(entry) => {
-                let task = entry.insert(SpecTask::start(
-                    task_goal.as_ref().clone(),
-                    preferences.clone().unwrap_or_else(SmallVec::new),
-                    self,
+                let inserted = entry.insert((
+                    SpecTask::start(
+                        task_goal.as_ref().clone(),
+                        preferences.clone().unwrap_or_else(SmallVec::new),
+                        self,
+                    ),
+                    final_result_idx,
                 ));
 
                 // TODO: Avoid collecting batches into Vecs.
@@ -313,7 +318,8 @@ where
 
                 let mut batches = Vec::new();
                 loop {
-                    let batch = task
+                    let batch = inserted
+                        .0
                         .next_request_batch()
                         .map(|b| b.collect::<Vec<_>>().into_iter());
                     let last_batch = batch.is_none();
@@ -334,7 +340,11 @@ where
                     );
                 }
             }
-            Entry::Occupied(_) => {}
+            Entry::Occupied(mut occupied_entry) => {
+                let (_, fri) = occupied_entry.get_mut();
+                debug_assert!(fri.is_none() || fri == &final_result_idx);
+                *fri = final_result_idx;
+            }
         }
 
         SearchFinalResult::Empty { preferences }
@@ -349,7 +359,7 @@ where
         &mut self,
         next_batch: Option<B>,
         working_set_representative: &Spec<Tgt>,
-        working_set: &mut HashMap<Rc<Spec<Tgt>>, SpecTask<Tgt>>,
+        working_set: &mut HashMap<Rc<Spec<Tgt>>, (SpecTask<Tgt>, Option<usize>)>,
         subblocks: &mut Vec<HashSet<Rc<Spec<Tgt>>>>,
         request_map: &mut HashMap<Rc<Spec<Tgt>>, Vec<(Rc<Spec<Tgt>>, (usize, usize))>>,
         ready_to_complete: &mut Vec<Rc<Spec<Tgt>>>,
@@ -374,6 +384,7 @@ where
                 if !working_set.contains_key(subtask_rc.as_ref()) {
                     self.search_within_working_block(
                         &subtask_rc,
+                        None,
                         working_set_representative,
                         working_set,
                         subblocks,
@@ -407,9 +418,8 @@ where
     fn complete_ready_tasks<Tgt>(
         &mut self,
         ready_to_complete: Vec<Rc<Spec<Tgt>>>,
-        working_set: &mut HashMap<Rc<Spec<Tgt>>, SpecTask<Tgt>>,
+        working_set: &mut HashMap<Rc<Spec<Tgt>>, (SpecTask<Tgt>, Option<usize>)>,
         request_map: &mut HashMap<Rc<Spec<Tgt>>, Vec<(Rc<Spec<Tgt>>, (usize, usize))>>,
-        goals: &[Spec<Tgt>],
         final_results: &mut [SearchFinalResult],
     ) where
         Tgt: Target,
@@ -429,7 +439,7 @@ where
                     continue;
                 }
 
-                let Some(task) = working_set.remove(r.as_ref()) else {
+                let Some((task, final_result_idx)) = working_set.remove(r.as_ref()) else {
                     panic!(
                         "ready_to_complete contained a Spec not in the working set: {}",
                         r.as_ref()
@@ -439,22 +449,18 @@ where
                 for (requesting_spec, request_id) in
                     request_map.remove(r.as_ref()).into_iter().flatten()
                 {
-                    let requesting_task = working_set.get_mut(requesting_spec.as_ref()).unwrap();
-                    let rr = result.iter().next().map(|v| v.1.clone());  // TODO: Inline
-                    requesting_task
-                        .resolve_request(request_id, rr);
+                    let (requesting_task, _) =
+                        working_set.get_mut(requesting_spec.as_ref()).unwrap();
+                    let rr = result.iter().next().map(|v| v.1.clone()); // TODO: Inline
+                    requesting_task.resolve_request(request_id, rr);
                     if requesting_task.ready_to_complete() {
                         accum_next.push(requesting_spec);
                     }
                 }
 
-                // TODO: Shouldn't need to scan over all goals.
-                if let Some(goal_idx) = goals.iter().position(|g| g == r.as_ref()) {
-                    debug_assert!(matches!(
-                        final_results[goal_idx],
-                        SearchFinalResult::Empty { .. }
-                    ));
-                    final_results[goal_idx] = SearchFinalResult::Computed(result);
+                if let Some(i) = final_result_idx {
+                    debug_assert!(matches!(final_results[i], SearchFinalResult::Empty { .. }));
+                    final_results[i] = SearchFinalResult::Computed(result);
                 }
             }
             target_set = accum_next;
