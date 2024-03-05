@@ -569,7 +569,7 @@ mod tests {
                 contig: 3,
                 aligned: false,
                 level: CpuMemoryLevel::GL,
-                layout: Layout::New(vec![
+                layout: Layout::New(smallvec![
                     (0, None),
                     (2, None),
                     (3, None),

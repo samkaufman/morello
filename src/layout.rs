@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::{collections::HashSet, fmt::Display, hash::Hash, iter};
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
 pub enum Layout {
-    New(Vec<(u8, Option<DimSize>)>),
+    New(SmallVec<[(u8, Option<DimSize>); 4]>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -29,7 +29,7 @@ pub enum LayoutError {
 }
 
 impl Layout {
-    pub fn new(dims: Vec<(u8, Option<DimSize>)>) -> Layout {
+    pub fn new(dims: SmallVec<[(u8, Option<DimSize>); 4]>) -> Layout {
         #[cfg(debug_assertions)]
         {
             assert!(!dims.is_empty());
@@ -297,7 +297,7 @@ impl Layout {
         let first_contig_idx = dims.len() - usize::from(source_contig);
 
         let mut new_contig = source_contig;
-        let mut new_dims = Vec::with_capacity(dims.len());
+        let mut new_dims = SmallVec::with_capacity(dims.len());
         new_dims.push(dims[0]);
 
         for (idx, (dim, packing_size)) in dims.iter().skip(1).enumerate() {
@@ -481,7 +481,7 @@ pub fn col_major(rank: u8) -> Layout {
 }
 
 pub fn nhwc() -> Layout {
-    Layout::new(vec![(0, None), (2, None), (3, None), (1, None)])
+    Layout::new(smallvec![(0, None), (2, None), (3, None), (1, None)])
 }
 
 #[cfg(test)]
@@ -500,11 +500,12 @@ mod tests {
         proptest,
         strategy::{Just, Strategy},
     };
+    use smallvec::smallvec;
     use std::collections::HashSet;
 
     #[test]
     fn test_expand_physical_shape() {
-        let layout = Layout::new(vec![(0, None), (1, None), (0, Some(4))]);
+        let layout = Layout::new(smallvec![(0, None), (1, None), (0, Some(4))]);
         assert_eq!(
             &layout.expand_physical_shape(&[64, 64]).unwrap()[..],
             &[16, 64, 4],
