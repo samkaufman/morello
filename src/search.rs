@@ -42,7 +42,6 @@ enum SearchFinalResult {
 /// and this [SpecTask] is dropped.
 #[derive(Debug)]
 struct SpecTask<Tgt: Target> {
-    goal: Spec<Tgt>, // TODO: Do we really need to store the `goal`?
     reducer: ImplReducer,
     partial_impls: Vec<WorkingPartialImpl<Tgt>>,
     partial_impls_incomplete: usize,
@@ -258,7 +257,6 @@ where
                                 .join(", ")
                         );
                     };
-                    debug_assert_eq!(&requesting_task.goal, requesting_spec.as_ref());
                     requesting_task
                         .resolve_request(request_id, r.iter().next().map(|v| v.1.clone()));
                 }
@@ -445,7 +443,7 @@ where
                         r.as_ref()
                     );
                 };
-                let result = task.complete(self);
+                let result = task.complete(&r, self);
                 for (requesting_spec, request_id) in
                     request_map.remove(r.as_ref()).into_iter().flatten()
                 {
@@ -479,7 +477,6 @@ impl<Tgt: Target> SpecTask<Tgt> {
         search: &TopDownSearch<D>,
     ) -> Self {
         let mut task = SpecTask {
-            goal,
             reducer: ImplReducer::new(search.top_k, preferences),
             partial_impls: Vec::new(),
             partial_impls_incomplete: 0,
@@ -488,12 +485,12 @@ impl<Tgt: Target> SpecTask<Tgt> {
             request_batches_returned: 0,
         };
 
-        let all_actions = task.goal.0.actions().into_iter().collect::<Vec<_>>();
+        let all_actions = goal.0.actions().into_iter().collect::<Vec<_>>();
         let initial_skip = search.thread_idx * all_actions.len() / search.thread_count;
 
         for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
             let action = &all_actions[action_idx];
-            match action.apply(&task.goal) {
+            match action.apply(&goal) {
                 Ok(partial_impl) => {
                     let mut partial_impl_subspecs = Vec::new();
                     collect_nested_specs(&partial_impl, &mut partial_impl_subspecs);
@@ -534,12 +531,6 @@ impl<Tgt: Target> SpecTask<Tgt> {
     fn next_request_batch(
         &mut self,
     ) -> Option<impl Iterator<Item = (Spec<Tgt>, (usize, usize))> + '_> {
-        // debug_assert_eq!(
-        //     self.last_batch_requests_remaining, 0,
-        //     "Didn't resolve all requests from last batch for {}",
-        //     self.goal
-        // ); // TODO: Remove
-
         // TODO: Define behavior for and document returning duplicates from this function.
 
         if self.request_batches_returned == self.max_children {
@@ -572,7 +563,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
         id: (usize, usize),
         cost: Option<Cost>, // `None` means that the Spec was unsat
     ) {
-        debug_assert_ne!(self.last_batch_requests_remaining, 0, "{}", self.goal);
+        debug_assert_ne!(self.last_batch_requests_remaining, 0);
         if self.partial_impls_incomplete == 0 {
             return;
         }
@@ -618,7 +609,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
         }
     }
 
-    fn complete<'d, D>(self, search: &TopDownSearch<'d, D>) -> SmallVec<[(ActionIdx, Cost); 1]>
+    fn complete<'d, D>(self, task_goal: &Spec<Tgt>, search: &TopDownSearch<'d, D>) -> SmallVec<[(ActionIdx, Cost); 1]>
     where
         D: Database<'d>,
         Tgt::Level: CanonicalBimap,
@@ -627,8 +618,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
         debug_assert_eq!(
             self.partial_impls_incomplete,
             0,
-            "Some of {}'s partial Impls are unresolved:\n  {}",
-            self.goal,
+            "Some partial Impls are unresolved:\n  {}",
             self.partial_impls
                 .iter()
                 .filter(|pi| matches!(pi, WorkingPartialImpl::Constructing { .. }))
@@ -639,8 +629,8 @@ impl<Tgt: Target> SpecTask<Tgt> {
 
         // TODO: Avoid this clone
         let final_result = self.reducer.clone().finalize();
-        // TODO: Check that the final costs are below `self.goal`'s peaks.
-        search.db.put(self.goal.clone(), final_result.clone());
+        // TODO: Check that the final costs are below `task_goal`'s peaks.
+        search.db.put(task_goal.clone(), final_result.clone());
         final_result
     }
 
