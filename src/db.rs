@@ -282,9 +282,8 @@ where
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-
         let bimap = self.spec_bimap();
         let (table_key_lhs, global_pt_lhs) = bimap.apply(lhs);
         let (table_key_rhs, global_pt_rhs) = bimap.apply(rhs);

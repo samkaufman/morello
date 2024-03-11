@@ -3,7 +3,7 @@ use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use smallvec::{smallvec, SmallVec};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::{replace, take};
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -160,15 +160,17 @@ where
             working_block_requests: HashMap::new(),
             subblock_requests: Vec::new(),
         };
+        let mut visited_in_stage = HashSet::new();
+        let mut outbox = Vec::new();
         let mut final_result_tasks = Vec::with_capacity(goals.len());
         for g in &goals {
-            final_result_tasks.push(block.visit_spec_wb(g));
+            final_result_tasks.push(block.visit_spec_wb(g, &mut visited_in_stage, &mut outbox));
         }
 
         loop {
-            println!("Working set:");
-            for entry in block.working_set.keys() {
-                println!("  {}", entry);
+            for (spec, completed_task_results) in outbox.drain(..) {
+                block.resolve_wb_request(&spec, completed_task_results);
+                block.working_set.remove(&spec).unwrap();
             }
 
             for mut subblock in take(&mut block.subblock_requests) {
@@ -195,8 +197,9 @@ where
                 .iter()
                 .map(|(k, v)| (k.clone(), Rc::clone(v)))
                 .collect::<Vec<_>>();
+            visited_in_stage.clear();
             for (spec, task_ref) in ws_vec {
-                block.visit_next_request_batch(&spec, task_ref);
+                block.visit_next_request_batch(&spec, task_ref, &mut visited_in_stage, &mut outbox);
             }
         }
         debug_assert!(
@@ -236,8 +239,22 @@ where
             .collect()
     }
 
+    fn visit_spec_wb(
+        &mut self,
+        spec: &Spec<Tgt>,
+        visited_in_stage: &mut HashSet<Spec<Tgt>>,
+        outbox: &mut Vec<(Spec<Tgt>, ActionCostVec)>,
+    ) -> Rc<RefCell<SpecTask<Tgt>>> {
+        let task = self.get_wb_task(spec);
+        if !visited_in_stage.contains(spec) {
+            visited_in_stage.insert(spec.clone());
+            self.visit_next_request_batch(spec, Rc::clone(&task), visited_in_stage, outbox);
+        }
+        task
+    }
+
     /// Return or create from the working set a running task or return an immediately complete task.
-    fn visit_spec_wb(&mut self, spec: &Spec<Tgt>) -> Rc<RefCell<SpecTask<Tgt>>> {
+    fn get_wb_task(&mut self, spec: &Spec<Tgt>) -> Rc<RefCell<SpecTask<Tgt>>> {
         match self.working_set.entry(spec.clone()) {
             Entry::Occupied(e) => Rc::clone(e.get()),
             Entry::Vacant(e) => {
@@ -253,7 +270,13 @@ where
         }
     }
 
-    fn visit_next_request_batch(&mut self, spec: &Spec<Tgt>, task_ref: Rc<RefCell<SpecTask<Tgt>>>) {
+    fn visit_next_request_batch(
+        &mut self,
+        spec: &Spec<Tgt>,
+        task_ref: Rc<RefCell<SpecTask<Tgt>>>,
+        visited_in_stage: &mut HashSet<Spec<Tgt>>,
+        outbox: &mut Vec<(Spec<Tgt>, ActionCostVec)>, // TODO: Make Option<Cost>
+    ) {
         let task: &mut SpecTask<Tgt> = &mut task_ref.borrow_mut();
         if !matches!(task, SpecTask::Running { .. }) {
             return;
@@ -264,7 +287,7 @@ where
         if let Some(request_batch) = b {
             for (subspec, request_id) in request_batch {
                 if self.search.db.specs_share_page(spec, &subspec) {
-                    let subtask = self.visit_spec_wb(&subspec);
+                    let subtask = self.visit_spec_wb(&subspec, visited_in_stage, outbox);
                     let subtask_ref = subtask.borrow();
                     match &*subtask_ref {
                         SpecTask::Running { .. } => {
@@ -275,11 +298,14 @@ where
                             let cost = subtask_result.iter().next().map(|v| v.1.clone());
                             task.resolve_request(request_id, cost, spec, self.search);
                             // At this point, the task_ref might have completed (be
-                            // `SpecTask::Complete`). Propagate the completion to any tasks
-                            // waiting within the working set.
+                            // `SpecTask::Complete`). We want to propagate the completion to any
+                            // tasks waiting within the working set, but we don't want to recurse
+                            // into a Spec we're already borrowing lower on the current stack.
+                            // That's overly complicated and will lead to a RefCell borrow panic.
+                            // Instead, push thd completion into a queue (the `outbox`) we'll
+                            // resolve later.
                             if let SpecTask::Complete(completed_task_results) = task {
-                                self.resolve_wb_request(spec, completed_task_results.clone());
-                                self.working_set.remove(spec).unwrap();
+                                outbox.push((spec.clone(), completed_task_results.clone()));
                             }
                         }
                     };
