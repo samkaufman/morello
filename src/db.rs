@@ -14,20 +14,15 @@ use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
-use anyhow::{anyhow, Result};
-use dashmap::mapref::entry::Entry;
-use dashmap::DashMap;
+use anyhow::Result;
 use divrem::DivRem;
 use itertools::Itertools;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-use std::collections::hash_map::RandomState;
-use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, Range};
-use std::time::Instant;
+use std::sync::RwLock;
 use std::{iter, path};
 
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
@@ -69,10 +64,6 @@ pub trait Database<'a> {
 
     fn flush(&'a self);
 
-    fn save(&'a self) -> anyhow::Result<()>;
-
-    fn compact(&'a self);
-
     /// Returns the maximum number of Impls this [Database] as store per Spec.
     ///
     /// If unlimited, returns `None`.
@@ -94,12 +85,11 @@ pub trait DatabaseExt<'a>: Database<'a> {
 #[derive(Clone, Debug)]
 pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
 
-pub struct DashmapDiskDatabase {
-    file_path: Option<path::PathBuf>,
-    pub blocks: DashMap<DbKey, DbBlock>,
+pub struct RocksDatabase {
+    db: rocksdb::DB,
     binary_scale_shapes: bool,
     k: u8,
-    use_rle_blocks: bool,
+    live_block: RwLock<Option<(DbKey, Option<DbBlock>)>>,
 }
 
 /// Stores a [Database] block. This may be a single value if all block entries have been filled with
@@ -128,12 +118,6 @@ pub struct WholeBlock {
 // TODO: Replace [Option<u16>] with just [u16] offset by one.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ActionOnlyBlock(NDArray<ActionIdx>);
-
-// TODO: Storing Spec and usize is too expensive.
-pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
-    dashmap::mapref::one::Ref<'a, DbKey, HashMap<Spec<Tgt>, ActionCostVec>, S>,
-    Option<&'a ActionCostVec>,
-);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionCostVec(pub SmallVec<[(ActionIdx, Cost); 1]>);
@@ -173,55 +157,21 @@ impl<Tgt: Target> Default for DbImplAux<Tgt> {
     }
 }
 
-impl DashmapDiskDatabase {
+impl RocksDatabase {
     pub fn try_new(
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
         k: u8,
     ) -> Result<Self> {
-        Self::try_new_with_dashmap_constructor(file_path, binary_scale_shapes, k, &DashMap::new)
-    }
-
-    pub fn try_with_capacity(
-        file_path: Option<&path::Path>,
-        binary_scale_shapes: bool,
-        k: u8,
-        capacity: usize,
-    ) -> Result<Self> {
-        Self::try_new_with_dashmap_constructor(file_path, binary_scale_shapes, k, &|| {
-            DashMap::with_capacity(capacity)
-        })
-    }
-
-    fn try_new_with_dashmap_constructor(
-        file_path: Option<&path::Path>,
-        binary_scale_shapes: bool,
-        k: u8,
-        dashmap_constructor: &impl Fn() -> DashMap<DbKey, DbBlock>,
-    ) -> Result<Self> {
-        let use_rle_blocks = std::env::var("MORELLO_STORE_COSTS").is_ok();
-        let grouped_entries = match file_path {
-            Some(path) => match std::fs::File::open(path) {
-                Ok(f) => {
-                    let start = Instant::now();
-                    let decoder = snap::read::FrameDecoder::new(f);
-                    let result = bincode::deserialize_from(decoder).unwrap();
-                    log::debug!("Loading database took {:?}", start.elapsed());
-                    result
-                }
-                Err(err) => match err.kind() {
-                    std::io::ErrorKind::NotFound => dashmap_constructor(),
-                    _ => return Err(err.into()),
-                },
-            },
-            None => Default::default(),
-        };
+        let resolved_file_path = file_path
+            .map(|p| p.to_owned())
+            .unwrap_or_else(|| tempfile::TempDir::new().unwrap().into_path());
+        let db = rocksdb::DB::open_default(resolved_file_path)?;
         Ok(Self {
-            file_path: file_path.map(|p| p.to_owned()),
-            blocks: grouped_entries,
+            db,
             binary_scale_shapes,
             k,
-            use_rle_blocks,
+            live_block: RwLock::new(None),
         })
     }
 
@@ -242,9 +192,66 @@ impl DashmapDiskDatabase {
         };
         surmap.into_bimap()
     }
+
+    fn load_live_block(
+        &self,
+        table_key: &(SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
+        block_pt: &[BimapInt],
+    ) {
+        let read_guard = self.live_block.read().unwrap();
+        if let Some(live_block) = &*read_guard {
+            if &live_block.0 .0 == table_key && &live_block.0 .1[..] == block_pt {
+                return;
+            }
+        }
+        self.save_live_block_inner(&read_guard);
+        drop(read_guard);
+
+        let mut live_block = self.live_block.write().unwrap();
+        // TODO: Use a faster and stable key encoding.
+        let key = make_key(table_key, block_pt);
+        if let Some(value_encoded) = self.db.get(key).unwrap() {
+            let block = bincode::deserialize::<DbBlock>(&value_encoded).unwrap();
+            *live_block = Some(((table_key.clone(), block_pt.into()), Some(block)));
+        } else {
+            *live_block = Some(((table_key.clone(), block_pt.into()), None));
+        }
+    }
+
+    fn save_live_block(&self) {
+        // TODO: Assert that table_key corresponds to whatever is in live_block
+        // TODO: Assert that block_key corresponds to whatever is in live_block
+        let live_block = self.live_block.read().unwrap();
+        let r = live_block.deref();
+        self.save_live_block_inner(r);
+    }
+
+    fn save_live_block_inner(
+        &self,
+        r: &Option<(
+            (
+                (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
+                SmallVec<[u32; 10]>,
+            ),
+            Option<DbBlock>,
+        )>,
+    ) {
+        match r {
+            Some(((table_key, block_pt), Some(b))) => {
+                let key = make_key(table_key, block_pt);
+                self.db
+                    .put(key, bincode::serialize::<DbBlock>(b).unwrap())
+                    .unwrap();
+            }
+            Some((_, None)) => {
+                // TODO: Delete the key. Shouldn't happen, but this'll make the API clearer.
+            }
+            None => {}
+        }
+    }
 }
 
-impl<'a> Database<'a> for DashmapDiskDatabase
+impl<'a> Database<'a> for RocksDatabase
 where
     Self: 'a,
 {
@@ -272,10 +279,12 @@ where
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
         let (block_pt, inner_pt) = blockify_point(global_pt);
-        let Some(group) = self.blocks.get(&(table_key, block_pt)) else {
-            return GetPreference::Miss(None);
-        };
-        group.get_with_preference(self, query, &inner_pt)
+
+        self.load_live_block(&table_key, &block_pt);
+        match &self.live_block.read().unwrap().as_ref().unwrap().1 {
+            Some(b) => b.get_with_preference(self, query, &inner_pt),
+            None => GetPreference::Miss(None),
+        }
     }
 
     fn specs_share_page<Tgt>(&self, lhs: &Spec<Tgt>, rhs: &Spec<Tgt>) -> bool
@@ -314,86 +323,56 @@ where
             .multi_cartesian_product();
 
         for joined_row in blocks_iter {
-            let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
+            let block_pt = joined_row
+                .iter()
+                .map(|(b, _)| *b)
+                .collect::<SmallVec<[BimapInt; 10]>>();
 
-            let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
-            match block_entry {
-                Entry::Occupied(mut existing_block) => {
-                    let r = existing_block.get_mut();
-                    let dim_ranges = joined_row
-                        .iter()
-                        .map(|(_, r)| r.clone())
-                        .collect::<Vec<_>>();
-                    match r {
-                        DbBlock::ActionOnly(b) => {
-                            // Drop the given cost. This will need to be recomputed.
-                            b.fill_region(
-                                &dim_ranges,
-                                Some(&decisions.iter().map(|d| d.0).collect::<SmallVec<[_; 1]>>()),
-                            )
-                        }
-                        DbBlock::Whole(e) => {
-                            // Examine the table before updating.
-                            e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
-                        }
-                    }
-                }
-                Entry::Vacant(entry) => {
-                    let db_shape = db_shape::<Tgt>(rank);
-                    let bs = block_shape(&block_pt, &db_shape, block_size_dim);
-                    let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
-                    let dim_ranges = joined_row
-                        .iter()
-                        .map(|(_, r)| r.clone())
-                        .collect::<Vec<_>>();
-                    if self.use_rle_blocks {
-                        entry.insert(DbBlock::Whole(Box::new(
-                            WholeBlock::partially_filled::<Tgt>(
-                                self.k,
-                                &block_shape_usize,
-                                &dim_ranges,
-                                &ActionCostVec(decisions.clone()),
-                            ),
-                        )));
-                    } else {
-                        let actions_only = decisions
-                            .iter()
-                            .map(|&(a, _)| a)
-                            .collect::<SmallVec<[_; 1]>>();
-                        entry.insert(DbBlock::ActionOnly(ActionOnlyBlock::partially_filled(
-                            self.k,
-                            &block_shape_usize,
+            self.load_live_block(&db_key, &block_pt);
+            let mut live_block = self.live_block.write().unwrap();
+            let live_block_data = &mut live_block.as_mut().unwrap().1;
+
+            if let Some(loaded_block) = live_block_data.as_mut() {
+                let dim_ranges = joined_row
+                    .iter()
+                    .map(|(_, r)| r.clone())
+                    .collect::<Vec<_>>();
+                match loaded_block {
+                    DbBlock::ActionOnly(b) => {
+                        // Drop the given cost. This will need to be recomputed.
+                        b.fill_region(
                             &dim_ranges,
-                            Some(&actions_only),
-                        )));
+                            Some(&decisions.iter().map(|d| d.0).collect::<SmallVec<[_; 1]>>()),
+                        )
                     }
-                }
+                    DbBlock::Whole(e) => {
+                        // Examine the table before updating.
+                        e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
+                    }
+                };
+            } else {
+                let db_shape = db_shape::<Tgt>(rank);
+                let bs = block_shape(&block_pt, &db_shape, block_size_dim);
+                let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
+                let dim_ranges = joined_row
+                    .iter()
+                    .map(|(_, r)| r.clone())
+                    .collect::<Vec<_>>();
+                *live_block_data = Some(DbBlock::Whole(Box::new(WholeBlock::partially_filled::<
+                    Tgt,
+                >(
+                    self.k,
+                    &block_shape_usize,
+                    &dim_ranges,
+                    &ActionCostVec(decisions.clone()),
+                ))));
             }
         }
     }
 
-    fn flush(&'a self) {}
-
-    fn save(&self) -> anyhow::Result<()> {
-        if let Some(path) = &self.file_path {
-            let start = Instant::now();
-            let dir = path
-                .parent()
-                .ok_or_else(|| anyhow!("path must have parent, but is: {:?}", path))?;
-            let temp_file = tempfile::NamedTempFile::new_in(dir)?;
-            let encoder = snap::write::FrameEncoder::new(&temp_file);
-            bincode::serialize_into(encoder, &self.blocks)?;
-            let temp_file_path = temp_file.keep()?.1;
-            std::fs::rename(temp_file_path, path)?;
-            log::debug!("Saving database took {:?}", start.elapsed());
-        }
-        Ok(())
-    }
-
-    fn compact(&'a self) {
-        self.blocks.par_iter_mut().for_each(|mut block| {
-            block.compact();
-        });
+    fn flush(&'a self) {
+        self.save_live_block();
+        self.db.flush().unwrap();
     }
 
     fn max_k(&'a self) -> Option<usize> {
@@ -401,60 +380,63 @@ where
     }
 
     fn stats_str(&self) -> String {
-        let start = Instant::now();
-        let mut runs_filled = 0;
-        let mut lens_filled = 0;
-        let mut runs_actiononly = 0;
-        let mut lens_actiononly = 0;
-        let mut runs_main_costs = 0;
-        let mut lens_main_costs = 0;
-        let mut runs_peaks = 0;
-        let mut lens_peaks = 0;
-        let mut runs_depths_actions = 0;
-        let mut lens_depths_actions = 0;
-        for block in &self.blocks {
-            match block.value() {
-                DbBlock::ActionOnly(b) => {
-                    runs_actiononly += b.0.runs_len();
-                    lens_actiononly += b.0.len();
-                }
-                DbBlock::Whole(e) => {
-                    runs_filled += e.filled.runs_len();
-                    lens_filled += e.filled.len();
-                    runs_main_costs += e.main_costs.runs_len();
-                    lens_main_costs += e.main_costs.len();
-                    runs_peaks += e.peaks.runs_len();
-                    lens_peaks += e.peaks.len();
-                    runs_depths_actions += e.depths_actions.runs_len();
-                    lens_depths_actions += e.depths_actions.len();
-                }
-            }
-        }
-        let stat_duration = start.elapsed();
-        format!(
-            "blocks={} \
-            runs_actiononly={} runs_filled={} runs_main_costs={} runs_peaks={} \
-            runs_depthsactions={} cr_actiononly={} cr_filled={:.5} \
-            cr_main_costs={:.5} cr_peaks={:.5} cr_depthsactions={:.5} statms={}",
-            self.blocks.len(),
-            runs_actiononly,
-            runs_filled,
-            runs_main_costs,
-            runs_peaks,
-            runs_depths_actions,
-            runs_actiononly as f32 / lens_actiononly as f32,
-            runs_filled as f32 / lens_filled as f32,
-            runs_main_costs as f32 / lens_main_costs as f32,
-            runs_peaks as f32 / lens_peaks as f32,
-            runs_depths_actions as f32 / lens_depths_actions as f32,
-            stat_duration.as_millis(),
-        )
+        // let start = Instant::now();
+        // let mut runs_filled = 0;
+        // let mut lens_filled = 0;
+        // let mut runs_actiononly = 0;
+        // let mut lens_actiononly = 0;
+        // let mut runs_main_costs = 0;
+        // let mut lens_main_costs = 0;
+        // let mut runs_peaks = 0;
+        // let mut lens_peaks = 0;
+        // let mut runs_depths_actions = 0;
+        // let mut lens_depths_actions = 0;
+        // for block in &self.blocks {
+        //     match block.value() {
+        //         DbBlock::ActionOnly(b) => {
+        //             runs_actiononly += b.0.runs_len();
+        //             lens_actiononly += b.0.len();
+        //         }
+        //         DbBlock::Whole(e) => {
+        //             runs_filled += e.filled.runs_len();
+        //             lens_filled += e.filled.len();
+        //             runs_main_costs += e.main_costs.runs_len();
+        //             lens_main_costs += e.main_costs.len();
+        //             runs_peaks += e.peaks.runs_len();
+        //             lens_peaks += e.peaks.len();
+        //             runs_depths_actions += e.depths_actions.runs_len();
+        //             lens_depths_actions += e.depths_actions.len();
+        //         }
+        //     }
+        // }
+        // let stat_duration = start.elapsed();
+        // format!(
+        //     "blocks={} \
+        //     runs_actiononly={} runs_filled={} runs_main_costs={} runs_peaks={} \
+        //     runs_depthsactions={} cr_actiononly={} cr_filled={:.5} \
+        //     cr_main_costs={:.5} cr_peaks={:.5} cr_depthsactions={:.5} statms={}",
+        //     self.blocks.len(),
+        //     runs_actiononly,
+        //     runs_filled,
+        //     runs_main_costs,
+        //     runs_peaks,
+        //     runs_depths_actions,
+        //     runs_actiononly as f32 / lens_actiononly as f32,
+        //     runs_filled as f32 / lens_filled as f32,
+        //     runs_main_costs as f32 / lens_main_costs as f32,
+        //     runs_peaks as f32 / lens_peaks as f32,
+        //     runs_depths_actions as f32 / lens_depths_actions as f32,
+        //     stat_duration.as_millis(),
+        // )
+
+        // TODO: Reimplement with RocksDB.
+        "".to_owned()
     }
 }
 
-impl Drop for DashmapDiskDatabase {
+impl Drop for RocksDatabase {
     fn drop(&mut self) {
-        self.save().unwrap();
+        self.flush();
     }
 }
 
@@ -492,7 +474,7 @@ impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
 impl DbBlock {
     pub fn get_with_preference<Tgt>(
         &self,
-        containing_db: &DashmapDiskDatabase,
+        containing_db: &RocksDatabase,
         query: &Spec<Tgt>,
         inner_pt: &[u8],
     ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
@@ -762,26 +744,6 @@ impl ActionOnlyBlock {
     }
 }
 
-impl<'a, Tgt: Target> Deref for DashmapDbRef<'a, Tgt> {
-    type Target = ActionCostVec;
-
-    fn deref(&self) -> &Self::Target {
-        self.1.unwrap()
-    }
-}
-
-impl<'a, Tgt: Target> AsRef<ActionCostVec> for DashmapDbRef<'a, Tgt> {
-    fn as_ref(&self) -> &ActionCostVec {
-        self.deref()
-    }
-}
-
-impl<'a, Tgt: Target> AsRef<SmallVec<[(ActionIdx, Cost); 1]>> for DashmapDbRef<'a, Tgt> {
-    fn as_ref(&self) -> &SmallVec<[(ActionIdx, Cost); 1]> {
-        self.deref().as_ref()
-    }
-}
-
 impl Deref for ActionCostVec {
     type Target = SmallVec<[(ActionIdx, Cost); 1]>;
 
@@ -1029,6 +991,13 @@ where
     }
 }
 
+fn make_key(
+    table_key: &(SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
+    block_pt: &[BimapInt],
+) -> String {
+    format!("{table_key:?}/{block_pt:?}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1125,7 +1094,7 @@ mod tests {
         #[test]
         fn test_put_then_get_fills_across_memory_limits(decision in arb_spec_and_decision::<X86Target>()) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
+            let db = RocksDatabase::try_new(None, false, 1).unwrap();
 
             // Put all decisions into database.
             for d in decision.visit_decisions() {
@@ -1162,7 +1131,7 @@ mod tests {
         // fn test_two_puts_return_correct_gets_for_second_put(
         //     decision_pair in arb_spec_and_decision_pair::<X86Target>()
         // ) {
-        //     let db = DashmapDiskDatabase::try_new(None, false, 1).unwrap();
+        //     let db = RocksDatabase::try_new(None, false, 1).unwrap();
         //     let (decision_a, decision_b) = decision_pair;
         //     assert!(decision_a.actions_costs.len() < 2 && decision_b.actions_costs.len() < 2);
         //     let logical_specs_match = decision_a.spec.0 == decision_b.spec.0;

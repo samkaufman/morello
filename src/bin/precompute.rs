@@ -34,7 +34,6 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 const DB_SAVE_PERIOD: Duration = Duration::from_secs(10 * 60);
 const K: u8 = 1;
-const INITIAL_HASHMAP_CAPACITY: usize = 100_000_000;
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -59,12 +58,7 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
-    let db = DashmapDiskDatabase::try_with_capacity(
-        args.db.as_deref(),
-        true,
-        K,
-        INITIAL_HASHMAP_CAPACITY,
-    )?;
+    let db = DashmapDiskDatabase::try_new(args.db.as_deref(), true, K)?;
     main_per_db(&args, &db);
 
     Ok(())
