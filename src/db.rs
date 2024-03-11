@@ -104,7 +104,6 @@ pub struct RocksDatabase {
 #[serde(bound = "")]
 pub enum DbBlock {
     Whole(Box<WholeBlock>),
-    ActionOnly(ActionOnlyBlock),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -114,10 +113,6 @@ pub struct WholeBlock {
     pub peaks: NDArray<MemVec>,
     pub depths_actions: NDArray<(u8, ActionIdx)>,
 }
-
-// TODO: Replace [Option<u16>] with just [u16] offset by one.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ActionOnlyBlock(NDArray<ActionIdx>);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionCostVec(pub SmallVec<[(ActionIdx, Cost); 1]>);
@@ -338,13 +333,6 @@ where
                     .map(|(_, r)| r.clone())
                     .collect::<Vec<_>>();
                 match loaded_block {
-                    DbBlock::ActionOnly(b) => {
-                        // Drop the given cost. This will need to be recomputed.
-                        b.fill_region(
-                            &dim_ranges,
-                            Some(&decisions.iter().map(|d| d.0).collect::<SmallVec<[_; 1]>>()),
-                        )
-                    }
                     DbBlock::Whole(e) => {
                         // Examine the table before updating.
                         e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
@@ -383,8 +371,6 @@ where
         // let start = Instant::now();
         // let mut runs_filled = 0;
         // let mut lens_filled = 0;
-        // let mut runs_actiononly = 0;
-        // let mut lens_actiononly = 0;
         // let mut runs_main_costs = 0;
         // let mut lens_main_costs = 0;
         // let mut runs_peaks = 0;
@@ -393,10 +379,6 @@ where
         // let mut lens_depths_actions = 0;
         // for block in &self.blocks {
         //     match block.value() {
-        //         DbBlock::ActionOnly(b) => {
-        //             runs_actiononly += b.0.runs_len();
-        //             lens_actiononly += b.0.len();
-        //         }
         //         DbBlock::Whole(e) => {
         //             runs_filled += e.filled.runs_len();
         //             lens_filled += e.filled.len();
@@ -412,16 +394,14 @@ where
         // let stat_duration = start.elapsed();
         // format!(
         //     "blocks={} \
-        //     runs_actiononly={} runs_filled={} runs_main_costs={} runs_peaks={} \
-        //     runs_depthsactions={} cr_actiononly={} cr_filled={:.5} \
+        //     runs_filled={} runs_main_costs={} runs_peaks={} \
+        //     runs_depthsactions={} cr_filled={:.5} \
         //     cr_main_costs={:.5} cr_peaks={:.5} cr_depthsactions={:.5} statms={}",
         //     self.blocks.len(),
-        //     runs_actiononly,
         //     runs_filled,
         //     runs_main_costs,
         //     runs_peaks,
         //     runs_depths_actions,
-        //     runs_actiononly as f32 / lens_actiononly as f32,
         //     runs_filled as f32 / lens_filled as f32,
         //     runs_main_costs as f32 / lens_main_costs as f32,
         //     runs_peaks as f32 / lens_peaks as f32,
@@ -484,50 +464,6 @@ impl DbBlock {
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         match self {
-            DbBlock::ActionOnly(v) => {
-                match v.get(inner_pt) {
-                    Some(inner) => {
-                        GetPreference::Hit(ActionCostVec(
-                            inner
-                                .iter()
-                                .map(|&action_idx| {
-                                    let action = query
-                                        .0
-                                        .actions()
-                                        .into_iter()
-                                        .nth(action_idx.into())
-                                        .unwrap();
-                                    let imp = action.apply(query).unwrap();
-                                    let recomputed_cost = compute_cost(&imp, &|s| {
-                                        let Some(ActionCostVec(inner_decisions)) = containing_db.get(&s.0)
-                                        else {
-                                            panic!(
-                                                "Missed sub-Impl {} while computing cost for {}",
-                                                s.0, query
-                                            );
-                                        };
-                                        if inner_decisions.is_empty() {
-                                            panic!(
-                                                "No actions for sub-Impl {} while computing cost for {}",
-                                                s.0, query
-                                            );
-                                        } else if inner_decisions.len() == 1 {
-                                            inner_decisions[0].1.clone()
-                                        } else {
-                                            todo!();
-                                        }
-                                    });
-                                    (action_idx, recomputed_cost)
-                                })
-                                .collect(),
-                        ))
-                    },
-                    None => {
-                        // TODO: Reintoduce returning `neighbor` as a preference.
-                        GetPreference::Miss(None)
-                    }
-                }
-            }
             DbBlock::Whole(b) => {
                 // TODO: Propogate an action index preference.
                 let inner_pt_usize = inner_pt
@@ -544,14 +480,12 @@ impl DbBlock {
 
     pub fn compact(&mut self) {
         match self {
-            DbBlock::ActionOnly(b) => b.compact(),
             DbBlock::Whole(e) => e.compact(),
         }
     }
 
     pub fn shape(&self) -> &[usize] {
         match self {
-            DbBlock::ActionOnly(b) => b.shape(),
             DbBlock::Whole(e) => e.shape(),
         }
     }
@@ -659,88 +593,6 @@ impl WholeBlock {
 
     pub fn shape(&self) -> &[usize] {
         self.filled.shape()
-    }
-}
-
-impl ActionOnlyBlock {
-    pub(crate) fn partially_filled(
-        k: u8,
-        shape: &[usize],
-        dim_ranges: &[Range<BimapInt>],
-        value: Option<&[ActionIdx]>,
-    ) -> Self {
-        assert!(value.map(|v| v.len() <= k.into()).unwrap_or(true));
-        let concatenated_shape: Vec<_> = iter::once(usize::from(k))
-            .chain(shape.iter().copied())
-            .collect();
-        let mut e = ActionOnlyBlock(NDArray::new_with_value(&concatenated_shape, 0));
-        e.fill_region(dim_ranges, value);
-        e
-    }
-
-    fn shape(&self) -> &[usize] {
-        &self.0.shape()[1..]
-    }
-
-    pub fn runs_len(&self) -> usize {
-        self.0.runs_len()
-    }
-
-    fn get(&self, pt: &[u8]) -> Option<SmallVec<[u16; 1]>> {
-        // Scan across the corresponding entries at each k to collec the result.
-        let k = u32::try_from(self.0.shape()[0]).unwrap();
-        let mut inner_pt = iter::once(0)
-            .chain(pt.iter().copied().map_into())
-            .collect::<Vec<_>>();
-
-        // If the first entry is a zero, then we're empty.
-        if self.0.get_with_neighbor(&inner_pt).0 == &0 {
-            return None;
-        }
-
-        let mut result = SmallVec::new();
-        for i in 0..usize::try_from(k).unwrap() {
-            inner_pt[0] = i;
-
-            let collected = self.0[&inner_pt];
-            if collected < 2 {
-                break;
-            }
-            // Shift returned values down by 2 because 0 and 1 are reserved.
-            result.push(collected - 2);
-        }
-        Some(result)
-    }
-
-    fn fill_region(&mut self, dim_ranges: &[Range<u32>], value: Option<&[ActionIdx]>) {
-        let k = u32::try_from(self.0.shape()[0]).unwrap();
-        let mut region: Vec<Range<BimapInt>> = iter::once(Range::default())
-            .chain(dim_ranges.iter().cloned())
-            .collect();
-        match value {
-            None => {
-                region[0] = 0..k;
-                self.0.fill_region(&region, &0);
-            }
-            Some(v) => {
-                for (i, &k_slice_value) in v.iter().enumerate() {
-                    let i = u32::try_from(i).unwrap();
-                    region[0] = i..(i + 1);
-                    // Shift values by 2 so that 0 and 1 can be reserved for empty and
-                    // end-of-sequence, respectively.
-                    self.0.fill_region(&region, &(k_slice_value + 2));
-                }
-                // Fill in a 1 after the above range to indicate the end of the sequence.
-                if v.len() < self.0.shape()[0] {
-                    region[0] = u32::try_from(v.len()).unwrap()..k;
-                    self.0.fill_region(&region, &1);
-                }
-            }
-        }
-    }
-
-    fn compact(&mut self) {
-        self.0.shrink_to_fit();
     }
 }
 
