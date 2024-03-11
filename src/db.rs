@@ -54,6 +54,12 @@ pub trait Database<'a> {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
 
+    fn specs_share_page<Tgt>(&self, lhs: &Spec<Tgt>, rhs: &Spec<Tgt>) -> bool
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
+
     // TODO: Document interior mutability of put.
     fn put<Tgt>(&'a self, problem: Spec<Tgt>, impls: SmallVec<[(ActionIdx, Cost); 1]>)
     where
@@ -270,6 +276,24 @@ where
             return GetPreference::Miss(None);
         };
         group.get_with_preference(self, query, &inner_pt)
+    }
+
+    fn specs_share_page<Tgt>(&self, lhs: &Spec<Tgt>, rhs: &Spec<Tgt>) -> bool
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>
+    {
+
+        let bimap = self.spec_bimap();
+        let (table_key_lhs, global_pt_lhs) = bimap.apply(lhs);
+        let (table_key_rhs, global_pt_rhs) = bimap.apply(rhs);
+        if table_key_lhs != table_key_rhs {
+            return false;
+        }
+        let (block_pt_lhs, _) = blockify_point(global_pt_lhs);
+        let (block_pt_rhs, _) = blockify_point(global_pt_rhs);
+        block_pt_lhs == block_pt_rhs
     }
 
     fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
