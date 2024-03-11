@@ -190,7 +190,14 @@ where
                 break;
             }
 
-            block.progress_wb_specs();
+            let ws_vec = block
+                .working_set
+                .iter()
+                .map(|(k, v)| (k.clone(), Rc::clone(v)))
+                .collect::<Vec<_>>();
+            for (spec, task_ref) in ws_vec {
+                block.visit_next_request_batch(&spec, task_ref);
+            }
         }
         debug_assert!(
             block.working_block_requests.is_empty(),
@@ -246,46 +253,38 @@ where
         }
     }
 
-    fn progress_wb_specs(&mut self) {
-        let ws_vec = self
-            .working_set
-            .iter()
-            .map(|(k, v)| (k.clone(), Rc::clone(v)))
-            .collect::<Vec<_>>();
+    fn visit_next_request_batch(&mut self, spec: &Spec<Tgt>, task_ref: Rc<RefCell<SpecTask<Tgt>>>) {
+        let task: &mut SpecTask<Tgt> = &mut task_ref.borrow_mut();
+        if !matches!(task, SpecTask::Running { .. }) {
+            return;
+        }
 
-        for (spec, task_ref) in ws_vec {
-            let task: &mut SpecTask<Tgt> = &mut task_ref.borrow_mut();
-            if !matches!(task, SpecTask::Running { .. }) {
-                continue;
-            }
-
-            let next_batch_opt = task.next_request_batch();
-            let b = next_batch_opt.map(|it| it.collect::<Vec<_>>()); // TODO: Need `collect`?
-            if let Some(request_batch) = b {
-                for (subspec, request_id) in request_batch {
-                    if self.search.db.specs_share_page(&spec, &subspec) {
-                        let subtask = self.visit_spec_wb(&subspec);
-                        let subtask_ref = subtask.borrow();
-                        match &*subtask_ref {
-                            SpecTask::Running { .. } => {
-                                drop(subtask_ref);
-                                self.add_wb_request_mapping(&spec, &subspec, request_id);
+        let next_batch_opt = task.next_request_batch();
+        let b = next_batch_opt.map(|it| it.collect::<Vec<_>>()); // TODO: Need `collect`?
+        if let Some(request_batch) = b {
+            for (subspec, request_id) in request_batch {
+                if self.search.db.specs_share_page(spec, &subspec) {
+                    let subtask = self.visit_spec_wb(&subspec);
+                    let subtask_ref = subtask.borrow();
+                    match &*subtask_ref {
+                        SpecTask::Running { .. } => {
+                            drop(subtask_ref);
+                            self.add_wb_request_mapping(spec, &subspec, request_id);
+                        }
+                        SpecTask::Complete(subtask_result) => {
+                            let cost = subtask_result.iter().next().map(|v| v.1.clone());
+                            task.resolve_request(request_id, cost, spec, self.search);
+                            // At this point, the task_ref might have completed (be
+                            // `SpecTask::Complete`). Propagate the completion to any tasks
+                            // waiting within the working set.
+                            if let SpecTask::Complete(completed_task_results) = task {
+                                self.resolve_wb_request(spec, completed_task_results.clone());
+                                self.working_set.remove(spec).unwrap();
                             }
-                            SpecTask::Complete(subtask_result) => {
-                                let cost = subtask_result.iter().next().map(|v| v.1.clone());
-                                task.resolve_request(request_id, cost, &spec, self.search);
-                                // At this point, the task_ref might have completed (be
-                                // `SpecTask::Complete`). Propagate the completion to any tasks
-                                // waiting within the working set.
-                                if let SpecTask::Complete(completed_task_results) = task {
-                                    self.resolve_wb_request(&spec, completed_task_results.clone());
-                                    self.working_set.remove(&spec).unwrap();
-                                }
-                            }
-                        };
-                    } else {
-                        self.add_subblock_request_mapping(&spec, &subspec, request_id);
-                    }
+                        }
+                    };
+                } else {
+                    self.add_subblock_request_mapping(spec, &subspec, request_id);
                 }
             }
         }
