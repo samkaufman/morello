@@ -5,7 +5,7 @@ use std::{iter, path, thread};
 
 use morello::common::Dtype;
 use morello::datadeps::SpecKey;
-use morello::db::{deblockify_points, ActionCostVec, DashmapDiskDatabase, DbBlock, GetPreference};
+use morello::db::{deblockify_points, ActionCostVec, DbBlock, GetPreference, RocksDatabase};
 use morello::grid::general::BiMap;
 use morello::spec::Spec;
 use morello::target::X86Target;
@@ -55,7 +55,7 @@ fn block_stats(block: &DbBlock) -> String {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let db = DashmapDiskDatabase::try_new(args.db.as_deref(), true, 1)?;
+    let db = RocksDatabase::try_new(args.db.as_deref(), true, 1)?;
     let bimap = db.spec_bimap();
     let p = if args.group { "      " } else { "" };
 

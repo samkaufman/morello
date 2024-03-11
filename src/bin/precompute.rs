@@ -13,7 +13,7 @@ use std::time::Duration;
 use std::{iter, path};
 
 use morello::common::{DimSize, Dtype};
-use morello::db::{DashmapDiskDatabase, Database};
+use morello::db::{Database, RocksDatabase};
 use morello::grid::general::SurMap;
 use morello::layout::row_major;
 use morello::lspec;
@@ -58,7 +58,7 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
-    let db = DashmapDiskDatabase::try_new(args.db.as_deref(), true, K)?;
+    let db = RocksDatabase::try_new(args.db.as_deref(), true, K)?;
     main_per_db(&args, &db);
 
     Ok(())

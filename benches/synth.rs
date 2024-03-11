@@ -2,7 +2,7 @@ use iai_callgrind::{black_box, main};
 use nonzero::nonzero as nz;
 
 use morello::common::{DimSize, Dtype};
-use morello::db::DashmapDiskDatabase;
+use morello::db::RocksDatabase;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
@@ -23,7 +23,7 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> Spec<Tgt> {
 }
 
 fn synth(goal: &Spec<X86Target>) {
-    let db = DashmapDiskDatabase::try_new(None, true, 1).unwrap();
+    let db = RocksDatabase::try_new(None, true, 1).unwrap();
     morello::search::top_down(&db, black_box(goal), 1, Some(nz!(1usize)));
 }
 
