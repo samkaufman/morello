@@ -20,6 +20,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
+use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, Range};
 use std::sync::RwLock;
@@ -27,11 +28,12 @@ use std::{iter, path};
 
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
-type DbKey = (
-    (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
-    SmallVec<[BimapInt; 10]>,
-);
+type DbKey = (TableKey, SmallVec<[BimapInt; 10]>);
+type TableKey = (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>);
+type SuperBlock = HashMap<SmallVec<[BimapInt; 10]>, DbBlock>;
 pub type ActionIdx = u16;
+
+const SUPERBLOCK_FACTOR: BimapInt = 8;
 
 pub trait Database<'a> {
     fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<ActionCostVec>
@@ -89,7 +91,7 @@ pub struct RocksDatabase {
     db: rocksdb::DB,
     binary_scale_shapes: bool,
     k: u8,
-    live_block: RwLock<Option<(DbKey, Option<DbBlock>)>>,
+    live_superblock: RwLock<Option<(DbKey, Option<SuperBlock>)>>,
 }
 
 /// Stores a [Database] block. This may be a single value if all block entries have been filled with
@@ -161,12 +163,13 @@ impl RocksDatabase {
         let resolved_file_path = file_path
             .map(|p| p.to_owned())
             .unwrap_or_else(|| tempfile::TempDir::new().unwrap().into_path());
+        log::info!("Opening database at: {}", resolved_file_path.display());
         let db = rocksdb::DB::open_default(resolved_file_path)?;
         Ok(Self {
             db,
             binary_scale_shapes,
             k,
-            live_block: RwLock::new(None),
+            live_superblock: RwLock::new(None),
         })
     }
 
@@ -188,55 +191,41 @@ impl RocksDatabase {
         surmap.into_bimap()
     }
 
-    fn load_live_block(
-        &self,
-        table_key: &(SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
-        block_pt: &[BimapInt],
-    ) {
-        let read_guard = self.live_block.read().unwrap();
+    fn load_live_superblock(&self, table_key: &TableKey, superblock_pt: &[BimapInt]) {
+        let read_guard = self.live_superblock.read().unwrap();
         if let Some(live_block) = &*read_guard {
-            if &live_block.0 .0 == table_key && &live_block.0 .1[..] == block_pt {
+            if &live_block.0 .0 == table_key && &live_block.0 .1[..] == superblock_pt {
                 return;
             }
         }
+        log::debug!("Switching live superblock: ({table_key:?}, {superblock_pt:?})");
         self.save_live_block_inner(&read_guard);
         drop(read_guard);
 
-        let mut live_block = self.live_block.write().unwrap();
+        let mut live_block = self.live_superblock.write().unwrap();
         // TODO: Use a faster and stable key encoding.
-        let key = make_key(table_key, block_pt);
-        if let Some(value_encoded) = self.db.get(key).unwrap() {
-            let block = bincode::deserialize::<DbBlock>(&value_encoded).unwrap();
-            *live_block = Some(((table_key.clone(), block_pt.into()), Some(block)));
-        } else {
-            *live_block = Some(((table_key.clone(), block_pt.into()), None));
-        }
+        let key = make_key(table_key, superblock_pt);
+        let block_to_insert = self
+            .db
+            .get_pinned(key)
+            .unwrap()
+            .map(|e| bincode::deserialize(&e).unwrap());
+        *live_block = Some(((table_key.clone(), superblock_pt.into()), block_to_insert));
     }
 
     fn save_live_block(&self) {
         // TODO: Assert that table_key corresponds to whatever is in live_block
         // TODO: Assert that block_key corresponds to whatever is in live_block
-        let live_block = self.live_block.read().unwrap();
+        let live_block = self.live_superblock.read().unwrap();
         let r = live_block.deref();
         self.save_live_block_inner(r);
     }
 
-    fn save_live_block_inner(
-        &self,
-        r: &Option<(
-            (
-                (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
-                SmallVec<[u32; 10]>,
-            ),
-            Option<DbBlock>,
-        )>,
-    ) {
+    fn save_live_block_inner(&self, r: &Option<(DbKey, Option<SuperBlock>)>) {
         match r {
             Some(((table_key, block_pt), Some(b))) => {
                 let key = make_key(table_key, block_pt);
-                self.db
-                    .put(key, bincode::serialize::<DbBlock>(b).unwrap())
-                    .unwrap();
+                self.db.put(key, bincode::serialize(b).unwrap()).unwrap();
             }
             Some((_, None)) => {
                 // TODO: Delete the key. Shouldn't happen, but this'll make the API clearer.
@@ -274,12 +263,18 @@ where
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
         let (block_pt, inner_pt) = blockify_point(global_pt);
+        let superblock_pt = superblockify_pt(&block_pt);
 
-        self.load_live_block(&table_key, &block_pt);
-        match &self.live_block.read().unwrap().as_ref().unwrap().1 {
-            Some(b) => b.get_with_preference(self, query, &inner_pt),
-            None => GetPreference::Miss(None),
-        }
+        self.load_live_superblock(&table_key, &superblock_pt);
+
+        let live_superblock_guard = self.live_superblock.read().unwrap();
+        let Some(superblock) = &live_superblock_guard.as_ref().unwrap().1 else {
+            return GetPreference::Miss(None);
+        };
+        let Some(b) = superblock.get(&block_pt) else {
+            return GetPreference::Miss(None);
+        };
+        b.get_with_preference(self, query, &inner_pt)
     }
 
     fn specs_share_page<Tgt>(&self, lhs: &Spec<Tgt>, rhs: &Spec<Tgt>) -> bool
@@ -296,7 +291,7 @@ where
         }
         let (block_pt_lhs, _) = blockify_point(global_pt_lhs);
         let (block_pt_rhs, _) = blockify_point(global_pt_rhs);
-        block_pt_lhs == block_pt_rhs
+        superblockify_pt(&block_pt_lhs) == superblockify_pt(&block_pt_rhs)
     }
 
     fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
@@ -322,39 +317,45 @@ where
                 .iter()
                 .map(|(b, _)| *b)
                 .collect::<SmallVec<[BimapInt; 10]>>();
+            let superblock_pt = superblockify_pt(&block_pt);
 
-            self.load_live_block(&db_key, &block_pt);
-            let mut live_block = self.live_block.write().unwrap();
-            let live_block_data = &mut live_block.as_mut().unwrap().1;
+            self.load_live_superblock(&db_key, &superblock_pt);
 
-            if let Some(loaded_block) = live_block_data.as_mut() {
-                let dim_ranges = joined_row
-                    .iter()
-                    .map(|(_, r)| r.clone())
-                    .collect::<Vec<_>>();
-                match loaded_block {
-                    DbBlock::Whole(e) => {
-                        // Examine the table before updating.
-                        e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
-                    }
-                };
+            let mut live_superblock = self.live_superblock.write().unwrap();
+            let live_superblock_data = if let Some(inner) = &mut live_superblock.as_mut().unwrap().1
+            {
+                // If the superblock and block exist, just mutate in place and continue the loop.
+                if let Some(live_block) = inner.get_mut(&block_pt) {
+                    let dim_ranges = joined_row
+                        .iter()
+                        .map(|(_, r)| r.clone())
+                        .collect::<Vec<_>>();
+                    let DbBlock::Whole(e) = live_block;
+                    // Examine the table before updating.
+                    e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
+                    continue;
+                }
+                inner
             } else {
-                let db_shape = db_shape::<Tgt>(rank);
-                let bs = block_shape(&block_pt, &db_shape, block_size_dim);
-                let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
-                let dim_ranges = joined_row
-                    .iter()
-                    .map(|(_, r)| r.clone())
-                    .collect::<Vec<_>>();
-                *live_block_data = Some(DbBlock::Whole(Box::new(WholeBlock::partially_filled::<
-                    Tgt,
-                >(
-                    self.k,
-                    &block_shape_usize,
-                    &dim_ranges,
-                    &ActionCostVec(decisions.clone()),
-                ))));
-            }
+                // If the superblock doesn't exist, create it and fall through to block creation.
+                *live_superblock = Some(((db_key.clone(), superblock_pt), Some(HashMap::new())));
+                live_superblock.as_mut().unwrap().1.as_mut().unwrap()
+            };
+
+            let db_shape = db_shape::<Tgt>(rank);
+            let bs = block_shape(&block_pt, &db_shape, block_size_dim);
+            let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
+            let dim_ranges = joined_row
+                .iter()
+                .map(|(_, r)| r.clone())
+                .collect::<Vec<_>>();
+            let new_block = DbBlock::Whole(Box::new(WholeBlock::partially_filled::<Tgt>(
+                self.k,
+                &block_shape_usize,
+                &dim_ranges,
+                &ActionCostVec(decisions.clone()),
+            )));
+            live_superblock_data.insert(block_pt, new_block);
         }
     }
 
@@ -412,6 +413,10 @@ where
         // TODO: Reimplement with RocksDB.
         "".to_owned()
     }
+}
+
+fn superblockify_pt(block_pt: &[BimapInt]) -> SmallVec<[BimapInt; 10]> {
+    block_pt.iter().map(|&i| i / SUPERBLOCK_FACTOR).collect()
 }
 
 impl Drop for RocksDatabase {
@@ -475,12 +480,6 @@ impl DbBlock {
                     None => GetPreference::Miss(None),
                 }
             }
-        }
-    }
-
-    pub fn compact(&mut self) {
-        match self {
-            DbBlock::Whole(e) => e.compact(),
         }
     }
 
@@ -721,7 +720,7 @@ fn put_range_to_fill<Tgt, B>(
     spec: &Spec<Tgt>,
     impls: &SmallVec<[(ActionIdx, Cost); 1]>,
 ) -> (
-    (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
+    TableKey,
     (SmallVec<[BimapInt; 10]>, SmallVec<[BimapInt; 10]>),
 )
 where
@@ -843,10 +842,7 @@ where
     }
 }
 
-fn make_key(
-    table_key: &(SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
-    block_pt: &[BimapInt],
-) -> String {
+fn make_key(table_key: &TableKey, block_pt: &[BimapInt]) -> String {
     format!("{table_key:?}/{block_pt:?}")
 }
 

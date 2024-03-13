@@ -9,7 +9,6 @@ use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::{smallvec, SmallVec};
 use std::collections::VecDeque;
-use std::time::Duration;
 use std::{iter, path};
 
 use morello::common::{DimSize, Dtype};
@@ -32,7 +31,6 @@ use morello::utils::bit_length;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-const DB_SAVE_PERIOD: Duration = Duration::from_secs(10 * 60);
 const K: u8 = 1;
 
 #[derive(clap::Parser)]
@@ -125,8 +123,6 @@ where
     }
 
     let mut rng = rand::thread_rng();
-    let mut last_save_completion = std::time::Instant::now();
-    let mut last_stage_results_saved = true;
     for (stage_idx, stage) in bounds.iter().flat_map(logical_specs_to_compute).enumerate() {
         info!(
             "Beginning stage {}, which has peak parallelism of {}",
@@ -159,7 +155,6 @@ where
                 }
             }
         });
-        db.compact();
         info!(
             "Stage (without saving) {} took {:?}",
             stage_idx,
@@ -167,31 +162,11 @@ where
         );
         info!("Database stats: {}", db.stats_str());
 
-        last_stage_results_saved = false;
-        if last_save_completion.elapsed() >= DB_SAVE_PERIOD {
-            save_db(db);
-            last_save_completion = std::time::Instant::now();
-            last_stage_results_saved = true;
-        }
-
         if Some(stage_idx) == args.stages {
             info!("Stopping early because --stages was passed");
             break;
         }
     }
-
-    if !last_stage_results_saved {
-        save_db(db);
-    }
-}
-
-fn save_db<'a, D>(db: &'a D)
-where
-    D: Database<'a> + Send + Sync,
-{
-    let save_start = std::time::Instant::now();
-    db.save().unwrap();
-    info!("Saving took {:?}", save_start.elapsed());
 }
 
 /// Returns a logical Move Spec of given size and rank.
