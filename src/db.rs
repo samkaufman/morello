@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, DerefMut, Range};
+use std::sync::Arc;
 use std::{iter, path};
 
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
@@ -37,8 +38,8 @@ type SuperBlock = HashMap<SmallVec<[BimapInt; 10]>, DbBlock>;
 pub type ActionIdx = u16;
 
 const CONCURRENT_CACHE_SHARDS: usize = 16;
-const CACHE_PER_SHARE_SIZE: usize = 1;
-const CACHE_PER_SHARE_SAMPLES: usize = 1;
+const CACHE_PER_SHARD_SIZE: usize = 2;
+const CACHE_PER_SHARD_SAMPLES: usize = 1;
 const SUPERBLOCK_FACTOR: BimapInt = 8;
 
 pub trait Database<'a> {
@@ -94,11 +95,12 @@ pub trait DatabaseExt<'a>: Database<'a> {
 pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
 
 pub struct RocksDatabase {
-    db: rocksdb::DB,
+    db: Arc<rocksdb::DB>, // TODO: Arc shouldn't be necessary.
     binary_scale_shapes: bool,
     k: u8,
     // TODO: Shard this cache if lock contention matters.
     cache: ConcurrentWTinyLfuCache,
+    put_thread_pool: rayon::ThreadPool,
 }
 
 struct ConcurrentWTinyLfuCache {
@@ -175,12 +177,18 @@ impl RocksDatabase {
             .map(|p| p.to_owned())
             .unwrap_or_else(|| tempfile::TempDir::new().unwrap().into_path());
         log::info!("Opening database at: {}", resolved_file_path.display());
-        let db = rocksdb::DB::open_default(resolved_file_path)?;
+        let db = Arc::new(rocksdb::DB::open_default(resolved_file_path)?);
+        let put_thread_pool = rayon::ThreadPoolBuilder::new()
+            .thread_name(|thread_id| format!("PutThread-{}", thread_id))
+            .num_threads(1)
+            .build()
+            .unwrap();
         Ok(Self {
             db,
             binary_scale_shapes,
             k,
             cache: ConcurrentWTinyLfuCache::new(),
+            put_thread_pool,
         })
     }
 
@@ -226,21 +234,26 @@ impl RocksDatabase {
         F: FnOnce() -> (T, Option<(SuperBlockKey, SuperBlock)>),
         T: 'a,
     {
-        let mut put_options = rocksdb::WriteOptions::default();
-        put_options.disable_wal(true);
-
         let (superblock, evicted) = getter();
-        if let Some((evicted_key, evicted_value)) = &evicted {
-            let evicted_db_key = make_key(&evicted_key.0, &evicted_key.1);
-            self.db
-                .put_opt(
-                    evicted_db_key,
-                    bincode::serialize(evicted_value).unwrap(),
-                    &put_options,
-                )
-                .unwrap();
+        if let Some((evicted_key, evicted_value)) = evicted {
+            self.async_put(evicted_key, evicted_value);
         }
         superblock
+    }
+
+    fn async_put(&self, evicted_key: SuperBlockKey, evicted_value: SuperBlock) {
+        let db = Arc::clone(&self.db);
+        self.put_thread_pool.spawn(move || {
+            let evicted_db_key = make_key(&evicted_key.0, &evicted_key.1);
+            let mut put_options = rocksdb::WriteOptions::default();
+            put_options.disable_wal(true);
+            db.put_opt(
+                evicted_db_key,
+                bincode::serialize(&evicted_value).unwrap(),
+                &put_options,
+            )
+            .unwrap();
+        });
     }
 
     fn get_from_rocksdb(&self, key: &SuperBlockKey) -> SuperBlock {
@@ -427,13 +440,10 @@ fn superblockify_pt(block_pt: &[BimapInt]) -> SmallVec<[BimapInt; 10]> {
 
 impl Drop for RocksDatabase {
     fn drop(&mut self) {
-        for (k, v) in self.cache.drain() {
-            let rocksdb_key = make_key(&k.0, &k.1);
-            self.db
-                .put(rocksdb_key, bincode::serialize(&v).unwrap())
-                .unwrap();
+        let drained = self.cache.drain().collect::<Vec<_>>();
+        for (k, v) in drained {
+            self.async_put(k, v);
         }
-        self.db.flush().unwrap()
     }
 }
 
@@ -443,8 +453,8 @@ impl ConcurrentWTinyLfuCache {
         Self {
             shards: std::array::from_fn(|_| {
                 RwLock::new(WTinyLfuCache::new(
-                    CACHE_PER_SHARE_SIZE,
-                    CACHE_PER_SHARE_SAMPLES,
+                    CACHE_PER_SHARD_SIZE,
+                    CACHE_PER_SHARD_SAMPLES,
                 ))
             }),
         }
