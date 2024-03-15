@@ -17,22 +17,28 @@ use crate::tensorspec::TensorSpecAuxNonDepBimap;
 use anyhow::Result;
 use divrem::DivRem;
 use itertools::Itertools;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use wtinylfu::WTinyLfuCache;
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::ops::{Deref, Range};
-use std::sync::RwLock;
+use std::ops::{Deref, DerefMut, Range};
 use std::{iter, path};
 
 pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
-type DbKey = (TableKey, SmallVec<[BimapInt; 10]>);
+type DbKey = (TableKey, SmallVec<[BimapInt; 10]>); // TODO: Rename to BlockKey for consistency?
 type TableKey = (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>);
+type SuperBlockKey = DbKey;
 type SuperBlock = HashMap<SmallVec<[BimapInt; 10]>, DbBlock>;
 pub type ActionIdx = u16;
 
+const CONCURRENT_CACHE_SHARDS: usize = 16;
+const CACHE_PER_SHARE_SIZE: usize = 1;
+const CACHE_PER_SHARE_SAMPLES: usize = 1;
 const SUPERBLOCK_FACTOR: BimapInt = 8;
 
 pub trait Database<'a> {
@@ -91,7 +97,12 @@ pub struct RocksDatabase {
     db: rocksdb::DB,
     binary_scale_shapes: bool,
     k: u8,
-    live_superblock: RwLock<Option<(DbKey, Option<SuperBlock>)>>,
+    // TODO: Shard this cache if lock contention matters.
+    cache: ConcurrentWTinyLfuCache,
+}
+
+struct ConcurrentWTinyLfuCache {
+    shards: [RwLock<WTinyLfuCache<SuperBlockKey, SuperBlock>>; CONCURRENT_CACHE_SHARDS],
 }
 
 /// Stores a [Database] block. This may be a single value if all block entries have been filled with
@@ -169,7 +180,7 @@ impl RocksDatabase {
             db,
             binary_scale_shapes,
             k,
-            live_superblock: RwLock::new(None),
+            cache: ConcurrentWTinyLfuCache::new(),
         })
     }
 
@@ -191,47 +202,54 @@ impl RocksDatabase {
         surmap.into_bimap()
     }
 
-    fn load_live_superblock(&self, table_key: &TableKey, superblock_pt: &[BimapInt]) {
-        let read_guard = self.live_superblock.read().unwrap();
-        if let Some(live_block) = &*read_guard {
-            if &live_block.0 .0 == table_key && &live_block.0 .1[..] == superblock_pt {
-                return;
-            }
-        }
-        log::debug!("Switching live superblock: ({table_key:?}, {superblock_pt:?})");
-        self.save_live_block_inner(&read_guard);
-        drop(read_guard);
+    fn load_live_superblock<'a>(
+        &'a self,
+        key: &SuperBlockKey,
+    ) -> impl Deref<Target = SuperBlock> + 'a {
+        self.load_live_superblock_shared(key, || {
+            self.cache.get_or_insert(key, |k| self.get_from_rocksdb(k))
+        })
+    }
 
-        let mut live_block = self.live_superblock.write().unwrap();
-        // TODO: Use a faster and stable key encoding.
-        let key = make_key(table_key, superblock_pt);
-        let block_to_insert = self
-            .db
-            .get_pinned(key)
+    fn load_live_superblock_mut<'a>(
+        &'a self,
+        key: &SuperBlockKey,
+    ) -> impl DerefMut<Target = SuperBlock> + 'a {
+        self.load_live_superblock_shared(key, || {
+            self.cache
+                .get_or_insert_mut(key, |k| self.get_from_rocksdb(k))
+        })
+    }
+
+    fn load_live_superblock_shared<'a, F, T>(&'a self, key: &SuperBlockKey, getter: F) -> T
+    where
+        F: FnOnce() -> (T, Option<(SuperBlockKey, SuperBlock)>),
+        T: 'a,
+    {
+        let mut put_options = rocksdb::WriteOptions::default();
+        put_options.disable_wal(true);
+
+        let (superblock, evicted) = getter();
+        if let Some((evicted_key, evicted_value)) = &evicted {
+            let evicted_db_key = make_key(&evicted_key.0, &evicted_key.1);
+            self.db
+                .put_opt(
+                    evicted_db_key,
+                    bincode::serialize(evicted_value).unwrap(),
+                    &put_options,
+                )
+                .unwrap();
+        }
+        superblock
+    }
+
+    fn get_from_rocksdb(&self, key: &SuperBlockKey) -> SuperBlock {
+        let rocksdb_key = make_key(&key.0, &key.1); // TODO: Move inside.
+        self.db
+            .get_pinned(rocksdb_key)
             .unwrap()
-            .map(|e| bincode::deserialize(&e).unwrap());
-        *live_block = Some(((table_key.clone(), superblock_pt.into()), block_to_insert));
-    }
-
-    fn save_live_block(&self) {
-        // TODO: Assert that table_key corresponds to whatever is in live_block
-        // TODO: Assert that block_key corresponds to whatever is in live_block
-        let live_block = self.live_superblock.read().unwrap();
-        let r = live_block.deref();
-        self.save_live_block_inner(r);
-    }
-
-    fn save_live_block_inner(&self, r: &Option<(DbKey, Option<SuperBlock>)>) {
-        match r {
-            Some(((table_key, block_pt), Some(b))) => {
-                let key = make_key(table_key, block_pt);
-                self.db.put(key, bincode::serialize(b).unwrap()).unwrap();
-            }
-            Some((_, None)) => {
-                // TODO: Delete the key. Shouldn't happen, but this'll make the API clearer.
-            }
-            None => {}
-        }
+            .map(|pinnable_slice| bincode::deserialize(&pinnable_slice).unwrap())
+            .unwrap_or_default()
     }
 }
 
@@ -263,14 +281,11 @@ where
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
         let (block_pt, inner_pt) = blockify_point(global_pt);
+
         let superblock_pt = superblockify_pt(&block_pt);
+        let superblock_key = (table_key, superblock_pt);
 
-        self.load_live_superblock(&table_key, &superblock_pt);
-
-        let live_superblock_guard = self.live_superblock.read().unwrap();
-        let Some(superblock) = &live_superblock_guard.as_ref().unwrap().1 else {
-            return GetPreference::Miss(None);
-        };
+        let superblock: &SuperBlock = &self.load_live_superblock(&superblock_key);
         let Some(b) = superblock.get(&block_pt) else {
             return GetPreference::Miss(None);
         };
@@ -317,31 +332,23 @@ where
                 .iter()
                 .map(|(b, _)| *b)
                 .collect::<SmallVec<[BimapInt; 10]>>();
-            let superblock_pt = superblockify_pt(&block_pt);
+            // TODO: Factor out this tuple construction
+            let mut superblock_guard =
+                self.load_live_superblock_mut(&(db_key.clone(), superblockify_pt(&block_pt)));
 
-            self.load_live_superblock(&db_key, &superblock_pt);
+            // If the superblock already contains the block, mutate in place and continue the loop.
+            if let Some(live_block) = superblock_guard.get_mut(&block_pt) {
+                let dim_ranges = joined_row
+                    .iter()
+                    .map(|(_, r)| r.clone())
+                    .collect::<Vec<_>>();
+                let DbBlock::Whole(e) = live_block;
+                // Examine the table before updating.
+                e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
+                continue;
+            }
 
-            let mut live_superblock = self.live_superblock.write().unwrap();
-            let live_superblock_data = if let Some(inner) = &mut live_superblock.as_mut().unwrap().1
-            {
-                // If the superblock and block exist, just mutate in place and continue the loop.
-                if let Some(live_block) = inner.get_mut(&block_pt) {
-                    let dim_ranges = joined_row
-                        .iter()
-                        .map(|(_, r)| r.clone())
-                        .collect::<Vec<_>>();
-                    let DbBlock::Whole(e) = live_block;
-                    // Examine the table before updating.
-                    e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
-                    continue;
-                }
-                inner
-            } else {
-                // If the superblock doesn't exist, create it and fall through to block creation.
-                *live_superblock = Some(((db_key.clone(), superblock_pt), Some(HashMap::new())));
-                live_superblock.as_mut().unwrap().1.as_mut().unwrap()
-            };
-
+            // If not, create the block and add it to the superblock.
             let db_shape = db_shape::<Tgt>(rank);
             let bs = block_shape(&block_pt, &db_shape, block_size_dim);
             let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
@@ -355,12 +362,11 @@ where
                 &dim_ranges,
                 &ActionCostVec(decisions.clone()),
             )));
-            live_superblock_data.insert(block_pt, new_block);
+            superblock_guard.insert(block_pt, new_block);
         }
     }
 
     fn flush(&'a self) {
-        self.save_live_block();
         self.db.flush().unwrap();
     }
 
@@ -421,7 +427,108 @@ fn superblockify_pt(block_pt: &[BimapInt]) -> SmallVec<[BimapInt; 10]> {
 
 impl Drop for RocksDatabase {
     fn drop(&mut self) {
-        self.flush();
+        for (k, v) in self.cache.drain() {
+            let rocksdb_key = make_key(&k.0, &k.1);
+            self.db
+                .put(rocksdb_key, bincode::serialize(&v).unwrap())
+                .unwrap();
+        }
+        self.db.flush().unwrap()
+    }
+}
+
+impl ConcurrentWTinyLfuCache {
+    fn new() -> Self {
+        // TODO: Update the WTinyLfuCache parameters.
+        Self {
+            shards: std::array::from_fn(|_| {
+                RwLock::new(WTinyLfuCache::new(
+                    CACHE_PER_SHARE_SIZE,
+                    CACHE_PER_SHARE_SAMPLES,
+                ))
+            }),
+        }
+    }
+
+    fn get_or_insert<'a, F>(
+        &'a self,
+        key: &SuperBlockKey,
+        insert_fn: F,
+    ) -> (
+        impl Deref<Target = SuperBlock> + 'a,
+        Option<(SuperBlockKey, SuperBlock)>,
+    )
+    where
+        F: FnOnce(&SuperBlockKey) -> SuperBlock,
+    {
+        let (write_guard, evicted) = self.get_or_insert_shared(key, insert_fn);
+        let new_guard = RwLockReadGuard::map(RwLockWriteGuard::downgrade(write_guard), |s| {
+            s.peek(key).expect("just-checked key is present")
+        });
+        (new_guard, evicted)
+    }
+
+    fn get_or_insert_mut<'a, F>(
+        &'a self,
+        key: &SuperBlockKey,
+        insert_fn: F,
+    ) -> (
+        impl DerefMut<Target = SuperBlock> + 'a,
+        Option<(SuperBlockKey, SuperBlock)>,
+    )
+    where
+        F: FnOnce(&SuperBlockKey) -> SuperBlock,
+    {
+        let (write_guard, evicted) = self.get_or_insert_shared(key, insert_fn);
+        let new_guard = RwLockWriteGuard::map(write_guard, |s| {
+            s.peek_mut(key).expect("just-checked key is present")
+        });
+        (new_guard, evicted)
+    }
+
+    fn get_or_insert_shared<'a, F>(
+        &'a self,
+        key: &SuperBlockKey,
+        insert_fn: F,
+    ) -> (
+        RwLockWriteGuard<'a, WTinyLfuCache<SuperBlockKey, SuperBlock>>,
+        Option<(SuperBlockKey, SuperBlock)>,
+    )
+    where
+        F: FnOnce(&SuperBlockKey) -> SuperBlock,
+    {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        let shard_idx = hasher.finish() as usize % self.shards.len();
+        let shard = &self.shards[shard_idx];
+
+        let mut evicted = None;
+        let mut shard_guard = shard.write();
+
+        // TODO: We use `get`, not contains, to update the cache statistics.
+        if shard_guard.get(key).is_none() {
+            evicted = shard_guard.push(key.clone(), insert_fn(key));
+        }
+
+        (shard_guard, evicted)
+    }
+
+    fn drain(&mut self) -> impl Iterator<Item = (SuperBlockKey, SuperBlock)> + '_ {
+        self.shards.iter().flat_map(|shard| {
+            let mut guard = shard.write();
+            std::iter::from_fn(move || {
+                if let Some(popped) = guard.pop_lru_window() {
+                    return Some(popped);
+                }
+                guard.pop_lru_main()
+            })
+        })
+    }
+}
+
+impl Default for ConcurrentWTinyLfuCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -843,6 +950,7 @@ where
 }
 
 fn make_key(table_key: &TableKey, block_pt: &[BimapInt]) -> String {
+    // TODO: Use a faster (non-String?) and more stable encoding.
     format!("{table_key:?}/{block_pt:?}")
 }
 
