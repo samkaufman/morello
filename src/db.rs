@@ -37,10 +37,11 @@ type SuperBlockKey = DbKey;
 type SuperBlock = HashMap<SmallVec<[BimapInt; 10]>, DbBlock>;
 pub type ActionIdx = u16;
 
-const CONCURRENT_CACHE_SHARDS: usize = 16;
-const CACHE_PER_SHARD_SIZE: usize = 2;
-const CACHE_PER_SHARD_SAMPLES: usize = 1;
+const CONCURRENT_CACHE_SHARDS: usize = 32;
+const CACHE_PER_SHARD_SIZE: usize = 5; // 50  (no degradation at 25, some at 10)
+const CACHE_PER_SHARD_SAMPLES: usize = 16;
 const SUPERBLOCK_FACTOR: BimapInt = 8;
+const CHANNEL_SIZE: usize = 2;
 
 pub trait Database<'a> {
     fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<ActionCostVec>
@@ -53,6 +54,12 @@ pub trait Database<'a> {
         &'a self,
         query: &Spec<Tgt>,
     ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
+
+    fn prefetch<Tgt>(&'a self, query: &Spec<Tgt>)
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -98,13 +105,21 @@ pub struct RocksDatabase {
     db: Arc<rocksdb::DB>, // TODO: Arc shouldn't be necessary.
     binary_scale_shapes: bool,
     k: u8,
-    // TODO: Shard this cache if lock contention matters.
-    cache: ConcurrentWTinyLfuCache,
-    put_thread_pool: rayon::ThreadPool,
+    shards: ShardArray,
 }
 
-struct ConcurrentWTinyLfuCache {
-    shards: [RwLock<WTinyLfuCache<SuperBlockKey, SuperBlock>>; CONCURRENT_CACHE_SHARDS],
+struct ShardArray([RwLock<Shard>; CONCURRENT_CACHE_SHARDS]);
+
+struct Shard {
+    cache: WTinyLfuCache<SuperBlockKey, SuperBlock>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    thread_tx: std::sync::mpsc::SyncSender<ShardThreadMsg>,
+}
+
+enum ShardThreadMsg {
+    Get(SuperBlockKey, std::sync::mpsc::SyncSender<SuperBlock>),
+    Put(SuperBlockKey, SuperBlock),
+    Exit,
 }
 
 /// Stores a [Database] block. This may be a single value if all block entries have been filled with
@@ -178,17 +193,12 @@ impl RocksDatabase {
             .unwrap_or_else(|| tempfile::TempDir::new().unwrap().into_path());
         log::info!("Opening database at: {}", resolved_file_path.display());
         let db = Arc::new(rocksdb::DB::open_default(resolved_file_path)?);
-        let put_thread_pool = rayon::ThreadPoolBuilder::new()
-            .thread_name(|thread_id| format!("PutThread-{}", thread_id))
-            .num_threads(1)
-            .build()
-            .unwrap();
+        let shards = ShardArray(std::array::from_fn(|i| RwLock::new(Shard::new(i, &db))));
         Ok(Self {
             db,
             binary_scale_shapes,
             k,
-            cache: ConcurrentWTinyLfuCache::new(),
-            put_thread_pool,
+            shards,
         })
     }
 
@@ -214,55 +224,106 @@ impl RocksDatabase {
         &'a self,
         key: &SuperBlockKey,
     ) -> impl Deref<Target = SuperBlock> + 'a {
-        self.load_live_superblock_shared(key, || {
-            self.cache.get_or_insert(key, |k| self.get_from_rocksdb(k))
-        })
-    }
-
-    fn load_live_superblock_mut<'a>(
-        &'a self,
-        key: &SuperBlockKey,
-    ) -> impl DerefMut<Target = SuperBlock> + 'a {
-        self.load_live_superblock_shared(key, || {
-            self.cache
-                .get_or_insert_mut(key, |k| self.get_from_rocksdb(k))
-        })
-    }
-
-    fn load_live_superblock_shared<'a, F, T>(&'a self, key: &SuperBlockKey, getter: F) -> T
-    where
-        F: FnOnce() -> (T, Option<(SuperBlockKey, SuperBlock)>),
-        T: 'a,
-    {
-        let (superblock, evicted) = getter();
+        let (superblock, evicted) = self.get_or_insert_cache(key);
         if let Some((evicted_key, evicted_value)) = evicted {
             self.async_put(evicted_key, evicted_value);
         }
         superblock
     }
 
-    fn async_put(&self, evicted_key: SuperBlockKey, evicted_value: SuperBlock) {
-        let db = Arc::clone(&self.db);
-        self.put_thread_pool.spawn(move || {
-            let evicted_db_key = make_key(&evicted_key.0, &evicted_key.1);
-            let mut put_options = rocksdb::WriteOptions::default();
-            put_options.disable_wal(true);
-            db.put_opt(
-                evicted_db_key,
-                bincode::serialize(&evicted_value).unwrap(),
-                &put_options,
-            )
-            .unwrap();
-        });
+    fn load_live_superblock_mut<'a>(
+        &'a self,
+        key: &SuperBlockKey,
+    ) -> impl DerefMut<Target = SuperBlock> + 'a {
+        let shard = &self.shards.0[self.shard_index(key)];
+
+        let mut shard_guard = shard.write();
+
+        // TODO: We use `get`, not contains, to update the cache statistics.
+        if shard_guard.cache.get(key).is_none() {
+            let v = shard_guard.get_from_rocksdb(key);
+
+            let evicted = shard_guard.cache.push(key.clone(), v);
+            if let Some((evicted_key, evicted_value)) = evicted {
+                shard_guard
+                    .thread_tx
+                    .send(ShardThreadMsg::Put(evicted_key, evicted_value))
+                    .unwrap();
+            }
+        }
+
+        RwLockWriteGuard::map(shard_guard, |s| {
+            s.cache.peek_mut(key).expect("just-checked key is present")
+        })
     }
 
-    fn get_from_rocksdb(&self, key: &SuperBlockKey) -> SuperBlock {
-        let rocksdb_key = make_key(&key.0, &key.1); // TODO: Move inside.
-        self.db
-            .get_pinned(rocksdb_key)
-            .unwrap()
-            .map(|pinnable_slice| bincode::deserialize(&pinnable_slice).unwrap())
-            .unwrap_or_default()
+    fn get_or_insert_cache<'a>(
+        &'a self,
+        key: &SuperBlockKey,
+    ) -> (
+        impl Deref<Target = SuperBlock> + 'a,
+        Option<(SuperBlockKey, SuperBlock)>,
+    ) {
+        let shard = &self.shards.0[self.shard_index(key)];
+
+        let mut evicted = None;
+        let mut shard_guard = shard.write();
+
+        // TODO: We use `get`, not contains, to update the cache statistics.
+        if shard_guard.cache.get(key).is_none() {
+            let v = shard_guard.get_from_rocksdb(key);
+            evicted = shard_guard.cache.push(key.clone(), v);
+        }
+
+        let new_guard = RwLockReadGuard::map(RwLockWriteGuard::downgrade(shard_guard), |s| {
+            s.cache.peek(key).expect("just-checked key is present")
+        });
+        (new_guard, evicted)
+    }
+
+    fn async_put(&self, key: SuperBlockKey, value: SuperBlock) {
+        let shard = &self.shards.0[self.shard_index(&key)];
+        shard.read().async_put(key, value);
+    }
+
+    fn shard_index(&self, key: &SuperBlockKey) -> usize {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish() as usize % self.shards.0.len()
+    }
+
+    fn get_or_insert_cache_shared<'a>(
+        &'a self,
+        key: &SuperBlockKey,
+    ) -> (
+        RwLockWriteGuard<'a, Shard>,
+        Option<(SuperBlockKey, SuperBlock)>,
+    ) {
+        let shard = &self.shards.0[self.shard_index(key)];
+
+        let mut evicted = None;
+        let mut shard_guard = shard.write();
+
+        // TODO: We use `get`, not contains, to update the cache statistics.
+        if shard_guard.cache.get(key).is_none() {
+            let v = shard_guard.get_from_rocksdb(key);
+            evicted = shard_guard.cache.push(key.clone(), v);
+        }
+
+        (shard_guard, evicted)
+    }
+}
+
+impl Drop for RocksDatabase {
+    fn drop(&mut self) {
+        for shard in &mut self.shards.0 {
+            let mut shard_guard = shard.write();
+            let drained = shard_guard.drain_cache().collect::<Vec<_>>();
+            let shard_guard = RwLockWriteGuard::downgrade(shard_guard);
+            for (k, v) in drained {
+                shard_guard.async_put(k, v);
+            }
+        }
     }
 }
 
@@ -303,6 +364,15 @@ where
             return GetPreference::Miss(None);
         };
         b.get_with_preference(self, query, &inner_pt)
+    }
+
+    fn prefetch<Tgt>(&'a self, query: &Spec<Tgt>)
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        log::warn!("prefetch not implemented");
     }
 
     fn specs_share_page<Tgt>(&self, lhs: &Spec<Tgt>, rhs: &Spec<Tgt>) -> bool
@@ -434,111 +504,80 @@ where
     }
 }
 
-fn superblockify_pt(block_pt: &[BimapInt]) -> SmallVec<[BimapInt; 10]> {
-    block_pt.iter().map(|&i| i / SUPERBLOCK_FACTOR).collect()
-}
+impl ShardArray {}
 
-impl Drop for RocksDatabase {
-    fn drop(&mut self) {
-        let drained = self.cache.drain().collect::<Vec<_>>();
-        for (k, v) in drained {
-            self.async_put(k, v);
-        }
-    }
-}
+impl Shard {
+    fn new(idx: usize, db: &Arc<rocksdb::DB>) -> Self {
+        let db = Arc::clone(db);
+        let (tx, rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
 
-impl ConcurrentWTinyLfuCache {
-    fn new() -> Self {
-        // TODO: Update the WTinyLfuCache parameters.
+        let thread = Some(
+            std::thread::Builder::new()
+                .name(format!("ShardThread-{idx}"))
+                .spawn(move || loop {
+                    match rx.recv() {
+                        Ok(ShardThreadMsg::Get(key, response_tx)) => {
+                            let rocksdb_key = make_key(&key.0, &key.1); // TODO: Move inside.
+                            let result = db
+                                .get_pinned(rocksdb_key)
+                                .unwrap()
+                                .map(|pinnable_slice| {
+                                    bincode::deserialize(&pinnable_slice).unwrap()
+                                })
+                                .unwrap_or_default();
+                            response_tx.send(result).unwrap();
+                        }
+                        Ok(ShardThreadMsg::Put(key, value)) => {
+                            let mut put_options = rocksdb::WriteOptions::default();
+                            put_options.disable_wal(true);
+
+                            let rocksdb_key = make_key(&key.0, &key.1); // TODO: Move inside.
+                            let rocksdb_value = bincode::serialize(&value).unwrap();
+                            db.put_opt(rocksdb_key, &rocksdb_value, &put_options)
+                                .unwrap();
+                        }
+                        Ok(ShardThreadMsg::Exit) => break,
+                        Err(_) => unreachable!("expected Exit first"),
+                    }
+                })
+                .unwrap(),
+        );
+
         Self {
-            shards: std::array::from_fn(|_| {
-                RwLock::new(WTinyLfuCache::new(
-                    CACHE_PER_SHARD_SIZE,
-                    CACHE_PER_SHARD_SAMPLES,
-                ))
-            }),
+            cache: WTinyLfuCache::new(CACHE_PER_SHARD_SIZE, CACHE_PER_SHARD_SAMPLES),
+            thread,
+            thread_tx: tx,
         }
     }
 
-    fn get_or_insert<'a, F>(
-        &'a self,
-        key: &SuperBlockKey,
-        insert_fn: F,
-    ) -> (
-        impl Deref<Target = SuperBlock> + 'a,
-        Option<(SuperBlockKey, SuperBlock)>,
-    )
-    where
-        F: FnOnce(&SuperBlockKey) -> SuperBlock,
-    {
-        let (write_guard, evicted) = self.get_or_insert_shared(key, insert_fn);
-        let new_guard = RwLockReadGuard::map(RwLockWriteGuard::downgrade(write_guard), |s| {
-            s.peek(key).expect("just-checked key is present")
-        });
-        (new_guard, evicted)
+    fn get_from_rocksdb(&self, key: &SuperBlockKey) -> SuperBlock {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.thread_tx
+            .send(ShardThreadMsg::Get(key.clone(), tx))
+            .unwrap();
+        rx.recv().unwrap()
     }
 
-    fn get_or_insert_mut<'a, F>(
-        &'a self,
-        key: &SuperBlockKey,
-        insert_fn: F,
-    ) -> (
-        impl DerefMut<Target = SuperBlock> + 'a,
-        Option<(SuperBlockKey, SuperBlock)>,
-    )
-    where
-        F: FnOnce(&SuperBlockKey) -> SuperBlock,
-    {
-        let (write_guard, evicted) = self.get_or_insert_shared(key, insert_fn);
-        let new_guard = RwLockWriteGuard::map(write_guard, |s| {
-            s.peek_mut(key).expect("just-checked key is present")
-        });
-        (new_guard, evicted)
+    fn async_put(&self, key: SuperBlockKey, value: SuperBlock) {
+        self.thread_tx
+            .send(ShardThreadMsg::Put(key, value))
+            .unwrap();
     }
 
-    fn get_or_insert_shared<'a, F>(
-        &'a self,
-        key: &SuperBlockKey,
-        insert_fn: F,
-    ) -> (
-        RwLockWriteGuard<'a, WTinyLfuCache<SuperBlockKey, SuperBlock>>,
-        Option<(SuperBlockKey, SuperBlock)>,
-    )
-    where
-        F: FnOnce(&SuperBlockKey) -> SuperBlock,
-    {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        let shard_idx = hasher.finish() as usize % self.shards.len();
-        let shard = &self.shards[shard_idx];
-
-        let mut evicted = None;
-        let mut shard_guard = shard.write();
-
-        // TODO: We use `get`, not contains, to update the cache statistics.
-        if shard_guard.get(key).is_none() {
-            evicted = shard_guard.push(key.clone(), insert_fn(key));
-        }
-
-        (shard_guard, evicted)
-    }
-
-    fn drain(&mut self) -> impl Iterator<Item = (SuperBlockKey, SuperBlock)> + '_ {
-        self.shards.iter().flat_map(|shard| {
-            let mut guard = shard.write();
-            std::iter::from_fn(move || {
-                if let Some(popped) = guard.pop_lru_window() {
-                    return Some(popped);
-                }
-                guard.pop_lru_main()
-            })
+    fn drain_cache(&mut self) -> impl Iterator<Item = (SuperBlockKey, SuperBlock)> + '_ {
+        std::iter::from_fn(move || {
+            if let Some(popped) = self.cache.pop_lru_window() {
+                return Some(popped);
+            }
+            self.cache.pop_lru_main()
         })
     }
 }
 
-impl Default for ConcurrentWTinyLfuCache {
-    fn default() -> Self {
-        Self::new()
+impl Drop for Shard {
+    fn drop(&mut self) {
+        self.thread_tx.send(ShardThreadMsg::Exit).unwrap();
+        self.thread.take().unwrap().join().unwrap();
     }
 }
 
@@ -724,6 +763,10 @@ impl AsRef<SmallVec<[(ActionIdx, Cost); 1]>> for ActionCostVec {
     fn as_ref(&self) -> &SmallVec<[(ActionIdx, Cost); 1]> {
         self.deref()
     }
+}
+
+fn superblockify_pt(block_pt: &[BimapInt]) -> SmallVec<[BimapInt; 10]> {
+    block_pt.iter().map(|&i| i / SUPERBLOCK_FACTOR).collect()
 }
 
 fn construct_impl<'a, Tgt, D>(db: &'a D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>

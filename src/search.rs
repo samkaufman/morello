@@ -173,7 +173,14 @@ where
                 block.working_set.remove(&spec).unwrap();
             }
 
-            for mut subblock in take(&mut block.subblock_requests) {
+            let mut subblock_reqs_iter = take(&mut block.subblock_requests).into_iter().peekable();
+            while let Some(mut subblock) = subblock_reqs_iter.next() {
+                if let Some(next_subblock) = subblock_reqs_iter.peek() {
+                    if let Some(next_subblock_spec) = next_subblock.keys().next() {
+                        search.db.prefetch(next_subblock_spec);
+                    }
+                };
+
                 let subblock_goals = subblock.keys().cloned().collect::<Vec<_>>();
                 let subblock_results = Self::synthesize(&subblock_goals, search);
                 for (subspec, subspec_result) in subblock_goals.into_iter().zip(subblock_results) {
