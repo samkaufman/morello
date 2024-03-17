@@ -744,7 +744,6 @@ dependencies = [
  "env_logger",
  "iai-callgrind",
  "itertools 0.11.0",
- "lazy_static",
  "log",
  "ndarray",
  "ndarray-conv",
@@ -758,12 +757,10 @@ dependencies = [
  "rayon",
  "rle_vec",
  "rocksdb",
- "scc",
  "serde",
  "smallvec",
  "tempfile",
  "thiserror",
- "thread_local",
  "tikv-jemallocator",
  "wtinylfu",
 ]
@@ -1268,12 +1265,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e86697c916019a8588c99b5fac3cead74ec0b4b819707a682fd4d23fa0ce1ba1"
 
 [[package]]
-name = "scc"
-version = "1.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be6effabd7563ad3037a693171700ea8917e34ac023aea7de86dd7bfbb703df6"
-
-[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1410,16 +1401,6 @@ dependencies = [
  "proc-macro2 1.0.79",
  "quote 1.0.35",
  "syn 2.0.57",
-]
-
-[[package]]
-name = "thread_local"
-version = "1.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b9ef9bad013ada3808854ceac7b46812a6465ba368859a37e2100283d2d719c"
-dependencies = [
- "cfg-if",
- "once_cell",
 ]
 
 [[package]]

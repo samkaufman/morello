@@ -22,7 +22,6 @@ enum_dispatch = "0.3.11"
 enum-iterator = "1.4.1"
 env_logger = "0.10.0"
 itertools = "0.11.0"
-lazy_static = "1.4.0"
 log = "0.4.0"
 ndarray = { version = "0.15.6", optional = true }
 ndarray-conv = { version = "0.2.0", optional = true }
@@ -33,12 +32,10 @@ rayon = "1.7.0"
 rle_vec = { git = "https://github.com/samkaufman/rle_vec.git", branch = "morello-main", features = [
     "serialize",
 ] }
-scc = "1.7.0"
 serde = { version = "1.0.160", features = ["derive"] }
 smallvec = { version = "1.10.0", features = ["serde"] }
 tempfile = "3"
 thiserror = "1.0.47"
-thread_local = "1.1.7"
 nonzero = "0.2.0"
 rocksdb = { version = "0.22.0", default-features = false, features = [
     "snappy",
