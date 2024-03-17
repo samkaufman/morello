@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use wtinylfu::WTinyLfuCache;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, DerefMut, Range};
@@ -111,16 +111,11 @@ pub struct RocksDatabase {
 struct ShardArray([Mutex<Shard>; CONCURRENT_CACHE_SHARDS]);
 
 struct Shard {
-    cache: WTinyLfuCache<SuperBlockKey, SuperBox>,
+    cache: WTinyLfuCache<SuperBlockKey, SuperBlock>,
+    outstanding_gets: HashSet<SuperBlockKey>,
     thread: Option<std::thread::JoinHandle<()>>,
     thread_tx: std::sync::mpsc::SyncSender<ShardThreadMsg>,
     thread_rx: std::sync::mpsc::Receiver<ShardThreadResponse>,
-}
-
-#[derive(Debug)]
-enum SuperBox {
-    SuperBlock(SuperBlock),
-    Fetching,
 }
 
 enum ShardThreadMsg {
@@ -243,22 +238,21 @@ impl RocksDatabase {
         key: &SuperBlockKey,
     ) -> impl DerefMut<Target = SuperBlock> + 'a {
         let shard = &self.shards.0[self.shard_index(key)];
-        let mut shard_guard = shard.lock();
+        let shard_guard = shard.lock();
 
-        shard_guard.process_available_bg_thread_msgs();
-        if shard_guard.async_get(key) {
-            eprintln!("FG Getting {key:?}");
-        }
+        let shard_guard = match MutexGuard::try_map(shard_guard, |s| s.cache.get_mut(key)) {
+            Ok(mapped) => return mapped,
+            Err(s) => s,
+        };
 
-        debug_assert!(shard_guard.cache.peek(key).is_some());
-        if matches!(shard_guard.cache.peek(key), Some(SuperBox::Fetching)) {
-            shard_guard.process_bg_thread_msgs_until(|resp| match resp {
+        MutexGuard::map(shard_guard, |s| {
+            s.async_get(key);
+            s.process_bg_thread_msgs_until(|resp| match resp {
                 ShardThreadResponse::Loaded(k, _) => k != key,
             });
-        }
-        MutexGuard::map(shard_guard, |s| match s.cache.peek_mut(key) {
-            Some(SuperBox::SuperBlock(v)) => v,
-            g => unreachable!("Unexpectedly got {:?}", g),
+            s.cache
+                .get_mut(key)
+                .unwrap_or_else(|| panic!("just-requested key in cache: {key:?}"))
         })
     }
 
@@ -326,17 +320,18 @@ where
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        return;
-
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
-        let (block_pt, inner_pt) = blockify_point(global_pt);
+        let (block_pt, _) = blockify_point(global_pt);
 
         let superblock_pt = superblockify_pt(&block_pt);
         let superblock_key = (table_key, superblock_pt);
 
         let shard = &self.shards.0[self.shard_index(&superblock_key)];
-        shard.lock().async_get(&superblock_key);
+        let mut shard_guard = shard.lock();
+        if shard_guard.cache.peek(&superblock_key).is_none() {
+            shard_guard.async_get(&superblock_key);
+        }
     }
 
     fn specs_share_page<Tgt>(&self, lhs: &Spec<Tgt>, rhs: &Spec<Tgt>) -> bool
@@ -480,7 +475,6 @@ impl Shard {
                 .spawn(move || loop {
                     match command_rx.recv() {
                         Ok(ShardThreadMsg::Get(key)) => {
-                            eprintln!("BG Getting: {key:?}");
                             let rocksdb_key = make_key(&key.0, &key.1); // TODO: Move inside.
                             let result = db
                                 .get_pinned(rocksdb_key)
@@ -494,8 +488,6 @@ impl Shard {
                                 .unwrap();
                         }
                         Ok(ShardThreadMsg::Put(key, value)) => {
-                            eprintln!("BG Putting: {key:?}");
-
                             let mut put_options = rocksdb::WriteOptions::default();
                             put_options.disable_wal(true);
 
@@ -513,6 +505,7 @@ impl Shard {
 
         Self {
             cache: WTinyLfuCache::new(CACHE_PER_SHARD_SIZE, CACHE_PER_SHARD_SAMPLES),
+            outstanding_gets: HashSet::new(),
             thread,
             thread_tx: command_tx,
             thread_rx: response_rx,
@@ -548,44 +541,32 @@ impl Shard {
 
     fn process_bg_thread_msg_inner(&mut self, msg: ShardThreadResponse) {
         let ShardThreadResponse::Loaded(key, new_value) = msg;
-        eprintln!("FG Received from bg thread: {key:?}");
-        match self.cache.peek_mut(&key) {
-            Some(slot @ SuperBox::Fetching) => {
-                *slot = SuperBox::SuperBlock(new_value);
-            }
-            Some(SuperBox::SuperBlock(_)) => unreachable!("unexpected SuperBlock for {key:?}"),
-            None => log::warn!("Key was evicted before load resolved: {key:?}"),
-        };
+
+        let key_clone = key.clone(); // dead code in release builds
+
+        let was_present = self.outstanding_gets.remove(&key);
+        debug_assert!(was_present);
+        if let Some((evicted_key, evicted_value)) = self.cache.push(key, new_value) {
+            debug_assert_ne!(key_clone, evicted_key);
+            self.async_put(evicted_key, evicted_value);
+        }
     }
 
-    /// Start a background task to load a superblock. Return `false` if superblock or request exist.
+    /// Start a background task to load a superblock. Do nothing if request already enqueued.
     ///
-    /// This updates cache statistics immediately.
+    /// This updates does not update cache statistics.
+    ///
+    /// This may panic if the key is already in the cache.
     fn async_get(&mut self, key: &SuperBlockKey) -> bool {
-        match self.cache.get(key) {
-            Some(_) => false,
-            None => {
-                let evicted = self.cache.push(key.clone(), SuperBox::Fetching);
-                match evicted {
-                    Some((evicted_key, SuperBox::SuperBlock(evicted_value))) => {
-                        debug_assert_ne!(key, &evicted_key);
-                        // TODO: Remove
-                        eprintln!("FG Evicted: {evicted_key:?}");
-                        self.thread_tx
-                            .send(ShardThreadMsg::Put(evicted_key, evicted_value))
-                            .unwrap();
-                    }
-                    Some((evicted_key, SuperBox::Fetching)) => {
-                        eprintln!("FG Evicted Fetching: {evicted_key:?}");
-                    }
-                    None => {}
-                }
-                self.thread_tx
-                    .send(ShardThreadMsg::Get(key.clone()))
-                    .unwrap();
-                true
-            }
+        if self.outstanding_gets.contains(key) {
+            return false;
         }
+        debug_assert!(self.cache.peek(key).is_none(), "cache already had {key:?}");
+        self.outstanding_gets.insert(key.clone());
+        self.thread_tx
+            .send(ShardThreadMsg::Get(key.clone()))
+            .unwrap();
+        true
     }
 
     fn async_put(&self, key: SuperBlockKey, value: SuperBlock) {
@@ -601,9 +582,8 @@ impl Shard {
             }
             self.cache.pop_lru_main()
         })
-        .filter_map(|(k, v)| match v {
-            SuperBox::SuperBlock(v) => Some((k, v)),
-            SuperBox::Fetching => None,
+        .map(|(k, v)| match v {
+            v => (k, v),
         })
     }
 }
@@ -1375,10 +1355,6 @@ mod tests {
             })
             .next()
         {
-            eprintln!(
-                "Taking action {:?}",
-                spec.0.actions().into_iter().nth(action_idx).unwrap()
-            );
             recursively_decide_with_action(spec, action_idx.try_into().unwrap(), &partial_impl)
         } else {
             Decision {
