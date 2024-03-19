@@ -84,15 +84,37 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d> + Send + Sync,
 {
+    // TODO: Just return the ActionCostVec directly
+    let (r, h, m) = top_down_many(db, &[goal.clone()], top_k, jobs);
+    (r.into_iter().next().unwrap().0, h, m)
+}
+
+pub fn top_down_many<'d, Tgt, D>(
+    db: &'d D,
+    goals: &[Spec<Tgt>],
+    top_k: usize,
+    jobs: Option<NonZeroUsize>,
+) -> (Vec<ActionCostVec>, u64, u64)
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    D: Database<'d> + Send + Sync,
+{
     assert!(db.max_k().map_or(true, |k| k >= top_k));
     if top_k > 1 {
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
 
-    let mut canonical_goal = goal.clone();
-    canonical_goal
-        .canonicalize()
-        .expect("should be possible to canonicalize goal Spec");
+    let canonical_goals = goals
+        .iter()
+        .map(|g| {
+            let mut g = g.clone();
+            g.canonicalize()
+                .expect("should be possible to canonicalize goal Spec");
+            g
+        })
+        .collect::<Vec<_>>();
 
     let thread_count = jobs
         .map(|j| j.get())
@@ -106,22 +128,18 @@ where
             hits: 0,
             misses: 1,
         };
-        let result = BlockSearch::synthesize(&[canonical_goal], &search);
-        return (
-            result.into_iter().next().unwrap().0,
-            search.hits,
-            search.misses,
-        );
+        let result = BlockSearch::synthesize(canonical_goals.iter(), &search);
+        return (result, search.hits, search.misses);
     }
 
     let tasks = (0..thread_count)
-        .zip(std::iter::repeat(canonical_goal.clone()))
+        .zip(std::iter::repeat(canonical_goals.clone()))
         .collect::<Vec<_>>();
     // Collect all and take the result from the first call so that we get
     // deterministic results.
     tasks
         .into_par_iter()
-        .map(|(i, g)| {
+        .map(|(i, gs)| {
             let search = TopDownSearch::<'d, D> {
                 db,
                 top_k,
@@ -130,8 +148,8 @@ where
                 hits: 0,
                 misses: 1,
             };
-            let r = BlockSearch::synthesize(&[g], &search);
-            (r.into_iter().next().unwrap().0, search.hits, search.misses)
+            let r = BlockSearch::synthesize(gs.iter(), &search);
+            (r, search.hits, search.misses)
         })
         .collect::<Vec<_>>()
         .pop()
@@ -175,9 +193,10 @@ where
 
             let mut subblock_reqs_iter = take(&mut block.subblock_requests).into_iter().peekable();
             while let Some(mut subblock) = subblock_reqs_iter.next() {
+                // Prefetch the *next* subblock, overlapping it with the following work.
                 if let Some(next_subblock) = subblock_reqs_iter.peek() {
-                    if let Some(next_subblock_spec) = next_subblock.keys().next() {
-                        search.db.prefetch(next_subblock_spec);
+                    if let Some(next_subblock_representative_spec) = next_subblock.keys().next() {
+                        search.db.prefetch(next_subblock_representative_spec);
                     }
                 };
 
@@ -369,24 +388,28 @@ where
             // `wb_spec` should be in the working set unless its partial Impls became unsat.
             if let Some(requester_task) = working_set.get(&wb_spec) {
                 let mut requester = requester_task.borrow_mut();
-                debug_assert!(
-                    matches!(&*requester, SpecTask::Running { .. }),
-                    "Requester wasn't running: {wb_spec}"
-                );
-                requester.resolve_request(request_id, cost.clone(), &wb_spec, search);
-                if let SpecTask::Complete(completed_requester_results) = &*requester {
-                    // TODO: Avoid this clone by consuming the sub-block. (Do at the call site.)
-                    let cloned_results = completed_requester_results.clone();
-                    drop(requester);
-                    Self::inner_resolve_subblock_request(
-                        working_set,
-                        resolved_next_subblock,
-                        None,
-                        &wb_spec,
-                        cloned_results,
-                        search,
-                    );
-                    working_set.remove(&wb_spec).unwrap();
+                if matches!(&*requester, SpecTask::Running { .. }) {
+                    requester.resolve_request(request_id, cost.clone(), &wb_spec, search);
+                    if let SpecTask::Complete(completed_requester_results) = &*requester {
+                        // TODO: Avoid this clone by consuming the sub-block. (Do at the call site.)
+                        let cloned_results = completed_requester_results.clone();
+                        drop(requester);
+                        Self::inner_resolve_subblock_request(
+                            working_set,
+                            resolved_next_subblock,
+                            None,
+                            &wb_spec,
+                            cloned_results,
+                            search,
+                        );
+                        working_set.remove(&wb_spec).unwrap();
+                    }
+                } else {
+                    log::warn!(
+                        "Requester {} was in working set but wasn't Running: {:?}",
+                        wb_spec,
+                        &*requester
+                    )
                 }
             }
         }

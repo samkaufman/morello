@@ -8,7 +8,7 @@ use nonzero::nonzero as nz;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use smallvec::{smallvec, SmallVec};
-use std::collections::VecDeque;
+use std::collections::HashSet;
 use std::{iter, path};
 
 use morello::common::{DimSize, Dtype};
@@ -20,6 +20,7 @@ use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
 };
+use morello::search::top_down_many;
 use morello::target::{
     CpuMemoryLevel::{self, GL},
     Target, X86Target,
@@ -143,16 +144,24 @@ where
 
         let stage_start = std::time::Instant::now();
         nonempty_tasks.into_par_iter().for_each(|task| {
-            let mut worklist = VecDeque::new();
-            for logical_spec in task.iter() {
-                worklist.push_back(top.clone());
-                while let Some(job) = worklist.pop_front() {
-                    let spec = Spec(logical_spec.clone(), MemoryLimits::Standard(job));
-                    let result = morello::search::top_down(db, &spec, 1, Some(nz!(1usize)));
-                    if let [(_, only_result_cost)] = &result.0[..] {
-                        worklist.extend(next_limits(&spec.1, &only_result_cost.peaks));
+            let mut stage = task
+                .into_iter()
+                .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
+                .collect::<Vec<_>>();
+            let mut next_stage = HashSet::new();
+
+            while !stage.is_empty() {
+                let stage_results = top_down_many(db, &stage, 1, Some(nz!(1usize))).0;
+                for (spec, result) in stage.iter().zip(stage_results) {
+                    if let [(_, only_result_cost)] = &result[..] {
+                        next_stage.extend(
+                            next_limits(&spec.1, &only_result_cost.peaks)
+                                .map(|l| Spec(spec.0.clone(), MemoryLimits::Standard(l))),
+                        );
                     }
                 }
+                // TODO: Just swap data structures.
+                stage = next_stage.drain().collect();
             }
         });
         info!(

@@ -37,9 +37,10 @@ type SuperBlockKey = DbKey;
 type SuperBlock = HashMap<SmallVec<[BimapInt; 10]>, DbBlock>;
 pub type ActionIdx = u16;
 
-const CONCURRENT_CACHE_SHARDS: usize = 32;
-const CACHE_PER_SHARD_SIZE: usize = 5; // 50  (no degradation at 25, some at 10)
-const CACHE_PER_SHARD_SAMPLES: usize = 16;
+// TODO: Select these at runtime.
+const CONCURRENT_CACHE_SHARDS: usize = 256;
+const CACHE_PER_SHARD_SIZE: usize = 640;
+const CACHE_PER_SHARD_SAMPLES: usize = 8;
 const SUPERBLOCK_FACTOR: BimapInt = 8;
 const CHANNEL_SIZE: usize = 2;
 
@@ -238,7 +239,9 @@ impl RocksDatabase {
         key: &SuperBlockKey,
     ) -> impl DerefMut<Target = SuperBlock> + 'a {
         let shard = &self.shards.0[self.shard_index(key)];
-        let shard_guard = shard.lock();
+        let mut shard_guard = shard.lock();
+
+        shard_guard.process_available_bg_thread_msgs();
 
         let shard_guard = match MutexGuard::try_map(shard_guard, |s| s.cache.get_mut(key)) {
             Ok(mapped) => return mapped,
@@ -329,6 +332,7 @@ where
 
         let shard = &self.shards.0[self.shard_index(&superblock_key)];
         let mut shard_guard = shard.lock();
+        shard_guard.process_available_bg_thread_msgs();
         if shard_guard.cache.peek(&superblock_key).is_none() {
             shard_guard.async_get(&superblock_key);
         }
