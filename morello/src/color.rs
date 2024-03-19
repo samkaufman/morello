@@ -1,13 +1,12 @@
 use std::cell::RefCell;
 
-use clap::ValueEnum;
-
 thread_local! {
     /// Singleton for the color mode.
     static COLOR_MODE: RefCell<ColorMode> = RefCell::new(ColorMode::Auto);
 }
 
-#[derive(Copy, Clone, PartialEq, ValueEnum)]
+#[derive(Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum ColorMode {
     Never,
     Auto,

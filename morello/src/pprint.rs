@@ -5,12 +5,12 @@ use crate::utils::indent;
 use crate::views::View;
 use crate::{imp::Impl, views::Param};
 
-use clap::ValueEnum;
 use prettytable::{self, format, row, Cell};
 use std::collections::HashMap;
 use std::fmt;
 
-#[derive(Debug, Copy, Clone, PartialEq, ValueEnum)]
+#[derive(Debug, Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum ImplPrintStyle {
     Full,

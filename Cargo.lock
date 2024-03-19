@@ -472,6 +472,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "frontend"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "log",
+ "morello",
+ "nonzero",
+ "smallvec",
+ "tikv-jemallocator",
+]
+
+[[package]]
 name = "gapbuf"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -741,7 +755,6 @@ dependencies = [
  "divrem",
  "enum-iterator",
  "enum_dispatch",
- "env_logger",
  "iai-callgrind",
  "itertools 0.11.0",
  "log",
@@ -761,7 +774,6 @@ dependencies = [
  "smallvec",
  "tempfile",
  "thiserror",
- "tikv-jemallocator",
  "wtinylfu",
 ]
 
@@ -951,6 +963,22 @@ name = "ppv-lite86"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b40af805b3121feab8a3c29f04d8ad262fa8e0561883e7653e024ae4479e6de"
+
+[[package]]
+name = "precompute"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "log",
+ "morello",
+ "nonzero",
+ "rand",
+ "rayon",
+ "smallvec",
+ "tikv-jemallocator",
+]
 
 [[package]]
 name = "prettytable-rs"

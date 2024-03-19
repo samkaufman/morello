@@ -14,7 +14,6 @@ use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
 use crate::{codegen::c_utils::VecType, common::Dtype};
 
-use clap::ValueEnum;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::{Debug, Display};
@@ -64,7 +63,8 @@ pub trait MemoryLevel:
     }
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum TargetId {
     X86,
     Arm,
