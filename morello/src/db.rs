@@ -18,12 +18,12 @@ use anyhow::Result;
 use divrem::DivRem;
 use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
+use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Prehasher};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use wtinylfu::WTinyLfuCache;
 
-use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, DerefMut, Range};
 use std::sync::Arc;
@@ -38,10 +38,10 @@ type SuperBlock = HashMap<SmallVec<[BimapInt; 10]>, DbBlock>;
 pub type ActionIdx = u16;
 
 // TODO: Select these at runtime.
-const CONCURRENT_CACHE_SHARDS: usize = 256;
-const CACHE_PER_SHARD_SIZE: usize = 640;
+const CONCURRENT_CACHE_SHARDS: usize = 16;
+const CACHE_PER_SHARD_SIZE: usize = 64;
 const CACHE_PER_SHARD_SAMPLES: usize = 8;
-const SUPERBLOCK_FACTOR: BimapInt = 8;
+const SUPERBLOCK_FACTOR: BimapInt = 4;
 const CHANNEL_SIZE: usize = 2;
 
 pub trait Database<'a> {
@@ -107,26 +107,27 @@ pub struct RocksDatabase {
     binary_scale_shapes: bool,
     k: u8,
     shards: ShardArray,
+    prehasher: DefaultPrehasher,
 }
 
 struct ShardArray([Mutex<Shard>; CONCURRENT_CACHE_SHARDS]);
 
 struct Shard {
-    cache: WTinyLfuCache<SuperBlockKey, SuperBlock>,
-    outstanding_gets: HashSet<SuperBlockKey>,
+    cache: WTinyLfuCache<Prehashed<SuperBlockKey>, SuperBlock>,
+    outstanding_gets: PrehashedSet<SuperBlockKey>,
     thread: Option<std::thread::JoinHandle<()>>,
     thread_tx: std::sync::mpsc::SyncSender<ShardThreadMsg>,
     thread_rx: std::sync::mpsc::Receiver<ShardThreadResponse>,
 }
 
 enum ShardThreadMsg {
-    Get(SuperBlockKey),
+    Get(Prehashed<SuperBlockKey>),
     Put(SuperBlockKey, SuperBlock),
     Exit,
 }
 
 enum ShardThreadResponse {
-    Loaded(SuperBlockKey, SuperBlock),
+    Loaded(Prehashed<SuperBlockKey>, SuperBlock),
 }
 
 /// Stores a [Database] block. This may be a single value if all block entries have been filled with
@@ -206,6 +207,7 @@ impl RocksDatabase {
             binary_scale_shapes,
             k,
             shards,
+            prehasher: DefaultPrehasher::default(),
         })
     }
 
@@ -229,14 +231,14 @@ impl RocksDatabase {
 
     fn load_live_superblock<'a>(
         &'a self,
-        key: &SuperBlockKey,
+        key: &Prehashed<SuperBlockKey>,
     ) -> impl Deref<Target = SuperBlock> + 'a {
         self.load_live_superblock_mut(key)
     }
 
     fn load_live_superblock_mut<'a>(
         &'a self,
-        key: &SuperBlockKey,
+        key: &Prehashed<SuperBlockKey>,
     ) -> impl DerefMut<Target = SuperBlock> + 'a {
         let shard = &self.shards.0[self.shard_index(key)];
         let mut shard_guard = shard.lock();
@@ -259,10 +261,8 @@ impl RocksDatabase {
         })
     }
 
-    fn shard_index(&self, key: &SuperBlockKey) -> usize {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish() as usize % self.shards.0.len()
+    fn shard_index(&self, key: &Prehashed<SuperBlockKey>) -> usize {
+        *Prehashed::as_hash(key) as usize % self.shards.0.len()
     }
 }
 
@@ -308,7 +308,7 @@ where
         let (block_pt, inner_pt) = blockify_point(global_pt);
 
         let superblock_pt = superblockify_pt(&block_pt);
-        let superblock_key = (table_key, superblock_pt);
+        let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
 
         let superblock: &SuperBlock = &self.load_live_superblock(&superblock_key);
         let Some(b) = superblock.get(&block_pt) else {
@@ -328,7 +328,7 @@ where
         let (block_pt, _) = blockify_point(global_pt);
 
         let superblock_pt = superblockify_pt(&block_pt);
-        let superblock_key = (table_key, superblock_pt);
+        let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
 
         let shard = &self.shards.0[self.shard_index(&superblock_key)];
         let mut shard_guard = shard.lock();
@@ -379,8 +379,11 @@ where
                 .map(|(b, _)| *b)
                 .collect::<SmallVec<[BimapInt; 10]>>();
             // TODO: Factor out this tuple construction
-            let mut superblock_guard =
-                self.load_live_superblock_mut(&(db_key.clone(), superblockify_pt(&block_pt)));
+            let mut superblock_guard = self.load_live_superblock_mut(
+                &self
+                    .prehasher
+                    .prehash((db_key.clone(), superblockify_pt(&block_pt))),
+            );
 
             // If the superblock already contains the block, mutate in place and continue the loop.
             if let Some(live_block) = superblock_guard.get_mut(&block_pt) {
@@ -509,7 +512,7 @@ impl Shard {
 
         Self {
             cache: WTinyLfuCache::new(CACHE_PER_SHARD_SIZE, CACHE_PER_SHARD_SAMPLES),
-            outstanding_gets: HashSet::new(),
+            outstanding_gets: new_prehashed_set(),
             thread,
             thread_tx: command_tx,
             thread_rx: response_rx,
@@ -546,13 +549,10 @@ impl Shard {
     fn process_bg_thread_msg_inner(&mut self, msg: ShardThreadResponse) {
         let ShardThreadResponse::Loaded(key, new_value) = msg;
 
-        let key_clone = key.clone(); // dead code in release builds
-
         let was_present = self.outstanding_gets.remove(&key);
         debug_assert!(was_present);
         if let Some((evicted_key, evicted_value)) = self.cache.push(key, new_value) {
-            debug_assert_ne!(key_clone, evicted_key);
-            self.async_put(evicted_key, evicted_value);
+            self.async_put(Prehashed::into_inner(evicted_key), evicted_value);
         }
     }
 
@@ -561,14 +561,14 @@ impl Shard {
     /// This updates does not update cache statistics.
     ///
     /// This may panic if the key is already in the cache.
-    fn async_get(&mut self, key: &SuperBlockKey) -> bool {
+    fn async_get(&mut self, key: &Prehashed<SuperBlockKey>) -> bool {
         if self.outstanding_gets.contains(key) {
             return false;
         }
         debug_assert!(self.cache.peek(key).is_none(), "cache already had {key:?}");
-        self.outstanding_gets.insert(key.clone());
+        self.outstanding_gets.insert(prehashed_clone(key));
         self.thread_tx
-            .send(ShardThreadMsg::Get(key.clone()))
+            .send(ShardThreadMsg::Get(prehashed_clone(key)))
             .unwrap();
         true
     }
@@ -586,9 +586,7 @@ impl Shard {
             }
             self.cache.pop_lru_main()
         })
-        .map(|(k, v)| match v {
-            v => (k, v),
-        })
+        .map(|(k, v)| (Prehashed::into_inner(k), v))
     }
 }
 
@@ -1024,6 +1022,12 @@ where
 fn make_key(table_key: &TableKey, block_pt: &[BimapInt]) -> String {
     // TODO: Use a faster (non-String?) and more stable encoding.
     format!("{table_key:?}/{block_pt:?}")
+}
+
+// For some reason, [Prehashed]'s [Clone] impl requires that the value be [Copy].
+fn prehashed_clone<T: Clone>(value: &Prehashed<T>) -> Prehashed<T> {
+    let (inner, h) = Prehashed::as_parts(value);
+    Prehashed::new(inner.clone(), *h)
 }
 
 #[cfg(test)]

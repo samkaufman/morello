@@ -13,24 +13,3 @@ opt-level = 1 # Synthesis is relatively slow and often part of the dev. cycle, s
 debug = 1
 lto = "thin"
 codegen-units = 8
-
-[dev-dependencies]
-iai-callgrind = "0.4.0"
-proptest = "1.2.0"
-proptest-derive = "0.3.0"
-
-[[bench]]
-name = "iter_actions"
-harness = false
-
-[[bench]]
-name = "logicalspec_parameters"
-harness = false
-
-[[bench]]
-name = "synth"
-harness = false
-
-[[bench]]
-name = "update_for_tiling"
-harness = false
