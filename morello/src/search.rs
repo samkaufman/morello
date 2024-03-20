@@ -128,7 +128,7 @@ where
             hits: 0,
             misses: 1,
         };
-        let result = BlockSearch::synthesize(canonical_goals.iter(), &search);
+        let result = BlockSearch::synthesize(canonical_goals.iter(), &search, None);
         return (result, search.hits, search.misses);
     }
 
@@ -148,7 +148,7 @@ where
                 hits: 0,
                 misses: 1,
             };
-            let r = BlockSearch::synthesize(gs.iter(), &search);
+            let r = BlockSearch::synthesize(gs.iter(), &search, None);
             (r, search.hits, search.misses)
         })
         .collect::<Vec<_>>()
@@ -165,7 +165,11 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d> + Send + Sync,
 {
-    fn synthesize<'i, I>(goals: I, search: &'a TopDownSearch<'d, D>) -> Vec<ActionCostVec>
+    fn synthesize<'i, I>(
+        goals: I,
+        search: &'a TopDownSearch<'d, D>,
+        prefetch_after: Option<&Spec<Tgt>>,
+    ) -> Vec<ActionCostVec>
     where
         I: IntoIterator<Item = &'i Spec<Tgt>> + 'i,
     {
@@ -193,15 +197,20 @@ where
 
             let mut subblock_reqs_iter = take(&mut block.subblock_requests).into_iter().peekable();
             while let Some(mut subblock) = subblock_reqs_iter.next() {
-                // Prefetch the *next* subblock, overlapping it with the following work.
-                if let Some(next_subblock) = subblock_reqs_iter.peek() {
-                    if let Some(next_subblock_representative_spec) = next_subblock.keys().next() {
-                        search.db.prefetch(next_subblock_representative_spec);
+                // TODO: Move prefetch so that it happens after the get inside the recursive call.
+                let mut prefetch_to_push_down: Option<&Spec<Tgt>> = None;
+                match subblock_reqs_iter.peek() {
+                    Some(next_subblock) => prefetch_to_push_down = next_subblock.keys().next(),
+                    None => {
+                        if let Some(prefetch_after) = prefetch_after.as_ref() {
+                            search.db.prefetch(prefetch_after);
+                        }
                     }
-                };
+                }
 
                 let subblock_goals = subblock.keys().cloned().collect::<Vec<_>>();
-                let subblock_results = Self::synthesize(&subblock_goals, search);
+                let subblock_results =
+                    Self::synthesize(&subblock_goals, search, prefetch_to_push_down);
                 for (subspec, subspec_result) in subblock_goals.into_iter().zip(subblock_results) {
                     block.resolve_subblock_request(&mut subblock, &subspec, subspec_result);
                 }
