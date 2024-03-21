@@ -114,44 +114,70 @@ where
         })
         .collect::<Vec<_>>();
 
+    // Group goal Specs by database page.
+    let mut grouped_canonical_goals = HashMap::<_, Vec<usize>>::new();
+    for (idx, goal) in canonical_goals.iter().enumerate() {
+        let page = db.page_id(goal);
+        let key = (page.table_key, page.superblock_id);
+        grouped_canonical_goals.entry(key).or_default().push(idx);
+    }
+
     let thread_count = jobs
         .map(|j| j.get())
         .unwrap_or_else(rayon::current_num_threads);
-    if thread_count == 1 {
-        let search = TopDownSearch::<'d> {
-            db,
-            top_k,
-            thread_idx: 0,
-            thread_count: 1,
-            hits: 0,
-            misses: 1,
-        };
-        let result = BlockSearch::synthesize(canonical_goals.iter(), &search, None);
-        return (result, search.hits, search.misses);
-    }
 
-    let tasks = (0..thread_count)
-        .zip(std::iter::repeat(canonical_goals.clone()))
-        .collect::<Vec<_>>();
-    // Collect all and take the result from the first call so that we get
-    // deterministic results.
-    tasks
-        .into_par_iter()
-        .map(|(i, gs)| {
+    let mut combined_results = vec![Default::default(); canonical_goals.len()];
+    let mut combined_hits = 0;
+    let mut combined_misses = 0;
+    let mut goal_group = Vec::new();
+    for page_group in grouped_canonical_goals.values() {
+        goal_group.clear();
+        goal_group.extend(page_group.iter().map(|&i| &canonical_goals[i]));
+
+        let (result, hits, misses) = if thread_count == 1 {
             let search = TopDownSearch::<'d> {
                 db,
                 top_k,
-                thread_idx: i,
-                thread_count,
+                thread_idx: 0,
+                thread_count: 1,
                 hits: 0,
                 misses: 1,
             };
-            let r = BlockSearch::synthesize(gs.iter(), &search, None);
+            let r = BlockSearch::synthesize(goal_group.iter().copied(), &search, None);
             (r, search.hits, search.misses)
-        })
-        .collect::<Vec<_>>()
-        .pop()
-        .unwrap()
+        } else {
+            let tasks = (0..thread_count)
+                .zip(std::iter::repeat(canonical_goals.clone()))
+                .collect::<Vec<_>>();
+            // Collect all and take the result from the first call so that we get
+            // deterministic results.
+            tasks
+                .into_par_iter()
+                .map(|(i, gs)| {
+                    let search = TopDownSearch::<'d> {
+                        db,
+                        top_k,
+                        thread_idx: i,
+                        thread_count,
+                        hits: 0,
+                        misses: 1,
+                    };
+                    let r = BlockSearch::synthesize(gs.iter(), &search, None);
+                    (r, search.hits, search.misses)
+                })
+                .collect::<Vec<_>>()
+                .pop()
+                .unwrap()
+        };
+
+        for (r, i) in result.into_iter().zip(page_group) {
+            combined_results[*i] = r;
+        }
+        combined_hits += hits;
+        combined_misses += misses;
+    }
+
+    (combined_results, combined_hits, combined_misses)
 }
 
 impl<'a, 'd, Tgt> BlockSearch<'a, 'd, Tgt>
@@ -275,6 +301,7 @@ where
         visited_in_stage: &mut HashSet<Spec<Tgt>>,
         outbox: &mut Vec<(Spec<Tgt>, ActionCostVec)>,
     ) -> Rc<RefCell<SpecTask<Tgt>>> {
+        debug_assert!(self.working_set.is_empty() || self.spec_in_working_set(spec));
         let task = self.get_wb_task(spec);
         if !visited_in_stage.contains(spec) {
             visited_in_stage.insert(spec.clone());
@@ -312,11 +339,13 @@ where
             return;
         }
 
+        let page_id = self.search.db.page_id(spec);
+
         let next_batch_opt = task.next_request_batch();
         let b = next_batch_opt.map(|it| it.collect::<Vec<_>>()); // TODO: Need `collect`?
         if let Some(request_batch) = b {
             for (subspec, request_id) in request_batch {
-                if self.search.db.specs_share_page(spec, &subspec) {
+                if page_id.contains(&subspec) {
                     let subtask = self.visit_spec_wb(&subspec, visited_in_stage, outbox);
                     let subtask_ref = subtask.borrow();
                     match &*subtask_ref {
@@ -441,11 +470,12 @@ where
     ) {
         debug_assert!(self.spec_in_working_set(spec));
         debug_assert!(!self.spec_in_working_set(subspec));
-        let request_set = match self.subblock_requests.iter_mut().find(|s| {
-            self.search
-                .db
-                .specs_share_page(s.keys().next().unwrap(), subspec)
-        }) {
+        let subspec_page = self.search.db.page_id(subspec);
+        let request_set = match self
+            .subblock_requests
+            .iter_mut()
+            .find(|s| subspec_page.contains(s.keys().next().unwrap()))
+        {
             Some(s) => s,
             None => {
                 self.subblock_requests.push(HashMap::new());
@@ -459,8 +489,9 @@ where
     }
 
     fn spec_in_working_set(&self, spec: &Spec<Tgt>) -> bool {
+        // TODO: Store the PageId instead of computing
         let ws_rep = self.working_set.keys().next().unwrap();
-        self.search.db.specs_share_page(ws_rep, spec)
+        self.search.db.page_id(ws_rep).contains(spec)
     }
 }
 

@@ -57,6 +57,12 @@ pub struct RocksDatabase {
 
 struct ShardArray([Mutex<Shard>; CONCURRENT_CACHE_SHARDS]);
 
+pub struct PageId<'a> {
+    db: &'a RocksDatabase,
+    pub(crate) table_key: TableKey,
+    pub(crate) superblock_id: SmallVec<[BimapInt; 10]>,
+}
+
 struct Shard {
     cache: WTinyLfuCache<Prehashed<SuperBlockKey>, SuperBlock>,
     outstanding_gets: PrehashedSet<SuperBlockKey>,
@@ -241,21 +247,20 @@ impl RocksDatabase {
         }
     }
 
-    pub fn specs_share_page<Tgt>(&self, lhs: &Spec<Tgt>, rhs: &Spec<Tgt>) -> bool
+    pub fn page_id<Tgt>(&self, lhs: &Spec<Tgt>) -> PageId
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let bimap = self.spec_bimap();
-        let (table_key_lhs, global_pt_lhs) = bimap.apply(lhs);
-        let (table_key_rhs, global_pt_rhs) = bimap.apply(rhs);
-        if table_key_lhs != table_key_rhs {
-            return false;
+        let (table_key, global_pt_lhs) = bimap.apply(lhs);
+        let (block_pt, _) = blockify_point(global_pt_lhs);
+        PageId {
+            db: &self,
+            table_key,
+            superblock_id: superblockify_pt(&block_pt),
         }
-        let (block_pt_lhs, _) = blockify_point(global_pt_lhs);
-        let (block_pt_rhs, _) = blockify_point(global_pt_rhs);
-        superblockify_pt(&block_pt_lhs) == superblockify_pt(&block_pt_rhs)
     }
 
     pub fn put<Tgt>(&self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
@@ -436,6 +441,23 @@ impl Drop for RocksDatabase {
                 shard_guard.async_put(k, v);
             }
         }
+    }
+}
+
+impl<'a> PageId<'a> {
+    pub fn contains<Tgt>(&self, spec: &Spec<Tgt>) -> bool
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        let bimap = self.db.spec_bimap();
+        let (table_key, global_pt) = bimap.apply(spec);
+        if self.table_key != table_key {
+            return false;
+        }
+        let (block_pt, _) = blockify_point(global_pt);
+        self.superblock_id == superblockify_pt(&block_pt)
     }
 }
 
