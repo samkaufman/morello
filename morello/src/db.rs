@@ -38,8 +38,8 @@ type SuperBlock = HashMap<SmallVec<[BimapInt; 10]>, DbBlock>;
 pub type ActionIdx = u16;
 
 // TODO: Select these at runtime.
-const CONCURRENT_CACHE_SHARDS: usize = 16;
-const CACHE_PER_SHARD_SIZE: usize = 64;
+const CONCURRENT_CACHE_SHARDS: usize = 128;
+const CACHE_PER_SHARD_SIZE: usize = 32;
 const CACHE_PER_SHARD_SAMPLES: usize = 8;
 const SUPERBLOCK_FACTOR: BimapInt = 4;
 const CHANNEL_SIZE: usize = 2;
