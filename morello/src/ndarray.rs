@@ -173,18 +173,21 @@ impl<T> NDArray<T> {
                     step_size,
                     value,
                     through_unfilled,
+                    None,
                 );
             } else {
+                let mut run_index_hint = None;
                 let substrides = &self.strides[..(prefix_size - 1)];
                 iter_multidim_range(&dim_ranges[..(prefix_size - 1)], substrides, |i, _| {
-                    Self::fill_region_ext_inner(
+                    run_index_hint = Self::fill_region_ext_inner(
                         &mut self.data,
                         i,
                         offset,
                         step_size,
                         value,
                         through_unfilled,
-                    )
+                        run_index_hint,
+                    );
                 });
             }
         } else {
@@ -200,12 +203,15 @@ impl<T> NDArray<T> {
         step_size: u32,
         value: &T,
         through_unfilled: Option<(u8, &NDArray<u8>)>,
-    ) where
+        run_index_hint: Option<u32>,
+    ) -> Option<u32>
+    where
         T: Clone + Eq,
     {
         // Fill beyond the step size if permitted by fill. Note that this
         // fills forwards only, not backward.
         let mut fill_len = step_size;
+        let mut hint_to_return = None;
         if let Some((unfilled_max, filled)) = through_unfilled {
             // TODO: Map the following by dividing out any k. Using stride?
             //
@@ -216,8 +222,9 @@ impl<T> NDArray<T> {
             //   we cheaply avoid these?
             let mut extended_idx = u32::try_from(index).unwrap() + offset + step_size;
             if extended_idx < u32::try_from(filled.data.len()).unwrap() {
-                let eiri = filled.data.run_index(extended_idx).try_into().unwrap();
-                let mut ext_iter = filled.data.runs().skip(eiri);
+                let eiri = run_index_frhint(&filled.data, extended_idx, run_index_hint);
+                hint_to_return = Some(eiri);
+                let mut ext_iter = filled.data.runs().skip(eiri.try_into().unwrap());
                 loop {
                     if filled.data.len() <= usize::try_from(extended_idx).unwrap() {
                         break;
@@ -237,6 +244,7 @@ impl<T> NDArray<T> {
             fill_len,
             value.clone(),
         );
+        hint_to_return
     }
 
     pub fn fill_broadcast_1d<I>(
@@ -293,6 +301,25 @@ impl<T> Index<&[usize]> for NDArray<T> {
     fn index(&self, pt: &[usize]) -> &Self::Output {
         &self.data[self.data_offset(pt)]
     }
+}
+
+fn run_index_frhint<T>(rle_vec: &RleVec<T>, index: u32, hint: Option<u32>) -> u32 {
+    // First, test up to 8 ahead of the hint. This is just an empirically derived heurstic.
+    // TODO: Tune this.
+    if let Some(hint) = hint {
+        for to_test in (hint..hint + 8) {
+            if let Some(tested_run) = rle_vec.runs().nth(to_test.try_into().unwrap()) {
+                // TODO: Can abort faster below.
+                if tested_run.start <= index && index < tested_run.start + tested_run.len {
+                    return to_test;
+                }
+            }
+        }
+    }
+
+    // TODO: Binary search at and ahead of the hint before a binary search behind.
+
+    rle_vec.run_index(index)
 }
 
 fn calculate_strides(shape: &[usize]) -> SmallVec<[usize; NDARRAY_DEFAULT_RANK]> {
