@@ -11,7 +11,7 @@ use std::{io, path};
 use morello::codegen::CodeGen;
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
-use morello::db::{Database, DatabaseExt, RocksDatabase};
+use morello::db::RocksDatabase;
 use morello::layout::{col_major, row_major};
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::target::{
@@ -134,14 +134,13 @@ fn main() -> Result<()> {
     color::set_color_mode(args.color);
     let db = RocksDatabase::try_new(args.db.as_deref(), BINARY_SCALE_SHAPES, K)?;
     match &args.target {
-        TargetId::X86 => main_per_db::<_, X86Target>(&args, &db),
-        TargetId::Arm => main_per_db::<_, ArmTarget>(&args, &db),
+        TargetId::X86 => main_per_db::<X86Target>(&args, &db),
+        TargetId::Arm => main_per_db::<ArmTarget>(&args, &db),
     }
 }
 
-fn main_per_db<'d, D, Tgt>(args: &Args, db: &'d D) -> Result<()>
+fn main_per_db<Tgt>(args: &Args, db: &RocksDatabase) -> Result<()>
 where
-    D: Database<'d> + Send + Sync,
     Tgt: Target<Level = CpuMemoryLevel>,
 {
     let subcmd = &args.subcmd;

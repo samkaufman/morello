@@ -44,61 +44,6 @@ const CACHE_PER_SHARD_SAMPLES: usize = 8;
 const SUPERBLOCK_FACTOR: BimapInt = 4;
 const CHANNEL_SIZE: usize = 2;
 
-pub trait Database<'a> {
-    fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<ActionCostVec>
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
-
-    fn get_with_preference<Tgt>(
-        &'a self,
-        query: &Spec<Tgt>,
-    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
-
-    fn prefetch<Tgt>(&'a self, query: &Spec<Tgt>)
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
-
-    fn specs_share_page<Tgt>(&self, lhs: &Spec<Tgt>, rhs: &Spec<Tgt>) -> bool
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
-
-    // TODO: Document interior mutability of put.
-    fn put<Tgt>(&'a self, problem: Spec<Tgt>, impls: SmallVec<[(ActionIdx, Cost); 1]>)
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
-
-    fn flush(&'a self);
-
-    /// Returns the maximum number of Impls this [Database] as store per Spec.
-    ///
-    /// If unlimited, returns `None`.
-    fn max_k(&'a self) -> Option<usize>;
-
-    fn stats_str(&self) -> String {
-        "".to_string()
-    }
-}
-
-pub trait DatabaseExt<'a>: Database<'a> {
-    fn get_impl<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
-}
-
 #[derive(Clone, Debug)]
 pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
 
@@ -211,6 +156,222 @@ impl RocksDatabase {
         })
     }
 
+    pub fn get<Tgt>(&self, query: &Spec<Tgt>) -> Option<ActionCostVec>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        match self.get_with_preference(query) {
+            GetPreference::Hit(v) => Some(v),
+            GetPreference::Miss(_) => None,
+        }
+    }
+
+    pub fn get_impl<Tgt>(&self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        let Some(root_results) = self.get(query) else {
+            return None;
+        };
+        let actions = query.0.actions();
+        Some(
+            root_results
+                .as_ref()
+                .iter()
+                .map(|(action_idx, cost)| {
+                    let root = actions[(*action_idx).into()]
+                        .apply_with_aux(query, DbImplAux(Some((query.clone(), cost.clone()))))
+                        .unwrap();
+                    let children = root.children();
+                    let new_children = children
+                        .iter()
+                        .map(|c| construct_impl(self, c))
+                        .collect::<Vec<_>>();
+                    root.replace_children(new_children.into_iter())
+                })
+                .collect::<SmallVec<_>>(),
+        )
+    }
+
+    pub fn get_with_preference<Tgt>(
+        &self,
+        query: &Spec<Tgt>,
+    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        let bimap = self.spec_bimap();
+        let (table_key, global_pt) = bimap.apply(query);
+        let (block_pt, inner_pt) = blockify_point(global_pt);
+
+        let superblock_pt = superblockify_pt(&block_pt);
+        let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
+
+        let superblock: &SuperBlock = &self.load_live_superblock(&superblock_key);
+        let Some(b) = superblock.get(&block_pt) else {
+            return GetPreference::Miss(None);
+        };
+        b.get_with_preference(self, query, &inner_pt)
+    }
+
+    pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        let bimap = self.spec_bimap();
+        let (table_key, global_pt) = bimap.apply(query);
+        let (block_pt, _) = blockify_point(global_pt);
+
+        let superblock_pt = superblockify_pt(&block_pt);
+        let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
+
+        let shard = &self.shards.0[self.shard_index(&superblock_key)];
+        let mut shard_guard = shard.lock();
+        shard_guard.process_available_bg_thread_msgs();
+        if shard_guard.cache.peek(&superblock_key).is_none() {
+            shard_guard.async_get(&superblock_key);
+        }
+    }
+
+    pub fn specs_share_page<Tgt>(&self, lhs: &Spec<Tgt>, rhs: &Spec<Tgt>) -> bool
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        let bimap = self.spec_bimap();
+        let (table_key_lhs, global_pt_lhs) = bimap.apply(lhs);
+        let (table_key_rhs, global_pt_rhs) = bimap.apply(rhs);
+        if table_key_lhs != table_key_rhs {
+            return false;
+        }
+        let (block_pt_lhs, _) = blockify_point(global_pt_lhs);
+        let (block_pt_rhs, _) = blockify_point(global_pt_rhs);
+        superblockify_pt(&block_pt_lhs) == superblockify_pt(&block_pt_rhs)
+    }
+
+    pub fn put<Tgt>(&self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        let bimap = self.spec_bimap();
+        let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
+
+        // Construct an iterator over all blocks to fill.
+        let rank = bottom.len();
+        let blocks_iter = bottom
+            .into_iter()
+            .zip(&top)
+            .enumerate()
+            .map(|(dim, (b, t))| iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank)))
+            .multi_cartesian_product();
+
+        for joined_row in blocks_iter {
+            let block_pt = joined_row
+                .iter()
+                .map(|(b, _)| *b)
+                .collect::<SmallVec<[BimapInt; 10]>>();
+            // TODO: Factor out this tuple construction
+            let mut superblock_guard = self.load_live_superblock_mut(
+                &self
+                    .prehasher
+                    .prehash((db_key.clone(), superblockify_pt(&block_pt))),
+            );
+
+            // If the superblock already contains the block, mutate in place and continue the loop.
+            if let Some(live_block) = superblock_guard.get_mut(&block_pt) {
+                let dim_ranges = joined_row
+                    .iter()
+                    .map(|(_, r)| r.clone())
+                    .collect::<Vec<_>>();
+                let DbBlock::Whole(e) = live_block;
+                // Examine the table before updating.
+                e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
+                continue;
+            }
+
+            // If not, create the block and add it to the superblock.
+            let db_shape = db_shape::<Tgt>(rank);
+            let bs = block_shape(&block_pt, &db_shape, block_size_dim);
+            let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
+            let dim_ranges = joined_row
+                .iter()
+                .map(|(_, r)| r.clone())
+                .collect::<Vec<_>>();
+            let new_block = DbBlock::Whole(Box::new(WholeBlock::partially_filled::<Tgt>(
+                self.k,
+                &block_shape_usize,
+                &dim_ranges,
+                &ActionCostVec(decisions.clone()),
+            )));
+            superblock_guard.insert(block_pt, new_block);
+        }
+    }
+
+    pub fn flush(&self) {
+        self.db.flush().unwrap();
+    }
+
+    pub fn max_k(&self) -> Option<usize> {
+        Some(self.k.into())
+    }
+
+    pub fn stats_str(&self) -> String {
+        // let start = Instant::now();
+        // let mut runs_filled = 0;
+        // let mut lens_filled = 0;
+        // let mut runs_main_costs = 0;
+        // let mut lens_main_costs = 0;
+        // let mut runs_peaks = 0;
+        // let mut lens_peaks = 0;
+        // let mut runs_depths_actions = 0;
+        // let mut lens_depths_actions = 0;
+        // for block in &self.blocks {
+        //     match block.value() {
+        //         DbBlock::Whole(e) => {
+        //             runs_filled += e.filled.runs_len();
+        //             lens_filled += e.filled.len();
+        //             runs_main_costs += e.main_costs.runs_len();
+        //             lens_main_costs += e.main_costs.len();
+        //             runs_peaks += e.peaks.runs_len();
+        //             lens_peaks += e.peaks.len();
+        //             runs_depths_actions += e.depths_actions.runs_len();
+        //             lens_depths_actions += e.depths_actions.len();
+        //         }
+        //     }
+        // }
+        // let stat_duration = start.elapsed();
+        // format!(
+        //     "blocks={} \
+        //     runs_filled={} runs_main_costs={} runs_peaks={} \
+        //     runs_depthsactions={} cr_filled={:.5} \
+        //     cr_main_costs={:.5} cr_peaks={:.5} cr_depthsactions={:.5} statms={}",
+        //     self.blocks.len(),
+        //     runs_filled,
+        //     runs_main_costs,
+        //     runs_peaks,
+        //     runs_depths_actions,
+        //     runs_filled as f32 / lens_filled as f32,
+        //     runs_main_costs as f32 / lens_main_costs as f32,
+        //     runs_peaks as f32 / lens_peaks as f32,
+        //     runs_depths_actions as f32 / lens_depths_actions as f32,
+        //     stat_duration.as_millis(),
+        // )
+
+        // TODO: Reimplement with RocksDB.
+        "".to_owned()
+    }
+
     pub fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
     where
         Tgt: Target,
@@ -275,198 +436,6 @@ impl Drop for RocksDatabase {
                 shard_guard.async_put(k, v);
             }
         }
-    }
-}
-
-impl<'a> Database<'a> for RocksDatabase
-where
-    Self: 'a,
-{
-    fn get<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<ActionCostVec>
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    {
-        match self.get_with_preference(query) {
-            GetPreference::Hit(v) => Some(v),
-            GetPreference::Miss(_) => None,
-        }
-    }
-
-    fn get_with_preference<Tgt>(
-        &'a self,
-        query: &Spec<Tgt>,
-    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    {
-        let bimap = self.spec_bimap();
-        let (table_key, global_pt) = bimap.apply(query);
-        let (block_pt, inner_pt) = blockify_point(global_pt);
-
-        let superblock_pt = superblockify_pt(&block_pt);
-        let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
-
-        let superblock: &SuperBlock = &self.load_live_superblock(&superblock_key);
-        let Some(b) = superblock.get(&block_pt) else {
-            return GetPreference::Miss(None);
-        };
-        b.get_with_preference(self, query, &inner_pt)
-    }
-
-    fn prefetch<Tgt>(&'a self, query: &Spec<Tgt>)
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    {
-        let bimap = self.spec_bimap();
-        let (table_key, global_pt) = bimap.apply(query);
-        let (block_pt, _) = blockify_point(global_pt);
-
-        let superblock_pt = superblockify_pt(&block_pt);
-        let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
-
-        let shard = &self.shards.0[self.shard_index(&superblock_key)];
-        let mut shard_guard = shard.lock();
-        shard_guard.process_available_bg_thread_msgs();
-        if shard_guard.cache.peek(&superblock_key).is_none() {
-            shard_guard.async_get(&superblock_key);
-        }
-    }
-
-    fn specs_share_page<Tgt>(&self, lhs: &Spec<Tgt>, rhs: &Spec<Tgt>) -> bool
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    {
-        let bimap = self.spec_bimap();
-        let (table_key_lhs, global_pt_lhs) = bimap.apply(lhs);
-        let (table_key_rhs, global_pt_rhs) = bimap.apply(rhs);
-        if table_key_lhs != table_key_rhs {
-            return false;
-        }
-        let (block_pt_lhs, _) = blockify_point(global_pt_lhs);
-        let (block_pt_rhs, _) = blockify_point(global_pt_rhs);
-        superblockify_pt(&block_pt_lhs) == superblockify_pt(&block_pt_rhs)
-    }
-
-    fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    {
-        let bimap = self.spec_bimap();
-        let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
-
-        // Construct an iterator over all blocks to fill.
-        let rank = bottom.len();
-        let blocks_iter = bottom
-            .into_iter()
-            .zip(&top)
-            .enumerate()
-            .map(|(dim, (b, t))| iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank)))
-            .multi_cartesian_product();
-
-        for joined_row in blocks_iter {
-            let block_pt = joined_row
-                .iter()
-                .map(|(b, _)| *b)
-                .collect::<SmallVec<[BimapInt; 10]>>();
-            // TODO: Factor out this tuple construction
-            let mut superblock_guard = self.load_live_superblock_mut(
-                &self
-                    .prehasher
-                    .prehash((db_key.clone(), superblockify_pt(&block_pt))),
-            );
-
-            // If the superblock already contains the block, mutate in place and continue the loop.
-            if let Some(live_block) = superblock_guard.get_mut(&block_pt) {
-                let dim_ranges = joined_row
-                    .iter()
-                    .map(|(_, r)| r.clone())
-                    .collect::<Vec<_>>();
-                let DbBlock::Whole(e) = live_block;
-                // Examine the table before updating.
-                e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
-                continue;
-            }
-
-            // If not, create the block and add it to the superblock.
-            let db_shape = db_shape::<Tgt>(rank);
-            let bs = block_shape(&block_pt, &db_shape, block_size_dim);
-            let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
-            let dim_ranges = joined_row
-                .iter()
-                .map(|(_, r)| r.clone())
-                .collect::<Vec<_>>();
-            let new_block = DbBlock::Whole(Box::new(WholeBlock::partially_filled::<Tgt>(
-                self.k,
-                &block_shape_usize,
-                &dim_ranges,
-                &ActionCostVec(decisions.clone()),
-            )));
-            superblock_guard.insert(block_pt, new_block);
-        }
-    }
-
-    fn flush(&'a self) {
-        self.db.flush().unwrap();
-    }
-
-    fn max_k(&'a self) -> Option<usize> {
-        Some(self.k.into())
-    }
-
-    fn stats_str(&self) -> String {
-        // let start = Instant::now();
-        // let mut runs_filled = 0;
-        // let mut lens_filled = 0;
-        // let mut runs_main_costs = 0;
-        // let mut lens_main_costs = 0;
-        // let mut runs_peaks = 0;
-        // let mut lens_peaks = 0;
-        // let mut runs_depths_actions = 0;
-        // let mut lens_depths_actions = 0;
-        // for block in &self.blocks {
-        //     match block.value() {
-        //         DbBlock::Whole(e) => {
-        //             runs_filled += e.filled.runs_len();
-        //             lens_filled += e.filled.len();
-        //             runs_main_costs += e.main_costs.runs_len();
-        //             lens_main_costs += e.main_costs.len();
-        //             runs_peaks += e.peaks.runs_len();
-        //             lens_peaks += e.peaks.len();
-        //             runs_depths_actions += e.depths_actions.runs_len();
-        //             lens_depths_actions += e.depths_actions.len();
-        //         }
-        //     }
-        // }
-        // let stat_duration = start.elapsed();
-        // format!(
-        //     "blocks={} \
-        //     runs_filled={} runs_main_costs={} runs_peaks={} \
-        //     runs_depthsactions={} cr_filled={:.5} \
-        //     cr_main_costs={:.5} cr_peaks={:.5} cr_depthsactions={:.5} statms={}",
-        //     self.blocks.len(),
-        //     runs_filled,
-        //     runs_main_costs,
-        //     runs_peaks,
-        //     runs_depths_actions,
-        //     runs_filled as f32 / lens_filled as f32,
-        //     runs_main_costs as f32 / lens_main_costs as f32,
-        //     runs_peaks as f32 / lens_peaks as f32,
-        //     runs_depths_actions as f32 / lens_depths_actions as f32,
-        //     stat_duration.as_millis(),
-        // )
-
-        // TODO: Reimplement with RocksDB.
-        "".to_owned()
     }
 }
 
@@ -595,37 +564,6 @@ impl Drop for Shard {
         self.thread_tx.send(ShardThreadMsg::Exit).unwrap();
         self.process_bg_thread_msgs_until_close();
         self.thread.take().unwrap().join().unwrap();
-    }
-}
-
-impl<'a, T: Database<'a>> DatabaseExt<'a> for T {
-    fn get_impl<Tgt>(&'a self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    {
-        let Some(root_results) = self.get(query) else {
-            return None;
-        };
-        let actions = query.0.actions();
-        Some(
-            root_results
-                .as_ref()
-                .iter()
-                .map(|(action_idx, cost)| {
-                    let root = actions[(*action_idx).into()]
-                        .apply_with_aux(query, DbImplAux(Some((query.clone(), cost.clone()))))
-                        .unwrap();
-                    let children = root.children();
-                    let new_children = children
-                        .iter()
-                        .map(|c| construct_impl(self, c))
-                        .collect::<Vec<_>>();
-                    root.replace_children(new_children.into_iter())
-                })
-                .collect::<SmallVec<_>>(),
-        )
     }
 }
 
@@ -786,12 +724,11 @@ fn superblockify_pt(block_pt: &[BimapInt]) -> SmallVec<[BimapInt; 10]> {
     block_pt.iter().map(|&i| i / SUPERBLOCK_FACTOR).collect()
 }
 
-fn construct_impl<'a, Tgt, D>(db: &'a D, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
+fn construct_impl<Tgt>(db: &RocksDatabase, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    D: Database<'a>,
 {
     match imp {
         ImplNode::SpecApp(p) => db

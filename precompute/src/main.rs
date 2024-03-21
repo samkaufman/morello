@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::{iter, path};
 
 use morello::common::{DimSize, Dtype};
-use morello::db::{Database, RocksDatabase};
+use morello::db::RocksDatabase;
 use morello::grid::general::SurMap;
 use morello::layout::row_major;
 use morello::lspec;
@@ -63,10 +63,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn main_per_db<'a, D>(args: &Args, db: &'a D)
-where
-    D: Database<'a> + Send + Sync,
-{
+fn main_per_db(args: &Args, db: &RocksDatabase) {
     let MemoryLimits::Standard(top) = X86Target::max_mem();
 
     // TODO: Most of the following details aren't used in computing the bound.

@@ -9,7 +9,7 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 use crate::cost::Cost;
-use crate::db::{ActionCostVec, ActionIdx, Database, GetPreference};
+use crate::db::{ActionCostVec, ActionIdx, GetPreference, RocksDatabase};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
@@ -19,8 +19,8 @@ use crate::target::Target;
 
 type RequestId = (usize, usize);
 
-struct TopDownSearch<'d, D> {
-    db: &'d D,
+struct TopDownSearch<'d> {
+    db: &'d RocksDatabase,
     top_k: usize,
     thread_idx: usize,
     thread_count: usize,
@@ -28,8 +28,8 @@ struct TopDownSearch<'d, D> {
     misses: u64,
 }
 
-struct BlockSearch<'a, 'd, D, Tgt: Target> {
-    search: &'a TopDownSearch<'d, D>,
+struct BlockSearch<'a, 'd, Tgt: Target> {
+    search: &'a TopDownSearch<'d>,
     working_set: HashMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
     // The following two fields map requested Specs (the keys) to the recipients
     // (Specs + RequestIds). The latter might be out-of-date by the time they are
@@ -72,8 +72,8 @@ struct ImplReducer {
 }
 
 // Computes an optimal Impl for `goal` and stores it in `db`.
-pub fn top_down<'d, Tgt, D>(
-    db: &'d D,
+pub fn top_down<'d, Tgt>(
+    db: &'d RocksDatabase,
     goal: &Spec<Tgt>,
     top_k: usize,
     jobs: Option<NonZeroUsize>,
@@ -82,15 +82,14 @@ where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    D: Database<'d> + Send + Sync,
 {
     // TODO: Just return the ActionCostVec directly
     let (r, h, m) = top_down_many(db, &[goal.clone()], top_k, jobs);
     (r.into_iter().next().unwrap().0, h, m)
 }
 
-pub fn top_down_many<'d, Tgt, D>(
-    db: &'d D,
+pub fn top_down_many<'d, Tgt>(
+    db: &'d RocksDatabase,
     goals: &[Spec<Tgt>],
     top_k: usize,
     jobs: Option<NonZeroUsize>,
@@ -99,7 +98,6 @@ where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    D: Database<'d> + Send + Sync,
 {
     assert!(db.max_k().map_or(true, |k| k >= top_k));
     if top_k > 1 {
@@ -120,7 +118,7 @@ where
         .map(|j| j.get())
         .unwrap_or_else(rayon::current_num_threads);
     if thread_count == 1 {
-        let search = TopDownSearch::<'d, D> {
+        let search = TopDownSearch::<'d> {
             db,
             top_k,
             thread_idx: 0,
@@ -140,7 +138,7 @@ where
     tasks
         .into_par_iter()
         .map(|(i, gs)| {
-            let search = TopDownSearch::<'d, D> {
+            let search = TopDownSearch::<'d> {
                 db,
                 top_k,
                 thread_idx: i,
@@ -156,18 +154,15 @@ where
         .unwrap()
 }
 
-impl<'d, D> TopDownSearch<'d, D> where D: Database<'d> + Send + Sync {}
-
-impl<'a, 'd, D, Tgt> BlockSearch<'a, 'd, D, Tgt>
+impl<'a, 'd, Tgt> BlockSearch<'a, 'd, Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    D: Database<'d> + Send + Sync,
 {
     fn synthesize<'i, I>(
         goals: I,
-        search: &'a TopDownSearch<'d, D>,
+        search: &'a TopDownSearch<'d>,
         prefetch_after: Option<&Spec<Tgt>>,
     ) -> Vec<ActionCostVec>
     where
@@ -384,7 +379,7 @@ where
         next_subblock: Option<&mut HashMap<Spec<Tgt>, Vec<(Spec<Tgt>, RequestId)>>>,
         subspec: &Spec<Tgt>,
         results: ActionCostVec,
-        search: &'a TopDownSearch<'d, D>,
+        search: &'a TopDownSearch<'d>,
     ) {
         let Some(rs) = subblock.remove(subspec) else {
             return;
@@ -473,9 +468,8 @@ impl<Tgt: Target> SpecTask<Tgt> {
     /// Begin computing the optimal implementation of a Spec.
     ///
     /// Internally, this will expand partial [Impl]s for all actions.
-    fn start<'d, D>(goal: Spec<Tgt>, search: &TopDownSearch<'d, D>) -> Self
+    fn start<'d>(goal: Spec<Tgt>, search: &TopDownSearch<'d>) -> Self
     where
-        D: Database<'d> + Send + Sync,
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
@@ -586,14 +580,13 @@ impl<Tgt: Target> SpecTask<Tgt> {
         Some(to_return.into_iter()) // TODO: Inline the iterator instead of collecting.
     }
 
-    fn resolve_request<'d, D>(
+    fn resolve_request<'d>(
         &mut self,
         id: RequestId,
         cost: Option<Cost>, // `None` means that the Spec was unsat
         task_goal: &Spec<Tgt>,
-        search: &TopDownSearch<'d, D>,
+        search: &TopDownSearch<'d>,
     ) where
-        D: Database<'d> + Send + Sync,
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
