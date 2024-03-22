@@ -151,7 +151,13 @@ impl RocksDatabase {
             .map(|p| p.to_owned())
             .unwrap_or_else(|| tempfile::TempDir::new().unwrap().into_path());
         log::info!("Opening database at: {}", resolved_file_path.display());
-        let db = Arc::new(rocksdb::DB::open_default(resolved_file_path)?);
+        let mut db_opts = rocksdb::Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.set_compression_type(rocksdb::DBCompressionType::None);
+        db_opts.set_level_compaction_dynamic_level_bytes(true);
+        db_opts.set_max_background_jobs(6);
+        db_opts.set_bytes_per_sync(1048576);
+        let db = Arc::new(rocksdb::DB::open(&db_opts, resolved_file_path)?);
         let shards = ShardArray(std::array::from_fn(|i| Mutex::new(Shard::new(i, &db))));
         Ok(Self {
             db,
