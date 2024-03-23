@@ -38,8 +38,8 @@ type SuperBlock = HashMap<SmallVec<[BimapInt; 10]>, DbBlock>;
 pub type ActionIdx = u16;
 
 // TODO: Select these at runtime.
-const CONCURRENT_CACHE_SHARDS: usize = 128;
-const CACHE_PER_SHARD_SIZE: usize = 32;
+const CONCURRENT_CACHE_SHARDS: usize = 256;
+const CACHE_PER_SHARD_SIZE: usize = 128;
 const CACHE_PER_SHARD_SAMPLES: usize = 8;
 const SUPERBLOCK_FACTOR: BimapInt = 4;
 const CHANNEL_SIZE: usize = 2;
@@ -157,6 +157,7 @@ impl RocksDatabase {
         db_opts.set_level_compaction_dynamic_level_bytes(true);
         db_opts.set_max_background_jobs(6);
         db_opts.set_bytes_per_sync(1048576);
+        db_opts.set_max_open_files(128);
         let db = Arc::new(rocksdb::DB::open(&db_opts, resolved_file_path)?);
         let shards = ShardArray(std::array::from_fn(|i| Mutex::new(Shard::new(i, &db))));
         Ok(Self {
