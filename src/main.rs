@@ -256,27 +256,26 @@ where
         }
         OutputFormat::Impl => pprint(synthesized_impl, args.impl_style),
     }
-
-    match subcmd {
-        Subcommand::Run(_) => {
-            let built_artifact = synthesized_impl.build(false)?;
-            let output = built_artifact.run()?;
-            println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
-            #[cfg(feature = "verification")]
-            if !built_artifact.check_correctness(&spec) {
-                panic!("Generated code returned incorrect output");
-            }
-        }
-        Subcommand::Bench(_) => {
-            // TODO: Test correctness (allow disabling with flag)
-            let result = synthesized_impl.bench(bench_inner_loop_iters.unwrap(), None)?;
-            let inner_loop_runtime = result.best_inner_loop_runtime();
-            let kernel_runtime = inner_loop_runtime / result.inner_loop_iterations;
-            println!("\nkernel runtime: {:.8}s", kernel_runtime.as_secs_f32());
-            println!("loop runtime: {}ns", inner_loop_runtime.as_nanos());
-        }
-        _ => {}
+    if let Subcommand::Emit(_) = subcmd {
+        return Ok(());
     }
 
+    let built_artifact = synthesized_impl.build(false)?;
+    let output = built_artifact.run()?;
+    if let Subcommand::Run(_) = subcmd {
+        println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
+    }
+    #[cfg(feature = "verification")]
+    if !built_artifact.check_correctness(&spec) {
+        panic!("Generated code returned incorrect output");
+    }
+
+    if let Subcommand::Bench(_) = subcmd {
+        let result = synthesized_impl.bench(bench_inner_loop_iters.unwrap(), None)?;
+        let inner_loop_runtime = result.best_inner_loop_runtime();
+        let kernel_runtime = inner_loop_runtime / result.inner_loop_iterations;
+        println!("\nkernel runtime: {:.8}s", kernel_runtime.as_secs_f32());
+        println!("loop runtime: {}ns", inner_loop_runtime.as_nanos());
+    }
     Ok(())
 }
