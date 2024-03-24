@@ -255,7 +255,7 @@ impl<'a> ImplReducer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{DimSize, Dtype};
+    use crate::common::DimSize;
     use crate::db::DashmapDiskDatabase;
     use crate::layout::row_major;
     use crate::lspec;
@@ -269,7 +269,7 @@ mod tests {
     use proptest::sample::select;
     use std::rc::Rc;
 
-    const TEST_SMALL_SIZE: DimSize = 2;
+    const TEST_SMALL_SIZE: DimSize = nz!(2u32);
     const TEST_SMALL_MEM: u64 = 2048;
 
     proptest! {
@@ -329,7 +329,10 @@ mod tests {
     #[test]
     fn test_synthesis_at_peak_memory_yields_same_decision_1() {
         let spec = Spec::<X86Target>(
-            lspec!(Zero([2, 2, 2, 2], (u8, GL, row_major(4), c0, ua))),
+            lspec!(Zero(
+                [nz!(2u32), nz!(2u32), nz!(2u32), nz!(2u32)],
+                (u8, GL, row_major(4), c0, ua)
+            )),
             MemoryLimits::Standard(MemVec::new_from_binary_scaled([0, 5, 7, 6])),
         );
 

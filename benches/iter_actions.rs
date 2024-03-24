@@ -1,6 +1,6 @@
 use iai_callgrind::{black_box, main};
+use nonzero::nonzero as nz;
 
-use morello::common::Dtype;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
@@ -11,7 +11,7 @@ use morello::tensorspec::TensorSpecAux;
 fn copy_actions_into_vec() {
     let rm2 = row_major(2);
     let logical_spec: LogicalSpec<X86Target> = lspec!(Matmul(
-        [64, 64, 64],
+        [nz!(64u32), nz!(64u32), nz!(64u32)],
         (u32, GL, rm2.clone()),
         (u32, GL, rm2.clone()),
         (u32, GL, rm2),

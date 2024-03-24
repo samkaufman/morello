@@ -1,7 +1,6 @@
 //! This example shows how to manually schedule a simple matrix multiplication for X86.
 
 use morello::codegen::CodeGen;
-use morello::common::Dtype;
 use morello::imp::kernels::KernelType;
 use morello::layout::row_major;
 use morello::lspec;
@@ -15,6 +14,7 @@ use morello::target::{
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
+use nonzero::nonzero as nz;
 use std::io;
 use std::panic;
 
@@ -32,7 +32,7 @@ fn main() {
 
     let spec = Spec::<X86Target>(
         lspec!(Matmul(
-            [64, 64, 64],
+            [nz!(64u32), nz!(64u32), nz!(64u32)],
             (u32, GL, layout.clone()),
             (u32, GL, layout.clone()),
             (u32, GL, layout),
@@ -44,11 +44,11 @@ fn main() {
 
     // Manually schedule the matrix multiplication.
     let implementation = spec
-        .tile_out(&[16, 16], false)
+        .tile_out(&[nz!(16u32), nz!(16u32)], false)
         .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
         .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
         .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
-        .tile_out(&[1, 1], false)
+        .tile_out(&[nz!(1u32), nz!(1u32)], false)
         .to_accum()
         .subschedule(&[0], &|z| {
             z.move_param(0, CpuMemoryLevel::RF, row_major(2), None)
@@ -58,11 +58,11 @@ fn main() {
             move_back.place(KernelType::ValueAssign)
         })
         .subschedule(&[1], &|bat| {
-            bat.split(4)
+            bat.split(nz!(4u32))
                 .move_param(0, CpuMemoryLevel::RF, row_major(2), None)
                 .subschedule(&[0], &|move_a| {
                     move_a
-                        .tile_out(&[1, 1], false)
+                        .tile_out(&[nz!(1u32), nz!(1u32)], false)
                         .place(KernelType::ValueAssign)
                 })
                 .subschedule(&[1], &|matmul_b| {
@@ -70,14 +70,16 @@ fn main() {
                 })
                 .subschedule(&[1, 0], &|move_ba| {
                     move_ba
-                        .tile_out(&[1, 1], false)
+                        .tile_out(&[nz!(1u32), nz!(1u32)], false)
                         .place(KernelType::ValueAssign)
                 })
                 .subschedule(&[1, 1], &|matmul_bb| {
                     matmul_bb.move_param(2, CpuMemoryLevel::RF, row_major(2), None)
                 })
                 .subschedule(&[1, 1, 0], &|s| s.place(KernelType::ValueAssign))
-                .subschedule(&[1, 1, 1], &|s| s.split(1).place(KernelType::MultAdd))
+                .subschedule(&[1, 1, 1], &|s| {
+                    s.split(nz!(1u32)).place(KernelType::MultAdd)
+                })
                 .subschedule(&[1, 1, 2], &|s| s.place(KernelType::ValueAssign))
         });
 

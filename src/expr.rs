@@ -75,9 +75,7 @@ impl<T: Bounds> Bounds for AffineForm<T> {
         let mut minimum = 0u32;
         let mut maximum: Option<u32> = None;
         for term in &self.0 {
-            let Some((term_min, term_max)) = term.1.bounds() else {
-                return None;
-            };
+            let (term_min, term_max) = term.1.bounds()?;
             minimum = minimum.min(u32::try_from(term.0).unwrap() * term_min);
             maximum = Some(
                 maximum

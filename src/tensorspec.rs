@@ -1,5 +1,6 @@
 use anyhow::Context;
 use itertools::iproduct;
+use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashSet;
@@ -95,7 +96,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub fn new_noncanon_with_aux(shape: Shape, dtype: Dtype, aux: TensorSpecAux<Tgt>) -> Self {
-        if shape.is_empty() || shape.iter().any(|&d| d < 1) {
+        if shape.is_empty() {
             panic!("Invalid shape: {:?}", shape);
         }
         if aux.vector_size.is_some() != aux.level.vector_rf() {
@@ -126,12 +127,12 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     pub fn is_valid_tile_shape(&self, shape: &[DimSize]) -> bool {
         debug_assert_eq!(shape.len(), self.shape.len());
         debug_assert!(shape.iter().zip(self.shape.iter()).all(|(i, o)| i <= o));
-        let all_ones = shape.iter().all(|d| *d == 1);
+        let all_ones = shape.iter().all(|d| d.get() == 1);
         all_ones || self.aux.layout.applies_to_shape(shape)
     }
 
     pub fn bytes_used(&self) -> u64 {
-        u64::from(self.dtype.size()) * u64::from(self.volume())
+        u64::from(self.dtype.size()) * u64::from(self.volume().get())
     }
 
     pub fn shape(&self) -> &[DimSize] {
@@ -139,7 +140,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub fn volume(&self) -> DimSize {
-        self.shape.iter().product()
+        DimSize::new(self.shape.iter().map(|d| d.get()).product()).unwrap()
     }
 
     pub fn dtype(&self) -> Dtype {
@@ -208,7 +209,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         for &dim in dropped_dims.iter().rev() {
             assert_eq!(
                 new_shape[usize::from(dim)],
-                1,
+                nz!(1u32),
                 "Cannot drop non-degenerate dimension {} of shape {:?}",
                 dim,
                 new_shape
@@ -216,7 +217,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             new_shape.remove(dim.into());
         }
 
-        let (new_layout, new_contig) = if new_shape.iter().all(|&d| d == 1) {
+        let (new_layout, new_contig) = if new_shape.iter().all(|&d| d.get() == 1) {
             let new_layout = row_major(new_shape.len().try_into().unwrap());
             (new_layout.clone(), new_layout.contiguous_full())
         } else {
@@ -247,7 +248,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         // of the vector sizes.
         let vector_bytes = dest_level.vector_bytes();
         if !vector_bytes.is_empty() {
-            let bytes = self.volume() * DimSize::from(self.dtype.size());
+            let bytes = self.volume().get() * u32::from(self.dtype.size());
             if vector_bytes.iter().all(|&vb| bytes % vb != 0) {
                 return false;
             }
@@ -293,10 +294,14 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
 
         args.0
             .into_iter()
-            .map(|m| 1..=m)
+            .map(|m| 1..=m.get())
             .collect::<Vec<_>>()
             .prop_flat_map(|shp| {
-                let shp = TensorSpecArbMaxShape(Shape::from(shp));
+                let shp = TensorSpecArbMaxShape(Shape::from(
+                    shp.iter()
+                        .map(|&x| DimSize::new(x).unwrap())
+                        .collect::<Vec<_>>(),
+                ));
                 let aux_strategy = TensorSpecAux::arbitrary_with(shp.clone());
                 let dtype_strategy = any::<Dtype>();
                 (Just(shp), dtype_strategy, aux_strategy)
@@ -355,7 +360,7 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpecAux<Tgt> {
 impl Default for TensorSpecArbMaxShape {
     fn default() -> Self {
         use smallvec::smallvec;
-        Self(smallvec![8, 8])
+        Self(smallvec![nz!(8u32), nz!(8u32)])
     }
 }
 
@@ -412,7 +417,7 @@ where
                         contig,
                         aligned,
                         layout: layout.clone(),
-                        vector_size,
+                        vector_size: vector_size.map(|v| DimSize::new(v).unwrap()),
                         level,
                     })
             }),
@@ -450,7 +455,7 @@ where
             contig: (*contig).try_into().unwrap(),
             aligned: *aligned_val != 0,
             level,
-            vector_size: vector_size.map(|v| v.into()),
+            vector_size: *vector_size,
         }
     }
 }
@@ -504,10 +509,7 @@ fn arb_tensorspecaux<Tgt: Target>(
                 Just(level),
                 select(contiguous_abs),
                 any::<bool>(),
-                select(
-                    gen_vector_sizes_opt(Some(&max_shape), dtype, level.vector_bytes())
-                        .collect::<Vec<_>>(),
-                ),
+                select(gen_vector_sizes_opt(dtype, level.vector_bytes()).collect::<Vec<_>>()),
             )
         })
         .prop_map(
@@ -527,6 +529,7 @@ mod tests {
     use crate::layout::Layout;
     use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
     use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape};
+    use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::proptest;
     use smallvec::smallvec;
@@ -546,14 +549,14 @@ mod tests {
 
         #[test]
         fn tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_x86(
-            tspec in any_with::<TensorSpec<X86Target>>(TensorSpecArbMaxShape(smallvec![4, 4, 4, 4]))
+            tspec in any_with::<TensorSpec<X86Target>>(TensorSpecArbMaxShape(smallvec![nz!(4u32), nz!(4u32), nz!(4u32), nz!(4u32)]))
         ) {
             shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
         }
 
         #[test]
         fn tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_arm(
-            tspec in any_with::<TensorSpec<ArmTarget>>(TensorSpecArbMaxShape(smallvec![4, 4, 4, 4]))
+            tspec in any_with::<TensorSpec<ArmTarget>>(TensorSpecArbMaxShape(smallvec![nz!(4u32), nz!(4u32), nz!(4u32), nz!(4u32)]))
         ) {
             shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
         }
@@ -563,7 +566,7 @@ mod tests {
     #[test]
     fn test_1() {
         let mut tspec = TensorSpec::<X86Target> {
-            shape: smallvec::smallvec![5, 2, 8, 4],
+            shape: smallvec::smallvec![nz!(5u32), nz!(2u32), nz!(8u32), nz!(4u32)],
             dtype: crate::common::Dtype::Uint8,
             aux: crate::tensorspec::TensorSpecAux {
                 contig: 3,
@@ -574,7 +577,7 @@ mod tests {
                     (2, None),
                     (3, None),
                     (1, None),
-                    (2, Some(4)),
+                    (2, Some(nz!(4u32))),
                 ]),
                 vector_size: None,
             },

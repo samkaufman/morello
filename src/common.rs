@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use std::num::NonZeroU32;
 
-pub type DimSize = u32; // TODO: Switch to NonZeroU32.
+pub type DimSize = NonZeroU32;
 pub type Shape = smallvec::SmallVec<[DimSize; 5]>;
 pub type Contig = u8;
 

@@ -1,7 +1,7 @@
 use iai_callgrind::{black_box, main};
 use nonzero::nonzero as nz;
 
-use morello::common::{DimSize, Dtype};
+use morello::common::DimSize;
 use morello::db::DashmapDiskDatabase;
 use morello::layout::row_major;
 use morello::lspec;
@@ -29,7 +29,7 @@ fn synth(goal: &Spec<X86Target>) {
 
 #[inline(never)]
 fn synth_matmul_benchmark_1() {
-    synth(&matmul_spec(1));
+    synth(&matmul_spec(nz!(1u32)));
 }
 
 main!(
