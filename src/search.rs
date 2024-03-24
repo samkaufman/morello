@@ -1,7 +1,6 @@
 use itertools::Itertools;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use smallvec::{smallvec, SmallVec};
-use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
 use crate::cost::Cost;
@@ -15,7 +14,7 @@ use crate::spec::Spec;
 use crate::target::Target;
 
 struct ImplReducer<'a> {
-    results: BTreeSet<(Cost, ActionIdx)>,
+    results: SmallVec<[(ActionIdx, Cost); 1]>,
     top_k: usize,
     preferences: &'a [ActionIdx],
 }
@@ -33,9 +32,6 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d> + Send + Sync,
 {
-    if top_k == 0 {
-        return (smallvec![], 0, 0);
-    }
     assert!(db.max_k().map_or(true, |k| k >= top_k));
 
     let mut canonical_goal = goal.clone();
@@ -76,8 +72,11 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     D: Database<'d>,
 {
+    if top_k > 1 {
+        unimplemented!("Search for top_k > 1 not yet implemented.");
+    }
+
     // First, check if the Spec is already in the database.
-    println!("get: {}", goal);
     let get_result = db.get_with_preference(goal);
     let mut preferences: &[_] = &[];
     if let GetPreference::Hit(v) = get_result {
@@ -133,26 +132,9 @@ where
     }
 
     // Copy into the memo. table and return.
-    let mut final_results = reducer.finalize();
-    // if format!("{}", goal.0) == "Move((1×2, u32, <[1,0], [None, None]>), (1×2, u32), serial)" {
-    println!(
-        "put: {} -- down to [{}]",
-        goal,
-        final_results.iter().map(|r| &r.1.peaks).format(", ")
-    );
-    // }
-
-    // Pop until len > 1
-    // while final_results.len() > 1 {
-    //     final_results.pop();
-    // }
-    // debug_assert!(final_results.len() <= 1);
-
-    // TODO: Popping until len > 1 showed that any len > 1 has a bug in put.
-    // Iterations after the first one would be somehow incorrect, e.g.,
-    // incorrect overwrite.
-    db.put(goal.clone(), final_results.clone());
-    (final_results, hits, misses)
+    let final_result = reducer.finalize();
+    db.put(goal.clone(), final_result.clone());
+    (final_result, hits, misses)
 }
 
 fn top_down_impl<'d, Tgt, D, Aux>(
@@ -183,17 +165,18 @@ where
         let mut child_costs: SmallVec<[Cost; 3]> =
             SmallVec::with_capacity(partial_impl.children().len());
         for child_node in partial_impl.children() {
-            let (child_results, subhits, submisses) =
+            let (mut child_results, subhits, submisses) =
                 top_down_impl(db, child_node, top_k, thread_idx, thread_count);
             hits += subhits;
             misses += submisses;
             if child_results.is_empty() {
                 // Unsatisfiable.
                 return (smallvec![], hits, misses);
+            } else if child_results.len() == 1 {
+                child_costs.append(&mut child_results);
+            } else {
+                todo!("support k > 1");
             }
-            // Pick the lowest cost.
-            debug_assert!(child_results.iter().tuple_windows().all(|(a, b)| a <= b));
-            child_costs.push(child_results[0].clone());
         }
         let partial_impl_cost = Cost::from_child_costs(partial_impl, &child_costs);
         (smallvec![partial_impl_cost], hits, misses)
@@ -203,59 +186,69 @@ where
 impl<'a> ImplReducer<'a> {
     fn new(top_k: usize, preferences: &'a [ActionIdx]) -> Self {
         ImplReducer {
-            results: BTreeSet::new(),
+            results: smallvec![],
             top_k,
             preferences,
         }
     }
 
-    fn insert(&mut self, new_action_idx: ActionIdx, new_cost: Cost) {
-        if self.results.len() < self.top_k {
-            // We have not yet filled the top_k, so just insert.
-            self.results.insert((new_cost, new_action_idx));
-        } else if self
-            .results
-            .iter()
-            .find(|&(cost, _)| *cost == new_cost)
-            .is_some()
-        {
-            debug_assert!(self.results.len() == self.top_k);
+    fn insert(&mut self, new_action_idx: ActionIdx, cost: Cost) {
+        match self.results.binary_search_by_key(&&cost, |imp| &imp.1) {
+            Ok(idx) => {
+                debug_assert!(idx < self.top_k);
+                // Replace something if it improves preference count, and do
+                //   nothing if not.
+                let mut to_set = None;
+                for i in self.iter_surrounding_matching_cost_indices(idx, &cost) {
+                    // TODO: Instead of filtering here, just push down the length.
+                    if i >= self.preferences.len() {
+                        continue;
+                    }
 
-            // We have filled the top_k and found the same cost in results, so
-            //   replace something if it improves preference count, and do
-            //   nothing if not.
-            if let Some(action) = self
-                .results
-                .iter()
-                .enumerate()
-                // Since we know that results is sorted by Cost, this filter
-                //   only takes contiguous elements with the same cost.
-                .filter(|&(i, (cost, _))| i < self.preferences.len() && *cost == new_cost)
-                .find(|&(i, _)| new_action_idx == self.preferences[i])
-                .map(|(_, action)| action)
-            {
-                self.results.remove(&action.clone());
-                self.results.insert((new_cost, new_action_idx));
+                    if new_action_idx == self.preferences[i] {
+                        to_set = Some(i);
+                        break;
+                    }
+                }
+                if let Some(i) = to_set {
+                    self.results[i].0 = new_action_idx;
+                }
+
+                debug_assert!(self.results.len() <= self.top_k);
             }
-        } else {
-            debug_assert!(self.results.len() == self.top_k);
-
-            // We have filled the top_k, but there is no same cost in results,
-            //   so replace the last element if it is worse than the new one.
-            self.results.insert((new_cost, new_action_idx));
-            self.results.pop_last();
+            Err(idx) if idx < self.top_k => {
+                if self.results.len() == self.top_k {
+                    self.results.pop();
+                }
+                self.results.insert(idx, (new_action_idx, cost));
+            }
+            Err(_) => {}
         }
-
-        debug_assert!(self.results.iter().tuple_windows().all(|(a, b)| a.0 <= b.0));
+        debug_assert!(self.results.iter().tuple_windows().all(|(a, b)| a.1 < b.1));
         debug_assert!(self.results.len() <= self.top_k);
-        debug_assert!(self.results.iter().map(|(_, a)| a).all_unique());
+        debug_assert!(self.results.iter().map(|(a, _)| a).all_unique());
     }
 
     fn finalize(self) -> SmallVec<[(ActionIdx, Cost); 1]> {
         self.results
-            .into_iter()
-            .map(|(cost, action_idx)| (action_idx, cost))
-            .collect()
+    }
+
+    fn iter_surrounding_matching_cost_indices<'s>(
+        &'s self,
+        initial_idx: usize,
+        cost: &'s Cost,
+    ) -> impl Iterator<Item = usize> + 's {
+        debug_assert_eq!(&self.results[initial_idx].1, cost);
+        std::iter::once(initial_idx)
+            .chain(
+                ((initial_idx + 1)..self.results.len())
+                    .take_while(move |idx| &self.results[*idx].1 == cost),
+            )
+            .chain(
+                (0..initial_idx)
+                    .rev()
+                    .take_while(move |idx| &self.results[*idx].1 == cost),
+            )
     }
 }
 
@@ -331,182 +324,6 @@ mod tests {
             let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, Some(nz!(1usize)));
             assert_eq!(first_solutions, lower_solutions);
         }
-    }
-
-    fn create_simple_cost(main: u32) -> Cost {
-        Cost {
-            main,
-            peaks: MemVec::zero::<X86Target>(),
-            depth: 0,
-        }
-    }
-
-    #[test]
-    fn test_implreducer_sort_by_cost() {
-        let top_k = 3;
-        let preferences = &[];
-        let mut reducer = ImplReducer::new(top_k, preferences);
-
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
-        let cost3 = create_simple_cost(3);
-
-        reducer.insert(0, cost1.clone());
-        reducer.insert(1, cost3.clone());
-        reducer.insert(2, cost2.clone());
-
-        let expected: SmallVec<[_; 1]> = smallvec![(0, cost1), (2, cost2), (1, cost3)];
-        assert_eq!(reducer.finalize(), expected);
-    }
-
-    #[test]
-    fn test_implreducer_sort_by_action_idx() {
-        let top_k = 3;
-        let preferences = &[];
-        let mut reducer = ImplReducer::new(top_k, preferences);
-
-        let cost1 = create_simple_cost(1);
-
-        reducer.insert(1, cost1.clone());
-        reducer.insert(0, cost1.clone());
-        reducer.insert(2, cost1.clone());
-
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(0, cost1.clone()), (1, cost1.clone()), (2, cost1.clone())];
-        assert_eq!(reducer.finalize(), expected);
-    }
-
-    #[test]
-    fn test_implreducer_sort_by_cost_then_action_idx() {
-        let top_k = 3;
-        let preferences = &[];
-        let mut reducer = ImplReducer::new(top_k, preferences);
-
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
-
-        reducer.insert(1, cost1.clone());
-        reducer.insert(0, cost2.clone());
-        reducer.insert(2, cost1.clone());
-
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(1, cost1.clone()), (2, cost1.clone()), (0, cost2)];
-        assert_eq!(reducer.finalize(), expected);
-    }
-
-    #[test]
-    fn test_implreducer_preference_replacement() {
-        let top_k = 3;
-        let preferences = &[0, 3, 3];
-        let mut reducer = ImplReducer::new(top_k, preferences);
-
-        let cost1 = create_simple_cost(1);
-
-        reducer.insert(0, cost1.clone());
-        reducer.insert(1, cost1.clone());
-        reducer.insert(2, cost1.clone());
-        reducer.insert(3, cost1.clone());
-
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(0, cost1.clone()), (2, cost1.clone()), (3, cost1)];
-        assert_eq!(reducer.finalize(), expected);
-    }
-
-    #[test]
-    fn test_implreducer_preference_replacement2() {
-        let top_k = 3;
-        let preferences = &[0, 0, 3];
-        let mut reducer = ImplReducer::new(top_k, preferences);
-
-        let cost1 = create_simple_cost(1);
-
-        reducer.insert(0, cost1.clone());
-        reducer.insert(1, cost1.clone());
-        reducer.insert(2, cost1.clone());
-        reducer.insert(3, cost1.clone());
-
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(0, cost1.clone()), (1, cost1.clone()), (3, cost1)];
-        assert_eq!(reducer.finalize(), expected);
-    }
-
-    #[test]
-    fn test_implreducer_preference_replacement_and_sort_by_cost() {
-        let top_k = 3;
-        let preferences = &[0, 0, 3];
-        let mut reducer = ImplReducer::new(top_k, preferences);
-
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
-
-        reducer.insert(0, cost2.clone());
-        reducer.insert(1, cost2.clone());
-        reducer.insert(2, cost2.clone());
-        reducer.insert(3, cost1.clone());
-
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(3, cost1.clone()), (0, cost2.clone()), (1, cost2)];
-        assert_eq!(reducer.finalize(), expected);
-    }
-
-    #[test]
-    fn test_implreducer_preference_replacement_and_sort_by_cost_then_action_idx() {
-        let top_k = 3;
-        let preferences = &[3, 0, 0];
-        let mut reducer = ImplReducer::new(top_k, preferences);
-
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
-
-        reducer.insert(0, cost1.clone());
-        reducer.insert(1, cost2.clone());
-        reducer.insert(2, cost1.clone());
-        // 0, 2, 1
-
-        reducer.insert(3, cost1.clone());
-        // 3, 2, 1 -> 2, 3, 1
-
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(2, cost1.clone()), (3, cost1.clone()), (1, cost2)];
-        assert_eq!(reducer.finalize(), expected);
-    }
-
-    #[test]
-    fn test_implreducer_cost_replacement() {
-        let top_k = 3;
-        let preferences = &[];
-        let mut reducer = ImplReducer::new(top_k, preferences);
-
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
-        let cost3 = create_simple_cost(3);
-
-        reducer.insert(0, cost1.clone());
-        reducer.insert(1, cost3.clone());
-        reducer.insert(2, cost3.clone());
-        reducer.insert(3, cost2.clone());
-
-        let expected: SmallVec<[_; 1]> = smallvec![(0, cost1), (3, cost2), (1, cost3)];
-        assert_eq!(reducer.finalize(), expected);
-    }
-
-    #[test]
-    fn test_implreducer_no_cost_replacement() {
-        let top_k = 3;
-        let preferences = &[];
-        let mut reducer = ImplReducer::new(top_k, preferences);
-
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
-
-        reducer.insert(0, cost1.clone());
-        reducer.insert(1, cost1.clone());
-        reducer.insert(2, cost1.clone());
-        reducer.insert(3, cost2.clone());
-
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(0, cost1.clone()), (1, cost1.clone()), (2, cost1.clone())];
-        assert_eq!(reducer.finalize(), expected, "no replacement should occur");
     }
 
     #[test]
