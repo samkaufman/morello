@@ -38,7 +38,7 @@ pub fn aligned_approx<Tgt: Target>(
     let parent_physical_shape = parent.layout().expand_physical_shape(parent.shape())?;
     let mut stride_bytes = u32::from(parent.dtype().size());
     for phys_dim_size in parent_physical_shape.iter().rev() {
-        stride_bytes *= phys_dim_size;
+        stride_bytes *= phys_dim_size.get();
         if stride_bytes % Tgt::line_size() != 0 {
             return Ok(false);
         }
@@ -59,6 +59,7 @@ mod tests {
         views::{Param, Tile, View},
     };
     use itertools::Itertools;
+    use nonzero::nonzero as nz;
     use smallvec::smallvec;
 
     #[test]
@@ -66,7 +67,7 @@ mod tests {
         // TODO: Make sure to test different dtypes.
 
         let parent = TensorSpec::<X86Target>::new_canon(
-            smallvec![16, 16, 16],
+            smallvec![nz!(16u32), nz!(16u32), nz!(16u32)],
             Dtype::Uint8,
             row_major(3).contiguous_full(),
             true,
@@ -81,7 +82,7 @@ mod tests {
         // TODO: We don't really need to allocate the buffer, do we? We just need the indices,
         //   shifted if parent is unaligned.
         let _buffer = {
-            let volume = usize::try_from(parent.volume()).unwrap();
+            let volume = usize::try_from(parent.volume().get()).unwrap();
             if parent.aligned() {
                 vec![0; volume]
             } else {
@@ -95,7 +96,12 @@ mod tests {
 
         let parent_as_param = Param::new(0, parent);
         let parent = parent_as_param.spec();
-        let tile = Tile::new(smallvec![4, 4, 4], smallvec![4, 4, 4], &parent_as_param).unwrap();
+        let tile = Tile::new(
+            smallvec![nz!(4u32), nz!(4u32), nz!(4u32)],
+            smallvec![nz!(4u32), nz!(4u32), nz!(4u32)],
+            &parent_as_param,
+        )
+        .unwrap();
         let iexpr = tile.compose_buffer_indexing_expr(
             parent
                 .layout()

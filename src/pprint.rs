@@ -148,7 +148,6 @@ fn pprint_inner<'a, Tgt, Aux>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Dtype;
     use crate::imp::subspecs::SpecApp;
     use crate::layout::row_major;
     use crate::lspec;
@@ -158,12 +157,13 @@ mod tests {
         X86Target,
     };
     use crate::tensorspec::TensorSpecAux;
+    use nonzero::nonzero as nz;
 
     #[test]
     fn test_can_pprint_a_specapp_with_no_aux() {
         let rm1 = row_major(1);
         let logical_spec: LogicalSpec<X86Target> =
-            lspec!(Move([4], (u8, GL, rm1.clone()), (u8, L1, rm1)));
+            lspec!(Move([nz!(4u32)], (u8, GL, rm1.clone()), (u8, L1, rm1)));
         let args = logical_spec
             .parameters()
             .into_iter()

@@ -32,7 +32,6 @@ impl Tiling {
 
     pub fn new_sliding(shape: Shape, steps: Shape) -> Tiling {
         assert_eq!(shape.len(), steps.len());
-        assert!(steps.iter().all(|&s| s > 0));
         Tiling {
             shape,
             step_sizes: steps,
@@ -77,7 +76,7 @@ impl Tiling {
             origin_size,
             self.shape[d]
         );
-        divrem::DivCeil::div_ceil(origin_size, self.step_sizes[d])
+        divrem::DivCeil::div_ceil(origin_size.get(), self.step_sizes[d].get())
     }
 
     /// Counts the boundary elements in a given Spec dimension of `origin_size`.
@@ -88,22 +87,22 @@ impl Tiling {
         let span = self.shape[usize::from(dim)];
         let step = self.step_sizes[usize::from(dim)];
 
-        if step >= span {
-            let remainder = origin_size % step;
-            if remainder == 0 || remainder >= span {
+        if step.get() >= span.get() {
+            let remainder = origin_size.get() % step.get();
+            if remainder == 0 || remainder >= span.get() {
                 0
             } else {
                 remainder
             }
-        } else if step + 1 == span {
+        } else if step.get() + 1 == span.get() {
             // This case should be the same as the following, more general,
             // `step < span` case, but when there is only a difference of 1, we know
             // that only one boundary case will result. This lets us satisfy the `u32`
             // result type of this function, rather than returning a collection.
             // step.try_into().unwrap()
-            let overlap = span - step;
+            let overlap = span.get() - step.get();
             assert_eq!(overlap, 1);
-            (origin_size - 1) % step + overlap
+            (origin_size.get() - 1) % step + overlap
         } else {
             todo!("Arbitrary overlaps mean multiple boundary cases per dimension!");
         }
@@ -120,33 +119,46 @@ impl Tiling {
 mod tests {
     use super::*;
     use itertools::Itertools;
+    use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::proptest;
     use smallvec::smallvec;
     use std::cmp::max;
 
     const ALLOW_ARBITRARY_SLIDES: bool = false;
-    const MAX_ORIGIN_SIZE: DimSize = 20;
+    const MAX_ORIGIN_SIZE: DimSize = nz!(20u32);
 
     /// A Strategy for generating valid Shapes.
     fn shape_strategy(max_size: DimSize, max_dims: u8) -> impl Strategy<Value = Shape> {
-        prop::collection::vec(1u32..=max_size, 1..=usize::from(max_dims)).prop_map_into()
+        prop::collection::vec(1u32..=max_size.get(), 1..=usize::from(max_dims))
+            .prop_map(|v| v.into_iter().map(|x| DimSize::new(x).unwrap()).collect())
     }
 
     /// A Strategy for generating valid Tilings.
     fn tiling_strategy(dims: u8) -> impl Strategy<Value = Tiling> {
-        shape_strategy(4, dims)
+        shape_strategy(nz!(4u32), dims)
             .prop_flat_map(|shp| {
                 let rank = shp.len();
                 if ALLOW_ARBITRARY_SLIDES {
                     (Just(shp), prop::collection::vec(1u32..=4, rank).boxed())
                 } else {
-                    let steps =
-                        Strategy::boxed(shp.iter().map(|&d| max(1, d - 1)..10).collect::<Vec<_>>());
+                    let steps = Strategy::boxed(
+                        shp.iter()
+                            .map(|&d| max(1, d.get() - 1)..10)
+                            .collect::<Vec<_>>(),
+                    );
                     (Just(shp), steps)
                 }
             })
-            .prop_map(|(shape, steps)| Tiling::new_sliding(shape, steps.into()))
+            .prop_map(|(shape, steps)| {
+                Tiling::new_sliding(
+                    shape,
+                    steps
+                        .into_iter()
+                        .map(|x| DimSize::new(x).unwrap())
+                        .collect(),
+                )
+            })
     }
 
     /// A Strategy for generating Tilings along with larger shapes.
@@ -158,18 +170,21 @@ mod tests {
                 .iter()
                 .map(|&tile_dim_size| {
                     assert!(tile_dim_size <= MAX_ORIGIN_SIZE);
-                    tile_dim_size..=MAX_ORIGIN_SIZE
+                    tile_dim_size.get()..=MAX_ORIGIN_SIZE.get()
                 })
                 .collect::<Vec<_>>()
-                .prop_map_into();
+                .prop_map(|v| v.into_iter().map(|x| DimSize::new(x).unwrap()).collect());
             (Just(tiling), origin_shape)
         })
     }
 
     #[test]
     fn test_tiling_sliding() {
-        const OUTER_SHAPE: [DimSize; 5] = [1, 4, 2, 4, 4];
-        let t = Tiling::new_sliding(smallvec![1, 3, 1, 3, 3], smallvec![1, 3, 2, 1, 1]);
+        const OUTER_SHAPE: [DimSize; 5] = [nz!(1u32), nz!(4u32), nz!(2u32), nz!(4u32), nz!(4u32)];
+        let t = Tiling::new_sliding(
+            smallvec![nz!(1u32), nz!(3u32), nz!(1u32), nz!(3u32), nz!(3u32)],
+            smallvec![nz!(1u32), nz!(3u32), nz!(2u32), nz!(1u32), nz!(1u32)],
+        );
         assert_eq!(t.steps_dim(0, OUTER_SHAPE[0]), 1);
         assert_eq!(t.steps_dim(1, OUTER_SHAPE[1]), 2);
         assert_eq!(t.steps_dim(2, OUTER_SHAPE[2]), 1);
@@ -187,12 +202,12 @@ mod tests {
             // dimension.
             for dim in 0..tiling.shape().len() {
                 let mut steps_began = 0;
-                for (tile_idx, pt_idx) in (0..).cartesian_product(0..tiling.shape()[dim]) {
-                    let origin_idx = tile_idx * tiling.step_sizes[dim] + pt_idx;
-                    if pt_idx == 0 && origin_idx >= origin_shape[dim] {
+                for (tile_idx, pt_idx) in (0..).cartesian_product(0..tiling.shape()[dim].get()) {
+                    let origin_idx = tile_idx * tiling.step_sizes[dim].get() + pt_idx;
+                    if pt_idx == 0 && origin_idx >= origin_shape[dim].get() {
                         break
                     }
-                    if origin_idx >= origin_shape[dim] {
+                    if origin_idx >= origin_shape[dim].get() {
                         continue
                     }
                     if pt_idx == 0 {
@@ -213,9 +228,9 @@ mod tests {
             // that boundary has the advertised size in the origin shape. Do this for
             // each dimension.
             for dim in 0..tiling.shape().len() {
-                for (tile_idx, pt_idx) in (0..).cartesian_product(0..tiling.shape()[dim]) {
-                    let origin_idx = tile_idx * tiling.step_sizes[dim] + pt_idx;
-                    if origin_idx >= origin_shape[dim] {
+                for (tile_idx, pt_idx) in (0..).cartesian_product(0..tiling.shape()[dim].get()) {
+                    let origin_idx = tile_idx * tiling.step_sizes[dim].get() + pt_idx;
+                    if origin_idx >= origin_shape[dim].get() {
                         // We've hit a boundary. Check that it has the right size.
                         let boundary_size = tiling.boundary_size(dim as u8, origin_shape[dim]);
                         assert_eq!(boundary_size, pt_idx, "Boundary size computed as {} but expected {}", boundary_size, pt_idx);

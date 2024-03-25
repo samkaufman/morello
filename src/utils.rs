@@ -137,7 +137,7 @@ pub const fn prev_power_of_two_u32(n: u32) -> u32 {
 pub fn iter_powers_of_two(
     n: u64,
     include_zero: bool,
-) -> impl Iterator<Item = u64> + DoubleEndedIterator + Clone {
+) -> impl DoubleEndedIterator<Item = u64> + Clone {
     let start = if include_zero { 0 } else { 1 };
     let top_bits = bit_length(n);
     (start..top_bits + 1).map(|b| if b == 0 { 0 } else { 2u64.pow(b - 1) })

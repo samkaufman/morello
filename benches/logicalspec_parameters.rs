@@ -1,6 +1,7 @@
 use iai_callgrind::{black_box, main};
+use nonzero::nonzero as nz;
 
-use morello::common::{DimSize, Dtype};
+use morello::common::DimSize;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
@@ -46,7 +47,7 @@ fn move_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
 
 #[inline(never)]
 fn iter_logicalspec_parameters_matmul() {
-    let sp = matmul_spec::<X86Target>(32);
+    let sp = matmul_spec::<X86Target>(nz!(32u32));
     for _ in 0..100 {
         for p in sp.parameters() {
             black_box(p);
@@ -56,7 +57,7 @@ fn iter_logicalspec_parameters_matmul() {
 
 #[inline(never)]
 fn iter_logicalspec_parameters_conv() {
-    let sp = conv_spec::<X86Target>(32);
+    let sp = conv_spec::<X86Target>(nz!(32u32));
     for _ in 0..100 {
         for p in sp.parameters() {
             black_box(p);
@@ -66,7 +67,7 @@ fn iter_logicalspec_parameters_conv() {
 
 #[inline(never)]
 fn iter_logicalspec_parameters_move() {
-    let sp = move_spec::<X86Target>(32);
+    let sp = move_spec::<X86Target>(nz!(32u32));
     for _ in 0..100 {
         for p in sp.parameters() {
             black_box(p);
