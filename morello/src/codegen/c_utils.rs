@@ -236,5 +236,7 @@ pub fn c_type(dtype: Dtype) -> &'static str {
         Dtype::Sint16 => "int16_t",
         Dtype::Uint32 => "uint32_t",
         Dtype::Sint32 => "int32_t",
+        Dtype::Float32 => "float",
+        Dtype::Bfloat16 => "hwy::bfloat16_t",
     }
 }

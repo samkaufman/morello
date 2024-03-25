@@ -1593,6 +1593,12 @@ pub mod macros {
             (i32) => {
                 $crate::common::Dtype::Sint32
             };
+            (f32) => {
+                $crate::common::Dtype::Float32
+            };
+            (bf16) => {
+                $crate::common::Dtype::Bfloat16
+            };
             ($val:expr) => {
                 $val
             };

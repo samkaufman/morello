@@ -14,6 +14,8 @@ pub enum Dtype {
     Sint16,
     Uint32,
     Sint32,
+    Float32,
+    Bfloat16,
 }
 
 impl Dtype {
@@ -21,8 +23,8 @@ impl Dtype {
     pub fn size(&self) -> u8 {
         match self {
             Dtype::Uint8 | Dtype::Sint8 => 1,
-            Dtype::Uint16 | Dtype::Sint16 => 2,
-            Dtype::Uint32 | Dtype::Sint32 => 4,
+            Dtype::Uint16 | Dtype::Sint16 | Dtype::Bfloat16 => 2,
+            Dtype::Uint32 | Dtype::Sint32 | Dtype::Float32 => 4,
         }
     }
 
@@ -34,6 +36,8 @@ impl Dtype {
             Dtype::Sint16 => "int16_t",
             Dtype::Uint32 => "uint32_t",
             Dtype::Sint32 => "int32_t",
+            Dtype::Float32 => "float",
+            Dtype::Bfloat16 => "bfloat16_t",
         }
     }
 
@@ -45,6 +49,7 @@ impl Dtype {
             Dtype::Sint16 => "PRIi16",
             Dtype::Uint32 => "PRIu32",
             Dtype::Sint32 => "PRIi32",
+            Dtype::Float32 | Dtype::Bfloat16 => todo!(),
         }
     }
 }
@@ -58,6 +63,8 @@ impl Display for Dtype {
             Dtype::Sint16 => write!(f, "i16"),
             Dtype::Uint32 => write!(f, "u32"),
             Dtype::Sint32 => write!(f, "i32"),
+            Dtype::Float32 => write!(f, "f32"),
+            Dtype::Bfloat16 => write!(f, "bf16"),
         }
     }
 }

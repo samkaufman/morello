@@ -1152,8 +1152,8 @@ fn zero_points(expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<BufferVar> {
 const fn endian_convert_fn(dtype: Dtype) -> &'static str {
     match dtype {
         Dtype::Uint8 | Dtype::Sint8 => "",
-        Dtype::Uint16 | Dtype::Sint16 => "LE_TO_CPU16",
-        Dtype::Uint32 | Dtype::Sint32 => "LE_TO_CPU32",
+        Dtype::Uint16 | Dtype::Sint16 | Dtype::Bfloat16 => "LE_TO_CPU16",
+        Dtype::Uint32 | Dtype::Sint32 | Dtype::Float32 => "LE_TO_CPU32",
     }
 }
 

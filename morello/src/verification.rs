@@ -3,7 +3,7 @@
 
 use crate::{
     codegen::BuiltArtifact,
-    common::Dtype,
+    common::{DimSize, Dtype},
     spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},
     target::Target,
     tensorspec::TensorSpec,
@@ -26,6 +26,8 @@ pub enum DynArray<D> {
     Sint16(Array<i16, D>),
     Uint32(Array<u32, D>),
     Sint32(Array<i32, D>),
+    Float32(Array<f32, D>),
+    Bfloat16(Array<half::bf16, D>),
 }
 
 pub enum DynArrayViewMut<'a, D> {
@@ -35,6 +37,8 @@ pub enum DynArrayViewMut<'a, D> {
     Sint16(ArrayViewMut<'a, i16, D>),
     Uint32(ArrayViewMut<'a, u32, D>),
     Sint32(ArrayViewMut<'a, i32, D>),
+    Float32(ArrayViewMut<'a, f32, D>),
+    Bfloat16(ArrayViewMut<'a, half::bf16, D>),
 }
 
 impl BuiltArtifact {
@@ -177,6 +181,8 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Sint16(a) => a.shape(),
             DynArray::Uint32(a) => a.shape(),
             DynArray::Sint32(a) => a.shape(),
+            DynArray::Float32(a) => a.shape(),
+            DynArray::Bfloat16(a) => a.shape(),
         }
     }
 
@@ -191,6 +197,8 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Sint16(a) => DynArray::Sint16(a.slice(info).to_owned()),
             DynArray::Uint32(a) => DynArray::Uint32(a.slice(info).to_owned()),
             DynArray::Sint32(a) => DynArray::Sint32(a.slice(info).to_owned()),
+            DynArray::Float32(a) => DynArray::Float32(a.slice(info).to_owned()),
+            DynArray::Bfloat16(a) => DynArray::Bfloat16(a.slice(info).to_owned()),
         }
     }
 
@@ -205,6 +213,8 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Sint16(a) => DynArrayViewMut::Sint16(a.slice_mut(info)),
             DynArray::Uint32(a) => DynArrayViewMut::Uint32(a.slice_mut(info)),
             DynArray::Sint32(a) => DynArrayViewMut::Sint32(a.slice_mut(info)),
+            DynArray::Float32(a) => DynArrayViewMut::Float32(a.slice_mut(info)),
+            DynArray::Bfloat16(a) => DynArrayViewMut::Bfloat16(a.slice_mut(info)),
         }
     }
 
@@ -219,6 +229,8 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Sint16(a) => a.into_dimensionality::<A>().map(DynArray::Sint16),
             DynArray::Uint32(a) => a.into_dimensionality::<A>().map(DynArray::Uint32),
             DynArray::Sint32(a) => a.into_dimensionality::<A>().map(DynArray::Sint32),
+            DynArray::Float32(a) => a.into_dimensionality::<A>().map(DynArray::Float32),
+            DynArray::Bfloat16(a) => a.into_dimensionality::<A>().map(DynArray::Bfloat16),
         }
     }
 
@@ -234,6 +246,8 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Sint16(a) => a.fill(0),
             DynArray::Uint32(a) => a.fill(0),
             DynArray::Sint32(a) => a.fill(0),
+            DynArray::Float32(a) => a.fill(0.0),
+            DynArray::Bfloat16(a) => a.fill(half::bf16::ZERO),
         }
     }
 
@@ -245,6 +259,8 @@ impl<D: ndarray::Dimension> DynArray<D> {
             (DynArray::Sint16(a), DynArray::Sint16(b)) => a.assign(b),
             (DynArray::Uint32(a), DynArray::Uint32(b)) => a.assign(b),
             (DynArray::Sint32(a), DynArray::Sint32(b)) => a.assign(b),
+            (DynArray::Float32(a), DynArray::Float32(b)) => a.assign(b),
+            (DynArray::Bfloat16(a), DynArray::Bfloat16(b)) => a.assign(b),
             _ => panic!("Mismatched types"),
         }
     }
@@ -258,6 +274,8 @@ impl<D: ndarray::Dimension> DynArray<D> {
         i16: num_traits::AsPrimitive<T>,
         u32: num_traits::AsPrimitive<T>,
         i32: num_traits::AsPrimitive<T>,
+        f32: num_traits::AsPrimitive<T>,
+        half::bf16: num_traits::AsPrimitive<T>,
     {
         match self {
             DynArray::Uint8(a) => a.mapv(|x| x.as_()),
@@ -266,6 +284,8 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Sint16(a) => a.mapv(|x| x.as_()),
             DynArray::Uint32(a) => a.mapv(|x| x.as_()),
             DynArray::Sint32(a) => a.mapv(|x| x.as_()),
+            DynArray::Float32(a) => a.mapv(|x| x.as_()),
+            DynArray::Bfloat16(a) => a.mapv(|x| x.as_()),
         }
     }
 }
@@ -303,6 +323,16 @@ impl DynArray<Ix2> {
                 let r = rhs.saturating_cast::<i32>();
                 o.assign(&l.dot(&r));
             }
+            DynArray::Float32(o) => {
+                let l = self.saturating_cast::<f32>();
+                let r = rhs.saturating_cast::<f32>();
+                o.assign(&l.dot(&r));
+            }
+            DynArray::Bfloat16(o) => {
+                let l = self.saturating_cast::<half::bf16>();
+                let r = rhs.saturating_cast::<half::bf16>();
+                o.assign(&l.dot(&r));
+            }
         }
     }
 
@@ -330,6 +360,12 @@ impl DynArray<Ix2> {
             (DynArray::Sint32(img), DynArray::Sint32(ker)) => img
                 .conv_2d(ker, conv_type, PaddingMode::Zeros)
                 .map(DynArray::Sint32),
+            (DynArray::Float32(img), DynArray::Float32(ker)) => img
+                .conv_2d(ker, conv_type, PaddingMode::Zeros)
+                .map(DynArray::Float32),
+            (DynArray::Bfloat16(img), DynArray::Bfloat16(ker)) => img
+                .conv_2d(ker, conv_type, PaddingMode::Zeros)
+                .map(DynArray::Bfloat16),
             _ => panic!("Mismatched types"),
         }
     }
@@ -344,6 +380,8 @@ impl<D: ndarray::Dimension> PartialEq for DynArray<D> {
             (Self::Sint16(l0), Self::Sint16(r0)) => l0 == r0,
             (Self::Uint32(l0), Self::Uint32(r0)) => l0 == r0,
             (Self::Sint32(l0), Self::Sint32(r0)) => l0 == r0,
+            (Self::Float32(l0), Self::Float32(r0)) => l0 == r0,
+            (Self::Bfloat16(l0), Self::Bfloat16(r0)) => l0 == r0,
             _ => false,
         }
     }
@@ -385,6 +423,18 @@ impl<D> From<Array<i32, D>> for DynArray<D> {
     }
 }
 
+impl<D> From<Array<f32, D>> for DynArray<D> {
+    fn from(value: Array<f32, D>) -> Self {
+        DynArray::Float32(value)
+    }
+}
+
+impl<D> From<Array<half::bf16, D>> for DynArray<D> {
+    fn from(value: Array<half::bf16, D>) -> Self {
+        DynArray::Bfloat16(value)
+    }
+}
+
 impl<'a, D> DynArrayViewMut<'a, D>
 where
     D: ndarray::Dimension,
@@ -397,6 +447,8 @@ where
             (DynArrayViewMut::Sint16(l), DynArray::Sint16(r)) => l.assign(r),
             (DynArrayViewMut::Uint32(l), DynArray::Uint32(r)) => l.assign(r),
             (DynArrayViewMut::Sint32(l), DynArray::Sint32(r)) => l.assign(r),
+            (DynArrayViewMut::Float32(l), DynArray::Float32(r)) => l.assign(r),
+            (DynArrayViewMut::Bfloat16(l), DynArray::Bfloat16(r)) => l.assign(r),
             _ => panic!("Mismatched types"),
         }
     }
@@ -427,23 +479,24 @@ where
 
 fn make_array_input_dyn<Tgt: Target>(input: &TensorSpec<Tgt>) -> DynArray<IxDyn> {
     match input.dtype() {
-        Dtype::Uint8 => DynArray::Uint8(make_array_input_static::<Tgt, _>(input)),
-        Dtype::Sint8 => DynArray::Sint8(make_array_input_static::<Tgt, _>(input)),
-        Dtype::Uint16 => DynArray::Uint16(make_array_input_static::<Tgt, _>(input)),
-        Dtype::Sint16 => DynArray::Sint16(make_array_input_static::<Tgt, _>(input)),
-        Dtype::Uint32 => DynArray::Uint32(make_array_input_static::<Tgt, _>(input)),
-        Dtype::Sint32 => DynArray::Sint32(make_array_input_static::<Tgt, _>(input)),
+        Dtype::Uint8 => DynArray::Uint8(make_array_input_static(input.shape())),
+        Dtype::Sint8 => DynArray::Sint8(make_array_input_static(input.shape())),
+        Dtype::Uint16 => DynArray::Uint16(make_array_input_static(input.shape())),
+        Dtype::Sint16 => DynArray::Sint16(make_array_input_static(input.shape())),
+        Dtype::Uint32 => DynArray::Uint32(make_array_input_static(input.shape())),
+        Dtype::Sint32 => DynArray::Sint32(make_array_input_static(input.shape())),
+        Dtype::Float32 => DynArray::Float32(make_array_input_static_f32(input.shape())),
+        Dtype::Bfloat16 => DynArray::Bfloat16(make_array_input_static_bf16(input.shape())),
     }
 }
 
-fn make_array_input_static<Tgt, T>(input: &TensorSpec<Tgt>) -> ArrayD<T>
+fn make_array_input_static<T>(shape: &[DimSize]) -> ArrayD<T>
 where
-    Tgt: Target,
     T: num_traits::Bounded + num_traits::WrappingAdd + num_traits::Num + Copy,
 {
     let mut value_cnt = 1;
-    let mut shp_usize = Vec::with_capacity(input.shape().len());
-    for v in input.shape() {
+    let mut shp_usize = Vec::with_capacity(shape.len());
+    for v in shape {
         let vc = usize::try_from(*v).unwrap();
         shp_usize.push(vc);
         value_cnt *= vc;
@@ -451,6 +504,14 @@ where
     Array::from_iter(cycle_int_values::<T>().take(value_cnt))
         .into_shape(IxDyn(&shp_usize))
         .unwrap()
+}
+
+fn make_array_input_static_f32(shape: &[DimSize]) -> ArrayD<f32> {
+    make_array_input_static::<u8>(shape).map(|x| x.as_())
+}
+
+fn make_array_input_static_bf16(shape: &[DimSize]) -> ArrayD<half::bf16> {
+    make_array_input_static::<u8>(shape).map(|x| x.as_())
 }
 
 /// Returns an iterator that yields infinitely all values of a numeric type in ascending order.
@@ -502,6 +563,16 @@ fn write_inputs(input: &DynArray<IxDyn>, writer: &mut BufWriter<NamedTempFile>) 
                 writer.write_all(value.to_le_bytes().as_ref())?;
             }
         }
+        DynArray::Float32(a) => {
+            for value in a.iter() {
+                writer.write_all(value.to_le_bytes().as_ref())?;
+            }
+        }
+        DynArray::Bfloat16(a) => {
+            for value in a.iter() {
+                writer.write_all(value.to_le_bytes().as_ref())?;
+            }
+        }
     };
     Ok(())
 }
@@ -532,6 +603,8 @@ fn read_output(dtype: Dtype, source: &[u8]) -> io::Result<DynArray<IxDyn>> {
         Dtype::Sint16 => ndarray_from_lines::<i16, _, _>(&shape, &mut lines),
         Dtype::Uint32 => ndarray_from_lines::<u32, _, _>(&shape, &mut lines),
         Dtype::Sint32 => ndarray_from_lines::<i32, _, _>(&shape, &mut lines),
+        Dtype::Float32 => ndarray_from_lines::<f32, _, _>(&shape, &mut lines),
+        Dtype::Bfloat16 => ndarray_from_lines::<half::bf16, _, _>(&shape, &mut lines),
     })
 }
 
