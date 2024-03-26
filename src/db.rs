@@ -193,6 +193,10 @@ impl DashmapDiskDatabase {
         k: u8,
         dashmap_constructor: &impl Fn() -> DashMap<DbKey, DbBlock>,
     ) -> Result<Self> {
+        if k == 0 {
+            todo!();
+        }
+
         let use_rle_blocks = std::env::var("MORELLO_STORE_COSTS").is_ok();
         let grouped_entries = match file_path {
             Some(path) => match std::fs::File::open(path) {
@@ -506,17 +510,19 @@ impl DbBlock {
                                                 "No actions for sub-Impl {} while computing cost for {}",
                                                 s.0, query
                                             );
-                                        } else if inner_decisions.len() == 1 {
-                                            inner_decisions[0].1.clone()
                                         } else {
-                                            todo!();
+                                            // Pick the lowest cost action by
+                                            //   O(N) over N implementations.
+                                            // Decisions are in ascending
+                                            //   order, so just pick the first.
+                                            inner_decisions[0].1.clone()
                                         }
                                     });
                                     (action_idx, recomputed_cost)
                                 })
                                 .collect(),
                         ))
-                    },
+                    }
                     None => {
                         // TODO: Reintoduce returning `neighbor` as a preference.
                         GetPreference::Miss(None)
