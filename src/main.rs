@@ -31,7 +31,6 @@ use morello::{
 static GLOBAL: Jemalloc = Jemalloc;
 
 const BINARY_SCALE_SHAPES: bool = true;
-const K: u8 = 1;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -62,6 +61,10 @@ struct Args {
     /// Number of parallel jobs for top-down search
     #[arg(long, short)]
     jobs: Option<usize>,
+
+    /// Try to schedule top k implementations
+    #[arg(long, short = 'k', default_value_t = 1)]
+    top_k: u8,
 
     #[command(subcommand)]
     subcmd: Subcommand,
@@ -132,7 +135,7 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     color::set_color_mode(args.color);
-    let db = DashmapDiskDatabase::try_new(args.db.as_deref(), BINARY_SCALE_SHAPES, K)?;
+    let db = DashmapDiskDatabase::try_new(args.db.as_deref(), BINARY_SCALE_SHAPES, args.top_k)?;
     match &args.target {
         TargetId::X86 => main_per_db::<_, X86Target>(&args, &db),
         TargetId::Arm => main_per_db::<_, ArmTarget>(&args, &db),
@@ -212,8 +215,12 @@ where
     info!("Synthesizing {}", spec);
 
     let start_time = std::time::Instant::now();
-    let (_, hits, misses) =
-        morello::search::top_down(db, &spec, K.into(), args.jobs.and_then(NonZeroUsize::new));
+    let (_, hits, misses) = morello::search::top_down(
+        db,
+        &spec,
+        args.top_k.into(),
+        args.jobs.and_then(NonZeroUsize::new),
+    );
     info!("top_down took {:?}", start_time.elapsed());
     info!(
         "top_down missed {} times ({:.2}% of {})",
@@ -228,6 +235,10 @@ where
     let Some(synthesized_impl) = results.first() else {
         panic!("No Impl found");
     };
+    info!(
+        "{} Impl(s) scheduled. Choosing the best Impl.",
+        results.len()
+    );
 
     let bench_inner_loop_iters = if let Subcommand::Bench(BenchCmd {
         inner_loop_iters, ..
