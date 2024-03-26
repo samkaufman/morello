@@ -10,6 +10,7 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::ndarray::NDArray;
 use crate::pprint::PrintableAux;
+use crate::scheduling::ApplyError::OutOfMemory;
 use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
@@ -18,10 +19,10 @@ use anyhow::{anyhow, Result};
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use divrem::DivRem;
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
@@ -194,7 +195,7 @@ impl DashmapDiskDatabase {
         dashmap_constructor: &impl Fn() -> DashMap<DbKey, DbBlock>,
     ) -> Result<Self> {
         if k == 0 {
-            todo!();
+            todo!("The case where k is 0 is not yet implemented");
         }
 
         let use_rle_blocks = std::env::var("MORELLO_STORE_COSTS").is_ok();
@@ -283,74 +284,99 @@ where
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let bimap = self.spec_bimap();
-        let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
+        let decision_iter = if decisions.is_empty() {
+            // No Impl satisfies the Spec, so fill by the initial state.
+            Either::Left(std::iter::once(None))
+        } else {
+            Either::Right(decisions.iter().map(|d| Some(d)))
+        };
 
-        // Construct an iterator over all blocks to fill.
-        let rank = bottom.len();
-        let blocks_iter = bottom
-            .into_iter()
-            .zip(&top)
-            .enumerate()
-            .map(|(dim, (b, t))| iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank)))
-            .multi_cartesian_product();
+        for (i, decision) in decision_iter.enumerate() {
+            let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, decision);
 
-        for joined_row in blocks_iter {
-            let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
+            // Construct an iterator over all blocks to fill.
+            let rank = bottom.len();
+            let blocks_iter = bottom
+                .into_iter()
+                .zip(top)
+                .enumerate()
+                .map(|(dim, (b, t))| {
+                    iter_blocks_in_single_dim_range(b, t, block_size_dim(dim, rank))
+                })
+                .multi_cartesian_product();
 
-            let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
-            match block_entry {
-                Entry::Occupied(mut existing_block) => {
-                    let r = existing_block.get_mut();
-                    let dim_ranges = joined_row
-                        .iter()
-                        .map(|(_, r)| r.clone())
-                        .collect::<Vec<_>>();
-                    match r {
-                        DbBlock::ActionOnly(b) => {
-                            // Drop the given cost. This will need to be recomputed.
-                            b.fill_region(
-                                &dim_ranges,
-                                Some(&decisions.iter().map(|d| d.0).collect::<SmallVec<[_; 1]>>()),
-                            )
-                        }
-                        DbBlock::Whole(e) => {
-                            // Examine the table before updating.
-                            e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
+            for joined_row in blocks_iter {
+                let block_pt = joined_row.iter().map(|(b, _)| *b).collect::<SmallVec<_>>();
+
+                let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
+                match block_entry {
+                    Entry::Occupied(mut existing_block) => {
+                        let r = existing_block.get_mut();
+                        let dim_ranges = joined_row
+                            .iter()
+                            .map(|(_, r)| r.clone())
+                            .collect::<Vec<_>>();
+                        match r {
+                            DbBlock::ActionOnly(b) => {
+                                // Drop the given cost. This will need to be recomputed.
+                                b.fill_region(
+                                    &dim_ranges,
+                                    Some(
+                                        &decisions
+                                            .iter()
+                                            .map(|d| d.0)
+                                            .collect::<SmallVec<[_; 1]>>(),
+                                    ),
+                                )
+                            }
+                            DbBlock::Whole(e) => {
+                                // Examine the table before updating.
+                                e.fill_region(
+                                    self.k,
+                                    &dim_ranges,
+                                    &ActionCostVec(decisions.clone()),
+                                );
+                            }
                         }
                     }
-                }
-                Entry::Vacant(entry) => {
-                    let db_shape = db_shape::<Tgt>(rank);
-                    let bs = block_shape(&block_pt, &db_shape, block_size_dim);
-                    let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
-                    let dim_ranges = joined_row
-                        .iter()
-                        .map(|(_, r)| r.clone())
-                        .collect::<Vec<_>>();
-                    if self.use_rle_blocks {
-                        entry.insert(DbBlock::Whole(Box::new(
-                            WholeBlock::partially_filled::<Tgt>(
+                    Entry::Vacant(entry) => {
+                        let db_shape = db_shape::<Tgt>(rank);
+                        let bs = block_shape(&block_pt, &db_shape, block_size_dim);
+                        let block_shape_usize =
+                            bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
+                        let dim_ranges = joined_row
+                            .iter()
+                            .map(|(_, r)| r.clone())
+                            .collect::<Vec<_>>();
+                        if self.use_rle_blocks {
+                            entry.insert(DbBlock::Whole(Box::new(WholeBlock::partially_filled::<
+                                Tgt,
+                            >(
                                 self.k,
                                 &block_shape_usize,
                                 &dim_ranges,
                                 &ActionCostVec(decisions.clone()),
-                            ),
-                        )));
-                    } else {
-                        let actions_only = decisions
-                            .iter()
-                            .map(|&(a, _)| a)
-                            .collect::<SmallVec<[_; 1]>>();
-                        entry.insert(DbBlock::ActionOnly(ActionOnlyBlock::partially_filled(
-                            self.k,
-                            &block_shape_usize,
-                            &dim_ranges,
-                            Some(&actions_only),
-                        )));
+                            ))));
+                        } else {
+                            let actions_only = decisions
+                                .iter()
+                                .map(|&(a, _)| a)
+                                .collect::<SmallVec<[_; 1]>>();
+                            entry.insert(DbBlock::ActionOnly(ActionOnlyBlock::partially_filled(
+                                self.k,
+                                &block_shape_usize,
+                                &dim_ranges,
+                                Some(&actions_only),
+                            )));
+                        }
                     }
                 }
             }
         }
+
+        // if decision_size > 0 {
+        //     println!();
+        // }
     }
 
     fn flush(&'a self) {}
@@ -486,42 +512,42 @@ impl DbBlock {
             DbBlock::ActionOnly(v) => {
                 match v.get(inner_pt) {
                     Some(inner) => {
-                        GetPreference::Hit(ActionCostVec(
-                            inner
-                                .iter()
-                                .map(|&action_idx| {
-                                    let action = query
-                                        .0
-                                        .actions()
-                                        .into_iter()
-                                        .nth(action_idx.into())
-                                        .unwrap();
-                                    let imp = action.apply(query).unwrap();
-                                    let recomputed_cost = compute_cost(&imp, &|s| {
-                                        let Some(ActionCostVec(inner_decisions)) = containing_db.get(&s.0)
-                                        else {
-                                            panic!(
-                                                "Missed sub-Impl {} while computing cost for {}",
-                                                s.0, query
-                                            );
-                                        };
-                                        if inner_decisions.is_empty() {
-                                            panic!(
-                                                "No actions for sub-Impl {} while computing cost for {}",
-                                                s.0, query
-                                            );
-                                        } else {
-                                            // Pick the lowest cost action by
-                                            //   O(N) over N implementations.
-                                            // Decisions are in ascending
-                                            //   order, so just pick the first.
-                                            inner_decisions[0].1.clone()
-                                        }
-                                    });
-                                    (action_idx, recomputed_cost)
-                                })
-                                .collect(),
-                        ))
+                        let mut action_costs = smallvec![];
+                        for (inner_idx, &action_idx) in inner.iter().enumerate() {
+                            let action = query
+                                .0
+                                .actions()
+                                .into_iter()
+                                .nth(action_idx.into())
+                                .unwrap();
+                            let imp_result = action.apply(query);
+                            let imp = match imp_result {
+                                Ok(imp) => imp,
+                                // As long as the first decision is Ok, remaining decisions can be skipped.
+                                Err(OutOfMemory) if inner_idx > 0 => continue,
+                                _ => imp_result.unwrap(),
+                            };
+                            let recomputed_cost = compute_cost(&imp, &|s| {
+                                let Some(ActionCostVec(inner_decisions)) = containing_db.get(&s.0)
+                                else {
+                                    panic!(
+                                        "Missed sub-Impl {} while computing cost for {}",
+                                        s.0, query
+                                    );
+                                };
+                                if inner_decisions.is_empty() {
+                                    panic!(
+                                        "No actions for sub-Impl {} while computing cost for {}",
+                                        s.0, query
+                                    );
+                                }
+                                // Pick the lowest cost action by O(N) over N implementations.
+                                // Decisions are in ascending order, so just pick the first.
+                                inner_decisions[0].1.clone()
+                            });
+                            action_costs.push((action_idx, recomputed_cost));
+                        }
+                        GetPreference::Hit(ActionCostVec(action_costs))
                     }
                     None => {
                         // TODO: Reintoduce returning `neighbor` as a preference.
@@ -888,7 +914,7 @@ pub fn deblockify_points(a: &[BimapInt], b: &[u8]) -> SmallVec<[BimapInt; 10]> {
 fn put_range_to_fill<Tgt, B>(
     bimap: &B,
     spec: &Spec<Tgt>,
-    impls: &SmallVec<[(ActionIdx, Cost); 1]>,
+    imp: Option<&(ActionIdx, Cost)>,
 ) -> (
     (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>),
     (SmallVec<[BimapInt; 10]>, SmallVec<[BimapInt; 10]>),
@@ -901,7 +927,9 @@ where
 {
     // Compute the per-level maximum limits of the solutions. This lower bounds the range.
     let mut per_level_peaks = [0; LEVEL_COUNT];
-    for (_, cost) in impls {
+    if let Some((_, cost)) = imp {
+        // for (_, cost) in impls {
+        debug_assert_eq!(cost.peaks.len(), LEVEL_COUNT);
         for (i, peak) in cost.peaks.iter().enumerate() {
             per_level_peaks[i] = per_level_peaks[i].max(peak);
         }
