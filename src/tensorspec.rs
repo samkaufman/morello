@@ -191,14 +191,14 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub fn canonicalize(&mut self) -> anyhow::Result<()> {
-        self.aux.canonicalize(&self.shape, self.aux.aligned)
+        self.aux.canonicalize(&self.shape)
     }
 
     /// Returns a TensorSpec with given size-one dimensions dropped.
     ///
     /// The given dimension indices must be sorted in ascending order.
     ///
-    /// The result will be canoncialized. If any given dimension index is not
+    /// The result will be canonicalized. If any given dimension index is not
     /// size one, this method panics.
     pub fn squeeze_dims(&self, dropped_dims: &[u8]) -> TensorSpec<Tgt> {
         // Make sure dropped_dims is sorted.
@@ -313,14 +313,13 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
 }
 
 impl<Tgt: Target> TensorSpecAux<Tgt> {
-    pub fn canonicalize(&mut self, shape: &Shape, aligned: bool) -> anyhow::Result<()> {
+    pub(crate) fn canonicalize(&mut self, shape: &Shape) -> anyhow::Result<()> {
         let (new_layout, new_contig) = self
             .layout
             .update_for_tiling(shape, shape, self.contig)
             .context("Updating with no-op tiling should never fail")?;
         self.layout = new_layout;
         self.contig = new_contig;
-        self.aligned = aligned;
         Ok(())
     }
 }

@@ -236,6 +236,7 @@ impl Layout {
         } else {
             let new_contig =
                 self.lower_contig_to_first_broken_dimension(parent_shape, tile_shape, contig)?;
+            debug_assert!(parent_shape != tile_shape || new_contig == contig);
             self.assert_no_consecutive_dimensions();
             let mut new_layout = self.clone();
             let new_contig = new_layout.drop_unneeded_packings(tile_shape, new_contig);
@@ -261,7 +262,7 @@ impl Layout {
             .zip(tile_physical_shape.iter().rev())
             .find_position(|(p, t)| p != t)
             .map(|(idx, _)| idx);
-        Ok((matching_suffix_len)
+        Ok(matching_suffix_len
             .map(|d| d + 1)
             .unwrap_or(dims.len())
             .min(source_contig.into())
@@ -346,6 +347,7 @@ impl Layout {
 
         let first_contig_idx = dims.len() - usize::from(contig);
 
+        // Count the number of packings applied to each logical dimension.
         let mut packings = vec![0; dims.len()];
         for (logical_dim, s) in dims.as_slice() {
             if s.is_some() {
@@ -353,20 +355,27 @@ impl Layout {
             }
         }
 
-        let mut logical_dims_noneified = std::collections::HashMap::<u8, _>::new();
+        // Walk from physically innermost to outermost, clearing packings unique to a logical
+        // dimension. `new_contig` becomes the new contig. with previously-counted-as-contiguous
+        // dimensions removed whenever they are redundant with a cleared packing.
+        //
+        // Cleared packings are recorded in `logical_dims_noneified` to be used in the next step.
+        // Logical dimensions are mapped to the index of the cleared packing for that dimension.
+        let mut logical_dims_noneified = vec![None; dims.len()];
         let mut new_contig = contig;
         for idx in (0..dims.len()).rev() {
             let (logical_dim, s) = dims[idx];
-            if packings[usize::from(logical_dim)] != 1 {
+            let logical_dim_usize = usize::from(logical_dim);
+            if packings[logical_dim_usize] != 1 {
                 continue;
             }
             match s {
-                Some(fixed_size) if tile_shape[usize::from(logical_dim)] == fixed_size => {
+                Some(fixed_size) if tile_shape[logical_dim_usize] == fixed_size => {
                     dims[idx] = (logical_dim, None);
-                    logical_dims_noneified.insert(logical_dim, idx);
+                    logical_dims_noneified[logical_dim_usize] = Some(idx);
                 }
                 None if idx >= first_contig_idx
-                    && logical_dims_noneified.contains_key(&logical_dim) =>
+                    && logical_dims_noneified[logical_dim_usize].is_some() =>
                 {
                     // We know this will be 1 since we'll have already visited the packed dimension
                     // with the same size as the logical dimension.
@@ -376,14 +385,18 @@ impl Layout {
             }
         }
 
+        // Layouts only include a single dynamic size reference to a logical dimension. If any
+        // packings were cleared (changed to dynamic size) in the previous step, then any outer
+        // reference to that same dimension is removed. (contig. was already updated to be
+        // consistent with this removal by the previous step.)
         let mut i = 0;
         dims.retain(|(logical_dim, _)| {
-            let should_retain = if let Some(noneified_idx) = logical_dims_noneified.get(logical_dim)
-            {
-                i >= *noneified_idx
-            } else {
-                true
-            };
+            let should_retain =
+                if let Some(noneified_idx) = logical_dims_noneified[usize::from(*logical_dim)] {
+                    i >= noneified_idx
+                } else {
+                    true
+                };
             i += 1;
             should_retain
         });
