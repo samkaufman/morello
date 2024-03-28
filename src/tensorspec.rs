@@ -322,6 +322,50 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
         self.contig = new_contig;
         Ok(())
     }
+
+    pub fn is_canonical(&self, shape: &Shape) -> bool {
+        if !self.layout.is_row_major() && shape.iter().all(|d| *d == 1) {
+            false
+        } else {
+            let Layout::New(dims) = &self.layout;
+
+            // Count the number of packings applied to each logical dimension.
+            // As a special case, `packings` is empty if there are no packed dims.
+            // (This avoids a heap allocation for many layouts.)
+            let mut packings = vec![];
+            for (logical_dim, s) in dims.as_slice() {
+                if s.is_some() {
+                    if packings.is_empty() {
+                        packings = vec![0; dims.len()];
+                    }
+                    packings[usize::from(*logical_dim)] += 1;
+                }
+            }
+
+            if !packings.is_empty() {
+                for idx in (0..dims.len()).rev() {
+                    let (logical_dim, s) = dims[idx];
+                    let logical_dim_usize = usize::from(logical_dim);
+                    if packings[logical_dim_usize] == 1 && s == Some(shape[logical_dim_usize]) {
+                        return false;
+                    }
+                }
+            }
+
+            let physical_rank = dims.len();
+            let first_contig_idx = u8::try_from(physical_rank).unwrap() - self.contig;
+            if first_contig_idx > 0 {
+                let ps = self
+                    .layout
+                    .physical_size(first_contig_idx - 1, shape)
+                    .unwrap();
+                if ps == 1 {
+                    return false;
+                }
+            }
+            true
+        }
+    }
 }
 
 impl<Tgt: Target> Display for TensorSpecAux<Tgt> {
@@ -398,10 +442,7 @@ where
         Box::new(
             iproduct!(
                 [true, false],
-                Tgt::all_layouts_for_shape(
-                    self.tensor_shape.len().try_into().unwrap(),
-                    self.tensor_dtype
-                ),
+                Tgt::all_layouts_for_shape(&self.tensor_shape, self.tensor_dtype),
                 vector_options
             )
             .flat_map(move |(aligned, layout, vector_size)| {
@@ -490,10 +531,8 @@ fn arb_tensorspecaux<Tgt: Target>(
     use proptest::sample::select;
 
     let max_shape = Shape::from(max_shape);
-    let rank = max_shape.len().try_into().unwrap();
-
     (
-        select(Tgt::all_layouts_for_shape(rank, dtype)),
+        select(Tgt::all_layouts_for_shape(&max_shape, dtype)),
         select(Tgt::levels().to_vec()),
     )
         .prop_flat_map(move |(layout, level)| {

@@ -221,7 +221,6 @@ impl Layout {
         )
     }
 
-    // TODO: Merge in contig_tile_transition?
     pub fn update_for_tiling(
         &self,
         parent_shape: &[DimSize],
@@ -410,32 +409,44 @@ impl Layout {
         &self,
         logical_shape: &[DimSize],
     ) -> Result<Shape, LayoutError> {
+        // We compute each dimension of the physical shape indendently by calling `physical_size`
+        // because, while it makes multiple passes over the layout, the number of dimensions is
+        // small enough that this is generally faster than a cleverer algorithm which makes
+        // an extra allocation. Besides... it's simple!
         let Layout::New(dims) = self;
-        let mut physical_shape = SmallVec::with_capacity(dims.len());
-        let mut logical_shape_remaining = logical_shape.to_vec();
-        for (dim, fixed_size) in dims.iter().rev() {
-            let remaining_size = &mut logical_shape_remaining[usize::from(*dim)];
-            debug_assert_ne!(
-                remaining_size, &0,
-                "Logical dimension {} with unpacked sized already seen in {:?}",
-                dim, dims
-            );
-            match fixed_size {
-                Some(s) => {
-                    if *remaining_size % *s != 0 {
+        let mut shape = Shape::with_capacity(dims.len());
+        for dim_idx in 0..dims.len() {
+            let dim_idx_u8 = u8::try_from(dim_idx).unwrap();
+            shape.push(self.physical_size(dim_idx_u8, logical_shape)?);
+        }
+        Ok(shape)
+    }
+
+    pub(crate) fn physical_size(
+        &self,
+        physical_dim: u8,
+        logical_shape: &[DimSize],
+    ) -> Result<DimSize, LayoutError> {
+        let Layout::New(dims) = self;
+
+        let physical_dim_usize = usize::from(physical_dim);
+        match dims[physical_dim_usize] {
+            (_, Some(packed_size)) => Ok(packed_size),
+            (logical_dim, None) => {
+                let mut physical_size = logical_shape[usize::from(logical_dim)];
+                for (ld, p) in &dims[(physical_dim_usize + 1)..] {
+                    if *ld != logical_dim {
+                        continue;
+                    }
+                    let p = p.expect("inner dims should be packed");
+                    if physical_size % p != 0 {
                         return Err(LayoutError::InvalidShape(logical_shape.into()));
                     }
-                    physical_shape.push(*s);
-                    *remaining_size /= *s;
+                    physical_size /= p;
                 }
-                None => {
-                    physical_shape.push(*remaining_size);
-                    *remaining_size = 0; // zero is a special value for error detection
-                }
+                Ok(physical_size)
             }
         }
-        physical_shape.reverse();
-        Ok(physical_shape)
     }
 
     fn assert_no_size_1_packings(&self) {
@@ -501,16 +512,18 @@ pub fn nhwc() -> Layout {
 mod tests {
     use super::{col_major, Layout};
     use crate::{
-        common::DimSize,
+        common::{DimSize, Dtype, Shape},
         expr::{AffineForm, Bounds, NonAffine, NonAffineExpr, Substitute, Term},
         layout::{row_major, BufferVar},
         opaque_symbol::OpaqueSymbol,
+        target::{Target, X86Target},
     };
     use itertools::Itertools;
     use proptest::{
         arbitrary::any,
         prelude::prop,
         proptest,
+        sample::select,
         strategy::{Just, Strategy},
     };
     use smallvec::smallvec;
@@ -535,6 +548,27 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn test_expand_physical_shape_matches_physical_size(
+            (shape, layout) in arb_test_expand_physical_shape_matches_physical_size::<X86Target>()
+        ) {
+            let physical_shape = layout.expand_physical_shape(&shape).unwrap();
+            for (i, d) in physical_shape.iter().copied().enumerate() {
+                let i = u8::try_from(i).unwrap();
+                assert_eq!(d, layout.physical_size(i, &shape).unwrap());
+            }
+        }
+
+        #[test]
+        #[should_panic]
+        fn test_physical_size_panics_on_oob_dim(
+            (shape, layout) in arb_test_expand_physical_shape_matches_physical_size::<X86Target>()
+        ) {
+            let physical_shape = layout.expand_physical_shape(&shape).unwrap();
+            let rank = u8::try_from(physical_shape.len()).unwrap();
+            layout.physical_size(rank, &shape).unwrap();
+        }
+
         #[test]
         fn test_layout_underapproximates_fully_contiguous(
             test_input in test_layout_fully_contiguous_or_not_strategy(),
@@ -693,5 +727,15 @@ mod tests {
             + Term(4, NonAffine::Leaf(BufferVar::Pt(0, expr_id.clone())))
             + Term(1, NonAffine::Leaf(BufferVar::Pt(1, expr_id.clone())));
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
+    }
+
+    fn arb_test_expand_physical_shape_matches_physical_size<Tgt: Target>(
+    ) -> impl Strategy<Value = (Shape, Layout)> {
+        (proptest::collection::vec(1..=32u32, 1..=5), any::<Dtype>()).prop_flat_map(
+            |(shape, dtype)| {
+                let all_layouts = Tgt::all_layouts_for_shape(&shape, dtype);
+                (Just(Shape::from(shape)), select(all_layouts))
+            },
+        )
     }
 }

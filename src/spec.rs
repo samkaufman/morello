@@ -622,12 +622,31 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     pub fn is_canonical(&self) -> bool {
-        // TODO: Probably slow.
-        let mut c = self.clone();
-        match c.canonicalize() {
-            Ok(()) => self == &c,
-            Err(_) => false,
+        match self {
+            LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
+                PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
+                    for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
+                        if !aux.is_canonical(shp) {
+                            return false;
+                        }
+                    }
+                }
+                PrimitiveSpecType::Move => {
+                    for aux in primitive_aux {
+                        if !aux.is_canonical(&basics.spec_shape) {
+                            return false;
+                        }
+                    }
+                }
+                PrimitiveSpecType::Zero => {
+                    if !primitive_aux[0].is_canonical(&basics.spec_shape) {
+                        return false;
+                    }
+                }
+            },
+            LogicalSpec::Compose { .. } => todo!(),
         }
+        true
     }
 
     pub fn actions(&self) -> impl ActionSeq<Tgt> + '_ {
@@ -1354,6 +1373,9 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
             })
             .prop_map(|(basics, auxes, serial_only)| {
                 LogicalSpec::Primitive(basics, auxes, serial_only)
+            })
+            .prop_filter("Layout must be applicable to TensorSpec shape", |s| {
+                s.clone().canonicalize().is_ok()
             })
             .boxed()
     }
