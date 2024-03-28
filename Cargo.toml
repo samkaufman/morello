@@ -32,10 +32,12 @@ num-traits = { version = "0.2.16", optional = true }
 prettytable-rs = "^0.10"
 rand = "0.8.5"
 rayon = "1.7.0"
-rle_vec = { git = "https://github.com/samkaufman/rle_vec.git", branch = "morello-main", features = ["serialize"] }
+rle_vec = { git = "https://github.com/samkaufman/rle_vec.git", branch = "morello-main", features = [
+    "serialize",
+] }
 scc = "1.7.0"
 serde = { version = "1.0.160", features = ["derive"] }
-smallvec = {version = "1.10.0", features = ["serde"]}
+smallvec = { version = "1.10.0", features = ["serde"] }
 snap = "1.1.0"
 tempfile = "3"
 thiserror = "1.0.47"
@@ -46,7 +48,7 @@ nonzero = "0.2.0"
 tikv-jemallocator = "0.5"
 
 [profile.dev]
-opt-level = 1  # Synthesis is relatively slow and often part of the dev. cycle, so optimize more than usual.
+opt-level = 1 # Synthesis is relatively slow and often part of the dev. cycle, so optimize more than usual.
 
 [profile.release]
 debug = 1
@@ -68,4 +70,8 @@ harness = false
 
 [[bench]]
 name = "synth"
+harness = false
+
+[[bench]]
+name = "update_for_tiling"
 harness = false
