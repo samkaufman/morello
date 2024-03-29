@@ -408,18 +408,33 @@ impl Layout {
     pub(crate) fn expand_physical_shape(
         &self,
         logical_shape: &[DimSize],
-    ) -> Result<Shape, LayoutError> {
-        // We compute each dimension of the physical shape indendently by calling `physical_size`
-        // because, while it makes multiple passes over the layout, the number of dimensions is
-        // small enough that this is generally faster than a cleverer algorithm which makes
-        // an extra allocation. Besides... it's simple!
+    ) -> Result<Shape, LayoutError>{
         let Layout::New(dims) = self;
-        let mut shape = Shape::with_capacity(dims.len());
-        for dim_idx in 0..dims.len() {
-            let dim_idx_u8 = u8::try_from(dim_idx).unwrap();
-            shape.push(self.physical_size(dim_idx_u8, logical_shape)?);
+        let mut physical_shape = SmallVec::with_capacity(dims.len());
+        let mut logical_shape_remaining = Shape::from(logical_shape);
+        for (dim, fixed_size) in dims.iter().rev() {
+            let remaining_size = &mut logical_shape_remaining[usize::from(*dim)];
+            debug_assert_ne!(
+                remaining_size, &0,
+                "Logical dimension {} with unpacked sized already seen in {:?}",
+                dim, dims
+            );
+            match fixed_size {
+                Some(s) => {
+                    if *remaining_size % *s != 0 {
+                        return Err(LayoutError::InvalidShape(logical_shape.into()));
+                    }
+                    physical_shape.push(*s);
+                    *remaining_size /= *s;
+                }
+                None => {
+                    physical_shape.push(*remaining_size);
+                    *remaining_size = 0; // zero is a special value for error detection
+                }
+            }
         }
-        Ok(shape)
+        physical_shape.reverse();
+        Ok(physical_shape)
     }
 
     pub(crate) fn physical_size(
