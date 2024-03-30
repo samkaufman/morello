@@ -15,6 +15,9 @@ pub enum Layout {
     New(SmallVec<[(u8, Option<DimSize>); 4]>),
 }
 
+#[cfg(test)]
+pub struct LayoutArbRankBounds(std::num::NonZeroU8, Option<std::num::NonZeroU8>);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BufferVar {
     TileIdx(u8, OpaqueSymbol),
@@ -22,7 +25,7 @@ pub enum BufferVar {
     Pt(u8, OpaqueSymbol),
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, PartialEq)]
 pub enum LayoutError {
     #[error("Layout does not apply to shape {0:?}")]
     InvalidShape(Shape),
@@ -445,23 +448,28 @@ impl Layout {
         let Layout::New(dims) = self;
 
         let physical_dim_usize = usize::from(physical_dim);
-        match dims[physical_dim_usize] {
-            (_, Some(packed_size)) => Ok(packed_size),
-            (logical_dim, None) => {
-                let mut physical_size = logical_shape[usize::from(logical_dim)];
-                for (ld, p) in &dims[(physical_dim_usize + 1)..] {
-                    if *ld != logical_dim {
-                        continue;
-                    }
-                    let p = p.expect("inner dims should be packed");
-                    if physical_size % p != 0 {
-                        return Err(LayoutError::InvalidShape(logical_shape.into()));
-                    }
-                    physical_size /= p;
+        let (logical_dim, first_size) = dims[physical_dim_usize];
+        let mut physical_size = match first_size {
+            Some(f) => {
+                if logical_shape[usize::from(logical_dim)] % f != 0 {
+                    return Err(LayoutError::InvalidShape(logical_shape.into()));
                 }
-                Ok(physical_size)
+                f
+            },
+            None => logical_shape[usize::from(logical_dim)],
+        };
+        for (ld, p) in &dims[(physical_dim_usize + 1)..] {
+            if *ld != logical_dim {
+                continue;
             }
+            let p = p.expect("inner dims should be packed");
+            if physical_size % p != 0 {
+                return Err(LayoutError::InvalidShape(logical_shape.into()));
+            }
+            physical_size /= p;
+
         }
+        Ok(first_size.unwrap_or(physical_size))
     }
 
     fn assert_no_size_1_packings(&self) {
@@ -472,6 +480,49 @@ impl Layout {
                 debug_assert_ne!(size, &Some(1), "Size-1 packing in layout: {:?}", dims);
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+impl proptest::arbitrary::Arbitrary for Layout {
+    type Parameters = LayoutArbRankBounds;
+    type Strategy = proptest::strategy::BoxedStrategy<Layout>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use proptest::strategy::{Just, Strategy};
+
+        let min_rank = usize::from(args.0.get());
+        let max_physical_rank = usize::from(args.1.map(|r| r.into()).unwrap_or(5));
+        assert!(min_rank <= max_physical_rank);
+
+        let packed_st = (1..=8u32).prop_map(Option::Some);
+        let optional_packed_st = Just(None)
+            .boxed()
+            .prop_union(packed_st.clone().boxed());
+        
+        let logical_dims_prefix =
+            proptest::collection::vec(
+                optional_packed_st, min_rank..=min_rank
+            ).prop_map(|v| v.into_iter().enumerate().map(|(i, p)| {
+                let i = u8::try_from(i).unwrap();
+                (i, p)
+            }).collect::<Vec<_>>());
+
+        let max_adds = max_physical_rank - min_rank;
+        let additional_logical_dims = proptest::collection::vec(
+            (0..max_adds).prop_flat_map(move |i| {
+                let i = u8::try_from(i).unwrap();
+                (Just(i), packed_st.clone())
+            }),
+            0..=max_adds,
+        );
+
+        (logical_dims_prefix, additional_logical_dims)
+            .prop_map(|(prefix, additional)| {
+                Layout::New(prefix.into_iter().chain(additional).collect())
+            })
+            .boxed()
     }
 }
 
@@ -496,6 +547,13 @@ impl Display for Layout {
                     .join(", ")
             )
         }
+    }
+}
+
+#[cfg(test)]
+impl Default for LayoutArbRankBounds {
+    fn default() -> Self {
+        Self(std::num::NonZeroU8::new(1).unwrap(), None)
     }
 }
 
@@ -525,31 +583,46 @@ pub fn nhwc() -> Layout {
 
 #[cfg(test)]
 mod tests {
-    use super::{col_major, Layout};
+    use super::{col_major, Layout, LayoutArbRankBounds};
     use crate::{
-        common::{DimSize, Dtype, Shape},
+        common::{DimSize, Shape},
         expr::{AffineForm, Bounds, NonAffine, NonAffineExpr, Substitute, Term},
-        layout::{row_major, BufferVar},
+        layout::{row_major, BufferVar, LayoutError},
         opaque_symbol::OpaqueSymbol,
         target::{Target, X86Target},
     };
     use itertools::Itertools;
     use proptest::{
-        arbitrary::any,
-        prelude::prop,
-        proptest,
-        sample::select,
-        strategy::{Just, Strategy},
+        arbitrary::{any, any_with}, prelude::prop, prop_assert_eq, prop_assume,
+        proptest, strategy::{Just, Strategy}
     };
     use smallvec::smallvec;
-    use std::collections::HashSet;
+    use std::{collections::HashSet, num::NonZeroU8};
 
     #[test]
-    fn test_expand_physical_shape() {
+    fn test_expand_physical_shape_1() {
         let layout = Layout::new(smallvec![(0, None), (1, None), (0, Some(4))]);
         assert_eq!(
             &layout.expand_physical_shape(&[64, 64]).unwrap()[..],
             &[16, 64, 4],
+        );
+    }
+
+    #[test]
+    fn test_expand_physical_shape_2() {
+        let layout = Layout::new(smallvec![(0, None), (1, Some(2))]);
+        assert_eq!(
+            &layout.expand_physical_shape(&[2, 2]).unwrap()[..],
+            &[2, 2],
+        );
+    }
+
+    #[test]
+    fn test_expand_physical_shape_3() {
+        let layout = Layout::new(smallvec![(0, None), (1, None), (0, Some(4))]);
+        matches!(
+            layout.expand_physical_shape(&[1, 64]),
+            Err(LayoutError::InvalidShape(_))
         );
     }
 
@@ -564,20 +637,46 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_expand_physical_shape_matches_physical_size(
-            (shape, layout) in arb_test_expand_physical_shape_matches_physical_size::<X86Target>()
+        fn test_expand_physical_shape_preserves_volume(
+            (shape, layout) in arb_shape_and_same_rank_layout::<X86Target>()
         ) {
-            let physical_shape = layout.expand_physical_shape(&shape).unwrap();
-            for (i, d) in physical_shape.iter().copied().enumerate() {
+            let pshp = layout.expand_physical_shape(&shape);
+            prop_assume!(pshp.is_ok());
+            let pshp = pshp.unwrap();
+
+            let physical_volume  = pshp.iter().copied().product::<DimSize>();
+            let shape_volume = shape.iter().copied().product::<DimSize>();
+            prop_assert_eq!(physical_volume, shape_volume);
+        }
+
+        #[test]
+        fn test_expand_physical_shape_matches_physical_size_for_tensor_layouts(
+            (shape, layout) in arb_shape_and_same_rank_layout::<X86Target>()
+        ) {
+            let Layout::New(dims) = &layout;
+            let physical_rank = dims.len();
+
+            let lhs = layout.expand_physical_shape(&shape);
+
+            let mut rhs = Ok(Shape::with_capacity(physical_rank));
+            for i in 0..physical_rank {
+                if rhs.is_err() {
+                    break;
+                }
                 let i = u8::try_from(i).unwrap();
-                assert_eq!(d, layout.physical_size(i, &shape).unwrap());
+                match layout.physical_size(i, &shape) {
+                    Ok(rhs_size) => rhs.as_mut().unwrap().push(rhs_size),
+                    Err(e) => rhs = Err(e),
+                }
             }
+
+            prop_assert_eq!(lhs, rhs);
         }
 
         #[test]
         #[should_panic]
         fn test_physical_size_panics_on_oob_dim(
-            (shape, layout) in arb_test_expand_physical_shape_matches_physical_size::<X86Target>()
+            (shape, layout) in arb_shape_and_same_rank_layout::<X86Target>()
         ) {
             let physical_shape = layout.expand_physical_shape(&shape).unwrap();
             let rank = u8::try_from(physical_shape.len()).unwrap();
@@ -633,10 +732,16 @@ mod tests {
                     .try_into()
                     .unwrap();
             let analysis_result_fully_contig = updated_contig == layout.contiguous_full();
-            assert_eq!(analysis_result_fully_contig, is_fully_contig,
-                "Layout {:?} is {}fully contiguous but contig.={:?} (full={:?})", layout,
+            prop_assert_eq!(
+                analysis_result_fully_contig, is_fully_contig,
+                "Tile is {}fully contiguous but contig.={:?} (full={:?}) (tensor={:?}, tile={:?}, visited={:?})",
                 if is_fully_contig { "" } else { "not " },
-                updated_contig, layout.contiguous_full());
+                updated_contig,
+                layout.contiguous_full(),
+                tensor_shape,
+                tile_shape,
+                visited
+            );
         }
     }
 
@@ -744,12 +849,14 @@ mod tests {
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
     }
 
-    fn arb_test_expand_physical_shape_matches_physical_size<Tgt: Target>(
+    fn arb_shape_and_same_rank_layout<Tgt: Target>(
     ) -> impl Strategy<Value = (Shape, Layout)> {
-        (proptest::collection::vec(1..=32u32, 1..=5), any::<Dtype>()).prop_flat_map(
-            |(shape, dtype)| {
-                let all_layouts = Tgt::all_layouts_for_shape(&shape, dtype);
-                (Just(Shape::from(shape)), select(all_layouts))
+        proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(
+            |shape| {
+                let shape_nz = NonZeroU8::try_from(u8::try_from(shape.len()).unwrap()).unwrap();
+                let bounds = LayoutArbRankBounds(shape_nz, Some(shape_nz));
+                let all_layouts = any_with::<Layout>(bounds);
+                (Just(Shape::from(shape)), all_layouts)
             },
         )
     }
