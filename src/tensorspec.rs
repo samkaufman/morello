@@ -191,14 +191,14 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub fn canonicalize(&mut self) -> anyhow::Result<()> {
-        self.aux.canonicalize(&self.shape, self.aux.aligned)
+        self.aux.canonicalize(&self.shape)
     }
 
     /// Returns a TensorSpec with given size-one dimensions dropped.
     ///
     /// The given dimension indices must be sorted in ascending order.
     ///
-    /// The result will be canoncialized. If any given dimension index is not
+    /// The result will be canonicalized. If any given dimension index is not
     /// size one, this method panics.
     pub fn squeeze_dims(&self, dropped_dims: &[u8]) -> TensorSpec<Tgt> {
         // Make sure dropped_dims is sorted.
@@ -313,15 +313,59 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
 }
 
 impl<Tgt: Target> TensorSpecAux<Tgt> {
-    pub fn canonicalize(&mut self, shape: &Shape, aligned: bool) -> anyhow::Result<()> {
+    pub(crate) fn canonicalize(&mut self, shape: &Shape) -> anyhow::Result<()> {
         let (new_layout, new_contig) = self
             .layout
             .update_for_tiling(shape, shape, self.contig)
             .context("Updating with no-op tiling should never fail")?;
         self.layout = new_layout;
         self.contig = new_contig;
-        self.aligned = aligned;
         Ok(())
+    }
+
+    pub fn is_canonical(&self, shape: &Shape) -> bool {
+        if !self.layout.is_row_major() && shape.iter().all(|d| *d == 1) {
+            false
+        } else {
+            let Layout::New(dims) = &self.layout;
+
+            // Count the number of packings applied to each logical dimension.
+            // As a special case, `packings` is empty if there are no packed dims.
+            // (This avoids potentially spilling onto the heap for unpacked
+            // layouts.)
+            let mut packings = SmallVec::<[_; 4]>::new();
+            for (logical_dim, s) in dims.as_slice() {
+                if s.is_some() {
+                    if packings.is_empty() {
+                        packings.resize(dims.len(), 0);
+                    }
+                    packings[usize::from(*logical_dim)] += 1;
+                }
+            }
+
+            if !packings.is_empty() {
+                for idx in (0..dims.len()).rev() {
+                    let (logical_dim, s) = dims[idx];
+                    let logical_dim_usize = usize::from(logical_dim);
+                    if packings[logical_dim_usize] == 1 && s == Some(shape[logical_dim_usize]) {
+                        return false;
+                    }
+                }
+            }
+
+            let physical_rank = dims.len();
+            let first_contig_idx = u8::try_from(physical_rank).unwrap() - self.contig;
+            if first_contig_idx > 0 {
+                let ps = self
+                    .layout
+                    .physical_size(first_contig_idx - 1, shape)
+                    .unwrap();
+                if ps == 1 {
+                    return false;
+                }
+            }
+            true
+        }
     }
 }
 
@@ -399,10 +443,7 @@ where
         Box::new(
             iproduct!(
                 [true, false],
-                Tgt::all_layouts_for_shape(
-                    self.tensor_shape.len().try_into().unwrap(),
-                    self.tensor_dtype
-                ),
+                Tgt::all_layouts_for_shape(&self.tensor_shape, self.tensor_dtype),
                 vector_options
             )
             .flat_map(move |(aligned, layout, vector_size)| {
@@ -491,10 +532,8 @@ fn arb_tensorspecaux<Tgt: Target>(
     use proptest::sample::select;
 
     let max_shape = Shape::from(max_shape);
-    let rank = max_shape.len().try_into().unwrap();
-
     (
-        select(Tgt::all_layouts_for_shape(rank, dtype)),
+        select(Tgt::all_layouts_for_shape(&max_shape, dtype)),
         select(Tgt::levels().to_vec()),
     )
         .prop_flat_map(move |(layout, level)| {
@@ -569,7 +608,7 @@ mod tests {
                 contig: 3,
                 aligned: false,
                 level: CpuMemoryLevel::GL,
-                layout: Layout::New(vec![
+                layout: Layout::New(smallvec![
                     (0, None),
                     (2, None),
                     (3, None),

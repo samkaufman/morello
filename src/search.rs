@@ -100,7 +100,7 @@ where
         let partial_impl = match action.apply(goal) {
             Ok(imp) => imp,
             Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => continue,
-            Err(ApplyError::SpecNotCanonical) => panic!(),
+            Err(ApplyError::SpecNotCanonical) => panic!("Goal was not canonical: {goal}"),
         };
 
         // Let top_down_impl compute the final cost of completing this Impl.

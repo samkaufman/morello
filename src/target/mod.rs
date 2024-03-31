@@ -33,8 +33,8 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn levels() -> [Self::Level; LEVEL_COUNT];
     fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
 
-    /// Returns possible layouts for a tensor of given rank and data type.
-    fn all_layouts_for_shape(rank: u8, dtype: Dtype) -> Vec<Layout>;
+    /// Returns possible layouts for a tensor of given shape and data type.
+    fn all_layouts_for_shape(shape: &[DimSize], dtype: Dtype) -> Vec<Layout>;
 
     /// Returns destination layouts for a move from a given tensor shape and [Dtype].
     ///

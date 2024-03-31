@@ -597,58 +597,56 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
     pub fn canonicalize(&mut self) -> anyhow::Result<()> {
         match self {
-            LogicalSpec::Primitive(basics, primitive_aux, _) => {
-                let parameter_shapes = basics.parameter_shapes();
-                match &basics.typ {
-                    PrimitiveSpecType::Matmul { accum: _ }
-                    | PrimitiveSpecType::Conv { accum: _ } => {
-                        for i in 0..primitive_aux.len() {
-                            let (new_layout, new_contig) =
-                                primitive_aux[i].layout.update_for_tiling(
-                                    &parameter_shapes[i],
-                                    &parameter_shapes[i],
-                                    primitive_aux[i].contig,
-                                )?;
-                            primitive_aux[i].layout = new_layout;
-                            primitive_aux[i].contig = new_contig;
-                        }
-                    }
-                    PrimitiveSpecType::Move => {
-                        let [outer_aux, inner_aux] = &mut primitive_aux[..] else {
-                            unreachable!();
-                        };
-                        outer_aux
-                            .canonicalize(&basics.spec_shape, outer_aux.aligned)
-                            .context("Failed to canonicalize the outer TensorSpecAux")?;
-                        let (new_inner_layout, new_inner_contig) =
-                            inner_aux.layout.update_for_tiling(
-                                &parameter_shapes[1],
-                                &parameter_shapes[1],
-                                inner_aux.contig,
-                            )?;
-                        inner_aux.layout = new_inner_layout;
-                        inner_aux.contig = new_inner_contig;
-                    }
-                    PrimitiveSpecType::Zero => {
-                        let aligned = primitive_aux[0].aligned;
-                        primitive_aux[0]
-                            .canonicalize(&basics.spec_shape, aligned)
+            LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
+                PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
+                    for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
+                        aux.canonicalize(shp)
                             .context("Failed to canonicalize the TensorSpecAux")?;
                     }
                 }
-            }
+                PrimitiveSpecType::Move => {
+                    for aux in primitive_aux.iter_mut() {
+                        aux.canonicalize(&basics.spec_shape)
+                            .context("Failed to canonicalize the TensorSpecAux")?;
+                    }
+                }
+                PrimitiveSpecType::Zero => {
+                    primitive_aux[0]
+                        .canonicalize(&basics.spec_shape)
+                        .context("Failed to canonicalize the TensorSpecAux")?;
+                }
+            },
             LogicalSpec::Compose { .. } => todo!(),
         }
         Ok(())
     }
 
     pub fn is_canonical(&self) -> bool {
-        // TODO: Probably slow.
-        let mut c = self.clone();
-        match c.canonicalize() {
-            Ok(()) => self == &c,
-            Err(_) => false,
+        match self {
+            LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
+                PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
+                    for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
+                        if !aux.is_canonical(shp) {
+                            return false;
+                        }
+                    }
+                }
+                PrimitiveSpecType::Move => {
+                    for aux in primitive_aux {
+                        if !aux.is_canonical(&basics.spec_shape) {
+                            return false;
+                        }
+                    }
+                }
+                PrimitiveSpecType::Zero => {
+                    if !primitive_aux[0].is_canonical(&basics.spec_shape) {
+                        return false;
+                    }
+                }
+            },
+            LogicalSpec::Compose { .. } => todo!(),
         }
+        true
     }
 
     pub fn actions(&self) -> impl ActionSeq<Tgt> + '_ {
@@ -1376,6 +1374,9 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
             .prop_map(|(basics, auxes, serial_only)| {
                 LogicalSpec::Primitive(basics, auxes, serial_only)
             })
+            .prop_filter("Layout must be applicable to TensorSpec shape", |s| {
+                s.clone().canonicalize().is_ok()
+            })
             .boxed()
     }
 }
@@ -1800,6 +1801,16 @@ mod tests {
             logical_spec in arb_canonical_logical_spec::<X86Target>(None)
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
+        }
+
+        #[test]
+        fn test_canonicalize_is_noop_if_already_canonical(
+            logical_spec in any::<LogicalSpec<X86Target>>()
+        ) {
+            let mut c = logical_spec.clone();
+            c.canonicalize().unwrap();
+            let unchanged = logical_spec == c;
+            assert_eq!(logical_spec.is_canonical(), unchanged);
         }
 
         #[test]

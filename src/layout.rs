@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::{collections::HashSet, fmt::Display, hash::Hash, iter};
 
 use crate::{
@@ -12,8 +12,11 @@ use crate::{
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
 pub enum Layout {
-    New(Vec<(u8, Option<DimSize>)>),
+    New(SmallVec<[(u8, Option<DimSize>); 4]>),
 }
+
+#[cfg(test)]
+pub struct LayoutArbRankBounds(std::num::NonZeroU8, Option<std::num::NonZeroU8>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BufferVar {
@@ -22,14 +25,14 @@ pub enum BufferVar {
     Pt(u8, OpaqueSymbol),
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, PartialEq)]
 pub enum LayoutError {
     #[error("Layout does not apply to shape {0:?}")]
     InvalidShape(Shape),
 }
 
 impl Layout {
-    pub fn new(dims: Vec<(u8, Option<DimSize>)>) -> Layout {
+    pub fn new(dims: SmallVec<[(u8, Option<DimSize>); 4]>) -> Layout {
         #[cfg(debug_assertions)]
         {
             assert!(!dims.is_empty());
@@ -221,7 +224,6 @@ impl Layout {
         )
     }
 
-    // TODO: Merge in contig_tile_transition?
     pub fn update_for_tiling(
         &self,
         parent_shape: &[DimSize],
@@ -236,6 +238,7 @@ impl Layout {
         } else {
             let new_contig =
                 self.lower_contig_to_first_broken_dimension(parent_shape, tile_shape, contig)?;
+            debug_assert!(parent_shape != tile_shape || new_contig == contig);
             self.assert_no_consecutive_dimensions();
             let mut new_layout = self.clone();
             let new_contig = new_layout.drop_unneeded_packings(tile_shape, new_contig);
@@ -261,7 +264,7 @@ impl Layout {
             .zip(tile_physical_shape.iter().rev())
             .find_position(|(p, t)| p != t)
             .map(|(idx, _)| idx);
-        Ok((matching_suffix_len)
+        Ok(matching_suffix_len
             .map(|d| d + 1)
             .unwrap_or(dims.len())
             .min(source_contig.into())
@@ -297,7 +300,7 @@ impl Layout {
         let first_contig_idx = dims.len() - usize::from(source_contig);
 
         let mut new_contig = source_contig;
-        let mut new_dims = Vec::with_capacity(dims.len());
+        let mut new_dims = SmallVec::with_capacity(dims.len());
         new_dims.push(dims[0]);
 
         for (idx, (dim, packing_size)) in dims.iter().skip(1).enumerate() {
@@ -346,6 +349,7 @@ impl Layout {
 
         let first_contig_idx = dims.len() - usize::from(contig);
 
+        // Count the number of packings applied to each logical dimension.
         let mut packings = vec![0; dims.len()];
         for (logical_dim, s) in dims.as_slice() {
             if s.is_some() {
@@ -353,20 +357,27 @@ impl Layout {
             }
         }
 
-        let mut logical_dims_noneified = std::collections::HashMap::<u8, _>::new();
+        // Walk from physically innermost to outermost, clearing packings unique to a logical
+        // dimension. `new_contig` becomes the new contig. with previously-counted-as-contiguous
+        // dimensions removed whenever they are redundant with a cleared packing.
+        //
+        // Cleared packings are recorded in `logical_dims_noneified` to be used in the next step.
+        // Logical dimensions are mapped to the index of the cleared packing for that dimension.
+        let mut logical_dims_noneified = vec![None; dims.len()];
         let mut new_contig = contig;
         for idx in (0..dims.len()).rev() {
             let (logical_dim, s) = dims[idx];
-            if packings[usize::from(logical_dim)] != 1 {
+            let logical_dim_usize = usize::from(logical_dim);
+            if packings[logical_dim_usize] != 1 {
                 continue;
             }
             match s {
-                Some(fixed_size) if tile_shape[usize::from(logical_dim)] == fixed_size => {
+                Some(fixed_size) if tile_shape[logical_dim_usize] == fixed_size => {
                     dims[idx] = (logical_dim, None);
-                    logical_dims_noneified.insert(logical_dim, idx);
+                    logical_dims_noneified[logical_dim_usize] = Some(idx);
                 }
                 None if idx >= first_contig_idx
-                    && logical_dims_noneified.contains_key(&logical_dim) =>
+                    && logical_dims_noneified[logical_dim_usize].is_some() =>
                 {
                     // We know this will be 1 since we'll have already visited the packed dimension
                     // with the same size as the logical dimension.
@@ -376,14 +387,18 @@ impl Layout {
             }
         }
 
+        // Layouts only include a single dynamic size reference to a logical dimension. If any
+        // packings were cleared (changed to dynamic size) in the previous step, then any outer
+        // reference to that same dimension is removed. (contig. was already updated to be
+        // consistent with this removal by the previous step.)
         let mut i = 0;
         dims.retain(|(logical_dim, _)| {
-            let should_retain = if let Some(noneified_idx) = logical_dims_noneified.get(logical_dim)
-            {
-                i >= *noneified_idx
-            } else {
-                true
-            };
+            let should_retain =
+                if let Some(noneified_idx) = logical_dims_noneified[usize::from(*logical_dim)] {
+                    i >= noneified_idx
+                } else {
+                    true
+                };
             i += 1;
             should_retain
         });
@@ -399,7 +414,7 @@ impl Layout {
     ) -> Result<Shape, LayoutError> {
         let Layout::New(dims) = self;
         let mut physical_shape = SmallVec::with_capacity(dims.len());
-        let mut logical_shape_remaining = logical_shape.to_vec();
+        let mut logical_shape_remaining = Shape::from(logical_shape);
         for (dim, fixed_size) in dims.iter().rev() {
             let remaining_size = &mut logical_shape_remaining[usize::from(*dim)];
             debug_assert_ne!(
@@ -421,6 +436,62 @@ impl Layout {
                 }
             }
         }
+        if logical_shape_remaining.iter().any(|&d| d > 1) {
+            return Err(LayoutError::InvalidShape(logical_shape.into()));
+        }
+        physical_shape.reverse();
+        Ok(physical_shape)
+    }
+
+    pub(crate) fn physical_size(
+        &self,
+        physical_dim: u8,
+        logical_shape: &[DimSize],
+    ) -> Result<DimSize, LayoutError> {
+        let Layout::New(dims) = self;
+        let logical_dim = dims[usize::from(physical_dim)].0;
+        let expanded = self.expand_logical_dim_physical_shape(logical_dim, logical_shape)?;
+        expanded
+            .into_iter()
+            .find(|(idx, _)| *idx == usize::from(physical_dim))
+            .map(|(_, s)| s)
+            .ok_or_else(|| LayoutError::InvalidShape(logical_shape.into()))
+    }
+
+    fn expand_logical_dim_physical_shape(
+        &self,
+        logical_dim: u8,
+        logical_shape: &[DimSize],
+    ) -> Result<SmallVec<[(usize, DimSize); 3]>, LayoutError> {
+        let Layout::New(dims) = self;
+        let mut physical_shape = smallvec![];
+        let mut remaining_size = logical_shape[usize::from(logical_dim)];
+        for (idx, (dim, fixed_size)) in dims.iter().enumerate().rev() {
+            if *dim != logical_dim {
+                continue;
+            }
+            debug_assert_ne!(
+                remaining_size, 0,
+                "Logical dimension {} with unpacked size already seen in {:?}",
+                dim, dims
+            );
+            match fixed_size {
+                Some(s) => {
+                    if remaining_size % *s != 0 {
+                        return Err(LayoutError::InvalidShape(logical_shape.into()));
+                    }
+                    physical_shape.push((idx, *s));
+                    remaining_size /= *s;
+                }
+                None => {
+                    physical_shape.push((idx, remaining_size));
+                    remaining_size = 0; // zero is a special value for error detection
+                }
+            }
+        }
+        if remaining_size > 1 {
+            return Err(LayoutError::InvalidShape(logical_shape.into()));
+        }
         physical_shape.reverse();
         Ok(physical_shape)
     }
@@ -433,6 +504,49 @@ impl Layout {
                 debug_assert_ne!(size, &Some(1), "Size-1 packing in layout: {:?}", dims);
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl proptest::arbitrary::Arbitrary for Layout {
+    type Parameters = LayoutArbRankBounds;
+    type Strategy = proptest::strategy::BoxedStrategy<Layout>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use proptest::strategy::{Just, Strategy};
+
+        let min_rank = usize::from(args.0.get());
+        let max_physical_rank = usize::from(args.1.map(|r| r.into()).unwrap_or(5));
+        assert!(min_rank <= max_physical_rank);
+
+        let packed_st = (2..=8u32).prop_map(Option::Some);
+        let optional_packed_st = Just(None).boxed().prop_union(packed_st.clone().boxed());
+
+        let logical_dims_prefix =
+            proptest::collection::vec(optional_packed_st, min_rank..=min_rank).prop_map(|v| {
+                v.into_iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let i = u8::try_from(i).unwrap();
+                        (i, p)
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+        let max_adds = max_physical_rank - min_rank;
+        let additional_logical_dims = proptest::collection::vec(
+            (0..max_adds).prop_flat_map(move |i| {
+                let i = u8::try_from(i).unwrap();
+                (Just(i), packed_st.clone())
+            }),
+            0..=max_adds,
+        );
+
+        (logical_dims_prefix, additional_logical_dims)
+            .prop_map(|(prefix, additional)| {
+                Layout::New(prefix.into_iter().chain(additional).collect())
+            })
+            .boxed()
     }
 }
 
@@ -460,6 +574,13 @@ impl Display for Layout {
     }
 }
 
+#[cfg(test)]
+impl Default for LayoutArbRankBounds {
+    fn default() -> Self {
+        Self(std::num::NonZeroU8::new(1).unwrap(), None)
+    }
+}
+
 impl Display for BufferVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -481,34 +602,98 @@ pub fn col_major(rank: u8) -> Layout {
 }
 
 pub fn nhwc() -> Layout {
-    Layout::new(vec![(0, None), (2, None), (3, None), (1, None)])
+    Layout::new(smallvec![(0, None), (2, None), (3, None), (1, None)])
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{col_major, Layout};
+    use super::{col_major, Layout, LayoutArbRankBounds};
     use crate::{
-        common::DimSize,
+        common::{DimSize, Shape},
         expr::{AffineForm, Bounds, NonAffine, NonAffineExpr, Substitute, Term},
-        layout::{row_major, BufferVar},
+        layout::{row_major, BufferVar, LayoutError},
         opaque_symbol::OpaqueSymbol,
+        target::{Target, X86Target},
     };
     use itertools::Itertools;
     use proptest::{
-        arbitrary::any,
+        arbitrary::{any, any_with},
         prelude::prop,
-        proptest,
+        prop_assert_eq, prop_assume, proptest,
         strategy::{Just, Strategy},
     };
-    use std::collections::HashSet;
+    use smallvec::smallvec;
+    use std::{collections::HashSet, num::NonZeroU8};
 
     #[test]
-    fn test_expand_physical_shape() {
-        let layout = Layout::new(vec![(0, None), (1, None), (0, Some(4))]);
+    fn test_expand_physical_shape_1() {
+        let layout = Layout::new(smallvec![(0, None), (1, None), (0, Some(4))]);
         assert_eq!(
             &layout.expand_physical_shape(&[64, 64]).unwrap()[..],
             &[16, 64, 4],
         );
+    }
+
+    #[test]
+    fn test_expand_physical_shape_2() {
+        let layout = Layout::new(smallvec![(0, None), (1, Some(2))]);
+        assert_eq!(&layout.expand_physical_shape(&[2, 2]).unwrap()[..], &[2, 2],);
+    }
+
+    #[test]
+    fn test_expand_physical_shape_3() {
+        let layout = Layout::new(smallvec![(0, Some(4)), (1, None)]);
+        assert!(matches!(
+            layout.expand_physical_shape(&[1, 64]),
+            Err(LayoutError::InvalidShape(_))
+        ));
+    }
+
+    #[test]
+    fn test_expand_physical_shape_4() {
+        let layout = Layout::new(smallvec![(0, Some(2))]);
+        let expanded = layout.expand_physical_shape(&[6]);
+        assert!(
+            matches!(expanded, Err(LayoutError::InvalidShape(_))),
+            "Expected LayoutError::InvalidShape, but was: {expanded:?}",
+        );
+    }
+
+    #[test]
+    fn test_expand_physical_shape_5() {
+        let layout = Layout::new(smallvec![(0, None), (1, None), (0, Some(4))]);
+        assert!(matches!(
+            layout.expand_physical_shape(&[2, 64]),
+            Err(LayoutError::InvalidShape(_)),
+        ));
+    }
+
+    #[test]
+    fn test_expand_physical_shape_6() {
+        let layout = Layout::new(smallvec![(0, Some(2))]);
+        assert!(matches!(
+            layout.expand_physical_shape(&[1]),
+            Err(LayoutError::InvalidShape(_)),
+        ));
+    }
+
+    #[test]
+    fn test_expand_physical_shape_7() {
+        let layout = Layout::new(smallvec![(0, Some(4)), (1, None)]);
+        let expanded = layout.expand_physical_shape(&[8, 64]);
+        assert!(
+            matches!(expanded, Err(LayoutError::InvalidShape(_))),
+            "Expected LayoutError::InvalidShape, but was: {expanded:?}",
+        );
+    }
+
+    #[test]
+    fn test_physical_size_1() {
+        let layout = Layout::new(smallvec![(0, Some(2))]);
+        assert!(matches!(
+            layout.physical_size(0, &[6]),
+            Err(LayoutError::InvalidShape(_)),
+        ));
     }
 
     #[test]
@@ -521,6 +706,77 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn test_expand_physical_shape_preserves_volume(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            let pshp = layout.expand_physical_shape(&shape);
+            prop_assume!(pshp.is_ok());
+            let pshp = pshp.unwrap();
+
+            let physical_volume  = pshp.iter().copied().product::<DimSize>();
+            let shape_volume = shape.iter().copied().product::<DimSize>();
+            prop_assert_eq!(physical_volume, shape_volume);
+        }
+
+        #[test]
+        fn test_expand_physical_shape_matches_physical_size_for_tensor_layouts(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            let Layout::New(dims) = &layout;
+            let physical_rank = dims.len();
+
+            let lhs = layout.expand_physical_shape(&shape);
+
+            let mut rhs = Ok(Shape::with_capacity(physical_rank));
+            for i in 0..physical_rank {
+                if rhs.is_err() {
+                    break;
+                }
+                let i = u8::try_from(i).unwrap();
+                match layout.physical_size(i, &shape) {
+                    Ok(rhs_size) => rhs.as_mut().unwrap().push(rhs_size),
+                    Err(e) => rhs = Err(e),
+                }
+            }
+
+            prop_assert_eq!(lhs, rhs);
+        }
+
+        #[test]
+        fn test_physical_shape_raises_error_on_some_dim_when_expansion_does(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            let Layout::New(dims) = &layout;
+            let physical_rank = dims.len();
+
+            let lhs = layout.expand_physical_shape(&shape).err();
+
+            let mut raised_error = None;
+            for i in 0..physical_rank {
+                if raised_error.is_some() {
+                    break;
+                }
+                let i = u8::try_from(i).unwrap();
+                match layout.physical_size(i, &shape) {
+                    Ok(_) => {},
+                    Err(e) => raised_error = Some(e),
+                }
+            }
+
+            prop_assert_eq!(lhs, raised_error);
+        }
+
+        #[test]
+        #[should_panic]
+        fn test_physical_size_panics_on_oob_dim(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            let physical_shape = layout.expand_physical_shape(&shape).unwrap();
+            let rank = u8::try_from(physical_shape.len()).unwrap();
+            layout.physical_size(rank, &shape).unwrap();
+        }
+
         #[test]
         fn test_layout_underapproximates_fully_contiguous(
             test_input in test_layout_fully_contiguous_or_not_strategy(),
@@ -570,10 +826,16 @@ mod tests {
                     .try_into()
                     .unwrap();
             let analysis_result_fully_contig = updated_contig == layout.contiguous_full();
-            assert_eq!(analysis_result_fully_contig, is_fully_contig,
-                "Layout {:?} is {}fully contiguous but contig.={:?} (full={:?})", layout,
+            prop_assert_eq!(
+                analysis_result_fully_contig, is_fully_contig,
+                "Tile is {}fully contiguous but contig.={:?} (full={:?}) (tensor={:?}, tile={:?}, visited={:?})",
                 if is_fully_contig { "" } else { "not " },
-                updated_contig, layout.contiguous_full());
+                updated_contig,
+                layout.contiguous_full(),
+                tensor_shape,
+                tile_shape,
+                visited
+            );
         }
     }
 
@@ -679,5 +941,14 @@ mod tests {
             + Term(4, NonAffine::Leaf(BufferVar::Pt(0, expr_id.clone())))
             + Term(1, NonAffine::Leaf(BufferVar::Pt(1, expr_id.clone())));
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
+    }
+
+    fn arb_shape_and_same_rank_layout() -> impl Strategy<Value = (Shape, Layout)> {
+        proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(|shape| {
+            let shape_nz = NonZeroU8::try_from(u8::try_from(shape.len()).unwrap()).unwrap();
+            let bounds = LayoutArbRankBounds(shape_nz, Some(shape_nz));
+            let all_layouts = any_with::<Layout>(bounds);
+            (Just(Shape::from(shape)), all_layouts)
+        })
     }
 }

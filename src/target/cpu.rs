@@ -76,7 +76,7 @@ impl<T: CpuTarget> Target for T {
         }
     }
 
-    fn all_layouts_for_shape(rank: u8, dtype: Dtype) -> Vec<Layout> {
+    fn all_layouts_for_shape(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
         let all_target_vector_bytes = Self::levels()
             .into_iter()
             .flat_map(|lvl| lvl.vector_bytes().iter().copied())
@@ -85,7 +85,8 @@ impl<T: CpuTarget> Target for T {
         // The following could be faster. It keeps two copies of the non-packed layouts
         // (`base` and the first few values in `result`) and it doesn't compute the size
         // of the `result` ahead-of-time, potentially causing some Vec resizes.
-        let base = match rank {
+        let rank = u8::try_from(shape.len()).unwrap();
+        let unpacked_layouts = match rank {
             2 => vec![row_major(2), col_major(2)],
             4 => vec![row_major(4), nhwc()],
             _ => vec![row_major(rank)],
@@ -93,12 +94,17 @@ impl<T: CpuTarget> Target for T {
 
         // Extend with all possible packings.
         let all_packing_sizes = pack_sizes(None, dtype, &all_target_vector_bytes);
-        let mut result = base.clone();
-        result.extend(base.iter().flat_map(|original_layout| {
+        let mut result = unpacked_layouts.clone();
+        result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
             let Layout::New(dims) = original_layout;
-            (0..dims.len()).cartesian_product(&all_packing_sizes).map(
-                |(packing_dim, &packing_size)| {
-                    Layout::New(
+            (0..dims.len())
+                .cartesian_product(&all_packing_sizes)
+                .filter_map(|(packing_dim, &packing_size)| {
+                    debug_assert_ne!(packing_size, 1);
+                    if shape[packing_dim] % packing_size != 0 {
+                        return None;
+                    }
+                    Some(Layout::New(
                         dims.iter()
                             .cloned()
                             .chain(iter::once((
@@ -106,9 +112,8 @@ impl<T: CpuTarget> Target for T {
                                 Some(packing_size),
                             )))
                             .collect(),
-                    )
-                },
-            )
+                    ))
+                })
         }));
         result
     }
@@ -631,9 +636,10 @@ mod tests {
     proptest! {
         #[test]
         fn test_all_layouts_for_shape_are_unique(
-            rank in 1..=5u8, dtype in any::<Dtype>(),
+            shape in proptest::collection::vec(1..8u32, 1..=5),
+            dtype in any::<Dtype>(),
         ) {
-            assert_unique_layouts(&X86Target::all_layouts_for_shape(rank, dtype));
+            assert_unique_layouts(&X86Target::all_layouts_for_shape(&shape, dtype));
         }
 
         #[test]
@@ -641,8 +647,7 @@ mod tests {
             shape in proptest::collection::vec(1..8u32, 1..=5),
             dtype in any::<Dtype>(),
         ) {
-            let rank = shape.len().try_into().unwrap();
-            let superset: HashSet<_> = X86Target::all_layouts_for_shape(rank, dtype)
+            let superset: HashSet<_> = X86Target::all_layouts_for_shape(&shape, dtype)
                 .into_iter()
                 .collect();
             let subset: HashSet<_> = X86Target::move_destination_layouts(&shape, dtype)
