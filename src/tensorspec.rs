@@ -331,12 +331,13 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
 
             // Count the number of packings applied to each logical dimension.
             // As a special case, `packings` is empty if there are no packed dims.
-            // (This avoids a heap allocation for unpacked layouts.)
-            let mut packings = vec![];
+            // (This avoids potentially spilling onto the heap for unpacked
+            // layouts.)
+            let mut packings = SmallVec::<[_; 4]>::new();
             for (logical_dim, s) in dims.as_slice() {
                 if s.is_some() {
                     if packings.is_empty() {
-                        packings = vec![0; dims.len()];
+                        packings.resize(dims.len(), 0);
                     }
                     packings[usize::from(*logical_dim)] += 1;
                 }
