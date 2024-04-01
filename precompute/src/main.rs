@@ -17,10 +17,10 @@ use morello::grid::general::SurMap;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::memorylimits::{MemVec, MemoryLimits};
+use morello::search::top_down_many;
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
 };
-use morello::search::top_down_many;
 use morello::target::{
     CpuMemoryLevel::{self, GL},
     Target, X86Target,
