@@ -63,6 +63,11 @@ struct Args {
     #[arg(long, short)]
     jobs: Option<usize>,
 
+    /// Disable verification
+    #[cfg(feature = "verification")]
+    #[arg(long, default_value_t = false)]
+    skip_check: bool,
+
     #[command(subcommand)]
     subcmd: Subcommand,
 }
@@ -266,7 +271,7 @@ where
         println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
     }
     #[cfg(feature = "verification")]
-    if !built_artifact.check_correctness(&spec) {
+    if !args.skip_check && !built_artifact.check_correctness(&spec) {
         panic!("Generated code returned incorrect output");
     }
 
