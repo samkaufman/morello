@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use itertools::Itertools;
-use std::{iter, path, thread};
+use std::path;
 
 use morello::common::Dtype;
 use morello::datadeps::SpecKey;
@@ -92,9 +92,9 @@ fn main() -> Result<()> {
         let block_key_description = format!("{:?}", block_key);
         if args.group {
             println!("{}", table_key_description);
-            println!("  {} ({})", block_key_description, block_stats(&block));
+            println!("  {} ({})", block_key_description, block_stats(block));
         }
-        let mut last_value = None;
+        let last_value = None;
         for inner_pt in block
             .shape()
             .iter()

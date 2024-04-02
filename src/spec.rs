@@ -1315,7 +1315,7 @@ impl BiMap for PrimitiveBasicsBimap {
                 PrimitiveBasics {
                     typ,
                     spec_shape,
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                    dtypes: dtypes.as_slice().into(),
                 }
             }
             SpecKey::Move { dtypes } => {

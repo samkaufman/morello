@@ -4,7 +4,7 @@ use clap::ValueEnum;
 
 thread_local! {
     /// Singleton for the color mode.
-    static COLOR_MODE: RefCell<ColorMode> = RefCell::new(ColorMode::Auto);
+    static COLOR_MODE: RefCell<ColorMode> = const { RefCell::new(ColorMode::Auto) };
 }
 
 #[derive(Copy, Clone, PartialEq, ValueEnum)]

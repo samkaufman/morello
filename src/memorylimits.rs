@@ -99,10 +99,7 @@ impl MemoryLimits {
                 let mut result = Vec::with_capacity(cur_limit.len());
                 for child_allocation in per_child_diffs {
                     debug_assert_eq!(child_allocation.len(), cur_limit.len());
-                    let Some(to_push) = cur_limit.clone().checked_sub_snap_down(child_allocation)
-                    else {
-                        return None;
-                    };
+                    let to_push = cur_limit.clone().checked_sub_snap_down(child_allocation)?;
                     let mut to_push = MemoryLimits::Standard(to_push);
                     to_push.discretize();
                     result.push(to_push);

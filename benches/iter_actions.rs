@@ -1,6 +1,5 @@
 use iai_callgrind::{black_box, main};
 
-use morello::common::Dtype;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};

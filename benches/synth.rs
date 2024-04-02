@@ -1,7 +1,7 @@
 use iai_callgrind::{black_box, main};
 use nonzero::nonzero as nz;
 
-use morello::common::{DimSize, Dtype};
+use morello::common::DimSize;
 use morello::db::DashmapDiskDatabase;
 use morello::layout::row_major;
 use morello::lspec;

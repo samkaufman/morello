@@ -255,7 +255,7 @@ impl<'a> ImplReducer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{DimSize, Dtype};
+    use crate::common::DimSize;
     use crate::db::DashmapDiskDatabase;
     use crate::layout::row_major;
     use crate::lspec;
