@@ -72,8 +72,8 @@ struct ImplReducer {
 }
 
 // Computes an optimal Impl for `goal` and stores it in `db`.
-pub fn top_down<'d, Tgt>(
-    db: &'d RocksDatabase,
+pub fn top_down<Tgt>(
+    db: &RocksDatabase,
     goal: &Spec<Tgt>,
     top_k: usize,
     jobs: Option<NonZeroUsize>,
@@ -499,7 +499,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
     /// Begin computing the optimal implementation of a Spec.
     ///
     /// Internally, this will expand partial [Impl]s for all actions.
-    fn start<'d>(goal: Spec<Tgt>, search: &TopDownSearch<'d>) -> Self
+    fn start(goal: Spec<Tgt>, search: &TopDownSearch<'_>) -> Self
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -611,12 +611,12 @@ impl<Tgt: Target> SpecTask<Tgt> {
         Some(to_return.into_iter()) // TODO: Inline the iterator instead of collecting.
     }
 
-    fn resolve_request<'d>(
+    fn resolve_request(
         &mut self,
         id: RequestId,
         cost: Option<Cost>, // `None` means that the Spec was unsat
         task_goal: &Spec<Tgt>,
-        search: &TopDownSearch<'d>,
+        search: &TopDownSearch<'_>,
     ) where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -626,8 +626,8 @@ impl<Tgt: Target> SpecTask<Tgt> {
             reducer,
             partial_impls,
             partial_impls_incomplete,
-            request_batches_returned,
-            max_children,
+            request_batches_returned: _,
+            max_children: _,
         } = self
         else {
             panic!("Task is not running");
@@ -640,12 +640,11 @@ impl<Tgt: Target> SpecTask<Tgt> {
         let (working_impl_idx, child_idx) = id;
         let mut finished = false;
         let mut became_unsat = false;
-        let partial_impls_cnt = partial_impls.len(); // TODO: remove
         let entry = partial_impls.get_mut(working_impl_idx).unwrap();
         match entry {
             WorkingPartialImpl::Constructing {
                 partial_impl,
-                subspecs,
+                subspecs: _,
                 subspec_costs,
                 producing_action_idx,
             } => {
