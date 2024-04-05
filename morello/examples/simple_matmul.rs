@@ -1,7 +1,6 @@
 //! This example shows how to manually schedule a simple matrix multiplication for X86.
 
 use morello::codegen::CodeGen;
-use morello::common::Dtype;
 use morello::imp::kernels::KernelType;
 use morello::layout::row_major;
 use morello::lspec;

@@ -11,8 +11,10 @@ use crate::target::MemoryLevel;
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
-use crate::utils::{bit_length_inverse, join_into_string};
-use crate::utils::{bit_length_u32, is_power_of_two_u32, prev_power_of_two_u32};
+use crate::utils::{
+    bit_length_inverse, bit_length_u32, is_power_of_two_u32, join_into_string,
+    prev_power_of_two_u32,
+};
 
 use anyhow::Context;
 use itertools::Either;
@@ -1315,7 +1317,7 @@ impl BiMap for PrimitiveBasicsBimap {
                 PrimitiveBasics {
                     typ,
                     spec_shape,
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                    dtypes: dtypes.as_slice().into(),
                 }
             }
             SpecKey::Move { dtypes } => {

@@ -187,9 +187,7 @@ impl RocksDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        let Some(root_results) = self.get(query) else {
-            return None;
-        };
+        let root_results = self.get(query)?;
         let actions = query.0.actions();
         Some(
             root_results
@@ -801,7 +799,7 @@ fn block_shape<'a, F>(
     block_pt: &'a [u32],
     db_shape: &'a [Option<NonZeroUsize>],
     block_max_size_fn: F,
-) -> impl Iterator<Item = BimapInt> + ExactSizeIterator + 'a
+) -> impl ExactSizeIterator<Item = BimapInt> + 'a
 where
     F: Fn(usize, usize) -> u32 + 'a,
 {

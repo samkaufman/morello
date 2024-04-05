@@ -613,7 +613,6 @@ mod tests {
         expr::{AffineForm, Bounds, NonAffine, NonAffineExpr, Substitute, Term},
         layout::{row_major, BufferVar, LayoutError},
         opaque_symbol::OpaqueSymbol,
-        target::{Target, X86Target},
     };
     use itertools::Itertools;
     use proptest::{
