@@ -1,11 +1,16 @@
 use crate::common::DimSize;
+use crate::db::RocksDatabase;
+use crate::grid::canon::CanonicalBimap;
+use crate::grid::general::BiMap;
 use crate::imp::kernels::KernelType;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::scheduling::Action;
+use crate::search::top_down;
 use crate::spec::Spec;
 use crate::target::Target;
 use std::iter;
+use std::num::NonZeroUsize;
 
 /// A trait extending [ImplNode]s and [Spec]s with methods for more conveniently applying [Action]s.
 ///
@@ -30,6 +35,11 @@ pub trait SchedulingSugar<Tgt: Target> {
     ) -> ImplNode<Tgt, ()>;
     fn spatial_split(&self) -> ImplNode<Tgt, ()>;
     fn place(&self, kernel_type: KernelType) -> ImplNode<Tgt, ()>;
+    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt, ()>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
 }
 
 pub trait Subschedule<Tgt: Target> {
@@ -98,6 +108,19 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn place(&self, kernel_type: KernelType) -> ImplNode<Tgt, ()> {
         Action::Place(kernel_type).apply(self).unwrap()
     }
+
+    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt, ()>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        top_down(db, self, 1, jobs);
+        match db.get_impl(self).unwrap().first() {
+            Some(imp) => imp.clone().drop_aux(),
+            None => panic!("No Impl exists for {self}"),
+        }
+    }
 }
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
@@ -145,6 +168,15 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
 
     fn place(&self, kernel_type: KernelType) -> ImplNode<Tgt, ()> {
         apply_to_leaf_spec(self, |spec| spec.place(kernel_type))
+    }
+
+    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt, ()>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        apply_to_leaf_spec(self, |spec| spec.synthesize(db, jobs))
     }
 }
 
