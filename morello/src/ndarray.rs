@@ -307,7 +307,7 @@ fn run_index_frhint<T>(rle_vec: &RleVec<T>, index: u32, hint: Option<u32>) -> u3
     // First, test up to 8 ahead of the hint. This is just an empirically derived heurstic.
     // TODO: Tune this.
     if let Some(hint) = hint {
-        for to_test in (hint..hint + 8) {
+        for to_test in hint..hint + 8 {
             if let Some(tested_run) = rle_vec.runs().nth(to_test.try_into().unwrap()) {
                 // TODO: Can abort faster below.
                 if tested_run.start <= index && index < tested_run.start + tested_run.len {
