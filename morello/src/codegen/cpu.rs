@@ -370,9 +370,9 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         let buffer_indexing_expr = tensor.make_buffer_indexing_expr(&self.param_bindings);
         writeln!(
             out,
-            "{}printf(\"%\" {} \" \", {});",
+            "{}printf(\"{} \", {});",
             indent(depth),
-            tensor.spec().dtype().int_fmt_macro(),
+            tensor.spec().dtype().printf_fmt(),
             self.c_index(buffer, &buffer_indexing_expr, None),
         )?;
         depth -= 1;

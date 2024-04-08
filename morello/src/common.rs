@@ -41,15 +41,15 @@ impl Dtype {
         }
     }
 
-    pub fn int_fmt_macro(&self) -> &'static str {
+    pub fn printf_fmt(&self) -> &'static str {
         match self {
-            Dtype::Uint8 => "PRIu8",
-            Dtype::Sint8 => "PRIi8",
-            Dtype::Uint16 => "PRIu16",
-            Dtype::Sint16 => "PRIi16",
-            Dtype::Uint32 => "PRIu32",
-            Dtype::Sint32 => "PRIi32",
-            Dtype::Float32 | Dtype::Bfloat16 => todo!(),
+            Dtype::Uint8 => "%\" PRIu8 \"",
+            Dtype::Sint8 => "%\" PRIi8 \"",
+            Dtype::Uint16 => "%\" PRIu16 \"",
+            Dtype::Sint16 => "%\" PRIi16 \"",
+            Dtype::Uint32 => "%\" PRIu32 \"",
+            Dtype::Sint32 => "%\" PRIi32 \"",
+            Dtype::Float32 | Dtype::Bfloat16 => "%f",
         }
     }
 }
