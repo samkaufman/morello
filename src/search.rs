@@ -77,7 +77,7 @@ where
     D: Database<'d>,
 {
     // First, check if the Spec is already in the database.
-    // println!("get: {}", goal);
+    println!("top_down_spec: {}", goal);
     let get_result = db.get_with_preference(goal);
     let mut preferences: &[_] = &[];
     if let GetPreference::Hit(v) = get_result {
@@ -135,11 +135,11 @@ where
     // Copy into the memo. table and return.
     let mut final_results = reducer.finalize();
     // if format!("{}", goal.0) == "Move((1×2, u32, <[1,0], [None, None]>), (1×2, u32), serial)" {
-    // println!(
-    //     "put: {} -- down to [{}]",
-    //     goal,
-    //     final_results.iter().map(|r| &r.1.peaks).format(", ")
-    // );
+    println!(
+        "put: {} -- down to [{}]",
+        goal,
+        final_results.iter().map(|r| &r.1.peaks).format(", ")
+    );
     // }
 
     // Pop until len > 1

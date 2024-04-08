@@ -1,0 +1,265 @@
+     Running `target/debug/morello -k 2 -j 1 matmul 2`
+thread 'main' panicked at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:627:37:
+No actions for sub-Impl (Move((1×1, u32), (1×1, u32, ua), serial), [4, 1024, 4, 16384]) while computing cost for (Move((1×1, u32, L1), (1×1, u32, ua), serial), [4, 1024, 4, 32768])
+stack backtrace:
+   0:        0x105136a54 - std::backtrace_rs::backtrace::libunwind::trace::hd3c0154278411ba9
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/../../backtrace/src/backtrace/libunwind.rs:104:5
+   1:        0x105136a54 - std::backtrace_rs::backtrace::trace_unsynchronized::h7e868fa4f72c0d0a
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/../../backtrace/src/backtrace/mod.rs:66:5
+   2:        0x105136a54 - std::sys_common::backtrace::_print_fmt::h7babef1c71141ed7
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/sys_common/backtrace.rs:68:5
+   3:        0x105136a54 - <std::sys_common::backtrace::_print::DisplayBacktrace as core::fmt::Display>::fmt::h3be43c6214e69043
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/sys_common/backtrace.rs:44:22
+   4:        0x105154bb0 - core::fmt::rt::Argument::fmt::he26861354a677178
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/core/src/fmt/rt.rs:142:9
+   5:        0x105154bb0 - core::fmt::write::h12f9049830901a82
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/core/src/fmt/mod.rs:1120:17
+   6:        0x1051344f8 - std::io::Write::write_fmt::h2ff514dfe799c882
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/io/mod.rs:1846:15
+   7:        0x105136888 - std::sys_common::backtrace::_print::h359885544b9d612b
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/sys_common/backtrace.rs:47:5
+   8:        0x105136888 - std::sys_common::backtrace::print::h722d6ff0889d39c2
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/sys_common/backtrace.rs:34:9
+   9:        0x105137cc4 - std::panicking::default_hook::{{closure}}::hd7f9985c1b9ae0aa
+  10:        0x105137a0c - std::panicking::default_hook::h29fb35819c2a32ca
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/panicking.rs:292:9
+  11:        0x105138100 - std::panicking::rust_panic_with_hook::h401df0236a0e7dae
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/panicking.rs:781:13
+  12:        0x105137ff4 - std::panicking::begin_panic_handler::{{closure}}::h67f4ee7322151c3c
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/panicking.rs:659:13
+  13:        0x105136ed8 - std::sys_common::backtrace::__rust_end_short_backtrace::hbce128a2ff88406e
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/sys_common/backtrace.rs:171:18
+  14:        0x105137d7c - rust_begin_unwind
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/panicking.rs:647:5
+  15:        0x1051812ec - core::panicking::panic_fmt::hecc1dfe94cb15bc7
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/core/src/panicking.rs:72:14
+  16:        0x104e5af90 - morello::db::DbBlock::get_with_preference::{{closure}}::h6804e70fc0b9dbc1
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:627:37
+  17:        0x104e5af90 - morello::db::compute_cost::hf3271485e223760c
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:1123:33
+  18:        0x104e5ad8c - morello::db::compute_cost::hf3271485e223760c
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:1128:34
+  19:        0x104e54610 - morello::db::DbBlock::get_with_preference::h06b72a79651dcea1
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:618:51
+  20:        0x104e54610 - <morello::db::DashmapDiskDatabase as morello::db::Database>::get_with_preference::h054d5da117b21b06
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:277:9
+  21:        0x104e5aae4 - <morello::db::DashmapDiskDatabase as morello::db::Database>::get::h660360aedae4ee5a
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:256:15
+  22:        0x104e5aae4 - morello::db::DbBlock::get_with_preference::{{closure}}::h6804e70fc0b9dbc1
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:619:76
+  23:        0x104e5aae4 - morello::db::compute_cost::hf3271485e223760c
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:1123:33
+  24:        0x104e5ad8c - morello::db::compute_cost::hf3271485e223760c
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:1128:34
+  25:        0x104e54610 - morello::db::DbBlock::get_with_preference::h06b72a79651dcea1
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:618:51
+  26:        0x104e54610 - <morello::db::DashmapDiskDatabase as morello::db::Database>::get_with_preference::h054d5da117b21b06
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:277:9
+  27:        0x104e5aae4 - <morello::db::DashmapDiskDatabase as morello::db::Database>::get::h660360aedae4ee5a
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:256:15
+  28:        0x104e5aae4 - morello::db::DbBlock::get_with_preference::{{closure}}::h6804e70fc0b9dbc1
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:619:76
+  29:        0x104e5aae4 - morello::db::compute_cost::hf3271485e223760c
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:1123:33
+  30:        0x104e5ad8c - morello::db::compute_cost::hf3271485e223760c
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:1128:34
+  31:        0x104e54610 - morello::db::DbBlock::get_with_preference::h06b72a79651dcea1
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:618:51
+  32:        0x104e54610 - <morello::db::DashmapDiskDatabase as morello::db::Database>::get_with_preference::h054d5da117b21b06
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/db.rs:277:9
+  33:        0x104ddffa8 - morello::search::top_down_spec::h47028e63d55bfe91
+  34:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  35:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  36:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  37:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  38:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  39:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  40:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  41:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  42:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  43:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  44:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  45:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  46:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  47:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  48:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  49:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  50:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  51:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  52:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  53:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  54:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  55:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  56:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  57:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  58:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  59:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  60:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  61:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  62:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  63:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  64:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  65:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  66:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  67:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  68:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  69:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  70:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  71:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  72:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  73:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  74:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  75:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  76:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  77:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  78:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  79:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  80:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  81:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  82:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  83:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  84:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  85:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  86:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  87:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  88:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  89:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  90:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  91:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  92:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  93:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  94:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  95:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  96:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+  97:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+  98:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+  99:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 100:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 101:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 102:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 103:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 104:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 105:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 106:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 107:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 108:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 109:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 110:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 111:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 112:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 113:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 114:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 115:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 116:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 117:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 118:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 119:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 120:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 121:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 122:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 123:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 124:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 125:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 126:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 127:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 128:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 129:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 130:        0x104ddf16c - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:171:13
+ 131:        0x104ddf3d8 - morello::search::top_down_impl::h04a411809b4a09cc
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:184:17
+ 132:        0x104de0164 - morello::search::top_down_spec::h47028e63d55bfe91
+ 133:        0x104de11c4 - morello::search::top_down::h4d9a498e857ded42
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/search.rs:50:16
+ 134:        0x104eac31c - morello::main_per_db::h32429d2bb8c17b8c
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/main.rs:218:29
+ 135:        0x104de1720 - morello::main::hb40515ab211e92ce
+                               at /Users/kmatsui/Library/CloudStorage/Dropbox/morello/src/main.rs:140:26
+ 136:        0x104ec2ea0 - core::ops::function::FnOnce::call_once::h92248b78cad6d8fc
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/core/src/ops/function.rs:250:5
+ 137:        0x104ec2ea0 - std::sys_common::backtrace::__rust_begin_short_backtrace::h9f67e311d4499d82
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/sys_common/backtrace.rs:155:18
+ 138:        0x104ea5df4 - std::rt::lang_start::{{closure}}::h92b78d39b88ac200
+ 139:        0x10512ddd4 - core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once::h088bff74bea6766c
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/core/src/ops/function.rs:284:13
+ 140:        0x10512ddd4 - std::panicking::try::do_call::h349c77c6d71b4fc6
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/panicking.rs:554:40
+ 141:        0x10512ddd4 - std::panicking::try::h31660b8b1df89448
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/panicking.rs:518:19
+ 142:        0x10512ddd4 - std::panic::catch_unwind::ha7acd3d7e422e73e
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/panic.rs:142:14
+ 143:        0x10512ddd4 - std::rt::lang_start_internal::{{closure}}::h2c19e0a817333fdf
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/rt.rs:148:48
+ 144:        0x10512ddd4 - std::panicking::try::do_call::heb90b028486943c5
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/panicking.rs:554:40
+ 145:        0x10512ddd4 - std::panicking::try::h172e9629589d181d
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/panicking.rs:518:19
+ 146:        0x10512ddd4 - std::panic::catch_unwind::h9f291b6d4dd4dc55
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/panic.rs:142:14
+ 147:        0x10512ddd4 - std::rt::lang_start_internal::h1e57a60f079a08c6
+                               at /rustc/aedd173a2c086e558c2b66d3743b344f977621a7/library/std/src/rt.rs:148:20
+ 148:        0x104de7be8 - _main

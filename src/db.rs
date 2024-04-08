@@ -133,6 +133,7 @@ pub struct DashmapDbRef<'a, Tgt: Target, S = RandomState>(
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionCostVec(pub SmallVec<[(ActionIdx, Cost); 1]>);
 
+#[derive(Debug)]
 pub enum GetPreference<T, V> {
     Hit(T),
     Miss(Option<V>),
@@ -268,13 +269,17 @@ where
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        println!("get: {query}");
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
         let (block_pt, inner_pt) = blockify_point(global_pt);
         let Some(group) = self.blocks.get(&(table_key, block_pt)) else {
+            println!("get_result {query}: miss");
             return GetPreference::Miss(None);
         };
-        group.get_with_preference(self, query, &inner_pt)
+        let result = group.get_with_preference(self, query, &inner_pt);
+        println!("get_result: {query} => {:?}", result);
+        result
     }
 
     fn put<Tgt>(&'a self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
@@ -311,6 +316,7 @@ where
                 let block_entry = self.blocks.entry((db_key.clone(), block_pt.clone()));
                 match block_entry {
                     Entry::Occupied(mut existing_block) => {
+                        // TODO: THIS IS INCORRECT.
                         // TODO: the second iteration and later should ignore this case so that we don't
                         // overwrite the best action with a worse one?
                         if i > 0 {
@@ -338,6 +344,7 @@ where
                             }
                             DbBlock::Whole(e) => {
                                 // Examine the table before updating.
+                                panic!();
                                 e.fill_region(
                                     self.k,
                                     &dim_ranges,
@@ -356,6 +363,7 @@ where
                             .map(|(_, r)| r.clone())
                             .collect::<Vec<_>>();
                         if self.use_rle_blocks {
+                            panic!();
                             entry.insert(DbBlock::Whole(Box::new(WholeBlock::partially_filled::<
                                 Tgt,
                             >(
@@ -530,6 +538,7 @@ impl DbBlock {
                                 Err(OutOfMemory) if inner_idx > 0 => continue,
                                 _ => imp_result.unwrap(),
                             };
+                            println!("{query} takes action index: {}", action_idx);
                             let recomputed_cost = compute_cost(&imp, &|s| {
                                 let Some(ActionCostVec(inner_decisions)) = containing_db.get(&s.0)
                                 else {
@@ -703,6 +712,8 @@ impl ActionOnlyBlock {
         dim_ranges: &[Range<BimapInt>],
         value: Option<&[ActionIdx]>,
     ) -> Self {
+        println!("partially_filled: {dim_ranges:?} {value:?}");
+
         assert!(value.map(|v| v.len() <= k.into()).unwrap_or(true));
         let concatenated_shape: Vec<_> = iter::once(usize::from(k))
             .chain(shape.iter().copied())
@@ -747,6 +758,8 @@ impl ActionOnlyBlock {
     }
 
     fn fill_region(&mut self, dim_ranges: &[Range<u32>], value: Option<&[ActionIdx]>) {
+        println!("fill_region: {dim_ranges:?} {value:?}");
+
         let k = u32::try_from(self.0.shape()[0]).unwrap();
         let mut region: Vec<Range<BimapInt>> = iter::once(Range::default())
             .chain(dim_ranges.iter().cloned())

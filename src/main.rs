@@ -1,3 +1,4 @@
+use morello::memorylimits::MemVec;
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 
@@ -13,10 +14,11 @@ use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
 use morello::db::{DashmapDiskDatabase, Database, DatabaseExt};
 use morello::layout::{col_major, row_major};
+use morello::memorylimits::MemoryLimits;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::target::{
     ArmTarget,
-    CpuMemoryLevel::{self, GL},
+    CpuMemoryLevel::{self, GL, L1},
     Target, TargetId, X86Target,
 };
 use morello::tensorspec::TensorSpecAux;
@@ -157,7 +159,7 @@ where
         QuerySpec::Transpose { size } => {
             let rm2 = row_major(2);
             let cm2 = col_major(2);
-            lspec!(Move([*size, *size], (u32, GL, rm2), (u32, GL, cm2), serial))
+            lspec!(Move([*size, *size], (u32, L1, rm2), (u32, L1, cm2), serial))
         }
         QuerySpec::Matmul { size } | QuerySpec::MatmulU8S8S16 { size } => {
             let rm2 = row_major(2);
@@ -211,7 +213,11 @@ where
         }
     };
 
-    let spec = Spec(logical_spec, Tgt::max_mem());
+    let spec = Spec(
+        logical_spec,
+        Tgt::max_mem(),
+        // MemoryLimits::Standard(MemVec::new([4, 0, 16, 0])),
+    );
     info!("Synthesizing {}", spec);
 
     let start_time = std::time::Instant::now();

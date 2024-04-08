@@ -48,7 +48,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn max_mem() -> MemoryLimits {
-        MemoryLimits::Standard(MemVec::new([64, 1024, 32_768, 1_073_741_824]))
+        MemoryLimits::Standard(MemVec::new([32, 16, 0, 0]))
     }
 
     fn processors() -> u8 {
