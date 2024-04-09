@@ -23,7 +23,7 @@ pub(super) trait CpuTarget:
     Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static
 {
     fn target_id() -> TargetId;
-    fn vec_types() -> &'static [VecType; 12];
+    fn vec_types() -> &'static [VecType; 16];
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -166,6 +166,10 @@ impl<T: CpuTarget> Target for T {
                         if broadcastvecmult_applies_to_operands(&spec.parameters()) {
                             microkernels.push(Action::Place(KernelType::BroadcastVecMultAdd));
                         }
+                        if broadcastvecmultbf16f32_applies_to_operands(&spec.parameters()) {
+                            microkernels
+                                .push(Action::Place(KernelType::BroadcastVecMultAddBf16F32));
+                        }
                         if twovecbroadcastvecmult_applies_to_operands(&spec.parameters()) {
                             microkernels.push(Action::Place(KernelType::TwoVecBroadcastVecMultAdd));
                         }
@@ -210,7 +214,7 @@ impl<T: CpuTarget> Target for T {
         <Self as CpuTarget>::target_id()
     }
 
-    fn vec_types() -> &'static [VecType; 12] {
+    fn vec_types() -> &'static [VecType; 16] {
         <Self as CpuTarget>::vec_types()
     }
 }
@@ -439,6 +443,38 @@ pub fn vectorzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
 pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
+    // Only integers and 32-bit floats, which Clang should be able to handle pretty well with
+    // its vector type extension.
+    let first_dtype = operands[0].dtype();
+    if !matches!(
+        first_dtype,
+        Dtype::Sint8
+            | Dtype::Uint8
+            | Dtype::Sint16
+            | Dtype::Uint16
+            | Dtype::Sint32
+            | Dtype::Uint32
+            | Dtype::Float32
+    ) {
+        return false;
+    }
+    operands.iter().skip(1).all(|o| o.dtype() == first_dtype)
+        && shared_broadcastvecmult_applies_to_operands(operands)
+}
+
+pub fn broadcastvecmultbf16f32_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
+    operands: &[TensorSpec<Tgt>],
+) -> bool {
+    operands[0].dtype() == Dtype::Bfloat16
+        && operands[1].dtype() == Dtype::Bfloat16
+        && operands[2].dtype() == Dtype::Float32
+        && operands[1].vector_size() == operands[2].vector_size()
+        && shared_broadcastvecmult_applies_to_operands(operands)
+}
+
+pub fn shared_broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
+    operands: &[TensorSpec<Tgt>],
+) -> bool {
     let scalar_level = operands[0].level();
     if scalar_level != CpuMemoryLevel::RF && scalar_level != CpuMemoryLevel::L1 {
         return false;
@@ -446,17 +482,14 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
 
     // Second and third parameters must be in VRF, vector size multiples, aligned, contig., and
     // have the same dtype as the first parameter.
-    for i in 1..3 {
-        if operands[i].level() != CpuMemoryLevel::VRF {
+    for o in &operands[1..] {
+        if o.level() != CpuMemoryLevel::VRF {
             return false;
         }
-        if !operands[i].aligned() || !operands[i].is_contiguous() {
+        if !o.aligned() || !o.is_contiguous() {
             return false;
         }
-        if operands[0].dtype() != operands[i].dtype() {
-            return false;
-        }
-        if operands[i].volume() % operands[i].vector_size().unwrap() != 0 {
+        if o.volume() % o.vector_size().unwrap() != 0 {
             return false;
         }
     }
@@ -466,17 +499,17 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
         return false;
     }
 
-    // Second parameter must have (no more than) one non-degenerate dimension.
-    // TODO: Make following true.
+    // Second parameter must have shape 1xn.
     if operands[1].shape().len() != 2 || operands[1].shape()[0] != 1 {
         return false;
     }
 
     // Third (output) parameter shape must match the second input parameter shape and
     // vector size.
-    if operands[1].shape() != operands[2].shape()
-        || operands[1].vector_size() != operands[2].vector_size()
-    {
+    if operands[1].shape() != operands[2].shape() {
+        return false;
+    }
+    if operands[1].vector_size() != operands[2].vector_size() {
         return false;
     }
     true

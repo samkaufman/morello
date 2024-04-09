@@ -623,6 +623,95 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
+                    KernelType::BroadcastVecMultAddBf16F32 => {
+                        let vector_size_bf16 = arguments[1].spec().vector_size().unwrap();
+                        let volume = arguments[1].spec().volume();
+                        debug_assert_eq!(volume % vector_size_bf16, 0);
+                        let vector_count = volume / vector_size_bf16;
+                        writeln!(w, "{}/* BroadcastVecMultAddBf16F32 */", indent(depth))?;
+                        for vector_idx in 0..vector_count {
+                            let exprs =
+                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                                    0 => self.c_index_ptr(a, b, None),
+                                    1 | 2 => self.c_index_vec(
+                                        a,
+                                        &(b.clone()
+                                            + i32::try_from(vector_idx * vector_size_bf16)
+                                                .unwrap()),
+                                        None,
+                                    ),
+                                    _ => unreachable!(),
+                                });
+
+                            let even_name = self.namer.fresh_name();
+                            let odd_name = self.namer.fresh_name();
+                            let concat_name = self.namer.fresh_name();
+                            let broad_name = self.namer.fresh_name();
+
+                            let (shift_fn, blend_fn, blend_param, zero_fn, _) =
+                                vec_func_names(vector_size_bf16);
+                            let (shift_fn_out, _, _, zero_fn_out, broadcast16_out) =
+                                vec_func_names(vector_size_bf16 * 2);
+
+                            let vf8 =
+                                get_vector(Tgt::vec_types(), Dtype::Float32, vector_size_bf16 / 2);
+                            let vfc =
+                                get_vector(Tgt::vec_types(), Dtype::Float32, vector_size_bf16);
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){shift_fn}(*({3}*)(&{4}), {5});",
+                                indent(depth),
+                                vf8.name,
+                                odd_name,
+                                vf8.native_type_name,
+                                exprs[1],
+                                8 * vector_size_bf16 / 4
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), {5});",
+                                indent(depth),
+                                vf8.name,
+                                even_name,
+                                vf8.native_type_name,
+                                exprs[1],
+                                blend_param
+                            )?;
+
+                            // TODO: Combine!
+                            // TODO: Indices below should be generic in vector size
+                            writeln!(
+                                w,
+                                "{}{} {} = __builtin_shufflevector({}, {}, 0, 4, 1, 5, 2, 6, 3, 7);",
+                                indent(depth),
+                                vfc.name,
+                                concat_name,
+                                odd_name,
+                                even_name,
+                            )?;
+
+                            // TODO: Don't inline `short` below.
+                            writeln!(
+                                w,
+                                "{0}{1} {broad_name} = {shift_fn_out}({broadcast16_out}(*(short *)({2})), 16);",
+                                indent(depth),
+                                vfc.name,
+                                exprs[0]
+                            )?;
+
+                            writeln!(
+                                w,
+                                "{}{} += {} * {}; /* BroadcastVecMultAddBf16F32 */",
+                                indent(depth),
+                                exprs[2],
+                                broad_name,
+                                concat_name
+                            )?;
+
+                            self.headers.vector_type_defs.insert(vf8);
+                        }
+                        Ok(())
+                    }
                     KernelType::TwoVecBroadcastVecMultAdd => {
                         let vector_size = arguments[2].spec().vector_size().unwrap();
                         let volume = arguments[2].spec().volume();
@@ -1050,6 +1139,35 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
     }
 }
 
+fn vec_func_names(
+    vector_size_bf16: u32,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    match vector_size_bf16 {
+        8 => (
+            "_mm_slli_epi32",
+            "_mm_blend_epi16",
+            "0xAA",
+            "_mm_setzero_si128",
+            "_mm_set1_epi16",
+        ),
+        16 => (
+            "_mm256_slli_epi32",
+            "_mm256_blend_epi16",
+            "0xAAAA",
+            "_mm256_setzero_si256",
+            "_mm256_set1_epi16",
+        ),
+        32 => todo!(),
+        _ => unimplemented!(),
+    }
+}
+
 fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
     l: &Loop<Tgt, Aux>,
 ) -> impl Iterator<Item = (u8, u32)> + '_ {
@@ -1087,7 +1205,7 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
 }
 
 fn get_vector(
-    vec_types: &'static [VecType; 12],
+    vec_types: &'static [VecType; 16],
     dtype: Dtype,
     vector_size: DimSize,
 ) -> &'static VecType {
@@ -1096,7 +1214,12 @@ fn get_vector(
         .find(|vec_type| {
             vec_type.dtype == dtype && vec_type.value_cnt == u8::try_from(vector_size).unwrap()
         })
-        .expect("VecType to match dtype and volume of vector_size")
+        .unwrap_or_else(|| {
+            panic!(
+                "vec_types does not contain dtype {:?} and size {}; vec_types are: {:?}",
+                dtype, vector_size, vec_types
+            )
+        })
 }
 
 fn expr_to_c(e: &AffineForm<NonAffine<CExprVar>>) -> String {

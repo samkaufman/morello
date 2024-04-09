@@ -27,6 +27,7 @@ pub struct Kernel<Tgt: Target, Aux> {
 pub enum KernelType {
     MultAdd,
     BroadcastVecMultAdd,
+    BroadcastVecMultAddBf16F32,
     TwoVecBroadcastVecMultAdd,
     PhysicalTransposeByte128,
     PhysicalTransposeByte256,
@@ -51,7 +52,10 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
     fn memory_allocated(&self) -> MemoryAllocation {
         match self.kernel_type {
-            KernelType::BroadcastVecMultAdd | KernelType::TwoVecBroadcastVecMultAdd => {
+            // TODO: Model memory correctly for BroadcastVecMultAddBf16F32
+            KernelType::BroadcastVecMultAdd
+            | KernelType::TwoVecBroadcastVecMultAdd
+            | KernelType::BroadcastVecMultAddBf16F32 => {
                 let vec_tensor_spec = self.arguments[1].spec();
                 let vb = u64::from(vec_tensor_spec.vector_size().unwrap())
                     * u64::from(vec_tensor_spec.dtype().size());
@@ -78,7 +82,10 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
 
     fn compute_main_cost(&self, _child_costs: &[MainCost]) -> MainCost {
         match self.kernel_type {
-            KernelType::BroadcastVecMultAdd | KernelType::TwoVecBroadcastVecMultAdd => {
+            // TODO: Model cost for BroadcastVecMultAddBf16F32 correctly.
+            KernelType::BroadcastVecMultAdd
+            | KernelType::TwoVecBroadcastVecMultAdd
+            | KernelType::BroadcastVecMultAddBf16F32 => {
                 let vector_size = self.arguments[1].spec().vector_size().unwrap();
                 let volume = self.arguments[1].spec().volume();
                 debug_assert_eq!(volume % vector_size, 0);
@@ -134,6 +141,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
         let name = match self.kernel_type {
             KernelType::MultAdd => "MultAdd",
             KernelType::BroadcastVecMultAdd => "BroadcastVecMultAdd",
+            KernelType::BroadcastVecMultAddBf16F32 => "BroadcastVecMultAddBf16F32",
             KernelType::TwoVecBroadcastVecMultAdd => "TwoVecBroadcastVecMultAdd",
             KernelType::PhysicalTransposeByte128 => "PhysicalTransposeByte128",
             KernelType::PhysicalTransposeByte256 => "PhysicalTransposeByte256",
@@ -168,6 +176,7 @@ impl KernelType {
         match self {
             KernelType::MultAdd
             | KernelType::BroadcastVecMultAdd
+            | KernelType::BroadcastVecMultAddBf16F32
             | KernelType::TwoVecBroadcastVecMultAdd => 3,
             KernelType::PhysicalTransposeByte128
             | KernelType::PhysicalTransposeByte256
