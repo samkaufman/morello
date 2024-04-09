@@ -29,7 +29,7 @@ use std::rc::Rc;
 use std::time::Duration;
 use tempfile::tempdir;
 
-const CLI_FLAGS: [&str; 3] = ["-std=gnu99", "-O3", "-o"];
+const CLI_FLAGS: [&str; 4] = ["-std=gnu99", "-O3", "-rtlib=compiler-rt", "-o"];
 
 const X86_CLI_VEC_FLAGS: [&str; 2] = ["-fopenmp", "-mavx2"];
 const ARM_CLI_VEC_FLAGS: [&str; 1] = ["-fopenmp"];
