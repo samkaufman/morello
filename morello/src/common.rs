@@ -28,19 +28,7 @@ impl Dtype {
         }
     }
 
-    pub fn c_type(&self) -> &'static str {
-        match self {
-            Dtype::Uint8 => "uint8_t",
-            Dtype::Sint8 => "int8_t",
-            Dtype::Uint16 => "uint16_t",
-            Dtype::Sint16 => "int16_t",
-            Dtype::Uint32 => "uint32_t",
-            Dtype::Sint32 => "int32_t",
-            Dtype::Float32 => "float",
-            Dtype::Bfloat16 => "bfloat16_t",
-        }
-    }
-
+    // TODO: Move into c_utils.rs.
     pub fn printf_fmt(&self) -> &'static str {
         match self {
             Dtype::Uint8 => "%\" PRIu8 \"",

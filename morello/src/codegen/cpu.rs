@@ -147,7 +147,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 out,
                 "{}(({1} *)dest{idx})[i] = {2}((({1} *)mapped)[i]);",
                 indent(2),
-                input_tensor.spec().dtype().c_type(),
+                c_type(input_tensor.spec().dtype()),
                 endian_convert_fn(input_tensor.spec().dtype())
             )?;
 
