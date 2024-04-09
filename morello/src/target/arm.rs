@@ -12,7 +12,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vsi8",
         native_type_name: "int32x4x2_t",
         load_fn: "vld2q_s32",
+        load_fn_arg0: "const int32_t",
         store_fn: "vst2q_s32",
+        store_fn_arg0: "int32_t",
     },
     VecType {
         dtype: Dtype::Sint32,
@@ -20,7 +22,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vsi4",
         native_type_name: "int32x4_t",
         load_fn: "vld1q_s32",
+        load_fn_arg0: "const int32_t",
         store_fn: "vst1q_s32",
+        store_fn_arg0: "int32_t",
     },
     VecType {
         dtype: Dtype::Uint32,
@@ -28,7 +32,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vui8",
         native_type_name: "uint32x4x2_t",
         load_fn: "vld2q_u32",
+        load_fn_arg0: "const uint32_t",
         store_fn: "vst2q_u32",
+        store_fn_arg0: "uint32_t",
     },
     VecType {
         dtype: Dtype::Uint32,
@@ -36,7 +42,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vui4",
         native_type_name: "uint32x4_t",
         load_fn: "vld1q_u32",
+        load_fn_arg0: "const uint32_t",
         store_fn: "vst1q_u32",
+        store_fn_arg0: "uint32_t",
     },
     VecType {
         dtype: Dtype::Sint16,
@@ -44,7 +52,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vsi8",
         native_type_name: "int16x4x2_t",
         load_fn: "vld2q_s16",
+        load_fn_arg0: "const int16_t",
         store_fn: "vst2q_s16",
+        store_fn_arg0: "int16_t",
     },
     VecType {
         dtype: Dtype::Sint16,
@@ -52,7 +62,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vsi4",
         native_type_name: "int16x4_t",
         load_fn: "vld1q_s16",
+        load_fn_arg0: "const int16_t",
         store_fn: "vst1q_s16",
+        store_fn_arg0: "int16_t",
     },
     VecType {
         dtype: Dtype::Uint16,
@@ -60,7 +72,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vui8",
         native_type_name: "uint16x4x2_t",
         load_fn: "vld2q_u16",
+        load_fn_arg0: "const uint16_t",
         store_fn: "vst2q_u16",
+        store_fn_arg0: "uint16_t",
     },
     VecType {
         dtype: Dtype::Uint16,
@@ -68,7 +82,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vui4",
         native_type_name: "uint16x4_t",
         load_fn: "vld1q_u16",
+        load_fn_arg0: "const uint16_t",
         store_fn: "vst1q_u16",
+        store_fn_arg0: "uint16_t",
     },
     VecType {
         dtype: Dtype::Sint8,
@@ -76,7 +92,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vsb32",
         native_type_name: "int8x16x2_t",
         load_fn: "vld2q_s8",
+        load_fn_arg0: "const int8_t",
         store_fn: "vst2q_s8",
+        store_fn_arg0: "int8_t",
     },
     VecType {
         dtype: Dtype::Sint8,
@@ -84,7 +102,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vsb16",
         native_type_name: "int8x16_t",
         load_fn: "vld1q_s8",
+        load_fn_arg0: "const int8_t",
         store_fn: "vst1q_s8",
+        store_fn_arg0: "int8_t",
     },
     VecType {
         dtype: Dtype::Uint8,
@@ -92,7 +112,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vub32",
         native_type_name: "uint8x16x2_t",
         load_fn: "vld2q_u8",
+        load_fn_arg0: "const uint8_t",
         store_fn: "vst2q_u8",
+        store_fn_arg0: "uint8_t",
     },
     VecType {
         dtype: Dtype::Uint8,
@@ -100,7 +122,9 @@ const ARM_VEC_TYPES: [VecType; 12] = [
         name: "vub16",
         native_type_name: "uint8x16_t",
         load_fn: "vld1q_u8",
+        load_fn_arg0: "const uint8_t",
         store_fn: "vst1q_u8",
+        store_fn_arg0: "uint8_t",
     },
 ];
 

@@ -584,14 +584,14 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         } else {
                             writeln!(
                                 w,
-                                "{}{}(({} *)({}), {}(({} *)({})));  /* VectorAssign */",
+                                "{0}{1}(({2} *)({3}), {4}(({5} *)({6})));  /* VectorAssign */",
                                 indent(depth),
                                 vtype.store_fn,
-                                itype,
+                                vtype.store_fn_arg0,
                                 exprs[1],
                                 vtype.load_fn,
-                                itype,
-                                exprs[0]
+                                vtype.load_fn_arg0,
+                                exprs[0],
                             )
                         }
                     }

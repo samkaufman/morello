@@ -12,7 +12,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vsi8",
         native_type_name: "__m256i",
         load_fn: "_mm256_loadu_si256",
+        load_fn_arg0: "__m256i",
         store_fn: "_mm256_storeu_si256",
+        store_fn_arg0: "__m256i",
     },
     VecType {
         dtype: Dtype::Sint32,
@@ -20,7 +22,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vsi4",
         native_type_name: "__m128i",
         load_fn: "_mm_loadu_si128",
+        load_fn_arg0: "__m128i",
         store_fn: "_mm_storeu_si128",
+        store_fn_arg0: "__m128i",
     },
     VecType {
         dtype: Dtype::Uint32,
@@ -28,7 +32,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vui8",
         native_type_name: "__m256i",
         load_fn: "_mm256_loadu_si256",
+        load_fn_arg0: "__m256i",
         store_fn: "_mm256_storeu_si256",
+        store_fn_arg0: "__m256i",
     },
     VecType {
         dtype: Dtype::Uint32,
@@ -36,7 +42,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vui4",
         native_type_name: "__m128i",
         load_fn: "_mm_loadu_si128",
+        load_fn_arg0: "__m128i",
         store_fn: "_mm_storeu_si128",
+        store_fn_arg0: "__m128i",
     },
     VecType {
         dtype: Dtype::Sint16,
@@ -44,7 +52,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vsi16",
         native_type_name: "__m256i",
         load_fn: "_mm256_loadu_si256",
+        load_fn_arg0: "__m256i",
         store_fn: "_mm256_storeu_si256",
+        store_fn_arg0: "__m256i",
     },
     VecType {
         dtype: Dtype::Sint16,
@@ -52,7 +62,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vsi8",
         native_type_name: "__m128i",
         load_fn: "_mm_loadu_si128",
+        load_fn_arg0: "__m128i",
         store_fn: "_mm_storeu_si128",
+        store_fn_arg0: "__m128i",
     },
     VecType {
         dtype: Dtype::Uint16,
@@ -60,7 +72,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vui16",
         native_type_name: "__m256i",
         load_fn: "_mm256_loadu_si256",
+        load_fn_arg0: "__m256i",
         store_fn: "_mm256_storeu_si256",
+        store_fn_arg0: "__m256i",
     },
     VecType {
         dtype: Dtype::Uint16,
@@ -68,7 +82,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vui8",
         native_type_name: "__m128i",
         load_fn: "_mm_loadu_si128",
+        load_fn_arg0: "__m128i",
         store_fn: "_mm_storeu_si128",
+        store_fn_arg0: "__m128i",
     },
     VecType {
         dtype: Dtype::Sint8,
@@ -76,7 +92,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vsb32",
         native_type_name: "__m256i",
         load_fn: "_mm256_loadu_si256",
+        load_fn_arg0: "__m256i",
         store_fn: "_mm256_storeu_si256",
+        store_fn_arg0: "__m256i",
     },
     VecType {
         dtype: Dtype::Sint8,
@@ -84,7 +102,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vsb16",
         native_type_name: "__m128i",
         load_fn: "_mm_loadu_si128",
+        load_fn_arg0: "__m128i",
         store_fn: "_mm_storeu_si128",
+        store_fn_arg0: "__m128i",
     },
     VecType {
         dtype: Dtype::Uint8,
@@ -92,7 +112,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vub32",
         native_type_name: "__m256i",
         load_fn: "_mm256_loadu_si256",
+        load_fn_arg0: "__m256i",
         store_fn: "_mm256_storeu_si256",
+        store_fn_arg0: "__m256i",
     },
     VecType {
         dtype: Dtype::Uint8,
@@ -100,7 +122,9 @@ const X86_VEC_TYPES: [VecType; 12] = [
         name: "vub16",
         native_type_name: "__m128i",
         load_fn: "_mm_loadu_si128",
+        load_fn_arg0: "__m128i",
         store_fn: "_mm_storeu_si128",
+        store_fn_arg0: "__m128i",
     },
 ];
 
