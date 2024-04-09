@@ -86,7 +86,13 @@ impl CBuffer {
     pub fn emit<W: fmt::Write>(&self, w: &mut W, init_type: InitType, depth: usize) -> fmt::Result {
         match self {
             CBuffer::HeapArray { name, size, dtype } => {
-                writeln!(w, "{}{} *restrict {};", indent(depth), c_type(*dtype), name)?;
+                writeln!(
+                    w,
+                    "{}{} *__restrict__ {};",
+                    indent(depth),
+                    c_type(*dtype),
+                    name
+                )?;
                 writeln!(
                     w,
                     "{}posix_memalign((void **)&{}, 128, {}*sizeof({}));",

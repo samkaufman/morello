@@ -109,9 +109,9 @@ fn main() {
     // Finally, we can lower that Impl to the following C kernel:
     //
     //    void kernel(
-    //      uint32_t *restrict aa,
-    //      uint32_t *restrict ab,
-    //      uint32_t *restrict ac
+    //      uint32_t *__restrict__ aa,
+    //      uint32_t *__restrict__ ab,
+    //      uint32_t *__restrict__ ac
     //    ) {
     //      for (int ad = 0; ad < 4; ad++) {
     //      for (int ae = 0; ae < 4; ae++) {

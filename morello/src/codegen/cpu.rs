@@ -65,7 +65,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             let parameter_name = self.namer.fresh_name();
             writeln!(
                 main_body_str,
-                "  {} *restrict {}{}",
+                "  {} *__restrict__ {}{}",
                 c_type(operand.dtype),
                 parameter_name,
                 if operand_idx + 1 < imp.parameter_count().into() {
@@ -119,7 +119,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
         write!(out, "int load_inputs(char *paths[]")?;
         for i in 0..top_arg_tensors.len() {
-            write!(out, ", void *restrict dest{i}")?;
+            write!(out, ", void *__restrict__ dest{i}")?;
         }
         writeln!(out, ") {{")?;
 
