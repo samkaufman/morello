@@ -5,7 +5,7 @@ use std::iter;
 use std::rc::Rc;
 
 use super::namegen::NameGenerator;
-use crate::codegen::c_utils::{c_type, CBuffer, CExprVar, InitType, VecType};
+use crate::codegen::c_utils::{c_type, printf_fmt, CBuffer, CExprVar, InitType, VecType};
 use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term};
@@ -372,7 +372,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             out,
             "{}printf(\"{} \", {});",
             indent(depth),
-            tensor.spec().dtype().printf_fmt(),
+            printf_fmt(tensor.spec().dtype()),
             self.c_index(buffer, &buffer_indexing_expr, None),
         )?;
         depth -= 1;

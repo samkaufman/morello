@@ -243,6 +243,18 @@ pub fn c_type(dtype: Dtype) -> &'static str {
         Dtype::Uint32 => "uint32_t",
         Dtype::Sint32 => "int32_t",
         Dtype::Float32 => "float",
-        Dtype::Bfloat16 => "hwy::bfloat16_t",
+        Dtype::Bfloat16 => "__bf16",
+    }
+}
+
+pub fn printf_fmt(dtype: Dtype) -> &'static str {
+    match dtype {
+        Dtype::Uint8 => "%\" PRIu8 \"",
+        Dtype::Sint8 => "%\" PRIi8 \"",
+        Dtype::Uint16 => "%\" PRIu16 \"",
+        Dtype::Sint16 => "%\" PRIi16 \"",
+        Dtype::Uint32 => "%\" PRIu32 \"",
+        Dtype::Sint32 => "%\" PRIi32 \"",
+        Dtype::Float32 | Dtype::Bfloat16 => "%f",
     }
 }
