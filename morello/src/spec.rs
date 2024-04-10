@@ -38,7 +38,7 @@ const MULTI_DIM_TILING: bool = false;
 const MOVE_RESULTS_CAPACITY: usize = 16;
 
 #[cfg(test)]
-const ARBITRARY_SPEC_MAX_SIZE: DimSize = 8;
+const ARBITRARY_SPEC_MAX_SIZE: DimSize = nonzero::nonzero!(8u32);
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
 #[serde(bound = "")]
@@ -293,7 +293,8 @@ impl PrimitiveBasics {
                         smaller_output.shape()[2..]
                             .iter()
                             .zip([fh, fw])
-                            .map(|(&o, f)| o + f - 1),
+                            .map(|(&o, f)| o.get() + f.get() - 1)
+                            .map(|d| DimSize::new(d).unwrap()),
                     )
                     .collect();
                 let mut new_image_steps: Shape = smaller_output.step_sizes().into();
@@ -402,25 +403,27 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
             .prop_flat_map(move |(typ, dtypes)| {
                 let shape_strategy = match typ {
                     PrimitiveSpecType::Matmul { accum: _ } => {
-                        proptest::collection::vec(1..=max_size, 3).boxed()
+                        proptest::collection::vec(1..=max_size.get(), 3).boxed()
                     }
-                    PrimitiveSpecType::Conv { accum: _ } => (1..=max_size, 1..=max_size)
-                        .prop_flat_map(move |(h, w)| {
-                            (
-                                1..max_size,
-                                1..8u32,
-                                1..4u32,
-                                Just(h),
-                                Just(w),
-                                1..=h,
-                                1..=w,
-                            )
-                        })
-                        .prop_map(|(b, f, c, h, w, fh, fw)| vec![b, f, c, h, w, fh, fw])
-                        .boxed(),
+                    PrimitiveSpecType::Conv { accum: _ } => {
+                        (1..=max_size.get(), 1..=max_size.get())
+                            .prop_flat_map(move |(h, w)| {
+                                (
+                                    1..max_size.get(),
+                                    1..8u32,
+                                    1..4u32,
+                                    Just(h),
+                                    Just(w),
+                                    1..=h,
+                                    1..=w,
+                                )
+                            })
+                            .prop_map(|(b, f, c, h, w, fh, fw)| vec![b, f, c, h, w, fh, fw])
+                            .boxed()
+                    }
                     PrimitiveSpecType::Move | PrimitiveSpecType::Zero => (1..=4usize)
                         .prop_flat_map(move |tensor_rank| {
-                            proptest::collection::vec(1..=max_size, tensor_rank)
+                            proptest::collection::vec(1..=max_size.get(), tensor_rank)
                         })
                         .boxed(),
                 };
@@ -428,7 +431,10 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
             })
             .prop_map(move |(typ, dtypes, spec_shape)| PrimitiveBasics {
                 typ,
-                spec_shape: spec_shape.into(),
+                spec_shape: spec_shape
+                    .into_iter()
+                    .map(|x| DimSize::new(x).unwrap())
+                    .collect(),
                 dtypes: dtypes.into(),
             })
             .boxed()
@@ -478,8 +484,13 @@ impl PrimitiveSpecType {
                 let ([b, _, h, w], [f, _, fh, fw]) = (inputs[0], inputs[1]) else {
                     panic!("Conv inputs must have 4 dimensions each");
                 };
-                debug_assert!(h >= fh && w >= fw);
-                smallvec![*b, *f, 1 + h - fh, 1 + w - fw]
+                debug_assert!(h.get() >= fh.get() && w.get() >= fw.get());
+                smallvec![
+                    *b,
+                    *f,
+                    DimSize::new(1 + h.get() - fh.get()).unwrap(),
+                    DimSize::new(1 + w.get() - fw.get()).unwrap(),
+                ]
             }
             PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
                 // The shape and dtype match for moves and zero.
@@ -716,7 +727,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
         for a in primitive_aux {
             if let Some(vector_size) = a.vector_size {
-                if vector_size != 1 {
+                if vector_size.get() != 1 {
                     return false;
                 }
             }
@@ -797,9 +808,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 // TODO: Need to implement `can_move_to`-style logic here.
 
                 if !vector_bytes.is_empty() {
-                    for vector_size in
-                        gen_vector_sizes(Some(intermediate_shape), intermediate_dtype, vector_bytes)
-                    {
+                    for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
                         results.push(Action::Peel {
                             layout: layout.clone(),
                             level,
@@ -835,22 +844,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
 
                     results.extend(
-                        gen_vector_sizes_opt(
-                            Some(operand.shape()),
-                            operand.dtype(),
-                            level.vector_bytes(),
-                        )
-                        .map(|vector_size| {
-                            // This may return Moves with identical source and destination
-                            // TensorSpecs (i.e., within-level copies). These will be filtered in
-                            // [apply_with_aux].
-                            Action::Move {
-                                source_idx: i,
-                                destination_level: level,
-                                destination_layout: layout.clone(),
-                                destination_vector_size: vector_size,
-                            }
-                        }),
+                        gen_vector_sizes_opt(operand.dtype(), level.vector_bytes()).map(
+                            |vector_size| {
+                                // This may return Moves with identical source and destination
+                                // TensorSpecs (i.e., within-level copies). These will be filtered in
+                                // [apply_with_aux].
+                                Action::Move {
+                                    source_idx: i,
+                                    destination_level: level,
+                                    destination_layout: layout.clone(),
+                                    destination_vector_size: vector_size,
+                                }
+                            },
+                        ),
                     )
                 }
             }
@@ -1241,7 +1247,7 @@ impl BiMap for PrimitiveBasicsBimap {
             spec_shape,
             dtypes,
         } = basics;
-        let shifted_shape = spec_shape.iter().map(|&d| {
+        let shifted_shape = spec_shape.iter().map(|d| d.get()).map(|d| {
             if self.binary_scale_shapes {
                 if !d.is_power_of_two() {
                     panic!("Given non-zero/power-of-two shape {}", d);
@@ -1299,7 +1305,7 @@ impl BiMap for PrimitiveBasicsBimap {
                     _ => unreachable!(),
                 };
 
-                let mut spec_shape = v.iter().skip(1).copied().collect::<SmallVec<_>>();
+                let mut spec_shape: SmallVec<[BimapInt; 10]> = v.iter().skip(1).copied().collect();
                 // Reverse the normalization of image dimensions (see `apply`).
                 if matches!(key, SpecKey::Conv { .. }) {
                     spec_shape[3] += spec_shape[5];
@@ -1307,7 +1313,7 @@ impl BiMap for PrimitiveBasicsBimap {
                 }
                 for d in &mut spec_shape[..] {
                     if self.binary_scale_shapes {
-                        *d = DimSize::try_from((bit_length_inverse(*d) + 1).next_power_of_two())
+                        *d = u32::try_from((bit_length_inverse(*d) + 1).next_power_of_two())
                             .unwrap();
                     } else {
                         *d += 1;
@@ -1316,35 +1322,38 @@ impl BiMap for PrimitiveBasicsBimap {
 
                 PrimitiveBasics {
                     typ,
-                    spec_shape,
+                    spec_shape: spec_shape
+                        .iter()
+                        .map(|&d| DimSize::new(d).unwrap())
+                        .collect(),
                     dtypes: dtypes.as_slice().into(),
                 }
             }
             SpecKey::Move { dtypes } => {
                 let unshifted_shape = v.iter().map(|&d| {
                     if self.binary_scale_shapes {
-                        DimSize::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
+                        u32::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
                     } else {
                         d + 1
                     }
                 });
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Move,
-                    spec_shape: unshifted_shape.collect(),
+                    spec_shape: unshifted_shape.map(|d| DimSize::new(d).unwrap()).collect(),
                     dtypes: dtypes.as_slice().into(),
                 }
             }
             SpecKey::Zero { dtype } => {
                 let unshifted_shape = v.iter().map(|&d| {
                     if self.binary_scale_shapes {
-                        DimSize::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
+                        u32::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
                     } else {
                         d + 1
                     }
                 });
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Zero,
-                    spec_shape: unshifted_shape.collect(),
+                    spec_shape: unshifted_shape.map(|d| DimSize::new(d).unwrap()).collect(),
                     dtypes: smallvec![*dtype],
                 }
             }
@@ -1437,7 +1446,11 @@ fn gen_tile_sizes<Tgt: Target>(
         )
     } else {
         let tensor_shape = tensor_shape.to_smallvec();
-        let own_shape_iter = if !drop_given && tensor_shape.iter().copied().all(is_power_of_two_u32)
+        let own_shape_iter = if !drop_given
+            && tensor_shape
+                .iter()
+                .map(|d: &DimSize| d.get())
+                .all(is_power_of_two_u32)
         {
             Either::Left(once(tensor_shape.clone()))
         } else {
@@ -1456,11 +1469,9 @@ fn gen_tile_sizes<Tgt: Target>(
 }
 
 pub fn gen_vector_sizes<'a>(
-    outer_shape: Option<&'a [DimSize]>,
     dtype: Dtype,
     vector_bytes: &'a [u32],
 ) -> impl Iterator<Item = DimSize> + 'a {
-    assert!(outer_shape.is_none() || outer_shape.unwrap().iter().all(|&d| d > 0));
     assert!(!vector_bytes.is_empty());
     assert!(
         vector_bytes
@@ -1469,14 +1480,12 @@ pub fn gen_vector_sizes<'a>(
         "vector_bytes must be a multiple of dtype size"
     );
     vector_bytes.iter().map(move |&vb| {
-        let value_cnt = vb / DimSize::from(dtype.size());
-        debug_assert!(value_cnt > 0);
-        value_cnt
+        let value_cnt = vb / u32::from(dtype.size());
+        DimSize::new(value_cnt).unwrap()
     })
 }
 
 pub fn gen_vector_sizes_opt<'a>(
-    outer_shape: Option<&'a [DimSize]>,
     dtype: Dtype,
     vector_bytes: &'a [u32],
 ) -> impl Iterator<Item = Option<DimSize>> + 'a {
@@ -1485,7 +1494,7 @@ pub fn gen_vector_sizes_opt<'a>(
     if vector_bytes.is_empty() {
         iter_a = Some(once(None));
     } else {
-        iter_b = Some(gen_vector_sizes(outer_shape, dtype, vector_bytes).map(Some));
+        iter_b = Some(gen_vector_sizes(dtype, vector_bytes).map(Some));
     }
     iter_a
         .into_iter()
@@ -1496,20 +1505,14 @@ pub fn gen_vector_sizes_opt<'a>(
 pub fn dim_range(dim_size: DimSize, include_end: bool) -> impl Iterator<Item = DimSize> {
     let it = (0..)
         .map(|power| 2u32.pow(power))
-        .take_while(move |x| *x < dim_size);
+        .take_while(move |x| *x < dim_size.get())
+        .map(|x| DimSize::new(x).unwrap());
 
-    it.chain(
-        once(if include_end && dim_size != 0 {
-            Some(dim_size)
-        } else {
-            None
-        })
-        .flatten(),
-    )
+    it.chain(once(if include_end { Some(dim_size) } else { None }).flatten())
 }
 
 // TODO: Drop in favor of primary output shape inference.
-pub fn conv_infer_output_shape(image_shape: &[u32], filters_shape: &[u32]) -> Shape {
+pub fn conv_infer_output_shape(image_shape: &[DimSize], filters_shape: &[DimSize]) -> Shape {
     let batch_cnt = image_shape[0];
     let channels = image_shape[1];
     let filter_cnt = filters_shape[0];
@@ -1529,13 +1532,29 @@ pub fn conv_infer_output_shape(image_shape: &[u32], filters_shape: &[u32]) -> Sh
                     img_dim,
                     filt_dim
                 );
-                img_dim - filt_dim + 1
+                DimSize::new(img_dim.get() - filt_dim.get() + 1).unwrap()
             },
         ))
         .collect()
 }
 
 pub mod macros {
+    #[macro_export]
+    macro_rules! shape {
+        ($dim:expr; $n:expr) => {{
+            use $crate::spec::macros::internal::IntoDimSize;
+            // Bind to a variable with an explicit type to help out type inference.
+            let sv: $crate::common::Shape = smallvec::smallvec![ ($dim).into_dim_size(); $n ];
+            sv
+        }};
+        ($($dim:expr),*$(,)*) => {{
+            use $crate::spec::macros::internal::IntoDimSize;
+            // Bind to a variable with an explicit type to help out type inference.
+            let sv: $crate::common::Shape = smallvec::smallvec![ $( ($dim).into_dim_size() ),* ];
+            sv
+        }};
+    }
+
     // TODO: Rename to `lspec`
     #[macro_export]
     macro_rules! lspec {
@@ -1549,6 +1568,21 @@ pub mod macros {
     pub use lspec;
 
     pub mod internal {
+        use crate::common::DimSize;
+        pub trait IntoDimSize {
+            fn into_dim_size(self) -> DimSize;
+        }
+        impl IntoDimSize for DimSize {
+            fn into_dim_size(self) -> DimSize {
+                self
+            }
+        }
+        impl IntoDimSize for u32 {
+            fn into_dim_size(self) -> DimSize {
+                DimSize::new(self).unwrap()
+            }
+        }
+
         // TODO: Make private.
         #[macro_export]
         macro_rules! __primitive_spec_type {
@@ -1651,13 +1685,13 @@ pub mod macros {
         #[macro_export]
         macro_rules! __spec_inner {
             ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),*, $s:literal ) ) => {{
-                use $crate::spec::macros::internal::{primitive_spec_type, tensorspecaux_tup};
+                use $crate::spec::macros::internal::{IntoDimSize, primitive_spec_type, tensorspecaux_tup};
 
                 let auxes = [ $( tensorspecaux_tup!($($opterms)*) ),* ];
                 let dtypes = auxes.iter().map(|v| v.0.clone()).collect();
                 let basics = PrimitiveBasics {
                     typ: primitive_spec_type!($typ),
-                    spec_shape: ($shp).into_iter().collect(),
+                    spec_shape: ($shp).into_iter().map(|x| x.into_dim_size()).collect(),
                     dtypes,
                 };
                 LogicalSpec::Primitive(
@@ -1675,13 +1709,14 @@ pub mod macros {
 mod tests {
     use super::*;
     use crate::imp::{visit_leaves, Impl, ImplExt, ImplNode};
-    use crate::lspec;
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
     use crate::scheduling::ApplyError;
     use crate::target::{ArmTarget, Target, X86Target};
     use crate::tensorspec::TensorSpecArbMaxShape;
     use crate::utils::{next_binary_power, sum_seqs};
     use crate::{layout::row_major, target::CpuMemoryLevel::GL};
+    use crate::{lspec, shape};
+    use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use smallvec::smallvec;
 
@@ -1718,7 +1753,7 @@ mod tests {
         let expected = LogicalSpec::<X86Target>::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Matmul { accum: true },
-                spec_shape: smallvec![2, 3, 3],
+                spec_shape: shape![2, 3, 3],
                 dtypes: smallvec![Dtype::Uint8, Dtype::Sint8, Dtype::Uint16],
             },
             vec![lhs, rhs, out],
@@ -1747,21 +1782,53 @@ mod tests {
 
     #[test]
     fn test_gen_tile_sizes_dim_2_multi_dim() {
-        assert_gen_tile_sizes(&[2, 2], [[1, 1], [1, 2], [2, 1], [2, 2]], false, true);
-        assert_gen_tile_sizes(&[2, 2], [[1, 1], [1, 2], [2, 1]], true, true);
+        assert_gen_tile_sizes(
+            &shape![2, 2],
+            [
+                [nz!(1u32), nz!(1u32)],
+                [nz!(1u32), nz!(2u32)],
+                [nz!(2u32), nz!(1u32)],
+                [nz!(2u32), nz!(2u32)],
+            ],
+            false,
+            true,
+        );
+        assert_gen_tile_sizes(
+            &shape![2, 2],
+            [
+                [nz!(1u32), nz!(1u32)],
+                [nz!(1u32), nz!(2u32)],
+                [nz!(2u32), nz!(1u32)],
+            ],
+            true,
+            true,
+        );
     }
 
     #[test]
     fn test_gen_tile_sizes_dim_2_multi_dim_non_powers_of_two() {
         assert_gen_tile_sizes(
-            &[2, 3],
-            [[1, 1], [1, 2], [1, 3], [2, 1], [2, 2], [2, 3]],
+            &shape![2, 3],
+            [
+                [nz!(1u32), nz!(1u32)],
+                [nz!(1u32), nz!(2u32)],
+                [nz!(1u32), nz!(3u32)],
+                [nz!(2u32), nz!(1u32)],
+                [nz!(2u32), nz!(2u32)],
+                [nz!(2u32), nz!(3u32)],
+            ],
             false,
             true,
         );
         assert_gen_tile_sizes(
-            &[2, 3],
-            [[1, 1], [1, 2], [1, 3], [2, 1], [2, 2]],
+            &shape![2, 3],
+            [
+                [nz!(1u32), nz!(1u32)],
+                [nz!(1u32), nz!(2u32)],
+                [nz!(1u32), nz!(3u32)],
+                [nz!(2u32), nz!(1u32)],
+                [nz!(2u32), nz!(2u32)],
+            ],
             true,
             true,
         );
@@ -1769,14 +1836,37 @@ mod tests {
 
     #[test]
     fn test_gen_tile_sizes_dim_2_single_dim() {
-        assert_gen_tile_sizes(&[2, 2], [[1, 2], [2, 1], [2, 2]], false, false);
-        assert_gen_tile_sizes(&[2, 2], [[1, 2], [2, 1]], true, false);
+        assert_gen_tile_sizes(
+            &shape![2, 2],
+            [
+                [nz!(1u32), nz!(2u32)],
+                [nz!(2u32), nz!(1u32)],
+                [nz!(2u32), nz!(2u32)],
+            ],
+            false,
+            false,
+        );
+        assert_gen_tile_sizes(
+            &shape![2, 2],
+            [[nz!(1u32), nz!(2u32)], [nz!(2u32), nz!(1u32)]],
+            true,
+            false,
+        );
     }
 
     #[test]
     fn test_gen_tile_sizes_dim_2_single_dim_non_powers_of_two() {
         for drop_given in [true, false] {
-            assert_gen_tile_sizes(&[2, 3], [[1, 3], [2, 1], [2, 2]], drop_given, false);
+            assert_gen_tile_sizes(
+                &shape![2, 3],
+                [
+                    [nz!(1u32), nz!(3u32)],
+                    [nz!(2u32), nz!(1u32)],
+                    [nz!(2u32), nz!(2u32)],
+                ],
+                drop_given,
+                false,
+            );
         }
     }
 
@@ -1850,7 +1940,7 @@ mod tests {
                             left.into_iter().chain(iter::once(si)).chain(right).collect::<Vec<_>>();
                         let basics = PrimitiveBasics {
                             typ: PrimitiveSpecType::Move,
-                            spec_shape: Shape::from(shape),
+                            spec_shape: Shape::from(shape.into_iter().map(|x| DimSize::new(x).unwrap()).collect::<Vec<_>>()),
                             dtypes: smallvec![dtype, dtype],
                         };
                         let auxes_strategy = basics
@@ -1872,7 +1962,7 @@ mod tests {
             let LogicalSpec::Primitive(PrimitiveBasics { spec_shape, ..}, _, _) = &spec.0 else {
                 unreachable!();
             };
-            let tile_out_result = Action::TileOut { output_shape: smallvec![1; spec_shape.len()], parallel: false }
+            let tile_out_result = Action::TileOut { output_shape: shape![1; spec_shape.len()], parallel: false }
                 .apply(&spec).unwrap_or_else(|_| panic!("Couldn't tile Spec {} to single value", spec));
             let ImplNode::SpecApp(child_spec_app) = &tile_out_result.children()[0] else {
                 panic!("First child was not a SpecApp; was: {:?}", tile_out_result.children()[0]);
@@ -1880,7 +1970,7 @@ mod tests {
             let mut tiled_logical_spec = child_spec_app.0.0.clone();
             tiled_logical_spec.canonicalize().unwrap();
             assert!(tiled_logical_spec.parameters().iter().all(|p| {
-                p.shape().iter().all(|&d| d == 1)
+                p.shape().iter().all(|&d| d.get() == 1)
             }));
             assert!(tiled_logical_spec.parameters().iter().all(|p| {
                 let mut c = p.clone();
@@ -2064,10 +2154,26 @@ mod tests {
     }
 
     fn shared_test_gen_tile_sizes_dim_1(multi_dim: bool) {
-        assert_gen_tile_sizes(&[1], [[1]], false, multi_dim);
-        assert_gen_tile_sizes::<0>(&[1], [], true, multi_dim);
-        assert_gen_tile_sizes(&[16], [[1], [2], [4], [8], [16]], false, multi_dim);
-        assert_gen_tile_sizes(&[16], [[1], [2], [4], [8]], true, multi_dim);
+        assert_gen_tile_sizes(&shape![1], [[nz!(1u32)]], false, multi_dim);
+        assert_gen_tile_sizes::<0>(&shape![1], [], true, multi_dim);
+        assert_gen_tile_sizes(
+            &shape![16],
+            [
+                [nz!(1u32)],
+                [nz!(2u32)],
+                [nz!(4u32)],
+                [nz!(8u32)],
+                [nz!(16u32)],
+            ],
+            false,
+            multi_dim,
+        );
+        assert_gen_tile_sizes(
+            &shape![16],
+            [[nz!(1u32)], [nz!(2u32)], [nz!(4u32)], [nz!(8u32)]],
+            true,
+            multi_dim,
+        );
     }
 
     fn assert_gen_tile_sizes<const D: usize>(

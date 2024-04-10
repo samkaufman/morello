@@ -1,7 +1,6 @@
 use iai_callgrind::{black_box, main};
 use nonzero::nonzero as nz;
 
-use morello::common::{DimSize, Dtype};
 use morello::db::RocksDatabase;
 use morello::layout::row_major;
 use morello::lspec;
@@ -10,7 +9,7 @@ use morello::target::{Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 
 #[export_name = "morello_bench_synth::matmul_spec"]
-fn matmul_spec<Tgt: Target>(size: DimSize) -> Spec<Tgt> {
+fn matmul_spec<Tgt: Target>(size: u32) -> Spec<Tgt> {
     let rm2 = row_major(2);
     let logical_spec = lspec!(Matmul(
         [size, size, size],

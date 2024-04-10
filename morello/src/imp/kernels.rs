@@ -53,7 +53,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
         match self.kernel_type {
             KernelType::BroadcastVecMultAdd | KernelType::TwoVecBroadcastVecMultAdd => {
                 let vec_tensor_spec = self.arguments[1].spec();
-                let vb = u64::from(vec_tensor_spec.vector_size().unwrap())
+                let vb = u64::from(vec_tensor_spec.vector_size().unwrap().get())
                     * u64::from(vec_tensor_spec.dtype().size());
                 MemoryAllocation::Simple(Tgt::levels().map(|level| {
                     if vec_tensor_spec.level() == level {
@@ -79,8 +79,8 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Kernel<Tgt, Aux> {
     fn compute_main_cost(&self, _child_costs: &[MainCost]) -> MainCost {
         match self.kernel_type {
             KernelType::BroadcastVecMultAdd | KernelType::TwoVecBroadcastVecMultAdd => {
-                let vector_size = self.arguments[1].spec().vector_size().unwrap();
-                let volume = self.arguments[1].spec().volume();
+                let vector_size = self.arguments[1].spec().vector_size().unwrap().get();
+                let volume = self.arguments[1].spec().volume().get();
                 debug_assert_eq!(volume % vector_size, 0);
                 let vector_count = volume / vector_size;
                 let mut cost = INST_COST * ((vector_count * 2) + 1);
