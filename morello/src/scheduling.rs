@@ -6,7 +6,7 @@ use std::{iter, mem};
 use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Shape};
 use crate::imp::blocks::Block;
-use crate::imp::kernels::{Kernel, KernelType};
+use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::moves::{MoveLet, TensorOrCacheView};
 use crate::imp::pipeline::Pipeline;
@@ -49,7 +49,7 @@ pub enum Action<Tgt: Target> {
         vector_size: Option<DimSize>,
     },
     SpatialSplit,
-    Place(KernelType),
+    Place(Tgt::Kernel),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -691,7 +691,7 @@ impl<Tgt: Target> Action<Tgt> {
                     aux,
                 }))
             }
-            Action::Place(k) => Ok(ImplNode::Kernel(Kernel {
+            Action::Place(k) => Ok(ImplNode::Kernel(KernelApp {
                 kernel_type: *k,
                 arguments: operands
                     .iter()

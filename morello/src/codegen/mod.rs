@@ -12,7 +12,8 @@ use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::pprint::ImplPrintStyle;
 use crate::pprint::PrintableAux;
-use crate::target::{CpuMemoryLevel, Target, TargetId};
+use crate::target::CpuTarget;
+use crate::target::{Target, TargetId};
 use crate::utils::ToWriteFmt;
 use crate::views::Tensor;
 
@@ -95,7 +96,7 @@ pub trait CodeGen<Tgt: Target> {
 
 impl<Tgt, Aux> CodeGen<Tgt> for ImplNode<Tgt, Aux>
 where
-    Tgt: Target<Level = CpuMemoryLevel>,
+    Tgt: CpuTarget,
     Aux: PrintableAux + Debug,
 {
     fn emit<W: fmt::Write>(

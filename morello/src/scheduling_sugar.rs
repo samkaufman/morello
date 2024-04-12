@@ -2,7 +2,6 @@ use crate::common::DimSize;
 use crate::db::RocksDatabase;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::imp::kernels::KernelType;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::scheduling::Action;
@@ -34,7 +33,7 @@ pub trait SchedulingSugar<Tgt: Target> {
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt, ()>;
     fn spatial_split(&self) -> ImplNode<Tgt, ()>;
-    fn place(&self, kernel_type: KernelType) -> ImplNode<Tgt, ()>;
+    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt, ()>;
     fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt, ()>
     where
         Tgt: Target,
@@ -105,7 +104,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         Action::SpatialSplit.apply(self).unwrap()
     }
 
-    fn place(&self, kernel_type: KernelType) -> ImplNode<Tgt, ()> {
+    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt, ()> {
         Action::Place(kernel_type).apply(self).unwrap()
     }
 
@@ -166,7 +165,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
         apply_to_leaf_spec(self, |spec| spec.spatial_split())
     }
 
-    fn place(&self, kernel_type: KernelType) -> ImplNode<Tgt, ()> {
+    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt, ()> {
         apply_to_leaf_spec(self, |spec| spec.place(kernel_type))
     }
 

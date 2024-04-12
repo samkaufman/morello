@@ -27,7 +27,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Block<Tgt, Aux> {
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
-        MemoryAllocation::none::<Tgt>()
+        MemoryAllocation::none()
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {

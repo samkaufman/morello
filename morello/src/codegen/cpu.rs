@@ -10,14 +10,14 @@ use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term};
 use crate::imp::blocks::Block;
-use crate::imp::kernels::{Kernel, KernelType};
+use crate::imp::kernels::KernelApp;
 use crate::imp::loops::Loop;
 use crate::imp::moves::TensorOrCacheView;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferVar;
 use crate::pprint::{pprint_write, ImplPrintStyle, PrintableAux};
-use crate::target::{CpuMemoryLevel, Target};
+use crate::target::{CpuKernel, CpuMemoryLevel, CpuTarget, Target};
 use crate::utils::{indent, LinePrefixWrite, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
 
@@ -32,7 +32,7 @@ pub struct CpuCodeGenerator<'a, Tgt: Target> {
     pub headers: HeaderEmitter,
 }
 
-impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
+impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -514,13 +514,13 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 )?;
                 writeln!(w, "{}assert(false);  /* Missing Impl */", indent(depth))
             }
-            ImplNode::Kernel(Kernel {
+            ImplNode::Kernel(KernelApp {
                 kernel_type,
                 arguments,
                 aux: _,
             }) => {
                 match kernel_type {
-                    KernelType::MultAdd => {
+                    CpuKernel::MultAdd => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
                         });
@@ -533,13 +533,13 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             exprs[1]
                         )
                     }
-                    KernelType::ValueAssign => {
+                    CpuKernel::ValueAssign => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
                         });
                         writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0])
                     }
-                    KernelType::MemsetZero => {
+                    CpuKernel::MemsetZero => {
                         // TODO: Merge this duplicate `exprs` block. It's used also in the ValueAssign.
                         debug_assert_eq!(arguments.len(), 1);
                         let backing_tensor =
@@ -556,13 +556,13 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             arguments[0].1.bytes_used()
                         )
                     }
-                    KernelType::VectorZero => {
+                    CpuKernel::VectorZero => {
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_vec(a, b, None)
                         });
                         writeln!(w, "{}{} *= 0;  /* VectorZero */", indent(depth), exprs[0])
                     }
-                    KernelType::VectorAssign => {
+                    CpuKernel::VectorAssign => {
                         let dtype = arguments[0].spec().dtype();
                         let volume = arguments[0].spec().volume();
 
@@ -595,7 +595,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             )
                         }
                     }
-                    KernelType::BroadcastVecMultAdd => {
+                    CpuKernel::BroadcastVecMultAdd => {
                         let vector_size = arguments[2].spec().vector_size().unwrap();
                         let volume = arguments[2].spec().volume();
                         debug_assert_eq!(volume % vector_size, 0);
@@ -623,7 +623,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
-                    KernelType::BroadcastVecMultAddBf16F32 => {
+                    CpuKernel::BroadcastVecMultAddBf16F32 => {
                         let vector_size_bf16 = arguments[1].spec().vector_size().unwrap();
                         let volume = arguments[1].spec().volume();
                         debug_assert_eq!(volume % vector_size_bf16, 0);
@@ -650,7 +650,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
                             let (shift_fn, blend_fn, blend_param, zero_fn, _) =
                                 vec_func_names(vector_size_bf16);
-                            let (shift_fn_out, _, _, zero_fn_out, broadcast16_out) =
+                            let (shift_fn_out, _, _, _, broadcast16_out) =
                                 vec_func_names(vector_size_bf16 * 2);
 
                             let vf8 =
@@ -712,7 +712,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
-                    KernelType::TwoVecBroadcastVecMultAdd => {
+                    CpuKernel::TwoVecBroadcastVecMultAdd => {
                         let vector_size = arguments[2].spec().vector_size().unwrap();
                         let volume = arguments[2].spec().volume();
                         debug_assert_eq!(volume % vector_size, 0);
@@ -755,7 +755,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
-                    KernelType::PhysicalTransposeByte128 => {
+                    CpuKernel::PhysicalTransposeByte128 => {
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
                             (&arguments[0], 0),
                             (&arguments[0], 16),
@@ -795,7 +795,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             in_higher,
                         )
                     }
-                    KernelType::PhysicalTransposeByte256 => {
+                    CpuKernel::PhysicalTransposeByte256 => {
                         use CpuMemoryLevel::VRF;
 
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [

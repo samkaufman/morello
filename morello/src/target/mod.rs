@@ -3,15 +3,16 @@ mod cpu;
 mod x86;
 
 pub use arm::ArmTarget;
-pub use cpu::CpuMemoryLevel;
+pub use cpu::{CpuKernel, CpuMemoryLevel, CpuTarget};
 pub use x86::X86Target;
 
 use crate::common::DimSize;
 use crate::cost::MainCost;
 use crate::layout::Layout;
-use crate::memorylimits::MemoryLimits;
+use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
+use crate::views::Param;
 use crate::{codegen::c_utils::VecType, common::Dtype};
 
 use serde::de::DeserializeOwned;
@@ -24,6 +25,7 @@ pub const LEVEL_COUNT: usize = 4;
 // TODO: Do we need so many trait bounds, here or in [CpuTarget]?
 pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Level: MemoryLevel;
+    type Kernel: Kernel;
 
     fn line_size() -> u32;
     fn max_mem() -> MemoryLimits;
@@ -61,6 +63,16 @@ pub trait MemoryLevel:
     fn vector_rf(&self) -> bool {
         !self.vector_bytes().is_empty()
     }
+}
+
+pub trait Kernel: PartialEq + Eq + Copy + Clone + Debug {
+    fn argument_count(&self) -> u8;
+
+    // TODO: Take something more generic than Param.
+    fn memory_allocated<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MemoryAllocation;
+    fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost;
+
+    fn name(&self) -> &'static str;
 }
 
 #[derive(Clone, Copy)]

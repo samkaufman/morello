@@ -3,13 +3,13 @@ use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::imp::kernels::KernelType;
 use crate::layout::{col_major, nhwc, row_major, Layout};
-use crate::memorylimits::{MemVec, MemoryLimits};
+use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
+use crate::views::Param;
 
 use divrem::DivRem;
 use itertools::Itertools;
@@ -19,11 +19,35 @@ use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter;
 
-pub(super) trait CpuTarget:
-    Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static
-{
+use super::Kernel;
+
+const INST_COST: MainCost = 100;
+const ASSIGN_INST_COST: MainCost = 1;
+const CPU_LEVELS: [CpuMemoryLevel; 4] = [
+    CpuMemoryLevel::RF,
+    CpuMemoryLevel::VRF,
+    CpuMemoryLevel::L1,
+    CpuMemoryLevel::GL,
+];
+
+pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     fn target_id() -> TargetId;
     fn vec_types() -> &'static [VecType; 16];
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(Hash, proptest_derive::Arbitrary))]
+pub enum CpuKernel {
+    MultAdd,
+    BroadcastVecMultAdd,
+    BroadcastVecMultAddBf16F32,
+    TwoVecBroadcastVecMultAdd,
+    PhysicalTransposeByte128,
+    PhysicalTransposeByte256,
+    ValueAssign,
+    VectorAssign,
+    MemsetZero,
+    VectorZero,
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -42,6 +66,7 @@ pub struct CpuMemoryLevelBimap;
 
 impl<T: CpuTarget> Target for T {
     type Level = CpuMemoryLevel;
+    type Kernel = CpuKernel;
 
     fn line_size() -> u32 {
         32
@@ -60,12 +85,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn levels() -> [Self::Level; LEVEL_COUNT] {
-        [
-            CpuMemoryLevel::RF,
-            CpuMemoryLevel::VRF,
-            CpuMemoryLevel::L1,
-            CpuMemoryLevel::GL,
-        ]
+        CPU_LEVELS
     }
 
     fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
@@ -161,17 +181,16 @@ impl<T: CpuTarget> Target for T {
                     if *accum {
                         let mut microkernels = vec![];
                         if mult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::MultAdd));
+                            microkernels.push(Action::Place(CpuKernel::MultAdd));
                         }
                         if broadcastvecmult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::BroadcastVecMultAdd));
+                            microkernels.push(Action::Place(CpuKernel::BroadcastVecMultAdd));
                         }
                         if broadcastvecmultbf16f32_applies_to_operands(&spec.parameters()) {
-                            microkernels
-                                .push(Action::Place(KernelType::BroadcastVecMultAddBf16F32));
+                            microkernels.push(Action::Place(CpuKernel::BroadcastVecMultAddBf16F32));
                         }
                         if twovecbroadcastvecmult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::TwoVecBroadcastVecMultAdd));
+                            microkernels.push(Action::Place(CpuKernel::TwoVecBroadcastVecMultAdd));
                         }
                         Box::new(microkernels.into_iter())
                     } else {
@@ -182,26 +201,26 @@ impl<T: CpuTarget> Target for T {
                 PrimitiveSpecType::Move { .. } => {
                     let mut microkernels = vec![];
                     if valueassign_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::ValueAssign));
+                        microkernels.push(Action::Place(CpuKernel::ValueAssign));
                     }
                     if vectorassign_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::VectorAssign));
+                        microkernels.push(Action::Place(CpuKernel::VectorAssign));
                     }
                     if physicaltransposebyte128_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::PhysicalTransposeByte128));
+                        microkernels.push(Action::Place(CpuKernel::PhysicalTransposeByte128));
                     }
                     if physicaltransposebyte256_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::PhysicalTransposeByte256));
+                        microkernels.push(Action::Place(CpuKernel::PhysicalTransposeByte256));
                     }
                     Box::new(microkernels.into_iter())
                 }
                 PrimitiveSpecType::Zero { .. } => {
                     let mut microkernels = vec![];
                     if memsetzero_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::MemsetZero));
+                        microkernels.push(Action::Place(CpuKernel::MemsetZero));
                     }
                     if vectorzero_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::VectorZero));
+                        microkernels.push(Action::Place(CpuKernel::VectorZero));
                     }
                     Box::new(microkernels.into_iter())
                 }
@@ -216,6 +235,105 @@ impl<T: CpuTarget> Target for T {
 
     fn vec_types() -> &'static [VecType; 16] {
         <Self as CpuTarget>::vec_types()
+    }
+}
+
+impl Kernel for CpuKernel {
+    fn argument_count(&self) -> u8 {
+        match self {
+            CpuKernel::MultAdd
+            | CpuKernel::BroadcastVecMultAdd
+            | CpuKernel::BroadcastVecMultAddBf16F32
+            | CpuKernel::TwoVecBroadcastVecMultAdd => 3,
+            CpuKernel::PhysicalTransposeByte128
+            | CpuKernel::PhysicalTransposeByte256
+            | CpuKernel::ValueAssign
+            | CpuKernel::VectorAssign => 2,
+            CpuKernel::MemsetZero | CpuKernel::VectorZero => 1,
+        }
+    }
+
+    fn memory_allocated<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MemoryAllocation {
+        match self {
+            // TODO: Model memory correctly for BroadcastVecMultAddBf16F32
+            CpuKernel::BroadcastVecMultAdd
+            | CpuKernel::TwoVecBroadcastVecMultAdd
+            | CpuKernel::BroadcastVecMultAddBf16F32 => {
+                let vec_tensor_spec = &parameters[1].1;
+                let vb = u64::from(vec_tensor_spec.vector_size().unwrap())
+                    * u64::from(vec_tensor_spec.dtype().size());
+                MemoryAllocation::Simple(CPU_LEVELS.map(
+                    |level| {
+                        if level.vector_rf() {
+                            vb * 2
+                        } else {
+                            0
+                        }
+                    },
+                ))
+            }
+            CpuKernel::PhysicalTransposeByte256 => MemoryAllocation::Simple(CPU_LEVELS.map(
+                |level| {
+                    if level.vector_rf() {
+                        64
+                    } else {
+                        0
+                    }
+                },
+            )),
+            _ => MemoryAllocation::none(),
+        }
+    }
+
+    fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost {
+        match self {
+            // TODO: Model cost for BroadcastVecMultAddBf16F32 correctly.
+            CpuKernel::BroadcastVecMultAdd
+            | CpuKernel::TwoVecBroadcastVecMultAdd
+            | CpuKernel::BroadcastVecMultAddBf16F32 => {
+                let vec_tensor_spec = &parameters[1].1;
+
+                let vector_size = vec_tensor_spec.vector_size().unwrap();
+                let volume = vec_tensor_spec.volume();
+                debug_assert_eq!(volume % vector_size, 0);
+                let vector_count = volume / vector_size;
+                let mut cost = INST_COST * ((vector_count * 2) + 1);
+
+                // TwoVecBroadcastVecMultAdd takes an input from L1.
+                if matches!(self, CpuKernel::TwoVecBroadcastVecMultAdd) {
+                    // TODO: Instead, call `move_cost`. Requires specializing kernel to X86/ARM.
+                    let mut l1_hit_cost = CpuMemoryLevel::L1.cache_hit_cost();
+                    if !parameters[0].1.is_contiguous() {
+                        l1_hit_cost *= 2;
+                    }
+                    cost += l1_hit_cost;
+                }
+
+                cost
+            }
+            CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
+            CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
+            CpuKernel::MultAdd => INST_COST,
+            CpuKernel::ValueAssign
+            | CpuKernel::VectorAssign
+            | CpuKernel::MemsetZero
+            | CpuKernel::VectorZero => ASSIGN_INST_COST,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            CpuKernel::MultAdd => "MultAdd",
+            CpuKernel::BroadcastVecMultAdd => "BroadcastVecMultAdd",
+            CpuKernel::BroadcastVecMultAddBf16F32 => "BroadcastVecMultAddBf16F32",
+            CpuKernel::TwoVecBroadcastVecMultAdd => "TwoVecBroadcastVecMultAdd",
+            CpuKernel::PhysicalTransposeByte128 => "PhysicalTransposeByte128",
+            CpuKernel::PhysicalTransposeByte256 => "PhysicalTransposeByte256",
+            CpuKernel::ValueAssign => "ValueAssign",
+            CpuKernel::VectorAssign => "VectorAssign",
+            CpuKernel::MemsetZero => "MemsetZero",
+            CpuKernel::VectorZero => "VectorZero",
+        }
     }
 }
 
