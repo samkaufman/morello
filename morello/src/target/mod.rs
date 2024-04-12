@@ -12,6 +12,7 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
+use crate::tensorspec::TensorSpec;
 use crate::views::Param;
 use crate::{codegen::c_utils::VecType, common::Dtype};
 
@@ -45,7 +46,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn move_destination_layouts(shape: &[DimSize], dtype: Dtype) -> Vec<Layout>;
 
     /// Yield target-specific actions which apply to a given [LogicalSpec].
-    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
+    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>> + '_>;
 
     /// Get corresponding [TargetId] enum
     fn target_id() -> TargetId;
@@ -68,11 +69,16 @@ pub trait MemoryLevel:
 pub trait Kernel: PartialEq + Eq + Copy + Clone + Debug {
     fn argument_count(&self) -> u8;
 
+    // TODO: Make into `applies_to_spec`
+    fn applies_to_parameters<Tgt: CpuTarget>(&self, parameters: &[TensorSpec<Tgt>]) -> bool;
+
     // TODO: Take something more generic than Param.
     fn memory_allocated<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MemoryAllocation;
     fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost;
 
     fn name(&self) -> &'static str;
+
+    fn all_kernels() -> &'static [Self];
 }
 
 #[derive(Clone, Copy)]
