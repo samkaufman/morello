@@ -560,7 +560,16 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_vec(a, b, None)
                         });
-                        writeln!(w, "{}{} *= 0;  /* VectorZero */", indent(depth), exprs[0])
+                        let dtype = arguments[0].spec().dtype();
+                        let volume = arguments[0].spec().volume();
+                        let vtype = get_vector(Tgt::vec_types(), dtype, volume);
+                        writeln!(
+                            w,
+                            "{}{} = ({}){{0}};  /* VectorZero */",
+                            indent(depth),
+                            exprs[0],
+                            vtype.name
+                        )
                     }
                     CpuKernel::VectorAssign => {
                         let dtype = arguments[0].spec().dtype();
