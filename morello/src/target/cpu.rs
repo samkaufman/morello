@@ -309,6 +309,40 @@ impl Kernel for CpuKernel {
                     && shared_broadcastvecmult_applies_to_operands(operands)
             }
             CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => {
+                matches!(
+                    operands,
+                    [
+                        lhs @ TensorSpec {
+                            shape: lhs_shape,
+                            dtype: Dtype::Uint8,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::L1,
+                                ..
+                            },
+                        },
+                        rhs @ TensorSpec {
+                            shape: rhs_shape,
+                            dtype: Dtype::Sint8,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::VRF,
+                                vector_size: Some(rhs_vector_size),
+                                ..
+                            },
+                        },
+                        out @ TensorSpec {
+                            shape: out_shape,
+                            dtype: Dtype::Sint16,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::VRF,
+                                ..
+                            },
+                        }
+                    ] if lhs_shape[..] == [1, 2]
+                      && rhs_shape[..] == [2, rhs_vector_size / 2]
+                      && out_shape[..] == [1, rhs_vector_size / 2]
+                      && rhs.layout() == col_major(2) && out.layout().is_row_major()
+                      && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
+                )
             }
             CpuKernel::PhysicalTransposeByte128 => {
                 physicaltransposebyte_applies_to_operands(operands, 16)
