@@ -712,7 +712,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
-                    CpuKernel::TwoVecBroadcastVecMultAdd => {
+                    CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => {
                         let vector_size = arguments[2].spec().vector_size().unwrap();
                         let volume = arguments[2].spec().volume();
                         debug_assert_eq!(volume % vector_size, 0);
@@ -733,7 +733,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
                             // TODO: Lift the broadcast out of this loop.
                             let broadcast_name = self.namer.fresh_name();
-                            writeln!(w, "/* TwoVecBroadcastVecMultAdd */")?;
+                            writeln!(w, "/* TwoVecBroadcastVecMultAddU8S8S16 */")?;
                             writeln!(
                                 w,
                                 "{}__m256i {} = _mm256_set1_epi16(*(int16_t *)({}));",

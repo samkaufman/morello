@@ -48,15 +48,39 @@ pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'st
 )]
 #[cfg_attr(test, derive(Hash, proptest_derive::Arbitrary))]
 pub enum CpuKernel {
+    /// Simple scalar multiplication (`+=`).
     MultAdd,
+    /// Lowers to Clang's scalar-vector multiply-accumulate.
     BroadcastVecMultAdd,
-    BroadcastVecMultAddBf16F32,
-    TwoVecBroadcastVecMultAdd,
+    BroadcastVecMultAddBf16F32, // TODO: Move into X86 kernel.
+    /// Lowers to an outer product 1x2xN MatmulAccum implementation taking u8 and s8 inputs and
+    /// producing a s16 output.
+    ///
+    /// The first argument is broadcast over the N dimension with
+    /// [_mm256_set1_epi16](https://www.felixcloutier.com/x86/vpbroadcastb:vpbroadcastw:vpbroadcastd:vpbroadcastq):
+    /// ```text
+    ///                        0 1 2 3
+    ///      0 1 2 3           4 5 6 7
+    ///      4 5 6 7       a b    
+    /// a b            →   a b
+    ///                    a b
+    ///                    a b
+    /// ```
+    ///
+    /// and then the Hadamard is accumulated into the output with
+    /// [_mm256_maddubs_epi16](https://www.felixcloutier.com/x86/pmaddubsw)
+    /// and [_mm256_add_epi16](https://www.felixcloutier.com/x86/paddb:paddw:paddd:paddq):
+    /// ```text
+    /// += 0a 1a 2a 3a
+    ///    4b 5b 6b 7b
+    /// ```
+    TwoVecBroadcastVecMultAddU8S8S16,
     PhysicalTransposeByte128,
     PhysicalTransposeByte256,
     ValueAssign,
     VectorAssign,
     MemsetZero,
+    /// Lowers to Clang vector extensions' zero-assignment, which, on x86, should emit `vxorps`.
     VectorZero,
 }
 
@@ -192,7 +216,7 @@ impl<T: CpuTarget> Target for T {
                                 CpuKernel::MultAdd,
                                 CpuKernel::BroadcastVecMultAdd,
                                 CpuKernel::BroadcastVecMultAddBf16F32,
-                                CpuKernel::TwoVecBroadcastVecMultAdd,
+                                CpuKernel::TwoVecBroadcastVecMultAddU8S8S16,
                             ];
                             &MATMUL_ACCUM_KERNELS
                         } else {
@@ -242,7 +266,7 @@ impl Kernel for CpuKernel {
             CpuKernel::MultAdd
             | CpuKernel::BroadcastVecMultAdd
             | CpuKernel::BroadcastVecMultAddBf16F32
-            | CpuKernel::TwoVecBroadcastVecMultAdd => 3,
+            | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => 3,
             CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
             | CpuKernel::ValueAssign
@@ -284,62 +308,7 @@ impl Kernel for CpuKernel {
                     && operands[1].vector_size() == operands[2].vector_size()
                     && shared_broadcastvecmult_applies_to_operands(operands)
             }
-            CpuKernel::TwoVecBroadcastVecMultAdd => {
-                // Check data types
-                let lhs_dt = operands[0].dtype();
-                let rhs_dt = operands[1].dtype();
-                let out_dt = operands[2].dtype();
-                if lhs_dt != Dtype::Uint8 || rhs_dt != Dtype::Sint8 || out_dt != Dtype::Sint16 {
-                    return false;
-                }
-
-                // Check levels
-                let lhs_level = operands[0].level();
-                let rhs_level = operands[1].level();
-                let out_level = operands[2].level();
-                if lhs_level != CpuMemoryLevel::L1
-                    || rhs_level != CpuMemoryLevel::VRF
-                    || out_level != CpuMemoryLevel::VRF
-                {
-                    return false;
-                }
-
-                // Check all parameters are contiguous
-                if !operands.iter().all(|o| o.is_contiguous()) {
-                    return false;
-                }
-
-                // Check all shapes are rank 2.
-                for op in operands {
-                    if op.shape().len() != 2 {
-                        return false;
-                    }
-                }
-
-                let Some(rhs_vector_size) = operands[1].vector_size() else {
-                    return false;
-                };
-                if operands[1].shape()[0] == 2 {
-                    if operands[1].shape()[1] * 2 != rhs_vector_size {
-                        return false;
-                    }
-                    if operands[2].shape()[0] != 1
-                        || operands[2].shape()[1] != operands[1].shape()[1]
-                    {
-                        return false;
-                    }
-                    if operands[1].layout() != col_major(2) {
-                        return false;
-                    }
-                    if operands[2].layout() != row_major(2) {
-                        return false;
-                    }
-                } else {
-                    // TODO: Support the case where `operands[1].shape()[1] == 2`.
-                    return false;
-                }
-
-                true
+            CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => {
             }
             CpuKernel::PhysicalTransposeByte128 => {
                 physicaltransposebyte_applies_to_operands(operands, 16)
@@ -420,7 +389,7 @@ impl Kernel for CpuKernel {
         match self {
             // TODO: Model memory correctly for BroadcastVecMultAddBf16F32
             CpuKernel::BroadcastVecMultAdd
-            | CpuKernel::TwoVecBroadcastVecMultAdd
+            | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::BroadcastVecMultAddBf16F32 => {
                 let vec_tensor_spec = &parameters[1].1;
                 let vb = u64::from(vec_tensor_spec.vector_size().unwrap())
@@ -452,7 +421,7 @@ impl Kernel for CpuKernel {
         match self {
             // TODO: Model cost for BroadcastVecMultAddBf16F32 correctly.
             CpuKernel::BroadcastVecMultAdd
-            | CpuKernel::TwoVecBroadcastVecMultAdd
+            | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::BroadcastVecMultAddBf16F32 => {
                 let vec_tensor_spec = &parameters[1].1;
 
@@ -463,7 +432,7 @@ impl Kernel for CpuKernel {
                 let mut cost = INST_COST * ((vector_count * 2) + 1);
 
                 // TwoVecBroadcastVecMultAdd takes an input from L1.
-                if matches!(self, CpuKernel::TwoVecBroadcastVecMultAdd) {
+                if matches!(self, CpuKernel::TwoVecBroadcastVecMultAddU8S8S16) {
                     // TODO: Instead, call `move_cost`. Requires specializing kernel to X86/ARM.
                     let mut l1_hit_cost = CpuMemoryLevel::L1.cache_hit_cost();
                     if !parameters[0].1.is_contiguous() {
@@ -851,7 +820,7 @@ mod tests {
                 Some(16),
             ),
         ];
-        assert!(CpuKernel::TwoVecBroadcastVecMultAdd.applies_to_parameters(&operands))
+        assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_parameters(&operands))
     }
 
     fn assert_unique_layouts(layouts: &[Layout]) {
