@@ -41,7 +41,7 @@ pub type ActionIdx = u16;
 const CONCURRENT_CACHE_SHARDS: usize = 256;
 const CACHE_PER_SHARD_SIZE: usize = 128;
 const CACHE_PER_SHARD_SAMPLES: usize = 8;
-const SUPERBLOCK_FACTOR: BimapInt = 4;
+const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 
 #[derive(Clone, Debug)]
