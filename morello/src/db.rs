@@ -274,6 +274,18 @@ impl RocksDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        // Check that all costs in decisions have peak memory less than or equal to spec's
+        // memory limits.
+        debug_assert!(
+            decisions.iter().all(|(_, c)| {
+                let MemoryLimits::Standard(limits) = &spec.1;
+                &c.peaks <= limits
+            }),
+            "peak memory of an action exceeds memory limits of {}: {:?}",
+            spec,
+            decisions
+        );
+
         let bimap = self.spec_bimap();
         let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
 
