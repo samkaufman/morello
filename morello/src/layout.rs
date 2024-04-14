@@ -238,7 +238,13 @@ impl Layout {
         } else {
             let new_contig =
                 self.lower_contig_to_first_broken_dimension(parent_shape, tile_shape, contig)?;
-            debug_assert!(parent_shape != tile_shape || new_contig == contig);
+            debug_assert!(
+                parent_shape != tile_shape || new_contig == contig,
+                "Contig. shouldn't change when the shape ({:?}) doesn't, but {:?} is now {:?}",
+                parent_shape,
+                contig,
+                new_contig
+            );
             self.assert_no_consecutive_dimensions();
             let mut new_layout = self.clone();
             let new_contig = new_layout.drop_unneeded_packings(tile_shape, new_contig);
