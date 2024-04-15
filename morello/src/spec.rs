@@ -827,31 +827,37 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             // Yield actions for movement with register file destination, which
             // includes relayouts in registers and movements from level 1 to RF.
             let i = u8::try_from(i).unwrap();
-            for layout in Tgt::move_destination_layouts(operand.shape(), operand.dtype()) {
+            let operand_dtype = operand.dtype();
+            for layout in Tgt::move_destination_layouts(operand.shape(), operand_dtype) {
                 // TODO: Prevent moving into packed layouts where strip size equals the whole dim.
                 for level in Tgt::possible_destination_levels(operand.level()) {
                     if !operand.can_move_to(&layout, &level) {
                         continue;
                     }
 
-                    results.extend(
-                        gen_vector_sizes_opt(
-                            Some(operand.shape()),
-                            operand.dtype(),
-                            level.vector_bytes(),
+                    for &destination_dtype in
+                        iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
+                    {
+                        results.extend(
+                            gen_vector_sizes_opt(
+                                Some(operand.shape()),
+                                operand_dtype,
+                                level.vector_bytes(),
+                            )
+                            .map(|vector_size| {
+                                // This may return Moves with identical source and destination
+                                // TensorSpecs (i.e., within-level copies). These will be filtered in
+                                // [apply_with_aux].
+                                Action::Move {
+                                    source_idx: i,
+                                    destination_dtype,
+                                    destination_level: level,
+                                    destination_layout: layout.clone(),
+                                    destination_vector_size: vector_size,
+                                }
+                            }),
                         )
-                        .map(|vector_size| {
-                            // This may return Moves with identical source and destination
-                            // TensorSpecs (i.e., within-level copies). These will be filtered in
-                            // [apply_with_aux].
-                            Action::Move {
-                                source_idx: i,
-                                destination_level: level,
-                                destination_layout: layout.clone(),
-                                destination_vector_size: vector_size,
-                            }
-                        }),
-                    )
+                    }
                 }
             }
         }

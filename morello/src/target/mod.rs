@@ -1,5 +1,5 @@
 mod arm;
-mod cpu;
+pub(crate) mod cpu;
 mod x86;
 
 pub use arm::ArmTarget;

@@ -29,6 +29,8 @@ const CPU_LEVELS: [CpuMemoryLevel; 4] = [
     CpuMemoryLevel::L1,
     CpuMemoryLevel::GL,
 ];
+pub(crate) const DOT_PRODUCT_STRIP_SIZE: u32 = 8;
+pub(crate) const DOT_PRODUCT_ACCUM_COUNT: u32 = 4;
 
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     fn target_id() -> TargetId;
@@ -75,6 +77,7 @@ pub enum CpuKernel {
     ///    4b 5b 6b 7b
     /// ```
     TwoVecBroadcastVecMultAddU8S8S16,
+    DotProductLoop,
     PhysicalTransposeByte128,
     PhysicalTransposeByte256,
     ValueAssign,
@@ -82,6 +85,7 @@ pub enum CpuKernel {
     MemsetZero,
     /// Lowers to Clang vector extensions' zero-assignment, which, on x86, should emit `vxorps`.
     VectorZero,
+    CastBf16F32,
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -212,11 +216,12 @@ impl<T: CpuTarget> Target for T {
                 let possible_kernels: &[CpuKernel] = match typ {
                     PrimitiveSpecType::Matmul { accum } => {
                         if *accum {
-                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 4] = [
+                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 5] = [
                                 CpuKernel::MultAdd,
                                 CpuKernel::BroadcastVecMultAdd,
                                 CpuKernel::BroadcastVecMultAddBf16F32,
                                 CpuKernel::TwoVecBroadcastVecMultAddU8S8S16,
+                                CpuKernel::DotProductLoop,
                             ];
                             &MATMUL_ACCUM_KERNELS
                         } else {
@@ -225,11 +230,12 @@ impl<T: CpuTarget> Target for T {
                     }
                     PrimitiveSpecType::Conv { .. } => &[],
                     PrimitiveSpecType::Move { .. } => {
-                        const MOVE_KERNELS: [CpuKernel; 4] = [
+                        const MOVE_KERNELS: [CpuKernel; 5] = [
                             CpuKernel::ValueAssign,
                             CpuKernel::VectorAssign,
                             CpuKernel::PhysicalTransposeByte128,
                             CpuKernel::PhysicalTransposeByte256,
+                            CpuKernel::CastBf16F32,
                         ];
                         &MOVE_KERNELS
                     }
@@ -266,11 +272,13 @@ impl Kernel for CpuKernel {
             CpuKernel::MultAdd
             | CpuKernel::BroadcastVecMultAdd
             | CpuKernel::BroadcastVecMultAddBf16F32
-            | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => 3,
+            | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
+            | CpuKernel::DotProductLoop => 3,
             CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
             | CpuKernel::ValueAssign
-            | CpuKernel::VectorAssign => 2,
+            | CpuKernel::VectorAssign
+            | CpuKernel::CastBf16F32 => 2,
             CpuKernel::MemsetZero | CpuKernel::VectorZero => 1,
         }
     }
@@ -344,6 +352,40 @@ impl Kernel for CpuKernel {
                       && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
                 )
             }
+            CpuKernel::DotProductLoop => {
+                matches!(
+                    operands,
+                    [
+                        lhs @ TensorSpec {
+                            shape: lhs_shape,
+                            dtype: Dtype::Float32,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::L1,
+                                ..
+                            },
+                        },
+                        rhs @ TensorSpec {
+                            shape: _,
+                            dtype: Dtype::Float32,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::L1, ..
+                            },
+                        },
+                        TensorSpec {
+                            shape: out_shape,
+                            dtype: Dtype::Float32,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::RF,
+                                ..
+                            },
+                        }
+                    ] if lhs_shape[1] % (DOT_PRODUCT_STRIP_SIZE * DOT_PRODUCT_ACCUM_COUNT) == 0
+                      && out_shape[..] == [1, 1]
+                      && lhs.layout().is_row_major()
+                      && rhs.layout() == col_major(2)
+                      && lhs.is_contiguous() && rhs.is_contiguous()
+                )
+            }
             CpuKernel::PhysicalTransposeByte128 => {
                 physicaltransposebyte_applies_to_operands(operands, 16)
             }
@@ -400,6 +442,30 @@ impl Kernel for CpuKernel {
                 }
                 has_vrf
             }
+            CpuKernel::CastBf16F32 => matches!(
+                operands,
+                [
+                    TensorSpec {
+                        shape: lhs_shape,
+                        dtype: Dtype::Bfloat16,
+                        aux: TensorSpecAux {
+                            level: CpuMemoryLevel::RF,
+                            vector_size: None,
+                            ..
+                        },
+                    },
+                    TensorSpec {
+                        shape: rhs_shape,
+                        dtype: Dtype::Float32,
+                        aux: TensorSpecAux {
+                            level: CpuMemoryLevel::RF,
+                            vector_size: None,
+                            ..
+                        },
+                    }
+                ] if lhs_shape.iter().all(|d| *d == 1)
+                  && rhs_shape.iter().all(|d| *d == 1)
+            ),
             CpuKernel::MemsetZero => {
                 operands[0].level() == CpuMemoryLevel::RF && operands[0].is_contiguous()
             }
@@ -432,6 +498,18 @@ impl Kernel for CpuKernel {
                     |level| {
                         if level.vector_rf() {
                             vb * 2
+                        } else {
+                            0
+                        }
+                    },
+                ))
+            }
+            CpuKernel::DotProductLoop => {
+                // TODO: Count any additional peak memory from sum8.
+                MemoryAllocation::Simple(CPU_LEVELS.map(
+                    |level| {
+                        if level.vector_rf() {
+                            128
                         } else {
                             0
                         }
@@ -477,9 +555,13 @@ impl Kernel for CpuKernel {
 
                 cost
             }
+            CpuKernel::DotProductLoop => {
+                // 4.2 cycles throughput.
+                INST_COST * 4
+            }
             CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
             CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
-            CpuKernel::MultAdd => INST_COST,
+            CpuKernel::MultAdd | CpuKernel::CastBf16F32 => INST_COST,
             CpuKernel::ValueAssign
             | CpuKernel::VectorAssign
             | CpuKernel::MemsetZero

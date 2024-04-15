@@ -1,4 +1,4 @@
-use crate::common::DimSize;
+use crate::common::{DimSize, Dtype};
 use crate::db::RocksDatabase;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
@@ -21,6 +21,14 @@ pub trait SchedulingSugar<Tgt: Target> {
     fn move_param(
         &self,
         source_idx: u8,
+        destination_level: Tgt::Level,
+        destination_layout: Layout,
+        destination_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt, ()>;
+    fn cast(
+        &self,
+        source_idx: u8,
+        destination_dtype: Dtype,
         destination_level: Tgt::Level,
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
@@ -71,8 +79,29 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt, ()> {
+        let destination_dtype = self.0.parameters()[usize::from(source_idx)].dtype();
         Action::Move {
             source_idx,
+            destination_dtype,
+            destination_level,
+            destination_layout,
+            destination_vector_size,
+        }
+        .apply(self)
+        .unwrap()
+    }
+
+    fn cast(
+        &self,
+        source_idx: u8,
+        destination_dtype: Dtype,
+        destination_level: Tgt::Level,
+        destination_layout: Layout,
+        destination_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt, ()> {
+        Action::Move {
+            source_idx,
+            destination_dtype,
             destination_level,
             destination_layout,
             destination_vector_size,
@@ -141,6 +170,25 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
         apply_to_leaf_spec(self, |spec| {
             spec.move_param(
                 source_idx,
+                destination_level,
+                destination_layout,
+                destination_vector_size,
+            )
+        })
+    }
+
+    fn cast(
+        &self,
+        source_idx: u8,
+        destination_dtype: Dtype,
+        destination_level: Tgt::Level,
+        destination_layout: Layout,
+        destination_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt, ()> {
+        apply_to_leaf_spec(self, |spec| {
+            spec.cast(
+                source_idx,
+                destination_dtype,
                 destination_level,
                 destination_layout,
                 destination_vector_size,

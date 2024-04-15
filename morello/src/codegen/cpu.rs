@@ -17,7 +17,10 @@ use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferVar;
 use crate::pprint::{pprint_write, ImplPrintStyle, PrintableAux};
-use crate::target::{CpuKernel, CpuMemoryLevel, CpuTarget, Target};
+use crate::target::{
+    cpu::{DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_STRIP_SIZE},
+    CpuKernel, CpuMemoryLevel, CpuTarget, Target,
+};
 use crate::utils::{indent, LinePrefixWrite, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
 
@@ -545,6 +548,12 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         });
                         writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0])
                     }
+                    CpuKernel::CastBf16F32 => {
+                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
+                            self.c_index(a, b, None)
+                        });
+                        writeln!(w, "{}{} = (float){};", indent(depth), exprs[1], exprs[0])
+                    }
                     CpuKernel::MemsetZero => {
                         // TODO: Merge this duplicate `exprs` block. It's used also in the ValueAssign.
                         debug_assert_eq!(arguments.len(), 1);
@@ -716,7 +725,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
                             writeln!(
                                 w,
-                                "{}{} += {} * {}; /* BroadcastVecMultAddBf16F32 */",
+                                "{}{} += {} * {};",
                                 indent(depth),
                                 exprs[2],
                                 broad_name,
@@ -767,6 +776,66 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                                 broadcast_name,
                                 exprs[1]
                             )?;
+                        }
+                        Ok(())
+                    }
+                    CpuKernel::DotProductLoop => {
+                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                            0 | 1 => self.c_index_ptr(a, b, None),
+                            2 => self.c_index(a, b, None),
+                            _ => unreachable!(),
+                        });
+
+                        let lhs_spec = arguments[0].spec();
+                        debug_assert_eq!(lhs_spec.shape()[1] % DOT_PRODUCT_STRIP_SIZE, 0);
+                        let step_idx_name = self.namer.fresh_name();
+                        let vector_accum_names = (0..DOT_PRODUCT_ACCUM_COUNT as usize)
+                            .map(|_| self.namer.fresh_name())
+                            .collect::<Vec<_>>();
+
+                        let vtype =
+                            get_vector(Tgt::vec_types(), Dtype::Float32, DOT_PRODUCT_STRIP_SIZE);
+                        writeln!(w, "{}// DotProductStrip", indent(depth))?;
+                        for accum_name in &vector_accum_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){{0}};",
+                                indent(depth),
+                                vtype.name,
+                                accum_name
+                            )?;
+                        }
+                        writeln!(
+                            w,
+                            "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
+                            indent(depth),
+                            step_idx_name,
+                            lhs_spec.shape()[1],
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_STRIP_SIZE
+                        )?;
+                        for (i, accum_name) in vector_accum_names.iter().enumerate() {
+                            writeln!(
+                                w,
+                                "{0}{1} += *({2} *)({3} + {5} + {6}) * *({2} *)({4} + {5} + {6});",
+                                indent(depth + 1),
+                                accum_name,
+                                vtype.name,
+                                exprs[0],
+                                exprs[1],
+                                step_idx_name,
+                                i * DOT_PRODUCT_STRIP_SIZE as usize
+                            )?;
+                        }
+                        writeln!(w, "{}}}", indent(depth))?;
+                        writeln!(
+                            w,
+                            "{}{} = sum8({});",
+                            indent(depth),
+                            exprs[2],
+                            vector_accum_names[0]
+                        )?;
+                        for accum_name in vector_accum_names.iter().skip(1) {
+                            writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
                         }
                         Ok(())
                     }
