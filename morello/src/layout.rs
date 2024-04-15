@@ -563,6 +563,15 @@ impl Display for Layout {
             write!(f, "RM")
         } else if dims.to_vec() == vec![(0, None), (2, None), (3, None), (1, None)] {
             write!(f, "NHWC")
+        } else if dims.iter().all(|(_, s)| s.is_none()) {
+            write!(
+                f,
+                "[{}]",
+                dims.iter()
+                    .map(|(d, _)| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
         } else {
             write!(
                 f,
