@@ -67,7 +67,7 @@ enum WorkingPartialImpl<Tgt: Target> {
 #[derive(Debug)]
 struct ImplReducer {
     results: BTreeSet<(Cost, ActionIdx)>,
-    top_k: usize, // TODO: Shared between ImplReducers. Pull out?
+    top_k: usize,
     preferences: SmallVec<[ActionIdx; 1]>,
 }
 
