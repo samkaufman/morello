@@ -55,7 +55,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt, ()> {
         Action::TileOut {
             output_shape: output_shape
-                .into_iter()
+                .iter()
                 .map(|&d| DimSize::new(d).unwrap())
                 .collect(),
             parallel,

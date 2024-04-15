@@ -1468,10 +1468,7 @@ fn gen_tile_sizes<Tgt: Target>(
     }
 }
 
-pub fn gen_vector_sizes<'a>(
-    dtype: Dtype,
-    vector_bytes: &'a [u32],
-) -> impl Iterator<Item = DimSize> + 'a {
+pub fn gen_vector_sizes(dtype: Dtype, vector_bytes: &[u32]) -> impl Iterator<Item = DimSize> + '_ {
     assert!(!vector_bytes.is_empty());
     assert!(
         vector_bytes
@@ -1485,10 +1482,10 @@ pub fn gen_vector_sizes<'a>(
     })
 }
 
-pub fn gen_vector_sizes_opt<'a>(
+pub fn gen_vector_sizes_opt(
     dtype: Dtype,
-    vector_bytes: &'a [u32],
-) -> impl Iterator<Item = Option<DimSize>> + 'a {
+    vector_bytes: &[u32],
+) -> impl Iterator<Item = Option<DimSize>> + '_ {
     let mut iter_a = None;
     let mut iter_b = None;
     if vector_bytes.is_empty() {
@@ -1716,7 +1713,6 @@ mod tests {
     use crate::utils::{next_binary_power, sum_seqs};
     use crate::{layout::row_major, target::CpuMemoryLevel::GL};
     use crate::{lspec, shape};
-    use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use smallvec::smallvec;
 
@@ -1783,23 +1779,14 @@ mod tests {
     #[test]
     fn test_gen_tile_sizes_dim_2_multi_dim() {
         assert_gen_tile_sizes(
-            &shape![2, 2],
-            [
-                [nz!(1u32), nz!(1u32)],
-                [nz!(1u32), nz!(2u32)],
-                [nz!(2u32), nz!(1u32)],
-                [nz!(2u32), nz!(2u32)],
-            ],
+            shape![2, 2],
+            [shape![1, 1], shape![1, 2], shape![2, 1], shape![2, 2]],
             false,
             true,
         );
         assert_gen_tile_sizes(
-            &shape![2, 2],
-            [
-                [nz!(1u32), nz!(1u32)],
-                [nz!(1u32), nz!(2u32)],
-                [nz!(2u32), nz!(1u32)],
-            ],
+            shape![2, 2],
+            [shape![1, 1], shape![1, 2], shape![2, 1]],
             true,
             true,
         );
@@ -1808,26 +1795,26 @@ mod tests {
     #[test]
     fn test_gen_tile_sizes_dim_2_multi_dim_non_powers_of_two() {
         assert_gen_tile_sizes(
-            &shape![2, 3],
+            shape![2, 3],
             [
-                [nz!(1u32), nz!(1u32)],
-                [nz!(1u32), nz!(2u32)],
-                [nz!(1u32), nz!(3u32)],
-                [nz!(2u32), nz!(1u32)],
-                [nz!(2u32), nz!(2u32)],
-                [nz!(2u32), nz!(3u32)],
+                shape![1, 1],
+                shape![1, 2],
+                shape![1, 3],
+                shape![2, 1],
+                shape![2, 2],
+                shape![2, 3],
             ],
             false,
             true,
         );
         assert_gen_tile_sizes(
-            &shape![2, 3],
+            shape![2, 3],
             [
-                [nz!(1u32), nz!(1u32)],
-                [nz!(1u32), nz!(2u32)],
-                [nz!(1u32), nz!(3u32)],
-                [nz!(2u32), nz!(1u32)],
-                [nz!(2u32), nz!(2u32)],
+                shape![1, 1],
+                shape![1, 2],
+                shape![1, 3],
+                shape![2, 1],
+                shape![2, 2],
             ],
             true,
             true,
@@ -1837,33 +1824,20 @@ mod tests {
     #[test]
     fn test_gen_tile_sizes_dim_2_single_dim() {
         assert_gen_tile_sizes(
-            &shape![2, 2],
-            [
-                [nz!(1u32), nz!(2u32)],
-                [nz!(2u32), nz!(1u32)],
-                [nz!(2u32), nz!(2u32)],
-            ],
+            shape![2, 2],
+            [shape![1, 2], shape![2, 1], shape![2, 2]],
             false,
             false,
         );
-        assert_gen_tile_sizes(
-            &shape![2, 2],
-            [[nz!(1u32), nz!(2u32)], [nz!(2u32), nz!(1u32)]],
-            true,
-            false,
-        );
+        assert_gen_tile_sizes(shape![2, 2], [shape![1, 2], shape![2, 1]], true, false);
     }
 
     #[test]
     fn test_gen_tile_sizes_dim_2_single_dim_non_powers_of_two() {
         for drop_given in [true, false] {
             assert_gen_tile_sizes(
-                &shape![2, 3],
-                [
-                    [nz!(1u32), nz!(3u32)],
-                    [nz!(2u32), nz!(1u32)],
-                    [nz!(2u32), nz!(2u32)],
-                ],
+                shape![2, 3],
+                [shape![1, 3], shape![2, 1], shape![2, 2]],
                 drop_given,
                 false,
             );
@@ -2154,43 +2128,38 @@ mod tests {
     }
 
     fn shared_test_gen_tile_sizes_dim_1(multi_dim: bool) {
-        assert_gen_tile_sizes(&shape![1], [[nz!(1u32)]], false, multi_dim);
-        assert_gen_tile_sizes::<0>(&shape![1], [], true, multi_dim);
+        assert_gen_tile_sizes(shape![1], [shape![1]], false, multi_dim);
+        assert_gen_tile_sizes(shape![1], [], true, multi_dim);
         assert_gen_tile_sizes(
-            &shape![16],
-            [
-                [nz!(1u32)],
-                [nz!(2u32)],
-                [nz!(4u32)],
-                [nz!(8u32)],
-                [nz!(16u32)],
-            ],
+            shape![16],
+            [shape![1], shape![2], shape![4], shape![8], shape![16]],
             false,
             multi_dim,
         );
         assert_gen_tile_sizes(
-            &shape![16],
-            [[nz!(1u32)], [nz!(2u32)], [nz!(4u32)], [nz!(8u32)]],
+            shape![16],
+            [shape![1], shape![2], shape![4], shape![8]],
             true,
             multi_dim,
         );
     }
 
-    fn assert_gen_tile_sizes<const D: usize>(
-        tensor_shape: &[DimSize],
-        expected: impl IntoIterator<Item = [DimSize; D]>,
+    fn assert_gen_tile_sizes(
+        tensor_shape: Shape,
+        expected: impl IntoIterator<Item = Shape>,
         drop_given: bool,
         multi_dim: bool,
     ) {
-        let actual: Vec<[DimSize; D]> =
-            gen_tile_sizes::<X86Target>(tensor_shape, drop_given, multi_dim)
-                .map(|s| {
-                    assert_eq!(s.len(), D);
-                    s.into_iter().collect::<Vec<_>>().try_into().unwrap()
-                })
-                .sorted()
-                .collect::<Vec<_>>();
-        let expected = expected.into_iter().sorted().collect::<Vec<_>>();
+        let expected: Vec<Shape> = expected.into_iter().sorted().collect();
+        let d = expected.get(0).map_or(0, |shape| shape.len());
+
+        let actual: Vec<Shape> = gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim)
+            .map(|s| {
+                assert_eq!(s.len(), d);
+                s.into_iter().collect::<Vec<_>>().try_into().unwrap()
+            })
+            .sorted()
+            .collect::<Vec<_>>();
         assert_eq!(
             actual, expected,
             "gen_tile_sizes({:?}, drop_given={}, serial={}) returned {:?}, expected {:?}",

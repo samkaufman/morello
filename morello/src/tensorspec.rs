@@ -566,13 +566,11 @@ fn arb_tensorspecaux<Tgt: Target>(
 #[cfg(test)]
 mod tests {
     use crate::layout::Layout;
-    use crate::shape;
     use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
     use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape};
-    use nonzero::nonzero as nz;
+    use crate::{layout, shape};
     use proptest::prelude::*;
     use proptest::proptest;
-    use smallvec::smallvec;
 
     proptest! {
         // TODO: Modify `any::<TensorSpec<_>>` to generate multiple ranks and dtypes.
@@ -612,13 +610,7 @@ mod tests {
                 contig: 3,
                 aligned: false,
                 level: CpuMemoryLevel::GL,
-                layout: Layout::New(smallvec![
-                    (0, None),
-                    (2, None),
-                    (3, None),
-                    (1, None),
-                    (2, Some(nz!(4u32))),
-                ]),
+                layout: layout![(0, None), (2, None), (3, None), (1, None), (2, Some(4))],
                 vector_size: None,
             },
         };

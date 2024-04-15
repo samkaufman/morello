@@ -671,14 +671,12 @@ mod tests {
         shape,
     };
     use itertools::Itertools;
-    use nonzero::nonzero as nz;
     use proptest::{
         arbitrary::{any, any_with},
         prelude::prop,
         prop_assert_eq, prop_assume, proptest,
         strategy::{Just, Strategy},
     };
-    use smallvec::smallvec;
     use std::{collections::HashSet, num::NonZeroU8};
 
     #[test]
