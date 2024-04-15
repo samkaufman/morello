@@ -476,7 +476,6 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             spec.level(),
                         );
                         dest_buffer.emit(w, InitType::None, depth)?;
-
                         self.name_env.insert(Rc::clone(tensor), dest_buffer);
                     }
                     TensorOrCacheView::CacheView(_) => (),
@@ -488,6 +487,13 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 self.emit(w, move_let.main_stage(), depth)?;
                 if let Some(epilogue) = move_let.epilogue() {
                     self.emit(w, epilogue, depth)?;
+                }
+
+                if let TensorOrCacheView::Tensor(tensor) = &move_let.introduced {
+                    self.name_env
+                        .remove(&**tensor)
+                        .unwrap()
+                        .emit_free(w, depth)?;
                 }
                 Ok(())
             }
