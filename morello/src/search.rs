@@ -64,7 +64,7 @@ enum WorkingPartialImpl<Tgt: Target> {
     Sat,
 }
 
-#[derive(Debug, Clone)] // TODO: Remove this Clone derive if not needed
+#[derive(Debug)]
 struct ImplReducer {
     results: BTreeSet<(Cost, ActionIdx)>,
     top_k: usize, // TODO: Shared between ImplReducers. Pull out?
