@@ -867,6 +867,45 @@ mod tests {
             let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, Some(nz!(1usize)));
             assert_eq!(first_solutions, lower_solutions);
         }
+
+        #[test]
+        fn test_implreducer_can_sort_any_top_k_actions(
+            (top_k, mut action_costs) in arb_top_k_and_action_costs()
+        ) {
+            let preferences = smallvec![];
+            let mut reducer = ImplReducer::new(top_k, preferences);
+
+            for (cost, action_idx) in &action_costs {
+                reducer.insert(*action_idx, cost.clone());
+            }
+
+            let finalized = reducer.finalize();
+            action_costs.sort();
+            assert_eq!(finalized.len(), action_costs.len());
+
+            for (reduced, original) in finalized.into_iter().zip(action_costs.into_iter().map(|(action_idx, cost)| (cost, action_idx))) {
+                assert_eq!(reduced, original);
+            }
+        }
+    }
+
+    fn arb_action_indices(top_k: usize) -> impl Strategy<Value = HashSet<ActionIdx>> {
+        prop::collection::hash_set(any::<ActionIdx>(), 1..top_k)
+    }
+
+    fn arb_costs(top_k: usize) -> impl Strategy<Value = Vec<Cost>> {
+        prop::collection::vec(any::<Cost>(), 1..top_k)
+    }
+
+    prop_compose! {
+        fn arb_top_k_and_action_costs()(top_k in 2..128usize)
+        (
+            top_k in Just(top_k),
+            action_indices in arb_action_indices(top_k),
+            costs in arb_costs(top_k)
+        ) -> (usize, Vec<(Cost, ActionIdx)>) {
+            (top_k, costs.into_iter().zip(action_indices).collect())
+        }
     }
 
     fn create_simple_cost(main: u32) -> Cost {
