@@ -70,6 +70,7 @@ pub trait Kernel: PartialEq + Eq + Copy + Clone + Debug {
     fn argument_count(&self) -> u8;
 
     // TODO: Make into `applies_to_spec`
+    // TODO: Don't require CpuKernel
     fn applies_to_parameters<Tgt: CpuTarget>(&self, parameters: &[TensorSpec<Tgt>]) -> bool;
 
     // TODO: Take something more generic than Param.

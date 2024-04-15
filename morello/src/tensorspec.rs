@@ -238,6 +238,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     // TODO: Shouldn't need this method. Should be implicit in Spec validity.
     pub fn can_move_to(&self, dest_layout: &Layout, dest_level: &Tgt::Level) -> bool {
+        // TODO: Ideally, we remove the following case. It's a scalability issue.
         // If the destination is into a cache ("non-addressed"), then it must have the same layout.
         if !dest_level.is_addressed() && dest_layout != &self.layout() {
             return false;
