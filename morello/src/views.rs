@@ -316,7 +316,7 @@ impl<V: View> Tile<V> {
 
     pub fn steps_dim(&self, dim: u8) -> u32 {
         let origin_size = self.view.shape()[usize::from(dim)];
-        divrem::DivCeil::div_ceil(origin_size, self.step_sizes[usize::from(dim)])
+        divrem::DivCeil::div_ceil(origin_size.get(), self.step_sizes[usize::from(dim)].get())
     }
 
     pub fn compose_buffer_indexing_expr(
@@ -342,7 +342,7 @@ impl<V: View> Tile<V> {
                 let mut terms = vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e.clone())))];
                 if size_in_dim != self.view.shape()[usize::from(dim)] {
                     terms.push(Term(
-                        size_in_dim.try_into().unwrap(),
+                        size_in_dim.get().try_into().unwrap(),
                         NonAffine::Leaf(BufferVar::TileIdx(dim, e.clone())),
                     ));
                 }

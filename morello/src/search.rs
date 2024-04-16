@@ -821,7 +821,7 @@ mod tests {
     use proptest::sample::select;
     use std::rc::Rc;
 
-    const TEST_SMALL_SIZE: DimSize = 2;
+    const TEST_SMALL_SIZE: DimSize = nz!(2u32);
     const TEST_SMALL_MEM: u64 = 2048;
 
     proptest! {

@@ -1,3 +1,4 @@
+use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::rc::Rc;
@@ -114,9 +115,10 @@ impl<Tgt: Target> Action<Tgt> {
                                 current_out_shape.len(),
                                 output_shape.len()
                             );
-                            assert!(output_shape.iter().enumerate().all(|(dim, dim_size)| {
-                                *dim_size > 0 && *dim_size <= current_out_shape[dim]
-                            }));
+                            assert!(output_shape
+                                .iter()
+                                .enumerate()
+                                .all(|(dim, dim_size)| *dim_size <= current_out_shape[dim]));
                             assert_ne!(
                                 current_out_shape,
                                 &output_shape[..],
@@ -203,45 +205,42 @@ impl<Tgt: Target> Action<Tgt> {
                             new_tiles.push(smaller_output);
                             (new_tiles, *parallel)
                         }
-                        Action::Split { k } => {
-                            debug_assert_ne!(*k, 0);
-                            match node_spec {
-                                LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
-                                    match typ {
-                                        PrimitiveSpecType::Matmul { accum: _ } => {
-                                            let [lhs, rhs] = &operands[..2] else {
-                                                panic!();
-                                            };
-                                            assert!(*k < lhs.shape()[1]);
+                        Action::Split { k } => match node_spec {
+                            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
+                                match typ {
+                                    PrimitiveSpecType::Matmul { accum: _ } => {
+                                        let [lhs, rhs] = &operands[..2] else {
+                                            panic!();
+                                        };
+                                        assert!(*k < lhs.shape()[1]);
 
-                                            let tiles = vec![
-                                                LoopTile {
-                                                    axes: smallvec![0, 1],
-                                                    tile: Tile::new(
-                                                        smallvec![lhs.shape()[0], *k],
-                                                        smallvec![lhs.shape()[0], *k],
-                                                        Param::new(0, lhs.clone()),
-                                                    )
-                                                    .map_err(tile_to_apply_err)?,
-                                                },
-                                                LoopTile {
-                                                    axes: smallvec![1, 2],
-                                                    tile: Tile::new(
-                                                        smallvec![*k, rhs.shape()[1]],
-                                                        smallvec![*k, rhs.shape()[1]],
-                                                        Param::new(1, rhs.clone()),
-                                                    )
-                                                    .map_err(tile_to_apply_err)?,
-                                                },
-                                            ];
-                                            (tiles, false)
-                                        }
-                                        _ => unimplemented!("Split not implemented for {:?}", typ),
+                                        let tiles = vec![
+                                            LoopTile {
+                                                axes: smallvec![0, 1],
+                                                tile: Tile::new(
+                                                    smallvec![lhs.shape()[0], *k],
+                                                    smallvec![lhs.shape()[0], *k],
+                                                    Param::new(0, lhs.clone()),
+                                                )
+                                                .map_err(tile_to_apply_err)?,
+                                            },
+                                            LoopTile {
+                                                axes: smallvec![1, 2],
+                                                tile: Tile::new(
+                                                    smallvec![*k, rhs.shape()[1]],
+                                                    smallvec![*k, rhs.shape()[1]],
+                                                    Param::new(1, rhs.clone()),
+                                                )
+                                                .map_err(tile_to_apply_err)?,
+                                            },
+                                        ];
+                                        (tiles, false)
                                     }
+                                    _ => unimplemented!("Split not implemented for {:?}", typ),
                                 }
-                                LogicalSpec::Compose { .. } => todo!(),
                             }
-                        }
+                            LogicalSpec::Compose { .. } => todo!(),
+                        },
                         _ => unreachable!(),
                     }
                 };
@@ -371,7 +370,9 @@ impl<Tgt: Target> Action<Tgt> {
                     let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
                         if level == &l {
                             u64::from(next_to_outer_basics.dtypes[ntob_out_idx].size())
-                                * u64::from(output_shape.into_iter().product::<DimSize>())
+                                * u64::from(
+                                    output_shape.into_iter().map(|d| d.get()).product::<u32>(),
+                                )
                         } else {
                             0u64
                         }
@@ -447,7 +448,7 @@ impl<Tgt: Target> Action<Tgt> {
                 let [outer_image_tile, outer_filters_tile] = [0, 1].map(|idx| {
                     let shape = operands[idx].shape()[..2]
                         .iter()
-                        .chain(iter::repeat(&1).take((rank - 2).into()))
+                        .chain(iter::repeat(&nz!(1u32)).take((rank - 2).into()))
                         .copied()
                         .collect::<Shape>();
                     let step_sizes = shape.clone();
