@@ -12,9 +12,7 @@ use crate::{
 };
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
-pub enum Layout {
-    New(SmallVec<[(u8, Option<DimSize>); 4]>),
-}
+pub struct Layout(pub SmallVec<[(u8, Option<DimSize>); 4]>);
 
 #[cfg(test)]
 pub struct LayoutArbRankBounds(std::num::NonZeroU8, Option<std::num::NonZeroU8>);
@@ -60,7 +58,7 @@ impl Layout {
         }
 
         // TODO: Adapt merge_consecutive_dimensions to make the following less convoluted.
-        let l = Layout::New(dims);
+        let l = Layout(dims);
         l.assert_no_consecutive_dimensions();
         l.assert_no_size_1_packings();
         l.merge_consecutive_dimensions(l.contiguous_full()).0
@@ -84,7 +82,7 @@ impl Layout {
         expr_id: &OpaqueSymbol,
         concrete_shape: &[DimSize],
     ) -> NonAffineExpr<BufferVar> {
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
 
         let tensor_rank = concrete_shape.len();
         debug_assert_eq!(
@@ -124,21 +122,15 @@ impl Layout {
     }
 
     pub fn contiguous_full(&self) -> Contig {
-        match self {
-            Layout::New(dims) => dims.len().try_into().unwrap(),
-        }
+        self.0.len().try_into().unwrap()
     }
 
     pub fn contiguous_none(&self) -> Contig {
-        match self {
-            Layout::New(_) => 0,
-        }
+        0
     }
 
     pub fn all_contiguous_abs(&self) -> impl Iterator<Item = Contig> + Clone {
-        match self {
-            Layout::New(dims) => 0..=dims.len().try_into().unwrap(),
-        }
+        0..=self.contiguous_full()
     }
 
     pub fn estimate_cache_lines<Tgt: Target>(
@@ -147,7 +139,7 @@ impl Layout {
         dtype: Dtype,
         contig: Contig,
     ) -> u32 {
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
 
         assert!(
             usize::from(contig) <= dims.len(),
@@ -181,7 +173,7 @@ impl Layout {
     }
 
     pub fn is_row_major(&self) -> bool {
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
         dims.iter()
             .enumerate()
             .all(|(i, (d, s))| i == usize::from(*d) && s.is_none())
@@ -193,7 +185,7 @@ impl Layout {
             return (self.clone(), contiguous_abs);
         }
 
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
         let first_contig_idx = dims.len() - usize::from(contiguous_abs);
 
         let new_contig = contiguous_abs
@@ -214,7 +206,7 @@ impl Layout {
     }
 
     pub fn swap_dims(&self, dims: (u8, u8), contiguous_abs: Contig) -> (Layout, Contig) {
-        let Layout::New(orig_dims) = self;
+        let Layout(orig_dims) = self;
         (
             Layout::new(
                 orig_dims
@@ -265,7 +257,7 @@ impl Layout {
         tile_shape: &[DimSize],
         source_contig: Contig,
     ) -> Result<Contig, LayoutError> {
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
         let parent_physical_shape = self.expand_physical_shape(parent_shape)?;
         let tile_physical_shape = self.expand_physical_shape(tile_shape)?;
         debug_assert_eq!(parent_physical_shape.len(), tile_physical_shape.len());
@@ -289,7 +281,7 @@ impl Layout {
     fn assert_no_consecutive_dimensions(&self) {
         #[cfg(debug_assertions)]
         {
-            let Layout::New(dims) = self;
+            let Layout(dims) = self;
             for idx in 1..dims.len() {
                 if dims[idx - 1].0 == dims[idx].0
                     && dims[idx - 1].1.is_some()
@@ -306,7 +298,7 @@ impl Layout {
 
     /// Merge matching, consecutive dimensions.
     fn merge_consecutive_dimensions(&self, source_contig: Contig) -> (Layout, Contig) {
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
 
         let first_contig_idx = dims.len() - usize::from(source_contig);
 
@@ -338,7 +330,7 @@ impl Layout {
             }
         }
 
-        (Layout::New(new_dims), new_contig)
+        (Layout(new_dims), new_contig)
     }
 
     /// Increase contig through any all-ones prefix.
@@ -357,7 +349,7 @@ impl Layout {
     }
 
     fn drop_unneeded_packings(&mut self, tile_shape: &[DimSize], contig: Contig) -> Contig {
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
 
         let first_contig_idx = dims.len() - usize::from(contig);
 
@@ -424,7 +416,7 @@ impl Layout {
         &self,
         logical_shape: &[DimSize],
     ) -> Result<Shape, LayoutError> {
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
         let mut physical_shape = SmallVec::with_capacity(dims.len());
         let mut logical_shape_remaining: SmallVec<[u32; 5]> = Shape::from(logical_shape)
             .into_iter()
@@ -463,7 +455,7 @@ impl Layout {
         physical_dim: u8,
         logical_shape: &[DimSize],
     ) -> Result<DimSize, LayoutError> {
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
         let logical_dim = dims[usize::from(physical_dim)].0;
         let expanded = self.expand_logical_dim_physical_shape(logical_dim, logical_shape)?;
         expanded
@@ -478,7 +470,7 @@ impl Layout {
         logical_dim: u8,
         logical_shape: &[DimSize],
     ) -> Result<SmallVec<[(usize, DimSize); 3]>, LayoutError> {
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
         let mut physical_shape = smallvec![];
         let mut remaining_size = logical_shape[usize::from(logical_dim)].get();
         for (idx, (dim, fixed_size)) in dims.iter().enumerate().rev() {
@@ -516,7 +508,7 @@ impl Layout {
         {
             use nonzero::nonzero as nz;
 
-            let Layout::New(dims) = self;
+            let Layout(dims) = self;
             for (_, size) in dims {
                 debug_assert_ne!(
                     size,
@@ -566,7 +558,7 @@ impl proptest::arbitrary::Arbitrary for Layout {
 
         (logical_dims_prefix, additional_logical_dims)
             .prop_map(|(prefix, additional)| {
-                Layout::New(
+                Layout(
                     prefix
                         .into_iter()
                         .chain(additional)
@@ -580,7 +572,7 @@ impl proptest::arbitrary::Arbitrary for Layout {
 
 impl Display for Layout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Layout::New(dims) = self;
+        let Layout(dims) = self;
         if self.is_row_major() {
             write!(f, "RM")
         } else if dims.to_vec() == vec![(0, None), (2, None), (3, None), (1, None)] {
@@ -772,7 +764,7 @@ mod tests {
         fn test_expand_physical_shape_matches_physical_size_for_tensor_layouts(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
-            let Layout::New(dims) = &layout;
+            let Layout(dims) = &layout;
             let physical_rank = dims.len();
 
             let lhs = layout.expand_physical_shape(&shape);
@@ -796,7 +788,7 @@ mod tests {
         fn test_physical_shape_raises_error_on_some_dim_when_expansion_does(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
-            let Layout::New(dims) = &layout;
+            let Layout(dims) = &layout;
             let physical_rank = dims.len();
 
             let lhs = layout.expand_physical_shape(&shape).err();
