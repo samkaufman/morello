@@ -98,7 +98,7 @@ impl<T: CpuTarget> Target for T {
         let all_packing_sizes = pack_sizes(None, dtype, &all_target_vector_bytes);
         let mut result = unpacked_layouts.clone();
         result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
-            let Layout::New(dims) = original_layout;
+            let Layout(dims) = original_layout;
             (0..dims.len())
                 .cartesian_product(&all_packing_sizes)
                 .filter_map(|(packing_dim, &packing_size)| {
@@ -106,7 +106,7 @@ impl<T: CpuTarget> Target for T {
                     if shape[packing_dim].get() % packing_size.get() != 0 {
                         return None;
                     }
-                    Some(Layout::New(
+                    Some(Layout(
                         dims.iter()
                             .cloned()
                             .chain(iter::once((
@@ -564,7 +564,7 @@ fn packed_layouts_for_standard_layout<'a>(
     dtype: Dtype,
     all_target_vector_bytes: &'a [u32],
 ) -> impl Iterator<Item = Layout> + 'a {
-    let Layout::New(dims) = &original_layout;
+    let Layout(dims) = &original_layout;
     debug_assert!(dims.iter().all(|(_, s)| s.is_none()));
 
     let final_nonone_dim = {

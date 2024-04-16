@@ -331,7 +331,7 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
         if !self.layout.is_row_major() && shape.iter().all(|d| d.get() == 1) {
             false
         } else {
-            let Layout::New(dims) = &self.layout;
+            let Layout(dims) = &self.layout;
 
             // Count the number of packings applied to each logical dimension.
             // As a special case, `packings` is empty if there are no packed dims.
@@ -633,8 +633,8 @@ mod tests {
         let mut second = tspec.clone();
         second.canonicalize().unwrap();
 
-        let Layout::New(dims_a) = tspec.layout();
-        let Layout::New(dims_b) = second.layout();
+        let Layout(dims_a) = tspec.layout();
+        let Layout(dims_b) = second.layout();
         assert!(
             dims_a != dims_b || tspec.aux.contig == second.aux.contig,
             "Dims were unchanged, but contig. changed from {:?} to {:?}",
