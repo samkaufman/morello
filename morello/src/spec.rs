@@ -1536,6 +1536,23 @@ pub fn conv_infer_output_shape(image_shape: &[DimSize], filters_shape: &[DimSize
 }
 
 pub mod macros {
+    pub mod internal {
+        use crate::common::DimSize;
+        pub trait IntoDimSize {
+            fn into_dim_size(self) -> DimSize;
+        }
+        impl IntoDimSize for DimSize {
+            fn into_dim_size(self) -> DimSize {
+                self
+            }
+        }
+        impl IntoDimSize for u32 {
+            fn into_dim_size(self) -> DimSize {
+                DimSize::new(self).unwrap()
+            }
+        }
+    }
+
     #[macro_export]
     macro_rules! shape {
         ($dim:expr; $n:expr) => {{
@@ -1552,153 +1569,107 @@ pub mod macros {
         }};
     }
 
-    // TODO: Rename to `lspec`
     #[macro_export]
     macro_rules! lspec {
+        // Entry points
         ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),+, serial ) ) => {{
-            $crate::spec::macros::internal::spec_inner!($typ($shp, $( ($($opterms)*) ),* , true))
+            lspec!(@inner $typ($shp, $( ($($opterms)*) ),* , true))
         }};
         ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),+ ) ) => {{
-            $crate::spec::macros::internal::spec_inner!($typ($shp, $( ($($opterms)*) ),* , false))
+            lspec!(@inner $typ($shp, $( ($($opterms)*) ),* , false))
         }};
-    }
-    pub use lspec;
 
-    pub mod internal {
-        use crate::common::DimSize;
-        pub trait IntoDimSize {
-            fn into_dim_size(self) -> DimSize;
-        }
-        impl IntoDimSize for DimSize {
-            fn into_dim_size(self) -> DimSize {
-                self
-            }
-        }
-        impl IntoDimSize for u32 {
-            fn into_dim_size(self) -> DimSize {
-                DimSize::new(self).unwrap()
-            }
-        }
+        // Inner macros
+        ( @inner $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),*, $s:literal ) ) => {{
+            use $crate::spec::macros::internal::IntoDimSize;
 
-        // TODO: Make private.
-        #[macro_export]
-        macro_rules! __primitive_spec_type {
-            (Zero) => {
-                PrimitiveSpecType::Zero
+            let auxes = [ $( lspec!(@tensorspecaux_tup $($opterms)*) ),* ];
+            let dtypes = auxes.iter().map(|v| v.0.clone()).collect();
+            let basics = PrimitiveBasics {
+                typ: lspec!(@primitive_spec_type $typ),
+                spec_shape: ($shp).into_iter().map(|x| x.into_dim_size()).collect(),
+                dtypes,
             };
-            (Move) => {
-                PrimitiveSpecType::Move
-            };
-            (Matmul) => {
-                PrimitiveSpecType::Matmul { accum: false }
-            };
-            (MatmulAccum) => {
-                PrimitiveSpecType::Matmul { accum: true }
-            };
-            (Conv) => {
-                PrimitiveSpecType::Conv { accum: false }
-            };
-            (ConvAccum) => {
-                PrimitiveSpecType::Conv { accum: true }
-            };
-        }
-        pub use __primitive_spec_type as primitive_spec_type;
+            LogicalSpec::Primitive(
+                basics,
+                auxes.into_iter().map(|v| v.1).collect(),
+                $s,
+            )
+        }};
 
-        #[macro_export]
-        macro_rules! __dt_convert {
-            (u8) => {
-                $crate::common::Dtype::Uint8
-            };
-            (i8) => {
-                $crate::common::Dtype::Sint8
-            };
-            (u16) => {
-                $crate::common::Dtype::Uint16
-            };
-            (i16) => {
-                $crate::common::Dtype::Sint16
-            };
-            (u32) => {
-                $crate::common::Dtype::Uint32
-            };
-            (i32) => {
-                $crate::common::Dtype::Sint32
-            };
-            ($val:expr) => {
-                $val
-            };
-        }
-        pub use __dt_convert as dt_convert;
+        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, c0, ua ) => {
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, false, false)
+        };
+        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, c0 ) => {
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, false, true)
+        };
+        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, ua ) => {
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, true, false)
+        };
+        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr ) => {
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, true, true)
+        };
 
         // TODO: Accept contiguousnesses other than fully contig. or not at all.
-        #[macro_export]
-        macro_rules! __tensorspecaux_tup_inner {
-            ($dt:tt, $level:expr, $layout:expr, $c:literal, $a:literal) => {{
-                let layout: $crate::layout::Layout = $layout;
-                let contig = if $c {
-                    layout.contiguous_full()
-                } else {
-                    layout.contiguous_none()
-                };
-                (
-                    $crate::spec::macros::internal::dt_convert!($dt),
-                    TensorSpecAux {
-                        contig,
-                        aligned: $a,
-                        level: $level,
-                        layout,
-                        vector_size: None, // TODO: Fill in vector size!
-                    },
-                )
-            }};
-        }
-        pub use __tensorspecaux_tup_inner as tensorspecaux_tup_inner;
+        ( @tensorspecaux_tup_inner $dt:tt, $level:expr, $layout:expr, $c:literal, $a:literal ) => {{
+            let layout: $crate::layout::Layout = $layout;
+            let contig = if $c {
+                layout.contiguous_full()
+            } else {
+                layout.contiguous_none()
+            };
+            (
+                lspec!(@dt_convert $dt),
+                TensorSpecAux {
+                    contig,
+                    aligned: $a,
+                    level: $level,
+                    layout,
+                    vector_size: None, // TODO: Fill in vector size!
+                },
+            )
+        }};
 
-        #[macro_export]
-        macro_rules! __tensorspecaux_tup {
-            ($dt:tt, $level:expr, $layout:expr, c0, ua) => {
-                $crate::spec::macros::internal::tensorspecaux_tup_inner!(
-                    $dt, $level, $layout, false, false
-                )
-            };
-            ($dt:tt, $level:expr, $layout:expr, c0) => {
-                $crate::spec::macros::internal::tensorspecaux_tup_inner!(
-                    $dt, $level, $layout, false, true
-                )
-            };
-            ($dt:tt, $level:expr, $layout:expr, ua) => {
-                $crate::spec::macros::internal::tensorspecaux_tup_inner!(
-                    $dt, $level, $layout, true, false
-                )
-            };
-            ($dt:tt, $level:expr, $layout:expr) => {
-                $crate::spec::macros::internal::tensorspecaux_tup_inner!(
-                    $dt, $level, $layout, true, true
-                )
-            };
-        }
-        pub use __tensorspecaux_tup as tensorspecaux_tup;
+        ( @primitive_spec_type Zero ) => {
+            PrimitiveSpecType::Zero
+        };
+        ( @primitive_spec_type Move ) => {
+            PrimitiveSpecType::Move
+        };
+        ( @primitive_spec_type Matmul ) => {
+            PrimitiveSpecType::Matmul { accum: false }
+        };
+        ( @primitive_spec_type MatmulAccum ) => {
+            PrimitiveSpecType::Matmul { accum: true }
+        };
+        ( @primitive_spec_type Conv ) => {
+            PrimitiveSpecType::Conv { accum: false }
+        };
+        ( @primitive_spec_type ConvAccum ) => {
+            PrimitiveSpecType::Conv { accum: true }
+        };
 
-        #[macro_export]
-        macro_rules! __spec_inner {
-            ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),*, $s:literal ) ) => {{
-                use $crate::spec::macros::internal::{IntoDimSize, primitive_spec_type, tensorspecaux_tup};
-
-                let auxes = [ $( tensorspecaux_tup!($($opterms)*) ),* ];
-                let dtypes = auxes.iter().map(|v| v.0.clone()).collect();
-                let basics = PrimitiveBasics {
-                    typ: primitive_spec_type!($typ),
-                    spec_shape: ($shp).into_iter().map(|x| x.into_dim_size()).collect(),
-                    dtypes,
-                };
-                LogicalSpec::Primitive(
-                    basics,
-                    auxes.into_iter().map(|v| v.1).collect(),
-                    $s,
-                )
-            }};
-        }
-        pub use __spec_inner as spec_inner;
+        ( @dt_convert u8 ) => {
+            $crate::common::Dtype::Uint8
+        };
+        ( @dt_convert i8 ) => {
+            $crate::common::Dtype::Sint8
+        };
+        ( @dt_convert u16 ) => {
+            $crate::common::Dtype::Uint16
+        };
+        ( @dt_convert i16 ) => {
+            $crate::common::Dtype::Sint16
+        };
+        ( @dt_convert u32 ) => {
+            $crate::common::Dtype::Uint32
+        };
+        ( @dt_convert i32 ) => {
+            $crate::common::Dtype::Sint32
+        };
+        ( @dt_convert $val:expr ) => {
+            $val
+        };
     }
 }
 
