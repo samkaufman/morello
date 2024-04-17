@@ -636,26 +636,21 @@ pub fn nhwc() -> Layout {
 pub mod macros {
     #[macro_export]
     macro_rules! layout {
-        ($($dim:tt),*$(,)*) => {
+        // Entry point
+        ( $($dim:tt),*$(,)* ) => {
             $crate::layout::Layout::new(
-                smallvec::smallvec![ $( $crate::layout::macros::internal::layout_inner!($dim) ),* ]
+                smallvec::smallvec![ $( layout!(@inner $dim) ),* ]
             )
         };
-    }
 
-    pub mod internal {
-        // TODO: Make private.
-        #[macro_export]
-        macro_rules! __layout_inner {
-            (($dim:expr, Some($ds:expr))) => {{
-                use $crate::spec::macros::internal::IntoDimSize;
-                ($dim, Some(($ds).into_dim_size()))
-            }};
-            (($dim:expr, None)) => {
-                ($dim, None)
-            };
-        }
-        pub use __layout_inner as layout_inner;
+        // Internal macros
+        ( @inner ($dim:expr, Some($ds:expr)) ) => {{
+            use $crate::spec::macros::internal::IntoDimSize;
+            ($dim, Some(($ds).into_dim_size()))
+        }};
+        ( @inner ($dim:expr, None) ) => {
+            ($dim, None)
+        };
     }
 }
 
