@@ -64,19 +64,6 @@ impl Layout {
         l.merge_consecutive_dimensions(l.contiguous_full()).0
     }
 
-    pub fn new_standard(dim_order: SmallVec<[u8; 5]>) -> Layout {
-        Layout::new(dim_order.iter().map(|&dim| (dim, None)).collect())
-    }
-
-    pub fn new_packed(dim_count: u8, strip_dim: u8, strip_size: DimSize) -> Layout {
-        Layout::new(
-            (0..dim_count)
-                .map(|dim| (dim, None))
-                .chain(iter::once((strip_dim, Some(strip_size))))
-                .collect(),
-        )
-    }
-
     pub fn buffer_indexing_expr(
         &self,
         expr_id: &OpaqueSymbol,

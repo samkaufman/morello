@@ -695,7 +695,12 @@ mod tests {
             example in arb_test_packed_layout_with_strip_size_one_is_row_major()
         ) {
             let (shape, strip_dim) = example;
-            Layout::new_packed(shape.len().try_into().unwrap(), strip_dim, nz!(1u32));
+            Layout::new(
+                (0..u8::try_from(shape.len()).unwrap())
+                    .map(|dim| (dim, None))
+                    .chain(std::iter::once((strip_dim, Some(nz!(1u32)))))
+                    .collect(),
+            );
         }
     }
 
