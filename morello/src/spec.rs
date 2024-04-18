@@ -1571,15 +1571,12 @@ pub mod macros {
 
     #[macro_export]
     macro_rules! lspec {
-        // Entry points
         ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),+, serial ) ) => {{
             lspec!(@inner $typ($shp, $( ($($opterms)*) ),* , true))
         }};
         ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),+ ) ) => {{
             lspec!(@inner $typ($shp, $( ($($opterms)*) ),* , false))
         }};
-
-        // Inner macros
         ( @inner $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),*, $s:literal ) ) => {{
             use $crate::spec::macros::internal::IntoDimSize;
 
