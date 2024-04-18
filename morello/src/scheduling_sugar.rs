@@ -17,8 +17,8 @@ use std::num::NonZeroUsize;
 /// These methods are intended to be used for manual scheduling by developers. Other clients should
 /// probably apply [Action]s directly.
 pub trait SchedulingSugar<Tgt: Target> {
-    fn tile_out(&self, output_shape: &[DimSize], parallel: bool) -> ImplNode<Tgt, ()>;
-    fn split(&self, k: DimSize) -> ImplNode<Tgt, ()>;
+    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt, ()>;
+    fn split(&self, k: u32) -> ImplNode<Tgt, ()>;
     fn move_param(
         &self,
         source_idx: u8,
@@ -52,17 +52,24 @@ pub trait Subschedule<Tgt: Target> {
 }
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
-    fn tile_out(&self, output_shape: &[DimSize], parallel: bool) -> ImplNode<Tgt, ()> {
+    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt, ()> {
         Action::TileOut {
-            output_shape: output_shape.into(),
+            output_shape: output_shape
+                .iter()
+                .map(|&d| DimSize::new(d).unwrap())
+                .collect(),
             parallel,
         }
         .apply(self)
         .unwrap()
     }
 
-    fn split(&self, k: DimSize) -> ImplNode<Tgt, ()> {
-        Action::Split { k }.apply(self).unwrap()
+    fn split(&self, k: u32) -> ImplNode<Tgt, ()> {
+        Action::Split {
+            k: DimSize::new(k).unwrap(),
+        }
+        .apply(self)
+        .unwrap()
     }
 
     fn move_param(
@@ -124,11 +131,11 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
 }
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
-    fn tile_out(&self, output_shape: &[DimSize], parallel: bool) -> ImplNode<Tgt, ()> {
+    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt, ()> {
         apply_to_leaf_spec(self, |spec| spec.tile_out(output_shape, parallel))
     }
 
-    fn split(&self, k: DimSize) -> ImplNode<Tgt, ()> {
+    fn split(&self, k: u32) -> ImplNode<Tgt, ()> {
         apply_to_leaf_spec(self, |spec| spec.split(k))
     }
 

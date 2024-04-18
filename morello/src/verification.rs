@@ -444,7 +444,7 @@ where
     let mut value_cnt = 1;
     let mut shp_usize = Vec::with_capacity(input.shape().len());
     for v in input.shape() {
-        let vc = usize::try_from(*v).unwrap();
+        let vc = usize::try_from(v.get()).unwrap();
         shp_usize.push(vc);
         value_cnt *= vc;
     }

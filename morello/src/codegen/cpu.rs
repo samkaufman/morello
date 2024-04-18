@@ -1,4 +1,5 @@
 use itertools::{Either, Itertools};
+use nonzero::nonzero as nz;
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Write};
 use std::iter;
@@ -17,6 +18,7 @@ use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferVar;
 use crate::pprint::{pprint_write, ImplPrintStyle, PrintableAux};
+use crate::shape;
 use crate::target::{CpuMemoryLevel, Target};
 use crate::utils::{indent, LinePrefixWrite, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
@@ -128,8 +130,8 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
         for (idx, input_tensor) in top_arg_tensors.iter().enumerate() {
             // Open and mmap the data.
-            let value_cnt = input_tensor.0.volume();
-            let byte_cnt = value_cnt * DimSize::from(input_tensor.spec().dtype().size());
+            let value_cnt = input_tensor.0.volume().get();
+            let byte_cnt = value_cnt * u32::from(input_tensor.spec().dtype().size());
             writeln!(out)?;
             writeln!(
                 out,
@@ -395,13 +397,14 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         debug_assert_eq!(vector_size.is_some(), level == CpuMemoryLevel::VRF);
 
         let name = self.namer.fresh_name();
-        let size = shape.iter().product::<DimSize>();
+        let size = shape.iter().map(|d| d.get()).product::<u32>();
         match level {
             CpuMemoryLevel::VRF => {
                 let vector_size = vector_size.unwrap();
                 let vec_type = get_vector(Tgt::vec_types(), dtype, vector_size);
                 self.headers.vector_type_defs.insert(vec_type);
 
+                let vector_size = vector_size.get();
                 debug_assert_eq!(size % vector_size, 0);
                 let name = self.namer.fresh_name();
                 if size == vector_size {
@@ -596,8 +599,8 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                     }
                     KernelType::BroadcastVecMultAdd => {
-                        let vector_size = arguments[2].spec().vector_size().unwrap();
-                        let volume = arguments[2].spec().volume();
+                        let vector_size = arguments[2].spec().vector_size().unwrap().get();
+                        let volume = arguments[2].spec().volume().get();
                         debug_assert_eq!(volume % vector_size, 0);
                         let vector_count = volume / vector_size;
                         for vector_idx in 0..vector_count {
@@ -624,8 +627,8 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         Ok(())
                     }
                     KernelType::TwoVecBroadcastVecMultAdd => {
-                        let vector_size = arguments[2].spec().vector_size().unwrap();
-                        let volume = arguments[2].spec().volume();
+                        let vector_size = arguments[2].spec().vector_size().unwrap().get();
+                        let volume = arguments[2].spec().volume().get();
                         debug_assert_eq!(volume % vector_size, 0);
                         let vector_count = volume / vector_size;
 
@@ -731,10 +734,18 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         .unwrap();
 
                         let intermediate_dtype = arguments[0].spec().dtype();
-                        let intermediate_lower =
-                            self.make_buffer(&[1, 32], Some(32), intermediate_dtype, VRF);
-                        let intermediate_higher =
-                            self.make_buffer(&[1, 32], Some(32), intermediate_dtype, VRF);
+                        let intermediate_lower = self.make_buffer(
+                            &shape![1, 32],
+                            Some(nz!(32u32)),
+                            intermediate_dtype,
+                            VRF,
+                        );
+                        let intermediate_higher = self.make_buffer(
+                            &shape![1, 32],
+                            Some(nz!(32u32)),
+                            intermediate_dtype,
+                            VRF,
+                        );
                         intermediate_lower.emit(w, InitType::None, depth)?;
                         intermediate_higher.emit(w, InitType::None, depth)?;
 
@@ -1094,7 +1105,8 @@ fn get_vector(
     vec_types
         .iter()
         .find(|vec_type| {
-            vec_type.dtype == dtype && vec_type.value_cnt == u8::try_from(vector_size).unwrap()
+            vec_type.dtype == dtype
+                && vec_type.value_cnt == u8::try_from(vector_size.get()).unwrap()
         })
         .expect("VecType to match dtype and volume of vector_size")
 }

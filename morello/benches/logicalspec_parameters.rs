@@ -1,6 +1,5 @@
 use iai_callgrind::{black_box, main};
 
-use morello::common::DimSize;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
@@ -10,7 +9,7 @@ use morello::tensorspec::TensorSpecAux;
 // TODO: Add a benchmark for Compose
 
 #[export_name = "morello_bench_logicalspec_parameters::matmul_spec"]
-fn matmul_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
+fn matmul_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
     let rm2 = row_major(2);
     lspec!(Matmul(
         [size, size, size],
@@ -22,7 +21,7 @@ fn matmul_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
 }
 
 #[export_name = "morello_bench_logicalspec_parameters::conv_spec"]
-fn conv_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
+fn conv_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
     let rm4 = row_major(4);
     lspec!(Conv(
         [size, size, size, size, size, size, size],
@@ -34,7 +33,7 @@ fn conv_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
 }
 
 #[export_name = "morello_bench_logicalspec_parameters::move_spec"]
-fn move_spec<Tgt: Target>(size: DimSize) -> LogicalSpec<Tgt> {
+fn move_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
     let rm2 = row_major(2);
     lspec!(Move(
         [size, size],
