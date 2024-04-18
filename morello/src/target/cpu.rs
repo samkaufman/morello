@@ -106,7 +106,7 @@ impl<T: CpuTarget> Target for T {
                     if shape[packing_dim].get() % packing_size.get() != 0 {
                         return None;
                     }
-                    Some(Layout(
+                    Some(Layout::new(
                         dims.iter()
                             .cloned()
                             .chain(iter::once((

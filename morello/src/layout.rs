@@ -545,7 +545,7 @@ impl proptest::arbitrary::Arbitrary for Layout {
 
         (logical_dims_prefix, additional_logical_dims)
             .prop_map(|(prefix, additional)| {
-                Layout(
+                Layout::new(
                     prefix
                         .into_iter()
                         .chain(additional)
