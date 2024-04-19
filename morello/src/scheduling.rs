@@ -728,12 +728,15 @@ fn move_gens_prologue<Tgt: Target>(
 ) -> bool {
     let source_idx_usize = usize::from(source_idx);
     let parameters = node_spec.parameters();
-    let operand_count = parameters.len();
-    let is_output = usize::from(source_idx) == operand_count - 1;
+    let is_output = usize::from(source_idx) == parameters.len() - 1;
     let is_read = !is_output || node_spec.output_is_read();
-    let layout_changed = &parameters[source_idx_usize].layout() != destination_layout;
-    let dtype_changed = parameters[source_idx_usize].dtype() != destination_dtype;
-    is_read && (destination_level.is_addressed() || layout_changed || dtype_changed)
+    is_read
+        && !move_is_cache_miss(
+            &parameters[source_idx_usize],
+            destination_dtype,
+            destination_level,
+            destination_layout,
+        )
 }
 
 fn move_gens_epilogue<Tgt: Target>(
@@ -743,10 +746,16 @@ fn move_gens_epilogue<Tgt: Target>(
     source_idx: u8,
     node_spec: &LogicalSpec<Tgt>,
 ) -> bool {
-    let operand_count = node_spec.operand_count();
-    let is_output = usize::from(source_idx) == operand_count - 1;
-    // TODO: Consider layout and dtype as in move_gens_prologue
-    destination_level.is_addressed() && is_output
+    let source_idx_usize = usize::from(source_idx);
+    let parameters = node_spec.parameters();
+    let is_output = source_idx_usize == node_spec.operand_count() - 1;
+    is_output
+        && !move_is_cache_miss(
+            &parameters[source_idx_usize],
+            destination_dtype,
+            destination_level,
+            destination_layout,
+        )
 }
 
 pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
