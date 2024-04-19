@@ -31,6 +31,8 @@ const CPU_LEVELS: [CpuMemoryLevel; 4] = [
 ];
 pub(crate) const DOT_PRODUCT_STRIP_SIZE: u32 = 8;
 pub(crate) const DOT_PRODUCT_ACCUM_COUNT: u32 = 4;
+pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: u32 = 16;
+pub(crate) const DOT_PRODUCT_BF16_ACCUM_COUNT: u32 = 4;
 
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     fn target_id() -> TargetId;
@@ -78,6 +80,7 @@ pub enum CpuKernel {
     /// ```
     TwoVecBroadcastVecMultAddU8S8S16,
     DotProductLoop,
+    DotProductLoopBf16,
     PhysicalTransposeByte128,
     PhysicalTransposeByte256,
     ValueAssign,
@@ -216,12 +219,13 @@ impl<T: CpuTarget> Target for T {
                 let possible_kernels: &[CpuKernel] = match typ {
                     PrimitiveSpecType::Matmul { accum } => {
                         if *accum {
-                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 5] = [
+                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 6] = [
                                 CpuKernel::MultAdd,
                                 CpuKernel::BroadcastVecMultAdd,
                                 CpuKernel::BroadcastVecMultAddBf16F32,
                                 CpuKernel::TwoVecBroadcastVecMultAddU8S8S16,
                                 CpuKernel::DotProductLoop,
+                                CpuKernel::DotProductLoopBf16,
                             ];
                             &MATMUL_ACCUM_KERNELS
                         } else {
@@ -273,7 +277,8 @@ impl Kernel for CpuKernel {
             | CpuKernel::BroadcastVecMultAdd
             | CpuKernel::BroadcastVecMultAddBf16F32
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
-            | CpuKernel::DotProductLoop => 3,
+            | CpuKernel::DotProductLoop
+            | CpuKernel::DotProductLoopBf16 => 3,
             CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
             | CpuKernel::ValueAssign
@@ -380,6 +385,40 @@ impl Kernel for CpuKernel {
                             },
                         }
                     ] if lhs_shape[1] % (DOT_PRODUCT_STRIP_SIZE * DOT_PRODUCT_ACCUM_COUNT) == 0
+                      && out_shape[..] == [1, 1]
+                      && lhs.layout().is_row_major()
+                      && rhs.layout() == col_major(2)
+                      && lhs.is_contiguous() && rhs.is_contiguous()
+                )
+            }
+            CpuKernel::DotProductLoopBf16 => {
+                matches!(
+                    operands,
+                    [
+                        lhs @ TensorSpec {
+                            shape: lhs_shape,
+                            dtype: Dtype::Bfloat16,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::L1,
+                                ..
+                            },
+                        },
+                        rhs @ TensorSpec {
+                            shape: _,
+                            dtype: Dtype::Bfloat16,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::L1, ..
+                            },
+                        },
+                        TensorSpec {
+                            shape: out_shape,
+                            dtype: Dtype::Float32,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::RF,
+                                ..
+                            },
+                        }
+                    ] if lhs_shape[1] % (DOT_PRODUCT_BF16_STRIP_SIZE * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
                       && out_shape[..] == [1, 1]
                       && lhs.layout().is_row_major()
                       && rhs.layout() == col_major(2)
@@ -504,17 +543,18 @@ impl Kernel for CpuKernel {
                     },
                 ))
             }
-            CpuKernel::DotProductLoop => {
+            CpuKernel::DotProductLoop | CpuKernel::DotProductLoopBf16 => {
                 // TODO: Count any additional peak memory from sum8.
-                MemoryAllocation::Simple(CPU_LEVELS.map(
-                    |level| {
-                        if level.vector_rf() {
-                            128
-                        } else {
-                            0
+                MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
+                    let mut used = 0;
+                    if level.vector_rf() {
+                        used = 128;
+                        if matches!(self, CpuKernel::DotProductLoopBf16) {
+                            // TODO: Add intermediate consumption
                         }
-                    },
-                ))
+                    }
+                    used
+                }))
             }
             CpuKernel::PhysicalTransposeByte256 => MemoryAllocation::Simple(CPU_LEVELS.map(
                 |level| {
@@ -558,6 +598,10 @@ impl Kernel for CpuKernel {
             CpuKernel::DotProductLoop => {
                 // 4.2 cycles throughput.
                 INST_COST * 4
+            }
+            CpuKernel::DotProductLoopBf16 => {
+                // TODO: Count throughput!
+                INST_COST * 5
             }
             CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
             CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,

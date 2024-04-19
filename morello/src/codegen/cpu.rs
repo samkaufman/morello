@@ -17,6 +17,7 @@ use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferVar;
 use crate::pprint::{pprint_write, ImplPrintStyle, PrintableAux};
+use crate::target::cpu::{DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE};
 use crate::target::{
     cpu::{DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_STRIP_SIZE},
     CpuKernel, CpuMemoryLevel, CpuTarget, Target,
@@ -672,9 +673,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             let concat_name = self.namer.fresh_name();
                             let broad_name = self.namer.fresh_name();
 
-                            let (shift_fn, blend_fn, blend_param, zero_fn, _) =
-                                vec_func_names(vector_size_bf16);
-                            let (shift_fn_out, _, _, _, broadcast16_out) =
+                            let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(vector_size_bf16);
+                            let (shift_fn_out, _, _, broadcast16_out) =
                                 vec_func_names(vector_size_bf16 * 2);
 
                             let vf8 =
@@ -693,13 +693,12 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             )?;
                             writeln!(
                                 w,
-                                "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), {5});",
+                                "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), 0xAA);",
                                 indent(depth),
                                 vf8.name,
                                 even_name,
                                 vf8.native_type_name,
                                 exprs[1],
-                                blend_param
                             )?;
 
                             // TODO: Combine!
@@ -795,7 +794,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
                         let vtype =
                             get_vector(Tgt::vec_types(), Dtype::Float32, DOT_PRODUCT_STRIP_SIZE);
-                        writeln!(w, "{}// DotProductStrip", indent(depth))?;
+                        writeln!(w, "{}// DotProductLoop", indent(depth))?;
                         for accum_name in &vector_accum_names {
                             writeln!(
                                 w,
@@ -837,6 +836,117 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         for accum_name in vector_accum_names.iter().skip(1) {
                             writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
                         }
+                        Ok(())
+                    }
+                    CpuKernel::DotProductLoopBf16 => {
+                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                            0 | 1 => self.c_index_ptr(a, b, None),
+                            2 => self.c_index(a, b, None),
+                            _ => unreachable!(),
+                        });
+
+                        let lhs_spec = arguments[0].spec();
+                        debug_assert_eq!(lhs_spec.shape()[1] % DOT_PRODUCT_STRIP_SIZE, 0);
+                        let step_idx_name = self.namer.fresh_name();
+                        let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
+                            .map(|_| {
+                                (
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+
+                        let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
+
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, 8);
+                        let vbf16 = get_vector(
+                            Tgt::vec_types(),
+                            Dtype::Bfloat16,
+                            DOT_PRODUCT_BF16_STRIP_SIZE,
+                        );
+
+                        writeln!(w, "{}// DotProductLoopBf16", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){{0}};",
+                                indent(depth),
+                                vf32.name,
+                                accum_name
+                            )?;
+                        }
+                        writeln!(
+                            w,
+                            "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
+                            indent(depth),
+                            step_idx_name,
+                            lhs_spec.shape()[1],
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE
+                        )?;
+                        for (i, (_, even_lhs_name, odd_lhs_name, even_rhs_name, odd_rhs_name)) in
+                            loop_names.iter().enumerate()
+                        {
+                            for (j, odd_name, even_name) in [
+                                (0, odd_lhs_name, even_lhs_name),
+                                (1, odd_rhs_name, even_rhs_name),
+                            ] {
+                                let compressed_name = self.namer.fresh_name();
+                                writeln!(
+                                    w,
+                                    "{0}{1} {compressed_name} = *({1} *)({2} + {3} + {4});",
+                                    indent(depth + 1),
+                                    vf32.name,
+                                    exprs[j],
+                                    step_idx_name,
+                                    i * DOT_PRODUCT_BF16_STRIP_SIZE as usize
+                                )?;
+
+                                writeln!(
+                                    w,
+                                    "{0}{1} {2} = ({1}){shift_fn}(({3}){compressed_name}, 16);",
+                                    indent(depth + 1),
+                                    vf32.name,
+                                    odd_name,
+                                    vf32.native_type_name,
+                                )?;
+                                writeln!(
+                                    w,
+                                    "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), ({3}){compressed_name}, 0xAA);",
+                                    indent(depth + 1),
+                                    vf32.name,
+                                    even_name,
+                                    vf32.native_type_name,
+                                )?;
+                            }
+
+                            for (lhs, rhs, a) in [
+                                (even_lhs_name, even_rhs_name, &loop_names[i].0),
+                                (
+                                    odd_lhs_name,
+                                    odd_rhs_name,
+                                    &loop_names[(i + 2) % loop_names.len()].0,
+                                ),
+                            ] {
+                                writeln!(
+                                    w,
+                                    "{0}{1} += *({2} *)(&{lhs}) * *({2} *)(&{rhs});",
+                                    indent(depth + 1),
+                                    a,
+                                    vf32.name
+                                )?;
+                            }
+                        }
+                        writeln!(w, "{}}}", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
+                        }
+
+                        self.headers.vector_type_defs.insert(vf32);
+                        self.headers.vector_type_defs.insert(vbf16);
                         Ok(())
                     }
                     CpuKernel::PhysicalTransposeByte128 => {
@@ -1225,25 +1335,17 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
 fn vec_func_names(
     vector_size_bf16: u32,
-) -> (
-    &'static str,
-    &'static str,
-    &'static str,
-    &'static str,
-    &'static str,
-) {
+) -> (&'static str, &'static str, &'static str, &'static str) {
     match vector_size_bf16 {
         8 => (
             "_mm_slli_epi32",
             "_mm_blend_epi16",
-            "0xAA",
             "_mm_setzero_si128",
             "_mm_set1_epi16",
         ),
         16 => (
             "_mm256_slli_epi32",
             "_mm256_blend_epi16",
-            "0xAAAA",
             "_mm256_setzero_si256",
             "_mm256_set1_epi16",
         ),
