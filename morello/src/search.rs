@@ -712,18 +712,13 @@ impl ImplReducer {
         if self.results.len() < self.top_k {
             // We have not yet filled the top_k, so just insert.
             self.results.insert((new_cost, new_action_idx));
-        } else if self
-            .results
-            .iter()
-            .find(|&(cost, _)| *cost == new_cost)
-            .is_some()
-        {
-            debug_assert!(self.results.len() == self.top_k);
+        } else if self.results.iter().any(|(cost, _)| *cost == new_cost) {
+            debug_assert_eq!(self.results.len(), self.top_k);
 
             // We have filled the top_k and found the same cost in results, so
             //   replace something if it improves preference count, and do
             //   nothing if not.
-            if let Some(action) = self
+            if let Some((_, action)) = self
                 .results
                 .iter()
                 .enumerate()
@@ -731,13 +726,12 @@ impl ImplReducer {
                 //   only takes contiguous elements with the same cost.
                 .filter(|&(i, (cost, _))| i < self.preferences.len() && *cost == new_cost)
                 .find(|&(i, _)| new_action_idx == self.preferences[i])
-                .map(|(_, action)| action)
             {
                 self.results.remove(&action.clone());
                 self.results.insert((new_cost, new_action_idx));
             }
         } else {
-            debug_assert!(self.results.len() == self.top_k);
+            debug_assert_eq!(self.results.len(), self.top_k);
 
             // We have filled the top_k, but there is no same cost in results,
             //   so replace the last element if it is worse than the new one.
