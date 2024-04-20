@@ -949,6 +949,123 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         self.headers.vector_type_defs.insert(vbf16);
                         Ok(())
                     }
+                    CpuKernel::DotProductLoopF32Bf16F32 => {
+                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                            0 | 1 => self.c_index_ptr(a, b, None),
+                            2 => self.c_index(a, b, None),
+                            _ => unreachable!(),
+                        });
+
+                        let lhs_spec = arguments[0].spec();
+                        debug_assert_eq!(lhs_spec.shape()[1] % DOT_PRODUCT_STRIP_SIZE, 0);
+                        let step_idx_name = self.namer.fresh_name();
+                        let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
+                            .map(|_| {
+                                (
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, 8);
+                        let vbf16 = get_vector(
+                            Tgt::vec_types(),
+                            Dtype::Bfloat16,
+                            DOT_PRODUCT_BF16_STRIP_SIZE,
+                        );
+
+                        writeln!(w, "{}// DotProductLoopF32Bf16F32", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){{0}};",
+                                indent(depth),
+                                vf32.name,
+                                accum_name
+                            )?;
+                        }
+                        writeln!(
+                            w,
+                            "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
+                            indent(depth),
+                            step_idx_name,
+                            lhs_spec.shape()[1],
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE
+                        )?;
+                        for (
+                            i,
+                            (_, upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name),
+                        ) in loop_names.iter().enumerate()
+                        {
+                            // Load already-dequantized f32 lhs into a pair of vectors.
+                            writeln!(
+                                w,
+                                "{0}{1} {upper_lhs_name} = *({1} *)({2} + {3} + {4});",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[0],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE as usize
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} {lower_lhs_name} = *({1} *)({2} + {3} + {4} + 8);",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[0],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE as usize
+                            )?;
+
+                            // Load compressed bf16 rhs strip and dequantize.
+                            let compressed_name = self.namer.fresh_name();
+                            writeln!(
+                                w,
+                                "{0}{1} {compressed_name} = *({1} *)({2} + {3} + {4});",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[1],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE as usize
+                            )?;
+                            writeln!(w, "{}{} {};", indent(depth + 1), vf32.name, upper_rhs_name)?;
+                            writeln!(w, "{}{} {};", indent(depth + 1), vf32.name, lower_rhs_name)?;
+                            writeln!(
+                                w,
+                                "{}cvtbf16_fp32_256({compressed_name}, &{upper_rhs_name}, &{lower_rhs_name});",
+                                indent(depth + 1),
+                            )?;
+
+                            for (lhs, rhs, a) in [
+                                (upper_lhs_name, upper_rhs_name, &loop_names[i].0),
+                                (
+                                    lower_lhs_name,
+                                    lower_rhs_name,
+                                    &loop_names[(i + 2) % loop_names.len()].0,
+                                ),
+                            ] {
+                                writeln!(
+                                    w,
+                                    "{0}{1} += *({2} *)(&{lhs}) * *({2} *)(&{rhs});",
+                                    indent(depth + 1),
+                                    a,
+                                    vf32.name
+                                )?;
+                            }
+                        }
+                        writeln!(w, "{}}}", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
+                        }
+
+                        self.headers.vector_type_defs.insert(vf32);
+                        self.headers.vector_type_defs.insert(vbf16);
+                        Ok(())
+                    }
                     CpuKernel::PhysicalTransposeByte128 => {
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
                             (&arguments[0], 0),

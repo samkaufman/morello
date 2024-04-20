@@ -80,7 +80,14 @@ pub enum CpuKernel {
     /// ```
     TwoVecBroadcastVecMultAddU8S8S16,
     DotProductLoop,
+    /// Lowers to a dot product loop with 4 accumulating registers which takes two bf16
+    /// vectors and produces a vector of float32s. The inputs are dequantized immediately
+    /// after being loaded and before multiplication.
     DotProductLoopBf16Bf16F32,
+    /// Lowers to a dot product loop with 4 accumulating registers which scans a buffer
+    /// of float32 values and a buffer of bfloat16 values, producing float32s. The f32
+    /// inputs are dequantized immediately after being loaded and before multiplcation.
+    DotProductLoopF32Bf16F32,
     PhysicalTransposeByte128,
     PhysicalTransposeByte256,
     ValueAssign,
@@ -219,13 +226,14 @@ impl<T: CpuTarget> Target for T {
                 let possible_kernels: &[CpuKernel] = match typ {
                     PrimitiveSpecType::Matmul { accum } => {
                         if *accum {
-                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 6] = [
+                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 7] = [
                                 CpuKernel::MultAdd,
                                 CpuKernel::BroadcastVecMultAdd,
                                 CpuKernel::BroadcastVecMultAddBf16F32,
                                 CpuKernel::TwoVecBroadcastVecMultAddU8S8S16,
                                 CpuKernel::DotProductLoop,
                                 CpuKernel::DotProductLoopBf16Bf16F32,
+                                CpuKernel::DotProductLoopF32Bf16F32,
                             ];
                             &MATMUL_ACCUM_KERNELS
                         } else {
@@ -278,6 +286,7 @@ impl Kernel for CpuKernel {
             | CpuKernel::BroadcastVecMultAddBf16F32
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::DotProductLoop
+            | CpuKernel::DotProductLoopF32Bf16F32
             | CpuKernel::DotProductLoopBf16Bf16F32 => 3,
             CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
@@ -391,39 +400,9 @@ impl Kernel for CpuKernel {
                       && lhs.is_contiguous() && rhs.is_contiguous()
                 )
             }
+            CpuKernel::DotProductLoopF32Bf16F32 => dotproductloop_applies(operands, Dtype::Float32),
             CpuKernel::DotProductLoopBf16Bf16F32 => {
-                matches!(
-                    operands,
-                    [
-                        lhs @ TensorSpec {
-                            shape: lhs_shape,
-                            dtype: Dtype::Bfloat16,
-                            aux: TensorSpecAux {
-                                level: CpuMemoryLevel::L1,
-                                ..
-                            },
-                        },
-                        rhs @ TensorSpec {
-                            shape: _,
-                            dtype: Dtype::Bfloat16,
-                            aux: TensorSpecAux {
-                                level: CpuMemoryLevel::L1, ..
-                            },
-                        },
-                        TensorSpec {
-                            shape: out_shape,
-                            dtype: Dtype::Float32,
-                            aux: TensorSpecAux {
-                                level: CpuMemoryLevel::RF,
-                                ..
-                            },
-                        }
-                    ] if lhs_shape[1] % (DOT_PRODUCT_BF16_STRIP_SIZE * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
-                      && out_shape[..] == [1, 1]
-                      && lhs.layout().is_row_major()
-                      && rhs.layout() == col_major(2)
-                      && lhs.is_contiguous() && rhs.is_contiguous()
-                )
+                dotproductloop_applies(operands, Dtype::Bfloat16)
             }
             CpuKernel::PhysicalTransposeByte128 => {
                 physicaltransposebyte_applies_to_operands(operands, 16)
@@ -543,14 +522,19 @@ impl Kernel for CpuKernel {
                     },
                 ))
             }
-            CpuKernel::DotProductLoop | CpuKernel::DotProductLoopBf16Bf16F32 => {
+            CpuKernel::DotProductLoop
+            | CpuKernel::DotProductLoopBf16Bf16F32
+            | CpuKernel::DotProductLoopF32Bf16F32 => {
                 // TODO: Count any additional peak memory from sum8.
                 MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
                     let mut used = 0;
                     if level.vector_rf() {
                         used = 128;
-                        if matches!(self, CpuKernel::DotProductLoopBf16Bf16F32) {
-                            // TODO: Add intermediate consumption
+                        // TODO: Add intermediate consumption
+                        match self {
+                            CpuKernel::DotProductLoopBf16Bf16F32 => {}
+                            CpuKernel::DotProductLoopF32Bf16F32 => {}
+                            _ => {}
                         }
                     }
                     used
@@ -599,7 +583,7 @@ impl Kernel for CpuKernel {
                 // 4.2 cycles throughput.
                 INST_COST * 4
             }
-            CpuKernel::DotProductLoopBf16Bf16F32 => {
+            CpuKernel::DotProductLoopBf16Bf16F32 | CpuKernel::DotProductLoopF32Bf16F32 => {
                 // TODO: Count throughput!
                 INST_COST * 5
             }
@@ -620,6 +604,42 @@ impl Kernel for CpuKernel {
     fn all_kernels() -> &'static [Self] {
         <Self as strum::VariantArray>::VARIANTS
     }
+}
+
+fn dotproductloop_applies<Tgt: CpuTarget>(operands: &[TensorSpec<Tgt>], lhs_dtype: Dtype) -> bool {
+    matches!(
+        operands,
+        [
+            lhs @ TensorSpec {
+                shape: lhs_shape,
+                dtype: ldt,
+                aux: TensorSpecAux {
+                    level: CpuMemoryLevel::L1,
+                    ..
+                },
+            },
+            rhs @ TensorSpec {
+                shape: _,
+                dtype: Dtype::Bfloat16,
+                aux: TensorSpecAux {
+                    level: CpuMemoryLevel::L1, ..
+                },
+            },
+            TensorSpec {
+                shape: out_shape,
+                dtype: Dtype::Float32,
+                aux: TensorSpecAux {
+                    level: CpuMemoryLevel::RF,
+                    ..
+                },
+            }
+        ] if *ldt == lhs_dtype
+          && lhs_shape[1] % (DOT_PRODUCT_BF16_STRIP_SIZE * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
+          && out_shape[..] == [1, 1]
+          && lhs.layout().is_row_major()
+          && rhs.layout() == col_major(2)
+          && lhs.is_contiguous() && rhs.is_contiguous()
+    )
 }
 
 impl MemoryLevel for CpuMemoryLevel {
