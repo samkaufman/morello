@@ -80,7 +80,7 @@ pub enum CpuKernel {
     /// ```
     TwoVecBroadcastVecMultAddU8S8S16,
     DotProductLoop,
-    DotProductLoopBf16,
+    DotProductLoopBf16Bf16F32,
     PhysicalTransposeByte128,
     PhysicalTransposeByte256,
     ValueAssign,
@@ -225,7 +225,7 @@ impl<T: CpuTarget> Target for T {
                                 CpuKernel::BroadcastVecMultAddBf16F32,
                                 CpuKernel::TwoVecBroadcastVecMultAddU8S8S16,
                                 CpuKernel::DotProductLoop,
-                                CpuKernel::DotProductLoopBf16,
+                                CpuKernel::DotProductLoopBf16Bf16F32,
                             ];
                             &MATMUL_ACCUM_KERNELS
                         } else {
@@ -278,7 +278,7 @@ impl Kernel for CpuKernel {
             | CpuKernel::BroadcastVecMultAddBf16F32
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::DotProductLoop
-            | CpuKernel::DotProductLoopBf16 => 3,
+            | CpuKernel::DotProductLoopBf16Bf16F32 => 3,
             CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
             | CpuKernel::ValueAssign
@@ -391,7 +391,7 @@ impl Kernel for CpuKernel {
                       && lhs.is_contiguous() && rhs.is_contiguous()
                 )
             }
-            CpuKernel::DotProductLoopBf16 => {
+            CpuKernel::DotProductLoopBf16Bf16F32 => {
                 matches!(
                     operands,
                     [
@@ -543,13 +543,13 @@ impl Kernel for CpuKernel {
                     },
                 ))
             }
-            CpuKernel::DotProductLoop | CpuKernel::DotProductLoopBf16 => {
+            CpuKernel::DotProductLoop | CpuKernel::DotProductLoopBf16Bf16F32 => {
                 // TODO: Count any additional peak memory from sum8.
                 MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
                     let mut used = 0;
                     if level.vector_rf() {
                         used = 128;
-                        if matches!(self, CpuKernel::DotProductLoopBf16) {
+                        if matches!(self, CpuKernel::DotProductLoopBf16Bf16F32) {
                             // TODO: Add intermediate consumption
                         }
                     }
@@ -599,7 +599,7 @@ impl Kernel for CpuKernel {
                 // 4.2 cycles throughput.
                 INST_COST * 4
             }
-            CpuKernel::DotProductLoopBf16 => {
+            CpuKernel::DotProductLoopBf16Bf16F32 => {
                 // TODO: Count throughput!
                 INST_COST * 5
             }

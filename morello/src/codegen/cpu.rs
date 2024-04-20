@@ -838,7 +838,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
-                    CpuKernel::DotProductLoopBf16 => {
+                    CpuKernel::DotProductLoopBf16Bf16F32 => {
                         let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
                             0 | 1 => self.c_index_ptr(a, b, None),
                             2 => self.c_index(a, b, None),
@@ -869,7 +869,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             DOT_PRODUCT_BF16_STRIP_SIZE,
                         );
 
-                        writeln!(w, "{}// DotProductLoopBf16", indent(depth))?;
+                        writeln!(w, "{}// DotProductLoopBf16Bf16F32", indent(depth))?;
                         for (accum_name, _, _, _, _) in &loop_names {
                             writeln!(
                                 w,
