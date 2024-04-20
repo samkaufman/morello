@@ -555,6 +555,35 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         });
                         writeln!(w, "{}{} = (float){};", indent(depth), exprs[1], exprs[0])
                     }
+                    CpuKernel::VectorCastBf16F32 => {
+                        let vector_size =
+                            i32::try_from(arguments[1].spec().vector_size().unwrap()).unwrap();
+
+                        let lhs_tensor = arguments[0].backing_tensor(&self.param_bindings).unwrap();
+                        let lhs_buffer = self.name_env.get(lhs_tensor).unwrap();
+                        let rhs_tensor = arguments[1].backing_tensor(&self.param_bindings).unwrap();
+                        let rhs_buffer = self.name_env.get(rhs_tensor).unwrap();
+
+                        let lhs_iexpr = zero_points(
+                            arguments[0].make_buffer_indexing_expr(&self.param_bindings),
+                        );
+                        let rhs0_iexpr = zero_points(
+                            arguments[1].make_buffer_indexing_expr(&self.param_bindings),
+                        );
+                        let rhs1_iexpr = zero_points(
+                            arguments[1].make_buffer_indexing_expr(&self.param_bindings)
+                                + vector_size,
+                        );
+
+                        writeln!(
+                            w,
+                            "{}cvtbf16_fp32_256({}, &{}, &{});",
+                            indent(depth),
+                            self.c_index_vec(lhs_buffer, &lhs_iexpr, None),
+                            self.c_index_vec(rhs_buffer, &rhs0_iexpr, None),
+                            self.c_index_vec(rhs_buffer, &rhs1_iexpr, None)
+                        )
+                    }
                     CpuKernel::MemsetZero => {
                         // TODO: Merge this duplicate `exprs` block. It's used also in the ValueAssign.
                         debug_assert_eq!(arguments.len(), 1);

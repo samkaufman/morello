@@ -96,6 +96,7 @@ pub enum CpuKernel {
     /// Lowers to Clang vector extensions' zero-assignment, which, on x86, should emit `vxorps`.
     VectorZero,
     CastBf16F32,
+    VectorCastBf16F32,
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -242,12 +243,13 @@ impl<T: CpuTarget> Target for T {
                     }
                     PrimitiveSpecType::Conv { .. } => &[],
                     PrimitiveSpecType::Move { .. } => {
-                        const MOVE_KERNELS: [CpuKernel; 5] = [
+                        const MOVE_KERNELS: [CpuKernel; 6] = [
                             CpuKernel::ValueAssign,
                             CpuKernel::VectorAssign,
                             CpuKernel::PhysicalTransposeByte128,
                             CpuKernel::PhysicalTransposeByte256,
                             CpuKernel::CastBf16F32,
+                            CpuKernel::VectorCastBf16F32,
                         ];
                         &MOVE_KERNELS
                     }
@@ -292,7 +294,8 @@ impl Kernel for CpuKernel {
             | CpuKernel::PhysicalTransposeByte256
             | CpuKernel::ValueAssign
             | CpuKernel::VectorAssign
-            | CpuKernel::CastBf16F32 => 2,
+            | CpuKernel::CastBf16F32
+            | CpuKernel::VectorCastBf16F32 => 2,
             CpuKernel::MemsetZero | CpuKernel::VectorZero => 1,
         }
     }
@@ -484,6 +487,31 @@ impl Kernel for CpuKernel {
                 ] if lhs_shape.iter().all(|d| *d == 1)
                   && rhs_shape.iter().all(|d| *d == 1)
             ),
+            CpuKernel::VectorCastBf16F32 => matches!(
+                operands,
+                [
+                    TensorSpec {
+                        shape: lhs_shape,
+                        dtype: Dtype::Bfloat16,
+                        aux: TensorSpecAux {
+                            level: CpuMemoryLevel::VRF,
+                            vector_size: Some(16),
+                            ..
+                        },
+                    },
+                    TensorSpec {
+                        shape: rhs_shape,
+                        dtype: Dtype::Float32,
+                        aux: TensorSpecAux {
+                            level: CpuMemoryLevel::VRF,
+                            vector_size: Some(8),
+                            ..
+                        },
+                    }
+                ] if lhs_shape == rhs_shape
+                  && lhs_shape.iter().all(|&d| d == 1 || d == 16)
+                  && lhs_shape.iter().filter(|&d| *d == 16).count() == 1
+            ),
             CpuKernel::MemsetZero => {
                 operands[0].level() == CpuMemoryLevel::RF && operands[0].is_contiguous()
             }
@@ -589,7 +617,7 @@ impl Kernel for CpuKernel {
             }
             CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
             CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
-            CpuKernel::MultAdd | CpuKernel::CastBf16F32 => INST_COST,
+            CpuKernel::MultAdd | CpuKernel::CastBf16F32 | CpuKernel::VectorCastBf16F32 => INST_COST,
             CpuKernel::ValueAssign
             | CpuKernel::VectorAssign
             | CpuKernel::MemsetZero
