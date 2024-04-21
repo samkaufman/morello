@@ -510,6 +510,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
+    pub fn set_serial_only(&mut self, serial_only: bool) {
+        match self {
+            LogicalSpec::Primitive(_, _, ref mut s) => *s = serial_only,
+            LogicalSpec::Compose {
+                serial_only: ref mut s,
+                ..
+            } => *s = serial_only,
+        }
+    }
+
     pub fn operand_count(&self) -> usize {
         match self {
             LogicalSpec::Compose { components, .. } => {

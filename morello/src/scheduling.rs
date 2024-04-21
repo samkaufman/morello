@@ -258,6 +258,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                 let mut inner_spec = node_spec.clone();
                 inner_spec.replace_io(&new_operands);
+                inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
                 match self {
                     Action::TileOut { .. } => {}
                     Action::Split { .. } => {
