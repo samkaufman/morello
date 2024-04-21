@@ -76,7 +76,12 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
             "__attribute__((noinline))\nvoid {}(",
             self.kernel_name
         )?;
-        for ((operand_idx, operand), tensor) in imp.parameters().enumerate().zip(top_arg_tensors) {
+
+        let thread_extra_args = self.thread_style_extra_args();
+        let fn_arg_count = usize::from(imp.parameter_count()) + thread_extra_args.len();
+
+        let mut operand_idx = 0;
+        for (operand, tensor) in imp.parameters().zip(top_arg_tensors) {
             let spec = tensor.spec();
             let parameter_name = self.namer.fresh_name();
             writeln!(
@@ -84,7 +89,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 "  {} *__restrict__ {}{}",
                 c_type(operand.dtype),
                 parameter_name,
-                if operand_idx + 1 < imp.parameter_count().into() {
+                if operand_idx + 1 < fn_arg_count {
                     ", "
                 } else {
                     "\n) {"
@@ -97,6 +102,20 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                     dtype: spec.dtype(),
                 },
             );
+            operand_idx += 1;
+        }
+
+        for extra_arg in self.thread_style_extra_args() {
+            writeln!(
+                main_body_str,
+                "  {extra_arg}{}",
+                if operand_idx + 1 < fn_arg_count {
+                    ", "
+                } else {
+                    "\n) {"
+                }
+            )?;
+            operand_idx += 1;
         }
 
         // Put the tensor->c_buffer binding into `self.name_env`. (And fill
@@ -1505,6 +1524,13 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                     reinterpret,
                 )
             }
+        }
+    }
+
+    fn thread_style_extra_args(&self) -> &[&'static str] {
+        match self.thread_style {
+            CpuCodeGenThreadStyle::OpenMP => &[],
+            CpuCodeGenThreadStyle::Highway => &["hwy::ThreadPool& pool"],
         }
     }
 }
