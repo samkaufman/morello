@@ -27,13 +27,21 @@ use crate::views::{Param, Tensor, View};
 
 const STACK_CUTOFF: u32 = 256;
 
-#[derive(Default)]
 pub struct CpuCodeGenerator<'a, Tgt: Target> {
     pub namer: NameGenerator,
     pub name_env: HashMap<Rc<Tensor<Tgt>>, CBuffer>,
     pub loop_iter_bindings: HashMap<BufferVar, Either<String, i32>>,
     pub param_bindings: HashMap<Param<Tgt>, &'a dyn View<Tgt = Tgt>>,
     pub headers: HeaderEmitter,
+    pub kernel_name: String,
+    pub thread_style: CpuCodeGenThreadStyle,
+}
+
+#[derive(Default)]
+pub enum CpuCodeGenThreadStyle {
+    #[default]
+    OpenMP,
+    Highway, // TODO: Generalize to plug-in codelets
 }
 
 impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
@@ -63,7 +71,11 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         debug_assert_eq!(top_arg_tensors.len(), usize::from(imp.parameter_count()));
 
         let mut main_body_str = String::new();
-        writeln!(main_body_str, "__attribute__((noinline))\nvoid kernel(")?;
+        writeln!(
+            main_body_str,
+            "__attribute__((noinline))\nvoid {}(",
+            self.kernel_name
+        )?;
         for ((operand_idx, operand), tensor) in imp.parameters().enumerate().zip(top_arg_tensors) {
             let spec = tensor.spec();
             let parameter_name = self.namer.fresh_name();
@@ -272,7 +284,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
     ) -> Result<String, fmt::Error> {
         let mut kernel_call_str = String::new();
-        write!(kernel_call_str, "kernel(")?;
+        write!(kernel_call_str, "{}(", self.kernel_name)?;
         for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
             let a = self.name_env.get(kernel_argument).unwrap();
             write!(
@@ -1235,29 +1247,47 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         }
 
         if l.parallel {
-            writeln!(
-                w,
-                "{}#pragma omp parallel for collapse({}) schedule(static)",
-                indent(depth),
-                axes_to_emit.len()
-            )?;
+            match self.thread_style {
+                CpuCodeGenThreadStyle::OpenMP => {
+                    writeln!(
+                        w,
+                        "{}#pragma omp parallel for collapse({}) schedule(static)",
+                        indent(depth),
+                        axes_to_emit.len()
+                    )?;
+                }
+                CpuCodeGenThreadStyle::Highway => {
+                    if axes_to_emit.len() != 1 {
+                        todo!("collapse loops for Highway parallel-for");
+                    }
+                    for (axis, steps) in &axes_to_emit {
+                        let var_name = iter_var_names.get(axis).unwrap();
+                        // TODO: Lift the pool out into a kernel argument.
+                        writeln!(
+                            w,
+                            "{}pool.Run(0, {}, [&](const uint64_t {}, size_t) HWY_ATTR {{",
+                            indent(depth),
+                            steps,
+                            var_name,
+                        )?;
+                    }
+                    self.emit(w, &l.body, depth + 1)?;
+                    for _ in 0..axes_to_emit.len() {
+                        writeln!(w, "{}}});", indent(depth))?;
+                    }
+                    return Ok(());
+                }
+            }
         }
-
         for (axis, steps) in &axes_to_emit {
             let var_name = iter_var_names.get(axis).unwrap();
             writeln!(
                 w,
-                "{}for (int {} = 0; {} < {}; {}++) {{",
-                indent(depth),
-                var_name,
-                var_name,
-                steps,
-                var_name
+                "{0}for (int {var_name} = 0; {var_name} < {steps}; {var_name}++) {{",
+                indent(depth)
             )?;
         }
-
         self.emit(w, &l.body, depth + 1)?;
-
         for _ in 0..axes_to_emit.len() {
             writeln!(w, "{}}}", indent(depth))?;
         }
@@ -1475,6 +1505,20 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                     reinterpret,
                 )
             }
+        }
+    }
+}
+
+impl<'a, Tgt: Target> Default for CpuCodeGenerator<'a, Tgt> {
+    fn default() -> Self {
+        CpuCodeGenerator {
+            namer: Default::default(),
+            name_env: Default::default(),
+            loop_iter_bindings: Default::default(),
+            param_bindings: Default::default(),
+            headers: Default::default(),
+            kernel_name: String::from("kernel"),
+            thread_style: Default::default(),
         }
     }
 }
