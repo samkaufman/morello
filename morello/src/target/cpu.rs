@@ -503,6 +503,7 @@ impl Kernel for CpuKernel {
                         dtype: Dtype::Bfloat16,
                         aux: TensorSpecAux {
                             level: CpuMemoryLevel::VRF,
+                            layout: lhs_layout,
                             vector_size: Some(lhs_vector_size),
                             ..
                         },
@@ -512,6 +513,7 @@ impl Kernel for CpuKernel {
                         dtype: Dtype::Float32,
                         aux: TensorSpecAux {
                             level: CpuMemoryLevel::VRF,
+                            layout: rhs_layout,
                             vector_size: Some(rhs_vector_size),
                             ..
                         },
@@ -521,6 +523,7 @@ impl Kernel for CpuKernel {
                   && lhs_shape.iter().filter(|&d| d.get() == 16).count() == 1
                   && lhs_vector_size.get() == 16
                   && rhs_vector_size.get() == 8
+                  && lhs_layout == rhs_layout
             ),
             CpuKernel::MemsetZero => {
                 operands[0].level() == CpuMemoryLevel::RF && operands[0].is_contiguous()
