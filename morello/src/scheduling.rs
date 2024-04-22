@@ -1,3 +1,4 @@
+use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::rc::Rc;
@@ -89,8 +90,8 @@ impl<Tgt: Target> Action<Tgt> {
             return Err(ApplyError::SpecNotCanonical);
         }
 
-        let node_spec = &spec.0; // TODO: Rename.
-        let operands = node_spec.parameters();
+        let logical_spec = &spec.0;
+        let operands = logical_spec.parameters();
 
         match self {
             Action::TileOut { .. } | Action::Split { .. } => {
@@ -101,11 +102,11 @@ impl<Tgt: Target> Action<Tgt> {
                             output_shape,
                             parallel,
                         } => {
-                            let current_output = &operands[node_spec.output_idx()];
+                            let current_output = &operands[logical_spec.output_idx()];
 
                             let current_out_shape = current_output.shape();
                             assert!(
-                                !(*parallel && node_spec.serial_only()),
+                                !(*parallel && logical_spec.serial_only()),
                                 "Serial-only Spec prevents parallel tiling"
                             );
                             assert_eq!(
@@ -115,9 +116,10 @@ impl<Tgt: Target> Action<Tgt> {
                                 current_out_shape.len(),
                                 output_shape.len()
                             );
-                            assert!(output_shape.iter().enumerate().all(|(dim, dim_size)| {
-                                *dim_size > 0 && *dim_size <= current_out_shape[dim]
-                            }));
+                            assert!(output_shape
+                                .iter()
+                                .enumerate()
+                                .all(|(dim, dim_size)| *dim_size <= current_out_shape[dim]));
                             assert_ne!(
                                 current_out_shape,
                                 &output_shape[..],
@@ -133,7 +135,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                             // Tiling happens in three steps:
                             // 1. Construct the simple tile corresponding to the new output shape.
-                            let out_idx: u8 = node_spec.output_idx().try_into().unwrap();
+                            let out_idx: u8 = logical_spec.output_idx().try_into().unwrap();
                             let smaller_output_tiling = Tiling::new_simple(output_shape.clone());
                             let smaller_output = LoopTile {
                                 axes: (0..output_shape.len())
@@ -146,7 +148,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                             // 2. Construct tilings which respect the data deps. of the new output tile.
                             let updated_input_tilings =
-                                node_spec.input_tilings_for_tile_out(&smaller_output_tiling);
+                                logical_spec.input_tilings_for_tile_out(&smaller_output_tiling);
 
                             // 3. Reify the tilings into Tiles we'll store with this action. Tiles
                             //    objects track the index and shape of the Impl parameter being
@@ -158,7 +160,7 @@ impl<Tgt: Target> Action<Tgt> {
                                 (original_input, (updated_input_tiling, updated_input_axes)),
                             ) in operands.iter().zip(updated_input_tilings.0).enumerate()
                             {
-                                if operand_idx == node_spec.output_idx() {
+                                if operand_idx == logical_spec.output_idx() {
                                     continue;
                                 }
 
@@ -204,45 +206,42 @@ impl<Tgt: Target> Action<Tgt> {
                             new_tiles.push(smaller_output);
                             (new_tiles, *parallel)
                         }
-                        Action::Split { k } => {
-                            debug_assert_ne!(*k, 0);
-                            match node_spec {
-                                LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
-                                    match typ {
-                                        PrimitiveSpecType::Matmul { accum: _ } => {
-                                            let [lhs, rhs] = &operands[..2] else {
-                                                panic!();
-                                            };
-                                            assert!(*k < lhs.shape()[1]);
+                        Action::Split { k } => match logical_spec {
+                            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
+                                match typ {
+                                    PrimitiveSpecType::Matmul { accum: _ } => {
+                                        let [lhs, rhs] = &operands[..2] else {
+                                            panic!();
+                                        };
+                                        assert!(*k < lhs.shape()[1]);
 
-                                            let tiles = vec![
-                                                LoopTile {
-                                                    axes: smallvec![0, 1],
-                                                    tile: Tile::new(
-                                                        smallvec![lhs.shape()[0], *k],
-                                                        smallvec![lhs.shape()[0], *k],
-                                                        Param::new(0, lhs.clone()),
-                                                    )
-                                                    .map_err(tile_to_apply_err)?,
-                                                },
-                                                LoopTile {
-                                                    axes: smallvec![1, 2],
-                                                    tile: Tile::new(
-                                                        smallvec![*k, rhs.shape()[1]],
-                                                        smallvec![*k, rhs.shape()[1]],
-                                                        Param::new(1, rhs.clone()),
-                                                    )
-                                                    .map_err(tile_to_apply_err)?,
-                                                },
-                                            ];
-                                            (tiles, false)
-                                        }
-                                        _ => unimplemented!("Split not implemented for {:?}", typ),
+                                        let tiles = vec![
+                                            LoopTile {
+                                                axes: smallvec![0, 1],
+                                                tile: Tile::new(
+                                                    smallvec![lhs.shape()[0], *k],
+                                                    smallvec![lhs.shape()[0], *k],
+                                                    Param::new(0, lhs.clone()),
+                                                )
+                                                .map_err(tile_to_apply_err)?,
+                                            },
+                                            LoopTile {
+                                                axes: smallvec![1, 2],
+                                                tile: Tile::new(
+                                                    smallvec![*k, rhs.shape()[1]],
+                                                    smallvec![*k, rhs.shape()[1]],
+                                                    Param::new(1, rhs.clone()),
+                                                )
+                                                .map_err(tile_to_apply_err)?,
+                                            },
+                                        ];
+                                        (tiles, false)
                                     }
+                                    _ => unimplemented!("Split not implemented for {:?}", typ),
                                 }
-                                LogicalSpec::Compose { .. } => todo!(),
                             }
-                        }
+                            LogicalSpec::Compose { .. } => todo!(),
+                        },
                         _ => unreachable!(),
                     }
                 };
@@ -256,7 +255,7 @@ impl<Tgt: Target> Action<Tgt> {
                     ref_op.shrink(loop_tile.tile.shape(), aligned).unwrap();
                 }
 
-                let mut inner_spec = node_spec.clone();
+                let mut inner_spec = logical_spec.clone();
                 inner_spec.replace_io(&new_operands);
                 inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
                 match self {
@@ -296,7 +295,7 @@ impl<Tgt: Target> Action<Tgt> {
                     components,
                     operand_auxes,
                     serial_only,
-                } = node_spec
+                } = logical_spec
                 else {
                     panic!();
                 };
@@ -323,7 +322,7 @@ impl<Tgt: Target> Action<Tgt> {
                 let head_spec = {
                     let head_operand_auxes = iter::once(&intermediate_tensorspec.aux)
                         .chain(&operand_auxes[..external_head_input_cnt])
-                        .chain(iter::once(&operand_auxes[node_spec.output_idx()]));
+                        .chain(iter::once(&operand_auxes[logical_spec.output_idx()]));
                     let head_basics = &components[0];
                     LogicalSpec::Primitive(
                         head_basics.clone(),
@@ -373,7 +372,9 @@ impl<Tgt: Target> Action<Tgt> {
                     let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
                         if level == &l {
                             u64::from(next_to_outer_basics.dtypes[ntob_out_idx].size())
-                                * u64::from(output_shape.into_iter().product::<DimSize>())
+                                * u64::from(
+                                    output_shape.into_iter().map(|d| d.get()).product::<u32>(),
+                                )
                         } else {
                             0u64
                         }
@@ -429,7 +430,7 @@ impl<Tgt: Target> Action<Tgt> {
                     },
                     _,
                     serial_only,
-                ) = node_spec
+                ) = logical_spec
                 else {
                     panic!();
                 };
@@ -449,7 +450,7 @@ impl<Tgt: Target> Action<Tgt> {
                 let [outer_image_tile, outer_filters_tile] = [0, 1].map(|idx| {
                     let shape = operands[idx].shape()[..2]
                         .iter()
-                        .chain(iter::repeat(&1).take((rank - 2).into()))
+                        .chain(iter::repeat(&nz!(1u32)).take((rank - 2).into()))
                         .copied()
                         .collect::<Shape>();
                     let step_sizes = shape.clone();
@@ -561,7 +562,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                 let lower_limits: MemoryLimits = {
                     let additional = u64::from(destination_dtype.size())
-                        * u64::from(operands[usize::from(*source_idx)].volume());
+                        * u64::from(operands[usize::from(*source_idx)].volume().get());
                     match &spec.1 {
                         MemoryLimits::Standard(base) => {
                             let updated_level_idx = Tgt::levels()
@@ -589,7 +590,7 @@ impl<Tgt: Target> Action<Tgt> {
                         destination_layout,
                         *destination_dtype,
                         *source_idx,
-                        node_spec,
+                        logical_spec,
                     ) {
                         let mut left_spec = outer_moved_operand_spec;
                         let mut right_spec = inner_moved_operand.spec();
@@ -610,7 +611,7 @@ impl<Tgt: Target> Action<Tgt> {
                                         dtypes: smallvec![left_spec.dtype(), right_spec.dtype()],
                                     },
                                     vec![left_spec.aux.clone(), right_spec.aux.clone()],
-                                    node_spec.serial_only(),
+                                    logical_spec.serial_only(),
                                 ),
                                 lower_limits.clone(),
                             ),
@@ -627,7 +628,7 @@ impl<Tgt: Target> Action<Tgt> {
                     let mut new_operands = operands.clone();
                     new_operands[usize::from(*source_idx)] = inner_moved_operand.spec().clone();
                     let new_inner_spec = {
-                        let mut new_spec = node_spec.clone();
+                        let mut new_spec = logical_spec.clone();
                         new_spec.replace_io(&new_operands);
                         new_spec
                     };
@@ -650,7 +651,7 @@ impl<Tgt: Target> Action<Tgt> {
                 )))
             }
             Action::ToAccum => {
-                let LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, ..) = node_spec else {
+                let LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, ..) = logical_spec else {
                     panic!();
                 };
                 let (PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum }) = typ
@@ -665,7 +666,7 @@ impl<Tgt: Target> Action<Tgt> {
                     shape: output_shape,
                     dtype: output_dtype,
                     aux: output_aux,
-                } = node_spec.output();
+                } = logical_spec.output();
 
                 let zero_app = {
                     let mut subspec = LogicalSpec::Primitive(
@@ -675,17 +676,17 @@ impl<Tgt: Target> Action<Tgt> {
                             dtypes: smallvec![output_dtype],
                         },
                         vec![output_aux],
-                        node_spec.serial_only(),
+                        logical_spec.serial_only(),
                     );
                     subspec
                         .canonicalize()
                         .expect("ToAccum's introduced Zero should be canonicalizable");
                     let spec = Spec(subspec, spec.1.clone());
-                    let app_arguments = [Param::new(0, node_spec.output())];
+                    let app_arguments = [Param::new(0, logical_spec.output())];
                     SpecApp::new(spec, app_arguments).into()
                 };
                 let accum_app = {
-                    let mut subspec = node_spec.clone_as_accum();
+                    let mut subspec = logical_spec.clone_as_accum();
                     subspec
                         .canonicalize()
                         .expect("ToAccum's introduced accumulating Spec should be canonicalizable");
@@ -725,12 +726,12 @@ fn move_gens_prologue<Tgt: Target>(
     destination_layout: &Layout,
     destination_dtype: Dtype,
     source_idx: u8,
-    node_spec: &LogicalSpec<Tgt>,
+    logical_spec: &LogicalSpec<Tgt>,
 ) -> bool {
     let source_idx_usize = usize::from(source_idx);
-    let parameters = node_spec.parameters();
+    let parameters = logical_spec.parameters();
     let is_output = usize::from(source_idx) == parameters.len() - 1;
-    let is_read = !is_output || node_spec.output_is_read();
+    let is_read = !is_output || logical_spec.output_is_read();
     is_read
         && !move_is_cache_miss(
             &parameters[source_idx_usize],
@@ -745,11 +746,11 @@ fn move_gens_epilogue<Tgt: Target>(
     destination_layout: &Layout,
     destination_dtype: Dtype,
     source_idx: u8,
-    node_spec: &LogicalSpec<Tgt>,
+    logical_spec: &LogicalSpec<Tgt>,
 ) -> bool {
     let source_idx_usize = usize::from(source_idx);
-    let parameters = node_spec.parameters();
-    let is_output = source_idx_usize == node_spec.operand_count() - 1;
+    let parameters = logical_spec.parameters();
+    let is_output = source_idx_usize == logical_spec.operand_count() - 1;
     is_output
         && !move_is_cache_miss(
             &parameters[source_idx_usize],

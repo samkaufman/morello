@@ -1,4 +1,5 @@
 use itertools::{Either, Itertools};
+use nonzero::nonzero as nz;
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Write};
 use std::iter;
@@ -17,6 +18,7 @@ use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferVar;
 use crate::pprint::{pprint_write, ImplPrintStyle, PrintableAux};
+use crate::shape;
 use crate::target::cpu::{DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE};
 use crate::target::{
     cpu::{DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_STRIP_SIZE},
@@ -163,8 +165,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
         for (idx, input_tensor) in top_arg_tensors.iter().enumerate() {
             // Open and mmap the data.
-            let value_cnt = input_tensor.0.volume();
-            let byte_cnt = value_cnt * DimSize::from(input_tensor.spec().dtype().size());
+            let value_cnt = input_tensor.0.volume().get();
+            let byte_cnt = value_cnt * u32::from(input_tensor.spec().dtype().size());
             writeln!(out)?;
             writeln!(
                 out,
@@ -430,13 +432,14 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         debug_assert_eq!(vector_size.is_some(), level == CpuMemoryLevel::VRF);
 
         let name = self.namer.fresh_name();
-        let size = shape.iter().product::<DimSize>();
+        let size = shape.iter().map(|d| d.get()).product::<u32>();
         match level {
             CpuMemoryLevel::VRF => {
                 let vector_size = vector_size.unwrap();
                 let vec_type = get_vector(Tgt::vec_types(), dtype, vector_size);
                 self.headers.vector_type_defs.insert(vec_type);
 
+                let vector_size = vector_size.get();
                 debug_assert_eq!(size % vector_size, 0);
                 let name = self.namer.fresh_name();
                 if size == vector_size {
@@ -588,7 +591,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                     }
                     CpuKernel::VectorCastBf16F32 => {
                         let vector_size =
-                            i32::try_from(arguments[1].spec().vector_size().unwrap()).unwrap();
+                            i32::try_from(arguments[1].spec().vector_size().unwrap().get())
+                                .unwrap();
 
                         let lhs_tensor = arguments[0].backing_tensor(&self.param_bindings).unwrap();
                         let lhs_buffer = self.name_env.get(lhs_tensor).unwrap();
@@ -681,8 +685,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         }
                     }
                     CpuKernel::BroadcastVecMultAdd => {
-                        let vector_size = arguments[2].spec().vector_size().unwrap();
-                        let volume = arguments[2].spec().volume();
+                        let vector_size = arguments[2].spec().vector_size().unwrap().get();
+                        let volume = arguments[2].spec().volume().get();
                         debug_assert_eq!(volume % vector_size, 0);
                         let vector_count = volume / vector_size;
                         for vector_idx in 0..vector_count {
@@ -709,8 +713,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         Ok(())
                     }
                     CpuKernel::BroadcastVecMultAddBf16F32 => {
-                        let vector_size_bf16 = arguments[1].spec().vector_size().unwrap();
-                        let volume = arguments[1].spec().volume();
+                        let vector_size_bf16 = arguments[1].spec().vector_size().unwrap().get();
+                        let volume = arguments[1].spec().volume().get();
                         debug_assert_eq!(volume % vector_size_bf16, 0);
                         let vector_count = volume / vector_size_bf16;
                         writeln!(w, "{}/* BroadcastVecMultAddBf16F32 */", indent(depth))?;
@@ -737,10 +741,16 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             let (shift_fn_out, _, _, broadcast16_out) =
                                 vec_func_names(vector_size_bf16 * 2);
 
-                            let vf8 =
-                                get_vector(Tgt::vec_types(), Dtype::Float32, vector_size_bf16 / 2);
-                            let vfc =
-                                get_vector(Tgt::vec_types(), Dtype::Float32, vector_size_bf16);
+                            let vf8 = get_vector(
+                                Tgt::vec_types(),
+                                Dtype::Float32,
+                                (vector_size_bf16 / 2).try_into().unwrap(),
+                            );
+                            let vfc = get_vector(
+                                Tgt::vec_types(),
+                                Dtype::Float32,
+                                vector_size_bf16.try_into().unwrap(),
+                            );
                             writeln!(
                                 w,
                                 "{0}{1} {2} = ({1}){shift_fn}(*({3}*)(&{4}), {5});",
@@ -796,8 +806,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         Ok(())
                     }
                     CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => {
-                        let vector_size = arguments[2].spec().vector_size().unwrap();
-                        let volume = arguments[2].spec().volume();
+                        let vector_size = arguments[2].spec().vector_size().unwrap().get();
+                        let volume = arguments[2].spec().volume().get();
                         debug_assert_eq!(volume % vector_size, 0);
                         let vector_count = volume / vector_size;
 
@@ -846,7 +856,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         });
 
                         let lhs_spec = arguments[0].spec();
-                        debug_assert_eq!(lhs_spec.shape()[1] % DOT_PRODUCT_STRIP_SIZE, 0);
+                        debug_assert_eq!(lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE, 0);
                         let step_idx_name = self.namer.fresh_name();
                         let vector_accum_names = (0..DOT_PRODUCT_ACCUM_COUNT as usize)
                             .map(|_| self.namer.fresh_name())
@@ -870,7 +880,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             indent(depth),
                             step_idx_name,
                             lhs_spec.shape()[1],
-                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_STRIP_SIZE
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_STRIP_SIZE.get()
                         )?;
                         for (i, accum_name) in vector_accum_names.iter().enumerate() {
                             writeln!(
@@ -882,7 +892,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                                 exprs[0],
                                 exprs[1],
                                 step_idx_name,
-                                i * DOT_PRODUCT_STRIP_SIZE as usize
+                                i * DOT_PRODUCT_STRIP_SIZE.get() as usize
                             )?;
                         }
                         writeln!(w, "{}}}", indent(depth))?;
@@ -906,7 +916,10 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         });
 
                         let lhs_spec = arguments[0].spec();
-                        debug_assert_eq!(lhs_spec.shape()[1] % DOT_PRODUCT_STRIP_SIZE, 0);
+                        debug_assert_eq!(
+                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            0
+                        );
                         let step_idx_name = self.namer.fresh_name();
                         let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
                             .map(|_| {
@@ -922,7 +935,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
                         let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
 
-                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, 8);
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
                         let vbf16 = get_vector(
                             Tgt::vec_types(),
                             Dtype::Bfloat16,
@@ -945,7 +958,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             indent(depth),
                             step_idx_name,
                             lhs_spec.shape()[1],
-                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
                         for (i, (_, even_lhs_name, odd_lhs_name, even_rhs_name, odd_rhs_name)) in
                             loop_names.iter().enumerate()
@@ -962,7 +975,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                                     vf32.name,
                                     exprs[j],
                                     step_idx_name,
-                                    i * DOT_PRODUCT_BF16_STRIP_SIZE as usize
+                                    i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
                                 )?;
 
                                 writeln!(
@@ -1017,7 +1030,10 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         });
 
                         let lhs_spec = arguments[0].spec();
-                        debug_assert_eq!(lhs_spec.shape()[1] % DOT_PRODUCT_STRIP_SIZE, 0);
+                        debug_assert_eq!(
+                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            0
+                        );
                         let step_idx_name = self.namer.fresh_name();
                         let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
                             .map(|_| {
@@ -1031,7 +1047,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             })
                             .collect::<Vec<_>>();
 
-                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, 8);
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
                         let vbf16 = get_vector(
                             Tgt::vec_types(),
                             Dtype::Bfloat16,
@@ -1054,7 +1070,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             indent(depth),
                             step_idx_name,
                             lhs_spec.shape()[1],
-                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
                         for (
                             i,
@@ -1069,7 +1085,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                                 vf32.name,
                                 exprs[0],
                                 step_idx_name,
-                                i * DOT_PRODUCT_BF16_STRIP_SIZE as usize
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
                             )?;
                             writeln!(
                                 w,
@@ -1078,7 +1094,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                                 vf32.name,
                                 exprs[0],
                                 step_idx_name,
-                                i * DOT_PRODUCT_BF16_STRIP_SIZE as usize
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
                             )?;
 
                             // Load compressed bf16 rhs strip and dequantize.
@@ -1090,7 +1106,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                                 vf32.name,
                                 exprs[1],
                                 step_idx_name,
-                                i * DOT_PRODUCT_BF16_STRIP_SIZE as usize
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
                             )?;
                             writeln!(w, "{}{} {};", indent(depth + 1), vf32.name, upper_rhs_name)?;
                             writeln!(w, "{}{} {};", indent(depth + 1), vf32.name, lower_rhs_name)?;
@@ -1191,10 +1207,18 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         .unwrap();
 
                         let intermediate_dtype = arguments[0].spec().dtype();
-                        let intermediate_lower =
-                            self.make_buffer(&[1, 32], Some(32), intermediate_dtype, VRF);
-                        let intermediate_higher =
-                            self.make_buffer(&[1, 32], Some(32), intermediate_dtype, VRF);
+                        let intermediate_lower = self.make_buffer(
+                            &shape![1, 32],
+                            Some(nz!(32u32)),
+                            intermediate_dtype,
+                            VRF,
+                        );
+                        let intermediate_higher = self.make_buffer(
+                            &shape![1, 32],
+                            Some(nz!(32u32)),
+                            intermediate_dtype,
+                            VRF,
+                        );
                         intermediate_lower.emit(w, InitType::None, depth)?;
                         intermediate_higher.emit(w, InitType::None, depth)?;
 
@@ -1614,7 +1638,8 @@ fn get_vector(
     vec_types
         .iter()
         .find(|vec_type| {
-            vec_type.dtype == dtype && vec_type.value_cnt == u8::try_from(vector_size).unwrap()
+            vec_type.dtype == dtype
+                && vec_type.value_cnt == u8::try_from(vector_size.get()).unwrap()
         })
         .unwrap_or_else(|| {
             panic!(

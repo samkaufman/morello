@@ -15,6 +15,7 @@ use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
 use clap::Parser;
+use nonzero::nonzero as nz;
 use std::io;
 use std::path;
 
@@ -29,9 +30,9 @@ fn main() {
     let args = Args::parse();
     let db = RocksDatabase::try_new(args.db.as_deref(), true, 1).unwrap();
 
-    const M: DimSize = 1;
-    const K: DimSize = 2048;
-    const N: DimSize = 16384;
+    const M: DimSize = nz!(1u32);
+    const K: DimSize = nz!(2048u32);
+    const N: DimSize = nz!(16384u32);
 
     let spec = Spec::<X86Target>(
         lspec!(Matmul(
@@ -50,10 +51,10 @@ fn main() {
         .subschedule(&[0], &|z| {
             z.tile_out(&[1, 16], false)
                 .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
-                .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(16))
+                .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(16u32)))
                 .subschedule(&[0], &|za| za.place(CpuKernel::VectorAssign))
                 .subschedule(&[1], &|zb| {
-                    zb.move_param(1, CpuMemoryLevel::VRF, row_major(2), Some(8))
+                    zb.move_param(1, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
                         .subschedule(&[0], &|zb0| zb0.place(CpuKernel::VectorCastBf16F32))
                         .subschedule(&[1], &|zb1| {
                             zb1.tile_out(&[1, 8], false).place(CpuKernel::VectorAssign)

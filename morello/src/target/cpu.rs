@@ -3,23 +3,23 @@ use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::layout::{col_major, nhwc, row_major, Layout};
+use crate::layout::{col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
+use crate::shape;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use crate::target::{MemoryLevel, Target, TargetId, LEVEL_COUNT};
+use crate::target::{Kernel, MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::Param;
 
 use divrem::DivRem;
 use itertools::Itertools;
+use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter;
-
-use super::Kernel;
 
 const INST_COST: MainCost = 100;
 const ASSIGN_INST_COST: MainCost = 1;
@@ -29,9 +29,9 @@ const CPU_LEVELS: [CpuMemoryLevel; 4] = [
     CpuMemoryLevel::L1,
     CpuMemoryLevel::GL,
 ];
-pub(crate) const DOT_PRODUCT_STRIP_SIZE: u32 = 8;
+pub(crate) const DOT_PRODUCT_STRIP_SIZE: DimSize = nz!(8u32);
 pub(crate) const DOT_PRODUCT_ACCUM_COUNT: u32 = 4;
-pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: u32 = 16;
+pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: DimSize = nz!(16u32);
 pub(crate) const DOT_PRODUCT_BF16_ACCUM_COUNT: u32 = 4;
 
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
@@ -160,23 +160,24 @@ impl<T: CpuTarget> Target for T {
         };
 
         // Extend with all possible packings.
+        // TODO: Extend with interleavings as well.
         let all_packing_sizes = pack_sizes(None, dtype, &all_target_vector_bytes);
         let mut result = unpacked_layouts.clone();
         result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
-            let Layout::New(dims) = original_layout;
+            let Layout(dims) = original_layout;
             (0..dims.len())
                 .cartesian_product(&all_packing_sizes)
                 .filter_map(|(packing_dim, &packing_size)| {
-                    debug_assert_ne!(packing_size, 1);
-                    if shape[packing_dim] % packing_size != 0 {
+                    debug_assert_ne!(packing_size.get(), 1);
+                    if shape[packing_dim].get() % packing_size.get() != 0 {
                         return None;
                     }
-                    Some(Layout::New(
+                    Some(Layout::new(
                         dims.iter()
                             .cloned()
                             .chain(iter::once((
                                 packing_dim.try_into().unwrap(),
-                                Some(packing_size),
+                                PhysDim::Packed(packing_size),
                             )))
                             .collect(),
                     ))
@@ -194,7 +195,7 @@ impl<T: CpuTarget> Target for T {
         // The following could be faster. It keeps two copies of the non-packed layouts
         // (`base` and the first few values in `result`) and it doesn't compute the size
         // of the `result` ahead-of-time, potentially causing some Vec resizes.
-        let only_ones = shape.iter().all(|&d| d == 1);
+        let only_ones = shape.iter().all(|&d| d.get() == 1);
         let base = match (shape.len(), only_ones) {
             (2, false) => vec![row_major(2), col_major(2)],
             (4, false) => vec![row_major(4), nhwc()],
@@ -209,6 +210,7 @@ impl<T: CpuTarget> Target for T {
                 &all_target_vector_bytes,
             )
         }));
+        // TODO: Extend with interleavings as well.
         debug_assert!(
             result.iter().all(|r| r.applies_to_shape(shape)),
             "Some layouts don't apply to shape {:?}: {:?}",
@@ -304,9 +306,9 @@ impl Kernel for CpuKernel {
     // TODO: Rename to parameters
     fn applies_to_parameters<Tgt: CpuTarget>(&self, operands: &[TensorSpec<Tgt>]) -> bool {
         match self {
-            CpuKernel::MultAdd => operands
-                .iter()
-                .all(|o| o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == 1)),
+            CpuKernel::MultAdd => operands.iter().all(|o| {
+                o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == nz!(1u32))
+            }),
             CpuKernel::BroadcastVecMultAdd => {
                 // Only integers and 32-bit floats, which Clang should be able to handle pretty well with
                 // its vector type extension.
@@ -362,9 +364,11 @@ impl Kernel for CpuKernel {
                                 ..
                             },
                         }
-                    ] if lhs_shape[..] == [1, 2]
-                      && rhs_shape[..] == [2, rhs_vector_size / 2]
-                      && out_shape[..] == [1, rhs_vector_size / 2]
+                    ] if lhs_shape[..] == [nz!(1u32), nz!(2u32)]
+                      && rhs_shape[0] == nz!(2u32)
+                      && out_shape[0] == nz!(1u32)
+                      && rhs_shape[1].get() * 2 == rhs_vector_size.get()
+                      && out_shape[1].get() * 2 == rhs_vector_size.get()
                       && rhs.layout() == col_major(2) && out.layout().is_row_major()
                       && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
                 )
@@ -396,8 +400,8 @@ impl Kernel for CpuKernel {
                                 ..
                             },
                         }
-                    ] if lhs_shape[1] % (DOT_PRODUCT_STRIP_SIZE * DOT_PRODUCT_ACCUM_COUNT) == 0
-                      && out_shape[..] == [1, 1]
+                    ] if lhs_shape[1].get() % (DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT) == 0
+                      && &out_shape[..] == &[nz!(1u32), nz!(1u32)]
                       && lhs.layout().is_row_major()
                       && rhs.layout() == col_major(2)
                       && lhs.is_contiguous() && rhs.is_contiguous()
@@ -416,7 +420,11 @@ impl Kernel for CpuKernel {
             CpuKernel::ValueAssign => {
                 debug_assert_eq!(operands.len(), 2);
 
-                if operands.iter().flat_map(|o| o.shape()).any(|&d| d != 1) {
+                if operands
+                    .iter()
+                    .flat_map(|o| o.shape())
+                    .any(|d| d.get() != 1)
+                {
                     return false;
                 }
 
@@ -484,8 +492,8 @@ impl Kernel for CpuKernel {
                             ..
                         },
                     }
-                ] if lhs_shape.iter().all(|d| *d == 1)
-                  && rhs_shape.iter().all(|d| *d == 1)
+                ] if lhs_shape.iter().all(|d| d.get() == 1)
+                  && rhs_shape.iter().all(|d| d.get() == 1)
             ),
             CpuKernel::VectorCastBf16F32 => matches!(
                 operands,
@@ -495,7 +503,7 @@ impl Kernel for CpuKernel {
                         dtype: Dtype::Bfloat16,
                         aux: TensorSpecAux {
                             level: CpuMemoryLevel::VRF,
-                            vector_size: Some(16),
+                            vector_size: Some(lhs_vector_size),
                             ..
                         },
                     },
@@ -504,13 +512,15 @@ impl Kernel for CpuKernel {
                         dtype: Dtype::Float32,
                         aux: TensorSpecAux {
                             level: CpuMemoryLevel::VRF,
-                            vector_size: Some(8),
+                            vector_size: Some(rhs_vector_size),
                             ..
                         },
                     }
                 ] if lhs_shape == rhs_shape
-                  && lhs_shape.iter().all(|&d| d == 1 || d == 16)
-                  && lhs_shape.iter().filter(|&d| *d == 16).count() == 1
+                  && lhs_shape.iter().all(|&d| d.get() == 1 || d.get() == 16)
+                  && lhs_shape.iter().filter(|&d| d.get() == 16).count() == 1
+                  && lhs_vector_size.get() == 16
+                  && rhs_vector_size.get() == 8
             ),
             CpuKernel::MemsetZero => {
                 operands[0].level() == CpuMemoryLevel::RF && operands[0].is_contiguous()
@@ -538,7 +548,7 @@ impl Kernel for CpuKernel {
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::BroadcastVecMultAddBf16F32 => {
                 let vec_tensor_spec = &parameters[1].1;
-                let vb = u64::from(vec_tensor_spec.vector_size().unwrap())
+                let vb = u64::from(vec_tensor_spec.vector_size().unwrap().get())
                     * u64::from(vec_tensor_spec.dtype().size());
                 MemoryAllocation::Simple(CPU_LEVELS.map(
                     |level| {
@@ -589,8 +599,8 @@ impl Kernel for CpuKernel {
             | CpuKernel::BroadcastVecMultAddBf16F32 => {
                 let vec_tensor_spec = &parameters[1].1;
 
-                let vector_size = vec_tensor_spec.vector_size().unwrap();
-                let volume = vec_tensor_spec.volume();
+                let vector_size = vec_tensor_spec.vector_size().unwrap().get();
+                let volume = vec_tensor_spec.volume().get();
                 debug_assert_eq!(volume % vector_size, 0);
                 let vector_count = volume / vector_size;
                 let mut cost = INST_COST * ((vector_count * 2) + 1);
@@ -662,8 +672,9 @@ fn dotproductloop_applies<Tgt: CpuTarget>(operands: &[TensorSpec<Tgt>], lhs_dtyp
                 },
             }
         ] if *ldt == lhs_dtype
-          && lhs_shape[1] % (DOT_PRODUCT_BF16_STRIP_SIZE * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
-          && out_shape[..] == [1, 1]
+          && lhs_shape[1].get() % (DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
+          && out_shape[0] == nz!(1u32)
+          && out_shape[1] == nz!(1u32)
           && lhs.layout().is_row_major()
           && rhs.layout() == col_major(2)
           && lhs.is_contiguous() && rhs.is_contiguous()
@@ -785,9 +796,9 @@ where
                         layout,
                         vector_size: Some(v),
                     },
-            } if shape[..] == [2, vector_values]
+            } if shape[..] == *shape![2, vector_values]
                 && *contig == layout.contiguous_full()
-                && *v == vector_values => {}
+                && v.get() == vector_values => {}
             _ => return false,
         };
     }
@@ -818,18 +829,18 @@ pub fn shared_broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemory
         if !o.aligned() || !o.is_contiguous() {
             return false;
         }
-        if o.volume() % o.vector_size().unwrap() != 0 {
+        if o.volume().get() % o.vector_size().unwrap().get() != 0 {
             return false;
         }
     }
 
     // First parameter is a single value.
-    if operands[0].shape().iter().any(|d| *d != 1) {
+    if operands[0].shape().iter().any(|d| d.get() != 1) {
         return false;
     }
 
     // Second parameter must have shape 1xn.
-    if operands[1].shape().len() != 2 || operands[1].shape()[0] != 1 {
+    if operands[1].shape().len() != 2 || operands[1].shape()[0].get() != 1 {
         return false;
     }
 
@@ -854,12 +865,12 @@ fn packed_layouts_for_standard_layout<'a>(
     dtype: Dtype,
     all_target_vector_bytes: &'a [u32],
 ) -> impl Iterator<Item = Layout> + 'a {
-    let Layout::New(dims) = &original_layout;
-    debug_assert!(dims.iter().all(|(_, s)| s.is_none()));
+    let Layout(dims) = &original_layout;
+    debug_assert!(dims.iter().all(|(_, s)| *s == PhysDim::Dynamic));
 
     let final_nonone_dim = {
         let mut d = dims.len() - 1;
-        while d > 0 && shape[d] == 1 {
+        while d > 0 && shape[d].get() == 1 {
             d -= 1;
         }
         d
@@ -868,7 +879,7 @@ fn packed_layouts_for_standard_layout<'a>(
     dims[..final_nonone_dim].iter().flat_map(move |&(dim, _)| {
         let dims = dims.clone();
         let mut it = None;
-        if shape[usize::from(dim)] != 1 {
+        if shape[usize::from(dim)].get() != 1 {
             it = Some(
                 pack_sizes(
                     Some(shape[usize::from(dim)]),
@@ -880,7 +891,7 @@ fn packed_layouts_for_standard_layout<'a>(
                     Layout::new(
                         dims.iter()
                             .cloned()
-                            .chain(iter::once((dim, Some(strip_size))))
+                            .chain(iter::once((dim, PhysDim::Packed(strip_size))))
                             .collect(),
                     )
                 }),
@@ -896,17 +907,17 @@ fn pack_sizes(
     all_target_vector_bytes: &[u32],
 ) -> SmallVec<[DimSize; 3]> {
     let mut result = SmallVec::new();
-    if dim_size.map(|d| d % 2 == 0).unwrap_or(true) {
-        result.push(2);
+    if dim_size.map(|d| d.get() % 2 == 0).unwrap_or(true) {
+        result.push(nz!(2u32));
     }
     result.extend(all_target_vector_bytes.iter().filter_map(|&bytes| {
-        match (dim_size, bytes.div_rem(DimSize::from(dtype.size()))) {
+        match (dim_size, bytes.div_rem(u32::from(dtype.size()))) {
             (Some(m), (vector_value_count, 0))
-                if vector_value_count < m && m % vector_value_count == 0 =>
+                if vector_value_count < m.get() && m.get() % vector_value_count == 0 =>
             {
-                Some(vector_value_count)
+                DimSize::new(vector_value_count)
             }
-            (None, (vector_value_count, 0)) => Some(vector_value_count),
+            (None, (vector_value_count, 0)) => DimSize::new(vector_value_count),
             _ => None,
         }
     }));
@@ -924,8 +935,8 @@ mod tests {
         tensorspec::TensorSpec,
     };
     use itertools::Itertools;
+    use nonzero::nonzero as nz;
     use proptest::prelude::*;
-    use smallvec::smallvec;
     use std::collections::HashSet;
 
     proptest! {
@@ -934,6 +945,7 @@ mod tests {
             shape in proptest::collection::vec(1..8u32, 1..=5),
             dtype in any::<Dtype>(),
         ) {
+            let shape = shape.into_iter().map(|x| DimSize::new(x).unwrap()).collect::<Vec<_>>();
             assert_unique_layouts(&X86Target::all_layouts_for_shape(&shape, dtype));
         }
 
@@ -942,6 +954,7 @@ mod tests {
             shape in proptest::collection::vec(1..8u32, 1..=5),
             dtype in any::<Dtype>(),
         ) {
+            let shape = shape.into_iter().map(|x| DimSize::new(x).unwrap()).collect::<Vec<_>>();
             let superset: HashSet<_> = X86Target::all_layouts_for_shape(&shape, dtype)
                 .into_iter()
                 .collect();
@@ -981,7 +994,12 @@ mod tests {
             example in arb_test_packed_layout_with_strip_size_one_is_row_major()
         ) {
             let (shape, strip_dim) = example;
-            Layout::new_packed(shape.len().try_into().unwrap(), strip_dim, 1);
+            Layout::new(
+                (0..u8::try_from(shape.len()).unwrap())
+                    .map(|dim| (dim, PhysDim::Dynamic))
+                    .chain(std::iter::once((strip_dim, PhysDim::Packed(nz!(1u32)))))
+                    .collect(),
+            );
         }
     }
 
@@ -991,7 +1009,7 @@ mod tests {
             (strip_dim in 0..shape.len(), shape in Just(shape))
             -> (Vec<DimSize>, u8)
         {
-            (shape, strip_dim.try_into().unwrap())
+            (shape.into_iter().map(|x| DimSize::new(x).unwrap()).collect(), strip_dim.try_into().unwrap())
         }
     }
 
@@ -1001,7 +1019,7 @@ mod tests {
         let cm2 = col_major(2);
         let operands = [
             TensorSpec::<X86Target>::new_canon(
-                smallvec![1, 2],
+                shape![1, 2],
                 Dtype::Uint8,
                 rm2.contiguous_full(),
                 true,
@@ -1010,22 +1028,22 @@ mod tests {
                 None,
             ),
             TensorSpec::<X86Target>::new_canon(
-                smallvec![2, 16],
+                shape![2, 16],
                 Dtype::Sint8,
                 cm2.contiguous_full(),
                 true,
                 CpuMemoryLevel::VRF,
                 cm2,
-                Some(32),
+                Some(nz!(32u32)),
             ),
             TensorSpec::<X86Target>::new_canon(
-                smallvec![1, 16],
+                shape![1, 16],
                 Dtype::Sint16,
                 rm2.contiguous_full(),
                 true,
                 CpuMemoryLevel::VRF,
                 rm2.clone(),
-                Some(16),
+                Some(nz!(16u32)),
             ),
         ];
         assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_parameters(&operands))
@@ -1038,7 +1056,7 @@ mod tests {
 
     fn eval_all_index_expr_points(expr: &NonAffineExpr<BufferVar>, shape: &[DimSize]) -> Vec<i32> {
         let mut results = vec![];
-        for pt in shape.iter().map(|&d| 0..d).multi_cartesian_product() {
+        for pt in shape.iter().map(|&d| 0..d.get()).multi_cartesian_product() {
             let evaluated: NonAffineExpr<&str> = expr.clone().map_vars(&mut |var| match var {
                 BufferVar::TileIdx(_, _) => panic!("TileIdx in index expression"),
                 BufferVar::Pt(dim, _) => NonAffineExpr::constant(pt[dim as usize] as i32),

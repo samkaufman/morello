@@ -1,6 +1,6 @@
 use std::{
     fmt::Display,
-    ops::{Add, AddAssign, Mul, MulAssign, Sub},
+    ops::{Add, AddAssign, Mul, MulAssign, Rem, Sub},
 };
 
 pub type NonAffineExpr<T> = AffineForm<NonAffine<T>>;
@@ -75,9 +75,7 @@ impl<T: Bounds> Bounds for AffineForm<T> {
         let mut minimum = 0u32;
         let mut maximum: Option<u32> = None;
         for term in &self.0 {
-            let Some((term_min, term_max)) = term.1.bounds() else {
-                return None;
-            };
+            let (term_min, term_max) = term.1.bounds()?;
             minimum = minimum.min(u32::try_from(term.0).unwrap() * term_min);
             maximum = Some(
                 maximum
@@ -291,6 +289,35 @@ impl<T> MulAssign<i32> for AffineForm<T> {
     fn mul_assign(&mut self, rhs: i32) {
         self.0.iter_mut().for_each(|Term(c, _)| *c *= rhs);
         self.1 *= rhs;
+    }
+}
+
+impl<T> Rem<u32> for AffineForm<NonAffine<T>> {
+    type Output = Self;
+
+    fn rem(mut self, rhs: u32) -> Self::Output {
+        if self.0.len() == 1 && self.0[0].0 == 1 && self.1 == 0 {
+            (self.0.pop().unwrap().1 % rhs).into()
+        } else {
+            NonAffine::Mod(Box::new(self), rhs).into()
+        }
+    }
+}
+
+impl<T> Rem<u32> for NonAffine<T> {
+    type Output = Self;
+
+    fn rem(self, rhs: u32) -> Self::Output {
+        match self {
+            // TODO: Below i32 cast shouldn't be necesary. May make more sense to use i32 for Mod.
+            NonAffine::Constant(c) => NonAffine::Constant(c % i32::try_from(rhs).unwrap()),
+            leaf @ NonAffine::Leaf(_) => NonAffine::Mod(Box::new(leaf.into()), rhs),
+            // e.g., (a % 8) % 2 == a % 2
+            NonAffine::Mod(a, r) if r % rhs == 0 => NonAffine::Mod(a, rhs),
+            // e.g., (a % 2) % 8 == a % 2
+            NonAffine::Mod(a, r) if rhs % r == 0 => NonAffine::Mod(a, r),
+            other => NonAffine::Mod(Box::new(other.into()), rhs),
+        }
     }
 }
 
