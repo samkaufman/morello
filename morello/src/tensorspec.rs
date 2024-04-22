@@ -10,7 +10,7 @@ use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
-use crate::layout::{row_major, Layout, LayoutError};
+use crate::layout::{row_major, Layout, LayoutError, PhysDim};
 use crate::target::{MemoryLevel, Target};
 use crate::utils::join_into_string;
 
@@ -339,7 +339,7 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
             // layouts.)
             let mut packings = SmallVec::<[_; 4]>::new();
             for (logical_dim, s) in dims.as_slice() {
-                if s.is_some() {
+                if matches!(s, PhysDim::Packed(_)) {
                     if packings.is_empty() {
                         packings.resize(dims.len(), 0);
                     }
@@ -351,7 +351,9 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
                 for idx in (0..dims.len()).rev() {
                     let (logical_dim, s) = dims[idx];
                     let logical_dim_usize = usize::from(logical_dim);
-                    if packings[logical_dim_usize] == 1 && s == Some(shape[logical_dim_usize]) {
+                    if packings[logical_dim_usize] == 1
+                        && s == PhysDim::Packed(shape[logical_dim_usize])
+                    {
                         return false;
                     }
                 }
@@ -610,7 +612,13 @@ mod tests {
                 contig: 3,
                 aligned: false,
                 level: CpuMemoryLevel::GL,
-                layout: layout![(0, None), (2, None), (3, None), (1, None), (2, Some(4))],
+                layout: layout![
+                    (0, PhysDim::Dynamic),
+                    (2, PhysDim::Dynamic),
+                    (3, PhysDim::Dynamic),
+                    (1, PhysDim::Dynamic),
+                    (2, PhysDim::Packed(4))
+                ],
                 vector_size: None,
             },
         };

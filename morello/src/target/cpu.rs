@@ -4,7 +4,7 @@ use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::kernels::KernelType;
-use crate::layout::{col_major, nhwc, row_major, Layout};
+use crate::layout::{col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::Action;
 use crate::shape;
@@ -95,6 +95,7 @@ impl<T: CpuTarget> Target for T {
         };
 
         // Extend with all possible packings.
+        // TODO: Extend with interleavings as well.
         let all_packing_sizes = pack_sizes(None, dtype, &all_target_vector_bytes);
         let mut result = unpacked_layouts.clone();
         result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
@@ -111,7 +112,7 @@ impl<T: CpuTarget> Target for T {
                             .cloned()
                             .chain(iter::once((
                                 packing_dim.try_into().unwrap(),
-                                Some(packing_size),
+                                PhysDim::Packed(packing_size),
                             )))
                             .collect(),
                     ))
@@ -144,6 +145,7 @@ impl<T: CpuTarget> Target for T {
                 &all_target_vector_bytes,
             )
         }));
+        // TODO: Extend with interleavings as well.
         debug_assert!(
             result.iter().all(|r| r.applies_to_shape(shape)),
             "Some layouts don't apply to shape {:?}: {:?}",
@@ -565,7 +567,7 @@ fn packed_layouts_for_standard_layout<'a>(
     all_target_vector_bytes: &'a [u32],
 ) -> impl Iterator<Item = Layout> + 'a {
     let Layout(dims) = &original_layout;
-    debug_assert!(dims.iter().all(|(_, s)| s.is_none()));
+    debug_assert!(dims.iter().all(|(_, s)| *s == PhysDim::Dynamic));
 
     let final_nonone_dim = {
         let mut d = dims.len() - 1;
@@ -590,7 +592,7 @@ fn packed_layouts_for_standard_layout<'a>(
                     Layout::new(
                         dims.iter()
                             .cloned()
-                            .chain(iter::once((dim, Some(strip_size))))
+                            .chain(iter::once((dim, PhysDim::Packed(strip_size))))
                             .collect(),
                     )
                 }),
@@ -628,7 +630,7 @@ mod tests {
     use crate::{
         common::{DimSize, Dtype},
         expr::{NonAffineExpr, Substitute},
-        layout::{col_major, row_major, BufferVar, Layout},
+        layout::{col_major, row_major, BufferVar, Layout, PhysDim},
         shape,
         target::{
             cpu::twovecbroadcastvecmult_applies_to_operands, CpuMemoryLevel, Target, X86Target,
@@ -697,8 +699,8 @@ mod tests {
             let (shape, strip_dim) = example;
             Layout::new(
                 (0..u8::try_from(shape.len()).unwrap())
-                    .map(|dim| (dim, None))
-                    .chain(std::iter::once((strip_dim, Some(nz!(1u32)))))
+                    .map(|dim| (dim, PhysDim::Dynamic))
+                    .chain(std::iter::once((strip_dim, PhysDim::Packed(nz!(1u32)))))
                     .collect(),
             );
         }
