@@ -602,21 +602,20 @@ impl<Tgt: Target> Action<Tgt> {
                             mem::swap(&mut left_spec, &mut right_spec);
                             args.swap(0, 1);
                         }
-                        Some(SpecApp::new(
-                            Spec(
-                                LogicalSpec::Primitive(
-                                    PrimitiveBasics {
-                                        typ: PrimitiveSpecType::Move,
-                                        spec_shape: left_spec.shape().into(),
-                                        dtypes: smallvec![left_spec.dtype(), right_spec.dtype()],
-                                    },
-                                    vec![left_spec.aux.clone(), right_spec.aux.clone()],
-                                    logical_spec.serial_only(),
-                                ),
-                                lower_limits.clone(),
+                        let mut logue_spec = Spec(
+                            LogicalSpec::Primitive(
+                                PrimitiveBasics {
+                                    typ: PrimitiveSpecType::Move,
+                                    spec_shape: left_spec.shape().into(),
+                                    dtypes: smallvec![left_spec.dtype(), right_spec.dtype()],
+                                },
+                                vec![left_spec.aux.clone(), right_spec.aux.clone()],
+                                logical_spec.serial_only(),
                             ),
-                            args,
-                        ))
+                            lower_limits.clone(),
+                        );
+                        logue_spec.canonicalize().unwrap();
+                        Some(SpecApp::new(logue_spec, args))
                     } else {
                         None
                     }

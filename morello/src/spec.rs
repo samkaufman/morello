@@ -5,6 +5,7 @@ use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
+use crate::layout::row_major;
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
@@ -631,6 +632,25 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     for aux in primitive_aux.iter_mut() {
                         aux.canonicalize(&basics.spec_shape)
                             .context("Failed to canonicalize the TensorSpecAux")?;
+                    }
+
+                    // It source and destination are fully contiguous and the dtypes and layouts
+                    // match, then we can canonicalize to a row-major bitwise move. This is a
+                    // workaround for not being able to split interleaved layouts with a tile, but
+                    // can be generalized to be a useful symmetry-breaking predicate later on.
+                    // TODO: Do just that: generalize this caonicalizaton rule.
+                    if basics.dtypes.iter().all_equal()
+                        && primitive_aux.iter().map(|a| &a.layout).all_equal()
+                        && primitive_aux
+                            .iter()
+                            .all(|aux| aux.contig == aux.layout.contiguous_full())
+                    {
+                        let rm = row_major(basics.spec_shape.len().try_into().unwrap());
+                        let new_contig = rm.contiguous_full();
+                        for aux in primitive_aux.iter_mut() {
+                            aux.layout = rm.clone();
+                            aux.contig = new_contig;
+                        }
                     }
                 }
                 PrimitiveSpecType::Zero => {
