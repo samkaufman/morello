@@ -1142,6 +1142,139 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         self.headers.vector_type_defs.insert(vbf16);
                         Ok(())
                     }
+                    CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
+                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                            0 | 1 => self.c_index_ptr(a, b, None),
+                            2 => self.c_index(a, b, None),
+                            _ => unreachable!(),
+                        });
+
+                        let lhs_spec = arguments[0].spec();
+                        debug_assert_eq!(
+                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            0
+                        );
+                        let step_idx_name = self.namer.fresh_name();
+                        let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
+                            .map(|_| {
+                                (
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        let vbf16 = get_vector(
+                            Tgt::vec_types(),
+                            Dtype::Bfloat16,
+                            DOT_PRODUCT_BF16_STRIP_SIZE,
+                        );
+
+                        writeln!(w, "{}// DotProductLoopF32InterleavedBf16F32", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){{0}};",
+                                indent(depth),
+                                vf32.name,
+                                accum_name
+                            )?;
+                        }
+                        writeln!(
+                            w,
+                            "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
+                            indent(depth),
+                            step_idx_name,
+                            lhs_spec.shape()[1],
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
+                        )?;
+                        for (
+                            i,
+                            (_, upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name),
+                        ) in loop_names.iter().enumerate()
+                        {
+                            // Load already-dequantized f32 lhs into a pair of vectors.
+                            writeln!(
+                                w,
+                                "{0}{1} {upper_lhs_name} = *({1} *)({2} + {3} + {4});",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[0],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} {lower_lhs_name} = *({1} *)({2} + {3} + {4} + 8);",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[0],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                            )?;
+
+                            // Load compressed bf16 rhs strip and dequantize without crossing lanes.
+                            let compressed_name = self.namer.fresh_name();
+                            writeln!(
+                                w,
+                                "{0}{1} {compressed_name} = *({1} *)({2} + {3} + {4});",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[1],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                            )?;
+
+                            let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){shift_fn}(*({3}*)(&{4}), 16);",
+                                indent(depth + 1),
+                                vf32.name,
+                                upper_rhs_name,
+                                vf32.native_type_name,
+                                compressed_name
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), 0xAA);",
+                                indent(depth + 1),
+                                vf32.name,
+                                lower_rhs_name,
+                                vf32.native_type_name,
+                                compressed_name
+                            )?;
+
+                            for (lhs, rhs, a) in [
+                                (upper_lhs_name, upper_rhs_name, &loop_names[i].0),
+                                (
+                                    lower_lhs_name,
+                                    lower_rhs_name,
+                                    &loop_names[(i + 2) % loop_names.len()].0,
+                                ),
+                            ] {
+                                writeln!(
+                                    w,
+                                    "{0}{1} += *({2} *)(&{lhs}) * *({2} *)(&{rhs});",
+                                    indent(depth + 1),
+                                    a,
+                                    vf32.name
+                                )?;
+                            }
+                        }
+                        writeln!(w, "{}}}", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
+                        }
+
+                        self.headers.vector_type_defs.insert(vf32);
+                        self.headers.vector_type_defs.insert(vbf16);
+                        Ok(())
+                    }
                     CpuKernel::PhysicalTransposeByte128 => {
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
                             (&arguments[0], 0),
@@ -1255,6 +1388,50 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             intermediate_higher.name().unwrap(),
                         )
                     }
+                    CpuKernel::VectorInterleaveBf16F32 => {
+                        let lhs_tensor = arguments[0].backing_tensor(&self.param_bindings).unwrap();
+                        let lhs_buffer = self.name_env.get(lhs_tensor).unwrap();
+                        let rhs_tensor = arguments[1].backing_tensor(&self.param_bindings).unwrap();
+                        let rhs_buffer = self.name_env.get(rhs_tensor).unwrap();
+
+                        let lhs_iexpr = zero_points(
+                            arguments[0].make_buffer_indexing_expr(&self.param_bindings),
+                        );
+                        let rhs0_iexpr = zero_points(
+                            arguments[1].make_buffer_indexing_expr(&self.param_bindings),
+                        );
+                        let rhs1_iexpr = zero_points(
+                            arguments[1].make_buffer_indexing_expr(&self.param_bindings) + 8,
+                        );
+
+                        let src_name = self.c_index_vec(lhs_buffer, &lhs_iexpr, None);
+                        let even_name = self.c_index_vec(rhs_buffer, &rhs0_iexpr, None);
+                        let odd_name = self.c_index_vec(rhs_buffer, &rhs1_iexpr, None);
+
+                        let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
+
+                        let vf8 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        writeln!(
+                            w,
+                            "{0}{2} = ({1}){shift_fn}(*({3}*)(&{4}), 16);",
+                            indent(depth),
+                            vf8.name,
+                            even_name,
+                            vf8.native_type_name,
+                            src_name
+                        )?;
+                        writeln!(
+                            w,
+                            "{0}{2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), 0xAA);",
+                            indent(depth),
+                            vf8.name,
+                            odd_name,
+                            vf8.native_type_name,
+                            src_name
+                        )?;
+                        Ok(())
+                    }
+                    CpuKernel::VectorDeinterleaveF32Bf16 => todo!(),
                 }
             }
         }

@@ -16,7 +16,7 @@ use divrem::DivRem;
 use itertools::Itertools;
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter;
@@ -88,8 +88,11 @@ pub enum CpuKernel {
     /// of float32 values and a buffer of bfloat16 values, producing float32s. The f32
     /// inputs are dequantized immediately after being loaded and before multiplcation.
     DotProductLoopF32Bf16F32,
+    DotProductLoopF32InterleavedBf16F32,
     PhysicalTransposeByte128,
     PhysicalTransposeByte256,
+    VectorInterleaveBf16F32,
+    VectorDeinterleaveF32Bf16,
     ValueAssign,
     VectorAssign,
     MemsetZero,
@@ -229,7 +232,7 @@ impl<T: CpuTarget> Target for T {
                 let possible_kernels: &[CpuKernel] = match typ {
                     PrimitiveSpecType::Matmul { accum } => {
                         if *accum {
-                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 7] = [
+                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 8] = [
                                 CpuKernel::MultAdd,
                                 CpuKernel::BroadcastVecMultAdd,
                                 CpuKernel::BroadcastVecMultAddBf16F32,
@@ -237,6 +240,7 @@ impl<T: CpuTarget> Target for T {
                                 CpuKernel::DotProductLoop,
                                 CpuKernel::DotProductLoopBf16Bf16F32,
                                 CpuKernel::DotProductLoopF32Bf16F32,
+                                CpuKernel::DotProductLoopF32InterleavedBf16F32,
                             ];
                             &MATMUL_ACCUM_KERNELS
                         } else {
@@ -245,11 +249,13 @@ impl<T: CpuTarget> Target for T {
                     }
                     PrimitiveSpecType::Conv { .. } => &[],
                     PrimitiveSpecType::Move { .. } => {
-                        const MOVE_KERNELS: [CpuKernel; 6] = [
+                        const MOVE_KERNELS: [CpuKernel; 8] = [
                             CpuKernel::ValueAssign,
                             CpuKernel::VectorAssign,
                             CpuKernel::PhysicalTransposeByte128,
                             CpuKernel::PhysicalTransposeByte256,
+                            CpuKernel::VectorInterleaveBf16F32,
+                            CpuKernel::VectorDeinterleaveF32Bf16,
                             CpuKernel::CastBf16F32,
                             CpuKernel::VectorCastBf16F32,
                         ];
@@ -291,9 +297,12 @@ impl Kernel for CpuKernel {
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::DotProductLoop
             | CpuKernel::DotProductLoopF32Bf16F32
+            | CpuKernel::DotProductLoopF32InterleavedBf16F32
             | CpuKernel::DotProductLoopBf16Bf16F32 => 3,
             CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
+            | CpuKernel::VectorInterleaveBf16F32
+            | CpuKernel::VectorDeinterleaveF32Bf16
             | CpuKernel::ValueAssign
             | CpuKernel::VectorAssign
             | CpuKernel::CastBf16F32
@@ -401,21 +410,79 @@ impl Kernel for CpuKernel {
                             },
                         }
                     ] if lhs_shape[1].get() % (DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT) == 0
-                      && &out_shape[..] == &[nz!(1u32), nz!(1u32)]
+                      && out_shape[..] == [nz!(1u32), nz!(1u32)]
                       && lhs.layout().is_row_major()
                       && rhs.layout() == col_major(2)
                       && lhs.is_contiguous() && rhs.is_contiguous()
                 )
             }
-            CpuKernel::DotProductLoopF32Bf16F32 => dotproductloop_applies(operands, Dtype::Float32),
+            CpuKernel::DotProductLoopF32Bf16F32 => {
+                dotproductloop_applies(operands, Dtype::Float32, &[row_major(2)])
+            }
+            CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
+                // TODO: Simplify with a closure instead of constructing all layouts AOT.
+                let layout0 = Layout::new(smallvec![
+                    (0, PhysDim::Dynamic),
+                    (1, PhysDim::Dynamic),
+                    (1, PhysDim::Interleaved(nz!(16u32)))
+                ]);
+                let layout1 = Layout::new(smallvec![
+                    (1, PhysDim::Dynamic),
+                    (0, PhysDim::Dynamic),
+                    (0, PhysDim::Interleaved(nz!(16u32)))
+                ]);
+                dotproductloop_applies(operands, Dtype::Bfloat16, &[layout0, layout1])
+            }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
-                dotproductloop_applies(operands, Dtype::Bfloat16)
+                dotproductloop_applies(operands, Dtype::Bfloat16, &[row_major(2)])
             }
             CpuKernel::PhysicalTransposeByte128 => {
                 physicaltransposebyte_applies_to_operands(operands, 16)
             }
             CpuKernel::PhysicalTransposeByte256 => {
                 physicaltransposebyte_applies_to_operands(operands, 32)
+            }
+            CpuKernel::VectorInterleaveBf16F32 => {
+                let leaved = PhysDim::Interleaved(nz!(16u32));
+                matches!(
+                    operands,
+                    [
+                        src @ TensorSpec {
+                            shape: src_shape,
+                            dtype: Dtype::Bfloat16,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::VRF,
+                                layout: src_layout,
+                                vector_size: src_vs,
+                                aligned: _,
+                                contig: _
+                            },
+                        },
+                        dest @ TensorSpec {
+                            shape: dest_shape,
+                            dtype: Dtype::Float32,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::VRF,
+                                layout: dest_layout,
+                                vector_size: dest_vs,
+                                aligned: _,
+                                contig: _
+                            },
+                        },
+                    ] if src.is_contiguous() && dest.is_contiguous()
+                      && src_shape.iter().all(|d| d.get() == 1 || d.get() == 16)
+                      && src_shape.iter().filter(|d| d.get() == 16).count() == 1
+                      && src_shape == dest_shape
+                      && src_vs == &Some(nz!(16u32))
+                      && dest_vs == &Some(nz!(8u32))
+                      && src_layout.is_row_major()
+                      && dest_layout.0.iter().all(|(_, pd)| pd == &PhysDim::Dynamic || pd == &leaved)
+                      && dest_layout.0.iter().filter(|(_, pd)| pd == &leaved).count() == 1
+                )
+            }
+            CpuKernel::VectorDeinterleaveF32Bf16 => {
+                // TODO: Fill in
+                false
             }
             CpuKernel::ValueAssign => {
                 debug_assert_eq!(operands.len(), 2);
@@ -565,6 +632,7 @@ impl Kernel for CpuKernel {
             }
             CpuKernel::DotProductLoop
             | CpuKernel::DotProductLoopBf16Bf16F32
+            | CpuKernel::DotProductLoopF32InterleavedBf16F32
             | CpuKernel::DotProductLoopF32Bf16F32 => {
                 // TODO: Count any additional peak memory from sum8.
                 MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
@@ -574,6 +642,7 @@ impl Kernel for CpuKernel {
                         // TODO: Add intermediate consumption
                         match self {
                             CpuKernel::DotProductLoopBf16Bf16F32 => {}
+                            CpuKernel::DotProductLoopF32InterleavedBf16F32 => {}
                             CpuKernel::DotProductLoopF32Bf16F32 => {}
                             _ => {}
                         }
@@ -590,6 +659,12 @@ impl Kernel for CpuKernel {
                     }
                 },
             )),
+            CpuKernel::VectorInterleaveBf16F32 | CpuKernel::VectorDeinterleaveF32Bf16 => {
+                MemoryAllocation::Simple(CPU_LEVELS.map(|_| {
+                    // TODO: Count any intermediate vectors.
+                    0
+                }))
+            }
             _ => MemoryAllocation::none(),
         }
     }
@@ -624,12 +699,18 @@ impl Kernel for CpuKernel {
                 // 4.2 cycles throughput.
                 INST_COST * 4
             }
-            CpuKernel::DotProductLoopBf16Bf16F32 | CpuKernel::DotProductLoopF32Bf16F32 => {
-                // TODO: Count throughput!
+            CpuKernel::DotProductLoopBf16Bf16F32
+            | CpuKernel::DotProductLoopF32InterleavedBf16F32
+            | CpuKernel::DotProductLoopF32Bf16F32 => {
+                // TODO: Measure throughput!
                 INST_COST * 5
             }
             CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
             CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
+            CpuKernel::VectorInterleaveBf16F32 | CpuKernel::VectorDeinterleaveF32Bf16 => {
+                // TODO: Measure throughput!
+                INST_COST
+            }
             CpuKernel::MultAdd | CpuKernel::CastBf16F32 | CpuKernel::VectorCastBf16F32 => INST_COST,
             CpuKernel::ValueAssign
             | CpuKernel::VectorAssign
@@ -647,7 +728,11 @@ impl Kernel for CpuKernel {
     }
 }
 
-fn dotproductloop_applies<Tgt: CpuTarget>(operands: &[TensorSpec<Tgt>], lhs_dtype: Dtype) -> bool {
+fn dotproductloop_applies<Tgt: CpuTarget>(
+    operands: &[TensorSpec<Tgt>],
+    lhs_dtype: Dtype,
+    allowed_lhs_layouts: &[Layout],
+) -> bool {
     matches!(
         operands,
         [
@@ -678,7 +763,7 @@ fn dotproductloop_applies<Tgt: CpuTarget>(operands: &[TensorSpec<Tgt>], lhs_dtyp
           && lhs_shape[1].get() % (DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
           && out_shape[0] == nz!(1u32)
           && out_shape[1] == nz!(1u32)
-          && lhs.layout().is_row_major()
+          && allowed_lhs_layouts.contains(&lhs.layout())
           && rhs.layout() == col_major(2)
           && lhs.is_contiguous() && rhs.is_contiguous()
     )

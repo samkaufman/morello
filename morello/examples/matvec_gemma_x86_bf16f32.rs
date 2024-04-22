@@ -1,7 +1,7 @@
 use morello::codegen::{CodeGen, CpuCodeGenThreadStyle};
 use morello::common::{DimSize, Dtype};
 use morello::db::RocksDatabase;
-use morello::layout::{col_major, row_major};
+use morello::layout::{col_major, row_major, Layout, PhysDim};
 use morello::lspec;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
@@ -16,6 +16,7 @@ use morello::utils::ToWriteFmt;
 
 use clap::Parser;
 use nonzero::nonzero as nz;
+use smallvec::smallvec;
 use std::io;
 use std::path;
 
@@ -46,18 +47,30 @@ fn main() {
     println!("Logical Spec: {}", spec.0);
 
     // Manually schedule the matrix multiplication.
+    let interleaved = Layout::new(smallvec![
+        (0, PhysDim::Dynamic),
+        (1, PhysDim::Dynamic),
+        (1, PhysDim::Interleaved(nz!(16u32)))
+    ]);
+
     let implementation = spec
-        .cast(0, Dtype::Float32, CpuMemoryLevel::L1, row_major(2), None)
+        .cast(
+            0,
+            Dtype::Float32,
+            CpuMemoryLevel::L1,
+            interleaved.clone(),
+            None,
+        )
         .subschedule(&[0], &|z| {
             z.tile_out(&[1, 16], false)
                 .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
                 .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(16u32)))
-                .subschedule(&[0], &|za| za.place(CpuKernel::VectorAssign))
-                .subschedule(&[1], &|zb| {
-                    zb.move_param(1, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
-                        .subschedule(&[0], &|zb0| zb0.place(CpuKernel::VectorCastBf16F32))
-                        .subschedule(&[1], &|zb1| {
-                            zb1.tile_out(&[1, 8], false).place(CpuKernel::VectorAssign)
+                .subschedule(&[0], &|z| z.place(CpuKernel::VectorAssign))
+                .subschedule(&[1], &|z| {
+                    z.move_param(1, CpuMemoryLevel::VRF, interleaved.clone(), Some(nz!(8u32)))
+                        .subschedule(&[0], &|z| z.place(CpuKernel::VectorInterleaveBf16F32))
+                        .subschedule(&[1], &|z| {
+                            z.tile_out(&[1, 8], false).place(CpuKernel::VectorAssign)
                         })
                 })
         })
@@ -68,15 +81,15 @@ fn main() {
                 .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
                 .subschedule(&[0], &|z| z.to_accum())
                 .subschedule(&[0, 0], &|z| z.place(CpuKernel::MemsetZero))
-        })
-        .subschedule(&[1, 0, 1], &|z| {
-            println!("Synthesizing {z}");
-            z.synthesize(&db, None)
-        })
-        .subschedule(&[1, 1], &|body| {
-            body.move_param(0, CpuMemoryLevel::L1, col_major(2), None)
-                .subschedule(&[0], &|z| z.synthesize(&db, None))
-                .subschedule(&[1], &|z| z.synthesize(&db, None))
+                .subschedule(&[0, 1], &|body| {
+                    body.move_param(1, CpuMemoryLevel::L1, col_major(2), None)
+                        .place(CpuKernel::DotProductLoopF32InterleavedBf16F32)
+                })
+                .subschedule(&[1], &|body| {
+                    body.move_param(0, CpuMemoryLevel::L1, col_major(2), None)
+                        .subschedule(&[0], &|z| z.place(CpuKernel::ValueAssign))
+                        .subschedule(&[1], &|z| z.place(CpuKernel::ValueAssign))
+                })
         });
 
     // Drop the DB to flush early.
