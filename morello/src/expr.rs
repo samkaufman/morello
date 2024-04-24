@@ -350,8 +350,8 @@ impl<T: Display> Display for NonAffine<T> {
         match self {
             NonAffine::Constant(v) => write!(f, "{}", v),
             NonAffine::Leaf(v) => write!(f, "{}", v),
-            NonAffine::FloorDiv(v, d) => write!(f, "{} / {}", v, d),
-            NonAffine::Mod(v, m) => write!(f, "{} % {}", v, m),
+            NonAffine::FloorDiv(v, d) => write!(f, "({}) / {}", v, d),
+            NonAffine::Mod(v, m) => write!(f, "({}) % {}", v, m),
         }
     }
 }
