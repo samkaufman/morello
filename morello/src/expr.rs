@@ -1,6 +1,6 @@
 use std::{
     fmt::Display,
-    ops::{Add, AddAssign, Mul, MulAssign, Rem, Sub},
+    ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Rem, RemAssign, Sub},
 };
 
 pub type NonAffineExpr<T> = AffineForm<NonAffine<T>>;
@@ -292,6 +292,25 @@ impl<T> MulAssign<i32> for AffineForm<T> {
     }
 }
 
+impl<T> Div<u32> for AffineForm<NonAffine<T>> {
+    type Output = Self;
+
+    fn div(self, rhs: u32) -> Self::Output {
+        debug_assert_ne!(rhs, 0);
+        if rhs == 1 {
+            self
+        } else {
+            NonAffine::FloorDiv(Box::new(self), rhs).into()
+        }
+    }
+}
+
+impl<T> DivAssign<u32> for AffineForm<NonAffine<T>> {
+    fn div_assign(&mut self, rhs: u32) {
+        *self = std::mem::take(self) / rhs
+    }
+}
+
 impl<T> Rem<u32> for AffineForm<NonAffine<T>> {
     type Output = Self;
 
@@ -321,9 +340,33 @@ impl<T> Rem<u32> for NonAffine<T> {
     }
 }
 
+impl<T> RemAssign<u32> for AffineForm<NonAffine<T>> {
+    fn rem_assign(&mut self, rhs: u32) {
+        *self = std::mem::take(self) % rhs
+    }
+}
+
+impl<T> RemAssign<u32> for NonAffine<T> {
+    fn rem_assign(&mut self, rhs: u32) {
+        *self = std::mem::take(self) % rhs
+    }
+}
+
 impl<T: Atom> From<T> for NonAffine<T> {
     fn from(t: T) -> Self {
         NonAffine::Leaf(t)
+    }
+}
+
+impl<T> Default for AffineForm<T> {
+    fn default() -> Self {
+        AffineForm::zero()
+    }
+}
+
+impl<T> Default for NonAffine<T> {
+    fn default() -> Self {
+        NonAffine::Constant(0)
     }
 }
 

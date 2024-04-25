@@ -108,29 +108,26 @@ impl Layout {
 
             // Construct a "term" for this physical dimension: really, an expression parameterized
             // by a logical dimension.
-            let mut term = BufferVar::Pt(logical_dim, expr_id.clone()).into();
+            let mut term = NonAffineExpr::from(BufferVar::Pt(logical_dim, expr_id.clone()));
+            if physical_size != concrete_shape[logical_dim_us] {
+                term %= prev_remaining_volume.get();
+            }
             match phys_dim {
                 PhysDim::Interleaved(deinterleave_strip_size) => {
                     let deinterleave_strip_size = deinterleave_strip_size.get();
                     debug_assert_eq!(deinterleave_strip_size % 2, 0);
-                    if concrete_shape[logical_dim_us] != physical_size {
-                        term = NonAffineExpr::from(term % prev_remaining_volume.get());
-                    }
-                    let wterm = term.clone() % 2;
-                    term = wterm * i32::try_from(deinterleave_strip_size / 2).unwrap()
-                        + NonAffineExpr::from(NonAffine::FloorDiv(Box::new(term), 2));
-                    if new_remaining_volume.get() > 1 {
-                        term =
-                            NonAffine::FloorDiv(Box::new(term), new_remaining_volume.get()).into();
-                    }
+                    let half_size = deinterleave_strip_size / 2;
+                    let half_size_i32 = i32::try_from(half_size).unwrap();
+
+                    let alternating_term =
+                        ((term.clone() % deinterleave_strip_size) % 2) * half_size_i32;
+                    let linear_term = (term % deinterleave_strip_size) / 2;
+                    term = linear_term + alternating_term;
+                    term /= new_remaining_volume.get();
                 }
                 _ => {
                     if concrete_shape[logical_dim_us] != physical_size {
-                        if prev_remaining_volume != concrete_shape[logical_dim_us] {
-                            term = term % prev_remaining_volume.get();
-                        }
-                        term =
-                            NonAffine::FloorDiv(Box::new(term), new_remaining_volume.get()).into();
+                        term /= new_remaining_volume.get();
                     }
                 }
             };
