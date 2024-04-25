@@ -319,6 +319,7 @@ impl<V: View> Tile<V> {
         divrem::DivCeil::div_ceil(origin_size.get(), self.step_sizes[usize::from(dim)].get())
     }
 
+    /// Replace points in the given indexing expression with tile coordinate-adjusted points.
     pub fn compose_buffer_indexing_expr(
         &self,
         inner_expr: NonAffineExpr<BufferVar>,
@@ -348,7 +349,7 @@ impl<V: View> Tile<V> {
                 }
                 AffineForm(terms, 0)
             }
-            BufferVar::TileIdx(_, _) => AffineForm(vec![Term(1, NonAffine::Leaf(term_var))], 0),
+            BufferVar::TileIdx(_, _) => NonAffine::Leaf(term_var).into(),
         })
     }
 }
