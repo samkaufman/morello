@@ -538,8 +538,6 @@ impl Layout {
     fn assert_no_size_1_packings(&self) {
         #[cfg(debug_assertions)]
         {
-            use nonzero::nonzero as nz;
-
             let Layout(dims) = self;
             for (_, size) in dims {
                 debug_assert_ne!(
