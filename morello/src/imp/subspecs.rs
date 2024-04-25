@@ -54,6 +54,7 @@ where
     P: Borrow<Spec<Tgt>> + Clone,
     Aux: Clone,
 {
+    /// Returns a [Spec] application with [Param] operands.
     pub fn default_app(spec: P) -> Self
     where
         Aux: Default,
