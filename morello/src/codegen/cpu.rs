@@ -203,10 +203,9 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         writeln!(out, "}}")
     }
 
-    pub fn emit_main<W: Write>(
+    pub fn emit_standard_main<W: Write>(
         &mut self,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
-        benchmark: bool,
         out: &mut W,
     ) -> fmt::Result {
         let mut main_body_str = String::new();
@@ -222,26 +221,14 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
             let spec = kernel_argument.spec();
             let buf =
                 self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
-            buf.emit(
-                &mut main_body_str,
-                if benchmark {
-                    InitType::Random
-                } else {
-                    InitType::Zero
-                },
-                depth,
-            )?;
+            buf.emit(&mut main_body_str, InitType::Zero, depth)?;
             parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
             self.name_env.insert(Rc::clone(kernel_argument), buf);
             writeln!(main_body_str)?;
         }
 
         // Load data, if provided.
-        let (bottom_argc, full_argc) = if benchmark {
-            (2, top_arg_tensors.len() + 2)
-        } else {
-            (1, top_arg_tensors.len() + 1)
-        };
+        let full_argc = top_arg_tensors.len() + 1;
         writeln!(
             main_body_str,
             "{}if (argc == {}) {{",
@@ -251,9 +238,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         depth += 1;
         writeln!(
             main_body_str,
-            "{}int load_result = load_inputs(&argv[{}]{});",
+            "{}int load_result = load_inputs(&argv[1]{});",
             indent(depth),
-            bottom_argc,
             parameter_buf_names
                 .iter()
                 .map(|n| format!(", {}", n))
@@ -270,11 +256,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         depth -= 1;
         writeln!(main_body_str, "{}}}", indent(depth))?;
         depth -= 1;
-        writeln!(
-            main_body_str,
-            "{}}} else if (argc != {bottom_argc}) {{",
-            indent(depth)
-        )?;
+        writeln!(main_body_str, "{}}} else if (argc != 1) {{", indent(depth))?;
         depth += 1;
         writeln!(
             main_body_str,
@@ -286,12 +268,48 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         writeln!(main_body_str, "{}}}", indent(depth))?;
 
         let kernel_call_str = self.make_kernel_call(top_arg_tensors)?;
-        if benchmark {
-            self.emit_benchmarking(&kernel_call_str, depth, &mut main_body_str)?;
-        } else {
-            writeln!(main_body_str, "{}{}\n", indent(depth), kernel_call_str)?;
-            self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
+        writeln!(main_body_str, "{}{}\n", indent(depth), kernel_call_str)?;
+        self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
+        writeln!(main_body_str)?;
+
+        // Free the buffers.
+        for kernel_argument in top_arg_tensors {
+            let buf = self.name_env.get(kernel_argument).unwrap();
+            buf.emit_free(&mut main_body_str, depth)?;
         }
+
+        writeln!(main_body_str, "\n{}return 0;", indent(depth))?;
+        writeln!(main_body_str, "}}")?;
+
+        out.write_str(&main_body_str)
+    }
+
+    pub fn emit_benchmarking_main<W: Write>(
+        &mut self,
+        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+        out: &mut W,
+    ) -> fmt::Result {
+        let mut main_body_str = String::new();
+        let mut depth = 0_usize;
+
+        writeln!(main_body_str, "int main(int argc, char *argv[]) {{")?;
+        depth += 1;
+
+        // Allocate a buffer for each Impl parameter and re-bind to a CBuffer corresponding to the
+        // local-scope buffer. It will have been previously bound by emit_kernel to a CBuffer::Ptr.
+        let mut parameter_buf_names = vec![];
+        for kernel_argument in top_arg_tensors {
+            let spec = kernel_argument.spec();
+            let buf =
+                self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
+            buf.emit(&mut main_body_str, InitType::Random, depth)?;
+            parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
+            self.name_env.insert(Rc::clone(kernel_argument), buf);
+            writeln!(main_body_str)?;
+        }
+
+        let kernel_call_str = self.make_kernel_call(top_arg_tensors)?;
+        self.emit_benchmarking(&kernel_call_str, depth, &mut main_body_str)?;
         writeln!(main_body_str)?;
 
         // Free the buffers.

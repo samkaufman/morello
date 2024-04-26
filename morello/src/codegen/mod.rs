@@ -130,9 +130,13 @@ where
         }
         generator.emit_kernel(self, &top_arg_tensors, benchmark, out)?;
         out.write_char('\n')?;
-        generator.emit_load_inputs(&top_arg_tensors, out)?;
-        out.write_char('\n')?;
-        generator.emit_main(&top_arg_tensors, benchmark, out)?;
+        if benchmark {
+            generator.emit_benchmarking_main(&top_arg_tensors, out)?;
+        } else {
+            generator.emit_load_inputs(&top_arg_tensors, out)?;
+            out.write_char('\n')?;
+            generator.emit_standard_main(&top_arg_tensors, out)?;
+        }
         Ok(())
     }
 
