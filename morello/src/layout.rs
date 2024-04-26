@@ -108,8 +108,8 @@ impl Layout {
 
             // Construct a "term" for this physical dimension: really, an expression parameterized
             // by a logical dimension.
-            let mut term = NonAffineExpr::from(BufferVar::Pt(logical_dim, expr_id.clone()));
-            if physical_size != concrete_shape[logical_dim_us] {
+            let mut term: NonAffineExpr<_> = BufferVar::Pt(logical_dim, expr_id.clone()).into();
+            if prev_remaining_volume != concrete_shape[logical_dim_us] {
                 term %= prev_remaining_volume.get();
             }
             match phys_dim {
