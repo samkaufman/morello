@@ -1091,12 +1091,8 @@ mod tests {
         let expr_id = OpaqueSymbol::new();
         let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![8]);
 
-        let pt = Box::new(NonAffineExpr::from(NonAffine::Leaf(BufferVar::Pt(
-            0,
-            expr_id.clone(),
-        ))));
-        let expected = (NonAffineExpr::from(NonAffine::Mod(pt.clone(), 2)) * 4i32)
-            + NonAffineExpr::from(NonAffine::FloorDiv(pt, 2));
+        let pt = NonAffineExpr::from(BufferVar::Pt(0, expr_id.clone()));
+        let expected = (pt.clone() % 8) / 2 + (pt % 2) * 4i32;
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
     }
 
@@ -1109,16 +1105,8 @@ mod tests {
         let expr_id = OpaqueSymbol::new();
         let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![16]);
 
-        let pt = Box::new(NonAffineExpr::from(NonAffine::Leaf(BufferVar::Pt(
-            0,
-            expr_id.clone(),
-        ))));
-        let expected = NonAffineExpr::from(NonAffine::FloorDiv(pt.clone(), 8)) * 8i32
-            + (NonAffineExpr::from(NonAffine::Mod(pt.clone(), 2)) * 4i32)
-            + NonAffineExpr::from(NonAffine::FloorDiv(
-                Box::new(NonAffine::Mod(pt, 8).into()),
-                2,
-            ));
+        let pt = NonAffineExpr::from(BufferVar::Pt(0, expr_id.clone()));
+        let expected = (pt.clone() / 8) * 8 + (pt.clone() % 8) / 2 + (pt % 2) * 4;
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
     }
 
