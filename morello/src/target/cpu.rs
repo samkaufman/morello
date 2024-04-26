@@ -315,9 +315,11 @@ impl Kernel for CpuKernel {
     // TODO: Rename to parameters
     fn applies_to_parameters<Tgt: CpuTarget>(&self, operands: &[TensorSpec<Tgt>]) -> bool {
         match self {
-            CpuKernel::MultAdd => operands.iter().all(|o| {
-                o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == nz!(1u32))
-            }),
+            CpuKernel::MultAdd => {
+                operands.iter().all(|o| {
+                    o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == nz!(1u32))
+                }) && operands.iter().map(|o| o.dtype()).all_equal()
+            }
             CpuKernel::BroadcastVecMultAdd => {
                 // Only integers and 32-bit floats, which Clang should be able to handle pretty well with
                 // its vector type extension.
