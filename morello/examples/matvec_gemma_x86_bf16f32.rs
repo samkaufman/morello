@@ -1,9 +1,7 @@
 use morello::codegen::{CodeGen, CpuCodeGenThreadStyle};
 use morello::common::{DimSize, Dtype};
-use morello::db::RocksDatabase;
 use morello::layout::{col_major, row_major, Layout, PhysDim};
 use morello::lspec;
-use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{
@@ -14,27 +12,17 @@ use morello::target::{
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
-use clap::Parser;
 use nonzero::nonzero as nz;
 use smallvec::smallvec;
 use std::io;
-use std::path;
-
-#[derive(Parser)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    #[arg(long, short)]
-    db: Option<path::PathBuf>,
-}
 
 fn main() {
-    let args = Args::parse();
-    let db = RocksDatabase::try_new(args.db.as_deref(), true, 1).unwrap();
-
     const M: DimSize = nz!(1u32);
     const K: DimSize = nz!(2048u32);
     const N: DimSize = nz!(16384u32);
 
+    // Let's construct a multi-threaded matrix-matrix multiplication which takes two bf16
+    // matrices and produces a f32 matrix.
     let spec = Spec::<X86Target>(
         lspec!(Matmul(
             [M, K, N],
@@ -44,13 +32,12 @@ fn main() {
         )),
         X86Target::max_mem(),
     );
-    println!("Logical Spec: {}", spec.0);
 
     // Manually schedule the matrix multiplication.
     let interleaved = Layout::new(smallvec![
         (0, PhysDim::Dynamic),
         (1, PhysDim::Dynamic),
-        (1, PhysDim::Interleaved(nz!(16u32)))
+        (1, PhysDim::Interleaved(nz!(16u32))),
     ]);
 
     let implementation = spec
@@ -92,36 +79,21 @@ fn main() {
                 })
         });
 
-    // Drop the DB to flush early.
-    drop(db);
-
-    println!("\nImpl resulting from manual scheduling:");
-    pprint(&implementation, ImplPrintStyle::Full);
-
-    println!("\nThe above Impl lowered to C:");
     implementation
         .emit_ext(
-            false,
+            true,
             None,
             CpuCodeGenThreadStyle::Highway,
             &mut ToWriteFmt(io::stdout()),
         )
         .unwrap();
 
-    // If the verification flag is set, let's additionally double-check that the lowered
-    // code builds and produces the correct results.
-    #[cfg(feature = "verification")]
-    {
-        let artifact = implementation.build(false).unwrap();
-        if !artifact.check_correctness(&spec) {
-            panic!("Generated code returned incorrect output");
-        }
-    }
-
-    // And benchmark!
-    let result = implementation.bench(3, None).unwrap();
-    let inner_loop_runtime = result.best_inner_loop_runtime();
-    let kernel_runtime = inner_loop_runtime / result.inner_loop_iterations;
-    println!("\nkernel runtime: {:.8}s", kernel_runtime.as_secs_f32());
-    println!("loop runtime: {}ns", inner_loop_runtime.as_nanos());
+    // Benchmark.
+    const ITERS: u32 = 100;
+    let result = implementation.bench(ITERS, None).unwrap();
+    let kernel_runtime =
+        (result.best_inner_loop_runtime() / result.inner_loop_iterations).as_secs_f64();
+    let throughput =
+        result.inner_loop_iterations as f64 / result.best_inner_loop_runtime().as_secs_f64();
+    println!("\n// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)",);
 }
