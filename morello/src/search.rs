@@ -132,7 +132,12 @@ where
     let mut goal_group = Vec::new();
     for page_group in grouped_canonical_goals.values() {
         goal_group.clear();
-        goal_group.extend(page_group.iter().map(|&i| &canonical_goals[i]));
+        goal_group.extend(page_group.iter().map(|&i| canonical_goals[i].clone()));
+
+        // TODO: Remove following check.
+        // goal_group.iter().counts().iter().for_each(|(k, v)| {
+        //     assert_eq!(*v, 1, "Goal group contains duplicate Spec: {k}");
+        // });
 
         let (result, hits, misses) = if thread_count == 1 {
             let search = TopDownSearch::<'d> {
@@ -143,7 +148,7 @@ where
                 hits: 0,
                 misses: 1,
             };
-            let r = BlockSearch::synthesize(goal_group.iter().copied(), &search, None);
+            let r = BlockSearch::synthesize(&goal_group, &search, None);
             (r, search.hits, search.misses)
         } else {
             let tasks = (0..thread_count)
@@ -162,7 +167,7 @@ where
                         hits: 0,
                         misses: 1,
                     };
-                    let r = BlockSearch::synthesize(gs.iter(), &search, None);
+                    let r = BlockSearch::synthesize(&gs, &search, None);
                     (r, search.hits, search.misses)
                 })
                 .collect::<Vec<_>>()
@@ -186,15 +191,11 @@ where
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
-    fn synthesize<'i, I>(
-        goals: I,
+    fn synthesize(
+        goals: &[Spec<Tgt>],
         search: &'a TopDownSearch<'d>,
         prefetch_after: Option<&Spec<Tgt>>,
-    ) -> Vec<ActionCostVec>
-    where
-        I: IntoIterator<Item = &'i Spec<Tgt>> + 'i,
-    {
-        let goals = goals.into_iter().collect::<Vec<_>>();
+    ) -> Vec<ActionCostVec> {
         debug_assert!(goals.iter().all_unique());
 
         let mut block = BlockSearch {
@@ -206,7 +207,7 @@ where
         let mut visited_in_stage = HashSet::new();
         let mut outbox = Vec::new();
         let mut final_result_tasks = Vec::with_capacity(goals.len());
-        for g in &goals {
+        for g in goals {
             final_result_tasks.push(block.visit_spec_wb(g, &mut visited_in_stage, &mut outbox));
         }
 
