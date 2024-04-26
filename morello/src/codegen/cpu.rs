@@ -80,7 +80,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         )?;
 
         let thread_extra_args = self.thread_style_extra_args();
-        let fn_arg_count = usize::from(imp.parameter_count()) + thread_extra_args.len();
+        let parameter_count = usize::from(imp.parameter_count());
+        let fn_arg_count = parameter_count + thread_extra_args.len();
 
         let mut operand_idx = 0;
         for (operand, tensor) in imp.parameters().zip(top_arg_tensors) {
@@ -88,7 +89,12 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
             let parameter_name = self.namer.fresh_name();
             writeln!(
                 main_body_str,
-                "  {} *__restrict__ {}{}",
+                "  {}{} *__restrict__ {}{}",
+                if operand_idx + 1 < parameter_count {
+                    "const "
+                } else {
+                    ""
+                },
                 c_type(operand.dtype),
                 parameter_name,
                 if operand_idx + 1 < fn_arg_count {
