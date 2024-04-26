@@ -2,7 +2,7 @@ use crate::{
     alignment::aligned_approx,
     common::{DimSize, Shape},
     expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term},
-    layout::{BufferVar, LayoutError},
+    layout::{BufferVar, Layout, LayoutError},
     opaque_symbol::OpaqueSymbol,
     target::Target,
     tensorspec::TensorSpec,
@@ -33,6 +33,15 @@ pub trait View: Debug {
     fn make_buffer_indexing_expr(
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+    ) -> NonAffineExpr<BufferVar> {
+        self.make_buffer_indexing_expr_with_layout(env, &self.spec().layout())
+    }
+
+    // TODO: Rename
+    fn make_buffer_indexing_expr_with_layout(
+        &self,
+        env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+        layout: &Layout,
     ) -> NonAffineExpr<BufferVar>;
 
     /// Update environment to map all nested [Param]s to Views, given `args`.
@@ -167,12 +176,13 @@ impl<Tgt: Target> View for Param<Tgt> {
         &self.1
     }
 
-    fn make_buffer_indexing_expr(
+    fn make_buffer_indexing_expr_with_layout(
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+        layout: &Layout,
     ) -> NonAffineExpr<BufferVar> {
         let resolved = env.get(self).expect("Param should be in environment");
-        resolved.make_buffer_indexing_expr(env)
+        resolved.make_buffer_indexing_expr_with_layout(env, layout)
     }
 
     fn bind<'i>(
@@ -228,13 +238,12 @@ impl<Tgt: Target> View for Tensor<Tgt> {
         &self.0
     }
 
-    fn make_buffer_indexing_expr(
+    fn make_buffer_indexing_expr_with_layout(
         &self,
         _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+        layout: &Layout,
     ) -> NonAffineExpr<BufferVar> {
-        self.spec()
-            .layout()
-            .buffer_indexing_expr(&self.1, self.shape())
+        layout.buffer_indexing_expr(&self.1, self.shape())
     }
 
     fn bind<'i>(
@@ -259,11 +268,13 @@ impl<V: View> View for CacheView<V> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr(
+    fn make_buffer_indexing_expr_with_layout(
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+        layout: &Layout,
     ) -> NonAffineExpr<BufferVar> {
-        self.source.make_buffer_indexing_expr(env)
+        self.source
+            .make_buffer_indexing_expr_with_layout(env, layout)
     }
 
     fn bind<'i>(
@@ -368,11 +379,14 @@ impl<T: View> View for Tile<T> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr(
+    fn make_buffer_indexing_expr_with_layout(
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+        layout: &Layout,
     ) -> NonAffineExpr<BufferVar> {
-        self.compose_buffer_indexing_expr(self.view.make_buffer_indexing_expr(env))
+        self.compose_buffer_indexing_expr(
+            self.view.make_buffer_indexing_expr_with_layout(env, layout),
+        )
     }
 
     fn bind<'i>(
@@ -398,9 +412,10 @@ impl<T: View> View for SqueezeDimsView<T> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr(
+    fn make_buffer_indexing_expr_with_layout(
         &self,
         _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+        _layout: &Layout,
     ) -> NonAffineExpr<BufferVar> {
         todo!()
     }
@@ -428,9 +443,10 @@ impl<T: View> View for TransposeView<T> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr(
+    fn make_buffer_indexing_expr_with_layout(
         &self,
         _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
+        _layout: &Layout,
     ) -> NonAffineExpr<BufferVar> {
         todo!()
     }
