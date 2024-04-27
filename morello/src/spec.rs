@@ -680,6 +680,18 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                             return false;
                         }
                     }
+
+                    if basics.dtypes.iter().all_equal()
+                        && primitive_aux.iter().map(|a| &a.layout).all_equal()
+                        && primitive_aux
+                            .iter()
+                            .all(|aux| aux.contig == aux.layout.contiguous_full())
+                        && primitive_aux.iter().any(|aux| {
+                            !aux.layout.is_row_major() || aux.contig != aux.layout.contiguous_full()
+                        })
+                    {
+                        return false;
+                    }
                 }
                 PrimitiveSpecType::Zero => {
                     if !primitive_aux[0].is_canonical(&basics.spec_shape) {
@@ -1883,10 +1895,21 @@ mod tests {
         fn test_canonicalize_is_noop_if_already_canonical(
             logical_spec in any::<LogicalSpec<X86Target>>()
         ) {
-            let mut c = logical_spec.clone();
-            c.canonicalize().unwrap();
-            let unchanged = logical_spec == c;
-            assert_eq!(logical_spec.is_canonical(), unchanged);
+            let mut canonicalized_logical_spec = logical_spec.clone();
+            canonicalized_logical_spec.canonicalize().unwrap();
+            if logical_spec == canonicalized_logical_spec {
+                prop_assert!(
+                    logical_spec.is_canonical(),
+                    "LogicalSpec::is_canonical was false, but canonicalizing {} was a no-op",
+                    logical_spec
+                );
+            } else {
+                prop_assert!(
+                    !logical_spec.is_canonical(),
+                    "LogicalSpec::is_canonical was true, but {} was canonicalized to {}",
+                    logical_spec, canonicalized_logical_spec
+                );
+            }
         }
 
         #[test]
