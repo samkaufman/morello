@@ -2021,6 +2021,34 @@ mod tests {
         }
 
         #[test]
+        fn test_actions_produce_canonical_subspecs(
+            spec in any::<Spec<X86Target>>()
+        ) {
+            spec.0.actions().into_iter().for_each(|action| {
+                let Ok(applied) = action.apply(&spec) else {
+                    return;
+                };
+                visit_leaves(&applied, &mut |leaf| {
+                    if let ImplNode::SpecApp(spec_app) = leaf {
+                        assert!(
+                            spec_app.0.is_canonical(),
+                            "Action {:?} applied to {} produced non-canonical {} (should be {})",
+                            action,
+                            spec,
+                            spec_app.0,
+                            {
+                                let mut c = spec_app.0.clone();
+                                c.canonicalize().unwrap();
+                                c
+                            }
+                        );
+                    }
+                    true
+                });
+            });
+        }
+
+        #[test]
         fn test_primitivebasicsbimap_is_invertible(basics in any::<PrimitiveBasics>()) {
             // TODO: Also test binary_scale_shapes = true
             let bimap = PrimitiveBasicsBimap {

@@ -258,6 +258,7 @@ impl<Tgt: Target> Action<Tgt> {
                 let mut inner_spec = logical_spec.clone();
                 inner_spec.replace_io(&new_operands);
                 inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
+                inner_spec.canonicalize().unwrap();
                 match self {
                     Action::TileOut { .. } => {}
                     Action::Split { .. } => {
@@ -631,7 +632,8 @@ impl<Tgt: Target> Action<Tgt> {
                         new_spec.replace_io(&new_operands);
                         new_spec
                     };
-                    let spec = Spec(new_inner_spec, lower_limits.clone());
+                    let mut spec = Spec(new_inner_spec, lower_limits.clone());
+                    spec.canonicalize().unwrap();
                     let inner_operands = new_operands.iter().enumerate().map(|(i, o)| {
                         Rc::new(Param::new(u8::try_from(i).unwrap(), o.clone()))
                             as Rc<dyn View<Tgt = Tgt>>
