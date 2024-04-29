@@ -1,7 +1,9 @@
 use morello::codegen::{CodeGen, CpuCodeGenThreadStyle};
 use morello::common::{DimSize, Dtype};
+use morello::cost::Cost;
 use morello::layout::{col_major, row_major, Layout, PhysDim};
 use morello::lspec;
+use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{
@@ -82,7 +84,7 @@ fn main() {
     implementation
         .emit_ext(
             true,
-            None,
+            Some(ImplPrintStyle::Compact),
             CpuCodeGenThreadStyle::Highway,
             &mut ToWriteFmt(io::stdout()),
         )
@@ -95,5 +97,6 @@ fn main() {
         (result.best_inner_loop_runtime() / result.inner_loop_iterations).as_secs_f64();
     let throughput =
         result.inner_loop_iterations as f64 / result.best_inner_loop_runtime().as_secs_f64();
-    println!("\n// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)",);
+    println!("\n// cost: {}", Cost::from_impl(&implementation).main);
+    println!("// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)",);
 }
