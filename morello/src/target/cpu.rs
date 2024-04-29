@@ -3,35 +3,107 @@ use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::imp::kernels::KernelType;
-use crate::layout::{col_major, nhwc, row_major, Layout};
-use crate::memorylimits::{MemVec, MemoryLimits};
+use crate::layout::{col_major, nhwc, row_major, Layout, PhysDim};
+use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
 use crate::shape;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use crate::target::{MemoryLevel, Target, TargetId, LEVEL_COUNT};
+use crate::target::{Kernel, MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
+use crate::views::Param;
 
 use divrem::DivRem;
 use itertools::Itertools;
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter;
 
-pub(super) trait CpuTarget:
-    Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static
-{
+const INST_COST: MainCost = 100;
+const ASSIGN_INST_COST: MainCost = 1;
+const CPU_LEVELS: [CpuMemoryLevel; 4] = [
+    CpuMemoryLevel::RF,
+    CpuMemoryLevel::VRF,
+    CpuMemoryLevel::L1,
+    CpuMemoryLevel::GL,
+];
+pub(crate) const DOT_PRODUCT_STRIP_SIZE: DimSize = nz!(8u32);
+pub(crate) const DOT_PRODUCT_ACCUM_COUNT: u32 = 4;
+pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: DimSize = nz!(16u32);
+pub(crate) const DOT_PRODUCT_BF16_ACCUM_COUNT: u32 = 4;
+
+pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     fn target_id() -> TargetId;
-    fn vec_types() -> &'static [VecType; 12];
+    fn vec_types() -> &'static [VecType; 16];
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    strum::VariantArray,
+    strum::IntoStaticStr,
+)]
+#[cfg_attr(test, derive(Hash, proptest_derive::Arbitrary))]
+pub enum CpuKernel {
+    /// Simple scalar multiplication (`+=`).
+    MultAdd,
+    /// Lowers to Clang's scalar-vector multiply-accumulate.
+    BroadcastVecMultAdd,
+    BroadcastVecMultAddBf16F32, // TODO: Move into X86 kernel.
+    /// Lowers to an outer product 1x2xN MatmulAccum implementation taking u8 and s8 inputs and
+    /// producing a s16 output.
+    ///
+    /// The first argument is broadcast over the N dimension with
+    /// [_mm256_set1_epi16](https://www.felixcloutier.com/x86/vpbroadcastb:vpbroadcastw:vpbroadcastd:vpbroadcastq):
+    /// ```text
+    ///                        0 1 2 3
+    ///      0 1 2 3           4 5 6 7
+    ///      4 5 6 7       a b    
+    /// a b            →   a b
+    ///                    a b
+    ///                    a b
+    /// ```
+    ///
+    /// and then the Hadamard is accumulated into the output with
+    /// [_mm256_maddubs_epi16](https://www.felixcloutier.com/x86/pmaddubsw)
+    /// and [_mm256_add_epi16](https://www.felixcloutier.com/x86/paddb:paddw:paddd:paddq):
+    /// ```text
+    /// += 0a 1a 2a 3a
+    ///    4b 5b 6b 7b
+    /// ```
+    TwoVecBroadcastVecMultAddU8S8S16,
+    DotProductLoop,
+    /// Lowers to a dot product loop with 4 accumulating registers which takes two bf16
+    /// vectors and produces a vector of float32s. The inputs are dequantized immediately
+    /// after being loaded and before multiplication.
+    DotProductLoopBf16Bf16F32,
+    /// Lowers to a dot product loop with 4 accumulating registers which scans a buffer
+    /// of float32 values and a buffer of bfloat16 values, producing float32s. The f32
+    /// inputs are dequantized immediately after being loaded and before multiplcation.
+    DotProductLoopF32Bf16F32,
+    DotProductLoopF32InterleavedBf16F32,
+    PhysicalTransposeByte128,
+    PhysicalTransposeByte256,
+    VectorInterleaveBf16F32,
+    VectorDeinterleaveF32Bf16,
+    ValueAssign,
+    VectorAssign,
+    MemsetZero,
+    /// Lowers to Clang vector extensions' zero-assignment, which, on x86, should emit `vxorps`.
+    VectorZero,
+    CastBf16F32,
+    VectorCastBf16F32,
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(
-    Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize, enum_iterator::Sequence,
-)]
+#[derive(Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize)]
 pub enum CpuMemoryLevel {
     RF,
     VRF,
@@ -44,6 +116,7 @@ pub struct CpuMemoryLevelBimap;
 
 impl<T: CpuTarget> Target for T {
     type Level = CpuMemoryLevel;
+    type Kernel = CpuKernel;
 
     fn line_size() -> u32 {
         32
@@ -62,12 +135,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn levels() -> [Self::Level; LEVEL_COUNT] {
-        [
-            CpuMemoryLevel::RF,
-            CpuMemoryLevel::VRF,
-            CpuMemoryLevel::L1,
-            CpuMemoryLevel::GL,
-        ]
+        CPU_LEVELS
     }
 
     fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
@@ -95,6 +163,7 @@ impl<T: CpuTarget> Target for T {
         };
 
         // Extend with all possible packings.
+        // TODO: Extend with interleavings as well.
         let all_packing_sizes = pack_sizes(None, dtype, &all_target_vector_bytes);
         let mut result = unpacked_layouts.clone();
         result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
@@ -111,7 +180,7 @@ impl<T: CpuTarget> Target for T {
                             .cloned()
                             .chain(iter::once((
                                 packing_dim.try_into().unwrap(),
-                                Some(packing_size),
+                                PhysDim::Packed(packing_size),
                             )))
                             .collect(),
                     ))
@@ -144,6 +213,7 @@ impl<T: CpuTarget> Target for T {
                 &all_target_vector_bytes,
             )
         }));
+        // TODO: Extend with interleavings as well.
         debug_assert!(
             result.iter().all(|r| r.applies_to_shape(shape)),
             "Some layouts don't apply to shape {:?}: {:?}",
@@ -156,54 +226,55 @@ impl<T: CpuTarget> Target for T {
         result
     }
 
-    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>> {
+    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>> + '_> {
         match spec {
-            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
-                PrimitiveSpecType::Matmul { accum } => {
-                    if *accum {
-                        let mut microkernels = vec![];
-                        if mult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::MultAdd));
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
+                let possible_kernels: &[CpuKernel] = match typ {
+                    PrimitiveSpecType::Matmul { accum } => {
+                        if *accum {
+                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 8] = [
+                                CpuKernel::MultAdd,
+                                CpuKernel::BroadcastVecMultAdd,
+                                CpuKernel::BroadcastVecMultAddBf16F32,
+                                CpuKernel::TwoVecBroadcastVecMultAddU8S8S16,
+                                CpuKernel::DotProductLoop,
+                                CpuKernel::DotProductLoopBf16Bf16F32,
+                                CpuKernel::DotProductLoopF32Bf16F32,
+                                CpuKernel::DotProductLoopF32InterleavedBf16F32,
+                            ];
+                            &MATMUL_ACCUM_KERNELS
+                        } else {
+                            &[]
                         }
-                        if broadcastvecmult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::BroadcastVecMultAdd));
-                        }
-                        if twovecbroadcastvecmult_applies_to_operands(&spec.parameters()) {
-                            microkernels.push(Action::Place(KernelType::TwoVecBroadcastVecMultAdd));
-                        }
-                        Box::new(microkernels.into_iter())
+                    }
+                    PrimitiveSpecType::Conv { .. } => &[],
+                    PrimitiveSpecType::Move { .. } => {
+                        const MOVE_KERNELS: [CpuKernel; 8] = [
+                            CpuKernel::ValueAssign,
+                            CpuKernel::VectorAssign,
+                            CpuKernel::PhysicalTransposeByte128,
+                            CpuKernel::PhysicalTransposeByte256,
+                            CpuKernel::VectorInterleaveBf16F32,
+                            CpuKernel::VectorDeinterleaveF32Bf16,
+                            CpuKernel::CastBf16F32,
+                            CpuKernel::VectorCastBf16F32,
+                        ];
+                        &MOVE_KERNELS
+                    }
+                    PrimitiveSpecType::Zero { .. } => {
+                        const ZERO_KERNELS: [CpuKernel; 2] =
+                            [CpuKernel::MemsetZero, CpuKernel::VectorZero];
+                        &ZERO_KERNELS
+                    }
+                };
+                Box::new(possible_kernels.iter().filter_map(move |mk| {
+                    if mk.applies_to_parameters(&spec.parameters()) {
+                        Some(Action::Place(*mk))
                     } else {
-                        Box::new(iter::empty())
+                        None
                     }
-                }
-                PrimitiveSpecType::Conv { .. } => Box::new(iter::empty()),
-                PrimitiveSpecType::Move { .. } => {
-                    let mut microkernels = vec![];
-                    if valueassign_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::ValueAssign));
-                    }
-                    if vectorassign_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::VectorAssign));
-                    }
-                    if physicaltransposebyte128_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::PhysicalTransposeByte128));
-                    }
-                    if physicaltransposebyte256_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::PhysicalTransposeByte256));
-                    }
-                    Box::new(microkernels.into_iter())
-                }
-                PrimitiveSpecType::Zero { .. } => {
-                    let mut microkernels = vec![];
-                    if memsetzero_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::MemsetZero));
-                    }
-                    if vectorzero_applies_to_operands(&spec.parameters()) {
-                        microkernels.push(Action::Place(KernelType::VectorZero));
-                    }
-                    Box::new(microkernels.into_iter())
-                }
-            },
+                }))
+            }
             LogicalSpec::Compose { .. } => Box::new(iter::empty()),
         }
     }
@@ -212,9 +283,492 @@ impl<T: CpuTarget> Target for T {
         <Self as CpuTarget>::target_id()
     }
 
-    fn vec_types() -> &'static [VecType; 12] {
+    fn vec_types() -> &'static [VecType; 16] {
         <Self as CpuTarget>::vec_types()
     }
+}
+
+impl Kernel for CpuKernel {
+    fn argument_count(&self) -> u8 {
+        match self {
+            CpuKernel::MultAdd
+            | CpuKernel::BroadcastVecMultAdd
+            | CpuKernel::BroadcastVecMultAddBf16F32
+            | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
+            | CpuKernel::DotProductLoop
+            | CpuKernel::DotProductLoopF32Bf16F32
+            | CpuKernel::DotProductLoopF32InterleavedBf16F32
+            | CpuKernel::DotProductLoopBf16Bf16F32 => 3,
+            CpuKernel::PhysicalTransposeByte128
+            | CpuKernel::PhysicalTransposeByte256
+            | CpuKernel::VectorInterleaveBf16F32
+            | CpuKernel::VectorDeinterleaveF32Bf16
+            | CpuKernel::ValueAssign
+            | CpuKernel::VectorAssign
+            | CpuKernel::CastBf16F32
+            | CpuKernel::VectorCastBf16F32 => 2,
+            CpuKernel::MemsetZero | CpuKernel::VectorZero => 1,
+        }
+    }
+
+    // TODO: Make into `applies_to_spec`
+    // TODO: Rename to parameters
+    fn applies_to_parameters<Tgt: CpuTarget>(&self, operands: &[TensorSpec<Tgt>]) -> bool {
+        match self {
+            CpuKernel::MultAdd => {
+                operands.iter().all(|o| {
+                    o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == nz!(1u32))
+                }) && operands.iter().map(|o| o.dtype()).all_equal()
+            }
+            CpuKernel::BroadcastVecMultAdd => {
+                // Only integers and 32-bit floats, which Clang should be able to handle pretty well with
+                // its vector type extension.
+                let first_dtype = operands[0].dtype();
+                if !matches!(
+                    first_dtype,
+                    Dtype::Sint8
+                        | Dtype::Uint8
+                        | Dtype::Sint16
+                        | Dtype::Uint16
+                        | Dtype::Sint32
+                        | Dtype::Uint32
+                        | Dtype::Float32
+                ) {
+                    return false;
+                }
+                operands.iter().skip(1).all(|o| o.dtype() == first_dtype)
+                    && shared_broadcastvecmult_applies_to_operands(operands)
+            }
+            CpuKernel::BroadcastVecMultAddBf16F32 => {
+                operands[0].dtype() == Dtype::Bfloat16
+                    && operands[1].dtype() == Dtype::Bfloat16
+                    && operands[2].dtype() == Dtype::Float32
+                    && operands[1].vector_size() == operands[2].vector_size()
+                    && shared_broadcastvecmult_applies_to_operands(operands)
+            }
+            CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => {
+                matches!(
+                    operands,
+                    [
+                        lhs @ TensorSpec {
+                            shape: lhs_shape,
+                            dtype: Dtype::Uint8,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::L1,
+                                ..
+                            },
+                        },
+                        rhs @ TensorSpec {
+                            shape: rhs_shape,
+                            dtype: Dtype::Sint8,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::VRF,
+                                vector_size: Some(rhs_vector_size),
+                                ..
+                            },
+                        },
+                        out @ TensorSpec {
+                            shape: out_shape,
+                            dtype: Dtype::Sint16,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::VRF,
+                                ..
+                            },
+                        }
+                    ] if lhs_shape[..] == [nz!(1u32), nz!(2u32)]
+                      && rhs_shape[0] == nz!(2u32)
+                      && out_shape[0] == nz!(1u32)
+                      && rhs_shape[1].get() * 2 == rhs_vector_size.get()
+                      && out_shape[1].get() * 2 == rhs_vector_size.get()
+                      && rhs.layout() == col_major(2) && out.layout().is_row_major()
+                      && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
+                )
+            }
+            CpuKernel::DotProductLoop => {
+                matches!(
+                    operands,
+                    [
+                        lhs @ TensorSpec {
+                            shape: lhs_shape,
+                            dtype: Dtype::Float32,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::L1,
+                                ..
+                            },
+                        },
+                        rhs @ TensorSpec {
+                            shape: _,
+                            dtype: Dtype::Float32,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::L1, ..
+                            },
+                        },
+                        TensorSpec {
+                            shape: out_shape,
+                            dtype: Dtype::Float32,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::RF,
+                                ..
+                            },
+                        }
+                    ] if lhs_shape[1].get() % (DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT) == 0
+                      && out_shape[..] == [nz!(1u32), nz!(1u32)]
+                      && lhs.layout().is_row_major()
+                      && rhs.layout() == col_major(2)
+                      && lhs.is_contiguous() && rhs.is_contiguous()
+                )
+            }
+            CpuKernel::DotProductLoopF32Bf16F32 => {
+                dotproductloop_applies(operands, Dtype::Float32, &[row_major(2)])
+            }
+            CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
+                // TODO: Simplify with a closure instead of constructing all layouts AOT.
+                let layout0 = Layout::new(smallvec![
+                    (0, PhysDim::Dynamic),
+                    (1, PhysDim::Dynamic),
+                    (1, PhysDim::Interleaved(nz!(16u32)))
+                ]);
+                let layout1 = Layout::new(smallvec![
+                    (1, PhysDim::Dynamic),
+                    (0, PhysDim::Dynamic),
+                    (0, PhysDim::Interleaved(nz!(16u32)))
+                ]);
+                dotproductloop_applies(operands, Dtype::Bfloat16, &[layout0, layout1])
+            }
+            CpuKernel::DotProductLoopBf16Bf16F32 => {
+                dotproductloop_applies(operands, Dtype::Bfloat16, &[row_major(2)])
+            }
+            CpuKernel::PhysicalTransposeByte128 => {
+                physicaltransposebyte_applies_to_operands(operands, 16)
+            }
+            CpuKernel::PhysicalTransposeByte256 => {
+                physicaltransposebyte_applies_to_operands(operands, 32)
+            }
+            CpuKernel::VectorInterleaveBf16F32 => {
+                let leaved = PhysDim::Interleaved(nz!(16u32));
+                matches!(
+                    operands,
+                    [
+                        src @ TensorSpec {
+                            shape: src_shape,
+                            dtype: Dtype::Bfloat16,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::VRF,
+                                layout: src_layout,
+                                vector_size: src_vs,
+                                aligned: _,
+                                contig: _
+                            },
+                        },
+                        dest @ TensorSpec {
+                            shape: dest_shape,
+                            dtype: Dtype::Float32,
+                            aux: TensorSpecAux {
+                                level: CpuMemoryLevel::VRF,
+                                layout: dest_layout,
+                                vector_size: dest_vs,
+                                aligned: _,
+                                contig: _
+                            },
+                        },
+                    ] if src.is_contiguous() && dest.is_contiguous()
+                      && src_shape.iter().all(|d| d.get() == 1 || d.get() == 16)
+                      && src_shape.iter().filter(|d| d.get() == 16).count() == 1
+                      && src_shape == dest_shape
+                      && src_vs == &Some(nz!(16u32))
+                      && dest_vs == &Some(nz!(8u32))
+                      && src_layout.is_row_major()
+                      && dest_layout.0.iter().all(|(_, pd)| pd == &PhysDim::Dynamic || pd == &leaved)
+                      && dest_layout.0.iter().filter(|(_, pd)| pd == &leaved).count() == 1
+                )
+            }
+            CpuKernel::VectorDeinterleaveF32Bf16 => {
+                // TODO: Fill in
+                false
+            }
+            CpuKernel::ValueAssign => {
+                debug_assert_eq!(operands.len(), 2);
+
+                if operands
+                    .iter()
+                    .flat_map(|o| o.shape())
+                    .any(|d| d.get() != 1)
+                {
+                    return false;
+                }
+
+                for o in &operands[1..] {
+                    if (o.dtype(), o.layout()) != (operands[0].dtype(), operands[0].layout()) {
+                        return false;
+                    }
+                }
+
+                operands.iter().any(|o| o.level() == CpuMemoryLevel::RF)
+                    && operands
+                        .iter()
+                        .all(|o| o.level() == CpuMemoryLevel::RF || o.level() == CpuMemoryLevel::L1)
+            }
+            CpuKernel::VectorAssign => {
+                if operands.iter().any(|o| !o.is_contiguous()) {
+                    return false;
+                }
+                if operands[0].dtype() != operands[1].dtype() {
+                    return false;
+                }
+                if operands[0].shape() != operands[1].shape() {
+                    return false;
+                }
+                if operands[0].layout() != operands[1].layout() {
+                    return false;
+                }
+
+                let mut has_vrf = false;
+                for o in operands {
+                    if o.level().vector_rf() {
+                        has_vrf = true;
+                        match o.vector_size() {
+                            Some(vector_size) => {
+                                if vector_size != o.volume() {
+                                    return false;
+                                }
+                            }
+                            None => {
+                                panic!("No vector_size on operand in level {:?}", o.level());
+                            }
+                        }
+                    }
+                }
+                has_vrf
+            }
+            CpuKernel::CastBf16F32 => matches!(
+                operands,
+                [
+                    TensorSpec {
+                        shape: lhs_shape,
+                        dtype: Dtype::Bfloat16,
+                        aux: TensorSpecAux {
+                            level: CpuMemoryLevel::RF,
+                            vector_size: None,
+                            ..
+                        },
+                    },
+                    TensorSpec {
+                        shape: rhs_shape,
+                        dtype: Dtype::Float32,
+                        aux: TensorSpecAux {
+                            level: CpuMemoryLevel::RF,
+                            vector_size: None,
+                            ..
+                        },
+                    }
+                ] if lhs_shape.iter().all(|d| d.get() == 1)
+                  && rhs_shape.iter().all(|d| d.get() == 1)
+            ),
+            CpuKernel::VectorCastBf16F32 => matches!(
+                operands,
+                [
+                    TensorSpec {
+                        shape: lhs_shape,
+                        dtype: Dtype::Bfloat16,
+                        aux: TensorSpecAux {
+                            level: CpuMemoryLevel::VRF,
+                            layout: lhs_layout,
+                            vector_size: Some(lhs_vector_size),
+                            ..
+                        },
+                    },
+                    TensorSpec {
+                        shape: rhs_shape,
+                        dtype: Dtype::Float32,
+                        aux: TensorSpecAux {
+                            level: CpuMemoryLevel::VRF,
+                            layout: rhs_layout,
+                            vector_size: Some(rhs_vector_size),
+                            ..
+                        },
+                    }
+                ] if lhs_shape == rhs_shape
+                  && lhs_shape.iter().all(|&d| d.get() == 1 || d.get() == 16)
+                  && lhs_shape.iter().filter(|&d| d.get() == 16).count() == 1
+                  && lhs_vector_size.get() == 16
+                  && rhs_vector_size.get() == 8
+                  && lhs_layout == rhs_layout
+            ),
+            CpuKernel::MemsetZero => {
+                operands[0].level() == CpuMemoryLevel::RF && operands[0].is_contiguous()
+            }
+            CpuKernel::VectorZero => {
+                if !operands[0].is_contiguous() {
+                    return false;
+                }
+                if operands[0].level() != CpuMemoryLevel::VRF {
+                    return false;
+                }
+                match operands[0].vector_size() {
+                    None => false,
+                    Some(vector_size) if vector_size != operands[0].volume() => false,
+                    _ => true,
+                }
+            }
+        }
+    }
+
+    fn memory_allocated<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MemoryAllocation {
+        match self {
+            // TODO: Model memory correctly for BroadcastVecMultAddBf16F32
+            CpuKernel::BroadcastVecMultAdd
+            | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
+            | CpuKernel::BroadcastVecMultAddBf16F32 => {
+                let vec_tensor_spec = &parameters[1].1;
+                let vb = u64::from(vec_tensor_spec.vector_size().unwrap().get())
+                    * u64::from(vec_tensor_spec.dtype().size());
+                MemoryAllocation::Simple(CPU_LEVELS.map(
+                    |level| {
+                        if level.vector_rf() {
+                            vb * 2
+                        } else {
+                            0
+                        }
+                    },
+                ))
+            }
+            CpuKernel::DotProductLoop
+            | CpuKernel::DotProductLoopBf16Bf16F32
+            | CpuKernel::DotProductLoopF32InterleavedBf16F32
+            | CpuKernel::DotProductLoopF32Bf16F32 => {
+                // TODO: Count any additional peak memory from sum8.
+                MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
+                    let mut used = 0;
+                    if level.vector_rf() {
+                        used = 128;
+                        // TODO: Add intermediate consumption
+                        match self {
+                            CpuKernel::DotProductLoopBf16Bf16F32 => {}
+                            CpuKernel::DotProductLoopF32InterleavedBf16F32 => {}
+                            CpuKernel::DotProductLoopF32Bf16F32 => {}
+                            _ => {}
+                        }
+                    }
+                    used
+                }))
+            }
+            CpuKernel::PhysicalTransposeByte256 => MemoryAllocation::Simple(CPU_LEVELS.map(
+                |level| {
+                    if level.vector_rf() {
+                        64
+                    } else {
+                        0
+                    }
+                },
+            )),
+            CpuKernel::VectorInterleaveBf16F32 | CpuKernel::VectorDeinterleaveF32Bf16 => {
+                MemoryAllocation::Simple(CPU_LEVELS.map(|_| {
+                    // TODO: Count any intermediate vectors.
+                    0
+                }))
+            }
+            _ => MemoryAllocation::none(),
+        }
+    }
+
+    fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost {
+        match self {
+            // TODO: Model cost for BroadcastVecMultAddBf16F32 correctly.
+            CpuKernel::BroadcastVecMultAdd
+            | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
+            | CpuKernel::BroadcastVecMultAddBf16F32 => {
+                let vec_tensor_spec = &parameters[1].1;
+
+                let vector_size = vec_tensor_spec.vector_size().unwrap().get();
+                let volume = vec_tensor_spec.volume().get();
+                debug_assert_eq!(volume % vector_size, 0);
+                let vector_count = volume / vector_size;
+                let mut cost = INST_COST * ((vector_count * 2) + 1);
+
+                // TwoVecBroadcastVecMultAdd takes an input from L1.
+                if matches!(self, CpuKernel::TwoVecBroadcastVecMultAddU8S8S16) {
+                    // TODO: Instead, call `move_cost`. Requires specializing kernel to X86/ARM.
+                    let mut l1_hit_cost = CpuMemoryLevel::L1.cache_hit_cost();
+                    if !parameters[0].1.is_contiguous() {
+                        l1_hit_cost *= 2;
+                    }
+                    cost += l1_hit_cost;
+                }
+
+                cost
+            }
+            CpuKernel::DotProductLoop => {
+                // 4.2 cycles throughput.
+                INST_COST * 4
+            }
+            CpuKernel::DotProductLoopBf16Bf16F32
+            | CpuKernel::DotProductLoopF32InterleavedBf16F32
+            | CpuKernel::DotProductLoopF32Bf16F32 => {
+                // TODO: Measure throughput!
+                INST_COST * 5
+            }
+            CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
+            CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
+            CpuKernel::VectorInterleaveBf16F32 | CpuKernel::VectorDeinterleaveF32Bf16 => {
+                // TODO: Measure throughput!
+                INST_COST
+            }
+            CpuKernel::MultAdd | CpuKernel::CastBf16F32 | CpuKernel::VectorCastBf16F32 => INST_COST,
+            CpuKernel::ValueAssign
+            | CpuKernel::VectorAssign
+            | CpuKernel::MemsetZero
+            | CpuKernel::VectorZero => ASSIGN_INST_COST,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        self.into()
+    }
+
+    fn all_kernels() -> &'static [Self] {
+        <Self as strum::VariantArray>::VARIANTS
+    }
+}
+
+fn dotproductloop_applies<Tgt: CpuTarget>(
+    operands: &[TensorSpec<Tgt>],
+    lhs_dtype: Dtype,
+    allowed_lhs_layouts: &[Layout],
+) -> bool {
+    matches!(
+        operands,
+        [
+            lhs @ TensorSpec {
+                shape: lhs_shape,
+                dtype: ldt,
+                aux: TensorSpecAux {
+                    level: CpuMemoryLevel::L1,
+                    ..
+                },
+            },
+            rhs @ TensorSpec {
+                shape: _,
+                dtype: Dtype::Bfloat16,
+                aux: TensorSpecAux {
+                    level: CpuMemoryLevel::L1, ..
+                },
+            },
+            TensorSpec {
+                shape: out_shape,
+                dtype: Dtype::Float32,
+                aux: TensorSpecAux {
+                    level: CpuMemoryLevel::RF,
+                    ..
+                },
+            }
+        ] if *ldt == lhs_dtype
+          && lhs_shape[1].get() % (DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
+          && out_shape[0] == nz!(1u32)
+          && out_shape[1] == nz!(1u32)
+          && allowed_lhs_layouts.contains(&lhs.layout())
+          && rhs.layout() == col_major(2)
+          && lhs.is_contiguous() && rhs.is_contiguous()
+    )
 }
 
 impl MemoryLevel for CpuMemoryLevel {
@@ -312,78 +866,6 @@ impl CanonicalBimap for CpuMemoryLevel {
     }
 }
 
-pub fn valueassign_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
-    operands: &[TensorSpec<Tgt>],
-) -> bool {
-    debug_assert_eq!(operands.len(), 2);
-
-    if operands
-        .iter()
-        .flat_map(|o| o.shape())
-        .any(|&d| d.get() != 1)
-    {
-        return false;
-    }
-
-    for o in &operands[1..] {
-        if (o.dtype(), o.layout()) != (operands[0].dtype(), operands[0].layout()) {
-            return false;
-        }
-    }
-
-    operands.iter().any(|o| o.level() == CpuMemoryLevel::RF)
-        && operands
-            .iter()
-            .all(|o| o.level() == CpuMemoryLevel::RF || o.level() == CpuMemoryLevel::L1)
-}
-
-pub fn vectorassign_applies_to_operands<Tgt: Target>(operands: &[TensorSpec<Tgt>]) -> bool {
-    if operands.iter().any(|o| !o.is_contiguous()) {
-        return false;
-    }
-    if operands[0].dtype() != operands[1].dtype() {
-        return false;
-    }
-    if operands[0].shape() != operands[1].shape() {
-        return false;
-    }
-    if operands[0].layout() != operands[1].layout() {
-        return false;
-    }
-
-    let mut has_vrf = false;
-    for o in operands {
-        if o.level().vector_rf() {
-            has_vrf = true;
-            match o.vector_size() {
-                Some(vector_size) => {
-                    if vector_size != o.volume() {
-                        return false;
-                    }
-                }
-                None => {
-                    panic!("No vector_size on operand in level {:?}", o.level());
-                }
-            }
-        }
-    }
-    has_vrf
-}
-
-pub fn physicaltransposebyte128_applies_to_operands<Tgt>(operands: &[TensorSpec<Tgt>]) -> bool
-where
-    Tgt: Target<Level = CpuMemoryLevel>,
-{
-    physicaltransposebyte_applies_to_operands(operands, 16)
-}
-
-pub fn physicaltransposebyte256_applies_to_operands<Tgt>(operands: &[TensorSpec<Tgt>]) -> bool
-where
-    Tgt: Target<Level = CpuMemoryLevel>,
-{
-    physicaltransposebyte_applies_to_operands(operands, 32)
-}
-
 fn physicaltransposebyte_applies_to_operands<Tgt>(
     operands: &[TensorSpec<Tgt>],
     vector_values: u32,
@@ -420,29 +902,7 @@ where
     true
 }
 
-pub fn memsetzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
-    operands: &[TensorSpec<Tgt>],
-) -> bool {
-    operands[0].level() == CpuMemoryLevel::RF && operands[0].is_contiguous()
-}
-
-pub fn vectorzero_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
-    operands: &[TensorSpec<Tgt>],
-) -> bool {
-    if !operands[0].is_contiguous() {
-        return false;
-    }
-    if operands[0].level() != CpuMemoryLevel::VRF {
-        return false;
-    }
-    match operands[0].vector_size() {
-        None => false,
-        Some(vector_size) if vector_size != operands[0].volume() => false,
-        _ => true,
-    }
-}
-
-pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
+pub fn shared_broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
     operands: &[TensorSpec<Tgt>],
 ) -> bool {
     let scalar_level = operands[0].level();
@@ -452,17 +912,14 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
 
     // Second and third parameters must be in VRF, vector size multiples, aligned, contig., and
     // have the same dtype as the first parameter.
-    for i in 1..3 {
-        if operands[i].level() != CpuMemoryLevel::VRF {
+    for o in &operands[1..] {
+        if o.level() != CpuMemoryLevel::VRF {
             return false;
         }
-        if !operands[i].aligned() || !operands[i].is_contiguous() {
+        if !o.aligned() || !o.is_contiguous() {
             return false;
         }
-        if operands[0].dtype() != operands[i].dtype() {
-            return false;
-        }
-        if operands[i].volume().get() % operands[i].vector_size().unwrap().get() != 0 {
+        if o.volume().get() % o.vector_size().unwrap().get() != 0 {
             return false;
         }
     }
@@ -472,86 +929,20 @@ pub fn broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>
         return false;
     }
 
-    // Second parameter must have (no more than) one non-degenerate dimension.
-    // TODO: Make following true.
+    // Second parameter must have shape 1xn.
     if operands[1].shape().len() != 2 || operands[1].shape()[0].get() != 1 {
         return false;
     }
 
     // Third (output) parameter shape must match the second input parameter shape and
     // vector size.
-    if operands[1].shape() != operands[2].shape()
-        || operands[1].vector_size() != operands[2].vector_size()
-    {
+    if operands[1].shape() != operands[2].shape() {
+        return false;
+    }
+    if operands[1].vector_size() != operands[2].vector_size() {
         return false;
     }
     true
-}
-
-pub fn twovecbroadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
-    operands: &[TensorSpec<Tgt>],
-) -> bool {
-    // Check data types
-    let lhs_dt = operands[0].dtype();
-    let rhs_dt = operands[1].dtype();
-    let out_dt = operands[2].dtype();
-    if lhs_dt != Dtype::Uint8 || rhs_dt != Dtype::Sint8 || out_dt != Dtype::Sint16 {
-        return false;
-    }
-
-    // Check levels
-    let lhs_level = operands[0].level();
-    let rhs_level = operands[1].level();
-    let out_level = operands[2].level();
-    if lhs_level != CpuMemoryLevel::L1
-        || rhs_level != CpuMemoryLevel::VRF
-        || out_level != CpuMemoryLevel::VRF
-    {
-        return false;
-    }
-
-    // Check all parameters are contiguous
-    if !operands.iter().all(|o| o.is_contiguous()) {
-        return false;
-    }
-
-    // Check all shapes are rank 2.
-    for op in operands {
-        if op.shape().len() != 2 {
-            return false;
-        }
-    }
-
-    let Some(rhs_vector_size) = operands[1].vector_size() else {
-        return false;
-    };
-    if operands[1].shape()[0].get() == 2 {
-        if operands[1].shape()[1].get() * 2 != rhs_vector_size.get() {
-            return false;
-        }
-        if operands[2].shape()[0].get() != 1 || operands[2].shape()[1] != operands[1].shape()[1] {
-            return false;
-        }
-        if operands[1].layout() != col_major(2) {
-            return false;
-        }
-        if operands[2].layout() != row_major(2) {
-            return false;
-        }
-    } else {
-        // TODO: Support the case where `operands[1].shape()[1] == 2`.
-        return false;
-    }
-
-    true
-}
-
-pub fn mult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
-    operands: &[TensorSpec<Tgt>],
-) -> bool {
-    operands
-        .iter()
-        .all(|o| o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d.get() == 1))
 }
 
 /// Yields versions of the given [Layout] with packed dimensions added.
@@ -565,7 +956,7 @@ fn packed_layouts_for_standard_layout<'a>(
     all_target_vector_bytes: &'a [u32],
 ) -> impl Iterator<Item = Layout> + 'a {
     let Layout(dims) = &original_layout;
-    debug_assert!(dims.iter().all(|(_, s)| s.is_none()));
+    debug_assert!(dims.iter().all(|(_, s)| *s == PhysDim::Dynamic));
 
     let final_nonone_dim = {
         let mut d = dims.len() - 1;
@@ -590,7 +981,7 @@ fn packed_layouts_for_standard_layout<'a>(
                     Layout::new(
                         dims.iter()
                             .cloned()
-                            .chain(iter::once((dim, Some(strip_size))))
+                            .chain(iter::once((dim, PhysDim::Packed(strip_size))))
                             .collect(),
                     )
                 }),
@@ -625,14 +1016,12 @@ fn pack_sizes(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         common::{DimSize, Dtype},
         expr::{NonAffineExpr, Substitute},
         layout::{col_major, row_major, BufferVar, Layout},
-        shape,
-        target::{
-            cpu::twovecbroadcastvecmult_applies_to_operands, CpuMemoryLevel, Target, X86Target,
-        },
+        target::X86Target,
         tensorspec::TensorSpec,
     };
     use itertools::Itertools;
@@ -697,8 +1086,8 @@ mod tests {
             let (shape, strip_dim) = example;
             Layout::new(
                 (0..u8::try_from(shape.len()).unwrap())
-                    .map(|dim| (dim, None))
-                    .chain(std::iter::once((strip_dim, Some(nz!(1u32)))))
+                    .map(|dim| (dim, PhysDim::Dynamic))
+                    .chain(std::iter::once((strip_dim, PhysDim::Packed(nz!(1u32)))))
                     .collect(),
             );
         }
@@ -747,7 +1136,7 @@ mod tests {
                 Some(nz!(16u32)),
             ),
         ];
-        assert!(twovecbroadcastvecmult_applies_to_operands(&operands))
+        assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_parameters(&operands))
     }
 
     fn assert_unique_layouts(layouts: &[Layout]) {

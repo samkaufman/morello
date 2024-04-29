@@ -1,12 +1,12 @@
 //! This example shows how to manually schedule a simple matrix multiplication for X86.
 
 use morello::codegen::CodeGen;
-use morello::imp::kernels::KernelType;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use morello::target::CpuKernel;
 use morello::target::{
     CpuMemoryLevel::{self, GL},
     Target, X86Target,
@@ -52,9 +52,9 @@ fn main() {
         .subschedule(&[0], &|z| {
             z.move_param(0, CpuMemoryLevel::RF, row_major(2), None)
         })
-        .subschedule(&[0, 0], &|z| z.place(KernelType::MemsetZero))
+        .subschedule(&[0, 0], &|z| z.place(CpuKernel::MemsetZero))
         .subschedule(&[0, 1], &|move_back| {
-            move_back.place(KernelType::ValueAssign)
+            move_back.place(CpuKernel::ValueAssign)
         })
         .subschedule(&[1], &|bat| {
             bat.split(4)
@@ -62,7 +62,7 @@ fn main() {
                 .subschedule(&[0], &|move_a| {
                     move_a
                         .tile_out(&[1, 1], false)
-                        .place(KernelType::ValueAssign)
+                        .place(CpuKernel::ValueAssign)
                 })
                 .subschedule(&[1], &|matmul_b| {
                     matmul_b.move_param(1, CpuMemoryLevel::RF, row_major(2), None)
@@ -70,14 +70,14 @@ fn main() {
                 .subschedule(&[1, 0], &|move_ba| {
                     move_ba
                         .tile_out(&[1, 1], false)
-                        .place(KernelType::ValueAssign)
+                        .place(CpuKernel::ValueAssign)
                 })
                 .subschedule(&[1, 1], &|matmul_bb| {
                     matmul_bb.move_param(2, CpuMemoryLevel::RF, row_major(2), None)
                 })
-                .subschedule(&[1, 1, 0], &|s| s.place(KernelType::ValueAssign))
-                .subschedule(&[1, 1, 1], &|s| s.split(1).place(KernelType::MultAdd))
-                .subschedule(&[1, 1, 2], &|s| s.place(KernelType::ValueAssign))
+                .subschedule(&[1, 1, 0], &|s| s.place(CpuKernel::ValueAssign))
+                .subschedule(&[1, 1, 1], &|s| s.split(1).place(CpuKernel::MultAdd))
+                .subschedule(&[1, 1, 2], &|s| s.place(CpuKernel::ValueAssign))
         });
 
     // The resulting implementation, as encoded in our Impl intermediate representation, is:
@@ -109,9 +109,9 @@ fn main() {
     // Finally, we can lower that Impl to the following C kernel:
     //
     //    void kernel(
-    //      uint32_t *restrict aa,
-    //      uint32_t *restrict ab,
-    //      uint32_t *restrict ac
+    //      uint32_t *__restrict__ aa,
+    //      uint32_t *__restrict__ ab,
+    //      uint32_t *__restrict__ ac
     //    ) {
     //      for (int ad = 0; ad < 4; ad++) {
     //      for (int ae = 0; ae < 4; ae++) {

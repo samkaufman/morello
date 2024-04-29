@@ -43,7 +43,9 @@ pub struct VecType {
     pub name: &'static str,
     pub native_type_name: &'static str,
     pub load_fn: &'static str,
+    pub load_fn_arg0: &'static str,
     pub store_fn: &'static str,
+    pub store_fn_arg0: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -86,7 +88,13 @@ impl CBuffer {
     pub fn emit<W: fmt::Write>(&self, w: &mut W, init_type: InitType, depth: usize) -> fmt::Result {
         match self {
             CBuffer::HeapArray { name, size, dtype } => {
-                writeln!(w, "{}{} *restrict {};", indent(depth), c_type(*dtype), name)?;
+                writeln!(
+                    w,
+                    "{}{} *__restrict__ {};",
+                    indent(depth),
+                    c_type(*dtype),
+                    name
+                )?;
                 writeln!(
                     w,
                     "{}posix_memalign((void **)&{}, 128, {}*sizeof({}));",
@@ -236,5 +244,19 @@ pub fn c_type(dtype: Dtype) -> &'static str {
         Dtype::Sint16 => "int16_t",
         Dtype::Uint32 => "uint32_t",
         Dtype::Sint32 => "int32_t",
+        Dtype::Float32 => "float",
+        Dtype::Bfloat16 => "__bf16",
+    }
+}
+
+pub fn printf_fmt(dtype: Dtype) -> &'static str {
+    match dtype {
+        Dtype::Uint8 => "%\" PRIu8 \"",
+        Dtype::Sint8 => "%\" PRIi8 \"",
+        Dtype::Uint16 => "%\" PRIu16 \"",
+        Dtype::Sint16 => "%\" PRIi16 \"",
+        Dtype::Uint32 => "%\" PRIu32 \"",
+        Dtype::Sint32 => "%\" PRIi32 \"",
+        Dtype::Float32 | Dtype::Bfloat16 => "%f",
     }
 }

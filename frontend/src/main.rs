@@ -17,7 +17,7 @@ use morello::pprint::{pprint, ImplPrintStyle};
 use morello::target::{
     ArmTarget,
     CpuMemoryLevel::{self, GL},
-    Target, TargetId, X86Target,
+    CpuTarget, Target, TargetId, X86Target,
 };
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
@@ -146,7 +146,7 @@ fn main() -> Result<()> {
 
 fn main_per_db<Tgt>(args: &Args, db: &RocksDatabase) -> Result<()>
 where
-    Tgt: Target<Level = CpuMemoryLevel>,
+    Tgt: CpuTarget,
 {
     let subcmd = &args.subcmd;
     let query_spec = match subcmd {

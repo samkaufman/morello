@@ -6,12 +6,12 @@ use std::iter;
 use std::rc::Rc;
 
 use super::namegen::NameGenerator;
-use crate::codegen::c_utils::{c_type, CBuffer, CExprVar, InitType, VecType};
+use crate::codegen::c_utils::{c_type, printf_fmt, CBuffer, CExprVar, InitType, VecType};
 use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term};
 use crate::imp::blocks::Block;
-use crate::imp::kernels::{Kernel, KernelType};
+use crate::imp::kernels::KernelApp;
 use crate::imp::loops::Loop;
 use crate::imp::moves::TensorOrCacheView;
 use crate::imp::Impl;
@@ -19,22 +19,34 @@ use crate::imp::ImplNode;
 use crate::layout::BufferVar;
 use crate::pprint::{pprint_write, ImplPrintStyle, PrintableAux};
 use crate::shape;
-use crate::target::{CpuMemoryLevel, Target};
+use crate::target::cpu::{DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE};
+use crate::target::{
+    cpu::{DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_STRIP_SIZE},
+    CpuKernel, CpuMemoryLevel, CpuTarget, Target,
+};
 use crate::utils::{indent, LinePrefixWrite, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
 
 const STACK_CUTOFF: u32 = 256;
 
-#[derive(Default)]
 pub struct CpuCodeGenerator<'a, Tgt: Target> {
     pub namer: NameGenerator,
     pub name_env: HashMap<Rc<Tensor<Tgt>>, CBuffer>,
     pub loop_iter_bindings: HashMap<BufferVar, Either<String, i32>>,
     pub param_bindings: HashMap<Param<Tgt>, &'a dyn View<Tgt = Tgt>>,
     pub headers: HeaderEmitter,
+    pub kernel_name: String,
+    pub thread_style: CpuCodeGenThreadStyle,
 }
 
-impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
+#[derive(Default)]
+pub enum CpuCodeGenThreadStyle {
+    #[default]
+    OpenMP,
+    Highway, // TODO: Generalize to plug-in codelets
+}
+
+impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -61,16 +73,31 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         debug_assert_eq!(top_arg_tensors.len(), usize::from(imp.parameter_count()));
 
         let mut main_body_str = String::new();
-        writeln!(main_body_str, "__attribute__((noinline))\nvoid kernel(")?;
-        for ((operand_idx, operand), tensor) in imp.parameters().enumerate().zip(top_arg_tensors) {
+        writeln!(
+            main_body_str,
+            "__attribute__((noinline))\nvoid {}(",
+            self.kernel_name
+        )?;
+
+        let thread_extra_args = self.thread_style_extra_args();
+        let parameter_count = usize::from(imp.parameter_count());
+        let fn_arg_count = parameter_count + thread_extra_args.len();
+
+        let mut operand_idx = 0;
+        for (operand, tensor) in imp.parameters().zip(top_arg_tensors) {
             let spec = tensor.spec();
             let parameter_name = self.namer.fresh_name();
             writeln!(
                 main_body_str,
-                "  {} *restrict {}{}",
+                "  {}{} *__restrict__ {}{}",
+                if operand_idx + 1 < parameter_count {
+                    "const "
+                } else {
+                    ""
+                },
                 c_type(operand.dtype),
                 parameter_name,
-                if operand_idx + 1 < imp.parameter_count().into() {
+                if operand_idx + 1 < fn_arg_count {
                     ", "
                 } else {
                     "\n) {"
@@ -83,6 +110,20 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                     dtype: spec.dtype(),
                 },
             );
+            operand_idx += 1;
+        }
+
+        for extra_arg in self.thread_style_extra_args() {
+            writeln!(
+                main_body_str,
+                "  {extra_arg}{}",
+                if operand_idx + 1 < fn_arg_count {
+                    ", "
+                } else {
+                    "\n) {"
+                }
+            )?;
+            operand_idx += 1;
         }
 
         // Put the tensor->c_buffer binding into `self.name_env`. (And fill
@@ -121,7 +162,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
         write!(out, "int load_inputs(char *paths[]")?;
         for i in 0..top_arg_tensors.len() {
-            write!(out, ", void *restrict dest{i}")?;
+            write!(out, ", void *__restrict__ dest{i}")?;
         }
         writeln!(out, ") {{")?;
 
@@ -149,7 +190,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 out,
                 "{}(({1} *)dest{idx})[i] = {2}((({1} *)mapped)[i]);",
                 indent(2),
-                input_tensor.spec().dtype().c_type(),
+                c_type(input_tensor.spec().dtype()),
                 endian_convert_fn(input_tensor.spec().dtype())
             )?;
 
@@ -162,10 +203,9 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(out, "}}")
     }
 
-    pub fn emit_main<W: Write>(
+    pub fn emit_standard_main<W: Write>(
         &mut self,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
-        benchmark: bool,
         out: &mut W,
     ) -> fmt::Result {
         let mut main_body_str = String::new();
@@ -181,26 +221,14 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             let spec = kernel_argument.spec();
             let buf =
                 self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
-            buf.emit(
-                &mut main_body_str,
-                if benchmark {
-                    InitType::Random
-                } else {
-                    InitType::Zero
-                },
-                depth,
-            )?;
+            buf.emit(&mut main_body_str, InitType::Zero, depth)?;
             parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
             self.name_env.insert(Rc::clone(kernel_argument), buf);
             writeln!(main_body_str)?;
         }
 
         // Load data, if provided.
-        let (bottom_argc, full_argc) = if benchmark {
-            (2, top_arg_tensors.len() + 2)
-        } else {
-            (1, top_arg_tensors.len() + 1)
-        };
+        let full_argc = top_arg_tensors.len() + 1;
         writeln!(
             main_body_str,
             "{}if (argc == {}) {{",
@@ -210,9 +238,8 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         depth += 1;
         writeln!(
             main_body_str,
-            "{}int load_result = load_inputs(&argv[{}]{});",
+            "{}int load_result = load_inputs(&argv[1]{});",
             indent(depth),
-            bottom_argc,
             parameter_buf_names
                 .iter()
                 .map(|n| format!(", {}", n))
@@ -229,11 +256,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         depth -= 1;
         writeln!(main_body_str, "{}}}", indent(depth))?;
         depth -= 1;
-        writeln!(
-            main_body_str,
-            "{}}} else if (argc != {bottom_argc}) {{",
-            indent(depth)
-        )?;
+        writeln!(main_body_str, "{}}} else if (argc != 1) {{", indent(depth))?;
         depth += 1;
         writeln!(
             main_body_str,
@@ -245,12 +268,48 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         writeln!(main_body_str, "{}}}", indent(depth))?;
 
         let kernel_call_str = self.make_kernel_call(top_arg_tensors)?;
-        if benchmark {
-            self.emit_benchmarking(&kernel_call_str, depth, &mut main_body_str)?;
-        } else {
-            writeln!(main_body_str, "{}{}\n", indent(depth), kernel_call_str)?;
-            self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
+        writeln!(main_body_str, "{}{}\n", indent(depth), kernel_call_str)?;
+        self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
+        writeln!(main_body_str)?;
+
+        // Free the buffers.
+        for kernel_argument in top_arg_tensors {
+            let buf = self.name_env.get(kernel_argument).unwrap();
+            buf.emit_free(&mut main_body_str, depth)?;
         }
+
+        writeln!(main_body_str, "\n{}return 0;", indent(depth))?;
+        writeln!(main_body_str, "}}")?;
+
+        out.write_str(&main_body_str)
+    }
+
+    pub fn emit_benchmarking_main<W: Write>(
+        &mut self,
+        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+        out: &mut W,
+    ) -> fmt::Result {
+        let mut main_body_str = String::new();
+        let mut depth = 0_usize;
+
+        writeln!(main_body_str, "int main(int argc, char *argv[]) {{")?;
+        depth += 1;
+
+        // Allocate a buffer for each Impl parameter and re-bind to a CBuffer corresponding to the
+        // local-scope buffer. It will have been previously bound by emit_kernel to a CBuffer::Ptr.
+        let mut parameter_buf_names = vec![];
+        for kernel_argument in top_arg_tensors {
+            let spec = kernel_argument.spec();
+            let buf =
+                self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
+            buf.emit(&mut main_body_str, InitType::Random, depth)?;
+            parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
+            self.name_env.insert(Rc::clone(kernel_argument), buf);
+            writeln!(main_body_str)?;
+        }
+
+        let kernel_call_str = self.make_kernel_call(top_arg_tensors)?;
+        self.emit_benchmarking(&kernel_call_str, depth, &mut main_body_str)?;
         writeln!(main_body_str)?;
 
         // Free the buffers.
@@ -270,7 +329,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
     ) -> Result<String, fmt::Error> {
         let mut kernel_call_str = String::new();
-        write!(kernel_call_str, "kernel(")?;
+        write!(kernel_call_str, "{}(", self.kernel_name)?;
         for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
             let a = self.name_env.get(kernel_argument).unwrap();
             write!(
@@ -372,9 +431,9 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         let buffer_indexing_expr = tensor.make_buffer_indexing_expr(&self.param_bindings);
         writeln!(
             out,
-            "{}printf(\"%\" {} \" \", {});",
+            "{}printf(\"{} \", {});",
             indent(depth),
-            tensor.spec().dtype().int_fmt_macro(),
+            printf_fmt(tensor.spec().dtype()),
             self.c_index(buffer, &buffer_indexing_expr, None),
         )?;
         depth -= 1;
@@ -479,7 +538,6 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             spec.level(),
                         );
                         dest_buffer.emit(w, InitType::None, depth)?;
-
                         self.name_env.insert(Rc::clone(tensor), dest_buffer);
                     }
                     TensorOrCacheView::CacheView(_) => (),
@@ -491,6 +549,13 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 self.emit(w, move_let.main_stage(), depth)?;
                 if let Some(epilogue) = move_let.epilogue() {
                     self.emit(w, epilogue, depth)?;
+                }
+
+                if let TensorOrCacheView::Tensor(tensor) = &move_let.introduced {
+                    self.name_env
+                        .remove(&**tensor)
+                        .unwrap()
+                        .emit_free(w, depth)?;
                 }
                 Ok(())
             }
@@ -517,13 +582,13 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                 )?;
                 writeln!(w, "{}assert(false);  /* Missing Impl */", indent(depth))
             }
-            ImplNode::Kernel(Kernel {
+            ImplNode::Kernel(KernelApp {
                 kernel_type,
                 arguments,
                 aux: _,
             }) => {
                 match kernel_type {
-                    KernelType::MultAdd => {
+                    CpuKernel::MultAdd => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
                         });
@@ -536,13 +601,49 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             exprs[1]
                         )
                     }
-                    KernelType::ValueAssign => {
+                    CpuKernel::ValueAssign => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
                         });
                         writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0])
                     }
-                    KernelType::MemsetZero => {
+                    CpuKernel::CastBf16F32 => {
+                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
+                            self.c_index(a, b, None)
+                        });
+                        writeln!(w, "{}{} = (float){};", indent(depth), exprs[1], exprs[0])
+                    }
+                    CpuKernel::VectorCastBf16F32 => {
+                        let vector_size =
+                            i32::try_from(arguments[1].spec().vector_size().unwrap().get())
+                                .unwrap();
+
+                        let lhs_tensor = arguments[0].backing_tensor(&self.param_bindings).unwrap();
+                        let lhs_buffer = self.name_env.get(lhs_tensor).unwrap();
+                        let rhs_tensor = arguments[1].backing_tensor(&self.param_bindings).unwrap();
+                        let rhs_buffer = self.name_env.get(rhs_tensor).unwrap();
+
+                        let lhs_iexpr = zero_points(
+                            arguments[0].make_buffer_indexing_expr(&self.param_bindings),
+                        );
+                        let rhs0_iexpr = zero_points(
+                            arguments[1].make_buffer_indexing_expr(&self.param_bindings),
+                        );
+                        let rhs1_iexpr = zero_points(
+                            arguments[1].make_buffer_indexing_expr(&self.param_bindings)
+                                + vector_size,
+                        );
+
+                        writeln!(
+                            w,
+                            "{}cvtbf16_fp32_256({}, &{}, &{});",
+                            indent(depth),
+                            self.c_index_vec(lhs_buffer, &lhs_iexpr, None),
+                            self.c_index_vec(rhs_buffer, &rhs0_iexpr, None),
+                            self.c_index_vec(rhs_buffer, &rhs1_iexpr, None)
+                        )
+                    }
+                    CpuKernel::MemsetZero => {
                         // TODO: Merge this duplicate `exprs` block. It's used also in the ValueAssign.
                         debug_assert_eq!(arguments.len(), 1);
                         let backing_tensor =
@@ -559,13 +660,22 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             arguments[0].1.bytes_used()
                         )
                     }
-                    KernelType::VectorZero => {
+                    CpuKernel::VectorZero => {
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_vec(a, b, None)
                         });
-                        writeln!(w, "{}{} *= 0;  /* VectorZero */", indent(depth), exprs[0])
+                        let dtype = arguments[0].spec().dtype();
+                        let volume = arguments[0].spec().volume();
+                        let vtype = get_vector(Tgt::vec_types(), dtype, volume);
+                        writeln!(
+                            w,
+                            "{}{} = ({}){{0}};  /* VectorZero */",
+                            indent(depth),
+                            exprs[0],
+                            vtype.name
+                        )
                     }
-                    KernelType::VectorAssign => {
+                    CpuKernel::VectorAssign => {
                         let dtype = arguments[0].spec().dtype();
                         let volume = arguments[0].spec().volume();
 
@@ -587,18 +697,18 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         } else {
                             writeln!(
                                 w,
-                                "{}{}(({} *)({}), {}(({} *)({})));  /* VectorAssign */",
+                                "{0}{1}(({2} *)({3}), {4}(({5} *)({6})));  /* VectorAssign */",
                                 indent(depth),
                                 vtype.store_fn,
-                                itype,
+                                vtype.store_fn_arg0,
                                 exprs[1],
                                 vtype.load_fn,
-                                itype,
-                                exprs[0]
+                                vtype.load_fn_arg0,
+                                exprs[0],
                             )
                         }
                     }
-                    KernelType::BroadcastVecMultAdd => {
+                    CpuKernel::BroadcastVecMultAdd => {
                         let vector_size = arguments[2].spec().vector_size().unwrap().get();
                         let volume = arguments[2].spec().volume().get();
                         debug_assert_eq!(volume % vector_size, 0);
@@ -626,7 +736,100 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
-                    KernelType::TwoVecBroadcastVecMultAdd => {
+                    CpuKernel::BroadcastVecMultAddBf16F32 => {
+                        let vector_size_bf16 = arguments[1].spec().vector_size().unwrap().get();
+                        let volume = arguments[1].spec().volume().get();
+                        debug_assert_eq!(volume % vector_size_bf16, 0);
+                        let vector_count = volume / vector_size_bf16;
+                        writeln!(w, "{}/* BroadcastVecMultAddBf16F32 */", indent(depth))?;
+                        for vector_idx in 0..vector_count {
+                            let exprs =
+                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                                    0 => self.c_index_ptr(a, b, None),
+                                    1 | 2 => self.c_index_vec(
+                                        a,
+                                        &(b.clone()
+                                            + i32::try_from(vector_idx * vector_size_bf16)
+                                                .unwrap()),
+                                        None,
+                                    ),
+                                    _ => unreachable!(),
+                                });
+
+                            let even_name = self.namer.fresh_name();
+                            let odd_name = self.namer.fresh_name();
+                            let concat_name = self.namer.fresh_name();
+                            let broad_name = self.namer.fresh_name();
+
+                            let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(vector_size_bf16);
+                            let (shift_fn_out, _, _, broadcast16_out) =
+                                vec_func_names(vector_size_bf16 * 2);
+
+                            let vf8 = get_vector(
+                                Tgt::vec_types(),
+                                Dtype::Float32,
+                                (vector_size_bf16 / 2).try_into().unwrap(),
+                            );
+                            let vfc = get_vector(
+                                Tgt::vec_types(),
+                                Dtype::Float32,
+                                vector_size_bf16.try_into().unwrap(),
+                            );
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){shift_fn}(*({3}*)(&{4}), {5});",
+                                indent(depth),
+                                vf8.name,
+                                odd_name,
+                                vf8.native_type_name,
+                                exprs[1],
+                                8 * vector_size_bf16 / 4
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), 0xAA);",
+                                indent(depth),
+                                vf8.name,
+                                even_name,
+                                vf8.native_type_name,
+                                exprs[1],
+                            )?;
+
+                            // TODO: Combine!
+                            // TODO: Indices below should be generic in vector size
+                            writeln!(
+                                w,
+                                "{}{} {} = __builtin_shufflevector({}, {}, 0, 4, 1, 5, 2, 6, 3, 7);",
+                                indent(depth),
+                                vfc.name,
+                                concat_name,
+                                odd_name,
+                                even_name,
+                            )?;
+
+                            // TODO: Don't inline `short` below.
+                            writeln!(
+                                w,
+                                "{0}{1} {broad_name} = {shift_fn_out}({broadcast16_out}(*(short *)({2})), 16);",
+                                indent(depth),
+                                vfc.name,
+                                exprs[0]
+                            )?;
+
+                            writeln!(
+                                w,
+                                "{}{} += {} * {};",
+                                indent(depth),
+                                exprs[2],
+                                broad_name,
+                                concat_name
+                            )?;
+
+                            self.headers.vector_type_defs.insert(vf8);
+                        }
+                        Ok(())
+                    }
+                    CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => {
                         let vector_size = arguments[2].spec().vector_size().unwrap().get();
                         let volume = arguments[2].spec().volume().get();
                         debug_assert_eq!(volume % vector_size, 0);
@@ -647,7 +850,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
 
                             // TODO: Lift the broadcast out of this loop.
                             let broadcast_name = self.namer.fresh_name();
-                            writeln!(w, "/* TwoVecBroadcastVecMultAdd */")?;
+                            writeln!(w, "/* TwoVecBroadcastVecMultAddU8S8S16 */")?;
                             writeln!(
                                 w,
                                 "{}__m256i {} = _mm256_set1_epi16(*(int16_t *)({}));",
@@ -669,7 +872,434 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                         }
                         Ok(())
                     }
-                    KernelType::PhysicalTransposeByte128 => {
+                    CpuKernel::DotProductLoop => {
+                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                            0 | 1 => self.c_index_ptr(a, b, None),
+                            2 => self.c_index(a, b, None),
+                            _ => unreachable!(),
+                        });
+
+                        let lhs_spec = arguments[0].spec();
+                        debug_assert_eq!(lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE, 0);
+                        let step_idx_name = self.namer.fresh_name();
+                        let vector_accum_names = (0..DOT_PRODUCT_ACCUM_COUNT as usize)
+                            .map(|_| self.namer.fresh_name())
+                            .collect::<Vec<_>>();
+
+                        let vtype =
+                            get_vector(Tgt::vec_types(), Dtype::Float32, DOT_PRODUCT_STRIP_SIZE);
+                        writeln!(w, "{}// DotProductLoop", indent(depth))?;
+                        for accum_name in &vector_accum_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){{0}};",
+                                indent(depth),
+                                vtype.name,
+                                accum_name
+                            )?;
+                        }
+                        writeln!(
+                            w,
+                            "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
+                            indent(depth),
+                            step_idx_name,
+                            lhs_spec.shape()[1],
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_STRIP_SIZE.get()
+                        )?;
+                        for (i, accum_name) in vector_accum_names.iter().enumerate() {
+                            writeln!(
+                                w,
+                                "{0}{1} += *({2} *)({3} + {5} + {6}) * *({2} *)({4} + {5} + {6});",
+                                indent(depth + 1),
+                                accum_name,
+                                vtype.name,
+                                exprs[0],
+                                exprs[1],
+                                step_idx_name,
+                                i * DOT_PRODUCT_STRIP_SIZE.get() as usize
+                            )?;
+                        }
+                        writeln!(w, "{}}}", indent(depth))?;
+                        writeln!(
+                            w,
+                            "{}{} = sum8({});",
+                            indent(depth),
+                            exprs[2],
+                            vector_accum_names[0]
+                        )?;
+                        for accum_name in vector_accum_names.iter().skip(1) {
+                            writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
+                        }
+                        Ok(())
+                    }
+                    CpuKernel::DotProductLoopBf16Bf16F32 => {
+                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                            0 | 1 => self.c_index_ptr(a, b, None),
+                            2 => self.c_index(a, b, None),
+                            _ => unreachable!(),
+                        });
+
+                        let lhs_spec = arguments[0].spec();
+                        debug_assert_eq!(
+                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            0
+                        );
+                        let step_idx_name = self.namer.fresh_name();
+                        let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
+                            .map(|_| {
+                                (
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+
+                        let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
+
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        let vbf16 = get_vector(
+                            Tgt::vec_types(),
+                            Dtype::Bfloat16,
+                            DOT_PRODUCT_BF16_STRIP_SIZE,
+                        );
+
+                        writeln!(w, "{}// DotProductLoopBf16Bf16F32", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){{0}};",
+                                indent(depth),
+                                vf32.name,
+                                accum_name
+                            )?;
+                        }
+                        writeln!(
+                            w,
+                            "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
+                            indent(depth),
+                            step_idx_name,
+                            lhs_spec.shape()[1],
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
+                        )?;
+                        for (i, (_, even_lhs_name, odd_lhs_name, even_rhs_name, odd_rhs_name)) in
+                            loop_names.iter().enumerate()
+                        {
+                            for (j, odd_name, even_name) in [
+                                (0, odd_lhs_name, even_lhs_name),
+                                (1, odd_rhs_name, even_rhs_name),
+                            ] {
+                                let compressed_name = self.namer.fresh_name();
+                                writeln!(
+                                    w,
+                                    "{0}{1} {compressed_name} = *({1} *)({2} + {3} + {4});",
+                                    indent(depth + 1),
+                                    vf32.name,
+                                    exprs[j],
+                                    step_idx_name,
+                                    i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                                )?;
+
+                                writeln!(
+                                    w,
+                                    "{0}{1} {2} = ({1}){shift_fn}(({3}){compressed_name}, 16);",
+                                    indent(depth + 1),
+                                    vf32.name,
+                                    odd_name,
+                                    vf32.native_type_name,
+                                )?;
+                                writeln!(
+                                    w,
+                                    "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), ({3}){compressed_name}, 0xAA);",
+                                    indent(depth + 1),
+                                    vf32.name,
+                                    even_name,
+                                    vf32.native_type_name,
+                                )?;
+                            }
+
+                            for (lhs, rhs, a) in [
+                                (even_lhs_name, even_rhs_name, &loop_names[i].0),
+                                (
+                                    odd_lhs_name,
+                                    odd_rhs_name,
+                                    &loop_names[(i + 2) % loop_names.len()].0,
+                                ),
+                            ] {
+                                writeln!(
+                                    w,
+                                    "{0}{1} += *({2} *)(&{lhs}) * *({2} *)(&{rhs});",
+                                    indent(depth + 1),
+                                    a,
+                                    vf32.name
+                                )?;
+                            }
+                        }
+                        writeln!(w, "{}}}", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
+                        }
+
+                        self.headers.vector_type_defs.insert(vf32);
+                        self.headers.vector_type_defs.insert(vbf16);
+                        Ok(())
+                    }
+                    CpuKernel::DotProductLoopF32Bf16F32 => {
+                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                            0 | 1 => self.c_index_ptr(a, b, None),
+                            2 => self.c_index(a, b, None),
+                            _ => unreachable!(),
+                        });
+
+                        let lhs_spec = arguments[0].spec();
+                        debug_assert_eq!(
+                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            0
+                        );
+                        let step_idx_name = self.namer.fresh_name();
+                        let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
+                            .map(|_| {
+                                (
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        let vbf16 = get_vector(
+                            Tgt::vec_types(),
+                            Dtype::Bfloat16,
+                            DOT_PRODUCT_BF16_STRIP_SIZE,
+                        );
+
+                        writeln!(w, "{}// DotProductLoopF32Bf16F32", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){{0}};",
+                                indent(depth),
+                                vf32.name,
+                                accum_name
+                            )?;
+                        }
+                        writeln!(
+                            w,
+                            "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
+                            indent(depth),
+                            step_idx_name,
+                            lhs_spec.shape()[1],
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
+                        )?;
+                        for (
+                            i,
+                            (_, upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name),
+                        ) in loop_names.iter().enumerate()
+                        {
+                            // Load already-dequantized f32 lhs into a pair of vectors.
+                            writeln!(
+                                w,
+                                "{0}{1} {upper_lhs_name} = *({1} *)({2} + {3} + {4});",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[0],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} {lower_lhs_name} = *({1} *)({2} + {3} + {4} + 8);",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[0],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                            )?;
+
+                            // Load compressed bf16 rhs strip and dequantize.
+                            let compressed_name = self.namer.fresh_name();
+                            writeln!(
+                                w,
+                                "{0}{1} {compressed_name} = *({1} *)({2} + {3} + {4});",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[1],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                            )?;
+                            writeln!(w, "{}{} {};", indent(depth + 1), vf32.name, upper_rhs_name)?;
+                            writeln!(w, "{}{} {};", indent(depth + 1), vf32.name, lower_rhs_name)?;
+                            writeln!(
+                                w,
+                                "{}cvtbf16_fp32_256({compressed_name}, &{upper_rhs_name}, &{lower_rhs_name});",
+                                indent(depth + 1),
+                            )?;
+
+                            for (lhs, rhs, a) in [
+                                (upper_lhs_name, upper_rhs_name, &loop_names[i].0),
+                                (
+                                    lower_lhs_name,
+                                    lower_rhs_name,
+                                    &loop_names[(i + 2) % loop_names.len()].0,
+                                ),
+                            ] {
+                                writeln!(
+                                    w,
+                                    "{0}{1} += *({2} *)(&{lhs}) * *({2} *)(&{rhs});",
+                                    indent(depth + 1),
+                                    a,
+                                    vf32.name
+                                )?;
+                            }
+                        }
+                        writeln!(w, "{}}}", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
+                        }
+
+                        self.headers.vector_type_defs.insert(vf32);
+                        self.headers.vector_type_defs.insert(vbf16);
+                        Ok(())
+                    }
+                    CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
+                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                            0 | 1 => self.c_index_ptr(a, b, None),
+                            2 => self.c_index(a, b, None),
+                            _ => unreachable!(),
+                        });
+
+                        let lhs_spec = arguments[0].spec();
+                        debug_assert_eq!(
+                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            0
+                        );
+                        let step_idx_name = self.namer.fresh_name();
+                        let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
+                            .map(|_| {
+                                (
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                    self.namer.fresh_name(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        let vbf16 = get_vector(
+                            Tgt::vec_types(),
+                            Dtype::Bfloat16,
+                            DOT_PRODUCT_BF16_STRIP_SIZE,
+                        );
+
+                        writeln!(w, "{}// DotProductLoopF32InterleavedBf16F32", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){{0}};",
+                                indent(depth),
+                                vf32.name,
+                                accum_name
+                            )?;
+                        }
+                        writeln!(
+                            w,
+                            "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
+                            indent(depth),
+                            step_idx_name,
+                            lhs_spec.shape()[1],
+                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
+                        )?;
+                        for (
+                            i,
+                            (_, upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name),
+                        ) in loop_names.iter().enumerate()
+                        {
+                            // Load already-dequantized f32 lhs into a pair of vectors.
+                            writeln!(
+                                w,
+                                "{0}{1} {upper_lhs_name} = *({1} *)({2} + {3} + {4});",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[0],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} {lower_lhs_name} = *({1} *)({2} + {3} + {4} + 8);",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[0],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                            )?;
+
+                            // Load compressed bf16 rhs strip and dequantize without crossing lanes.
+                            let compressed_name = self.namer.fresh_name();
+                            writeln!(
+                                w,
+                                "{0}{1} {compressed_name} = *({1} *)({2} + {3} + {4});",
+                                indent(depth + 1),
+                                vf32.name,
+                                exprs[1],
+                                step_idx_name,
+                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                            )?;
+
+                            let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){shift_fn}(*({3}*)(&{4}), 16);",
+                                indent(depth + 1),
+                                vf32.name,
+                                upper_rhs_name,
+                                vf32.native_type_name,
+                                compressed_name
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), 0xAA);",
+                                indent(depth + 1),
+                                vf32.name,
+                                lower_rhs_name,
+                                vf32.native_type_name,
+                                compressed_name
+                            )?;
+
+                            for (lhs, rhs, a) in [
+                                (upper_lhs_name, upper_rhs_name, &loop_names[i].0),
+                                (
+                                    lower_lhs_name,
+                                    lower_rhs_name,
+                                    &loop_names[(i + 2) % loop_names.len()].0,
+                                ),
+                            ] {
+                                writeln!(
+                                    w,
+                                    "{0}{1} += *({2} *)(&{lhs}) * *({2} *)(&{rhs});",
+                                    indent(depth + 1),
+                                    a,
+                                    vf32.name
+                                )?;
+                            }
+                        }
+                        writeln!(w, "{}}}", indent(depth))?;
+                        for (accum_name, _, _, _, _) in &loop_names {
+                            writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
+                        }
+
+                        self.headers.vector_type_defs.insert(vf32);
+                        self.headers.vector_type_defs.insert(vbf16);
+                        Ok(())
+                    }
+                    CpuKernel::PhysicalTransposeByte128 => {
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
                             (&arguments[0], 0),
                             (&arguments[0], 16),
@@ -709,7 +1339,7 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             in_higher,
                         )
                     }
-                    KernelType::PhysicalTransposeByte256 => {
+                    CpuKernel::PhysicalTransposeByte256 => {
                         use CpuMemoryLevel::VRF;
 
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
@@ -782,6 +1412,50 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
                             intermediate_higher.name().unwrap(),
                         )
                     }
+                    CpuKernel::VectorInterleaveBf16F32 => {
+                        let lhs_tensor = arguments[0].backing_tensor(&self.param_bindings).unwrap();
+                        let lhs_buffer = self.name_env.get(lhs_tensor).unwrap();
+                        let rhs_tensor = arguments[1].backing_tensor(&self.param_bindings).unwrap();
+                        let rhs_buffer = self.name_env.get(rhs_tensor).unwrap();
+
+                        let lhs_iexpr = zero_points(
+                            arguments[0].make_buffer_indexing_expr(&self.param_bindings),
+                        );
+                        let rhs0_iexpr = zero_points(
+                            arguments[1].make_buffer_indexing_expr(&self.param_bindings),
+                        );
+                        let rhs1_iexpr = zero_points(
+                            arguments[1].make_buffer_indexing_expr(&self.param_bindings) + 8,
+                        );
+
+                        let src_name = self.c_index_vec(lhs_buffer, &lhs_iexpr, None);
+                        let even_name = self.c_index_vec(rhs_buffer, &rhs0_iexpr, None);
+                        let odd_name = self.c_index_vec(rhs_buffer, &rhs1_iexpr, None);
+
+                        let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
+
+                        let vf8 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        writeln!(
+                            w,
+                            "{0}{2} = ({1}){shift_fn}(*({3}*)(&{4}), 16);",
+                            indent(depth),
+                            vf8.name,
+                            even_name,
+                            vf8.native_type_name,
+                            src_name
+                        )?;
+                        writeln!(
+                            w,
+                            "{0}{2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), 0xAA);",
+                            indent(depth),
+                            vf8.name,
+                            odd_name,
+                            vf8.native_type_name,
+                            src_name
+                        )?;
+                        Ok(())
+                    }
+                    CpuKernel::VectorDeinterleaveF32Bf16 => todo!(),
                 }
             }
         }
@@ -817,29 +1491,47 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
         }
 
         if l.parallel {
-            writeln!(
-                w,
-                "{}#pragma omp parallel for collapse({}) schedule(static)",
-                indent(depth),
-                axes_to_emit.len()
-            )?;
+            match self.thread_style {
+                CpuCodeGenThreadStyle::OpenMP => {
+                    writeln!(
+                        w,
+                        "{}#pragma omp parallel for collapse({}) schedule(static)",
+                        indent(depth),
+                        axes_to_emit.len()
+                    )?;
+                }
+                CpuCodeGenThreadStyle::Highway => {
+                    if axes_to_emit.len() != 1 {
+                        todo!("collapse loops for Highway parallel-for");
+                    }
+                    for (axis, steps) in &axes_to_emit {
+                        let var_name = iter_var_names.get(axis).unwrap();
+                        // TODO: Lift the pool out into a kernel argument.
+                        writeln!(
+                            w,
+                            "{}pool.Run(0, {}, [&](const uint64_t {}, size_t) HWY_ATTR {{",
+                            indent(depth),
+                            steps,
+                            var_name,
+                        )?;
+                    }
+                    self.emit(w, &l.body, depth + 1)?;
+                    for _ in 0..axes_to_emit.len() {
+                        writeln!(w, "{}}});", indent(depth))?;
+                    }
+                    return Ok(());
+                }
+            }
         }
-
         for (axis, steps) in &axes_to_emit {
             let var_name = iter_var_names.get(axis).unwrap();
             writeln!(
                 w,
-                "{}for (int {} = 0; {} < {}; {}++) {{",
-                indent(depth),
-                var_name,
-                var_name,
-                steps,
-                var_name
+                "{0}for (int {var_name} = 0; {var_name} < {steps}; {var_name}++) {{",
+                indent(depth)
             )?;
         }
-
         self.emit(w, &l.body, depth + 1)?;
-
         for _ in 0..axes_to_emit.len() {
             writeln!(w, "{}}}", indent(depth))?;
         }
@@ -1059,6 +1751,48 @@ impl<'a, Tgt: Target<Level = CpuMemoryLevel>> CpuCodeGenerator<'a, Tgt> {
             }
         }
     }
+
+    fn thread_style_extra_args(&self) -> &[&'static str] {
+        match self.thread_style {
+            CpuCodeGenThreadStyle::OpenMP => &[],
+            CpuCodeGenThreadStyle::Highway => &["hwy::ThreadPool& pool"],
+        }
+    }
+}
+
+impl<'a, Tgt: Target> Default for CpuCodeGenerator<'a, Tgt> {
+    fn default() -> Self {
+        CpuCodeGenerator {
+            namer: Default::default(),
+            name_env: Default::default(),
+            loop_iter_bindings: Default::default(),
+            param_bindings: Default::default(),
+            headers: Default::default(),
+            kernel_name: String::from("kernel"),
+            thread_style: Default::default(),
+        }
+    }
+}
+
+fn vec_func_names(
+    vector_size_bf16: u32,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match vector_size_bf16 {
+        8 => (
+            "_mm_slli_epi32",
+            "_mm_blend_epi16",
+            "_mm_setzero_si128",
+            "_mm_set1_epi16",
+        ),
+        16 => (
+            "_mm256_slli_epi32",
+            "_mm256_blend_epi16",
+            "_mm256_setzero_si256",
+            "_mm256_set1_epi16",
+        ),
+        32 => todo!(),
+        _ => unimplemented!(),
+    }
 }
 
 fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
@@ -1098,7 +1832,7 @@ fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
 }
 
 fn get_vector(
-    vec_types: &'static [VecType; 12],
+    vec_types: &'static [VecType; 16],
     dtype: Dtype,
     vector_size: DimSize,
 ) -> &'static VecType {
@@ -1108,7 +1842,12 @@ fn get_vector(
             vec_type.dtype == dtype
                 && vec_type.value_cnt == u8::try_from(vector_size.get()).unwrap()
         })
-        .expect("VecType to match dtype and volume of vector_size")
+        .unwrap_or_else(|| {
+            panic!(
+                "vec_types does not contain dtype {:?} and size {}; vec_types are: {:?}",
+                dtype, vector_size, vec_types
+            )
+        })
 }
 
 fn expr_to_c(e: &AffineForm<NonAffine<CExprVar>>) -> String {
@@ -1164,8 +1903,8 @@ fn zero_points(expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<BufferVar> {
 const fn endian_convert_fn(dtype: Dtype) -> &'static str {
     match dtype {
         Dtype::Uint8 | Dtype::Sint8 => "",
-        Dtype::Uint16 | Dtype::Sint16 => "LE_TO_CPU16",
-        Dtype::Uint32 | Dtype::Sint32 => "LE_TO_CPU32",
+        Dtype::Uint16 | Dtype::Sint16 | Dtype::Bfloat16 => "LE_TO_CPU16",
+        Dtype::Uint32 | Dtype::Sint32 | Dtype::Float32 => "LE_TO_CPU32",
     }
 }
 

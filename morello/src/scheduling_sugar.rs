@@ -1,8 +1,7 @@
-use crate::common::DimSize;
+use crate::common::{DimSize, Dtype};
 use crate::db::RocksDatabase;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::imp::kernels::KernelType;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::scheduling::Action;
@@ -26,6 +25,14 @@ pub trait SchedulingSugar<Tgt: Target> {
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt, ()>;
+    fn cast(
+        &self,
+        source_idx: u8,
+        destination_dtype: Dtype,
+        destination_level: Tgt::Level,
+        destination_layout: Layout,
+        destination_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt, ()>;
     fn to_accum(&self) -> ImplNode<Tgt, ()>;
     fn peel(
         &self,
@@ -34,7 +41,7 @@ pub trait SchedulingSugar<Tgt: Target> {
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt, ()>;
     fn spatial_split(&self) -> ImplNode<Tgt, ()>;
-    fn place(&self, kernel_type: KernelType) -> ImplNode<Tgt, ()>;
+    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt, ()>;
     fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt, ()>
     where
         Tgt: Target,
@@ -79,8 +86,29 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt, ()> {
+        let destination_dtype = self.0.parameters()[usize::from(source_idx)].dtype();
         Action::Move {
             source_idx,
+            destination_dtype,
+            destination_level,
+            destination_layout,
+            destination_vector_size,
+        }
+        .apply(self)
+        .unwrap()
+    }
+
+    fn cast(
+        &self,
+        source_idx: u8,
+        destination_dtype: Dtype,
+        destination_level: Tgt::Level,
+        destination_layout: Layout,
+        destination_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt, ()> {
+        Action::Move {
+            source_idx,
+            destination_dtype,
             destination_level,
             destination_layout,
             destination_vector_size,
@@ -112,7 +140,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         Action::SpatialSplit.apply(self).unwrap()
     }
 
-    fn place(&self, kernel_type: KernelType) -> ImplNode<Tgt, ()> {
+    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt, ()> {
         Action::Place(kernel_type).apply(self).unwrap()
     }
 
@@ -156,6 +184,25 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
         })
     }
 
+    fn cast(
+        &self,
+        source_idx: u8,
+        destination_dtype: Dtype,
+        destination_level: Tgt::Level,
+        destination_layout: Layout,
+        destination_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt, ()> {
+        apply_to_leaf_spec(self, |spec| {
+            spec.cast(
+                source_idx,
+                destination_dtype,
+                destination_level,
+                destination_layout,
+                destination_vector_size,
+            )
+        })
+    }
+
     fn to_accum(&self) -> ImplNode<Tgt, ()> {
         apply_to_leaf_spec(self, |spec| spec.to_accum())
     }
@@ -173,7 +220,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
         apply_to_leaf_spec(self, |spec| spec.spatial_split())
     }
 
-    fn place(&self, kernel_type: KernelType) -> ImplNode<Tgt, ()> {
+    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt, ()> {
         apply_to_leaf_spec(self, |spec| spec.place(kernel_type))
     }
 

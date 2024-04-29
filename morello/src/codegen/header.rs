@@ -1,4 +1,4 @@
-use super::c_utils::VecType;
+use super::c_utils::{c_type, VecType};
 use crate::target::TargetId;
 
 use std::{collections::HashSet, fmt};
@@ -42,11 +42,10 @@ impl HeaderEmitter {
             // Declare a vector of {vec_bytes} bytes, divided into {dt.c_type}
             // values. (vec_bytes must be a multiple of the c_type size.)
             out.write_str(&format!(
-                "typedef {} {} __attribute__ ((vector_size ({} * sizeof({}))));\n",
-                vec_type.dtype.c_type(),
+                "typedef {0} {1} __attribute__ ((vector_size ({2} * sizeof({0}))));\n",
+                c_type(vec_type.dtype),
                 vec_type.name,
                 vec_type.value_cnt,
-                vec_type.dtype.c_type()
             ))?;
         }
         if !self.vector_type_defs.is_empty() {

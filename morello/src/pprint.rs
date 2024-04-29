@@ -60,6 +60,15 @@ where
     write!(out, "{}", pprint_table(root, style))
 }
 
+pub fn pprint_string<Tgt, Aux>(root: &ImplNode<Tgt, Aux>, style: ImplPrintStyle) -> String
+where
+    Tgt: Target,
+    Aux: PrintableAux,
+{
+    // TODO: Avoid final newline
+    format!("{}", pprint_table(root, style))
+}
+
 fn pprint_table<Tgt, Aux>(root: &ImplNode<Tgt, Aux>, style: ImplPrintStyle) -> prettytable::Table
 where
     Tgt: Target,

@@ -144,7 +144,7 @@ impl Display for MemoryLimits {
     }
 }
 impl MemoryAllocation {
-    pub fn none<Tgt: Target>() -> Self {
+    pub fn none() -> Self {
         MemoryAllocation::Simple([0; LEVEL_COUNT])
     }
 }

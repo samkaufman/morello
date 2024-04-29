@@ -5,9 +5,9 @@ use std::rc::Rc;
 use std::{iter, mem};
 
 use crate::alignment::aligned_approx;
-use crate::common::{DimSize, Shape};
+use crate::common::{DimSize, Dtype, Shape};
 use crate::imp::blocks::Block;
-use crate::imp::kernels::{Kernel, KernelType};
+use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::moves::{MoveLet, TensorOrCacheView};
 use crate::imp::pipeline::Pipeline;
@@ -39,6 +39,7 @@ pub enum Action<Tgt: Target> {
     },
     Move {
         source_idx: u8,
+        destination_dtype: Dtype,
         destination_level: Tgt::Level,
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
@@ -50,7 +51,7 @@ pub enum Action<Tgt: Target> {
         vector_size: Option<DimSize>,
     },
     SpatialSplit,
-    Place(KernelType),
+    Place(Tgt::Kernel),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -256,6 +257,8 @@ impl<Tgt: Target> Action<Tgt> {
 
                 let mut inner_spec = logical_spec.clone();
                 inner_spec.replace_io(&new_operands);
+                inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
+                inner_spec.canonicalize().unwrap();
                 match self {
                     Action::TileOut { .. } => {}
                     Action::Split { .. } => {
@@ -518,6 +521,7 @@ impl<Tgt: Target> Action<Tgt> {
             }
             Action::Move {
                 source_idx,
+                destination_dtype,
                 destination_level,
                 destination_layout,
                 destination_vector_size,
@@ -526,6 +530,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                 let new_spec = movelet_inner_tensorspec(
                     outer_moved_operand_spec,
+                    *destination_dtype,
                     destination_level,
                     destination_layout,
                     *destination_vector_size,
@@ -544,17 +549,21 @@ impl<Tgt: Target> Action<Tgt> {
                     return Err(ApplyError::ActionNotApplicable);
                 }
 
-                let inner_moved_operand = if new_spec.level().is_addressed() {
-                    TensorOrCacheView::Tensor(Rc::new(Tensor::new(new_spec)))
-                } else {
+                let inner_moved_operand = if move_is_cache_miss(
+                    outer_moved_operand_spec,
+                    *destination_dtype,
+                    destination_level,
+                    destination_layout,
+                ) {
                     let source = Param::new(*source_idx, outer_moved_operand_spec.clone());
                     TensorOrCacheView::CacheView(Rc::new(CacheView::new(source, new_spec)))
+                } else {
+                    TensorOrCacheView::Tensor(Rc::new(Tensor::new(new_spec)))
                 };
 
                 let lower_limits: MemoryLimits = {
-                    // We assume bytes_used will be the same for source and destination
-                    // tensors.
-                    let additional = operands[usize::from(*source_idx)].bytes_used();
+                    let additional = u64::from(destination_dtype.size())
+                        * u64::from(operands[usize::from(*source_idx)].volume().get());
                     match &spec.1 {
                         MemoryLimits::Standard(base) => {
                             let updated_level_idx = Tgt::levels()
@@ -566,7 +575,6 @@ impl<Tgt: Target> Action<Tgt> {
                                 .get_unscaled(updated_level_idx)
                                 .checked_sub(additional)
                             else {
-                                // eprintln!("Dropping {:?} because out of memory. Used {} additional bytes and limit was {}", self, additional, new_limits.get_unscaled(updated_level_idx));
                                 return Err(ApplyError::OutOfMemory);
                             };
                             new_limits
@@ -577,8 +585,14 @@ impl<Tgt: Target> Action<Tgt> {
                 };
 
                 // Closure which makes a prologue or epilogue for this Spec.
-                let make_logue = |flip, f: &dyn Fn(_, _, _) -> bool| {
-                    if f(destination_level, *source_idx, logical_spec) {
+                let make_logue = |flip, f: &dyn Fn(_, _, _, _, _) -> bool| {
+                    if f(
+                        destination_level,
+                        destination_layout,
+                        *destination_dtype,
+                        *source_idx,
+                        logical_spec,
+                    ) {
                         let mut left_spec = outer_moved_operand_spec;
                         let mut right_spec = inner_moved_operand.spec();
                         let mut args: [Rc<dyn View<Tgt = Tgt>>; 2] = [
@@ -589,21 +603,20 @@ impl<Tgt: Target> Action<Tgt> {
                             mem::swap(&mut left_spec, &mut right_spec);
                             args.swap(0, 1);
                         }
-                        Some(SpecApp::new(
-                            Spec(
-                                LogicalSpec::Primitive(
-                                    PrimitiveBasics {
-                                        typ: PrimitiveSpecType::Move,
-                                        spec_shape: left_spec.shape().into(),
-                                        dtypes: smallvec![left_spec.dtype(), right_spec.dtype()],
-                                    },
-                                    vec![left_spec.aux.clone(), right_spec.aux.clone()],
-                                    logical_spec.serial_only(),
-                                ),
-                                lower_limits.clone(),
+                        let mut logue_spec = Spec(
+                            LogicalSpec::Primitive(
+                                PrimitiveBasics {
+                                    typ: PrimitiveSpecType::Move,
+                                    spec_shape: left_spec.shape().into(),
+                                    dtypes: smallvec![left_spec.dtype(), right_spec.dtype()],
+                                },
+                                vec![left_spec.aux.clone(), right_spec.aux.clone()],
+                                logical_spec.serial_only(),
                             ),
-                            args,
-                        ))
+                            lower_limits.clone(),
+                        );
+                        logue_spec.canonicalize().unwrap();
+                        Some(SpecApp::new(logue_spec, args))
                     } else {
                         None
                     }
@@ -619,7 +632,8 @@ impl<Tgt: Target> Action<Tgt> {
                         new_spec.replace_io(&new_operands);
                         new_spec
                     };
-                    let spec = Spec(new_inner_spec, lower_limits.clone());
+                    let mut spec = Spec(new_inner_spec, lower_limits.clone());
+                    spec.canonicalize().unwrap();
                     let inner_operands = new_operands.iter().enumerate().map(|(i, o)| {
                         Rc::new(Param::new(u8::try_from(i).unwrap(), o.clone()))
                             as Rc<dyn View<Tgt = Tgt>>
@@ -692,48 +706,78 @@ impl<Tgt: Target> Action<Tgt> {
                     aux,
                 }))
             }
-            Action::Place(k) => Ok(ImplNode::Kernel(Kernel {
-                kernel_type: *k,
-                arguments: operands
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| Param::new(i.try_into().unwrap(), p.clone()))
-                    .collect(),
-                aux,
-            })),
+            Action::Place(k) => {
+                // TODO: Add: debug_assert!(k.applies_to_parameters(&operands));
+                Ok(ImplNode::Kernel(KernelApp {
+                    kernel_type: *k,
+                    arguments: operands
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| Param::new(i.try_into().unwrap(), p.clone()))
+                        .collect(),
+                    aux,
+                }))
+            }
         }
     }
 }
 
 fn move_gens_prologue<Tgt: Target>(
     destination_level: &Tgt::Level,
+    destination_layout: &Layout,
+    destination_dtype: Dtype,
     source_idx: u8,
     logical_spec: &LogicalSpec<Tgt>,
 ) -> bool {
-    let operand_count = logical_spec.operand_count();
-    let is_output = usize::from(source_idx) == operand_count - 1;
-    destination_level.is_addressed() && (!is_output || logical_spec.output_is_read())
+    let source_idx_usize = usize::from(source_idx);
+    let parameters = logical_spec.parameters();
+    let is_output = usize::from(source_idx) == parameters.len() - 1;
+    let is_read = !is_output || logical_spec.output_is_read();
+    is_read
+        && !move_is_cache_miss(
+            &parameters[source_idx_usize],
+            destination_dtype,
+            destination_level,
+            destination_layout,
+        )
 }
 
 fn move_gens_epilogue<Tgt: Target>(
     destination_level: &Tgt::Level,
+    destination_layout: &Layout,
+    destination_dtype: Dtype,
     source_idx: u8,
     logical_spec: &LogicalSpec<Tgt>,
 ) -> bool {
-    let operand_count = logical_spec.operand_count();
-    let is_output = usize::from(source_idx) == operand_count - 1;
-    destination_level.is_addressed() && is_output
+    let source_idx_usize = usize::from(source_idx);
+    let parameters = logical_spec.parameters();
+    let is_output = source_idx_usize == logical_spec.operand_count() - 1;
+    is_output
+        && !move_is_cache_miss(
+            &parameters[source_idx_usize],
+            destination_dtype,
+            destination_level,
+            destination_layout,
+        )
 }
 
 pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
     operand: &TensorSpec<Tgt>,
+    destination_dtype: Dtype,
     destination_level: &Tgt::Level,
     destination_layout: &Layout,
     destination_vector_size: Option<DimSize>,
 ) -> TensorSpec<Tgt> {
+    let simple_cache_miss = move_is_cache_miss(
+        operand,
+        destination_dtype,
+        destination_level,
+        destination_layout,
+    );
+
     // When moving into an addressed bank, we'll generate an aligned destination.
     // If it's into a cache level, alignment won't change.
-    let aligned = if destination_level.is_addressed() {
+    let aligned = if !simple_cache_miss {
         true
     } else {
         operand.aligned()
@@ -741,7 +785,7 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
 
     // Will the result be contiguous? If the move is into a cache, it might be.
     // If it's into memory bank with its own address space, then yes.
-    let contiguous_abs = if destination_level.is_addressed() {
+    let contiguous_abs = if !simple_cache_miss {
         destination_layout.contiguous_full()
     } else {
         operand.contiguous_abs()
@@ -749,13 +793,28 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
 
     TensorSpec::<Tgt>::new_canon(
         operand.shape().into(),
-        operand.dtype(),
+        destination_dtype,
         contiguous_abs,
         aligned,
         *destination_level,
         destination_layout.clone(),
         destination_vector_size,
     )
+}
+
+/// Returns `true` if the move is a simple cache miss.
+///
+/// This is true if the destination is a hardware cache and the layout and data type are
+/// unchanged.
+fn move_is_cache_miss<Tgt: Target>(
+    operand: &TensorSpec<Tgt>,
+    destination_dtype: Dtype,
+    destination_level: &Tgt::Level,
+    destination_layout: &Layout,
+) -> bool {
+    !destination_level.is_addressed()
+        && &operand.layout() == destination_layout
+        && operand.dtype() == destination_dtype
 }
 
 /// Converts an internal [TileError] to an external [ApplyError].

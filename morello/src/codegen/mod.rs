@@ -12,7 +12,8 @@ use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::pprint::ImplPrintStyle;
 use crate::pprint::PrintableAux;
-use crate::target::{CpuMemoryLevel, Target, TargetId};
+use crate::target::CpuTarget;
+use crate::target::{Target, TargetId};
 use crate::utils::ToWriteFmt;
 use crate::views::Tensor;
 
@@ -29,8 +30,11 @@ use std::rc::Rc;
 use std::time::Duration;
 use tempfile::tempdir;
 
-const CLI_FLAGS: [&str; 3] = ["-std=gnu99", "-O3", "-o"];
+pub use self::cpu::CpuCodeGenThreadStyle;
 
+const CLI_FLAGS: [&str; 4] = ["-std=gnu99", "-O3", "-rtlib=compiler-rt", "-o"];
+
+// TODO: Avoid -fopenmp if we're not using an OpenMP pool.
 const X86_CLI_VEC_FLAGS: [&str; 2] = ["-fopenmp", "-mavx2"];
 const ARM_CLI_VEC_FLAGS: [&str; 1] = ["-fopenmp"];
 
@@ -48,11 +52,20 @@ pub trait CodeGen<Tgt: Target> {
             TargetId::Arm => &ARM_CLI_VEC_FLAGS,
         }
     }
-
     fn emit<W: fmt::Write>(
         &self,
         benchmark: bool,
         include_impl: Option<ImplPrintStyle>,
+        out: &mut W,
+    ) -> fmt::Result {
+        self.emit_ext(benchmark, include_impl, CpuCodeGenThreadStyle::OpenMP, out)
+    }
+
+    fn emit_ext<W: fmt::Write>(
+        &self,
+        benchmark: bool,
+        include_impl: Option<ImplPrintStyle>,
+        thread_style: CpuCodeGenThreadStyle, // TODO: CPU-specific type shouldn't be here
         out: &mut W,
     ) -> fmt::Result;
 
@@ -95,13 +108,14 @@ pub trait CodeGen<Tgt: Target> {
 
 impl<Tgt, Aux> CodeGen<Tgt> for ImplNode<Tgt, Aux>
 where
-    Tgt: Target<Level = CpuMemoryLevel>,
+    Tgt: CpuTarget,
     Aux: PrintableAux + Debug,
 {
-    fn emit<W: fmt::Write>(
+    fn emit_ext<W: fmt::Write>(
         &self,
         benchmark: bool,
         include_impl: Option<ImplPrintStyle>,
+        thread_style: CpuCodeGenThreadStyle,
         out: &mut W,
     ) -> fmt::Result {
         let top_arg_tensors = self
@@ -109,15 +123,20 @@ where
             .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
             .collect::<Vec<_>>();
         let mut generator = CpuCodeGenerator::<Tgt>::new();
+        generator.thread_style = thread_style;
         if let Some(impl_style) = include_impl {
             generator.emit_impl_comment(self, impl_style, out)?;
             writeln!(out)?;
         }
         generator.emit_kernel(self, &top_arg_tensors, benchmark, out)?;
         out.write_char('\n')?;
-        generator.emit_load_inputs(&top_arg_tensors, out)?;
-        out.write_char('\n')?;
-        generator.emit_main(&top_arg_tensors, benchmark, out)?;
+        if benchmark {
+            generator.emit_benchmarking_main(&top_arg_tensors, out)?;
+        } else {
+            generator.emit_load_inputs(&top_arg_tensors, out)?;
+            out.write_char('\n')?;
+            generator.emit_standard_main(&top_arg_tensors, out)?;
+        }
         Ok(())
     }
 

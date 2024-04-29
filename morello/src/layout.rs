@@ -1,7 +1,8 @@
 use itertools::Itertools;
+use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
-use std::{collections::HashSet, fmt::Display, hash::Hash, iter};
+use std::{collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
@@ -12,10 +13,23 @@ use crate::{
 };
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
-pub struct Layout(pub SmallVec<[(u8, Option<DimSize>); 4]>);
+pub struct Layout(pub SmallVec<[(u8, PhysDim); 4]>);
+
+// TODO: Remove PartialOrd and Ord
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
+pub enum PhysDim {
+    Dynamic,
+    Packed(DimSize),
+    /// A physical dimension split into two halves, laid out such that the elements are
+    /// interleaved. The parameter `0` is the total size: both halves.
+    Interleaved(DimSize),
+}
 
 #[cfg(test)]
-pub struct LayoutArbRankBounds(std::num::NonZeroU8, Option<std::num::NonZeroU8>);
+pub struct LayoutArbRankBounds {
+    min_rank: std::num::NonZeroU8,
+    max_rank: Option<std::num::NonZeroU8>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BufferVar {
@@ -31,18 +45,21 @@ pub enum LayoutError {
 }
 
 impl Layout {
-    pub fn new(dims: SmallVec<[(u8, Option<DimSize>); 4]>) -> Layout {
+    pub fn new(dims: SmallVec<[(u8, PhysDim); 4]>) -> Layout {
         #[cfg(debug_assertions)]
         {
             assert!(!dims.is_empty());
 
-            // Check that every logical dimension in the tensor is mentioned at least once.
-            // Also check that, for each logical dimension, only index 0 can be None.
+            // Check that every logical dimension in the tensor is mentioned at least once.  Also
+            // check that, for each logical dimension, only the first mention, if any, is dynamic.
             let logical_rank = dims.iter().map(|&(d, _)| d).max().unwrap();
             let mut seen = vec![false; usize::from(logical_rank) + 1];
             for (d, fixed_size) in &dims {
-                if fixed_size.is_none() && seen[usize::from(*d)] {
-                    panic!("Non-first occurrence of logical dimension {} is None", d);
+                if matches!(fixed_size, PhysDim::Dynamic) && seen[usize::from(*d)] {
+                    panic!(
+                        "Non-first occurrence of logical dimension {} is PhysDim::Dynamic",
+                        d
+                    );
                 }
                 seen[usize::from(*d)] = true;
             }
@@ -61,6 +78,7 @@ impl Layout {
         let l = Layout(dims);
         l.assert_no_consecutive_dimensions();
         l.assert_no_size_1_packings();
+        l.assert_no_odd_deinterleaves();
         l.merge_consecutive_dimensions(l.contiguous_full()).0
     }
 
@@ -80,25 +98,39 @@ impl Layout {
         let physical_shape = self.expand_physical_shape(concrete_shape).unwrap();
         let mut working_expr = AffineForm::zero();
         let mut dim_remaining_volume = Shape::from(concrete_shape);
-        for (&(logical_dim, _), &physical_size) in dims.iter().zip(&physical_shape) {
+        for (&(logical_dim, phys_dim), physical_size) in dims.iter().zip(physical_shape) {
             let logical_dim_us = usize::from(logical_dim);
             let prev_remaining_volume = dim_remaining_volume[logical_dim_us];
             debug_assert!(prev_remaining_volume <= concrete_shape[logical_dim_us]);
-            dim_remaining_volume[logical_dim_us] =
-                DimSize::new(dim_remaining_volume[logical_dim_us].get() / physical_size.get())
-                    .unwrap();
+            let new_remaining_volume =
+                DimSize::new(prev_remaining_volume.get() / physical_size.get()).unwrap();
+            dim_remaining_volume[logical_dim_us] = new_remaining_volume;
 
             // Construct a "term" for this physical dimension: really, an expression parameterized
             // by a logical dimension.
-            let mut term = BufferVar::Pt(logical_dim, expr_id.clone()).into();
-            if concrete_shape[logical_dim_us] != physical_size {
-                if prev_remaining_volume != concrete_shape[logical_dim_us] {
-                    term = NonAffine::Mod(Box::new(term), prev_remaining_volume.get()).into();
-                }
-                term =
-                    NonAffine::FloorDiv(Box::new(term), dim_remaining_volume[logical_dim_us].get())
-                        .into();
+            let mut term: NonAffineExpr<_> = BufferVar::Pt(logical_dim, expr_id.clone()).into();
+            if prev_remaining_volume != concrete_shape[logical_dim_us] {
+                term %= prev_remaining_volume.get();
             }
+            match phys_dim {
+                PhysDim::Interleaved(deinterleave_strip_size) => {
+                    let deinterleave_strip_size = deinterleave_strip_size.get();
+                    debug_assert_eq!(deinterleave_strip_size % 2, 0);
+                    let half_size = deinterleave_strip_size / 2;
+                    let half_size_i32 = i32::try_from(half_size).unwrap();
+
+                    let alternating_term =
+                        ((term.clone() % deinterleave_strip_size) % 2) * half_size_i32;
+                    let linear_term = (term % deinterleave_strip_size) / 2;
+                    term = linear_term + alternating_term;
+                    term /= new_remaining_volume.get();
+                }
+                _ => {
+                    if concrete_shape[logical_dim_us] != physical_size {
+                        term /= new_remaining_volume.get();
+                    }
+                }
+            };
 
             working_expr *= i32::try_from(physical_size.get()).unwrap();
             working_expr += term;
@@ -163,7 +195,7 @@ impl Layout {
         let Layout(dims) = self;
         dims.iter()
             .enumerate()
-            .all(|(i, (d, s))| i == usize::from(*d) && s.is_none())
+            .all(|(i, (d, s))| i == usize::from(*d) && *s == PhysDim::Dynamic)
     }
 
     // TODO: Do we really need callers to build a HashSet?
@@ -228,7 +260,13 @@ impl Layout {
         } else {
             let new_contig =
                 self.lower_contig_to_first_broken_dimension(parent_shape, tile_shape, contig)?;
-            debug_assert!(parent_shape != tile_shape || new_contig == contig);
+            debug_assert!(
+                parent_shape != tile_shape || new_contig == contig,
+                "Contig. shouldn't change when the shape ({:?}) doesn't, but {:?} is now {:?}",
+                parent_shape,
+                contig,
+                new_contig
+            );
             self.assert_no_consecutive_dimensions();
             let mut new_layout = self.clone();
             let new_contig = new_layout.drop_unneeded_packings(tile_shape, new_contig);
@@ -262,7 +300,8 @@ impl Layout {
             .unwrap())
     }
 
-    /// Asserts that there are no consecutive dimensions with the same logical dimension.
+    /// Asserts that there are no consecutive packed or interleaved dimensions with the same logical
+    /// dimension.
     ///
     /// This does nothing on release builds.
     fn assert_no_consecutive_dimensions(&self) {
@@ -271,8 +310,8 @@ impl Layout {
             let Layout(dims) = self;
             for idx in 1..dims.len() {
                 if dims[idx - 1].0 == dims[idx].0
-                    && dims[idx - 1].1.is_some()
-                    && dims[idx].1.is_some()
+                    && dims[idx - 1].1 != PhysDim::Dynamic
+                    && dims[idx].1 != PhysDim::Dynamic
                 {
                     panic!(
                         "Consecutive packed dimensions for logical dimension {} in layout: {:?}",
@@ -293,25 +332,30 @@ impl Layout {
         let mut new_dims = SmallVec::with_capacity(dims.len());
         new_dims.push(dims[0]);
 
-        for (idx, (dim, packing_size)) in dims.iter().skip(1).enumerate() {
-            let (last_dim, last_packing_size): &mut (u8, Option<DimSize>) =
-                new_dims.last_mut().unwrap();
+        for (idx, (dim, phys_dim)) in dims.iter().skip(1).enumerate() {
+            let (last_dim, last_phys_dim): &mut (u8, PhysDim) = new_dims.last_mut().unwrap();
             if dim != last_dim {
-                new_dims.push((*dim, *packing_size));
+                new_dims.push((*dim, *phys_dim));
                 continue;
             }
 
-            match (last_packing_size, packing_size) {
-                (Some(l), Some(n)) => {
-                    *l = DimSize::new(l.get() * n.get()).unwrap();
+            match (last_phys_dim, phys_dim) {
+                (PhysDim::Packed(l), PhysDim::Packed(n)) => {
+                    *l = l.checked_mul(*n).unwrap();
                     if idx >= first_contig_idx {
                         new_contig -= 1;
                     }
                 }
-                (None, Some(_)) | (Some(_), None) => {
-                    new_dims.push((*dim, *packing_size));
+                (PhysDim::Dynamic, PhysDim::Packed(_))
+                | (PhysDim::Dynamic, PhysDim::Interleaved(_))
+                | (PhysDim::Packed(_), PhysDim::Dynamic)
+                | (PhysDim::Packed(_), PhysDim::Interleaved(_))
+                | (PhysDim::Interleaved(_), PhysDim::Dynamic)
+                | (PhysDim::Interleaved(_), PhysDim::Packed(_)) => {
+                    new_dims.push((*dim, *phys_dim));
                 }
-                (None, None) => {
+                (PhysDim::Interleaved(_), PhysDim::Interleaved(_)) => todo!(),
+                (PhysDim::Dynamic, PhysDim::Dynamic) => {
                     panic!("Repeating non-packed dimensions is undefined: {:?}", self)
                 }
             }
@@ -343,7 +387,7 @@ impl Layout {
         // Count the number of packings applied to each logical dimension.
         let mut packings = vec![0; dims.len()];
         for (logical_dim, s) in dims.as_slice() {
-            if s.is_some() {
+            if matches!(s, PhysDim::Packed(_)) {
                 packings[usize::from(*logical_dim)] += 1;
             }
         }
@@ -363,12 +407,13 @@ impl Layout {
                 continue;
             }
             match s {
-                Some(fixed_size) if tile_shape[logical_dim_usize] == fixed_size => {
-                    dims[idx] = (logical_dim, None);
+                PhysDim::Packed(fixed_size) if tile_shape[logical_dim_usize] == fixed_size => {
+                    dims[idx] = (logical_dim, PhysDim::Dynamic);
                     logical_dims_noneified[logical_dim_usize] = Some(idx);
                 }
-                None if idx >= first_contig_idx
-                    && logical_dims_noneified[logical_dim_usize].is_some() =>
+                PhysDim::Dynamic
+                    if idx >= first_contig_idx
+                        && logical_dims_noneified[logical_dim_usize].is_some() =>
                 {
                     // We know this will be 1 since we'll have already visited the packed dimension
                     // with the same size as the logical dimension.
@@ -409,22 +454,22 @@ impl Layout {
             .into_iter()
             .map(|x| x.get())
             .collect();
-        for (dim, fixed_size) in dims.iter().rev() {
+        for (dim, phys_dim) in dims.iter().rev() {
             let remaining_size = &mut logical_shape_remaining[usize::from(*dim)];
             debug_assert_ne!(
                 remaining_size, &0,
                 "Logical dimension {} with unpacked sized already seen in {:?}",
                 dim, dims
             );
-            match fixed_size {
-                Some(s) => {
+            match phys_dim {
+                PhysDim::Interleaved(s) | PhysDim::Packed(s) => {
                     if *remaining_size % s.get() != 0 {
                         return Err(LayoutError::InvalidShape(logical_shape.into()));
                     }
                     physical_shape.push(*s);
                     *remaining_size /= s.get();
                 }
-                None => {
+                PhysDim::Dynamic => {
                     physical_shape.push(DimSize::new(*remaining_size).unwrap());
                     *remaining_size = 0; // zero is a special value for error detection
                 }
@@ -470,14 +515,14 @@ impl Layout {
                 dim, dims
             );
             match fixed_size {
-                Some(s) => {
+                PhysDim::Interleaved(s) | PhysDim::Packed(s) => {
                     if remaining_size % *s != 0 {
                         return Err(LayoutError::InvalidShape(logical_shape.into()));
                     }
                     physical_shape.push((idx, *s));
                     remaining_size /= s.get();
                 }
-                None => {
+                PhysDim::Dynamic => {
                     physical_shape.push((idx, DimSize::new(remaining_size).unwrap()));
                     remaining_size = 0; // zero is a special value for error detection
                 }
@@ -493,16 +538,26 @@ impl Layout {
     fn assert_no_size_1_packings(&self) {
         #[cfg(debug_assertions)]
         {
-            use nonzero::nonzero as nz;
-
             let Layout(dims) = self;
             for (_, size) in dims {
                 debug_assert_ne!(
                     size,
-                    &Some(nz!(1u32)),
+                    &PhysDim::Packed(nz!(1u32)),
                     "Size-1 packing in layout: {:?}",
                     dims
                 );
+            }
+        }
+    }
+
+    fn assert_no_odd_deinterleaves(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let Layout(dims) = self;
+            for (_, size) in dims {
+                if let PhysDim::Interleaved(s) = size {
+                    debug_assert_eq!(s.get() % 2, 0);
+                }
             }
         }
     }
@@ -514,17 +569,23 @@ impl proptest::arbitrary::Arbitrary for Layout {
     type Strategy = proptest::strategy::BoxedStrategy<Layout>;
 
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
-        use proptest::strategy::{Just, Strategy};
+        use proptest::{
+            prop_oneof,
+            strategy::{Just, Strategy},
+        };
 
-        let min_rank = usize::from(args.0.get());
-        let max_physical_rank = usize::from(args.1.map(|r| r.into()).unwrap_or(5));
+        let min_rank = usize::from(args.min_rank.get());
+        let max_physical_rank = usize::from(args.max_rank.map(|r| r.into()).unwrap_or(5));
         assert!(min_rank <= max_physical_rank);
 
-        let packed_st = (2..=8u32).prop_map(Option::Some);
-        let optional_packed_st = Just(None).boxed().prop_union(packed_st.clone().boxed());
+        let packed_st = (2..=8u32).prop_map(|s| PhysDim::Packed(s.try_into().unwrap()));
+        let interleaved_st =
+            (1..=4u32).prop_map(|s| PhysDim::Interleaved((s * 2).try_into().unwrap()));
+        let non_dynamic_st = prop_oneof![packed_st, interleaved_st];
+        let any_phys_dim_st = prop_oneof![Just(PhysDim::Dynamic), non_dynamic_st.clone()];
 
-        let logical_dims_prefix =
-            proptest::collection::vec(optional_packed_st, min_rank..=min_rank).prop_map(|v| {
+        let required_dims = proptest::collection::vec(any_phys_dim_st, min_rank..=min_rank)
+            .prop_map(|v| {
                 v.into_iter()
                     .enumerate()
                     .map(|(i, p)| {
@@ -535,23 +596,17 @@ impl proptest::arbitrary::Arbitrary for Layout {
             });
 
         let max_adds = max_physical_rank - min_rank;
-        let additional_logical_dims = proptest::collection::vec(
+        let additional_dims = proptest::collection::vec(
             (0..max_adds).prop_flat_map(move |i| {
                 let i = u8::try_from(i).unwrap();
-                (Just(i), packed_st.clone())
+                (Just(i), non_dynamic_st.clone())
             }),
             0..=max_adds,
         );
 
-        (logical_dims_prefix, additional_logical_dims)
+        (required_dims, additional_dims)
             .prop_map(|(prefix, additional)| {
-                Layout::new(
-                    prefix
-                        .into_iter()
-                        .chain(additional)
-                        .map(|(d, s)| (d, s.map(|x| DimSize::new(x).unwrap())))
-                        .collect(),
-                )
+                Layout::new(prefix.into_iter().chain(additional).collect())
             })
             .boxed()
     }
@@ -562,8 +617,24 @@ impl Display for Layout {
         let Layout(dims) = self;
         if self.is_row_major() {
             write!(f, "RM")
-        } else if dims.to_vec() == vec![(0, None), (2, None), (3, None), (1, None)] {
+        } else if dims[..]
+            == [
+                (0, PhysDim::Dynamic),
+                (2, PhysDim::Dynamic),
+                (3, PhysDim::Dynamic),
+                (1, PhysDim::Dynamic),
+            ]
+        {
             write!(f, "NHWC")
+        } else if dims.iter().all(|(_, s)| s == &PhysDim::Dynamic) {
+            write!(
+                f,
+                "[{}]",
+                dims.iter()
+                    .map(|(d, _)| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
         } else {
             write!(
                 f,
@@ -584,7 +655,10 @@ impl Display for Layout {
 #[cfg(test)]
 impl Default for LayoutArbRankBounds {
     fn default() -> Self {
-        Self(std::num::NonZeroU8::new(1).unwrap(), None)
+        Self {
+            min_rank: std::num::NonZeroU8::new(1).unwrap(),
+            max_rank: None,
+        }
     }
 }
 
@@ -601,15 +675,20 @@ impl Atom for BufferVar {}
 impl Bounds for BufferVar {}
 
 pub fn row_major(rank: u8) -> Layout {
-    Layout::new((0..rank).map(|d| (d, None)).collect())
+    Layout::new((0..rank).map(|d| (d, PhysDim::Dynamic)).collect())
 }
 
 pub fn col_major(rank: u8) -> Layout {
-    Layout::new((0..rank).rev().map(|d| (d, None)).collect())
+    Layout::new((0..rank).rev().map(|d| (d, PhysDim::Dynamic)).collect())
 }
 
 pub fn nhwc() -> Layout {
-    layout![(0, None), (2, None), (3, None), (1, None)]
+    layout![
+        (0, PhysDim::Dynamic),
+        (2, PhysDim::Dynamic),
+        (3, PhysDim::Dynamic),
+        (1, PhysDim::Dynamic)
+    ]
 }
 
 pub mod macros {
@@ -620,24 +699,29 @@ pub mod macros {
                 smallvec::smallvec![ $( layout!(@inner $dim) ),* ]
             )
         };
-        ( @inner ($dim:expr, Some($ds:expr)) ) => {{
+        ( @inner ($dim:expr, PhysDim::Interleaved($ds:expr)) ) => {{
+            use $crate::layout::PhysDim;
             use $crate::spec::macros::internal::IntoDimSize;
-            ($dim, Some(($ds).into_dim_size()))
+            ($dim, PhysDim::Interleaved(($ds).into_dim_size()))
         }};
-        ( @inner ($dim:expr, None) ) => {
-            ($dim, None)
-        };
+        ( @inner ($dim:expr, PhysDim::Packed($ds:expr)) ) => {{
+            use $crate::layout::PhysDim;
+            use $crate::spec::macros::internal::IntoDimSize;
+            ($dim, PhysDim::Packed(($ds).into_dim_size()))
+        }};
+        ( @inner ($dim:expr, PhysDim::Dynamic) ) => {{
+            use $crate::layout::PhysDim;
+            ($dim, PhysDim::Dynamic)
+        }};
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{col_major, Layout, LayoutArbRankBounds};
+    use super::*;
     use crate::{
         common::{DimSize, Shape},
         expr::{AffineForm, Bounds, NonAffine, NonAffineExpr, Substitute, Term},
-        layout,
-        layout::{row_major, BufferVar, LayoutError},
         opaque_symbol::OpaqueSymbol,
         shape,
     };
@@ -652,7 +736,11 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_1() {
-        let layout = layout![(0, None), (1, None), (0, Some(4))];
+        let layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(4))
+        ];
         assert_eq!(
             layout.expand_physical_shape(&shape![64, 64]).unwrap()[..],
             *shape![16, 64, 4],
@@ -661,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_2() {
-        let layout = layout![(0, None), (1, Some(2))];
+        let layout = layout![(0, PhysDim::Dynamic), (1, PhysDim::Packed(2))];
         assert_eq!(
             layout.expand_physical_shape(&shape![2, 2]).unwrap()[..],
             *shape![2, 2],
@@ -670,7 +758,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_3() {
-        let layout = layout![(0, Some(4)), (1, None)];
+        let layout = layout![(0, PhysDim::Packed(4)), (1, PhysDim::Dynamic)];
         assert!(matches!(
             layout.expand_physical_shape(&shape![1, 64]),
             Err(LayoutError::InvalidShape(_))
@@ -679,7 +767,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_4() {
-        let layout = layout![(0, Some(2))];
+        let layout = layout![(0, PhysDim::Packed(2))];
         let expanded = layout.expand_physical_shape(&shape![6]);
         assert!(
             matches!(expanded, Err(LayoutError::InvalidShape(_))),
@@ -689,7 +777,11 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_5() {
-        let layout = layout![(0, None), (1, None), (0, Some(4))];
+        let layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(4))
+        ];
         assert!(matches!(
             layout.expand_physical_shape(&shape![2, 64]),
             Err(LayoutError::InvalidShape(_)),
@@ -698,7 +790,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_6() {
-        let layout = layout![(0, Some(2))];
+        let layout = layout![(0, PhysDim::Packed(2))];
         assert!(matches!(
             layout.expand_physical_shape(&shape![1]),
             Err(LayoutError::InvalidShape(_)),
@@ -707,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_7() {
-        let layout = layout![(0, Some(4)), (1, None)];
+        let layout = layout![(0, PhysDim::Packed(4)), (1, PhysDim::Dynamic)];
         let expanded = layout.expand_physical_shape(&shape![8, 64]);
         assert!(
             matches!(expanded, Err(LayoutError::InvalidShape(_))),
@@ -717,7 +809,7 @@ mod tests {
 
     #[test]
     fn test_physical_size_1() {
-        let layout = layout![(0, Some(2))];
+        let layout = layout![(0, PhysDim::Packed(2))];
         assert!(matches!(
             layout.physical_size(0, &shape![6]),
             Err(LayoutError::InvalidShape(_)),
@@ -887,13 +979,17 @@ mod tests {
                     .flat_map(|(logical_dim, (prefix_none, per_dim_shape))| {
                         let mut prefix = None;
                         if prefix_none {
-                            prefix = Some((u8::try_from(logical_dim).unwrap(), None));
+                            prefix = Some((u8::try_from(logical_dim).unwrap(), PhysDim::Dynamic));
                         };
-                        prefix.into_iter().chain(
-                            per_dim_shape
-                                .into_iter()
-                                .map(move |d| (u8::try_from(logical_dim).unwrap(), Some(d))),
-                        )
+                        prefix
+                            .into_iter()
+                            .chain(per_dim_shape.into_iter().map(move |d| {
+                                // TODO: Should also generate Interleaved
+                                (
+                                    u8::try_from(logical_dim).unwrap(),
+                                    PhysDim::Packed(d.try_into().unwrap()),
+                                )
+                            }))
                     })
                     .unzip();
                 let rank = usize::from(*dim_order.iter().max().unwrap()) + 1;
@@ -901,10 +997,11 @@ mod tests {
                 let mut tensor_shape = vec![1; rank];
                 for (&dim, &d) in dim_order.iter().zip(&physical_tile_shape) {
                     match d {
-                        Some(fixed) => {
-                            tensor_shape[usize::from(dim)] *= fixed;
+                        PhysDim::Interleaved(_) => todo!(),
+                        PhysDim::Packed(fixed) => {
+                            tensor_shape[usize::from(dim)] *= fixed.get();
                         }
-                        None => {
+                        PhysDim::Dynamic => {
                             // TODO: Multiply by something.
                         }
                     }
@@ -924,8 +1021,8 @@ mod tests {
                 |(_, dim_order, physical_tile_shape, _)| {
                     for idx in 1..dim_order.len() {
                         if dim_order[idx - 1] == dim_order[idx]
-                            && physical_tile_shape[idx - 1].is_some()
-                            && physical_tile_shape[idx].is_some()
+                            && matches!(physical_tile_shape[idx - 1], PhysDim::Packed(_))
+                            && matches!(physical_tile_shape[idx], PhysDim::Packed(_))
                         {
                             return false;
                         }
@@ -935,13 +1032,8 @@ mod tests {
             )
             .prop_flat_map(
                 |(tensor_shape, dim_order, physical_tile_shape, tile_shape)| {
-                    let new_layout = Layout::new(
-                        dim_order
-                            .into_iter()
-                            .zip(physical_tile_shape)
-                            .map(|(d, s)| (d, s.map(|x| DimSize::new(x).unwrap())))
-                            .collect(),
-                    );
+                    let new_layout =
+                        Layout::new(dim_order.into_iter().zip(physical_tile_shape).collect());
                     let tile_offset = tensor_shape
                         .iter()
                         .zip(&tile_shape)
@@ -990,6 +1082,34 @@ mod tests {
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
     }
 
+    #[test]
+    fn test_interleaved_indexing_expression_1() {
+        let layout = Layout::new(smallvec![(
+            0,
+            PhysDim::Interleaved(DimSize::new(8).unwrap())
+        )]);
+        let expr_id = OpaqueSymbol::new();
+        let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![8]);
+
+        let pt = NonAffineExpr::from(BufferVar::Pt(0, expr_id.clone()));
+        let expected = (pt.clone() % 8) / 2 + (pt % 2) * 4i32;
+        assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
+    }
+
+    #[test]
+    fn test_interleaved_indexing_expression_2() {
+        let layout = Layout::new(smallvec![
+            (0, PhysDim::Dynamic),
+            (0, PhysDim::Interleaved(DimSize::new(8).unwrap()))
+        ]);
+        let expr_id = OpaqueSymbol::new();
+        let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![16]);
+
+        let pt = NonAffineExpr::from(BufferVar::Pt(0, expr_id.clone()));
+        let expected = (pt.clone() / 8) * 8 + (pt.clone() % 8) / 2 + (pt % 2) * 4;
+        assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
+    }
+
     fn arb_shape_and_same_rank_layout() -> impl Strategy<Value = (Shape, Layout)> {
         proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(|shape| {
             let shape = shape
@@ -997,7 +1117,10 @@ mod tests {
                 .map(|x| DimSize::new(x).unwrap())
                 .collect::<Vec<_>>();
             let shape_nz = NonZeroU8::try_from(u8::try_from(shape.len()).unwrap()).unwrap();
-            let bounds = LayoutArbRankBounds(shape_nz, Some(shape_nz));
+            let bounds = LayoutArbRankBounds {
+                min_rank: shape_nz,
+                max_rank: Some(shape_nz),
+            };
             let all_layouts = any_with::<Layout>(bounds);
             (Just(Shape::from(shape)), all_layouts)
         })

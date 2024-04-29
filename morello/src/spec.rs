@@ -5,6 +5,7 @@ use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
+use crate::layout::row_major;
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
@@ -521,6 +522,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
+    pub fn set_serial_only(&mut self, serial_only: bool) {
+        match self {
+            LogicalSpec::Primitive(_, _, ref mut s) => *s = serial_only,
+            LogicalSpec::Compose {
+                serial_only: ref mut s,
+                ..
+            } => *s = serial_only,
+        }
+    }
+
     pub fn operand_count(&self) -> usize {
         match self {
             LogicalSpec::Compose { components, .. } => {
@@ -622,6 +633,25 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         aux.canonicalize(&basics.spec_shape)
                             .context("Failed to canonicalize the TensorSpecAux")?;
                     }
+
+                    // It source and destination are fully contiguous and the dtypes and layouts
+                    // match, then we can canonicalize to a row-major bitwise move. This is a
+                    // workaround for not being able to split interleaved layouts with a tile, but
+                    // can be generalized to be a useful symmetry-breaking predicate later on.
+                    // TODO: Do just that: generalize this caonicalizaton rule.
+                    if basics.dtypes.iter().all_equal()
+                        && primitive_aux.iter().map(|a| &a.layout).all_equal()
+                        && primitive_aux
+                            .iter()
+                            .all(|aux| aux.contig == aux.layout.contiguous_full())
+                    {
+                        let rm = row_major(basics.spec_shape.len().try_into().unwrap());
+                        let new_contig = rm.contiguous_full();
+                        for aux in primitive_aux.iter_mut() {
+                            aux.layout = rm.clone();
+                            aux.contig = new_contig;
+                        }
+                    }
                 }
                 PrimitiveSpecType::Zero => {
                     primitive_aux[0]
@@ -649,6 +679,18 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         if !aux.is_canonical(&basics.spec_shape) {
                             return false;
                         }
+                    }
+
+                    if basics.dtypes.iter().all_equal()
+                        && primitive_aux.iter().map(|a| &a.layout).all_equal()
+                        && primitive_aux
+                            .iter()
+                            .all(|aux| aux.contig == aux.layout.contiguous_full())
+                        && primitive_aux.iter().any(|aux| {
+                            !aux.layout.is_row_major() || aux.contig != aux.layout.contiguous_full()
+                        })
+                    {
+                        return false;
                     }
                 }
                 PrimitiveSpecType::Zero => {
@@ -836,28 +878,34 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             // Yield actions for movement with register file destination, which
             // includes relayouts in registers and movements from level 1 to RF.
             let i = u8::try_from(i).unwrap();
-            for layout in Tgt::move_destination_layouts(operand.shape(), operand.dtype()) {
+            let operand_dtype = operand.dtype();
+            for layout in Tgt::move_destination_layouts(operand.shape(), operand_dtype) {
                 // TODO: Prevent moving into packed layouts where strip size equals the whole dim.
                 for level in Tgt::possible_destination_levels(operand.level()) {
                     if !operand.can_move_to(&layout, &level) {
                         continue;
                     }
 
-                    results.extend(
-                        gen_vector_sizes_opt(operand.dtype(), level.vector_bytes()).map(
-                            |vector_size| {
-                                // This may return Moves with identical source and destination
-                                // TensorSpecs (i.e., within-level copies). These will be filtered in
-                                // [apply_with_aux].
-                                Action::Move {
-                                    source_idx: i,
-                                    destination_level: level,
-                                    destination_layout: layout.clone(),
-                                    destination_vector_size: vector_size,
-                                }
-                            },
-                        ),
-                    )
+                    for &destination_dtype in
+                        iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
+                    {
+                        results.extend(
+                            gen_vector_sizes_opt(operand_dtype, level.vector_bytes()).map(
+                                |vector_size| {
+                                    // This may return Moves with identical source and destination
+                                    // TensorSpecs (i.e., within-level copies). These will be filtered in
+                                    // [apply_with_aux].
+                                    Action::Move {
+                                        source_idx: i,
+                                        destination_dtype,
+                                        destination_level: level,
+                                        destination_layout: layout.clone(),
+                                        destination_vector_size: vector_size,
+                                    }
+                                },
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -1664,6 +1712,12 @@ pub mod macros {
         ( @dt_convert i32 ) => {
             $crate::common::Dtype::Sint32
         };
+        ( @dt_convert f32 ) => {
+            $crate::common::Dtype::Float32
+        };
+        ( @dt_convert bf16 ) => {
+            $crate::common::Dtype::Bfloat16
+        };
         ( @dt_convert $val:expr ) => {
             $val
         };
@@ -1841,10 +1895,21 @@ mod tests {
         fn test_canonicalize_is_noop_if_already_canonical(
             logical_spec in any::<LogicalSpec<X86Target>>()
         ) {
-            let mut c = logical_spec.clone();
-            c.canonicalize().unwrap();
-            let unchanged = logical_spec == c;
-            assert_eq!(logical_spec.is_canonical(), unchanged);
+            let mut canonicalized_logical_spec = logical_spec.clone();
+            canonicalized_logical_spec.canonicalize().unwrap();
+            if logical_spec == canonicalized_logical_spec {
+                prop_assert!(
+                    logical_spec.is_canonical(),
+                    "LogicalSpec::is_canonical was false, but canonicalizing {} was a no-op",
+                    logical_spec
+                );
+            } else {
+                prop_assert!(
+                    !logical_spec.is_canonical(),
+                    "LogicalSpec::is_canonical was true, but {} was canonicalized to {}",
+                    logical_spec, canonicalized_logical_spec
+                );
+            }
         }
 
         #[test]
@@ -1953,6 +2018,34 @@ mod tests {
             spec in any::<Spec<ArmTarget>>()
         ) {
             shared_test_no_action_produces_same_spec_with_higher_memory_limit(&spec)
+        }
+
+        #[test]
+        fn test_actions_produce_canonical_subspecs(
+            spec in any::<Spec<X86Target>>()
+        ) {
+            spec.0.actions().into_iter().for_each(|action| {
+                let Ok(applied) = action.apply(&spec) else {
+                    return;
+                };
+                visit_leaves(&applied, &mut |leaf| {
+                    if let ImplNode::SpecApp(spec_app) = leaf {
+                        assert!(
+                            spec_app.0.is_canonical(),
+                            "Action {:?} applied to {} produced non-canonical {} (should be {})",
+                            action,
+                            spec,
+                            spec_app.0,
+                            {
+                                let mut c = spec_app.0.clone();
+                                c.canonicalize().unwrap();
+                                c
+                            }
+                        );
+                    }
+                    true
+                });
+            });
         }
 
         #[test]

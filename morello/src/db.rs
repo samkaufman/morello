@@ -41,18 +41,26 @@ pub type ActionIdx = u16;
 const CONCURRENT_CACHE_SHARDS: usize = 256;
 const CACHE_PER_SHARD_SIZE: usize = 128;
 const CACHE_PER_SHARD_SAMPLES: usize = 8;
-const SUPERBLOCK_FACTOR: BimapInt = 4;
+const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 
 #[derive(Clone, Debug)]
 pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
 
 pub struct RocksDatabase {
-    db: Arc<rocksdb::DB>, // TODO: Arc shouldn't be necessary.
+    db: Arc<DBInner>,
     binary_scale_shapes: bool,
     k: u8,
     shards: ShardArray,
     prehasher: DefaultPrehasher,
+}
+
+/// Wraps a [rocksdb::DB] to optionally delete data on drop.
+///
+/// This implements [Deref] for convenience.
+struct DBInner {
+    db: Option<rocksdb::DB>,
+    transient: bool,
 }
 
 struct ShardArray([Mutex<Shard>; CONCURRENT_CACHE_SHARDS]);
@@ -158,7 +166,10 @@ impl RocksDatabase {
         db_opts.set_max_background_jobs(6);
         db_opts.set_bytes_per_sync(1048576);
         db_opts.set_max_open_files(128);
-        let db = Arc::new(rocksdb::DB::open(&db_opts, resolved_file_path)?);
+        let db = Arc::new(DBInner {
+            db: Some(rocksdb::DB::open(&db_opts, resolved_file_path)?),
+            transient: file_path.is_none(),
+        });
         let shards = ShardArray(std::array::from_fn(|i| Mutex::new(Shard::new(i, &db))));
         Ok(Self {
             db,
@@ -274,6 +285,18 @@ impl RocksDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        // Check that all costs in decisions have peak memory less than or equal to spec's
+        // memory limits.
+        debug_assert!(
+            decisions.iter().all(|(_, c)| {
+                let MemoryLimits::Standard(limits) = &spec.1;
+                &c.peaks <= limits
+            }),
+            "peak memory of an action exceeds memory limits of {}: {:?}",
+            spec,
+            decisions
+        );
+
         let bimap = self.spec_bimap();
         let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
 
@@ -449,6 +472,30 @@ impl Drop for RocksDatabase {
     }
 }
 
+impl Deref for DBInner {
+    type Target = rocksdb::DB;
+
+    fn deref(&self) -> &Self::Target {
+        self.db.as_ref().unwrap()
+    }
+}
+
+impl Drop for DBInner {
+    fn drop(&mut self) {
+        if self.transient {
+            let path = self.db.as_ref().unwrap().path().to_owned();
+            drop(self.db.take());
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                log::error!(
+                    "Failed to remove transient database at {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
+}
+
 impl<'a> PageId<'a> {
     pub fn contains<Tgt>(&self, spec: &Spec<Tgt>) -> bool
     where
@@ -467,7 +514,7 @@ impl<'a> PageId<'a> {
 }
 
 impl Shard {
-    fn new(idx: usize, db: &Arc<rocksdb::DB>) -> Self {
+    fn new(idx: usize, db: &Arc<DBInner>) -> Self {
         let db = Arc::clone(db);
         let (command_tx, command_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
         let (response_tx, response_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);

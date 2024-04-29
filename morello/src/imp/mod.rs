@@ -10,7 +10,7 @@ use crate::views::{Param, View};
 use crate::{
     cost::MainCost,
     imp::{
-        blocks::Block, kernels::Kernel, loops::Loop, moves::MoveLet, pipeline::Pipeline,
+        blocks::Block, kernels::KernelApp, loops::Loop, moves::MoveLet, pipeline::Pipeline,
         subspecs::SpecApp,
     },
     memorylimits::{MemVec, MemoryAllocation},
@@ -86,7 +86,7 @@ pub enum ImplNode<Tgt: Target, Aux: Clone> {
     MoveLet(MoveLet<Tgt, Aux>),
     Block(Block<Tgt, Aux>),
     Pipeline(Pipeline<Tgt, Aux>),
-    Kernel(Kernel<Tgt, Aux>),
+    Kernel(KernelApp<Tgt, Aux>),
     SpecApp(SpecApp<Tgt, Spec<Tgt>, Aux>),
 }
 
@@ -160,6 +160,7 @@ impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
 impl<Tgt, Aux> proptest::arbitrary::Arbitrary for ImplNode<Tgt, Aux>
 where
     Tgt: Target,
+    Tgt::Kernel: proptest::arbitrary::Arbitrary,
     Aux: Debug + Clone + proptest::arbitrary::Arbitrary + 'static,
 {
     type Parameters = ();
@@ -170,7 +171,7 @@ where
 
         // TODO: Generate non-leaf Impls.
         let impl_leaf_strategy = prop_oneof![
-            any::<Kernel<Tgt, Aux>>().prop_map(ImplNode::Kernel),
+            any::<KernelApp<Tgt, Aux>>().prop_map(ImplNode::Kernel),
             any::<SpecApp<Tgt, Spec<Tgt>, Aux>>().prop_map(ImplNode::SpecApp)
         ];
         impl_leaf_strategy.boxed()

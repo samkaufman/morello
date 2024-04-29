@@ -1,17 +1,19 @@
 mod arm;
-mod cpu;
+pub(crate) mod cpu;
 mod x86;
 
 pub use arm::ArmTarget;
-pub use cpu::CpuMemoryLevel;
+pub use cpu::{CpuKernel, CpuMemoryLevel, CpuTarget};
 pub use x86::X86Target;
 
 use crate::common::DimSize;
 use crate::cost::MainCost;
 use crate::layout::Layout;
-use crate::memorylimits::MemoryLimits;
+use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
+use crate::tensorspec::TensorSpec;
+use crate::views::Param;
 use crate::{codegen::c_utils::VecType, common::Dtype};
 
 use serde::de::DeserializeOwned;
@@ -24,6 +26,7 @@ pub const LEVEL_COUNT: usize = 4;
 // TODO: Do we need so many trait bounds, here or in [CpuTarget]?
 pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Level: MemoryLevel;
+    type Kernel: Kernel;
 
     fn line_size() -> u32;
     fn max_mem() -> MemoryLimits;
@@ -43,13 +46,13 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn move_destination_layouts(shape: &[DimSize], dtype: Dtype) -> Vec<Layout>;
 
     /// Yield target-specific actions which apply to a given [LogicalSpec].
-    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>>>;
+    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>> + '_>;
 
     /// Get corresponding [TargetId] enum
     fn target_id() -> TargetId;
 
     /// Get corresponding vector types
-    fn vec_types() -> &'static [VecType; 12];
+    fn vec_types() -> &'static [VecType; 16];
 }
 
 pub trait MemoryLevel:
@@ -61,6 +64,22 @@ pub trait MemoryLevel:
     fn vector_rf(&self) -> bool {
         !self.vector_bytes().is_empty()
     }
+}
+
+pub trait Kernel: PartialEq + Eq + Copy + Clone + Debug {
+    fn argument_count(&self) -> u8;
+
+    // TODO: Make into `applies_to_spec`
+    // TODO: Don't require CpuKernel
+    fn applies_to_parameters<Tgt: CpuTarget>(&self, parameters: &[TensorSpec<Tgt>]) -> bool;
+
+    // TODO: Take something more generic than Param.
+    fn memory_allocated<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MemoryAllocation;
+    fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost;
+
+    fn name(&self) -> &'static str;
+
+    fn all_kernels() -> &'static [Self];
 }
 
 #[derive(Clone, Copy)]
