@@ -702,6 +702,12 @@ impl<Tgt: Target> SpecTask<Tgt> {
 
 impl ImplReducer {
     fn new(top_k: usize, preferences: SmallVec<[ActionIdx; 1]>) -> Self {
+        debug_assert!(preferences.len() <= top_k);
+        debug_assert!(
+            preferences.iter().all_unique(),
+            "Preferences should not contain duplicates"
+        );
+
         ImplReducer {
             results: BTreeSet::new(),
             top_k,
@@ -964,25 +970,7 @@ mod tests {
     #[test]
     fn test_implreducer_preference_replacement() {
         let top_k = 3;
-        let preferences = smallvec![0, 3, 3];
-        let mut reducer = ImplReducer::new(top_k, preferences);
-
-        let cost1 = create_simple_cost(1);
-
-        reducer.insert(0, cost1.clone());
-        reducer.insert(1, cost1.clone());
-        reducer.insert(2, cost1.clone());
-        reducer.insert(3, cost1.clone());
-
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(0, cost1.clone()), (2, cost1.clone()), (3, cost1)];
-        assert_eq!(reducer.finalize(), expected);
-    }
-
-    #[test]
-    fn test_implreducer_preference_replacement2() {
-        let top_k = 3;
-        let preferences = smallvec![0, 0, 3];
+        let preferences = smallvec![0, 2, 3];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -1000,7 +988,7 @@ mod tests {
     #[test]
     fn test_implreducer_preference_replacement_and_sort_by_cost() {
         let top_k = 3;
-        let preferences = smallvec![0, 0, 3];
+        let preferences = smallvec![0, 2, 3];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -1019,7 +1007,7 @@ mod tests {
     #[test]
     fn test_implreducer_preference_replacement_and_sort_by_cost_then_action_idx() {
         let top_k = 3;
-        let preferences = smallvec![3, 0, 0];
+        let preferences = smallvec![3, u16::MAX, 0];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
