@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -64,11 +64,18 @@ enum WorkingPartialImpl<Tgt: Target> {
     Sat,
 }
 
+// TODO: Make this private once #[bench] gets stable.
 #[derive(Debug)]
-struct ImplReducer {
-    results: BTreeSet<(Cost, ActionIdx)>,
+pub struct ImplReducer {
+    results: ImplReducerResults,
     top_k: usize,
     preferences: SmallVec<[ActionIdx; 1]>,
+}
+
+#[derive(Debug)]
+enum ImplReducerResults {
+    One(Option<(Cost, ActionIdx)>),
+    Many(BTreeSet<(Cost, ActionIdx)>),
 }
 
 // Computes an optimal Impl for `goal` and stores it in `db`.
@@ -701,7 +708,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
 }
 
 impl ImplReducer {
-    fn new(top_k: usize, preferences: SmallVec<[ActionIdx; 1]>) -> Self {
+    pub fn new(top_k: usize, preferences: SmallVec<[ActionIdx; 1]>) -> Self {
         debug_assert!(preferences.len() <= top_k);
         debug_assert!(
             preferences.iter().all_unique(),
@@ -709,53 +716,73 @@ impl ImplReducer {
         );
 
         ImplReducer {
-            results: BTreeSet::new(),
+            results: if top_k == 1 {
+                ImplReducerResults::One(None)
+            } else {
+                ImplReducerResults::Many(BTreeSet::new())
+            },
             top_k,
             preferences,
         }
     }
 
-    fn insert(&mut self, new_action_idx: ActionIdx, new_cost: Cost) {
-        if self.results.len() < self.top_k {
-            // We have not yet filled the top_k, so just insert.
-            self.results.insert((new_cost, new_action_idx));
-        } else if self.results.iter().any(|(cost, _)| *cost == new_cost) {
-            debug_assert_eq!(self.results.len(), self.top_k);
-
-            // We have filled the top_k and found the same cost in results, so
-            //   replace something if it improves preference count, and do
-            //   nothing if not.
-            if let Some((_, action)) = self
-                .results
-                .iter()
-                .enumerate()
-                // Since we know that results is sorted by Cost, this filter
-                //   only takes contiguous elements with the same cost.
-                .filter(|&(i, (cost, _))| i < self.preferences.len() && *cost == new_cost)
-                .find(|&(i, _)| new_action_idx == self.preferences[i])
-            {
-                self.results.remove(&action.clone());
-                self.results.insert((new_cost, new_action_idx));
+    pub fn insert(&mut self, new_action_idx: ActionIdx, new_cost: Cost) {
+        match &mut self.results {
+            ImplReducerResults::One(None) => {
+                self.results = ImplReducerResults::One(Some((new_cost, new_action_idx)));
             }
-        } else {
-            debug_assert_eq!(self.results.len(), self.top_k);
+            ImplReducerResults::One(Some(action))
+                if *action > (new_cost.clone(), new_action_idx) =>
+            {
+                self.results = ImplReducerResults::One(Some((new_cost, new_action_idx)));
+            }
+            ImplReducerResults::Many(ref mut actions) => {
+                if actions.len() < self.top_k {
+                    // We have not yet filled the top_k, so just insert.
+                    actions.insert((new_cost, new_action_idx));
+                } else if actions.iter().any(|(cost, _)| *cost == new_cost) {
+                    debug_assert_eq!(actions.len(), self.top_k);
 
-            // We have filled the top_k, but there is no same cost in results,
-            //   so replace the last element if it is worse than the new one.
-            self.results.insert((new_cost, new_action_idx));
-            self.results.pop_last();
+                    // We have filled the top_k and found the same cost in results, so
+                    //   replace something if it improves preference count, and do
+                    //   nothing if not.
+                    if let Some((_, action)) = actions
+                        .iter()
+                        .enumerate()
+                        // Since we know that results is sorted by Cost, this filter
+                        //   only takes contiguous elements with the same cost.
+                        .filter(|&(i, (cost, _))| i < self.preferences.len() && *cost == new_cost)
+                        .find(|&(i, _)| new_action_idx == self.preferences[i])
+                    {
+                        actions.remove(&action.clone());
+                        actions.insert((new_cost, new_action_idx));
+                    }
+                } else {
+                    debug_assert_eq!(actions.len(), self.top_k);
+
+                    // We have filled the top_k, but there is no same cost in results,
+                    //   so replace the last element if it is worse than the new one.
+                    actions.insert((new_cost, new_action_idx));
+                    actions.pop_last();
+                }
+
+                debug_assert!(actions.iter().tuple_windows().all(|(a, b)| a.0 <= b.0));
+                debug_assert!(actions.len() <= self.top_k);
+                debug_assert!(actions.iter().map(|(_, a)| a).all_unique());
+            }
+            _ => {}
         }
-
-        debug_assert!(self.results.iter().tuple_windows().all(|(a, b)| a.0 <= b.0));
-        debug_assert!(self.results.len() <= self.top_k);
-        debug_assert!(self.results.iter().map(|(_, a)| a).all_unique());
     }
 
     fn finalize(self) -> SmallVec<[(ActionIdx, Cost); 1]> {
-        self.results
-            .into_iter()
-            .map(|(cost, action_idx)| (action_idx, cost))
-            .collect()
+        match self.results {
+            ImplReducerResults::One(None) => smallvec![],
+            ImplReducerResults::One(Some((cost, action_idx))) => smallvec![(action_idx, cost)],
+            ImplReducerResults::Many(actions) => actions
+                .into_iter()
+                .map(|(cost, action_idx)| (action_idx, cost))
+                .collect(),
+        }
     }
 }
 
@@ -915,6 +942,32 @@ mod tests {
             peaks: MemVec::zero::<X86Target>(),
             depth: 0,
         }
+    }
+
+    #[test]
+    fn test_implreducer_no_actions() {
+        let top_k = 1;
+        let preferences = smallvec![];
+        let reducer = ImplReducer::new(top_k, preferences);
+
+        let expected: SmallVec<[_; 1]> = smallvec![];
+        assert_eq!(reducer.finalize(), expected);
+    }
+
+    #[test]
+    fn test_implreducer_exactly_one_action() {
+        let top_k = 1;
+        let preferences = smallvec![];
+        let mut reducer = ImplReducer::new(top_k, preferences);
+
+        let cost1 = create_simple_cost(1);
+
+        reducer.insert(1, cost1.clone());
+        reducer.insert(0, cost1.clone());
+        reducer.insert(2, cost1.clone());
+
+        let expected: SmallVec<[_; 1]> = smallvec![(0, cost1)];
+        assert_eq!(reducer.finalize(), expected);
     }
 
     #[test]
