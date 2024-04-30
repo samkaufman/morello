@@ -708,6 +708,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
 }
 
 impl ImplReducer {
+    // TODO: Make this private once #[bench] gets stable.
     pub fn new(top_k: usize, preferences: SmallVec<[ActionIdx; 1]>) -> Self {
         debug_assert!(preferences.len() <= top_k);
         debug_assert!(
@@ -726,6 +727,7 @@ impl ImplReducer {
         }
     }
 
+    // TODO: Make this private once #[bench] gets stable.
     pub fn insert(&mut self, new_action_idx: ActionIdx, new_cost: Cost) {
         match &mut self.results {
             ImplReducerResults::One(None) => {
