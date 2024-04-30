@@ -6,7 +6,7 @@ use std::{collections::HashSet, fmt::Display, hash::Hash};
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
-    expr::{AffineForm, Atom, Bounds, NonAffine, NonAffineExpr},
+    expr::{AffineForm, Atom, Bounds, NonAffineExpr},
     layout,
     opaque_symbol::OpaqueSymbol,
     target::Target,
@@ -20,9 +20,10 @@ pub struct Layout(pub SmallVec<[(u8, PhysDim); 4]>);
 pub enum PhysDim {
     Dynamic,
     Packed(DimSize),
-    /// A physical dimension split into two halves, laid out such that the elements are
-    /// interleaved. The parameter `0` is the total size: both halves.
-    Interleaved(DimSize),
+    /// A physical dimension split into two halves, laid out such that values with odd indices in
+    /// that dimension come first, followed by even-indexed values. The parameter `0` is the total
+    /// size: both halves.
+    OddEven(DimSize),
 }
 
 #[cfg(test)]
@@ -113,7 +114,7 @@ impl Layout {
                 term %= prev_remaining_volume.get();
             }
             match phys_dim {
-                PhysDim::Interleaved(deinterleave_strip_size) => {
+                PhysDim::OddEven(deinterleave_strip_size) => {
                     let deinterleave_strip_size = deinterleave_strip_size.get();
                     debug_assert_eq!(deinterleave_strip_size % 2, 0);
                     let half_size = deinterleave_strip_size / 2;
@@ -347,14 +348,14 @@ impl Layout {
                     }
                 }
                 (PhysDim::Dynamic, PhysDim::Packed(_))
-                | (PhysDim::Dynamic, PhysDim::Interleaved(_))
+                | (PhysDim::Dynamic, PhysDim::OddEven(_))
                 | (PhysDim::Packed(_), PhysDim::Dynamic)
-                | (PhysDim::Packed(_), PhysDim::Interleaved(_))
-                | (PhysDim::Interleaved(_), PhysDim::Dynamic)
-                | (PhysDim::Interleaved(_), PhysDim::Packed(_)) => {
+                | (PhysDim::Packed(_), PhysDim::OddEven(_))
+                | (PhysDim::OddEven(_), PhysDim::Dynamic)
+                | (PhysDim::OddEven(_), PhysDim::Packed(_)) => {
                     new_dims.push((*dim, *phys_dim));
                 }
-                (PhysDim::Interleaved(_), PhysDim::Interleaved(_)) => todo!(),
+                (PhysDim::OddEven(_), PhysDim::OddEven(_)) => todo!(),
                 (PhysDim::Dynamic, PhysDim::Dynamic) => {
                     panic!("Repeating non-packed dimensions is undefined: {:?}", self)
                 }
@@ -462,7 +463,7 @@ impl Layout {
                 dim, dims
             );
             match phys_dim {
-                PhysDim::Interleaved(s) | PhysDim::Packed(s) => {
+                PhysDim::OddEven(s) | PhysDim::Packed(s) => {
                     if *remaining_size % s.get() != 0 {
                         return Err(LayoutError::InvalidShape(logical_shape.into()));
                     }
@@ -515,7 +516,7 @@ impl Layout {
                 dim, dims
             );
             match fixed_size {
-                PhysDim::Interleaved(s) | PhysDim::Packed(s) => {
+                PhysDim::OddEven(s) | PhysDim::Packed(s) => {
                     if remaining_size % *s != 0 {
                         return Err(LayoutError::InvalidShape(logical_shape.into()));
                     }
@@ -555,7 +556,7 @@ impl Layout {
         {
             let Layout(dims) = self;
             for (_, size) in dims {
-                if let PhysDim::Interleaved(s) = size {
+                if let PhysDim::OddEven(s) = size {
                     debug_assert_eq!(s.get() % 2, 0);
                 }
             }
@@ -579,8 +580,7 @@ impl proptest::arbitrary::Arbitrary for Layout {
         assert!(min_rank <= max_physical_rank);
 
         let packed_st = (2..=8u32).prop_map(|s| PhysDim::Packed(s.try_into().unwrap()));
-        let interleaved_st =
-            (1..=4u32).prop_map(|s| PhysDim::Interleaved((s * 2).try_into().unwrap()));
+        let interleaved_st = (1..=4u32).prop_map(|s| PhysDim::OddEven((s * 2).try_into().unwrap()));
         let non_dynamic_st = prop_oneof![packed_st, interleaved_st];
         let any_phys_dim_st = prop_oneof![Just(PhysDim::Dynamic), non_dynamic_st.clone()];
 
@@ -699,10 +699,10 @@ pub mod macros {
                 smallvec::smallvec![ $( layout!(@inner $dim) ),* ]
             )
         };
-        ( @inner ($dim:expr, PhysDim::Interleaved($ds:expr)) ) => {{
+        ( @inner ($dim:expr, PhysDim::OddEven($ds:expr)) ) => {{
             use $crate::layout::PhysDim;
             use $crate::spec::macros::internal::IntoDimSize;
-            ($dim, PhysDim::Interleaved(($ds).into_dim_size()))
+            ($dim, PhysDim::OddEven(($ds).into_dim_size()))
         }};
         ( @inner ($dim:expr, PhysDim::Packed($ds:expr)) ) => {{
             use $crate::layout::PhysDim;
@@ -984,7 +984,7 @@ mod tests {
                         prefix
                             .into_iter()
                             .chain(per_dim_shape.into_iter().map(move |d| {
-                                // TODO: Should also generate Interleaved
+                                // TODO: Should also generate OddEven
                                 (
                                     u8::try_from(logical_dim).unwrap(),
                                     PhysDim::Packed(d.try_into().unwrap()),
@@ -997,7 +997,7 @@ mod tests {
                 let mut tensor_shape = vec![1; rank];
                 for (&dim, &d) in dim_order.iter().zip(&physical_tile_shape) {
                     match d {
-                        PhysDim::Interleaved(_) => todo!(),
+                        PhysDim::OddEven(_) => todo!(),
                         PhysDim::Packed(fixed) => {
                             tensor_shape[usize::from(dim)] *= fixed.get();
                         }
@@ -1084,10 +1084,7 @@ mod tests {
 
     #[test]
     fn test_interleaved_indexing_expression_1() {
-        let layout = Layout::new(smallvec![(
-            0,
-            PhysDim::Interleaved(DimSize::new(8).unwrap())
-        )]);
+        let layout = Layout::new(smallvec![(0, PhysDim::OddEven(DimSize::new(8).unwrap()))]);
         let expr_id = OpaqueSymbol::new();
         let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![8]);
 
@@ -1100,7 +1097,7 @@ mod tests {
     fn test_interleaved_indexing_expression_2() {
         let layout = Layout::new(smallvec![
             (0, PhysDim::Dynamic),
-            (0, PhysDim::Interleaved(DimSize::new(8).unwrap()))
+            (0, PhysDim::OddEven(DimSize::new(8).unwrap()))
         ]);
         let expr_id = OpaqueSymbol::new();
         let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![16]);

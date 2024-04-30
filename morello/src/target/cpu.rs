@@ -426,12 +426,12 @@ impl Kernel for CpuKernel {
                 let layout0 = Layout::new(smallvec![
                     (0, PhysDim::Dynamic),
                     (1, PhysDim::Dynamic),
-                    (1, PhysDim::Interleaved(nz!(16u32)))
+                    (1, PhysDim::OddEven(nz!(16u32)))
                 ]);
                 let layout1 = Layout::new(smallvec![
                     (1, PhysDim::Dynamic),
                     (0, PhysDim::Dynamic),
-                    (0, PhysDim::Interleaved(nz!(16u32)))
+                    (0, PhysDim::OddEven(nz!(16u32)))
                 ]);
                 dotproductloop_applies(operands, Dtype::Bfloat16, &[layout0, layout1])
             }
@@ -445,7 +445,7 @@ impl Kernel for CpuKernel {
                 physicaltransposebyte_applies_to_operands(operands, 32)
             }
             CpuKernel::VectorInterleaveBf16F32 => {
-                let leaved = PhysDim::Interleaved(nz!(16u32));
+                let leaved = PhysDim::OddEven(nz!(16u32));
                 matches!(
                     operands,
                     [
