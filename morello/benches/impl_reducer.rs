@@ -10,9 +10,9 @@ use morello::search::ImplReducer;
 use morello::target::X86Target;
 
 #[inline(never)]
-fn impl_reducer(top_k: usize, action_indices: Vec<ActionIdx>) {
+fn impl_reducer(top_k: usize, action_indices: &[ActionIdx]) {
     let mut reducer = ImplReducer::new(top_k, smallvec![]);
-    action_indices.into_iter().for_each(|action_idx| {
+    action_indices.iter().for_each(|&action_idx| {
         reducer.insert(
             action_idx,
             Cost {
@@ -31,12 +31,13 @@ fn criterion_benchmark(c: &mut Criterion) {
         action_indices.shuffle(&mut thread_rng());
         group.bench_with_input(
             BenchmarkId::new("impl_reducer", top_k),
-            &(top_k, action_indices),
-            |b, (k, actions)| b.iter(|| impl_reducer((*k).into(), actions.clone())),
+            &(usize::from(top_k), &action_indices[..]),
+            |b, (k, actions)| b.iter(|| impl_reducer(*k, actions)),
         );
     }
     group.finish();
 }
 
+// TODO: Convert benchmark to use iai_callgrind.
 criterion_group!(benches, criterion_benchmark);
 criterion_main!(benches);
