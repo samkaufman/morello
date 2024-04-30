@@ -17,7 +17,7 @@ use crate::utils::join_into_string;
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Deserialize, Serialize)]
 #[serde(bound = "")]
 pub struct TensorSpec<Tgt: Target> {
-    pub shape: Shape, // TODO: Rename to shape
+    pub shape: Shape,
     pub dtype: Dtype,
     pub aux: TensorSpecAux<Tgt>,
 }
