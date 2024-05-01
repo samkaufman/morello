@@ -1107,6 +1107,21 @@ mod tests {
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
     }
 
+    #[test]
+    fn test_interleaved_indexing_expression_3() {
+        let layout = Layout::new(smallvec![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::OddEven(DimSize::new(8).unwrap()))
+        ]);
+        let expr_id = OpaqueSymbol::new();
+        let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![2, 8]);
+
+        let pt0 = NonAffineExpr::from(BufferVar::Pt(0, expr_id.clone()));
+        let pt1 = NonAffineExpr::from(BufferVar::Pt(1, expr_id.clone()));
+        let expected = pt0.clone() * 8 + (pt1.clone() % 8) / 2 + (pt1 % 2) * 4;
+        assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
+    }
+
     fn arb_shape_and_same_rank_layout() -> impl Strategy<Value = (Shape, Layout)> {
         proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(|shape| {
             let shape = shape
