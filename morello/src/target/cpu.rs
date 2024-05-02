@@ -782,6 +782,13 @@ impl MemoryLevel for CpuMemoryLevel {
         }
     }
 
+    fn can_parallel_tile(&self) -> bool {
+        match self {
+            CpuMemoryLevel::RF | CpuMemoryLevel::VRF => false,
+            CpuMemoryLevel::GL | CpuMemoryLevel::L1 => true,
+        }
+    }
+
     fn cache_hit_cost(&self) -> MainCost {
         match &self {
             CpuMemoryLevel::RF => 0,

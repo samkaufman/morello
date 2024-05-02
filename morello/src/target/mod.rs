@@ -59,6 +59,7 @@ pub trait MemoryLevel:
     Send + PartialOrd + Eq + Display + Debug + std::hash::Hash + Copy + DeserializeOwned + Serialize
 {
     fn is_addressed(&self) -> bool;
+    fn can_parallel_tile(&self) -> bool;
     fn cache_hit_cost(&self) -> MainCost;
     fn vector_bytes(&self) -> &'static [u32];
     fn vector_rf(&self) -> bool {

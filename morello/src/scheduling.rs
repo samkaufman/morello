@@ -129,7 +129,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                             // Abort if it's invalid to tile the original output tensor
                             // to the new shape (e.g., the new shape is larger).
-                            if !current_output.is_valid_tile_shape(output_shape) {
+                            if !current_output.is_valid_tile_shape(output_shape, *parallel) {
                                 return Err(ApplyError::ActionNotApplicable);
                             }
 
@@ -165,7 +165,7 @@ impl<Tgt: Target> Action<Tgt> {
                                 }
 
                                 let tiling_shape = updated_input_tiling.shape();
-                                if !original_input.is_valid_tile_shape(tiling_shape) {
+                                if !original_input.is_valid_tile_shape(tiling_shape, *parallel) {
                                     return Err(ApplyError::ActionNotApplicable);
                                 }
 

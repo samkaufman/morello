@@ -820,8 +820,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let operands = self.parameters();
         dim_range(orig_k, false)
             .filter(move |&new_k| {
-                operands[0].is_valid_tile_shape(&[m, new_k])
-                    && operands[1].is_valid_tile_shape(&[new_k, n])
+                // TODO: Shouldn't this be rejected during application instead?
+                operands[0].is_valid_tile_shape(&[m, new_k], false)
+                    && operands[1].is_valid_tile_shape(&[new_k, n], false)
             })
             .map(|k| Action::Split { k })
     }
