@@ -301,7 +301,7 @@ impl Layout {
             .unwrap())
     }
 
-    /// Asserts that there are no consecutive packed or interleaved dimensions with the same logical
+    /// Asserts that there are no consecutive packed or OddEven dimensions with the same logical
     /// dimension.
     ///
     /// This does nothing on release builds.
