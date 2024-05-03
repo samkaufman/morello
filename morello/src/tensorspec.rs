@@ -366,6 +366,10 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
                 }
             }
 
+            if self.layout.has_noncanon_size_one_dynamic_dimensions(shape) {
+                return false;
+            }
+
             let physical_rank = dims.len();
             let first_contig_idx = u8::try_from(physical_rank).unwrap() - self.contig;
             if first_contig_idx > 0 {
