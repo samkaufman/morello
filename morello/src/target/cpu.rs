@@ -164,7 +164,8 @@ impl<T: CpuTarget> Target for T {
 
         // Extend with all possible packings.
         // TODO: Extend with interleavings as well.
-        let all_packing_sizes = pack_sizes(None, dtype, &all_target_vector_bytes);
+        let all_packing_sizes: SmallVec<[_; 3]> =
+            pack_sizes_all(dtype, &all_target_vector_bytes).collect();
         let mut result = unpacked_layouts.clone();
         result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
             let Layout(dims) = original_layout;
@@ -426,12 +427,12 @@ impl Kernel for CpuKernel {
                 let layout0 = Layout::new(smallvec![
                     (0, PhysDim::Dynamic),
                     (1, PhysDim::Dynamic),
-                    (1, PhysDim::Interleaved(nz!(16u32)))
+                    (1, PhysDim::OddEven(nz!(16u32)))
                 ]);
                 let layout1 = Layout::new(smallvec![
                     (1, PhysDim::Dynamic),
                     (0, PhysDim::Dynamic),
-                    (0, PhysDim::Interleaved(nz!(16u32)))
+                    (0, PhysDim::OddEven(nz!(16u32)))
                 ]);
                 dotproductloop_applies(operands, Dtype::Bfloat16, &[layout0, layout1])
             }
@@ -445,7 +446,7 @@ impl Kernel for CpuKernel {
                 physicaltransposebyte_applies_to_operands(operands, 32)
             }
             CpuKernel::VectorInterleaveBf16F32 => {
-                let leaved = PhysDim::Interleaved(nz!(16u32));
+                let leaved = PhysDim::OddEven(nz!(16u32));
                 matches!(
                     operands,
                     [
@@ -971,47 +972,44 @@ fn packed_layouts_for_standard_layout<'a>(
         let mut it = None;
         if shape[usize::from(dim)].get() != 1 {
             it = Some(
-                pack_sizes(
-                    Some(shape[usize::from(dim)]),
-                    dtype,
-                    all_target_vector_bytes,
-                )
-                .into_iter()
-                .map(move |strip_size| {
-                    Layout::new(
-                        dims.iter()
-                            .cloned()
-                            .chain(iter::once((dim, PhysDim::Packed(strip_size))))
-                            .collect(),
-                    )
-                }),
+                pack_sizes_for_dim(shape[usize::from(dim)], dtype, all_target_vector_bytes).map(
+                    move |strip_size| {
+                        Layout::new(
+                            dims.iter()
+                                .cloned()
+                                .chain(iter::once((dim, PhysDim::Packed(strip_size))))
+                                .collect(),
+                        )
+                    },
+                ),
             );
         }
         it.into_iter().flatten()
     })
 }
 
-fn pack_sizes(
-    dim_size: Option<DimSize>,
+fn pack_sizes_all(
     dtype: Dtype,
     all_target_vector_bytes: &[u32],
-) -> SmallVec<[DimSize; 3]> {
-    let mut result = SmallVec::new();
-    if dim_size.map(|d| d.get() % 2 == 0).unwrap_or(true) {
-        result.push(nz!(2u32));
-    }
-    result.extend(all_target_vector_bytes.iter().filter_map(|&bytes| {
-        match (dim_size, bytes.div_rem(u32::from(dtype.size()))) {
-            (Some(m), (vector_value_count, 0))
-                if vector_value_count < m.get() && m.get() % vector_value_count == 0 =>
-            {
-                DimSize::new(vector_value_count)
-            }
-            (None, (vector_value_count, 0)) => DimSize::new(vector_value_count),
-            _ => None,
+) -> impl Iterator<Item = DimSize> + '_ {
+    iter::once(nz!(2u32)).chain(all_target_vector_bytes.iter().filter_map(move |&bytes| {
+        let (vector_value_count, vvc_rem) = bytes.div_rem(u32::from(dtype.size()));
+        if vvc_rem == 0 {
+            Some(DimSize::new(vector_value_count).unwrap())
+        } else {
+            None
         }
-    }));
-    result
+    }))
+}
+
+/// Like [pack_sizes_all] but filters out sizes that are not valid for the given dimension size.
+fn pack_sizes_for_dim(
+    dim_size: DimSize,
+    dtype: Dtype,
+    all_target_vector_bytes: &[u32],
+) -> impl Iterator<Item = DimSize> + '_ {
+    pack_sizes_all(dtype, all_target_vector_bytes)
+        .filter(move |&pack_size| pack_size < dim_size && dim_size.get() % pack_size.get() == 0)
 }
 
 #[cfg(test)]

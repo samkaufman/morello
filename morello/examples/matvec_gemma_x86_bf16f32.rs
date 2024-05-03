@@ -39,7 +39,7 @@ fn main() {
     let interleaved = Layout::new(smallvec![
         (0, PhysDim::Dynamic),
         (1, PhysDim::Dynamic),
-        (1, PhysDim::Interleaved(nz!(16u32))),
+        (1, PhysDim::OddEven(nz!(16u32))),
     ]);
 
     let implementation = spec
