@@ -729,20 +729,19 @@ impl ImplReducer {
 
     // TODO: Make this private once #[bench] gets stable.
     pub fn insert(&mut self, new_action_idx: ActionIdx, new_cost: Cost) {
+        let new_action = (new_cost, new_action_idx);
         match &mut self.results {
             ImplReducerResults::One(None) => {
-                self.results = ImplReducerResults::One(Some((new_cost, new_action_idx)));
+                self.results = ImplReducerResults::One(Some(new_action));
             }
-            ImplReducerResults::One(Some(action))
-                if *action > (new_cost.clone(), new_action_idx) =>
-            {
-                self.results = ImplReducerResults::One(Some((new_cost, new_action_idx)));
+            ImplReducerResults::One(Some(action)) if *action > new_action => {
+                self.results = ImplReducerResults::One(Some(new_action));
             }
             ImplReducerResults::Many(ref mut actions) => {
                 if actions.len() < self.top_k {
                     // We have not yet filled the top_k, so just insert.
-                    actions.insert((new_cost, new_action_idx));
-                } else if actions.iter().any(|(cost, _)| *cost == new_cost) {
+                    actions.insert(new_action);
+                } else if actions.iter().any(|(cost, _)| *cost == new_action.0) {
                     debug_assert_eq!(actions.len(), self.top_k);
 
                     // We have filled the top_k and found the same cost in results, so
@@ -753,18 +752,20 @@ impl ImplReducer {
                         .enumerate()
                         // Since we know that results is sorted by Cost, this filter
                         //   only takes contiguous elements with the same cost.
-                        .filter(|&(i, (cost, _))| i < self.preferences.len() && *cost == new_cost)
-                        .find(|&(i, _)| new_action_idx == self.preferences[i])
+                        .filter(|&(i, (cost, _))| {
+                            i < self.preferences.len() && *cost == new_action.0
+                        })
+                        .find(|&(i, _)| self.preferences[i] == new_action.1)
                     {
                         actions.remove(&action.clone());
-                        actions.insert((new_cost, new_action_idx));
+                        actions.insert(new_action);
                     }
                 } else {
                     debug_assert_eq!(actions.len(), self.top_k);
 
                     // We have filled the top_k, but there is no same cost in results,
                     //   so replace the last element if it is worse than the new one.
-                    actions.insert((new_cost, new_action_idx));
+                    actions.insert(new_action);
                     actions.pop_last();
                 }
 
