@@ -180,13 +180,21 @@ impl CBuffer {
             indent(depth),
             size,
         )?;
-        writeln!(
-            w,
-            "{}{}[idx] = ({})rand();",
-            indent(depth + 1),
-            name,
-            c_type(dtype)
-        )?;
+        // Special-base bf16 to mitigate the need for rtlib support for bf16 truncation,
+        // which is a partial workaround for a Clang issue:
+        //   https://github.com/llvm/llvm-project/pull/84192
+        if dtype == Dtype::Bfloat16 {
+            writeln!(w, "{}float fv = (float)rand();", indent(depth + 1))?;
+            writeln!(w, "{}{}[idx] = *(__bf16 *)(&fv);", indent(depth + 1), name)?;
+        } else {
+            writeln!(
+                w,
+                "{}{}[idx] = ({})rand();",
+                indent(depth + 1),
+                name,
+                c_type(dtype)
+            )?;
+        }
         writeln!(w, "{}}}", indent(depth))
     }
 

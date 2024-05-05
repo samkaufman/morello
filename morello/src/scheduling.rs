@@ -1,6 +1,7 @@
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
+use std::fmt::Display;
 use std::rc::Rc;
 use std::{iter, mem};
 
@@ -60,8 +61,16 @@ pub enum ApplyError {
     SpecNotCanonical,
     #[error("Insufficient memory to apply action")]
     OutOfMemory,
-    #[error("Action does not apply to this Spec")]
-    ActionNotApplicable,
+    #[error("Action does not apply to this Spec: {0}")]
+    ActionNotApplicable(ActionNotApplicableReason),
+}
+
+#[derive(Debug)]
+pub enum ActionNotApplicableReason {
+    TileShapeInvalid,
+    LayoutIncompatible,
+    SelfMove,
+    Other,
 }
 
 impl<Tgt: Target> Action<Tgt> {
@@ -129,8 +138,10 @@ impl<Tgt: Target> Action<Tgt> {
 
                             // Abort if it's invalid to tile the original output tensor
                             // to the new shape (e.g., the new shape is larger).
-                            if !current_output.is_valid_tile_shape(output_shape) {
-                                return Err(ApplyError::ActionNotApplicable);
+                            if !current_output.is_valid_tile_shape(output_shape, *parallel) {
+                                return Err(ApplyError::ActionNotApplicable(
+                                    ActionNotApplicableReason::TileShapeInvalid,
+                                ));
                             }
 
                             // Tiling happens in three steps:
@@ -165,8 +176,10 @@ impl<Tgt: Target> Action<Tgt> {
                                 }
 
                                 let tiling_shape = updated_input_tiling.shape();
-                                if !original_input.is_valid_tile_shape(tiling_shape) {
-                                    return Err(ApplyError::ActionNotApplicable);
+                                if !original_input.is_valid_tile_shape(tiling_shape, *parallel) {
+                                    return Err(ApplyError::ActionNotApplicable(
+                                        ActionNotApplicableReason::TileShapeInvalid,
+                                    ));
                                 }
 
                                 // Compute loop dimension names for the tile. Any axis which is None
@@ -546,7 +559,9 @@ impl<Tgt: Target> Action<Tgt> {
                 // Filter cases where, after canonicalization, the source and destination
                 // TensorSpecs match (i.e., within-level copies).
                 if outer_moved_operand_spec == &new_spec {
-                    return Err(ApplyError::ActionNotApplicable);
+                    return Err(ApplyError::ActionNotApplicable(
+                        ActionNotApplicableReason::SelfMove,
+                    ));
                 }
 
                 let inner_moved_operand = if move_is_cache_miss(
@@ -722,6 +737,26 @@ impl<Tgt: Target> Action<Tgt> {
     }
 }
 
+impl Display for ActionNotApplicableReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ActionNotApplicableReason::TileShapeInvalid => {
+                write!(f, "Invalid tile shape")
+            }
+            ActionNotApplicableReason::LayoutIncompatible => {
+                write!(f, "Layout does not apply to tile size")
+            }
+            ActionNotApplicableReason::SelfMove => {
+                write!(
+                    f,
+                    "Source and destination TensorSpecs were equal after canonicalization"
+                )
+            }
+            ActionNotApplicableReason::Other => write!(f, "Unknown reason"),
+        }
+    }
+}
+
 fn move_gens_prologue<Tgt: Target>(
     destination_level: &Tgt::Level,
     destination_layout: &Layout,
@@ -820,6 +855,8 @@ fn move_is_cache_miss<Tgt: Target>(
 /// Converts an internal [TileError] to an external [ApplyError].
 fn tile_to_apply_err(err: TileError) -> ApplyError {
     match err {
-        TileError::LayoutIncompatible(_) => ApplyError::ActionNotApplicable,
+        TileError::LayoutIncompatible(_) => {
+            ApplyError::ActionNotApplicable(ActionNotApplicableReason::LayoutIncompatible)
+        }
     }
 }

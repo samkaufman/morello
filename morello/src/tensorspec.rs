@@ -123,11 +123,17 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     /// Returns true if this TensorSpec can be tiled to the given shape.
-    pub fn is_valid_tile_shape(&self, shape: &[DimSize]) -> bool {
+    pub fn is_valid_tile_shape(&self, shape: &[DimSize], parallel_loop: bool) -> bool {
         debug_assert_eq!(shape.len(), self.shape.len());
         debug_assert!(shape.iter().zip(self.shape.iter()).all(|(i, o)| i <= o));
-        let all_ones = shape.iter().all(|d| d.get() == 1);
-        all_ones || self.aux.layout.applies_to_shape(shape)
+
+        if parallel_loop && !self.level().can_parallel_tile() && shape != self.shape() {
+            return false;
+        }
+        if shape.iter().all(|d| d.get() == 1) {
+            return true;
+        }
+        self.aux.layout.applies_to_shape(shape)
     }
 
     pub fn bytes_used(&self) -> u64 {
@@ -358,6 +364,10 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
                         return false;
                     }
                 }
+            }
+
+            if self.layout.has_noncanon_size_one_dynamic_dimensions(shape) {
+                return false;
             }
 
             let physical_rank = dims.len();

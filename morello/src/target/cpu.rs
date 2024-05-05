@@ -163,10 +163,11 @@ impl<T: CpuTarget> Target for T {
         };
 
         // Extend with all possible packings.
-        // TODO: Extend with interleavings as well.
+        // TODO: Reduce code duplication in the following
+        let mut result = unpacked_layouts.clone();
+
         let all_packing_sizes: SmallVec<[_; 3]> =
             pack_sizes_all(dtype, &all_target_vector_bytes).collect();
-        let mut result = unpacked_layouts.clone();
         result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
             let Layout(dims) = original_layout;
             (0..dims.len())
@@ -182,6 +183,29 @@ impl<T: CpuTarget> Target for T {
                             .chain(iter::once((
                                 packing_dim.try_into().unwrap(),
                                 PhysDim::Packed(packing_size),
+                            )))
+                            .collect(),
+                    ))
+                })
+        }));
+
+        let all_oddeven_sizes: SmallVec<[_; 3]> =
+            oddeven_sizes_all(dtype, &all_target_vector_bytes).collect();
+        result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
+            let Layout(dims) = original_layout;
+            (0..dims.len())
+                .cartesian_product(&all_oddeven_sizes)
+                .filter_map(|(packing_dim, &packing_size)| {
+                    debug_assert_ne!(packing_size.get(), 1);
+                    if shape[packing_dim].get() % packing_size.get() != 0 {
+                        return None;
+                    }
+                    Some(Layout::new(
+                        dims.iter()
+                            .cloned()
+                            .chain(iter::once((
+                                packing_dim.try_into().unwrap(),
+                                PhysDim::OddEven(packing_size),
                             )))
                             .collect(),
                     ))
@@ -214,7 +238,15 @@ impl<T: CpuTarget> Target for T {
                 &all_target_vector_bytes,
             )
         }));
-        // TODO: Extend with interleavings as well.
+        result.extend(base.iter().flat_map(|original_layout| {
+            oddeven_layouts_for_standard_layout(
+                original_layout,
+                shape,
+                dtype,
+                &all_target_vector_bytes,
+            )
+        }));
+
         debug_assert!(
             result.iter().all(|r| r.applies_to_shape(shape)),
             "Some layouts don't apply to shape {:?}: {:?}",
@@ -782,6 +814,13 @@ impl MemoryLevel for CpuMemoryLevel {
         }
     }
 
+    fn can_parallel_tile(&self) -> bool {
+        match self {
+            CpuMemoryLevel::RF | CpuMemoryLevel::VRF => false,
+            CpuMemoryLevel::GL | CpuMemoryLevel::L1 => true,
+        }
+    }
+
     fn cache_hit_cost(&self) -> MainCost {
         match &self {
             CpuMemoryLevel::RF => 0,
@@ -956,36 +995,14 @@ fn packed_layouts_for_standard_layout<'a>(
     dtype: Dtype,
     all_target_vector_bytes: &'a [u32],
 ) -> impl Iterator<Item = Layout> + 'a {
-    let Layout(dims) = &original_layout;
-    debug_assert!(dims.iter().all(|(_, s)| *s == PhysDim::Dynamic));
-
-    let final_nonone_dim = {
-        let mut d = dims.len() - 1;
-        while d > 0 && shape[d].get() == 1 {
-            d -= 1;
-        }
-        d
-    };
-
-    dims[..final_nonone_dim].iter().flat_map(move |&(dim, _)| {
-        let dims = dims.clone();
-        let mut it = None;
-        if shape[usize::from(dim)].get() != 1 {
-            it = Some(
-                pack_sizes_for_dim(shape[usize::from(dim)], dtype, all_target_vector_bytes).map(
-                    move |strip_size| {
-                        Layout::new(
-                            dims.iter()
-                                .cloned()
-                                .chain(iter::once((dim, PhysDim::Packed(strip_size))))
-                                .collect(),
-                        )
-                    },
-                ),
-            );
-        }
-        it.into_iter().flatten()
-    })
+    generic_packed_layouts_for_standard_layout::<'a>(
+        original_layout,
+        shape,
+        dtype,
+        all_target_vector_bytes,
+        pack_sizes_for_dim,
+        &PhysDim::Packed,
+    )
 }
 
 fn pack_sizes_all(
@@ -1010,6 +1027,92 @@ fn pack_sizes_for_dim(
 ) -> impl Iterator<Item = DimSize> + '_ {
     pack_sizes_all(dtype, all_target_vector_bytes)
         .filter(move |&pack_size| pack_size < dim_size && dim_size.get() % pack_size.get() == 0)
+}
+
+fn oddeven_layouts_for_standard_layout<'a>(
+    original_layout: &'a Layout,
+    shape: &'a [DimSize],
+    dtype: Dtype,
+    all_target_vector_bytes: &'a [u32],
+) -> impl Iterator<Item = Layout> + 'a {
+    generic_packed_layouts_for_standard_layout::<'a>(
+        original_layout,
+        shape,
+        dtype,
+        all_target_vector_bytes,
+        oddeven_sizes_for_dim,
+        &PhysDim::OddEven,
+    )
+}
+
+fn oddeven_sizes_all(
+    dtype: Dtype,
+    all_target_vector_bytes: &[u32],
+) -> impl Iterator<Item = DimSize> + '_ {
+    all_target_vector_bytes.iter().filter_map(move |&bytes| {
+        let double_bytes = bytes * 2;
+        let (vector_value_count, vvc_rem) = double_bytes.div_rem(u32::from(dtype.size()));
+        if vvc_rem != 0 {
+            return None;
+        }
+        Some(vector_value_count.try_into().unwrap())
+    })
+}
+
+fn oddeven_sizes_for_dim(
+    dim_size: DimSize,
+    dtype: Dtype,
+    all_target_vector_bytes: &[u32],
+) -> impl Iterator<Item = DimSize> + '_ {
+    oddeven_sizes_all(dtype, all_target_vector_bytes)
+        .filter(move |&pack_size| pack_size <= dim_size && dim_size.get() % pack_size.get() == 0)
+}
+
+/// Implements logic common to [packed_layouts_for_standard_layout] and
+/// [oddeven_layouts_for_standard_layout].
+fn generic_packed_layouts_for_standard_layout<'a, F, Fr, G>(
+    original_layout: &'a Layout,
+    shape: &'a [DimSize],
+    dtype: Dtype,
+    all_target_vector_bytes: &'a [u32],
+    sizes_for_dim_fn: F,
+    phys_dim_construct: &'a G,
+) -> impl Iterator<Item = Layout> + 'a
+where
+    F: 'a + Fn(DimSize, Dtype, &'a [u32]) -> Fr,
+    Fr: 'a + Iterator<Item = DimSize>,
+    G: 'a + Fn(DimSize) -> PhysDim,
+{
+    let Layout(dims) = &original_layout;
+    debug_assert!(dims.iter().all(|(_, s)| *s == PhysDim::Dynamic));
+
+    let final_nonone_dim = {
+        let mut d = dims.len() - 1;
+        while d > 0 && shape[d].get() == 1 {
+            d -= 1;
+        }
+        d
+    };
+
+    dims[..final_nonone_dim].iter().flat_map(move |&(dim, _)| {
+        let dims = dims.clone();
+        let mut it = None;
+        if shape[usize::from(dim)].get() != 1 {
+            it = Some(
+                sizes_for_dim_fn(shape[usize::from(dim)], dtype, all_target_vector_bytes).map(
+                    move |strip_size| {
+                        Layout::new(
+                            dims.iter()
+                                .cloned()
+                                .chain(iter::once((dim, phys_dim_construct(strip_size))))
+                                .collect(),
+                        )
+                    },
+                ),
+            );
+        }
+        it.into_iter().flatten()
+    })
 }
 
 #[cfg(test)]

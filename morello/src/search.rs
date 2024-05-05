@@ -560,7 +560,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
                         partial_impls_incomplete += 1;
                     }
                 }
-                Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => {}
+                Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => {}
                 Err(ApplyError::SpecNotCanonical) => panic!(),
             };
         }

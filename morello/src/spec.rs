@@ -820,8 +820,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let operands = self.parameters();
         dim_range(orig_k, false)
             .filter(move |&new_k| {
-                operands[0].is_valid_tile_shape(&[m, new_k])
-                    && operands[1].is_valid_tile_shape(&[new_k, n])
+                // TODO: Shouldn't this be rejected during application instead?
+                operands[0].is_valid_tile_shape(&[m, new_k], false)
+                    && operands[1].is_valid_tile_shape(&[new_k, n], false)
             })
             .map(|k| Action::Split { k })
     }
@@ -1643,20 +1644,34 @@ pub mod macros {
         }};
 
         ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, c0, ua ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, false, false)
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, None, false, false)
         };
         ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, c0 ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, false, true)
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, None, false, true)
         };
         ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, ua ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, true, false)
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, None, true, false)
         };
         ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, true, true)
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, None, true, true)
+        };
+        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, $vs:expr, c0, ua ) => {
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, Some($vs), false, false)
+        };
+        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, $vs:expr, c0 ) => {
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, Some($vs), false, true)
+        };
+        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, $vs:expr, ua ) => {
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, Some($vs), true, false)
+        };
+        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, $vs:expr ) => {
+            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, Some($vs), true, true)
         };
 
         // TODO: Accept contiguousnesses other than fully contig. or not at all.
-        ( @tensorspecaux_tup_inner $dt:tt, $level:expr, $layout:expr, $c:literal, $a:literal ) => {{
+        ( @tensorspecaux_tup_inner $dt:tt, $level:expr, $layout:expr, $vs:expr,
+          $c:literal, $a:literal ) =>
+        {{
             let layout: $crate::layout::Layout = $layout;
             let contig = if $c {
                 layout.contiguous_full()
@@ -1670,7 +1685,9 @@ pub mod macros {
                     aligned: $a,
                     level: $level,
                     layout,
-                    vector_size: None, // TODO: Fill in vector size!
+                    vector_size: ($vs).map(|x: u32| {
+                        $crate::common::DimSize::try_from(x).unwrap()
+                    }),
                 },
             )
         }};
@@ -2130,7 +2147,7 @@ mod tests {
                             // TODO: Assert here that the min of each level-wise limit is zero.
                             assert_eq!(&applied.peak_memory(), limits_memvec);
                         }
-                        Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => {}
+                        Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => {}
                         Err(ApplyError::SpecNotCanonical) => panic!(),
                     }
                 }
@@ -2152,7 +2169,7 @@ mod tests {
                     .into_iter()
                     .filter_map(|a| match a.apply(&spec) {
                         Ok(applied) => Some((a, applied)),
-                        Err(ApplyError::ActionNotApplicable | ApplyError::OutOfMemory) => None,
+                        Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => None,
                         Err(ApplyError::SpecNotCanonical) => unreachable!(),
                     })
                     .collect::<Vec<_>>();

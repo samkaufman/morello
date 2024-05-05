@@ -11,6 +11,8 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::{iter, slice};
 
+const PAR_TILE_OVERHEAD: MainCost = 45_000; // rough cycle estimate
+
 /// An Impl representing a loop over a set of zipped [`Tile`]s.
 ///
 /// It has a form like:
@@ -87,7 +89,9 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
             let processors = u32::from(Tgt::processors());
             let steps = self.steps();
             let main_steps = self.full_steps();
-            ((main_steps + processors - 1) / processors) + (steps - main_steps)
+            let execution_cost =
+                ((main_steps + processors - 1) / processors) + (steps - main_steps);
+            execution_cost + PAR_TILE_OVERHEAD
         } else {
             self.steps()
         };

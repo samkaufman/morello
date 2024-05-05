@@ -271,6 +271,7 @@ impl Layout {
             self.assert_no_consecutive_dimensions();
             let mut new_layout = self.clone();
             let new_contig = new_layout.drop_unneeded_packings(tile_shape, new_contig);
+            new_layout.reorder_size_one_dynamic_dimensions(tile_shape);
             let new_contig = new_layout.increase_contig_through_ones(tile_shape, new_contig);
             Ok((new_layout, new_contig))
         }
@@ -301,7 +302,7 @@ impl Layout {
             .unwrap())
     }
 
-    /// Asserts that there are no consecutive packed or interleaved dimensions with the same logical
+    /// Asserts that there are no consecutive packed or OddEven dimensions with the same logical
     /// dimension.
     ///
     /// This does nothing on release builds.
@@ -441,6 +442,43 @@ impl Layout {
         });
 
         new_contig
+    }
+
+    /// Canonicalize runs of physical dimension which have size 1 for the given `shape`.
+    fn reorder_size_one_dynamic_dimensions(&mut self, shape: &[DimSize]) {
+        let physical_shape = self.expand_physical_shape(shape).unwrap();
+
+        let Layout(dims) = self;
+
+        let mut start = 0;
+        while start < physical_shape.len() {
+            let mut end = start;
+            while end < physical_shape.len() && physical_shape[end].get() == 1 {
+                end += 1;
+            }
+            let ones_slice = &mut dims[start..end];
+            ones_slice.sort_by_key(|e| e.0);
+            start = end + 1;
+        }
+    }
+
+    pub(crate) fn has_noncanon_size_one_dynamic_dimensions(&self, shape: &[DimSize]) -> bool {
+        // This implementation could be much more efficient.
+        let Layout(dims) = self;
+        let physical_shape = self.expand_physical_shape(shape).unwrap();
+        let mut start = 0;
+        while start < physical_shape.len() {
+            let mut end = start;
+            while end < physical_shape.len() && physical_shape[end].get() == 1 {
+                end += 1;
+            }
+            let ones_slice = &dims[start..end];
+            if ones_slice.windows(2).any(|w| w[0].0 > w[1].0) {
+                return true;
+            }
+            start = end + 1;
+        }
+        false
     }
 
     // TODO: Make function private. (aligned_approx needs this.)
