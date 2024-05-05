@@ -75,6 +75,43 @@ impl MemoryLimits {
         }
     }
 
+    pub fn zero_levels_slower_than_all<Tgt>(&mut self, levels_bounds: &[Tgt::Level])
+    where
+        Tgt: Target,
+    {
+        // This is slow; it visits the product rather than computing a lub when that's correct.
+        let target_levels = Tgt::levels();
+        match self {
+            MemoryLimits::Standard(mem_vec) => {
+                for (limit_idx, cur) in target_levels.iter().enumerate() {
+                    if levels_bounds.iter().all(|bound| bound < cur) {
+                        mem_vec.set_unscaled(limit_idx, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn any_nonzero_levels_slower_than<Tgt>(&self, levels_bounds: &[Tgt::Level]) -> bool
+    where
+        Tgt: Target,
+    {
+        // This is slow; it visits the product rather than computing a lub when that's correct.
+        let target_levels = Tgt::levels();
+        match self {
+            MemoryLimits::Standard(mem_vec) => {
+                for (limit_idx, cur) in target_levels.iter().enumerate() {
+                    if mem_vec.get_unscaled(limit_idx) != 0
+                        && levels_bounds.iter().all(|bound| bound < cur)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Produce new MemoryLimits for each child of a node after some allocation.
     /// Returns `None` if the given memory allocation exceeds this limit.
     ///
@@ -143,6 +180,7 @@ impl Display for MemoryLimits {
         }
     }
 }
+
 impl MemoryAllocation {
     pub fn none() -> Self {
         MemoryAllocation::Simple([0; LEVEL_COUNT])

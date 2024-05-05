@@ -685,7 +685,7 @@ impl<Tgt: Target> Action<Tgt> {
                 } = logical_spec.output();
 
                 let zero_app = {
-                    let mut subspec = LogicalSpec::Primitive(
+                    let subspec = LogicalSpec::Primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Zero,
                             spec_shape: output_shape,
@@ -694,19 +694,16 @@ impl<Tgt: Target> Action<Tgt> {
                         vec![output_aux],
                         logical_spec.serial_only(),
                     );
-                    subspec
-                        .canonicalize()
+                    let mut spec = Spec(subspec, spec.1.clone());
+                    spec.canonicalize()
                         .expect("ToAccum's introduced Zero should be canonicalizable");
-                    let spec = Spec(subspec, spec.1.clone());
                     let app_arguments = [Param::new(0, logical_spec.output())];
                     SpecApp::new(spec, app_arguments).into()
                 };
                 let accum_app = {
-                    let mut subspec = logical_spec.clone_as_accum();
-                    subspec
-                        .canonicalize()
+                    let mut spec = Spec(logical_spec.clone_as_accum(), spec.1.clone());
+                    spec.canonicalize()
                         .expect("ToAccum's introduced accumulating Spec should be canonicalizable");
-                    let spec = Spec(subspec, spec.1.clone());
                     let app_arguments = operands
                         .iter()
                         .enumerate()

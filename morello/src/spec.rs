@@ -109,11 +109,16 @@ pub struct PrimitiveBasicsBimap {
 
 impl<Tgt: Target> Spec<Tgt> {
     pub fn canonicalize(&mut self) -> anyhow::Result<()> {
+        let parameters = self.0.parameters();
+        let levels = parameters.iter().map(|p| p.level()).collect::<Vec<_>>();
+        self.1.zero_levels_slower_than_all::<Tgt>(&levels);
         self.0.canonicalize()
     }
 
     pub fn is_canonical(&self) -> bool {
-        self.0.is_canonical()
+        let parameters = self.0.parameters();
+        let levels = parameters.iter().map(|p| p.level()).collect::<Vec<_>>();
+        !self.1.any_nonzero_levels_slower_than::<Tgt>(&levels) && self.0.is_canonical()
     }
 }
 
