@@ -86,17 +86,17 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        let factor = if self.parallel {
+        let (factor, overhead) = if self.parallel {
             let processors = u32::from(Tgt::processors());
             let steps = self.steps();
             let main_steps = self.full_steps();
-            let execution_cost =
-                ((main_steps + processors - 1) / processors) + (steps - main_steps);
-            execution_cost + PAR_TILE_OVERHEAD
+            let boundary_steps = steps - main_steps;
+            let per_thread_factor = main_steps.div_ceil(processors) + boundary_steps;
+            (per_thread_factor, PAR_TILE_OVERHEAD)
         } else {
-            self.steps()
+            (self.steps(), 0)
         };
-        child_costs[0].saturating_mul(factor)
+        child_costs[0].saturating_mul(factor) + overhead
     }
 
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
