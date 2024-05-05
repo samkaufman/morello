@@ -2,6 +2,7 @@ use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
+use crate::spec::Spec;
 use crate::target::Target;
 use crate::views::{Param, Tensor, View};
 use std::collections::HashMap;
@@ -10,18 +11,18 @@ use crate::tensorspec::TensorSpec;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
-pub struct Pipeline<Tgt: Target, Aux: Clone> {
+pub struct Pipeline<Tgt: Target> {
     pub intermediates: Vec<Rc<Tensor<Tgt>>>,
-    pub stages: Vec<ImplNode<Tgt, Aux>>,
-    pub aux: Aux,
+    pub stages: Vec<ImplNode<Tgt>>,
+    pub spec: Option<Spec<Tgt>>,
 }
 
-impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
+impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
         todo!()
     }
 
-    fn children(&self) -> &[ImplNode<Tgt, Aux>] {
+    fn children(&self) -> &[ImplNode<Tgt>] {
         &self.stages
     }
 
@@ -51,11 +52,11 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
             .expect("Pipeline should be given at least one child cost")
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
         Pipeline {
             intermediates: self.intermediates.clone(),
             stages: new_children.collect(),
-            aux: self.aux.clone(),
+            spec: self.spec.clone()
         }
     }
 
@@ -82,15 +83,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Pipeline<Tgt, Aux> {
         Some(main)
     }
 
-    fn aux(&self) -> &Aux {
-        &self.aux
-    }
-
-    fn drop_aux(self) -> ImplNode<Tgt, ()> {
-        ImplNode::Pipeline(Pipeline {
-            intermediates: self.intermediates,
-            stages: self.stages.into_iter().map(|s| s.drop_aux()).collect(),
-            aux: (),
-        })
+    fn spec(&self) -> Option<&Spec<Tgt>> {
+        self.spec.as_ref()
     }
 }

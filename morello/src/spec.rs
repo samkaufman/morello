@@ -2165,7 +2165,7 @@ mod tests {
     }
 
     fn arb_spec_action_and_lower_limit<Tgt: Target>(
-    ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt, ()>, MemoryLimits)> {
+    ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt>, MemoryLimits)> {
         arb_canonical_spec::<Tgt>(None, None)
             .prop_filter_map("Spec had zero applicable actions", |spec| {
                 let applied_actions = spec

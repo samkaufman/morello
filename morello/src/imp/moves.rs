@@ -2,6 +2,7 @@ use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
+use crate::spec::Spec;
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::views::{CacheView, Param, Tensor, View};
@@ -11,15 +12,15 @@ use std::iter;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
-pub struct MoveLet<Tgt: Target, Aux: Clone> {
+pub struct MoveLet<Tgt: Target> {
     pub parameter_idx: u8,
     // TODO: Needed if the body already has the new tensor?
     pub source_spec: TensorSpec<Tgt>,
     pub introduced: TensorOrCacheView<Param<Tgt>>,
     pub has_prologue: bool,
     pub has_epilogue: bool,
-    pub children: Vec<ImplNode<Tgt, Aux>>,
-    pub aux: Aux,
+    pub children: Vec<ImplNode<Tgt>>,
+    pub spec: Option<Spec<Tgt>>,
 }
 
 // TODO: Make private.
@@ -29,15 +30,15 @@ pub enum TensorOrCacheView<V: View + 'static> {
     CacheView(Rc<CacheView<V>>),
 }
 
-impl<Tgt: Target, Aux: Clone> MoveLet<Tgt, Aux> {
+impl<Tgt: Target> MoveLet<Tgt> {
     pub fn new(
         parameter_idx: u8,
         source_spec: TensorSpec<Tgt>,
         introduced: TensorOrCacheView<Param<Tgt>>,
-        prologue: Option<ImplNode<Tgt, Aux>>,
-        main_stage: ImplNode<Tgt, Aux>,
-        epilogue: Option<ImplNode<Tgt, Aux>>,
-        aux: Aux,
+        prologue: Option<ImplNode<Tgt>>,
+        main_stage: ImplNode<Tgt>,
+        epilogue: Option<ImplNode<Tgt>>,
+        spec: Option<Spec<Tgt>>,
     ) -> Self {
         let has_prologue = prologue.is_some();
         let has_epilogue = epilogue.is_some();
@@ -53,11 +54,11 @@ impl<Tgt: Target, Aux: Clone> MoveLet<Tgt, Aux> {
             has_prologue,
             has_epilogue,
             children,
-            aux,
+            spec,
         }
     }
 
-    pub fn prologue(&self) -> Option<&ImplNode<Tgt, Aux>> {
+    pub fn prologue(&self) -> Option<&ImplNode<Tgt>> {
         if self.has_prologue {
             Some(&self.children[0])
         } else {
@@ -65,7 +66,7 @@ impl<Tgt: Target, Aux: Clone> MoveLet<Tgt, Aux> {
         }
     }
 
-    pub fn main_stage(&self) -> &ImplNode<Tgt, Aux> {
+    pub fn main_stage(&self) -> &ImplNode<Tgt> {
         if self.has_prologue {
             &self.children[1]
         } else {
@@ -73,7 +74,7 @@ impl<Tgt: Target, Aux: Clone> MoveLet<Tgt, Aux> {
         }
     }
 
-    pub fn epilogue(&self) -> Option<&ImplNode<Tgt, Aux>> {
+    pub fn epilogue(&self) -> Option<&ImplNode<Tgt>> {
         if self.has_epilogue {
             self.children.last()
         } else {
@@ -82,7 +83,7 @@ impl<Tgt: Target, Aux: Clone> MoveLet<Tgt, Aux> {
     }
 }
 
-impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
+impl<Tgt: Target> Impl<Tgt> for MoveLet<Tgt> {
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
         Box::new(
             self.main_stage()
@@ -98,7 +99,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
         )
     }
 
-    fn children(&self) -> &[ImplNode<Tgt, Aux>] {
+    fn children(&self) -> &[ImplNode<Tgt>] {
         &self.children
     }
 
@@ -119,7 +120,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
         child_costs.iter().fold(cost, |a, &b| a.saturating_add(b))
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
         let new_children = new_children.collect::<Vec<_>>();
         debug_assert_eq!(self.children.len(), new_children.len());
         Self {
@@ -129,7 +130,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
             has_prologue: self.has_prologue,
             has_epilogue: self.has_epilogue,
             children: new_children,
-            aux: self.aux.clone(),
+            spec: self.spec.clone(),
         }
     }
 
@@ -180,20 +181,8 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for MoveLet<Tgt, Aux> {
         Some(top)
     }
 
-    fn aux(&self) -> &Aux {
-        &self.aux
-    }
-
-    fn drop_aux(self) -> ImplNode<Tgt, ()> {
-        ImplNode::MoveLet(MoveLet {
-            parameter_idx: self.parameter_idx,
-            source_spec: self.source_spec,
-            introduced: self.introduced,
-            has_prologue: self.has_prologue,
-            has_epilogue: self.has_epilogue,
-            children: self.children.into_iter().map(|c| c.drop_aux()).collect(),
-            aux: (),
-        })
+    fn spec(&self) -> Option<&Spec<Tgt>> {
+        self.spec.as_ref()
     }
 }
 

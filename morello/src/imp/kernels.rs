@@ -2,6 +2,7 @@ use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
+use crate::spec::Spec;
 use crate::target::{Kernel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
@@ -12,13 +13,13 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KernelApp<Tgt: Target, Aux> {
+pub struct KernelApp<Tgt: Target> {
     pub kernel_type: Tgt::Kernel,
     pub arguments: SmallVec<[Param<Tgt>; 3]>,
-    pub aux: Aux,
+    pub spec: Option<Spec<Tgt>>,
 }
 
-impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for KernelApp<Tgt, Aux> {
+impl<Tgt: Target> Impl<Tgt> for KernelApp<Tgt> {
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
         debug_assert_eq!(
             usize::from(self.kernel_type.argument_count()),
@@ -27,7 +28,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for KernelApp<Tgt, Aux> {
         Box::new(self.arguments.iter().map(|param| param.spec()))
     }
 
-    fn children(&self) -> &[ImplNode<Tgt, Aux>] {
+    fn children(&self) -> &[ImplNode<Tgt>] {
         &[]
     }
 
@@ -40,7 +41,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for KernelApp<Tgt, Aux> {
         self.kernel_type.main_cost(&self.arguments)
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
         debug_assert_eq!(new_children.count(), 0);
         self.clone()
     }
@@ -73,25 +74,16 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for KernelApp<Tgt, Aux> {
         Some(format!("{}({})", name, args_str))
     }
 
-    fn aux(&self) -> &Aux {
-        &self.aux
-    }
-
-    fn drop_aux(self) -> ImplNode<Tgt, ()> {
-        ImplNode::Kernel(KernelApp {
-            kernel_type: self.kernel_type,
-            arguments: self.arguments,
-            aux: (),
-        })
+    fn spec(&self) -> Option<&Spec<Tgt>> {
+        self.spec.as_ref()
     }
 }
 
 #[cfg(test)]
-impl<Tgt, Aux> proptest::arbitrary::Arbitrary for KernelApp<Tgt, Aux>
+impl<Tgt> proptest::arbitrary::Arbitrary for KernelApp<Tgt>
 where
     Tgt: Target,
     Tgt::Kernel: Debug + Clone + proptest::arbitrary::Arbitrary,
-    Aux: Debug + proptest::arbitrary::Arbitrary,
 {
     type Parameters = ();
     type Strategy = proptest::strategy::BoxedStrategy<Self>;
@@ -107,17 +99,16 @@ where
                         any::<TensorSpec<Tgt>>(),
                         usize::from(kernel_type.argument_count()),
                     ),
-                    any::<Aux>(),
                 )
             })
-            .prop_map(|(kernel_type, argument_specs, aux)| KernelApp {
+            .prop_map(|(kernel_type, argument_specs)| KernelApp {
                 kernel_type,
                 arguments: argument_specs
                     .into_iter()
                     .enumerate()
                     .map(|(i, spec)| Param::new(i.try_into().unwrap(), spec))
                     .collect(),
-                aux,
+                spec: None,
             })
             .boxed()
     }

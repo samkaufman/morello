@@ -16,15 +16,15 @@ use std::num::NonZeroUsize;
 /// These methods are intended to be used for manual scheduling by developers. Other clients should
 /// probably apply [Action]s directly.
 pub trait SchedulingSugar<Tgt: Target> {
-    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt, ()>;
-    fn split(&self, k: u32) -> ImplNode<Tgt, ()>;
+    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt>;
+    fn split(&self, k: u32) -> ImplNode<Tgt>;
     fn move_param(
         &self,
         source_idx: u8,
         destination_level: Tgt::Level,
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
-    ) -> ImplNode<Tgt, ()>;
+    ) -> ImplNode<Tgt>;
     fn cast(
         &self,
         source_idx: u8,
@@ -32,17 +32,17 @@ pub trait SchedulingSugar<Tgt: Target> {
         destination_level: Tgt::Level,
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
-    ) -> ImplNode<Tgt, ()>;
-    fn to_accum(&self) -> ImplNode<Tgt, ()>;
+    ) -> ImplNode<Tgt>;
+    fn to_accum(&self) -> ImplNode<Tgt>;
     fn peel(
         &self,
         layout: Layout,
         level: Tgt::Level,
         vector_size: Option<DimSize>,
-    ) -> ImplNode<Tgt, ()>;
-    fn spatial_split(&self) -> ImplNode<Tgt, ()>;
-    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt, ()>;
-    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt, ()>
+    ) -> ImplNode<Tgt>;
+    fn spatial_split(&self) -> ImplNode<Tgt>;
+    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt>;
+    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -54,12 +54,12 @@ pub trait Subschedule<Tgt: Target> {
     fn subschedule(
         &self,
         path: &[usize],
-        f: &impl Fn(&Spec<Tgt>) -> ImplNode<Tgt, ()>,
-    ) -> ImplNode<Tgt, ()>;
+        f: &impl Fn(&Spec<Tgt>) -> ImplNode<Tgt>,
+    ) -> ImplNode<Tgt>;
 }
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
-    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt, ()> {
+    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt> {
         Action::TileOut {
             output_shape: output_shape
                 .iter()
@@ -71,7 +71,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         .unwrap()
     }
 
-    fn split(&self, k: u32) -> ImplNode<Tgt, ()> {
+    fn split(&self, k: u32) -> ImplNode<Tgt> {
         Action::Split {
             k: DimSize::new(k).unwrap(),
         }
@@ -85,7 +85,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         destination_level: Tgt::Level,
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
-    ) -> ImplNode<Tgt, ()> {
+    ) -> ImplNode<Tgt> {
         let destination_dtype = self.0.parameters()[usize::from(source_idx)].dtype();
         Action::Move {
             source_idx,
@@ -105,7 +105,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         destination_level: Tgt::Level,
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
-    ) -> ImplNode<Tgt, ()> {
+    ) -> ImplNode<Tgt> {
         Action::Move {
             source_idx,
             destination_dtype,
@@ -117,7 +117,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         .unwrap()
     }
 
-    fn to_accum(&self) -> ImplNode<Tgt, ()> {
+    fn to_accum(&self) -> ImplNode<Tgt> {
         Action::ToAccum.apply(self).unwrap()
     }
 
@@ -126,7 +126,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         layout: Layout,
         level: Tgt::Level,
         vector_size: Option<DimSize>,
-    ) -> ImplNode<Tgt, ()> {
+    ) -> ImplNode<Tgt> {
         Action::Peel {
             layout,
             level,
@@ -136,15 +136,15 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         .unwrap()
     }
 
-    fn spatial_split(&self) -> ImplNode<Tgt, ()> {
+    fn spatial_split(&self) -> ImplNode<Tgt> {
         Action::SpatialSplit.apply(self).unwrap()
     }
 
-    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt, ()> {
+    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt> {
         Action::Place(kernel_type).apply(self).unwrap()
     }
 
-    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt, ()>
+    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -152,18 +152,18 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     {
         top_down(db, self, 1, jobs);
         match db.get_impl(self).unwrap().first() {
-            Some(imp) => imp.clone().drop_aux(),
+            Some(imp) => imp.clone(),
             None => panic!("No Impl exists for {self}"),
         }
     }
 }
 
-impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
-    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt, ()> {
+impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
+    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.tile_out(output_shape, parallel))
     }
 
-    fn split(&self, k: u32) -> ImplNode<Tgt, ()> {
+    fn split(&self, k: u32) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.split(k))
     }
 
@@ -173,7 +173,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
         destination_level: Tgt::Level,
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
-    ) -> ImplNode<Tgt, ()> {
+    ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
             spec.move_param(
                 source_idx,
@@ -191,7 +191,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
         destination_level: Tgt::Level,
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
-    ) -> ImplNode<Tgt, ()> {
+    ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
             spec.cast(
                 source_idx,
@@ -203,7 +203,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
         })
     }
 
-    fn to_accum(&self) -> ImplNode<Tgt, ()> {
+    fn to_accum(&self) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.to_accum())
     }
 
@@ -212,19 +212,19 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
         layout: Layout,
         level: Tgt::Level,
         vector_size: Option<DimSize>,
-    ) -> ImplNode<Tgt, ()> {
+    ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.peel(layout, level, vector_size))
     }
 
-    fn spatial_split(&self) -> ImplNode<Tgt, ()> {
+    fn spatial_split(&self) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.spatial_split())
     }
 
-    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt, ()> {
+    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.place(kernel_type))
     }
 
-    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt, ()>
+    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -234,12 +234,12 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt, ()> {
     }
 }
 
-impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt, ()> {
+impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt> {
     fn subschedule(
         &self,
         path: &[usize],
-        f: &impl Fn(&Spec<Tgt>) -> ImplNode<Tgt, ()>,
-    ) -> ImplNode<Tgt, ()> {
+        f: &impl Fn(&Spec<Tgt>) -> ImplNode<Tgt>,
+    ) -> ImplNode<Tgt> {
         let children = self.children();
         if children.is_empty() {
             match self {
@@ -260,10 +260,10 @@ impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt, ()> {
     }
 }
 
-fn apply_to_leaf_spec<Tgt, F>(node: &ImplNode<Tgt, ()>, f: F) -> ImplNode<Tgt, ()>
+fn apply_to_leaf_spec<Tgt, F>(node: &ImplNode<Tgt>, f: F) -> ImplNode<Tgt>
 where
     Tgt: Target,
-    F: FnOnce(&Spec<Tgt>) -> ImplNode<Tgt, ()>,
+    F: FnOnce(&Spec<Tgt>) -> ImplNode<Tgt>,
 {
     match node {
         ImplNode::SpecApp(app) => f(&app.0),
