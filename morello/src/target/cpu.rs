@@ -706,12 +706,14 @@ impl Kernel for CpuKernel {
 
     fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost {
         match self {
-            // TODO: Model cost for BroadcastVecMultAddBf16F32 correctly.
             CpuKernel::BroadcastVecMultAdd
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::BroadcastVecMultAddBf16F32 => {
-                let vec_tensor_spec = &parameters[1].1;
+                // TODO: Adjust the BroadcastVecMultAdd cost.
+                // TODO: Adjust the TwoVecBroadcastVecMultAddU8S8S16 cost.
+                // TODO: Model cost for BroadcastVecMultAddBf16F32 correctly.
 
+                let vec_tensor_spec = &parameters[1].1;
                 let vector_size = vec_tensor_spec.vector_size().unwrap().get();
                 let volume = vec_tensor_spec.volume().get();
                 debug_assert_eq!(volume % vector_size, 0);
@@ -731,22 +733,48 @@ impl Kernel for CpuKernel {
                 cost
             }
             CpuKernel::DotProductLoop => {
-                // 4.2 cycles throughput.
-                INST_COST * 4
+                // TODO: Measure throughput! This is a rough estimate.
+                let value_cnt = parameters[0].1.shape()[1].get();
+                let d = DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT;
+                8 * INST_COST * value_cnt / d
             }
-            CpuKernel::DotProductLoopBf16Bf16F32
-            | CpuKernel::DotProductLoopF32InterleavedBf16F32
-            | CpuKernel::DotProductLoopF32Bf16F32 => {
-                // TODO: Measure throughput!
-                INST_COST * 5
+            CpuKernel::DotProductLoopBf16Bf16F32 => {
+                // TODO: Measure throughput! This is a rough estimate.
+                let value_cnt = parameters[0].1.shape()[1].get();
+                let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT;
+                (12 * INST_COST * value_cnt) / d
             }
-            CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
-            CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
+            CpuKernel::DotProductLoopF32Bf16F32
+            | CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
+                // RThroughput = 8 or 16
+                let value_cnt = parameters[0].1.shape()[1].get();
+                let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT;
+                let mut cost = 16 * INST_COST * value_cnt;
+                if self == &CpuKernel::DotProductLoopF32Bf16F32 {
+                    cost *= 2;
+                }
+                cost / d
+            }
             CpuKernel::VectorInterleaveBf16F32 | CpuKernel::VectorDeinterleaveF32Bf16 => {
                 // TODO: Measure throughput!
                 INST_COST
             }
-            CpuKernel::MultAdd | CpuKernel::CastBf16F32 | CpuKernel::VectorCastBf16F32 => INST_COST,
+            CpuKernel::MultAdd => {
+                match parameters[0].1.dtype() {
+                    Dtype::Bfloat16 => 6 * INST_COST,
+                    Dtype::Float32 => INST_COST, // RThroughput = .5
+                    Dtype::Uint8
+                    | Dtype::Sint8
+                    | Dtype::Uint16
+                    | Dtype::Sint16
+                    | Dtype::Uint32
+                    | Dtype::Sint32 => 2 * INST_COST, // RThroughput = 1
+                }
+            }
+            CpuKernel::CastBf16F32 => 4 * INST_COST, // RThroughput = 2
+            CpuKernel::VectorCastBf16F32 => 6 * INST_COST, // RThroughput = 3
+            CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
+            CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
             CpuKernel::ValueAssign
             | CpuKernel::VectorAssign
             | CpuKernel::MemsetZero
