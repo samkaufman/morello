@@ -56,7 +56,7 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
         Pipeline {
             intermediates: self.intermediates.clone(),
             stages: new_children.collect(),
-            spec: self.spec.clone()
+            spec: self.spec.clone(),
         }
     }
 
