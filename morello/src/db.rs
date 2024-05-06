@@ -168,7 +168,7 @@ impl RocksDatabase {
             root_results
                 .as_ref()
                 .iter()
-                .map(|(action_idx, cost)| {
+                .map(|(action_idx, _cost)| {
                     let root = actions[(*action_idx).into()].apply(query).unwrap();
                     let children = root.children();
                     let new_children = children
@@ -606,8 +606,8 @@ impl Drop for Shard {
 impl DbBlock {
     pub fn get_with_preference<Tgt>(
         &self,
-        containing_db: &RocksDatabase,
-        query: &Spec<Tgt>,
+        _containing_db: &RocksDatabase,
+        _query: &Spec<Tgt>,
         inner_pt: &[u8],
     ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
     where
