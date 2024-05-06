@@ -1,5 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
+use rand_chacha::ChaCha8Rng;
 use smallvec::smallvec;
 
 use morello::cost::Cost;
@@ -18,7 +19,7 @@ fn impl_reducer(top_k: usize, actions: &[(ActionIdx, Cost)]) {
 fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("ImplReducer");
     for top_k in [1, 2, 8, 100] {
-        let mut rng = rand::thread_rng();
+        let mut rng = ChaCha8Rng::seed_from_u64(2);
         let mut actions: Vec<ActionIdx> = (0..top_k + 10000).collect();
         actions.shuffle(&mut rng);
         let actions: Vec<_> = actions

@@ -47,6 +47,7 @@ criterion = "0.4.0"
 iai-callgrind = "0.4.0"
 proptest = "1.2.0"
 proptest-derive = "0.3.0"
+rand_chacha = "0.3.1"
 
 [[bench]]
 name = "impl_reducer"
