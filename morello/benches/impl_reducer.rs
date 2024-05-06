@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use smallvec::smallvec;
@@ -32,7 +32,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("impl_reducer", top_k),
             &(usize::from(top_k), &action_indices[..]),
-            |b, (k, actions)| b.iter(|| impl_reducer(*k, actions)),
+            |b, (k, actions)| b.iter(|| impl_reducer(black_box(*k), black_box(actions))),
         );
     }
     group.finish();
