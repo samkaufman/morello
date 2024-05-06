@@ -1,6 +1,7 @@
 //! This example shows how to manually schedule a simple matrix multiplication for X86.
 
 use morello::codegen::CodeGen;
+use morello::cost::Cost;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::pprint::{pprint, ImplPrintStyle};
@@ -156,4 +157,14 @@ fn main() {
             panic!("Generated code returned incorrect output");
         }
     }
+
+    // Benchmark.
+    const ITERS: u32 = 100;
+    let result = implementation.bench(ITERS, None).unwrap();
+    let kernel_runtime =
+        (result.best_inner_loop_runtime() / result.inner_loop_iterations).as_secs_f64();
+    let throughput =
+        result.inner_loop_iterations as f64 / result.best_inner_loop_runtime().as_secs_f64();
+    println!("\n// cost: {}", Cost::from_impl(&implementation).main);
+    println!("// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)");
 }
