@@ -12,16 +12,11 @@ use smallvec::SmallVec;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::marker::PhantomData;
 use std::rc::Rc;
 
 // TODO: Do we still want to be generic over the specific Spec?
 #[derive(Debug, Clone)]
-pub struct SpecApp<Tgt, P>(
-    pub P,
-    pub SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]>,
-    PhantomData<Tgt>,
-)
+pub struct SpecApp<Tgt, P>(pub P, pub SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]>)
 where
     Tgt: Target,
     P: Borrow<Spec<Tgt>> + Clone;
@@ -40,7 +35,7 @@ where
             .into_iter()
             .map(|v| Rc::new(v) as _)
             .collect::<SmallVec<_>>();
-        Self(spec, cast_args, PhantomData)
+        Self(spec, cast_args)
     }
 }
 
@@ -59,7 +54,7 @@ where
             .enumerate()
             .map(|(i, o)| Rc::new(Param::new(i.try_into().unwrap(), o)) as Rc<_>)
             .collect();
-        SpecApp(spec, operands, PhantomData)
+        SpecApp(spec, operands)
     }
 }
 
@@ -143,7 +138,6 @@ where
                             Rc::new(Param::new(idx.try_into().unwrap(), parameter_spec)) as Rc<_>
                         })
                         .collect(),
-                    PhantomData,
                 )
             })
             .boxed()
