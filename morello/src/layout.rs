@@ -1,8 +1,10 @@
 use itertools::Itertools;
-use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::{collections::HashSet, fmt::Display, hash::Hash};
+
+#[cfg(any(debug_assertions, test))]
+use nonzero::nonzero as nz;
 
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
@@ -694,7 +696,7 @@ impl Display for Layout {
 impl Default for LayoutArbRankBounds {
     fn default() -> Self {
         Self {
-            min_rank: std::num::NonZeroU8::new(1).unwrap(),
+            min_rank: nz!(1u8),
             max_rank: None,
         }
     }
