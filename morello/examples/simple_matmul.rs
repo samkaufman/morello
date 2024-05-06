@@ -104,7 +104,7 @@ fn main() {
     //
 
     println!("\nImpl resulting from manual scheduling:");
-    pprint(&implementation, ImplPrintStyle::Full);
+    pprint(&implementation, ImplPrintStyle::Compact);
 
     // Finally, we can lower that Impl to the following C kernel:
     //
