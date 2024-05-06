@@ -466,7 +466,7 @@ impl Kernel for CpuKernel {
                     (0, PhysDim::Dynamic),
                     (0, PhysDim::OddEven(nz!(16u32)))
                 ]);
-                dotproductloop_applies(operands, Dtype::Bfloat16, &[layout0, layout1])
+                dotproductloop_applies(operands, Dtype::Float32, &[layout0, layout1])
             }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
                 dotproductloop_applies(operands, Dtype::Bfloat16, &[row_major(2)])
