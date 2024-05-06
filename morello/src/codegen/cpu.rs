@@ -1,7 +1,7 @@
 use itertools::{Either, Itertools};
 use nonzero::nonzero as nz;
 use std::collections::HashMap;
-use std::fmt::{self, Debug, Write};
+use std::fmt::{self, Write};
 use std::iter;
 use std::rc::Rc;
 
@@ -17,7 +17,7 @@ use crate::imp::moves::TensorOrCacheView;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferVar;
-use crate::pprint::{pprint_write, ImplPrintStyle, PrintableAux};
+use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
 use crate::target::cpu::{DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE};
 use crate::target::{
@@ -52,9 +52,9 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
     }
 
     /// Write a pretty-printed Impl as a C comment.
-    pub fn emit_impl_comment<W: Write, Aux: PrintableAux + Debug>(
+    pub fn emit_impl_comment<W: Write>(
         &mut self,
-        imp: &'a ImplNode<Tgt, Aux>,
+        imp: &'a ImplNode<Tgt>,
         impl_style: ImplPrintStyle,
         out: &mut W,
     ) -> fmt::Result {
@@ -63,9 +63,9 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         Ok(())
     }
 
-    pub fn emit_kernel<W: Write, Aux: PrintableAux + Debug>(
+    pub fn emit_kernel<W: Write>(
         &mut self,
-        imp: &'a ImplNode<Tgt, Aux>,
+        imp: &'a ImplNode<Tgt>,
         top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
         bench: bool,
         out: &mut W,
@@ -496,15 +496,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         }
     }
 
-    fn emit<Aux: PrintableAux + Debug, W: Write>(
-        &mut self,
-        w: &mut W,
-        imp: &ImplNode<Tgt, Aux>,
-        depth: usize,
-    ) -> fmt::Result {
-        if let Some(h) = imp.aux().c_header() {
-            writeln!(w, "{}// {}", indent(depth), h)?;
-        }
+    fn emit<W: Write>(&mut self, w: &mut W, imp: &ImplNode<Tgt>, depth: usize) -> fmt::Result {
         match imp {
             ImplNode::Loop(l) => {
                 // Emit a C loop nest or, if any tensor view is requires unrolling (i.e., vector
@@ -563,7 +555,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 stages,
                 bindings: _,
                 parameters: _,
-                aux: _,
+                spec: _,
             }) => {
                 for stage in stages {
                     self.emit(w, stage, depth)?;
@@ -585,7 +577,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
             ImplNode::Kernel(KernelApp {
                 kernel_type,
                 arguments,
-                aux: _,
+                spec: _,
             }) => {
                 match kernel_type {
                     CpuKernel::MultAdd => {
@@ -1461,10 +1453,10 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         }
     }
 
-    fn emit_rolled_loop<Aux: PrintableAux + Debug, W: Write>(
+    fn emit_rolled_loop<W: Write>(
         &mut self,
         w: &mut W,
-        l: &Loop<Tgt, Aux>,
+        l: &Loop<Tgt>,
         depth: usize,
     ) -> fmt::Result {
         let axes_to_emit = axis_order_and_steps(l).collect::<Vec<_>>();
@@ -1538,10 +1530,10 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         Ok(())
     }
 
-    fn emit_unrolled_loop<Aux: PrintableAux + Debug, W: Write>(
+    fn emit_unrolled_loop<W: Write>(
         &mut self,
         w: &mut W,
-        l: &Loop<Tgt, Aux>,
+        l: &Loop<Tgt>,
         depth: usize,
     ) -> fmt::Result {
         if l.parallel {
@@ -1795,9 +1787,7 @@ fn vec_func_names(
     }
 }
 
-fn axis_order_and_steps<Tgt: Target, Aux: Clone>(
-    l: &Loop<Tgt, Aux>,
-) -> impl Iterator<Item = (u8, u32)> + '_ {
+fn axis_order_and_steps<Tgt: Target>(l: &Loop<Tgt>) -> impl Iterator<Item = (u8, u32)> + '_ {
     // TODO: Choose according to a skip-minimizing heuristic.
     let result = l
         .tiles

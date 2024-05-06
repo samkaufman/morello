@@ -11,7 +11,6 @@ use crate::common::Dtype;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::pprint::ImplPrintStyle;
-use crate::pprint::PrintableAux;
 use crate::target::CpuTarget;
 use crate::target::{Target, TargetId};
 use crate::utils::ToWriteFmt;
@@ -21,7 +20,6 @@ use anyhow::{bail, Error, Result};
 use log::{debug, info};
 use std::cmp::max;
 use std::fmt;
-use std::fmt::Debug;
 use std::io;
 use std::io::Write;
 use std::path::PathBuf;
@@ -106,10 +104,9 @@ pub trait CodeGen<Tgt: Target> {
     }
 }
 
-impl<Tgt, Aux> CodeGen<Tgt> for ImplNode<Tgt, Aux>
+impl<Tgt> CodeGen<Tgt> for ImplNode<Tgt>
 where
     Tgt: CpuTarget,
-    Aux: PrintableAux + Debug,
 {
     fn emit_ext<W: fmt::Write>(
         &self,

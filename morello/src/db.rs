@@ -9,7 +9,6 @@ use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::ndarray::NDArray;
-use crate::pprint::PrintableAux;
 use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
@@ -26,10 +25,8 @@ use wtinylfu::WTinyLfuCache;
 use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, DerefMut, Range};
+use std::path;
 use std::sync::Arc;
-use std::{iter, path};
-
-pub type DbImpl<Tgt> = ImplNode<Tgt, DbImplAux<Tgt>>;
 
 type DbKey = (TableKey, SmallVec<[BimapInt; 10]>); // TODO: Rename to BlockKey for consistency?
 type TableKey = (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>);
@@ -43,9 +40,6 @@ const CACHE_PER_SHARD_SIZE: usize = 128;
 const CACHE_PER_SHARD_SAMPLES: usize = 8;
 const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
-
-#[derive(Clone, Debug)]
-pub struct DbImplAux<Tgt: Target>(Option<(Spec<Tgt>, Cost)>);
 
 pub struct RocksDatabase {
     db: Arc<DBInner>,
@@ -119,36 +113,6 @@ pub enum GetPreference<T, V> {
     Miss(Option<V>),
 }
 
-impl<Tgt: Target> PrintableAux for DbImplAux<Tgt> {
-    fn extra_column_titles(&self) -> Vec<String> {
-        iter::once("Logical Spec".to_owned())
-            .chain(Tgt::levels().iter().map(|lvl| lvl.to_string()))
-            .chain(iter::once("Cost".to_owned()))
-            .collect()
-    }
-
-    fn extra_column_values(&self) -> Vec<String> {
-        if let Some((spec, cost)) = &self.0 {
-            iter::once(spec.0.to_string())
-                .chain(cost.peaks.iter().map(|p| p.to_string()))
-                .chain(iter::once(cost.main.to_string()))
-                .collect()
-        } else {
-            vec![String::from(""); Tgt::levels().len() + 2]
-        }
-    }
-
-    fn c_header(&self) -> Option<String> {
-        self.0.as_ref().map(|(spec, _)| spec.to_string())
-    }
-}
-
-impl<Tgt: Target> Default for DbImplAux<Tgt> {
-    fn default() -> Self {
-        DbImplAux(None)
-    }
-}
-
 impl RocksDatabase {
     pub fn try_new(
         file_path: Option<&path::Path>,
@@ -192,7 +156,7 @@ impl RocksDatabase {
         }
     }
 
-    pub fn get_impl<Tgt>(&self, query: &Spec<Tgt>) -> Option<SmallVec<[DbImpl<Tgt>; 1]>>
+    pub fn get_impl<Tgt>(&self, query: &Spec<Tgt>) -> Option<SmallVec<[ImplNode<Tgt>; 1]>>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -205,9 +169,7 @@ impl RocksDatabase {
                 .as_ref()
                 .iter()
                 .map(|(action_idx, cost)| {
-                    let root = actions[(*action_idx).into()]
-                        .apply_with_aux(query, DbImplAux(Some((query.clone(), cost.clone()))))
-                        .unwrap();
+                    let root = actions[(*action_idx).into()].apply(query).unwrap();
                     let children = root.children();
                     let new_children = children
                         .iter()
@@ -798,7 +760,7 @@ fn superblockify_pt(block_pt: &[BimapInt]) -> SmallVec<[BimapInt; 10]> {
     block_pt.iter().map(|&i| i / SUPERBLOCK_FACTOR).collect()
 }
 
-fn construct_impl<Tgt>(db: &RocksDatabase, imp: &DbImpl<Tgt>) -> DbImpl<Tgt>
+fn construct_impl<Tgt>(db: &RocksDatabase, imp: &ImplNode<Tgt>) -> ImplNode<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -1011,11 +973,10 @@ pub fn iter_blocks_in_single_dim_range(
 }
 
 /// Compute the cost of an incomplete Impl.
-fn compute_cost<Tgt, Aux, F>(imp: &ImplNode<Tgt, Aux>, lookup: &F) -> Cost
+fn compute_cost<Tgt, F>(imp: &ImplNode<Tgt>, lookup: &F) -> Cost
 where
     Tgt: Target,
-    Aux: Clone,
-    F: Fn(&SpecApp<Tgt, Spec<Tgt>, Aux>) -> Cost,
+    F: Fn(&SpecApp<Tgt, Spec<Tgt>>) -> Cost,
 {
     match imp {
         ImplNode::SpecApp(s) => lookup(s),
@@ -1322,9 +1283,7 @@ mod tests {
     }
 
     /// Return some complete Impl for the given Spec.
-    fn complete_impl<Tgt: Target>(
-        partial_impl: &ImplNode<Tgt, ()>,
-    ) -> Option<(ImplNode<Tgt, ()>, Cost)> {
+    fn complete_impl<Tgt: Target>(partial_impl: &ImplNode<Tgt>) -> Option<(ImplNode<Tgt>, Cost)> {
         match partial_impl {
             ImplNode::SpecApp(spec_app) => {
                 for action in spec_app.0 .0.actions() {
@@ -1387,7 +1346,7 @@ mod tests {
     fn recursively_decide_with_action<Tgt: Target>(
         spec: &Spec<Tgt>,
         action_idx: ActionIdx,
-        partial_impl: &ImplNode<Tgt, ()>,
+        partial_impl: &ImplNode<Tgt>,
     ) -> Decision<Tgt> {
         let mut children = Vec::new();
         let mut unsat = false;

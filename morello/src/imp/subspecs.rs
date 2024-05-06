@@ -12,31 +12,22 @@ use smallvec::SmallVec;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::marker::PhantomData;
 use std::rc::Rc;
 
 // TODO: Do we still want to be generic over the specific Spec?
 #[derive(Debug, Clone)]
-pub struct SpecApp<Tgt, P, Aux>(
-    pub P,
-    pub SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]>,
-    pub Aux,
-    PhantomData<Tgt>,
-)
+pub struct SpecApp<Tgt, P>(pub P, pub SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]>)
 where
     Tgt: Target,
-    P: Borrow<Spec<Tgt>> + Clone,
-    Aux: Clone;
+    P: Borrow<Spec<Tgt>> + Clone;
 
-impl<Tgt, P, Aux> SpecApp<Tgt, P, Aux>
+impl<Tgt, P> SpecApp<Tgt, P>
 where
     Tgt: Target,
     P: Borrow<Spec<Tgt>> + Clone,
-    Aux: Clone,
 {
     pub fn new<ParamT, I>(spec: P, args: I) -> Self
     where
-        Aux: Default,
         ParamT: View<Tgt = Tgt> + 'static,
         I: IntoIterator<Item = ParamT>,
     {
@@ -44,21 +35,17 @@ where
             .into_iter()
             .map(|v| Rc::new(v) as _)
             .collect::<SmallVec<_>>();
-        Self(spec, cast_args, Aux::default(), PhantomData)
+        Self(spec, cast_args)
     }
 }
 
-impl<Tgt, P, Aux> SpecApp<Tgt, P, Aux>
+impl<Tgt, P> SpecApp<Tgt, P>
 where
     Tgt: Target,
     P: Borrow<Spec<Tgt>> + Clone,
-    Aux: Clone,
 {
     /// Returns a [Spec] application with [Param] operands.
-    pub fn default_app(spec: P) -> Self
-    where
-        Aux: Default,
-    {
+    pub fn default_app(spec: P) -> Self {
         let operands = spec
             .borrow()
             .0
@@ -67,21 +54,20 @@ where
             .enumerate()
             .map(|(i, o)| Rc::new(Param::new(i.try_into().unwrap(), o)) as Rc<_>)
             .collect();
-        SpecApp(spec, operands, Aux::default(), PhantomData)
+        SpecApp(spec, operands)
     }
 }
 
-impl<Tgt, P, Aux> Impl<Tgt, Aux> for SpecApp<Tgt, P, Aux>
+impl<Tgt, P> Impl<Tgt> for SpecApp<Tgt, P>
 where
     Tgt: Target,
     P: Borrow<Spec<Tgt>> + Clone + Debug,
-    Aux: Clone,
 {
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
         Box::new(self.1.iter().map(|p| p.spec()))
     }
 
-    fn children(&self) -> &[ImplNode<Tgt, Aux>] {
+    fn children(&self) -> &[ImplNode<Tgt>] {
         &[]
     }
 
@@ -94,7 +80,7 @@ where
         0
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
         debug_assert_eq!(new_children.count(), 0);
         self.clone()
     }
@@ -124,20 +110,15 @@ where
         Some(format!("{}({})", self.0.borrow(), args_str))
     }
 
-    fn aux(&self) -> &Aux {
-        &self.2
-    }
-
-    fn drop_aux(self) -> ImplNode<Tgt, ()> {
-        todo!()
+    fn spec(&self) -> Option<&Spec<Tgt>> {
+        Some(self.0.borrow())
     }
 }
 
 #[cfg(test)]
-impl<Tgt, Aux> proptest::arbitrary::Arbitrary for SpecApp<Tgt, Spec<Tgt>, Aux>
+impl<Tgt> proptest::arbitrary::Arbitrary for SpecApp<Tgt, Spec<Tgt>>
 where
     Tgt: Target,
-    Aux: Debug + Clone + proptest::arbitrary::Arbitrary + 'static,
 {
     type Parameters = ();
     type Strategy = proptest::strategy::BoxedStrategy<Self>;
@@ -145,8 +126,8 @@ where
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
         use proptest::prelude::*;
 
-        (any::<Spec<Tgt>>(), any::<Aux>())
-            .prop_map(|(spec, aux)| {
+        any::<Spec<Tgt>>()
+            .prop_map(|spec| {
                 let parameter_specs = spec.0.parameters();
                 SpecApp(
                     spec,
@@ -157,8 +138,6 @@ where
                             Rc::new(Param::new(idx.try_into().unwrap(), parameter_spec)) as Rc<_>
                         })
                         .collect(),
-                    aux,
-                    PhantomData,
                 )
             })
             .boxed()

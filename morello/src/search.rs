@@ -55,7 +55,7 @@ enum SpecTask<Tgt: Target> {
 #[derive(Debug)]
 enum WorkingPartialImpl<Tgt: Target> {
     Constructing {
-        partial_impl: ImplNode<Tgt, ()>,
+        partial_impl: ImplNode<Tgt>,
         subspecs: Vec<Spec<Tgt>>,
         subspec_costs: Vec<Option<Cost>>, // empty = unsat; all Some = ready-to-complete
         producing_action_idx: ActionIdx,
@@ -791,11 +791,7 @@ impl ImplReducer {
 
 // TODO: Can we replace this function with a more general `utils` crate fn. or something?
 /// Push all nested [Spec]s in an Impl into a given [Vec], left to right.
-fn collect_nested_specs<Tgt, A>(imp: &ImplNode<Tgt, A>, out: &mut Vec<Spec<Tgt>>)
-where
-    Tgt: Target,
-    A: Clone + std::fmt::Debug,
-{
+fn collect_nested_specs<Tgt: Target>(imp: &ImplNode<Tgt>, out: &mut Vec<Spec<Tgt>>) {
     match imp {
         ImplNode::SpecApp(spec_app) => {
             out.push(spec_app.0.clone());
@@ -808,8 +804,9 @@ where
     }
 }
 
-fn compute_impl_cost<Tgt: Target, A: Clone, I>(imp: &ImplNode<Tgt, A>, costs: &mut I) -> Cost
+fn compute_impl_cost<Tgt, I>(imp: &ImplNode<Tgt>, costs: &mut I) -> Cost
 where
+    Tgt: Target,
     I: Iterator<Item = Cost>,
 {
     match imp {

@@ -5,24 +5,25 @@ use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
+use crate::spec::Spec;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
 
 #[derive(Debug, Clone)]
-pub struct Block<Tgt: Target, Aux: Clone> {
-    pub stages: Vec<ImplNode<Tgt, Aux>>,
+pub struct Block<Tgt: Target> {
+    pub stages: Vec<ImplNode<Tgt>>,
     pub bindings: Vec<SmallVec<[u8; 3]>>,
     pub parameters: SmallVec<[TensorSpec<Tgt>; 3]>,
-    pub aux: Aux,
+    pub spec: Option<Spec<Tgt>>,
 }
 
-impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Block<Tgt, Aux> {
+impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
         Box::new(self.parameters.iter())
     }
 
-    fn children(&self) -> &[ImplNode<Tgt, Aux>] {
+    fn children(&self) -> &[ImplNode<Tgt>] {
         &self.stages
     }
 
@@ -38,14 +39,14 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Block<Tgt, Aux> {
             .expect("Block should be given at least one child cost")
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
         // TODO: Check that parameters are unchanged after children are replaced.
         // TODO: Flatten nested Blocks as well.
         Self {
             stages: new_children.collect(),
             bindings: self.bindings.clone(),
             parameters: self.parameters.clone(),
-            aux: self.aux.clone(),
+            spec: self.spec.clone(),
         }
     }
 
@@ -72,16 +73,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Block<Tgt, Aux> {
         None
     }
 
-    fn aux(&self) -> &Aux {
-        &self.aux
-    }
-
-    fn drop_aux(self) -> ImplNode<Tgt, ()> {
-        ImplNode::Block(Block {
-            stages: self.stages.into_iter().map(|s| s.drop_aux()).collect(),
-            bindings: self.bindings,
-            parameters: self.parameters,
-            aux: (),
-        })
+    fn spec(&self) -> Option<&Spec<Tgt>> {
+        self.spec.as_ref()
     }
 }

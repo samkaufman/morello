@@ -2,6 +2,7 @@ use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
+use crate::spec::Spec;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, Tile, View};
@@ -34,11 +35,11 @@ const PAR_TILE_OVERHEAD: MainCost = 45_000; // rough cycle estimate
 /// [`Impl`] while tiled arguments are replaced by [`Tile`]s
 /// (`a` and `b`).
 #[derive(Debug, Clone)]
-pub struct Loop<Tgt: Target, Aux: Clone> {
+pub struct Loop<Tgt: Target> {
     pub tiles: Vec<LoopTile<Tgt>>,
-    pub body: Box<ImplNode<Tgt, Aux>>,
+    pub body: Box<ImplNode<Tgt>>,
     pub parallel: bool,
-    pub aux: Aux,
+    pub spec: Option<Spec<Tgt>>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +48,7 @@ pub struct LoopTile<Tgt: Target> {
     pub tile: Tile<Param<Tgt>>,
 }
 
-impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
+impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
         debug_assert!(
             self.tiles
@@ -76,7 +77,7 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
         }))
     }
 
-    fn children(&self) -> &[ImplNode<Tgt, Aux>] {
+    fn children(&self) -> &[ImplNode<Tgt>] {
         slice::from_ref(&self.body)
     }
 
@@ -85,26 +86,26 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        let factor = if self.parallel {
+        let (factor, overhead) = if self.parallel {
             let processors = u32::from(Tgt::processors());
             let steps = self.steps();
             let main_steps = self.full_steps();
-            let execution_cost =
-                ((main_steps + processors - 1) / processors) + (steps - main_steps);
-            execution_cost + PAR_TILE_OVERHEAD
+            let boundary_steps = steps - main_steps;
+            let per_thread_factor = main_steps.div_ceil(processors) + boundary_steps;
+            (per_thread_factor, PAR_TILE_OVERHEAD)
         } else {
-            self.steps()
+            (self.steps(), 0)
         };
-        child_costs[0].saturating_mul(factor)
+        child_costs[0].saturating_mul(factor) + overhead
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self {
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
         let mut new_children = new_children;
         let new_loop = Loop {
             tiles: self.tiles.clone(),
             body: Box::new(new_children.next().unwrap()),
             parallel: self.parallel,
-            aux: self.aux.clone(),
+            spec: self.spec.clone(),
         };
         debug_assert!(new_children.next().is_none());
         new_loop
@@ -149,21 +150,12 @@ impl<Tgt: Target, Aux: Clone> Impl<Tgt, Aux> for Loop<Tgt, Aux> {
         ))
     }
 
-    fn aux(&self) -> &Aux {
-        &self.aux
-    }
-
-    fn drop_aux(self) -> ImplNode<Tgt, ()> {
-        ImplNode::Loop(Loop {
-            tiles: self.tiles,
-            body: Box::new(self.body.drop_aux()),
-            parallel: self.parallel,
-            aux: (),
-        })
+    fn spec(&self) -> Option<&Spec<Tgt>> {
+        self.spec.as_ref()
     }
 }
 
-impl<Tgt: Target, Aux: Clone> Loop<Tgt, Aux> {
+impl<Tgt: Target> Loop<Tgt> {
     pub fn steps(&self) -> u32 {
         first_dim_per_axis(self)
             .map(|(loop_tile, dim_idx, _)| loop_tile.tile.steps_dim(dim_idx))
@@ -178,8 +170,8 @@ impl<Tgt: Target, Aux: Clone> Loop<Tgt, Aux> {
 }
 
 /// Yields the first tile and tile dimension seen for each unique axis.
-fn first_dim_per_axis<Tgt: Target, Aux: Clone>(
-    imp: &Loop<Tgt, Aux>,
+fn first_dim_per_axis<Tgt: Target>(
+    imp: &Loop<Tgt>,
 ) -> impl Iterator<Item = (&LoopTile<Tgt>, u8, u8)> {
     imp.tiles
         .iter()

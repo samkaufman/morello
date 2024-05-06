@@ -27,14 +27,14 @@ pub mod pipeline;
 pub mod subspecs;
 
 #[enum_dispatch]
-pub trait Impl<Tgt: Target, Aux: Clone> {
+pub trait Impl<Tgt: Target> {
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_>;
 
     fn parameter_count(&self) -> u8 {
         self.parameters().count().try_into().unwrap()
     }
 
-    fn children(&self) -> &[ImplNode<Tgt, Aux>];
+    fn children(&self) -> &[ImplNode<Tgt>];
 
     /// Returns the amount of memory allocated by this Impl node alone.
     ///
@@ -44,7 +44,7 @@ pub trait Impl<Tgt: Target, Aux: Clone> {
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost;
 
     #[must_use]
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt, Aux>>) -> Self;
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self;
 
     fn bind<'i, 'j: 'i>(
         &'j self,
@@ -58,12 +58,14 @@ pub trait Impl<Tgt: Target, Aux: Clone> {
         param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String>;
 
-    fn aux(&self) -> &Aux;
-
-    fn drop_aux(self) -> ImplNode<Tgt, ()>;
+    /// The [Spec] this Impl satisfies, if any and known.
+    ///
+    /// This is not necessarily the only Spec the Impl satisifes. Instead, it is the concrete Spec
+    /// goal used during scheduling.
+    fn spec(&self) -> Option<&Spec<Tgt>>;
 }
 
-pub trait ImplExt<Tgt: Target, Aux: Clone>: Impl<Tgt, Aux> {
+pub trait ImplExt<Tgt: Target>: Impl<Tgt> {
     /// Returns the peak memory for the Impl.
     ///
     /// This traverses the Impl tree. Spec applications are treated as allocating no
@@ -80,17 +82,17 @@ pub trait ImplExt<Tgt: Target, Aux: Clone>: Impl<Tgt, Aux> {
 /// Unlike [Action](crate::scheduling::Action)s, parameters may be bound to "concrete" [Tensor]s and
 /// other [View]s and stored in [Rc]s (rather than an explicit environment structure).
 #[derive(Debug, Clone)]
-#[enum_dispatch(Impl<Tgt, Aux>)]
-pub enum ImplNode<Tgt: Target, Aux: Clone> {
-    Loop(Loop<Tgt, Aux>),
-    MoveLet(MoveLet<Tgt, Aux>),
-    Block(Block<Tgt, Aux>),
-    Pipeline(Pipeline<Tgt, Aux>),
-    Kernel(KernelApp<Tgt, Aux>),
-    SpecApp(SpecApp<Tgt, Spec<Tgt>, Aux>),
+#[enum_dispatch(Impl<Tgt>)]
+pub enum ImplNode<Tgt: Target> {
+    Loop(Loop<Tgt>),
+    MoveLet(MoveLet<Tgt>),
+    Block(Block<Tgt>),
+    Pipeline(Pipeline<Tgt>),
+    Kernel(KernelApp<Tgt>),
+    SpecApp(SpecApp<Tgt, Spec<Tgt>>),
 }
 
-impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
+impl<Tgt: Target, T: Impl<Tgt>> ImplExt<Tgt> for T {
     fn peak_memory(&self) -> MemVec {
         let children = self.children();
         let mut child_peaks = SmallVec::<[MemVec; 1]>::with_capacity(children.len());
@@ -157,22 +159,21 @@ impl<Tgt: Target, Aux: Clone, T: Impl<Tgt, Aux>> ImplExt<Tgt, Aux> for T {
 }
 
 #[cfg(test)]
-impl<Tgt, Aux> proptest::arbitrary::Arbitrary for ImplNode<Tgt, Aux>
+impl<Tgt> proptest::arbitrary::Arbitrary for ImplNode<Tgt>
 where
     Tgt: Target,
     Tgt::Kernel: proptest::arbitrary::Arbitrary,
-    Aux: Debug + Clone + proptest::arbitrary::Arbitrary + 'static,
 {
     type Parameters = ();
-    type Strategy = proptest::strategy::BoxedStrategy<ImplNode<Tgt, Aux>>;
+    type Strategy = proptest::strategy::BoxedStrategy<ImplNode<Tgt>>;
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
         use proptest::prelude::*;
 
         // TODO: Generate non-leaf Impls.
         let impl_leaf_strategy = prop_oneof![
-            any::<KernelApp<Tgt, Aux>>().prop_map(ImplNode::Kernel),
-            any::<SpecApp<Tgt, Spec<Tgt>, Aux>>().prop_map(ImplNode::SpecApp)
+            any::<KernelApp<Tgt>>().prop_map(ImplNode::Kernel),
+            any::<SpecApp<Tgt, Spec<Tgt>>>().prop_map(ImplNode::SpecApp)
         ];
         impl_leaf_strategy.boxed()
     }
@@ -182,10 +183,10 @@ where
 ///
 /// The given may return `false` to short-circuit, which will be propogated to the caller of this
 /// function.
-pub fn visit_leaves<Tgt, Aux: Clone, F>(imp: &ImplNode<Tgt, Aux>, f: &mut F) -> bool
+pub fn visit_leaves<Tgt, F>(imp: &ImplNode<Tgt>, f: &mut F) -> bool
 where
     Tgt: Target,
-    F: FnMut(&ImplNode<Tgt, Aux>) -> bool,
+    F: FnMut(&ImplNode<Tgt>) -> bool,
 {
     let children = imp.children();
     if children.is_empty() {

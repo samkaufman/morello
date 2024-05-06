@@ -86,15 +86,7 @@ impl<Tgt: Target> Action<Tgt> {
         }
     }
 
-    pub fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt, ()>, ApplyError> {
-        self.apply_with_aux(spec, ())
-    }
-
-    pub fn apply_with_aux<A: Default + Clone>(
-        &self,
-        spec: &Spec<Tgt>,
-        aux: A,
-    ) -> Result<ImplNode<Tgt, A>, ApplyError> {
+    pub fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         if !spec.is_canonical() {
             return Err(ApplyError::SpecNotCanonical);
         }
@@ -297,7 +289,7 @@ impl<Tgt: Target> Action<Tgt> {
                     tiles,
                     body,
                     parallel,
-                    aux,
+                    spec: Some(spec.clone()),
                 }))
             }
             Action::Peel {
@@ -432,7 +424,7 @@ impl<Tgt: Target> Action<Tgt> {
                 Ok(ImplNode::Pipeline(Pipeline {
                     intermediates: vec![intermediate_tensor],
                     stages: vec![remainder_spec_application, head_spec_application],
-                    aux,
+                    spec: Some(spec.clone()),
                 }))
             }
             Action::SpatialSplit => {
@@ -529,7 +521,7 @@ impl<Tgt: Target> Action<Tgt> {
                         .into(),
                     ),
                     parallel: false,
-                    aux,
+                    spec: Some(spec.clone()),
                 }))
             }
             Action::Move {
@@ -663,7 +655,7 @@ impl<Tgt: Target> Action<Tgt> {
                     prologue.map(|i| i.into()),
                     new_body_app.into(),
                     epilogue.map(|i| i.into()),
-                    aux,
+                    Some(spec.clone()),
                 )))
             }
             Action::ToAccum => {
@@ -685,7 +677,7 @@ impl<Tgt: Target> Action<Tgt> {
                 } = logical_spec.output();
 
                 let zero_app = {
-                    let mut subspec = LogicalSpec::Primitive(
+                    let subspec = LogicalSpec::Primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Zero,
                             spec_shape: output_shape,
@@ -694,19 +686,16 @@ impl<Tgt: Target> Action<Tgt> {
                         vec![output_aux],
                         logical_spec.serial_only(),
                     );
-                    subspec
-                        .canonicalize()
+                    let mut spec = Spec(subspec, spec.1.clone());
+                    spec.canonicalize()
                         .expect("ToAccum's introduced Zero should be canonicalizable");
-                    let spec = Spec(subspec, spec.1.clone());
                     let app_arguments = [Param::new(0, logical_spec.output())];
                     SpecApp::new(spec, app_arguments).into()
                 };
                 let accum_app = {
-                    let mut subspec = logical_spec.clone_as_accum();
-                    subspec
-                        .canonicalize()
+                    let mut spec = Spec(logical_spec.clone_as_accum(), spec.1.clone());
+                    spec.canonicalize()
                         .expect("ToAccum's introduced accumulating Spec should be canonicalizable");
-                    let spec = Spec(subspec, spec.1.clone());
                     let app_arguments = operands
                         .iter()
                         .enumerate()
@@ -718,7 +707,7 @@ impl<Tgt: Target> Action<Tgt> {
                     stages: vec![zero_app, accum_app],
                     bindings: vec![smallvec![2], smallvec![0, 1, 2]],
                     parameters: operands,
-                    aux,
+                    spec: Some(spec.clone()),
                 }))
             }
             Action::Place(k) => {
@@ -730,7 +719,7 @@ impl<Tgt: Target> Action<Tgt> {
                         .enumerate()
                         .map(|(i, p)| Param::new(i.try_into().unwrap(), p.clone()))
                         .collect(),
-                    aux,
+                    spec: Some(spec.clone()),
                 }))
             }
         }

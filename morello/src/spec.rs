@@ -109,11 +109,36 @@ pub struct PrimitiveBasicsBimap {
 
 impl<Tgt: Target> Spec<Tgt> {
     pub fn canonicalize(&mut self) -> anyhow::Result<()> {
+        let parameters = self.0.parameters();
+        let levels = parameters.iter().map(|p| p.level()).collect::<Vec<_>>();
+        self.1.zero_levels_slower_than_all::<Tgt>(&levels);
         self.0.canonicalize()
     }
 
     pub fn is_canonical(&self) -> bool {
-        self.0.is_canonical()
+        let parameters = self.0.parameters();
+        let levels = parameters.iter().map(|p| p.level()).collect::<Vec<_>>();
+        !self.1.any_nonzero_levels_slower_than::<Tgt>(&levels) && self.0.is_canonical()
+    }
+
+    /// Returns the FLOPs required to implement this Spec, if appropriate.
+    pub fn flops(&self) -> Option<u64> {
+        match self {
+            Spec(LogicalSpec::Primitive(basics, _, _), _) => match basics.typ {
+                PrimitiveSpecType::Matmul { .. } => {
+                    let [m, k, n] = basics.spec_shape[..] else {
+                        unreachable!();
+                    };
+                    Some(2 * u64::from(m.get()) * u64::from(k.get()) * u64::from(n.get()))
+                }
+                PrimitiveSpecType::Conv { .. } => {
+                    // TODO: Implement for floating-pt. Convs.
+                    None
+                }
+                PrimitiveSpecType::Move | PrimitiveSpecType::Zero => None,
+            },
+            Spec(LogicalSpec::Compose { .. }, _) => None,
+        }
     }
 }
 
@@ -2160,7 +2185,7 @@ mod tests {
     }
 
     fn arb_spec_action_and_lower_limit<Tgt: Target>(
-    ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt, ()>, MemoryLimits)> {
+    ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt>, MemoryLimits)> {
         arb_canonical_spec::<Tgt>(None, None)
             .prop_filter_map("Spec had zero applicable actions", |spec| {
                 let applied_actions = spec
