@@ -120,6 +120,26 @@ impl<Tgt: Target> Spec<Tgt> {
         let levels = parameters.iter().map(|p| p.level()).collect::<Vec<_>>();
         !self.1.any_nonzero_levels_slower_than::<Tgt>(&levels) && self.0.is_canonical()
     }
+
+    /// Returns the FLOPs required to implement this Spec, if appropriate.
+    pub fn flops(&self) -> Option<u64> {
+        match self {
+            Spec(LogicalSpec::Primitive(basics, _, _), _) => match basics.typ {
+                PrimitiveSpecType::Matmul { .. } => {
+                    let [m, k, n] = basics.spec_shape[..] else {
+                        unreachable!();
+                    };
+                    Some(2 * u64::from(m.get()) * u64::from(k.get()) * u64::from(n.get()))
+                }
+                PrimitiveSpecType::Conv { .. } => {
+                    // TODO: Implement for floating-pt. Convs.
+                    None
+                }
+                PrimitiveSpecType::Move | PrimitiveSpecType::Zero => None,
+            },
+            Spec(LogicalSpec::Compose { .. }, _) => None,
+        }
+    }
 }
 
 impl<Tgt: Target> Display for Spec<Tgt> {
