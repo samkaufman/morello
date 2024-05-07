@@ -1,5 +1,6 @@
-use iai_callgrind::{black_box, main};
+use iai_callgrind::main;
 use nonzero::nonzero as nz;
+use std::hint::black_box;
 
 use morello::db::RocksDatabase;
 use morello::layout::row_major;

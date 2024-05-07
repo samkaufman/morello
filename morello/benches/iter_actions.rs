@@ -1,4 +1,5 @@
-use iai_callgrind::{black_box, main};
+use iai_callgrind::main;
+use std::hint::black_box;
 
 use morello::layout::row_major;
 use morello::lspec;

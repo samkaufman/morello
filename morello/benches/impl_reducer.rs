@@ -1,5 +1,6 @@
-use iai_callgrind::{black_box, main};
+use iai_callgrind::main;
 use smallvec::smallvec;
+use std::hint::black_box;
 
 use morello::cost::Cost;
 use morello::db::ActionIdx;
