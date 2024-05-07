@@ -65,6 +65,7 @@ enum WorkingPartialImpl<Tgt: Target> {
 }
 
 // TODO: Make this private once #[bench] gets stable.
+#[doc(hidden)]
 #[derive(Debug)]
 pub struct ImplReducer {
     results: ImplReducerResults,
