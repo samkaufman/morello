@@ -2261,7 +2261,7 @@ mod tests {
         multi_dim: bool,
     ) {
         let expected: Vec<Shape> = expected.into_iter().sorted().collect();
-        let d = expected.get(0).map_or(0, |shape| shape.len());
+        let d = expected.first().map_or(0, |shape| shape.len());
         assert!(expected.iter().all(|shape| shape.len() == d));
 
         let actual: Vec<Shape> = gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim)
