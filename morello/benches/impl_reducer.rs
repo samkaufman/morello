@@ -1,46 +1,65 @@
-use rand::prelude::*;
-use rand_chacha::ChaCha8Rng;
+use iai_callgrind::{black_box, main};
 use smallvec::smallvec;
-use std::hint::black_box;
-use tango_bench::{benchmark_fn, tango_benchmarks, tango_main, IntoBenchmarks};
 
 use morello::cost::Cost;
 use morello::db::ActionIdx;
 use morello::memorylimits::MemVec;
 use morello::search::ImplReducer;
 
-#[inline(never)]
-fn impl_reducer(top_k: u16) {
-    let mut rng = ChaCha8Rng::seed_from_u64(2);
-    let mut reducer = ImplReducer::new(usize::from(top_k), smallvec![]);
-    let mut actions: Vec<ActionIdx> = (0..top_k + 10000).collect();
-    actions.shuffle(&mut rng);
-    actions
-        .into_iter()
-        .map(|action_idx| {
+#[export_name = "morello_bench_impl_reducer::init_reduce_costs"]
+fn init_reduce_costs(k: u16) -> (Vec<(ActionIdx, Cost)>, ImplReducer) {
+    let mut reducer = ImplReducer::new(usize::from(k), smallvec![]);
+    // Generate some "random" entries to reduce.
+    let entries = (0..k + 10000)
+        .map(|i| {
             (
-                action_idx,
+                i % 10,
                 Cost {
-                    main: rng.gen(),
-                    peaks: MemVec::new([rng.gen(), rng.gen(), rng.gen(), rng.gen()]),
-                    depth: rng.gen(),
+                    main: ((i + 11) % 13).into(),
+                    peaks: MemVec::new_from_binary_scaled([
+                        ((i + 2) % 5).try_into().unwrap(),
+                        ((i + 3) % 4).try_into().unwrap(),
+                        (i % 2).try_into().unwrap(),
+                        (i % 13).try_into().unwrap(),
+                    ]),
+                    depth: ((i + 1) % 3 + 1).try_into().unwrap(),
                 },
             )
         })
-        .for_each(|(action_idx, cost)| reducer.insert(action_idx, cost));
+        .collect::<Vec<_>>();
+    (entries, reducer)
 }
 
-fn impl_reducer_benchmarks() -> impl IntoBenchmarks {
-    [
-        benchmark_fn("impl_reducer: 1", |b| b.iter(|| impl_reducer(black_box(1)))),
-        benchmark_fn("impl_reducer: 2", |b| b.iter(|| impl_reducer(black_box(2)))),
-        benchmark_fn("impl_reducer: 8", |b| b.iter(|| impl_reducer(black_box(8)))),
-        benchmark_fn("impl_reducer: 100", |b| {
-            b.iter(|| impl_reducer(black_box(100)))
-        }),
-    ]
+fn reduce_costs(k: u16) {
+    let (entries, mut reducer) = black_box(init_reduce_costs(k));
+    for (action_idx, cost) in entries {
+        reducer.insert(black_box(action_idx), black_box(cost));
+    }
 }
 
-// TODO: Convert benchmark to use iai_callgrind.
-tango_benchmarks!(impl_reducer_benchmarks());
-tango_main!();
+#[inline(never)]
+fn reduce_costs_1() {
+    reduce_costs(1);
+}
+
+#[inline(never)]
+fn reduce_costs_2() {
+    reduce_costs(2);
+}
+
+#[inline(never)]
+fn reduce_costs_8() {
+    reduce_costs(8);
+}
+
+#[inline(never)]
+fn reduce_costs_100() {
+    reduce_costs(100);
+}
+
+main!(
+    callgrind_args = "toggle-collect=morello_bench_impl_reducer::init_reduce_costs",
+        "--simulate-wb=no", "--simulate-hwpref=yes",
+        "--I1=32768,8,64", "--D1=32768,8,64", "--LL=8388608,16,64";
+    functions = reduce_costs_1, reduce_costs_2, reduce_costs_8, reduce_costs_100
+);
