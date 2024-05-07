@@ -43,7 +43,7 @@ half = { version = "2.4.0", features = ["num-traits"] }
 strum = { version = "0.26.2", features = ["derive"] }
 
 [dev-dependencies]
-iai-callgrind = "0.4.0"
+iai-callgrind = "0.10.2"
 proptest = "1.2.0"
 proptest-derive = "0.3.0"
 
