@@ -9,7 +9,7 @@ use morello::search::ImplReducer;
 
 #[export_name = "morello_bench_impl_reducer::init_reduce_costs"]
 fn init_reduce_costs(k: u16) -> (Vec<(ActionIdx, Cost)>, ImplReducer) {
-    let mut reducer = ImplReducer::new(usize::from(k), smallvec![]);
+    let reducer = ImplReducer::new(usize::from(k), smallvec![]);
     // Generate some "random" entries to reduce.
     let entries = (0..k + 10000)
         .map(|i| {
