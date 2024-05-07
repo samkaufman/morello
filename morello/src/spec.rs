@@ -2267,7 +2267,7 @@ mod tests {
         let actual: Vec<Shape> = gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim)
             .map(|s| {
                 assert_eq!(s.len(), d);
-                s.into_iter().collect::<Vec<_>>().try_into().unwrap()
+                s.into_iter().collect::<Vec<_>>().into()
             })
             .sorted()
             .collect::<Vec<_>>();
