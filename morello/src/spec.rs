@@ -2137,10 +2137,17 @@ mod tests {
         // If an action consumes x bytes, then it should be valid for any Spec with the same logical
         // Spec at that memory limit and up.
         let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem();
-        let maxes = maxes_vec
-            .iter_binary_scaled()
-            .map(u32::from)
-            .collect::<Vec<_>>();
+        let mut maxes = Vec::with_capacity(maxes_vec.len());
+        for binary_scaled in maxes_vec.iter_binary_scaled() {
+            maxes.push(u32::from(binary_scaled));
+        }
+        // Zero out levels which are slower than all present operands' levels.
+        let parameters = logical_spec.parameters();
+        for (level_idx, level) in Tgt::levels().into_iter().enumerate() {
+            if parameters.iter().all(|p| p.level() < level) {
+                maxes[level_idx] = 0;
+            }
+        }
 
         // The list of actions depends only on the logical Spec. Filtering by memory limit happens
         // at application. So it's safe to just collect the list of actions once, up front.
