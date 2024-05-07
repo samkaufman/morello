@@ -13,7 +13,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Install libomp
         run: |
@@ -30,7 +30,7 @@ jobs:
   smoke-test-arm:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Install llvm & libomp
         run: brew install llvm libomp
@@ -44,14 +44,14 @@ jobs:
   build-without-verification:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - run: cargo build --no-default-features
 
   smoke-test-precompute:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@v2
       - run: cargo run --bin precompute -- --stages 100 2
@@ -59,7 +59,7 @@ jobs:
   format:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile default --no-self-update
       - run: cargo fmt --all -- --check
 
@@ -69,7 +69,7 @@ jobs:
       - run: |
           sudo apt-fast update -qq
           DEBIAN_FRONTEND='noninteractive' sudo apt install --no-install-recommends -yq valgrind
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - run: cargo install --version 0.4.0 iai-callgrind-runner
       - name: Run benchmarks
         run: cargo bench --verbose
