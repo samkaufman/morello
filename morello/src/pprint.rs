@@ -150,8 +150,8 @@ fn pprint_inner<'a, Tgt>(
     }
 }
 
-fn fill_costs_table_entry<'a, 'b, Tgt: Target>(
-    table: &'b mut HashMap<ByThinAddress<&'a ImplNode<Tgt>>, Cost>,
+fn fill_costs_table_entry<'a, Tgt: Target>(
+    table: &mut HashMap<ByThinAddress<&'a ImplNode<Tgt>>, Cost>,
     imp: &'a ImplNode<Tgt>,
 ) -> Cost {
     let imp_address = ByThinAddress(imp);
