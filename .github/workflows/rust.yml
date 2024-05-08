@@ -70,6 +70,6 @@ jobs:
           sudo apt-fast update -qq
           DEBIAN_FRONTEND='noninteractive' sudo apt install --no-install-recommends -yq valgrind
       - uses: actions/checkout@v3
-      - run: cargo install --version 0.4.0 iai-callgrind-runner
+      - run: cargo install --version 0.10.2 iai-callgrind-runner
       - name: Run benchmarks
         run: cargo bench --verbose
