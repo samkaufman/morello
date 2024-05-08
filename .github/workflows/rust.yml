@@ -73,3 +73,4 @@ jobs:
       - run: cargo install --version 0.10.2 iai-callgrind-runner
       - name: Run benchmarks
         run: cargo bench --verbose
+        working-directory: morello
