@@ -1,5 +1,4 @@
-use iai_callgrind::main;
-
+use iai_callgrind::{library_benchmark, library_benchmark_group, main, LibraryBenchmarkConfig};
 use std::hint::black_box;
 
 use morello::cost::Cost;
@@ -31,36 +30,26 @@ fn init_reduce_costs(k: u16) -> (Vec<(ActionIdx, Cost)>, ImplReducer) {
     (entries, reducer)
 }
 
+#[library_benchmark]
+#[benches::multiple(1, 2, 8, 100)]
 fn reduce_costs(k: u16) {
-    let (entries, mut reducer) = black_box(init_reduce_costs(k));
+    let (entries, mut reducer) = black_box(init_reduce_costs(black_box(k)));
     for (action_idx, cost) in entries {
         reducer.insert(black_box(action_idx), black_box(cost));
     }
 }
 
-#[inline(never)]
-fn reduce_costs_1() {
-    reduce_costs(1);
-}
-
-#[inline(never)]
-fn reduce_costs_2() {
-    reduce_costs(2);
-}
-
-#[inline(never)]
-fn reduce_costs_8() {
-    reduce_costs(8);
-}
-
-#[inline(never)]
-fn reduce_costs_100() {
-    reduce_costs(100);
-}
+library_benchmark_group!(
+    name = impl_reducer_group;
+    benchmarks = reduce_costs
+);
 
 main!(
-    callgrind_args = "toggle-collect=morello_bench_impl_reducer::init_reduce_costs",
-        "--simulate-wb=no", "--simulate-hwpref=yes",
-        "--I1=32768,8,64", "--D1=32768,8,64", "--LL=8388608,16,64";
-    functions = reduce_costs_1, reduce_costs_2, reduce_costs_8, reduce_costs_100
+    config = LibraryBenchmarkConfig::default()
+                .raw_callgrind_args([
+                    "toggle-collect=morello_bench_impl_reducer::init_reduce_costs",
+                    "--simulate-wb=no", "--simulate-hwpref=yes",
+                    "--I1=32768,8,64", "--D1=32768,8,64", "--LL=8388608,16,64",
+                ]);
+    library_benchmark_groups = impl_reducer_group
 );
