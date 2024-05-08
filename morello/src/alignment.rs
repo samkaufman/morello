@@ -65,7 +65,7 @@ mod tests {
     fn test_aligned_approx_x86() {
         // TODO: Make sure to test different dtypes.
 
-        let parent = TensorSpec::<X86Target>::new_canon(
+        let parent = TensorSpec::<X86Target>::new(
             shape![16, 16, 16],
             Dtype::Uint8,
             row_major(3).contiguous_full(),
@@ -73,7 +73,9 @@ mod tests {
             CpuMemoryLevel::GL,
             row_major(3),
             None,
-        );
+        )
+        .try_into_canon()
+        .unwrap();
         let layout = parent.layout();
 
         // TODO: Allocate a buffer which is aligned, or not, according to `parent.aligned()`.

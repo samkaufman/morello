@@ -193,8 +193,11 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(i, ts)| Param::new(i.try_into().unwrap(), ts));
-        let spec_app: ImplNode<X86Target> =
-            SpecApp::new(Spec(logical_spec, X86Target::max_mem()), args).into();
+        let spec_app: ImplNode<X86Target> = SpecApp::new(
+            Spec::new(logical_spec, X86Target::max_mem()).into_canon(),
+            args,
+        )
+        .into();
         pprint(&spec_app, ImplPrintStyle::Full);
         pprint(&spec_app, ImplPrintStyle::Compact);
     }

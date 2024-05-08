@@ -25,7 +25,7 @@ fn main() {
 
     // Let's construct a multi-threaded matrix-matrix multiplication which takes two bf16
     // matrices and produces a f32 matrix.
-    let spec = Spec::<X86Target>(
+    let spec = Spec::<X86Target>::new(
         lspec!(Matmul(
             [M, K, N],
             (bf16, GL, row_major(2)),
@@ -33,7 +33,8 @@ fn main() {
             (f32, GL, row_major(2))
         )),
         X86Target::max_mem(),
-    );
+    )
+    .into_canon();
 
     // Manually schedule the matrix multiplication.
     let interleaved = Layout::new(smallvec![

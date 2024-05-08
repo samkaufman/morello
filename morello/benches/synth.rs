@@ -19,7 +19,7 @@ fn matmul_spec<Tgt: Target>(size: u32) -> Spec<Tgt> {
         (u32, Tgt::default_level(), rm2),
         serial
     ));
-    Spec(logical_spec, X86Target::max_mem())
+    Spec::new(logical_spec, X86Target::max_mem()).into_canon()
 }
 
 fn synth(goal: &Spec<X86Target>) {

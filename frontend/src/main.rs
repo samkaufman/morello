@@ -183,7 +183,7 @@ where
             size,
         } => {
             let rm = row_major(4);
-            LogicalSpec::Primitive(
+            LogicalSpec::new_primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Conv { accum: false },
                     spec_shape: smallvec![
@@ -209,10 +209,12 @@ where
                 ],
                 true,
             )
+            .try_into_canon()
+            .unwrap()
         }
     };
 
-    let spec = Spec(logical_spec, Tgt::max_mem());
+    let spec = Spec::new(logical_spec, Tgt::max_mem()).into_canon();
     info!("Synthesizing {}", spec);
 
     let start_time = std::time::Instant::now();

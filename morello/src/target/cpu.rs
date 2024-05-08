@@ -65,7 +65,7 @@ pub enum CpuKernel {
     /// ```text
     ///                        0 1 2 3
     ///      0 1 2 3           4 5 6 7
-    ///      4 5 6 7       a b    
+    ///      4 5 6 7       a b
     /// a b            →   a b
     ///                    a b
     ///                    a b
@@ -1237,7 +1237,7 @@ mod tests {
         let rm2 = row_major(2);
         let cm2 = col_major(2);
         let operands = [
-            TensorSpec::<X86Target>::new_canon(
+            TensorSpec::<X86Target>::new(
                 shape![1, 2],
                 Dtype::Uint8,
                 rm2.contiguous_full(),
@@ -1245,8 +1245,10 @@ mod tests {
                 CpuMemoryLevel::L1,
                 rm2.clone(),
                 None,
-            ),
-            TensorSpec::<X86Target>::new_canon(
+            )
+            .try_into_canon()
+            .unwrap(),
+            TensorSpec::<X86Target>::new(
                 shape![2, 16],
                 Dtype::Sint8,
                 cm2.contiguous_full(),
@@ -1254,8 +1256,10 @@ mod tests {
                 CpuMemoryLevel::VRF,
                 cm2,
                 Some(nz!(32u32)),
-            ),
-            TensorSpec::<X86Target>::new_canon(
+            )
+            .try_into_canon()
+            .unwrap(),
+            TensorSpec::<X86Target>::new(
                 shape![1, 16],
                 Dtype::Sint16,
                 rm2.contiguous_full(),
@@ -1263,7 +1267,9 @@ mod tests {
                 CpuMemoryLevel::VRF,
                 rm2.clone(),
                 Some(nz!(16u32)),
-            ),
+            )
+            .try_into_canon()
+            .unwrap(),
         ];
         assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_parameters(&operands))
     }

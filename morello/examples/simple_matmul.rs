@@ -30,7 +30,7 @@ fn main() {
     // (VRF), so it is `None` below.
     let layout = row_major(2);
 
-    let spec = Spec::<X86Target>(
+    let spec = Spec::<X86Target>::new(
         lspec!(Matmul(
             [64, 64, 64],
             (u32, GL, layout.clone()),
@@ -39,7 +39,8 @@ fn main() {
             serial
         )),
         X86Target::max_mem(),
-    );
+    )
+    .into_canon();
     println!("Logical Spec: {}", spec.0);
 
     // Manually schedule the matrix multiplication.
