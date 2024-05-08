@@ -1,4 +1,4 @@
-use iai_callgrind::main;
+use iai_callgrind::{library_benchmark, library_benchmark_group, main, LibraryBenchmarkConfig};
 use nonzero::nonzero as nz;
 use std::hint::black_box;
 
@@ -27,14 +27,23 @@ fn synth(goal: &Spec<X86Target>) {
     morello::search::top_down(&db, black_box(goal), 1, Some(nz!(1usize)));
 }
 
-#[inline(never)]
-fn synth_matmul_benchmark_1() {
-    synth(&matmul_spec(1));
+#[library_benchmark]
+#[benches::multiple(1)]
+fn synth_matmul(size: u32) {
+    synth(&matmul_spec(black_box(size)));
 }
 
+library_benchmark_group!(
+    name = synth_group;
+    benchmarks = synth_matmul
+);
+
 main!(
-    callgrind_args = "toggle-collect=morello_bench_synth::matmul_spec",
-        "--simulate-wb=no", "--simulate-hwpref=yes",
-        "--I1=32768,8,64", "--D1=32768,8,64", "--LL=8388608,16,64";
-    functions = synth_matmul_benchmark_1
+    config = LibraryBenchmarkConfig::default()
+                .raw_callgrind_args([
+                    "toggle-collect=morello_bench_synth::matmul_spec",
+                    "--simulate-wb=no", "--simulate-hwpref=yes",
+                    "--I1=32768,8,64", "--D1=32768,8,64", "--LL=8388608,16,64",
+                ]);
+    library_benchmark_groups = synth_group
 );
