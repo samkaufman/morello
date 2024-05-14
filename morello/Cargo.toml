@@ -32,9 +32,6 @@ serde = { version = "1.0.160", features = ["derive"] }
 tempfile = "3"
 thiserror = "1.0.47"
 nonzero = "0.2.0"
-rocksdb = { version = "0.22.0", default-features = false, features = [
-    "snappy",
-] }
 wtinylfu = "0.1.0"
 parking_lot = "0.12.1"
 prehash = "1.0.0"

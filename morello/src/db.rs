@@ -23,10 +23,11 @@ use serde::{Deserialize, Serialize};
 use wtinylfu::WTinyLfuCache;
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, DerefMut, Range};
-use std::path;
-use std::sync::Arc;
+use std::path::{self, Path};
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
 type TableKey = (SpecKey, Vec<(Layout, u8, Option<NonZeroU32>)>);
@@ -41,26 +42,17 @@ const CACHE_PER_SHARD_SAMPLES: usize = 8;
 const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 
-pub struct RocksDatabase {
-    db: Arc<DBInner>,
+pub struct FilesDatabase {
     binary_scale_shapes: bool,
     k: u8,
     shards: ShardArray,
     prehasher: DefaultPrehasher,
 }
 
-/// Wraps a [rocksdb::DB] to optionally delete data on drop.
-///
-/// This implements [Deref] for convenience.
-struct DBInner {
-    db: Option<rocksdb::DB>,
-    transient: bool,
-}
-
 struct ShardArray([Mutex<Shard>; CONCURRENT_CACHE_SHARDS]);
 
 pub struct PageId<'a> {
-    db: &'a RocksDatabase,
+    db: &'a FilesDatabase,
     pub(crate) table_key: TableKey,
     pub(crate) superblock_id: Vec<BimapInt>,
 }
@@ -113,7 +105,7 @@ pub enum GetPreference<T, V> {
     Miss(Option<V>),
 }
 
-impl RocksDatabase {
+impl FilesDatabase {
     pub fn try_new(
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
@@ -123,20 +115,11 @@ impl RocksDatabase {
             .map(|p| p.to_owned())
             .unwrap_or_else(|| tempfile::TempDir::new().unwrap().into_path());
         log::info!("Opening database at: {}", resolved_file_path.display());
-        let mut db_opts = rocksdb::Options::default();
-        db_opts.create_if_missing(true);
-        db_opts.set_compression_type(rocksdb::DBCompressionType::None);
-        db_opts.set_level_compaction_dynamic_level_bytes(true);
-        db_opts.set_max_background_jobs(6);
-        db_opts.set_bytes_per_sync(1048576);
-        db_opts.set_max_open_files(128);
-        let db = Arc::new(DBInner {
-            db: Some(rocksdb::DB::open(&db_opts, resolved_file_path)?),
-            transient: file_path.is_none(),
-        });
-        let shards = ShardArray(std::array::from_fn(|i| Mutex::new(Shard::new(i, &db))));
+
+        let shards = ShardArray(std::array::from_fn(|i| {
+            Mutex::new(Shard::new(i, &resolved_file_path))
+        }));
         Ok(Self {
-            db,
             binary_scale_shapes,
             k,
             shards,
@@ -314,7 +297,7 @@ impl RocksDatabase {
     }
 
     pub fn flush(&self) {
-        self.db.flush().unwrap();
+        // Background thread writes flush immediately, so this is a no-op.
     }
 
     pub fn max_k(&self) -> Option<usize> {
@@ -363,7 +346,7 @@ impl RocksDatabase {
         //     stat_duration.as_millis(),
         // )
 
-        // TODO: Reimplement with RocksDB.
+        // TODO: Reimplement.
         "".to_owned()
     }
 
@@ -422,37 +405,13 @@ impl RocksDatabase {
     }
 }
 
-impl Drop for RocksDatabase {
+impl Drop for FilesDatabase {
     fn drop(&mut self) {
         for shard in &mut self.shards.0 {
             let mut shard_guard = shard.lock();
             let drained = shard_guard.drain_cache().collect::<Vec<_>>();
             for (k, v) in drained {
                 shard_guard.async_put(k, v);
-            }
-        }
-    }
-}
-
-impl Deref for DBInner {
-    type Target = rocksdb::DB;
-
-    fn deref(&self) -> &Self::Target {
-        self.db.as_ref().unwrap()
-    }
-}
-
-impl Drop for DBInner {
-    fn drop(&mut self) {
-        if self.transient {
-            let path = self.db.as_ref().unwrap().path().to_owned();
-            drop(self.db.take());
-            if let Err(e) = std::fs::remove_dir_all(&path) {
-                log::error!(
-                    "Failed to remove transient database at {}: {}",
-                    path.display(),
-                    e
-                );
             }
         }
     }
@@ -476,8 +435,8 @@ impl<'a> PageId<'a> {
 }
 
 impl Shard {
-    fn new(idx: usize, db: &Arc<DBInner>) -> Self {
-        let db = Arc::clone(db);
+    fn new(idx: usize, db_root: &Path) -> Self {
+        let db_root = db_root.to_owned();
         let (command_tx, command_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
         let (response_tx, response_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
 
@@ -487,26 +446,28 @@ impl Shard {
                 .spawn(move || loop {
                     match command_rx.recv() {
                         Ok(ShardThreadMsg::Get(key)) => {
-                            let rocksdb_key = make_key(&key.0, &key.1); // TODO: Move inside.
-                            let result = db
-                                .get_pinned(rocksdb_key)
-                                .unwrap()
-                                .map(|pinnable_slice| {
-                                    bincode::deserialize::<SuperBlock>(&pinnable_slice).unwrap()
-                                })
-                                .unwrap_or_default();
+                            let path = superblock_file_path(&db_root, &key);
+                            let result = match fs::File::open(&path) {
+                                Ok(file) => {
+                                    let buf_reader = std::io::BufReader::new(file);
+                                    bincode::deserialize_from(buf_reader).unwrap()
+                                }
+                                Err(_) => HashMap::new(),
+                            };
                             response_tx
                                 .send(ShardThreadResponse::Loaded(key, result))
                                 .unwrap();
                         }
                         Ok(ShardThreadMsg::Put(key, value)) => {
-                            let mut put_options = rocksdb::WriteOptions::default();
-                            put_options.disable_wal(true);
-
-                            let rocksdb_key = make_key(&key.0, &key.1); // TODO: Move inside.
-                            let rocksdb_value = bincode::serialize(&value).unwrap();
-                            db.put_opt(rocksdb_key, &rocksdb_value, &put_options)
-                                .unwrap();
+                            let path = superblock_file_path(&db_root, &key);
+                            let serialized = bincode::serialize(&value).unwrap();
+                            if let Some(parent) = path.parent() {
+                                fs::create_dir_all(parent).unwrap();
+                            }
+                            let file = fs::File::create(&path).unwrap();
+                            let mut buf_writer = std::io::BufWriter::new(file);
+                            buf_writer.write_all(&serialized).unwrap();
+                            buf_writer.flush().unwrap();
                         }
                         Ok(ShardThreadMsg::Exit) => break,
                         Err(_) => unreachable!("expected Exit first"),
@@ -606,7 +567,7 @@ impl Drop for Shard {
 impl DbBlock {
     pub fn get_with_preference<Tgt>(
         &self,
-        _containing_db: &RocksDatabase,
+        _containing_db: &FilesDatabase,
         _query: &Spec<Tgt>,
         inner_pt: &[u8],
     ) -> GetPreference<ActionCostVec, Vec<ActionIdx>>
@@ -757,7 +718,7 @@ fn superblockify_pt(block_pt: &[BimapInt]) -> Vec<BimapInt> {
     block_pt.iter().map(|&i| i / SUPERBLOCK_FACTOR).collect()
 }
 
-fn construct_impl<Tgt>(db: &RocksDatabase, imp: &ImplNode<Tgt>) -> ImplNode<Tgt>
+fn construct_impl<Tgt>(db: &FilesDatabase, imp: &ImplNode<Tgt>) -> ImplNode<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -983,9 +944,25 @@ where
     }
 }
 
-fn make_key(table_key: &TableKey, block_pt: &[BimapInt]) -> String {
-    // TODO: Use a faster (non-String?) and more stable encoding.
-    format!("{table_key:?}/{block_pt:?}")
+fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::PathBuf {
+    let ((spec_key, table_key_rest), block_pt) = superblock_key;
+    let spec_key_dir_name = match spec_key {
+        SpecKey::Matmul { dtypes } => root
+            .join("Matmul")
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
+        SpecKey::Conv { dtypes } => root
+            .join("Conv")
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
+        SpecKey::Move { dtypes } => root
+            .join("Move")
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
+        SpecKey::Zero { dtype } => root.join("Zero").join(dtype.to_string()),
+    };
+    let table_key_rest_dir_name = format!("{table_key_rest:?}");
+    let block_pt_file_name = block_pt.iter().map(|p| p.to_string()).join("_");
+    spec_key_dir_name
+        .join(table_key_rest_dir_name)
+        .join(block_pt_file_name)
 }
 
 // For some reason, [Prehashed]'s [Clone] impl requires that the value be [Copy].
@@ -1090,7 +1067,7 @@ mod tests {
         #[test]
         fn test_put_then_get_fills_across_memory_limits(decision in arb_spec_and_decision::<X86Target>()) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = RocksDatabase::try_new(None, false, 1).unwrap();
+            let db = FilesDatabase::try_new(None, false, 1).unwrap();
 
             // Put all decisions into database.
             for d in decision.visit_decisions() {

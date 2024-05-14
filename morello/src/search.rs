@@ -9,7 +9,7 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 use crate::cost::Cost;
-use crate::db::{ActionCostVec, ActionIdx, GetPreference, RocksDatabase};
+use crate::db::{ActionCostVec, ActionIdx, FilesDatabase, GetPreference};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
@@ -20,7 +20,7 @@ use crate::target::Target;
 type RequestId = (usize, usize);
 
 struct TopDownSearch<'d> {
-    db: &'d RocksDatabase,
+    db: &'d FilesDatabase,
     top_k: usize,
     thread_idx: usize,
     thread_count: usize,
@@ -81,7 +81,7 @@ enum ImplReducerResults {
 
 // Computes an optimal Impl for `goal` and stores it in `db`.
 pub fn top_down<Tgt>(
-    db: &RocksDatabase,
+    db: &FilesDatabase,
     goal: &Spec<Tgt>,
     top_k: usize,
     jobs: Option<NonZeroUsize>,
@@ -97,7 +97,7 @@ where
 }
 
 pub fn top_down_many<'d, Tgt>(
-    db: &'d RocksDatabase,
+    db: &'d FilesDatabase,
     goals: &[Spec<Tgt>],
     top_k: usize,
     jobs: Option<NonZeroUsize>,
@@ -127,6 +127,7 @@ where
     for (idx, goal) in canonical_goals.iter().enumerate() {
         let page = db.page_id(goal);
         let key = (page.table_key, page.superblock_id);
+        // TODO: prefetch here?
         grouped_canonical_goals.entry(key).or_default().push(idx);
     }
 
@@ -225,7 +226,10 @@ where
                 block.working_set.remove(&spec).unwrap();
             }
 
-            let mut subblock_reqs_iter = take(&mut block.subblock_requests).into_iter().peekable();
+            let new_vec = Vec::with_capacity(block.subblock_requests.len());
+            let mut subblock_reqs_iter = replace(&mut block.subblock_requests, new_vec)
+                .into_iter()
+                .peekable();
             while let Some(mut subblock) = subblock_reqs_iter.next() {
                 // TODO: Move prefetch so that it happens after the get inside the recursive call.
                 let mut prefetch_to_push_down: Option<&Spec<Tgt>> = None;
@@ -487,6 +491,9 @@ where
         {
             Some(s) => s,
             None => {
+                if self.subblock_requests.is_empty() {
+                    self.search.db.prefetch(spec);
+                }
                 self.subblock_requests.push(HashMap::new());
                 self.subblock_requests.last_mut().unwrap()
             }
@@ -825,7 +832,7 @@ where
 mod tests {
     use super::*;
     use crate::common::DimSize;
-    use crate::db::RocksDatabase;
+    use crate::db::FilesDatabase;
     use crate::layout::row_major;
     use crate::lspec;
     use crate::memorylimits::{MemVec, MemoryLimits};
@@ -850,7 +857,7 @@ mod tests {
         fn test_can_synthesize_any_canonical_spec(
             spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = RocksDatabase::try_new(None, false, 1).unwrap();
+            let db = FilesDatabase::try_new(None, false, 1).unwrap();
             top_down(&db, &spec, 1, Some(nz!(1usize)));
         }
 
@@ -860,7 +867,7 @@ mod tests {
             spec_pair in lower_and_higher_canonical_specs::<X86Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
-            let db = RocksDatabase::try_new(None, false, 1).unwrap();
+            let db = FilesDatabase::try_new(None, false, 1).unwrap();
 
             // Solve the first, lower Spec.
             let (lower_result_vec, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
@@ -883,7 +890,7 @@ mod tests {
         fn test_synthesis_at_peak_memory_yields_same_decision(
             spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = RocksDatabase::try_new(None, false, 1).unwrap();
+            let db = FilesDatabase::try_new(None, false, 1).unwrap();
             let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
             let first_peak = if let Some(first_sol) = first_solutions.first() {
                 first_sol.1.peaks.clone()
@@ -1120,7 +1127,7 @@ mod tests {
             MemoryLimits::Standard(MemVec::new_from_binary_scaled([0, 5, 7, 6])),
         );
 
-        let db = RocksDatabase::try_new(None, false, 1).unwrap();
+        let db = FilesDatabase::try_new(None, false, 1).unwrap();
         let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
         let first_peak = if let Some(first_sol) = first_solutions.first() {
             first_sol.1.peaks.clone()
