@@ -958,10 +958,17 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::Zero { dtype } => root.join("Zero").join(dtype.to_string()),
     };
-    let table_key_rest_dir_name = format!("{table_key_rest:?}");
+    let a = table_key_rest.iter().map(|(l, _, _)| l).join("_");
+    let b = table_key_rest.iter().map(|(_, d, _)| d).join("_");
+    let c = table_key_rest
+        .iter()
+        .map(|(_, _, v)| v.map(|z| z.get()).unwrap_or(0))
+        .join("_");
     let block_pt_file_name = block_pt.iter().map(|p| p.to_string()).join("_");
     spec_key_dir_name
-        .join(table_key_rest_dir_name)
+        .join(a)
+        .join(b)
+        .join(c)
         .join(block_pt_file_name)
 }
 
