@@ -643,7 +643,7 @@ impl WholeBlock {
         shape_with_k.push(k.into());
 
         self.filled
-            .fill_region(dim_ranges, &(u8::try_from(value.len()).unwrap() + 1));
+            .fill_region(dim_ranges, u8::try_from(value.len()).unwrap() + 1);
         self.main_costs.fill_broadcast_1d(
             dim_ranges,
             value.0.iter().map(|(_, c)| c.main),

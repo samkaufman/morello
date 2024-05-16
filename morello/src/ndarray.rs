@@ -132,7 +132,7 @@ impl<T> NDArray<T> {
         self.data.len()
     }
 
-    pub fn fill_region(&mut self, dim_ranges: &[Range<u32>], value: &T)
+    pub fn fill_region(&mut self, dim_ranges: &[Range<u32>], value: T)
     where
         T: Clone + Eq,
     {
@@ -142,12 +142,12 @@ impl<T> NDArray<T> {
     pub fn fill_region_ext(
         &mut self,
         dim_ranges: &[Range<u32>],
-        value: &T,
+        value: T,
         through_unfilled: Option<(u8, &NDArray<u8>)>,
     ) where
         T: Clone + Eq,
     {
-        // Figure out the volume of contiguous inner tile.
+        // Figure out the volume of contiguous inner tiles (`step_size`) in `self`.
         let mut prefix_size = self.shape.len();
         let mut step_size: u32 = 1;
         for (&sh, dr) in self.shape().iter().zip(dim_ranges).rev() {
@@ -158,6 +158,8 @@ impl<T> NDArray<T> {
             prefix_size -= 1;
         }
 
+        // If `prefix_size` is 0, then we just `set_range` the whole buffer. Otherwise, we're going
+        // to repeatedly called `fill_region_ext_inner`.
         if prefix_size >= 1 {
             let next_rng = &dim_ranges[prefix_size - 1];
             let offset = next_rng.start * step_size;
@@ -166,11 +168,10 @@ impl<T> NDArray<T> {
             if prefix_size == 1 {
                 Self::fill_region_ext_inner(
                     &mut self.data,
-                    0,
                     offset,
                     step_size,
                     value,
-                    through_unfilled,
+                    through_unfilled.map(|(v, f)| (v, &f.data)),
                     None,
                 );
             } else {
@@ -179,36 +180,38 @@ impl<T> NDArray<T> {
                 iter_multidim_range(&dim_ranges[..(prefix_size - 1)], substrides, |i, _| {
                     run_index_hint = Self::fill_region_ext_inner(
                         &mut self.data,
-                        i,
-                        offset,
+                        u32::try_from(i).unwrap() + offset,
                         step_size,
-                        value,
-                        through_unfilled,
+                        value.clone(),
+                        through_unfilled.map(|(v, f)| (v, &f.data)),
                         run_index_hint,
                     );
                 });
             }
         } else {
             debug_assert_eq!(self.volume(), usize::try_from(step_size).unwrap());
-            self.data.set_range(0, step_size, value.clone());
+            self.data.set_range(0, step_size, value);
         }
     }
 
+    /// Fills a range of an [RleVec], starting at index, up to at least `fill_len` with `value`.
+    ///
+    /// If `through_unfilled` is given, then `data` may be filled even beyond the given length.  The
+    /// given [RleVec] will be scanned for as long as it contains integers less than or equal to the
+    /// given value (the first element of the given tuple).
     fn fill_region_ext_inner(
         data: &mut RleVec<T>,
-        index: usize,
-        offset: u32,
-        step_size: u32,
-        value: &T,
-        through_unfilled: Option<(u8, &NDArray<u8>)>,
+        index: u32,
+        mut fill_len: u32,
+        value: T,
+        through_unfilled: Option<(u8, &RleVec<u8>)>, // TODO: Should also be RleVec?
         run_index_hint: Option<u32>,
     ) -> Option<u32>
     where
         T: Clone + Eq,
     {
-        // Fill beyond the step size if permitted by fill. Note that this
-        // fills forwards only, not backward.
-        let mut fill_len = step_size;
+        // Extend `fill_len` if permitted by `through_unfilled`.  (There's an opportunity
+        // here to also fill *backwards* by updating `index`, but this isn't implemented.)
         let mut hint_to_return = None;
         if let Some((unfilled_max, filled)) = through_unfilled {
             // TODO: Map the following by dividing out any k. Using stride?
@@ -218,30 +221,30 @@ impl<T> NDArray<T> {
             //   the entire Vec with a single run. In this case, we don't
             //   really need all the subsequent calls to set_range at all. Can
             //   we cheaply avoid these?
-            let mut extended_idx = u32::try_from(index).unwrap() + offset + step_size;
-            if extended_idx < u32::try_from(filled.data.len()).unwrap() {
-                let eiri = run_index_frhint(&filled.data, extended_idx, run_index_hint);
-                hint_to_return = Some(eiri);
-                let mut ext_iter = filled.data.runs().skip(eiri.try_into().unwrap());
+            debug_assert_eq!(data.len(), filled.len());
+
+            // Update `extended_idx` to be the first index where the value if greater than
+            // `unfilled_max`.
+            let mut extended_idx = index + fill_len;
+            if extended_idx < u32::try_from(filled.len()).unwrap() {
+                let extended_run_idx = run_index_frhint(filled, extended_idx, run_index_hint);
+                hint_to_return = Some(extended_run_idx);
+                let mut ext_iter = filled.runs().skip(extended_run_idx.try_into().unwrap());
                 loop {
-                    if filled.data.len() <= usize::try_from(extended_idx).unwrap() {
+                    if filled.len() <= usize::try_from(extended_idx).unwrap() {
                         break;
                     }
                     let run = ext_iter.next().unwrap();
                     if *run.value > unfilled_max {
                         break;
                     }
-                    // TODO: What about removing extra start?
+                    // TODO: Remove extra start?
                     extended_idx = run.start + run.len;
                 }
-                fill_len = extended_idx - u32::try_from(index).unwrap() - offset;
+                fill_len = extended_idx - index;
             }
         }
-        data.set_range(
-            u32::try_from(index).unwrap() + offset,
-            fill_len,
-            value.clone(),
-        );
+        data.set_range(index, fill_len, value);
         hint_to_return
     }
 
@@ -261,7 +264,6 @@ impl<T> NDArray<T> {
         dim_ranges_ext.extend_from_slice(dim_ranges);
         dim_ranges_ext.push(0..k);
 
-        // TODO: If k = 1, we'll use the faster implementation: `fill_region`.
         // If may faster to always use this implementation, even when k > 1, which we
         // could accomplish by moving the k dimension to the front of the shape.
         if k == 1 {
@@ -269,7 +271,7 @@ impl<T> NDArray<T> {
                 // TODO: The following `1` should be a function of the index in the iterator, not
                 //   a constant. (It's okay to fill in parts of the table which are blocked by a
                 //   too-low `filled` value.)
-                self.fill_region_ext(&dim_ranges_ext, &single_value, filled.map(|f| (1, f)));
+                self.fill_region_ext(&dim_ranges_ext, single_value, filled.map(|f| (1, f)));
             }
             return;
         }
@@ -368,7 +370,7 @@ mod tests {
     fn test_fill_subarray_with_infill_1() {
         let filled = NDArray::new_with_value(&[3, 3], 0);
         let mut arr = NDArray::new_with_value(&[3, 3, 1], 0);
-        arr.fill_region_ext(&[0..1, 0..3, 0..1], &1, Some((0, &filled)));
+        arr.fill_region_ext(&[0..1, 0..3, 0..1], 1, Some((0, &filled)));
         assert_eq!(arr.data.to_vec(), vec![1, 1, 1, 1, 1, 1, 1, 1, 1]);
     }
 
@@ -376,7 +378,7 @@ mod tests {
     fn test_fill_subarray_with_infill_2() {
         let filled = NDArray::new_with_value(&[3, 3], 1);
         let mut arr = NDArray::new_with_value(&[3, 3, 1], 0);
-        arr.fill_region_ext(&[1..2, 0..3, 0..1], &1, Some((0, &filled)));
+        arr.fill_region_ext(&[1..2, 0..3, 0..1], 1, Some((0, &filled)));
         assert_eq!(arr.data.to_vec(), vec![0, 0, 0, 1, 1, 1, 0, 0, 0]);
     }
 
@@ -384,7 +386,7 @@ mod tests {
     fn test_fill_subarray_with_infill_3() {
         let filled = NDArray::new_with_value(&[3, 3], 1);
         let mut arr = NDArray::new_with_value(&[3, 3, 1], 0);
-        arr.fill_region_ext(&[0..3, 0..3, 0..1], &1, Some((0, &filled)));
+        arr.fill_region_ext(&[0..3, 0..3, 0..1], 1, Some((0, &filled)));
         assert_eq!(arr.data.to_vec(), vec![1; 9]);
     }
 
@@ -392,7 +394,7 @@ mod tests {
     fn test_fill_subarray_with_infill_4() {
         let filled = NDArray::new_from_buffer(&[3, 3], vec![1, 1, 1, 1, 1, 0, 1, 0, 0]);
         let mut arr = NDArray::new_with_value(&[3, 3, 1], 0);
-        arr.fill_region_ext(&[0..3, 1..2, 0..1], &1, Some((0, &filled)));
+        arr.fill_region_ext(&[0..3, 1..2, 0..1], 1, Some((0, &filled)));
         assert_eq!(arr.data.to_vec(), vec![0, 1, 0, 0, 1, 1, 0, 1, 1]);
     }
 }
