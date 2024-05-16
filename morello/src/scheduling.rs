@@ -835,7 +835,7 @@ fn move_is_cache_miss<Tgt: Target>(
     destination_layout: &Layout,
 ) -> bool {
     !destination_level.is_addressed()
-        && &operand.layout() == destination_layout
+        && operand.layout() == destination_layout
         && operand.dtype() == destination_dtype
 }
 

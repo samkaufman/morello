@@ -64,7 +64,7 @@ pub enum CpuKernel {
     /// ```text
     ///                        0 1 2 3
     ///      0 1 2 3           4 5 6 7
-    ///      4 5 6 7       a b    
+    ///      4 5 6 7       a b
     /// a b            →   a b
     ///                    a b
     ///                    a b
@@ -411,7 +411,7 @@ impl Kernel for CpuKernel {
                       && out_shape[0] == nz!(1u32)
                       && rhs_shape[1].get() * 2 == rhs_vector_size.get()
                       && out_shape[1].get() * 2 == rhs_vector_size.get()
-                      && rhs.layout() == col_major(2) && out.layout().is_row_major()
+                      && rhs.layout() == &col_major(2) && out.layout().is_row_major()
                       && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
                 )
             }
@@ -445,7 +445,7 @@ impl Kernel for CpuKernel {
                     ] if lhs_shape[1].get() % (DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT) == 0
                       && out_shape[..] == [nz!(1u32), nz!(1u32)]
                       && lhs.layout().is_row_major()
-                      && rhs.layout() == col_major(2)
+                      && rhs.layout() == &col_major(2)
                       && lhs.is_contiguous() && rhs.is_contiguous()
                 )
             }
@@ -824,8 +824,8 @@ fn dotproductloop_applies<Tgt: CpuTarget>(
           && lhs_shape[1].get() % (DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
           && out_shape[0] == nz!(1u32)
           && out_shape[1] == nz!(1u32)
-          && allowed_lhs_layouts.contains(&lhs.layout())
-          && rhs.layout() == col_major(2)
+          && allowed_lhs_layouts.contains(lhs.layout())
+          && rhs.layout() == &col_major(2)
           && lhs.is_contiguous() && rhs.is_contiguous()
     )
 }
@@ -962,7 +962,7 @@ where
     if !operands[0].layout().is_row_major() {
         return false;
     }
-    if operands[1].layout() != col_major(2) {
+    if operands[1].layout() != &col_major(2) {
         return false;
     }
     true
