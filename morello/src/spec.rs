@@ -10,7 +10,7 @@ use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
 use crate::target::Target;
-use crate::tensorspec::{TensorSpec, TensorSpecAux};
+use crate::tensorspec::{NonCanon, TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::{
     bit_length_inverse, bit_length_u32, is_power_of_two_u32, join_into_string,
@@ -43,12 +43,14 @@ const ARBITRARY_SPEC_MAX_SIZE: DimSize = nonzero::nonzero!(8u32);
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
 #[serde(bound = "")]
+#[non_exhaustive] // to prevent direct construction.
 pub struct Spec<Tgt: Target>(pub LogicalSpec<Tgt>, pub MemoryLimits);
 
 // The following should probably just be Spec::Primitive and Spec::Compose variants once
 // there are good conversions to/from image/filter shapes for Conv.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
+#[non_exhaustive] // to prevent direct construction.
 pub enum LogicalSpec<Tgt: Target> {
     Primitive(PrimitiveBasics, Vec<TensorSpecAux<Tgt>>, bool),
     Compose {
@@ -107,18 +109,18 @@ pub struct PrimitiveBasicsBimap {
     pub binary_scale_shapes: bool,
 }
 
-impl<Tgt: Target> Spec<Tgt> {
-    pub fn canonicalize(&mut self) -> anyhow::Result<()> {
-        let parameters = self.0.parameters();
+impl<Tgt: Target> NonCanon<Spec<Tgt>> {
+    pub fn into_canon(mut self) -> Spec<Tgt> {
+        let parameters = self.0 .0.parameters();
         let levels = parameters.iter().map(|p| p.level()).collect::<Vec<_>>();
-        self.1.zero_levels_slower_than_all::<Tgt>(&levels);
-        self.0.canonicalize()
+        self.0 .1.zero_levels_slower_than_all::<Tgt>(&levels);
+        self.0
     }
+}
 
-    pub fn is_canonical(&self) -> bool {
-        let parameters = self.0.parameters();
-        let levels = parameters.iter().map(|p| p.level()).collect::<Vec<_>>();
-        !self.1.any_nonzero_levels_slower_than::<Tgt>(&levels) && self.0.is_canonical()
+impl<Tgt: Target> Spec<Tgt> {
+    pub fn new(logical_spec: LogicalSpec<Tgt>, memory_limits: MemoryLimits) -> NonCanon<Self> {
+        NonCanon::new(Spec(logical_spec, memory_limits))
     }
 
     /// Returns the FLOPs required to implement this Spec, if appropriate.
@@ -167,27 +169,9 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for Spec<Tgt> {
             any_with::<LogicalSpec<Tgt>>(args.0),
             arb_memorylimits::<Tgt>(&max_memory),
         )
-            .prop_map(|(logical_spec, mem_limits)| Spec(logical_spec, mem_limits))
+            .prop_map(|(logical_spec, mem_limits)| Spec::new(logical_spec, mem_limits).into_canon())
             .boxed()
     }
-}
-
-#[cfg(test)]
-pub fn arb_canonical_spec<Tgt: Target>(
-    max_size: Option<DimSize>,
-    max_memory: Option<u64>,
-) -> impl proptest::strategy::Strategy<Value = Spec<Tgt>> {
-    use proptest::prelude::*;
-
-    any_with::<Spec<Tgt>>((max_size, max_memory)).prop_filter_map(
-        "Must be possible to canonicalize Spec",
-        |mut s| {
-            if s.canonicalize().is_err() {
-                return None;
-            }
-            Some(s)
-        },
-    )
 }
 
 impl PrimitiveBasics {
@@ -539,113 +523,9 @@ impl Display for PrimitiveSpecType {
     }
 }
 
-impl<Tgt: Target> LogicalSpec<Tgt> {
-    pub fn serial_only(&self) -> bool {
-        match self {
-            LogicalSpec::Primitive(_, _, serial_only) => *serial_only,
-            LogicalSpec::Compose { serial_only, .. } => *serial_only,
-        }
-    }
-
-    pub fn set_serial_only(&mut self, serial_only: bool) {
-        match self {
-            LogicalSpec::Primitive(_, _, ref mut s) => *s = serial_only,
-            LogicalSpec::Compose {
-                serial_only: ref mut s,
-                ..
-            } => *s = serial_only,
-        }
-    }
-
-    pub fn operand_count(&self) -> usize {
-        match self {
-            LogicalSpec::Compose { components, .. } => {
-                let (innermost_component, outer_components) = components.split_last().unwrap();
-                let mut cnt = innermost_component.typ.operand_count();
-                cnt += outer_components
-                    .iter()
-                    .map(|p| p.typ.operand_count() - 2)
-                    .sum::<usize>();
-                cnt
-            }
-            LogicalSpec::Primitive(basics, _, _) => basics.typ.operand_count(),
-        }
-    }
-
-    pub fn parameters(&self) -> SmallVec<[TensorSpec<Tgt>; 3]> {
-        match self {
-            LogicalSpec::Primitive(basics, auxes, _) => match basics.typ {
-                PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => basics
-                    .parameter_shapes()
-                    .into_iter()
-                    .zip(&basics.dtypes)
-                    .zip(auxes)
-                    .map(|((s, dt), a)| TensorSpec::new_noncanon_with_aux(s, *dt, a.clone()))
-                    .collect(),
-                PrimitiveSpecType::Move | PrimitiveSpecType::Zero => auxes
-                    .iter()
-                    .zip(&basics.dtypes)
-                    .map(|(a, dtype)| {
-                        TensorSpec::new_noncanon_with_aux(
-                            basics.spec_shape.clone(),
-                            *dtype,
-                            a.clone(),
-                        )
-                    })
-                    .collect(),
-            },
-            LogicalSpec::Compose {
-                components,
-                operand_auxes,
-                serial_only: _,
-            } => {
-                let mut result_basics = Vec::with_capacity(self.operand_count());
-                let mut last_seen_output = None;
-                for (i, c) in components.iter().rev().enumerate() {
-                    let mut operand_basics: Vec<(Shape, Dtype)> = c
-                        .parameter_shapes()
-                        .into_iter()
-                        .zip(c.dtypes.iter().copied())
-                        .collect::<Vec<_>>();
-                    last_seen_output = operand_basics.pop();
-                    debug_assert!(last_seen_output.is_some());
-                    operand_basics.reverse();
-                    if i != 0 {
-                        operand_basics.pop();
-                    }
-                    result_basics.append(&mut operand_basics);
-                }
-                result_basics.reverse();
-                result_basics.push(last_seen_output.unwrap());
-                debug_assert_eq!(result_basics.len(), operand_auxes.len());
-                result_basics
-                    .into_iter()
-                    .zip(operand_auxes)
-                    .map(|((s, d), a)| TensorSpec::new_noncanon_with_aux(s, d, a.clone()))
-                    .collect()
-            }
-        }
-    }
-
-    pub fn inputs(&self) -> SmallVec<[TensorSpec<Tgt>; 3]> {
-        let mut operands = self.parameters();
-        operands.remove(self.output_idx());
-        operands
-    }
-
-    pub fn output(&self) -> TensorSpec<Tgt> {
-        self.parameters()[self.output_idx()].clone()
-    }
-
-    pub fn output_idx(&self) -> usize {
-        match &self {
-            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_idx(),
-            LogicalSpec::Compose { .. } => self.operand_count() - 1,
-        }
-    }
-
-    pub fn canonicalize(&mut self) -> anyhow::Result<()> {
-        match self {
+impl<Tgt: Target> NonCanon<LogicalSpec<Tgt>> {
+    pub fn try_into_canon(mut self) -> anyhow::Result<LogicalSpec<Tgt>> {
+        match &mut self.0 {
             LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
                 PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
                     for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
@@ -686,47 +566,137 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             },
             LogicalSpec::Compose { .. } => todo!(),
         }
-        Ok(())
+        Ok(self.0)
     }
 
-    pub fn is_canonical(&self) -> bool {
-        match self {
-            LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
-                PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
-                    for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
-                        if !aux.is_canonical(shp) {
-                            return false;
-                        }
-                    }
-                }
-                PrimitiveSpecType::Move => {
-                    for aux in primitive_aux {
-                        if !aux.is_canonical(&basics.spec_shape) {
-                            return false;
-                        }
-                    }
+    /// These methods are to avoid having to deal with move over Deref.
+    pub fn replace_io(self, new_operands: &[TensorSpec<Tgt>]) -> Self {
+        self.0.replace_io(new_operands)
+    }
 
-                    if basics.dtypes.iter().all_equal()
-                        && primitive_aux.iter().map(|a| &a.layout).all_equal()
-                        && primitive_aux
-                            .iter()
-                            .all(|aux| aux.contig == aux.layout.contiguous_full())
-                        && primitive_aux.iter().any(|aux| {
-                            !aux.layout.is_row_major() || aux.contig != aux.layout.contiguous_full()
-                        })
-                    {
-                        return false;
-                    }
-                }
-                PrimitiveSpecType::Zero => {
-                    if !primitive_aux[0].is_canonical(&basics.spec_shape) {
-                        return false;
-                    }
-                }
-            },
-            LogicalSpec::Compose { .. } => todo!(),
+    pub fn set_serial_only(self, serial_only: bool) -> Self {
+        self.0.set_serial_only(serial_only)
+    }
+}
+
+impl<Tgt: Target> LogicalSpec<Tgt> {
+    pub fn new_primitive(
+        basics: PrimitiveBasics,
+        auxes: Vec<TensorSpecAux<Tgt>>,
+        serial_only: bool,
+    ) -> NonCanon<Self> {
+        NonCanon::new(LogicalSpec::Primitive(basics, auxes, serial_only))
+    }
+
+    pub fn serial_only(&self) -> bool {
+        match self {
+            LogicalSpec::Primitive(_, _, serial_only) => *serial_only,
+            LogicalSpec::Compose { serial_only, .. } => *serial_only,
         }
-        true
+    }
+
+    pub fn set_serial_only(mut self, serial_only: bool) -> NonCanon<Self> {
+        match &mut self {
+            LogicalSpec::Primitive(_, _, ref mut s) => *s = serial_only,
+            LogicalSpec::Compose {
+                serial_only: ref mut s,
+                ..
+            } => *s = serial_only,
+        }
+        NonCanon::new(self)
+    }
+
+    pub fn operand_count(&self) -> usize {
+        match self {
+            LogicalSpec::Compose { components, .. } => {
+                let (innermost_component, outer_components) = components.split_last().unwrap();
+                let mut cnt = innermost_component.typ.operand_count();
+                cnt += outer_components
+                    .iter()
+                    .map(|p| p.typ.operand_count() - 2)
+                    .sum::<usize>();
+                cnt
+            }
+            LogicalSpec::Primitive(basics, _, _) => basics.typ.operand_count(),
+        }
+    }
+
+    pub fn parameters(&self) -> SmallVec<[TensorSpec<Tgt>; 3]> {
+        match self {
+            LogicalSpec::Primitive(basics, auxes, _) => match basics.typ {
+                PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => basics
+                    .parameter_shapes()
+                    .into_iter()
+                    .zip(&basics.dtypes)
+                    .zip(auxes)
+                    .map(|((s, dt), a)| {
+                        TensorSpec::new_with_aux(s, *dt, a.clone())
+                            .try_into_canon()
+                            .unwrap()
+                    })
+                    .collect(),
+                PrimitiveSpecType::Move | PrimitiveSpecType::Zero => auxes
+                    .iter()
+                    .zip(&basics.dtypes)
+                    .map(|(a, dtype)| {
+                        TensorSpec::new_with_aux(basics.spec_shape.clone(), *dtype, a.clone())
+                            .try_into_canon()
+                            .unwrap()
+                    })
+                    .collect(),
+            },
+            LogicalSpec::Compose {
+                components,
+                operand_auxes,
+                serial_only: _,
+            } => {
+                let mut result_basics = Vec::with_capacity(self.operand_count());
+                let mut last_seen_output = None;
+                for (i, c) in components.iter().rev().enumerate() {
+                    let mut operand_basics: Vec<(Shape, Dtype)> = c
+                        .parameter_shapes()
+                        .into_iter()
+                        .zip(c.dtypes.iter().copied())
+                        .collect::<Vec<_>>();
+                    last_seen_output = operand_basics.pop();
+                    debug_assert!(last_seen_output.is_some());
+                    operand_basics.reverse();
+                    if i != 0 {
+                        operand_basics.pop();
+                    }
+                    result_basics.append(&mut operand_basics);
+                }
+                result_basics.reverse();
+                result_basics.push(last_seen_output.unwrap());
+                debug_assert_eq!(result_basics.len(), operand_auxes.len());
+                result_basics
+                    .into_iter()
+                    .zip(operand_auxes)
+                    .map(|((s, d), a)| {
+                        TensorSpec::new_with_aux(s, d, a.clone())
+                            .try_into_canon()
+                            .unwrap()
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub fn inputs(&self) -> SmallVec<[TensorSpec<Tgt>; 3]> {
+        let mut operands = self.parameters();
+        operands.remove(self.output_idx());
+        operands
+    }
+
+    pub fn output(&self) -> TensorSpec<Tgt> {
+        self.parameters()[self.output_idx()].clone()
+    }
+
+    pub fn output_idx(&self) -> usize {
+        match &self {
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_idx(),
+            LogicalSpec::Compose { .. } => self.operand_count() - 1,
+        }
     }
 
     pub fn actions(&self) -> impl ActionSeq<Tgt> + '_ {
@@ -1045,9 +1015,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
     // TODO: Need IO? Would inputs alone be sufficient? Caller can check inferred output.
     // TODO: Should move new_operands in.
-    pub fn replace_io(&mut self, new_operands: &[TensorSpec<Tgt>]) {
+    pub fn replace_io(mut self, new_operands: &[TensorSpec<Tgt>]) -> NonCanon<Self> {
         assert_eq!(new_operands.len(), self.operand_count());
-        match self {
+        match &mut self {
             LogicalSpec::Compose {
                 components,
                 operand_auxes,
@@ -1128,6 +1098,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             self,
             new_operands.iter().map(|o| o.to_string()).join(", "),
         );
+        NonCanon::new(self)
     }
 
     pub fn output_is_read(&self) -> bool {
@@ -1137,7 +1108,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    pub fn clone_as_accum(&self) -> Self {
+    pub fn clone_as_accum(&self) -> NonCanon<Self> {
         let mut cloned = self.clone();
         match &mut cloned {
             LogicalSpec::Primitive(basics, _, _) => match &mut basics.typ {
@@ -1148,7 +1119,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             },
             LogicalSpec::Compose { .. } => todo!("Compose can accumulate if head can."),
         }
-        cloned
+        NonCanon::new(cloned)
     }
 }
 
@@ -1205,7 +1176,7 @@ where
     type DomainIter = Box<dyn Iterator<Item = Self::Domain>>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
-        let mut initial = SurMap::apply(&self.logical_spec_surmap, &t.0);
+        let mut initial = SurMap::apply(&self.logical_spec_surmap, &NonCanon::new(t.0.clone()));
         initial
             .1
             .extend(BiMap::apply(&self.memory_limits_bimap, &t.1));
@@ -1224,7 +1195,7 @@ where
         Box::new(
             self.logical_spec_surmap
                 .apply_inverse(&remaining_value)
-                .map(move |ls| Spec(ls, m.clone())),
+                .map(move |ls| Spec::new(ls.try_into_canon().unwrap(), m.clone()).into_canon()),
         )
     }
 }
@@ -1249,12 +1220,12 @@ where
     A::DomainIter: 'static,
     Aa: Clone,
 {
-    type Domain = LogicalSpec<Tgt>;
+    type Domain = NonCanon<LogicalSpec<Tgt>>;
     type Codomain = ((SpecKey, SmallVec<[Aa; 3]>), SmallVec<[BimapInt; 10]>);
     type DomainIter = Box<dyn Iterator<Item = Self::Domain>>;
 
-    fn apply(&self, spec: &LogicalSpec<Tgt>) -> Self::Codomain {
-        match spec {
+    fn apply(&self, spec: &NonCanon<LogicalSpec<Tgt>>) -> Self::Codomain {
+        match &spec.0 {
             LogicalSpec::Primitive(basics, auxes, serial_only) => {
                 let (key, mut pt) = BiMap::apply(&self.primitive_basics_bimap, basics);
                 let aux_keys = auxes
@@ -1305,7 +1276,7 @@ where
                 })
                 .multi_cartesian_product()
                 .map(move |tensor_auxes| {
-                    LogicalSpec::Primitive(primitive_basics.clone(), tensor_auxes, serial)
+                    LogicalSpec::new_primitive(primitive_basics.clone(), tensor_auxes, serial)
                 }),
         )
     }
@@ -1437,9 +1408,9 @@ impl BiMap for PrimitiveBasicsBimap {
 }
 
 #[cfg(test)]
-impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
+impl<Tgt: Target> proptest::arbitrary::Arbitrary for NonCanon<LogicalSpec<Tgt>> {
     type Parameters = Option<DimSize>;
-    type Strategy = proptest::strategy::BoxedStrategy<LogicalSpec<Tgt>>;
+    type Strategy = proptest::strategy::BoxedStrategy<NonCanon<LogicalSpec<Tgt>>>;
 
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
         use crate::tensorspec::TensorSpecArbMaxShape;
@@ -1457,30 +1428,26 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
                 (Just(basics), auxes_strategy, Just(serial_only))
             })
             .prop_map(|(basics, auxes, serial_only)| {
-                LogicalSpec::Primitive(basics, auxes, serial_only)
-            })
-            .prop_filter("Layout must be applicable to TensorSpec shape", |s| {
-                s.clone().canonicalize().is_ok()
+                LogicalSpec::new_primitive(basics, auxes, serial_only)
             })
             .boxed()
     }
 }
 
 #[cfg(test)]
-pub fn arb_canonical_logical_spec<Tgt: Target>(
-    max_size: Option<DimSize>,
-) -> impl proptest::strategy::Strategy<Value = LogicalSpec<Tgt>> {
-    use proptest::prelude::*;
+impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
+    type Parameters = Option<DimSize>;
+    type Strategy = proptest::strategy::BoxedStrategy<LogicalSpec<Tgt>>;
 
-    any_with::<LogicalSpec<Tgt>>(max_size).prop_filter_map(
-        "Must be possible to canonicalize LogicalSpec",
-        |mut s| {
-            if s.canonicalize().is_err() {
-                return None;
-            }
-            Some(s)
-        },
-    )
+    fn arbitrary_with(max_size: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+
+        any_with::<NonCanon<LogicalSpec<Tgt>>>(max_size)
+            .prop_filter_map("Must be possible to canonicalize LogicalSpec", |s| {
+                s.try_into_canon().ok()
+            })
+            .boxed()
+    }
 }
 
 // TODO: Modify to return an `impl Iterator` of some kind instead of a `Box`.
@@ -1661,11 +1628,13 @@ pub mod macros {
                 spec_shape: ($shp).into_iter().map(|x| x.into_dim_size()).collect(),
                 dtypes,
             };
-            LogicalSpec::Primitive(
+            LogicalSpec::new_primitive(
                 basics,
                 auxes.into_iter().map(|v| v.1).collect(),
                 $s,
             )
+            .try_into_canon()
+            .unwrap()
         }};
 
         ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, c0, ua ) => {
@@ -1921,14 +1890,14 @@ mod tests {
 
         #[test]
         fn test_actions_are_valid_through_consumed_memory_x86(
-            logical_spec in arb_canonical_logical_spec::<X86Target>(None)
+            logical_spec in any::<LogicalSpec<X86Target>>()
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
 
         #[test]
         fn test_actions_are_valid_through_consumed_memory_arm(
-            logical_spec in arb_canonical_logical_spec::<X86Target>(None)
+            logical_spec in any::<LogicalSpec<ArmTarget>>()
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
@@ -1937,18 +1906,17 @@ mod tests {
         fn test_canonicalize_is_noop_if_already_canonical(
             logical_spec in any::<LogicalSpec<X86Target>>()
         ) {
-            let mut canonicalized_logical_spec = logical_spec.clone();
-            canonicalized_logical_spec.canonicalize().unwrap();
+            let canonicalized_logical_spec = NonCanon::new(logical_spec.clone()).try_into_canon().unwrap();
             if logical_spec == canonicalized_logical_spec {
                 prop_assert!(
-                    logical_spec.is_canonical(),
-                    "LogicalSpec::is_canonical was false, but canonicalizing {} was a no-op",
+                    NonCanon::new(logical_spec.clone()).try_into_canon().is_ok(),
+                    "LogicalSpec was NOT canonical, but canonicalizing {} was a no-op",
                     logical_spec
                 );
             } else {
                 prop_assert!(
-                    !logical_spec.is_canonical(),
-                    "LogicalSpec::is_canonical was true, but {} was canonicalized to {}",
+                    NonCanon::new(logical_spec.clone()).try_into_canon().is_err(),
+                    "LogicalSpec was canonical, but {} was canonicalized to {}",
                     logical_spec, canonicalized_logical_spec
                 );
             }
@@ -1956,14 +1924,12 @@ mod tests {
 
         #[test]
         fn test_canonicalizing_specs_canonicalizes_parameters(
-            logical_spec in any::<LogicalSpec<X86Target>>()
+            logical_spec in any::<NonCanon<LogicalSpec<X86Target>>>()
         ) {
-            let mut logical_spec = logical_spec;
-            match logical_spec.canonicalize() {
-                Ok(()) => {
+            match logical_spec.try_into_canon() {
+                Ok(logical_spec) => {
                     for p in logical_spec.parameters() {
-                        let mut recanonicalized = p.clone();
-                        recanonicalized.canonicalize().unwrap();
+                        let recanonicalized = NonCanon::new(p.clone()).try_into_canon().unwrap();
                         assert_eq!(p, recanonicalized);
                     }
                 }
@@ -2000,11 +1966,9 @@ mod tests {
                         (Just(basics), auxes_strategy, any::<bool>())
                     })
                     .prop_filter_map("Spec should be canonical", |(basics, auxes, serial_only)| {
-                        let s = Spec(LogicalSpec::Primitive(basics, auxes, serial_only), X86Target::max_mem());
-                        if s.is_canonical() {
-                            Some(s)
-                        } else {
-                            None
+                        match LogicalSpec::new_primitive(basics, auxes, serial_only).try_into_canon() {
+                            Ok(logical_spec) => Some(Spec::new(logical_spec, X86Target::max_mem()).into_canon()),
+                            Err(_) => None,
                         }
                     })
         ) {
@@ -2016,15 +1980,12 @@ mod tests {
             let ImplNode::SpecApp(child_spec_app) = &tile_out_result.children()[0] else {
                 panic!("First child was not a SpecApp; was: {:?}", tile_out_result.children()[0]);
             };
-            let mut tiled_logical_spec = child_spec_app.0.0.clone();
-            tiled_logical_spec.canonicalize().unwrap();
+            let tiled_logical_spec = NonCanon::new(child_spec_app.0.0.clone()).try_into_canon().unwrap();
             assert!(tiled_logical_spec.parameters().iter().all(|p| {
                 p.shape().iter().all(|&d| d.get() == 1)
             }));
             assert!(tiled_logical_spec.parameters().iter().all(|p| {
-                let mut c = p.clone();
-                c.canonicalize().unwrap();
-                p == &c
+                p == &NonCanon::new(p.clone()).try_into_canon().unwrap()
             }));
         }
 
@@ -2042,7 +2003,7 @@ mod tests {
         fn test_action_applies_everywhere_down_through_peak_memory(
             (spec, action, _, lower_limit) in arb_spec_action_and_lower_limit::<X86Target>()
         ) {
-            let lower_spec = Spec(spec.0.clone(), lower_limit);
+            let lower_spec = Spec::new(spec.0.clone(), lower_limit).into_canon();
             assert!(lower_spec.0.actions().into_iter().contains(&action),
                 "Action {:?} was not present in lower-limits Spec {:?}",
                 action, lower_spec);
@@ -2072,17 +2033,13 @@ mod tests {
                 };
                 visit_leaves(&applied, &mut |leaf| {
                     if let ImplNode::SpecApp(spec_app) = leaf {
+                        let logical_spec = NonCanon::new(spec_app.0.0.clone()).try_into_canon();
                         assert!(
-                            spec_app.0.is_canonical(),
-                            "Action {:?} applied to {} produced non-canonical {} (should be {})",
+                            logical_spec.is_ok(),
+                            "Action {:?} applied to {} produced non-canonical {}",
                             action,
                             spec,
                             spec_app.0,
-                            {
-                                let mut c = spec_app.0.clone();
-                                c.canonicalize().unwrap();
-                                c
-                            }
                         );
                     }
                     true
@@ -2153,7 +2110,8 @@ mod tests {
         // at application. So it's safe to just collect the list of actions once, up front.
         let mut unseen_actions = logical_spec.actions().into_iter().collect::<Vec<_>>();
 
-        let mut shared_spec = Spec(logical_spec, MemoryLimits::Standard(MemVec::zero::<Tgt>()));
+        let mut shared_spec =
+            Spec::new(logical_spec, MemoryLimits::Standard(MemVec::zero::<Tgt>())).into_canon();
         let mut diagonal_idx = 0;
         loop {
             let mut empty = true;
@@ -2180,7 +2138,6 @@ mod tests {
                             assert_eq!(&applied.peak_memory(), limits_memvec);
                         }
                         Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => {}
-                        Err(ApplyError::SpecNotCanonical) => panic!(),
                     }
                 }
             }
@@ -2193,7 +2150,7 @@ mod tests {
 
     fn arb_spec_action_and_lower_limit<Tgt: Target>(
     ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt>, MemoryLimits)> {
-        arb_canonical_spec::<Tgt>(None, None)
+        any_with::<Spec<Tgt>>((None, None))
             .prop_filter_map("Spec had zero applicable actions", |spec| {
                 let applied_actions = spec
                     .0
@@ -2202,7 +2159,6 @@ mod tests {
                     .filter_map(|a| match a.apply(&spec) {
                         Ok(applied) => Some((a, applied)),
                         Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => None,
-                        Err(ApplyError::SpecNotCanonical) => unreachable!(),
                     })
                     .collect::<Vec<_>>();
                 if applied_actions.is_empty() {

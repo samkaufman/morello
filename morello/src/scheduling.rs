@@ -57,8 +57,6 @@ pub enum Action<Tgt: Target> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ApplyError {
-    #[error("Cannot apply action to non-canonical Spec")]
-    SpecNotCanonical,
     #[error("Insufficient memory to apply action")]
     OutOfMemory,
     #[error("Action does not apply to this Spec: {0}")]
@@ -87,10 +85,6 @@ impl<Tgt: Target> Action<Tgt> {
     }
 
     pub fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
-        if !spec.is_canonical() {
-            return Err(ApplyError::SpecNotCanonical);
-        }
-
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 
@@ -253,17 +247,28 @@ impl<Tgt: Target> Action<Tgt> {
 
                 let mut new_operands = operands;
                 for loop_tile in &tiles {
-                    let ref_op = &mut new_operands[usize::from(loop_tile.tile.view.0)];
-                    let aligned =
-                        aligned_approx(loop_tile.tile.shape(), loop_tile.tile.step_sizes(), ref_op)
-                            .unwrap();
-                    ref_op.shrink(loop_tile.tile.shape(), aligned).unwrap();
+                    let operand_idx = usize::from(loop_tile.tile.view.0);
+                    let aligned = aligned_approx(
+                        loop_tile.tile.shape(),
+                        loop_tile.tile.step_sizes(),
+                        &new_operands[operand_idx],
+                    )
+                    .unwrap();
+                    new_operands[operand_idx] = new_operands[operand_idx]
+                        .clone()
+                        .shrink(loop_tile.tile.shape(), aligned)
+                        .unwrap()
+                        .try_into_canon()
+                        .unwrap();
                 }
 
-                let mut inner_spec = logical_spec.clone();
-                inner_spec.replace_io(&new_operands);
-                inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
-                inner_spec.canonicalize().unwrap();
+                let serial_only = logical_spec.serial_only() || parallel;
+                let inner_spec = logical_spec
+                    .clone()
+                    .replace_io(&new_operands)
+                    .set_serial_only(serial_only)
+                    .try_into_canon()
+                    .unwrap();
                 match self {
                     Action::TileOut { .. } => {}
                     Action::Split { .. } => {
@@ -283,7 +288,9 @@ impl<Tgt: Target> Action<Tgt> {
                     }
                     _ => unreachable!(),
                 };
-                let body = Box::new(SpecApp::default_app(Spec(inner_spec, spec.1.clone())).into());
+                let body = Box::new(
+                    SpecApp::default_app(Spec::new(inner_spec, spec.1.clone()).into_canon()).into(),
+                );
 
                 Ok(ImplNode::Loop(Loop {
                     tiles,
@@ -311,7 +318,7 @@ impl<Tgt: Target> Action<Tgt> {
                 // This is the shape of the intermediate tensor.
                 let next_to_outer_basics = &components[1];
                 let out_idx = next_to_outer_basics.typ.output_idx();
-                let intermediate_tensorspec = TensorSpec::<Tgt>::new_canon(
+                let intermediate_tensorspec = TensorSpec::<Tgt>::new(
                     next_to_outer_basics.parameter_shapes().swap_remove(out_idx),
                     next_to_outer_basics.dtypes[out_idx],
                     layout.contiguous_full(),
@@ -319,7 +326,9 @@ impl<Tgt: Target> Action<Tgt> {
                     *level,
                     layout.clone(),
                     *vector_size,
-                );
+                )
+                .try_into_canon()
+                .unwrap();
                 let intermediate_tensor = Rc::new(Tensor::new(intermediate_tensorspec.clone()));
 
                 // The head of a Compose is the final function evaluated. Build
@@ -330,7 +339,7 @@ impl<Tgt: Target> Action<Tgt> {
                         .chain(&operand_auxes[..external_head_input_cnt])
                         .chain(iter::once(&operand_auxes[logical_spec.output_idx()]));
                     let head_basics = &components[0];
-                    LogicalSpec::Primitive(
+                    LogicalSpec::new_primitive(
                         head_basics.clone(),
                         head_basics.aux_from_operand_auxes(head_operand_auxes),
                         *serial_only,
@@ -343,7 +352,7 @@ impl<Tgt: Target> Action<Tgt> {
                 let next_to_head_input_auxes = &operand_auxes[external_head_input_cnt
                     ..external_head_input_cnt + next_to_outer_basics.typ.input_count()];
                 let remainder: LogicalSpec<Tgt> = if components.len() == 2 {
-                    LogicalSpec::Primitive(
+                    LogicalSpec::new_primitive(
                         next_to_outer_basics.clone(),
                         next_to_outer_basics.aux_from_operand_auxes(
                             next_to_head_input_auxes
@@ -352,6 +361,8 @@ impl<Tgt: Target> Action<Tgt> {
                         ),
                         *serial_only,
                     )
+                    .try_into_canon()
+                    .unwrap()
                 } else {
                     let remainder_inputs =
                         &operands[external_head_input_cnt..next_to_head_input_auxes.len() - 1];
@@ -410,7 +421,10 @@ impl<Tgt: Target> Action<Tgt> {
                         Rc::new(Param::new(i.try_into().unwrap(), inp.clone())) as _
                     }));
                     params.push(Rc::new(intermediate_tensor.clone()) as _);
-                    ImplNode::SpecApp(SpecApp::new(Spec(remainder, new_limits.clone()), params))
+                    ImplNode::SpecApp(SpecApp::new(
+                        Spec::new(remainder, new_limits.clone()).into_canon(),
+                        params,
+                    ))
                 };
                 let head_spec_application = {
                     let mut params: SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]> = smallvec![];
@@ -418,7 +432,10 @@ impl<Tgt: Target> Action<Tgt> {
                     params.extend(head_spec.parameters().iter().skip(1).map(|_operand| {
                         todo!();
                     }));
-                    ImplNode::SpecApp(SpecApp::new(Spec(head_spec, new_limits), params))
+                    ImplNode::SpecApp(SpecApp::new(
+                        Spec::new(head_spec.try_into_canon().unwrap(), new_limits).into_canon(),
+                        params,
+                    ))
                 };
 
                 Ok(ImplNode::Pipeline(Pipeline {
@@ -480,7 +497,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                 let inner_output_view = Param::new(2, operands[2].clone()).squeeze_dims(2..rank);
 
-                let body_spec = LogicalSpec::Primitive(
+                let body_spec = LogicalSpec::new_primitive(
                     PrimitiveBasics {
                         typ: PrimitiveSpecType::Matmul { accum: true },
                         spec_shape: operands[0].shape()[..2]
@@ -511,7 +528,8 @@ impl<Tgt: Target> Action<Tgt> {
                     ],
                     body: Box::new(
                         SpecApp::new(
-                            Spec(body_spec, spec.1.clone()),
+                            Spec::new(body_spec.try_into_canon().unwrap(), spec.1.clone())
+                                .into_canon(),
                             [
                                 Rc::new(inner_image_tile) as Rc<dyn View<Tgt = Tgt>>,
                                 Rc::new(inner_filters_tile) as Rc<dyn View<Tgt = Tgt>>,
@@ -610,8 +628,8 @@ impl<Tgt: Target> Action<Tgt> {
                             mem::swap(&mut left_spec, &mut right_spec);
                             args.swap(0, 1);
                         }
-                        let mut logue_spec = Spec(
-                            LogicalSpec::Primitive(
+                        let logue_spec = Spec::new(
+                            LogicalSpec::new_primitive(
                                 PrimitiveBasics {
                                     typ: PrimitiveSpecType::Move,
                                     spec_shape: left_spec.shape().into(),
@@ -619,10 +637,12 @@ impl<Tgt: Target> Action<Tgt> {
                                 },
                                 vec![left_spec.aux.clone(), right_spec.aux.clone()],
                                 logical_spec.serial_only(),
-                            ),
+                            )
+                            .try_into_canon()
+                            .unwrap(),
                             lower_limits.clone(),
-                        );
-                        logue_spec.canonicalize().unwrap();
+                        )
+                        .into_canon();
                         Some(SpecApp::new(logue_spec, args))
                     } else {
                         None
@@ -634,13 +654,12 @@ impl<Tgt: Target> Action<Tgt> {
                 let new_body_app = {
                     let mut new_operands = operands.clone();
                     new_operands[usize::from(*source_idx)] = inner_moved_operand.spec().clone();
-                    let new_inner_spec = {
-                        let mut new_spec = logical_spec.clone();
-                        new_spec.replace_io(&new_operands);
-                        new_spec
-                    };
-                    let mut spec = Spec(new_inner_spec, lower_limits.clone());
-                    spec.canonicalize().unwrap();
+                    let new_inner_spec = logical_spec
+                        .clone()
+                        .replace_io(&new_operands)
+                        .try_into_canon()
+                        .unwrap();
+                    let spec = Spec::new(new_inner_spec, lower_limits.clone()).into_canon();
                     let inner_operands = new_operands.iter().enumerate().map(|(i, o)| {
                         Rc::new(Param::new(u8::try_from(i).unwrap(), o.clone()))
                             as Rc<dyn View<Tgt = Tgt>>
@@ -677,7 +696,7 @@ impl<Tgt: Target> Action<Tgt> {
                 } = logical_spec.output();
 
                 let zero_app = {
-                    let subspec = LogicalSpec::Primitive(
+                    let subspec = LogicalSpec::new_primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Zero,
                             spec_shape: output_shape,
@@ -686,16 +705,24 @@ impl<Tgt: Target> Action<Tgt> {
                         vec![output_aux],
                         logical_spec.serial_only(),
                     );
-                    let mut spec = Spec(subspec, spec.1.clone());
-                    spec.canonicalize()
-                        .expect("ToAccum's introduced Zero should be canonicalizable");
+                    let spec = Spec::new(
+                        subspec
+                            .try_into_canon()
+                            .expect("ToAccum's introduced Zero should be canonicalizable"),
+                        spec.1.clone(),
+                    )
+                    .into_canon();
                     let app_arguments = [Param::new(0, logical_spec.output())];
                     SpecApp::new(spec, app_arguments).into()
                 };
                 let accum_app = {
-                    let mut spec = Spec(logical_spec.clone_as_accum(), spec.1.clone());
-                    spec.canonicalize()
-                        .expect("ToAccum's introduced accumulating Spec should be canonicalizable");
+                    let spec = Spec::new(
+                        logical_spec.clone_as_accum().try_into_canon().expect(
+                            "ToAccum's introduced accumulating Spec should be canonicalizable",
+                        ),
+                        spec.1.clone(),
+                    )
+                    .into_canon();
                     let app_arguments = operands
                         .iter()
                         .enumerate()
@@ -815,7 +842,7 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
         operand.contiguous_abs()
     };
 
-    TensorSpec::<Tgt>::new_canon(
+    TensorSpec::<Tgt>::new(
         operand.shape().into(),
         destination_dtype,
         contiguous_abs,
@@ -824,6 +851,8 @@ pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
         destination_layout.clone(),
         destination_vector_size,
     )
+    .try_into_canon()
+    .unwrap()
 }
 
 /// Returns `true` if the move is a simple cache miss.

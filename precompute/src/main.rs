@@ -25,7 +25,7 @@ use morello::target::{
     CpuMemoryLevel::{self, GL},
     Target, X86Target,
 };
-use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
+use morello::tensorspec::{NonCanon, TensorSpecAux, TensorSpecAuxSurMap};
 use morello::utils::bit_length;
 
 #[cfg(not(target_env = "msvc"))]
@@ -98,7 +98,7 @@ fn main_per_db(args: &Args, db: &RocksDatabase) {
             args.filters_size
                 .iter()
                 .map(|&fs| {
-                    LogicalSpec::Primitive(
+                    LogicalSpec::new_primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Conv { accum: false },
                             spec_shape: smallvec![
@@ -115,6 +115,8 @@ fn main_per_db(args: &Args, db: &RocksDatabase) {
                         vec![a.clone(), a.clone(), a.clone()],
                         true,
                     )
+                    .try_into_canon()
+                    .unwrap()
                 })
                 .collect::<Vec<_>>()
         });
@@ -143,7 +145,7 @@ fn main_per_db(args: &Args, db: &RocksDatabase) {
         nonempty_tasks.into_par_iter().for_each(|task| {
             let mut stage = task
                 .into_iter()
-                .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
+                .map(|t| Spec::new(t, MemoryLimits::Standard(top.clone())).into_canon())
                 .collect::<Vec<_>>();
             let mut next_stage = HashSet::new();
 
@@ -151,10 +153,9 @@ fn main_per_db(args: &Args, db: &RocksDatabase) {
                 let stage_results = top_down_many(db, &stage, 1, Some(nz!(1usize))).0;
                 for (spec, result) in stage.iter().zip(stage_results) {
                     if let [(_, only_result_cost)] = &result[..] {
-                        next_stage.extend(
-                            next_limits(&spec.1, &only_result_cost.peaks)
-                                .map(|l| Spec(spec.0.clone(), MemoryLimits::Standard(l))),
-                        );
+                        next_stage.extend(next_limits(&spec.1, &only_result_cost.peaks).map(|l| {
+                            Spec::new(spec.0.clone(), MemoryLimits::Standard(l)).into_canon()
+                        }));
                     }
                 }
                 // TODO: Just swap data structures.
@@ -219,7 +220,7 @@ fn logical_specs_to_compute(
         TensorSpecAuxSurMap::new,
     );
 
-    let (spec_key, bound_pt) = SurMap::apply(&surmap, bound_spec);
+    let (spec_key, bound_pt) = SurMap::apply(&surmap, &NonCanon::new(bound_spec.clone()));
     debug!(
         "Grid shape is {:?}",
         bound_pt.iter().map(|d| d + 1).collect::<Vec<_>>()
@@ -231,8 +232,11 @@ fn logical_specs_to_compute(
             let mut task = vec![];
             // TODO: Factor out below key
             for sp in SurMap::apply_inverse(&surmap, &(spec_key.clone(), SmallVec::from_vec(pt))) {
-                if sp.is_canonical() {
-                    task.push(sp);
+                if let Ok(sp_canon) = sp.clone().try_into_canon() {
+                    if sp.0 == sp_canon {
+                        // Put only spec that was originally canonical.
+                        task.push(sp_canon);
+                    }
                 }
             }
             tasks.push(task);

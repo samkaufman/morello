@@ -89,7 +89,7 @@ pub trait ViewExt: View {
             .spec()
             .layout()
             .swap_dims((0, 1), self.spec().contiguous_abs());
-        let spec = TensorSpec::new_canon(
+        let spec = TensorSpec::new(
             shape,
             self.spec().dtype(),
             new_contig,
@@ -97,7 +97,9 @@ pub trait ViewExt: View {
             self.spec().level(),
             transposed_layout,
             self.spec().vector_size(),
-        );
+        )
+        .try_into_canon()
+        .unwrap();
         TransposeView { inner: self, spec }
     }
 }
@@ -289,15 +291,14 @@ impl<V: View> View for CacheView<V> {
 impl<V: View> Tile<V> {
     pub fn new(shape: Shape, step_sizes: Shape, view: V) -> Result<Self, TileError> {
         let expr_term_id = OpaqueSymbol::new();
-        let mut spec = view.spec().clone();
+        let spec = view.spec().clone();
         let aligned = aligned_approx(&shape, &step_sizes, view.spec())?;
-        spec.shrink(&shape, aligned)?;
         Ok(Self {
+            spec: spec.shrink(&shape, aligned)?.try_into_canon().unwrap(),
             shape,
             step_sizes,
             view,
             expr_term_id,
-            spec,
         })
     }
 

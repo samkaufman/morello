@@ -5,6 +5,7 @@ use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::num::NonZeroU32;
+use std::ops::Deref;
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
@@ -14,8 +15,12 @@ use crate::layout::{row_major, Layout, LayoutError, PhysDim};
 use crate::target::{MemoryLevel, Target};
 use crate::utils::join_into_string;
 
+#[derive(Clone, Debug)]
+pub struct NonCanon<T>(pub T);
+
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Deserialize, Serialize)]
 #[serde(bound = "")]
+#[non_exhaustive] // to prevent direct construction.
 pub struct TensorSpec<Tgt: Target> {
     pub shape: Shape,
     pub dtype: Dtype,
@@ -48,31 +53,35 @@ pub struct TensorSpecAuxNonDepBimap<Tgt: Target> {
 #[derive(Debug, Clone)]
 pub struct TensorSpecArbMaxShape(pub Shape);
 
-impl<Tgt: Target> TensorSpec<Tgt> {
-    pub fn new_canon(
-        shape: Shape,
-        dtype: Dtype,
-        contiguous_abs: Contig,
-        aligned: bool,
-        level: Tgt::Level,
-        layout: Layout,
-        vector_size: Option<DimSize>,
-    ) -> Self {
-        let mut r = Self::new_noncanon(
-            shape,
-            dtype,
-            contiguous_abs,
-            aligned,
-            level,
-            layout,
-            vector_size,
-        );
-        // TODO: This should prop. the error, not unwrap, and be called try_new_canon.
-        r.canonicalize().unwrap();
-        r
+impl<T> NonCanon<T> {
+    pub fn new(t: T) -> Self {
+        NonCanon(t)
     }
+}
 
-    pub fn new_noncanon(
+impl<T> Deref for NonCanon<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Display> Display for NonCanon<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<Tgt: Target> NonCanon<TensorSpec<Tgt>> {
+    pub fn try_into_canon(mut self) -> anyhow::Result<TensorSpec<Tgt>> {
+        self.0.aux.canonicalize(&self.0.shape)?;
+        Ok(self.0)
+    }
+}
+
+impl<Tgt: Target> TensorSpec<Tgt> {
+    pub fn new(
         shape: Shape,
         dtype: Dtype,
         contiguous_abs: Contig,
@@ -80,8 +89,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         level: Tgt::Level,
         layout: Layout,
         vector_size: Option<DimSize>,
-    ) -> Self {
-        Self::new_noncanon_with_aux(
+    ) -> NonCanon<Self> {
+        Self::new_with_aux(
             shape,
             dtype,
             TensorSpecAux {
@@ -94,7 +103,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         )
     }
 
-    pub fn new_noncanon_with_aux(shape: Shape, dtype: Dtype, aux: TensorSpecAux<Tgt>) -> Self {
+    pub fn new_with_aux(shape: Shape, dtype: Dtype, aux: TensorSpecAux<Tgt>) -> NonCanon<Self> {
         if shape.is_empty() {
             panic!("Invalid shape: {:?}", shape);
         }
@@ -103,19 +112,21 @@ impl<Tgt: Target> TensorSpec<Tgt> {
                 "vector_size must be specified if and only if the bank ({:?}) is a vector register file", aux.level
             )
         }
-        TensorSpec { shape, dtype, aux }
+        NonCanon::new(TensorSpec { shape, dtype, aux })
     }
 
     pub fn layout(&self) -> Layout {
         self.aux.layout.clone()
     }
 
-    pub fn set_layout(&mut self, new_layout: Layout) {
+    pub fn set_layout(mut self, new_layout: Layout) -> NonCanon<Self> {
         self.aux.layout = new_layout;
+        NonCanon::new(self)
     }
 
-    pub fn set_contiguous_abs(&mut self, contiguous_abs: Contig) {
+    pub fn set_contiguous_abs(mut self, contiguous_abs: Contig) -> NonCanon<Self> {
         self.aux.contig = contiguous_abs;
+        NonCanon::new(self)
     }
 
     pub fn is_contiguous(&self) -> bool {
@@ -168,7 +179,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.aux.vector_size
     }
 
-    pub fn set_level(&mut self, level: Tgt::Level, vector_size: Option<DimSize>) {
+    pub fn set_level(mut self, level: Tgt::Level, vector_size: Option<DimSize>) -> NonCanon<Self> {
         assert_eq!(
             level.vector_rf(),
             vector_size.is_some(),
@@ -178,13 +189,18 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         );
         self.aux.level = level;
         self.aux.vector_size = vector_size;
+        NonCanon::new(self)
     }
 
     /// Returns a new TensorSpec with the given shape and alignment.
     ///
     /// The result's layout and contiguousness abstraction will have been
     /// canonicalized for the given shape.
-    pub fn shrink(&mut self, shape: &[DimSize], aligned: bool) -> Result<(), LayoutError> {
+    pub fn shrink(
+        mut self,
+        shape: &[DimSize],
+        aligned: bool,
+    ) -> Result<NonCanon<Self>, LayoutError> {
         let (new_layout, new_contig) =
             self.aux
                 .layout
@@ -193,11 +209,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.aux.layout = new_layout;
         self.aux.contig = new_contig;
         self.aux.aligned = aligned;
-        Ok(())
-    }
-
-    pub fn canonicalize(&mut self) -> anyhow::Result<()> {
-        self.aux.canonicalize(&self.shape)
+        Ok(NonCanon::new(self))
     }
 
     /// Returns a TensorSpec with given size-one dimensions dropped.
@@ -231,7 +243,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
                 .dim_drop(&dropped_dims_set, self.contiguous_abs())
         };
 
-        TensorSpec::new_canon(
+        TensorSpec::new(
             new_shape,
             self.dtype(),
             new_contig,
@@ -240,6 +252,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             new_layout,
             self.vector_size(),
         )
+        .try_into_canon()
+        .unwrap()
     }
 
     // TODO: Shouldn't need this method. Should be implicit in Spec validity.
@@ -298,6 +312,25 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
         use proptest::prelude::*;
 
+        any_with::<NonCanon<TensorSpec<Tgt>>>(args)
+            .prop_filter_map("TensorSpec was not canonical", |tensor_spec| {
+                tensor_spec
+                    .try_into_canon()
+                    .with_context(|| "Couldn't canonicalize")
+                    .ok()
+            })
+            .boxed()
+    }
+}
+
+#[cfg(test)]
+impl<Tgt: Target> proptest::arbitrary::Arbitrary for NonCanon<TensorSpec<Tgt>> {
+    type Parameters = TensorSpecArbMaxShape;
+    type Strategy = proptest::strategy::BoxedStrategy<NonCanon<TensorSpec<Tgt>>>;
+
+    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+
         args.0
             .into_iter()
             .map(|m| 1..=m.get())
@@ -312,13 +345,7 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
                 let dtype_strategy = any::<Dtype>();
                 (Just(shp), dtype_strategy, aux_strategy)
             })
-            .prop_filter_map("TensorSpec was not canonical", |(shp, dtype, aux)| {
-                let mut tensor_spec = TensorSpec::new_noncanon_with_aux(shp.0, dtype, aux);
-                let canon_result = tensor_spec
-                    .canonicalize()
-                    .with_context(|| format!("Couldn't canonicalize {}", tensor_spec));
-                canon_result.ok().map(|_| tensor_spec)
-            })
+            .prop_map(|(shp, dtype, aux)| TensorSpec::new_with_aux(shp.0, dtype, aux))
             .boxed()
     }
 }
@@ -493,7 +520,7 @@ where
             (
                 aux.layout.clone(),
                 BiMap::apply(&Tgt::Level::bimap(), &aux.level),
-                aux.vector_size.map(|v| NonZeroU32::try_from(v).unwrap()),
+                aux.vector_size,
             ),
             [aux.contig.into(), aux.aligned as _],
         )
@@ -580,7 +607,7 @@ fn arb_tensorspecaux<Tgt: Target>(
 mod tests {
     use crate::layout::Layout;
     use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
-    use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape};
+    use crate::tensorspec::{NonCanon, TensorSpec, TensorSpecArbMaxShape};
     use crate::{layout, shape};
     use proptest::prelude::*;
     use proptest::proptest;
@@ -588,35 +615,43 @@ mod tests {
     proptest! {
         // TODO: Modify `any::<TensorSpec<_>>` to generate multiple ranks and dtypes.
         #[test]
-        fn tensorspec_canonicalize_should_be_idempodent_x86(tspec in any::<TensorSpec<X86Target>>()) {
+        fn tensorspec_canonicalize_should_be_idempodent_x86(
+            tspec in any::<NonCanon<TensorSpec<X86Target>>>()
+        ) {
             shared_tensorspec_canonicalize_should_be_idempodent(tspec)
         }
 
         // TODO: Modify `any::<TensorSpec<_>>` to generate multiple ranks and dtypes.
         #[test]
-        fn tensorspec_canonicalize_should_be_idempodent_arm(tspec in any::<TensorSpec<ArmTarget>>()) {
+        fn tensorspec_canonicalize_should_be_idempodent_arm(
+            tspec in any::<NonCanon<TensorSpec<ArmTarget>>>()
+        ) {
             shared_tensorspec_canonicalize_should_be_idempodent(tspec)
         }
 
         #[test]
         fn tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_x86(
-            tspec in any_with::<TensorSpec<X86Target>>(TensorSpecArbMaxShape(shape![4, 4, 4, 4]))
+            tspec in any_with::<TensorSpec<X86Target>>(
+                TensorSpecArbMaxShape(shape![4, 4, 4, 4])
+            )
         ) {
-            shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
+            shared_canonicalizable_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
         }
 
         #[test]
         fn tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_arm(
-            tspec in any_with::<TensorSpec<ArmTarget>>(TensorSpecArbMaxShape(shape![4, 4, 4, 4]))
+            tspec in any_with::<TensorSpec<ArmTarget>>(
+                TensorSpecArbMaxShape(shape![4, 4, 4, 4])
+            )
         ) {
-            shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
+            shared_canonicalizable_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
         }
     }
 
     // TODO: Rename
     #[test]
     fn test_1() {
-        let mut tspec = TensorSpec::<X86Target> {
+        let tspec = NonCanon::new(TensorSpec::<X86Target> {
             shape: shape![5, 2, 8, 4],
             dtype: crate::common::Dtype::Uint8,
             aux: crate::tensorspec::TensorSpecAux {
@@ -632,25 +667,26 @@ mod tests {
                 ],
                 vector_size: None,
             },
-        };
-        tspec.canonicalize().unwrap();
+        })
+        .try_into_canon()
+        .unwrap();
         assert_eq!(tspec.aux.contig, 3);
     }
 
     fn shared_tensorspec_canonicalize_should_be_idempodent<Tgt: Target>(
-        mut tspec: TensorSpec<Tgt>,
+        tspec: NonCanon<TensorSpec<Tgt>>,
     ) {
-        tspec.canonicalize().unwrap();
-        let mut second = tspec.clone();
-        second.canonicalize().unwrap();
+        let tspec = tspec.clone().try_into_canon().unwrap();
+        let second = NonCanon::new(tspec.clone()).try_into_canon().unwrap();
         assert_eq!(tspec, second);
     }
 
-    fn shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change<Tgt: Target>(
+    fn shared_canonicalizable_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change<
+        Tgt: Target,
+    >(
         tspec: TensorSpec<Tgt>,
     ) {
-        let mut second = tspec.clone();
-        second.canonicalize().unwrap();
+        let second = NonCanon::new(tspec.clone()).try_into_canon().unwrap();
 
         let Layout(dims_a) = tspec.layout();
         let Layout(dims_b) = second.layout();

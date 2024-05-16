@@ -1009,7 +1009,6 @@ mod tests {
         imp::visit_leaves,
         memorylimits::{MemVec, MemoryLimits},
         scheduling::ApplyError,
-        spec::arb_canonical_spec,
         target::X86Target,
         utils::{bit_length, bit_length_inverse},
     };
@@ -1123,7 +1122,7 @@ mod tests {
             for limit_to_check_bits in filled_limits_iter {
                 let limit_to_check_vec = limit_to_check_bits.iter().copied().map(bit_length_inverse).collect::<Vec<_>>();
                 let limit_to_check = MemoryLimits::Standard(MemVec::new(limit_to_check_vec.try_into().unwrap()));
-                let spec_to_check = Spec(decision.spec.0.clone(), limit_to_check);
+                let spec_to_check = Spec::new(decision.spec.0.clone(), limit_to_check).into_canon();
                 let get_result = db.get(&spec_to_check).expect("Spec should be in database");
                 assert_eq!(get_result, expected, "Entries differed at {}", spec_to_check);
             }
@@ -1189,10 +1188,11 @@ mod tests {
         //             None
         //         };
 
-        //         let spec_to_check = Spec(
+        //         let spec_to_check = Spec::new(
         //             decision_b.spec.0.clone(),
         //             MemoryLimits::Standard(MemVec::new(limit_to_check.try_into().unwrap())),
-        //         );
+        //         )
+        //         .into_canon();
         //         let get_result = db.get(&spec_to_check);
         //         match (get_result.as_ref(), expected_value.as_ref()) {
         //             (Some(g), Some(e)) if g == e => {}
@@ -1222,7 +1222,7 @@ mod tests {
     }
 
     fn arb_spec_and_decision<Tgt: Target>() -> impl Strategy<Value = Decision<Tgt>> {
-        arb_canonical_spec::<Tgt>(None, None)
+        any_with::<Spec<Tgt>>((None, None))
             .prop_flat_map(|spec| {
                 let valid_actions = spec
                     .0
@@ -1233,9 +1233,6 @@ mod tests {
                         Ok(applied) => Some((ActionIdx::from(u16::try_from(i).unwrap()), applied)),
                         Err(ApplyError::ActionNotApplicable(_)) => None,
                         Err(ApplyError::OutOfMemory) => None,
-                        Err(ApplyError::SpecNotCanonical) => {
-                            unreachable!("Non-canonical Specs should be filtered")
-                        }
                     })
                     .collect::<Vec<_>>();
                 let action_idx_strategy = if valid_actions.is_empty() {
@@ -1273,7 +1270,7 @@ mod tests {
                     let MemoryLimits::Standard(max_memory) = Tgt::max_mem();
                     let first_logical = first.spec.0.clone();
                     arb_memorylimits::<Tgt>(&max_memory).prop_map(move |spec_limits| {
-                        recursively_decide_actions(&Spec(first_logical.clone(), spec_limits))
+                        recursively_decide_actions(&Spec::new(first_logical.clone(), spec_limits).into_canon())
                     })
                 },
                 1 => arb_spec_and_decision(),
@@ -1294,9 +1291,6 @@ mod tests {
                             }
                         }
                         Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => {}
-                        Err(ApplyError::SpecNotCanonical) => {
-                            panic!("Spec-to-complete must be canon")
-                        }
                     }
                 }
                 None
@@ -1329,7 +1323,6 @@ mod tests {
             .filter_map(|(i, a)| match a.apply(spec) {
                 Ok(imp) => Some((i, imp)),
                 Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => None,
-                Err(ApplyError::SpecNotCanonical) => panic!(),
             })
             .next()
         {

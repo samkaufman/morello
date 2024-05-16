@@ -112,35 +112,25 @@ where
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
 
-    let canonical_goals = goals
-        .iter()
-        .map(|g| {
-            let mut g = g.clone();
-            g.canonicalize()
-                .expect("should be possible to canonicalize goal Spec");
-            g
-        })
-        .collect::<Vec<_>>();
-
     // Group goal Specs by database page.
-    let mut grouped_canonical_goals = HashMap::<_, Vec<usize>>::new();
-    for (idx, goal) in canonical_goals.iter().enumerate() {
+    let mut grouped_goals = HashMap::<_, Vec<usize>>::new();
+    for (idx, goal) in goals.iter().enumerate() {
         let page = db.page_id(goal);
         let key = (page.table_key, page.superblock_id);
-        grouped_canonical_goals.entry(key).or_default().push(idx);
+        grouped_goals.entry(key).or_default().push(idx);
     }
 
     let thread_count = jobs
         .map(|j| j.get())
         .unwrap_or_else(rayon::current_num_threads);
 
-    let mut combined_results = vec![Default::default(); canonical_goals.len()];
+    let mut combined_results = vec![Default::default(); goals.len()];
     let mut combined_hits = 0;
     let mut combined_misses = 0;
     let mut goal_group = Vec::new();
-    for page_group in grouped_canonical_goals.values() {
+    for page_group in grouped_goals.values() {
         goal_group.clear();
-        goal_group.extend(page_group.iter().map(|&i| canonical_goals[i].clone()));
+        goal_group.extend(page_group.iter().map(|&i| goals[i].clone()));
 
         // TODO: Remove following check.
         // goal_group.iter().counts().iter().for_each(|(k, v)| {
@@ -160,7 +150,7 @@ where
             (r, search.hits, search.misses)
         } else {
             let tasks = (0..thread_count)
-                .zip(std::iter::repeat(canonical_goals.clone()))
+                .zip(std::iter::repeat(goals.to_owned()))
                 .collect::<Vec<_>>();
             // Collect all and take the result from the first call so that we get
             // deterministic results.
@@ -562,7 +552,6 @@ impl<Tgt: Target> SpecTask<Tgt> {
                     }
                 }
                 Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => {}
-                Err(ApplyError::SpecNotCanonical) => panic!(),
             };
         }
 
@@ -829,7 +818,7 @@ mod tests {
     use crate::layout::row_major;
     use crate::lspec;
     use crate::memorylimits::{MemVec, MemoryLimits};
-    use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+    use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{CpuMemoryLevel::GL, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use crate::utils::{bit_length, bit_length_inverse};
@@ -848,7 +837,7 @@ mod tests {
         #[test]
         #[ignore]
         fn test_can_synthesize_any_canonical_spec(
-            spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+            spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
         ) {
             let db = RocksDatabase::try_new(None, false, 1).unwrap();
             top_down(&db, &spec, 1, Some(nz!(1usize)));
@@ -881,7 +870,7 @@ mod tests {
         #[test]
         #[ignore]
         fn test_synthesis_at_peak_memory_yields_same_decision(
-            spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+            spec in any_with::<Spec<X86Target>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
         ) {
             let db = RocksDatabase::try_new(None, false, 1).unwrap();
             let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
@@ -890,7 +879,7 @@ mod tests {
             } else {
                 MemVec::zero::<X86Target>()
             };
-            let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
+            let lower_spec = Spec::new(spec.0, MemoryLimits::Standard(first_peak)).into_canon();
             let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, Some(nz!(1usize)));
             assert_eq!(first_solutions, lower_solutions);
         }
@@ -1133,7 +1122,7 @@ mod tests {
         } else {
             MemVec::zero::<X86Target>()
         };
-        let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
+        let lower_spec = Spec::new(spec.0, MemoryLimits::Standard(first_peak)).into_canon();
         let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1, Some(nz!(1usize)));
         assert_eq!(first_solutions, lower_solutions);
     }
@@ -1147,7 +1136,7 @@ mod tests {
         let top_memory_b = Rc::clone(&top_memory_a);
         let top_memory_c = Rc::clone(&top_memory_a);
 
-        arb_canonical_spec::<Tgt>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+        any_with::<Spec<Tgt>>((Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)))
             .prop_filter("limits should not be max", move |s| s.1 != *top_memory_a)
             .prop_flat_map(move |spec| {
                 let MemoryLimits::Standard(top_memvec) = top_memory_b.as_ref();
@@ -1170,7 +1159,7 @@ mod tests {
                 let mut raised_memory = spec.1.clone();
                 let MemoryLimits::Standard(ref mut raised_memvec) = raised_memory;
                 raised_memvec.set_unscaled(dim_idx_to_raise, raise_amount);
-                let raised_spec = Spec(spec.0.clone(), raised_memory);
+                let raised_spec = Spec::new(spec.0.clone(), raised_memory).into_canon();
                 (spec, raised_spec)
             })
     }
