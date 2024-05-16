@@ -106,8 +106,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         TensorSpec { shape, dtype, aux }
     }
 
-    pub fn layout(&self) -> Layout {
-        self.aux.layout.clone()
+    pub fn layout(&self) -> &Layout {
+        &self.aux.layout
     }
 
     pub fn set_layout(&mut self, new_layout: Layout) {
@@ -224,7 +224,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
         let (new_layout, new_contig) = if new_shape.iter().all(|&d| d.get() == 1) {
             let new_layout = row_major(new_shape.len().try_into().unwrap());
-            (new_layout.clone(), new_layout.contiguous_full())
+            let new_contig = new_layout.contiguous_full();
+            (new_layout, new_contig)
         } else {
             let dropped_dims_set = dropped_dims.iter().copied().collect::<HashSet<_>>();
             self.layout()
@@ -246,7 +247,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     pub fn can_move_to(&self, dest_layout: &Layout, dest_level: &Tgt::Level) -> bool {
         // TODO: Ideally, we remove the following case. It's a scalability issue.
         // If the destination is into a cache ("non-addressed"), then it must have the same layout.
-        if !dest_level.is_addressed() && dest_layout != &self.layout() {
+        if !dest_level.is_addressed() && dest_layout != self.layout() {
             return false;
         }
 
