@@ -1,5 +1,5 @@
 use enum_dispatch::enum_dispatch;
-use smallvec::SmallVec;
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 
@@ -95,7 +95,7 @@ pub enum ImplNode<Tgt: Target> {
 impl<Tgt: Target, T: Impl<Tgt>> ImplExt<Tgt> for T {
     fn peak_memory(&self) -> MemVec {
         let children = self.children();
-        let mut child_peaks = SmallVec::<[MemVec; 1]>::with_capacity(children.len());
+        let mut child_peaks = Vec::with_capacity(children.len());
         for child in children {
             child_peaks.push(child.peak_memory());
         }

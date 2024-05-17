@@ -9,7 +9,7 @@ use crate::{
 use itertools::{Either, Itertools};
 use log::warn;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::{iter, ops::Sub};
@@ -256,7 +256,6 @@ impl MemVec {
     /// Returns an [Iterator] over smaller power-of-two [MemVec]s.
     ///
     /// ```
-    /// # use smallvec::smallvec;
     /// # use morello::memorylimits::MemVec;
     /// # use morello::target::X86Target;
     /// let it = MemVec::new([2, 1, 0, 0]).iter_down_by_powers_of_two::<X86Target>();
@@ -326,7 +325,7 @@ impl Display for MemVec {
 
 impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
     type Domain = MemoryLimits;
-    type Codomain = SmallVec<[BimapInt; 4]>;
+    type Codomain = Vec<BimapInt>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
         match t {

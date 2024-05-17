@@ -1,6 +1,6 @@
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
+
 use std::fmt::Display;
 use std::rc::Rc;
 use std::{iter, mem};
@@ -141,9 +141,7 @@ impl<Tgt: Target> Action<Tgt> {
                             let out_idx: u8 = logical_spec.output_idx().try_into().unwrap();
                             let smaller_output_tiling = Tiling::new_simple(output_shape.clone());
                             let smaller_output = LoopTile {
-                                axes: (0..output_shape.len())
-                                    .map(|d| d.try_into().unwrap())
-                                    .collect(),
+                                axes: (0..u8::try_from(output_shape.len()).unwrap()).collect(),
                                 tile: smaller_output_tiling
                                     .apply(Param::new(out_idx, current_output.clone()))
                                     .map_err(tile_to_apply_err)?,
@@ -222,19 +220,19 @@ impl<Tgt: Target> Action<Tgt> {
 
                                         let tiles = vec![
                                             LoopTile {
-                                                axes: smallvec![0, 1],
+                                                axes: vec![0, 1],
                                                 tile: Tile::new(
-                                                    smallvec![lhs.shape()[0], *k],
-                                                    smallvec![lhs.shape()[0], *k],
+                                                    vec![lhs.shape()[0], *k],
+                                                    vec![lhs.shape()[0], *k],
                                                     Param::new(0, lhs.clone()),
                                                 )
                                                 .map_err(tile_to_apply_err)?,
                                             },
                                             LoopTile {
-                                                axes: smallvec![1, 2],
+                                                axes: vec![1, 2],
                                                 tile: Tile::new(
-                                                    smallvec![*k, rhs.shape()[1]],
-                                                    smallvec![*k, rhs.shape()[1]],
+                                                    vec![*k, rhs.shape()[1]],
+                                                    vec![*k, rhs.shape()[1]],
                                                     Param::new(1, rhs.clone()),
                                                 )
                                                 .map_err(tile_to_apply_err)?,
@@ -405,7 +403,7 @@ impl<Tgt: Target> Action<Tgt> {
                 // Reify the new Specs and TensorSpecs into applications we can
                 // nest in the Pipeline body.
                 let remainder_spec_application = {
-                    let mut params: SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]> = smallvec![];
+                    let mut params: Vec<Rc<dyn View<Tgt = Tgt>>> = vec![];
                     params.extend(remainder.inputs().iter().enumerate().map(|(i, inp)| {
                         Rc::new(Param::new(i.try_into().unwrap(), inp.clone())) as _
                     }));
@@ -413,7 +411,7 @@ impl<Tgt: Target> Action<Tgt> {
                     ImplNode::SpecApp(SpecApp::new(Spec(remainder, new_limits.clone()), params))
                 };
                 let head_spec_application = {
-                    let mut params: SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]> = smallvec![];
+                    let mut params: Vec<Rc<dyn View<Tgt = Tgt>>> = vec![];
                     // TODO: Fill in.
                     params.extend(head_spec.parameters().iter().skip(1).map(|_operand| {
                         todo!();
@@ -501,11 +499,11 @@ impl<Tgt: Target> Action<Tgt> {
                 Ok(ImplNode::Loop(Loop {
                     tiles: vec![
                         LoopTile {
-                            axes: smallvec![7, 8, 0, 1],
+                            axes: vec![7, 8, 0, 1],
                             tile: outer_image_tile,
                         },
                         LoopTile {
-                            axes: smallvec![9, 8, 0, 1],
+                            axes: vec![9, 8, 0, 1],
                             tile: outer_filters_tile,
                         },
                     ],
@@ -615,7 +613,7 @@ impl<Tgt: Target> Action<Tgt> {
                                 PrimitiveBasics {
                                     typ: PrimitiveSpecType::Move,
                                     spec_shape: left_spec.shape().into(),
-                                    dtypes: smallvec![left_spec.dtype(), right_spec.dtype()],
+                                    dtypes: vec![left_spec.dtype(), right_spec.dtype()],
                                 },
                                 vec![left_spec.aux.clone(), right_spec.aux.clone()],
                                 logical_spec.serial_only(),
@@ -681,7 +679,7 @@ impl<Tgt: Target> Action<Tgt> {
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Zero,
                             spec_shape: output_shape,
-                            dtypes: smallvec![output_dtype],
+                            dtypes: vec![output_dtype],
                         },
                         vec![output_aux],
                         logical_spec.serial_only(),
@@ -705,7 +703,7 @@ impl<Tgt: Target> Action<Tgt> {
 
                 Ok(ImplNode::Block(Block {
                     stages: vec![zero_app, accum_app],
-                    bindings: vec![smallvec![2], smallvec![0, 1, 2]],
+                    bindings: vec![vec![2], vec![0, 1, 2]],
                     parameters: operands,
                     spec: Some(spec.clone()),
                 }))

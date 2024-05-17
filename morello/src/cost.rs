@@ -6,7 +6,6 @@ use crate::target::Target;
 use crate::utils::snap_memvec_up;
 
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 
 #[derive(Clone, Eq, PartialEq, Debug, Deserialize, Serialize)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
@@ -31,7 +30,7 @@ impl Cost {
             .children()
             .iter()
             .map(|k| Cost::from_impl(k))
-            .collect::<SmallVec<[_; 3]>>();
+            .collect::<Vec<_>>();
         Cost::from_child_costs(imp, &child_costs)
     }
 
@@ -43,14 +42,11 @@ impl Cost {
         Tgt: Target,
         I: Impl<Tgt>,
     {
-        let child_main_costs = child_costs
-            .iter()
-            .map(|k| k.main)
-            .collect::<SmallVec<[_; 3]>>();
+        let child_main_costs = child_costs.iter().map(|k| k.main).collect::<Vec<_>>();
         let child_peaks = child_costs
             .iter()
             .map(|k| k.peaks.clone())
-            .collect::<SmallVec<[_; 3]>>();
+            .collect::<Vec<_>>();
         let main_cost: MainCost = imp.compute_main_cost(&child_main_costs);
         // TODO: Handle other kinds of memory, not just standard/TinyMap peaks.
         let raised_peaks = snap_memvec_up(imp.peak_memory_from_child_peaks(&child_peaks), false);

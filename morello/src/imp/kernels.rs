@@ -8,14 +8,14 @@ use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
 
 use itertools::Itertools;
-use smallvec::SmallVec;
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KernelApp<Tgt: Target> {
     pub kernel_type: Tgt::Kernel,
-    pub arguments: SmallVec<[Param<Tgt>; 3]>,
+    pub arguments: Vec<Param<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
 }
 

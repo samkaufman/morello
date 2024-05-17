@@ -15,7 +15,7 @@ use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
 use nonzero::nonzero as nz;
-use smallvec::smallvec;
+
 use std::io;
 
 fn main() {
@@ -36,7 +36,7 @@ fn main() {
     );
 
     // Manually schedule the matrix multiplication.
-    let interleaved = Layout::new(smallvec![
+    let interleaved = Layout::new(vec![
         (0, PhysDim::Dynamic),
         (1, PhysDim::Dynamic),
         (1, PhysDim::OddEven(nz!(16u32))),

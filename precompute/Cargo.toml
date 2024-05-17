@@ -14,7 +14,6 @@ log = "0.4.0"
 nonzero = "0.2.0"
 rand = "0.8.5"
 rayon = "1.7.0"
-smallvec = { version = "1.10.0", features = ["serde"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.5"

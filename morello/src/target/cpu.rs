@@ -16,7 +16,6 @@ use divrem::DivRem;
 use itertools::Itertools;
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter;
@@ -166,8 +165,7 @@ impl<T: CpuTarget> Target for T {
         // TODO: Reduce code duplication in the following
         let mut result = unpacked_layouts.clone();
 
-        let all_packing_sizes: SmallVec<[_; 3]> =
-            pack_sizes_all(dtype, &all_target_vector_bytes).collect();
+        let all_packing_sizes = pack_sizes_all(dtype, &all_target_vector_bytes).collect::<Vec<_>>();
         result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
             let Layout(dims) = original_layout;
             (0..dims.len())
@@ -189,8 +187,8 @@ impl<T: CpuTarget> Target for T {
                 })
         }));
 
-        let all_oddeven_sizes: SmallVec<[_; 3]> =
-            oddeven_sizes_all(dtype, &all_target_vector_bytes).collect();
+        let all_oddeven_sizes =
+            oddeven_sizes_all(dtype, &all_target_vector_bytes).collect::<Vec<_>>();
         result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
             let Layout(dims) = original_layout;
             (0..dims.len())
@@ -456,12 +454,12 @@ impl Kernel for CpuKernel {
             }
             CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
                 // TODO: Simplify with a closure instead of constructing all layouts AOT.
-                let layout0 = Layout::new(smallvec![
+                let layout0 = Layout::new(vec![
                     (0, PhysDim::Dynamic),
                     (1, PhysDim::Dynamic),
                     (1, PhysDim::OddEven(nz!(16u32)))
                 ]);
-                let layout1 = Layout::new(smallvec![
+                let layout1 = Layout::new(vec![
                     (1, PhysDim::Dynamic),
                     (0, PhysDim::Dynamic),
                     (0, PhysDim::OddEven(nz!(16u32)))

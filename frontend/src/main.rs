@@ -4,7 +4,7 @@ use tikv_jemallocator::Jemalloc;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::info;
-use smallvec::smallvec;
+
 use std::num::NonZeroUsize;
 use std::{io, path};
 
@@ -186,7 +186,7 @@ where
             LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Conv { accum: false },
-                    spec_shape: smallvec![
+                    spec_shape: vec![
                         *batch,
                         *filters,
                         *channels,
@@ -195,7 +195,7 @@ where
                         *filters_size,
                         *filters_size,
                     ],
-                    dtypes: smallvec![Dtype::Uint32; 3],
+                    dtypes: vec![Dtype::Uint32; 3],
                 },
                 vec![
                     TensorSpecAux::<Tgt> {

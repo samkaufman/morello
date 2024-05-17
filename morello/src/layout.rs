@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
+
 use std::{collections::HashSet, fmt::Display, hash::Hash};
 
 #[cfg(any(debug_assertions, test))]
@@ -15,7 +15,7 @@ use crate::{
 };
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
-pub struct Layout(pub SmallVec<[(u8, PhysDim); 4]>);
+pub struct Layout(pub Vec<(u8, PhysDim)>);
 
 // TODO: Remove PartialOrd and Ord
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
@@ -48,7 +48,7 @@ pub enum LayoutError {
 }
 
 impl Layout {
-    pub fn new(dims: SmallVec<[(u8, PhysDim); 4]>) -> Layout {
+    pub fn new(dims: Vec<(u8, PhysDim)>) -> Layout {
         #[cfg(debug_assertions)]
         {
             assert!(!dims.is_empty());
@@ -333,7 +333,7 @@ impl Layout {
         let first_contig_idx = dims.len() - usize::from(source_contig);
 
         let mut new_contig = source_contig;
-        let mut new_dims = SmallVec::with_capacity(dims.len());
+        let mut new_dims = Vec::with_capacity(dims.len());
         new_dims.push(dims[0]);
 
         for (idx, (dim, phys_dim)) in dims.iter().skip(1).enumerate() {
@@ -490,8 +490,8 @@ impl Layout {
         logical_shape: &[DimSize],
     ) -> Result<Shape, LayoutError> {
         let Layout(dims) = self;
-        let mut physical_shape = SmallVec::with_capacity(dims.len());
-        let mut logical_shape_remaining: SmallVec<[u32; 5]> = Shape::from(logical_shape)
+        let mut physical_shape = Vec::with_capacity(dims.len());
+        let mut logical_shape_remaining: Vec<u32> = Shape::from(logical_shape)
             .into_iter()
             .map(|x| x.get())
             .collect();
@@ -542,9 +542,9 @@ impl Layout {
         &self,
         logical_dim: u8,
         logical_shape: &[DimSize],
-    ) -> Result<SmallVec<[(usize, DimSize); 3]>, LayoutError> {
+    ) -> Result<Vec<(usize, DimSize)>, LayoutError> {
         let Layout(dims) = self;
-        let mut physical_shape = smallvec![];
+        let mut physical_shape = vec![];
         let mut remaining_size = logical_shape[usize::from(logical_dim)].get();
         for (idx, (dim, fixed_size)) in dims.iter().enumerate().rev() {
             if *dim != logical_dim {
@@ -736,7 +736,7 @@ pub mod macros {
     macro_rules! layout {
         ( $($dim:tt),*$(,)* ) => {
             $crate::layout::Layout::new(
-                smallvec::smallvec![ $( layout!(@inner $dim) ),* ]
+                vec![ $( layout!(@inner $dim) ),* ]
             )
         };
         ( @inner ($dim:expr, PhysDim::OddEven($ds:expr)) ) => {{
@@ -1124,7 +1124,7 @@ mod tests {
 
     #[test]
     fn test_interleaved_indexing_expression_1() {
-        let layout = Layout::new(smallvec![(0, PhysDim::OddEven(DimSize::new(8).unwrap()))]);
+        let layout = Layout::new(vec![(0, PhysDim::OddEven(DimSize::new(8).unwrap()))]);
         let expr_id = OpaqueSymbol::new();
         let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![8]);
 
@@ -1135,9 +1135,9 @@ mod tests {
 
     #[test]
     fn test_interleaved_indexing_expression_2() {
-        let layout = Layout::new(smallvec![
+        let layout = Layout::new(vec![
             (0, PhysDim::Dynamic),
-            (0, PhysDim::OddEven(DimSize::new(8).unwrap()))
+            (0, PhysDim::OddEven(DimSize::new(8).unwrap())),
         ]);
         let expr_id = OpaqueSymbol::new();
         let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![16]);
@@ -1149,9 +1149,9 @@ mod tests {
 
     #[test]
     fn test_interleaved_indexing_expression_3() {
-        let layout = Layout::new(smallvec![
+        let layout = Layout::new(vec![
             (0, PhysDim::Dynamic),
-            (1, PhysDim::OddEven(DimSize::new(8).unwrap()))
+            (1, PhysDim::OddEven(DimSize::new(8).unwrap())),
         ]);
         let expr_id = OpaqueSymbol::new();
         let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![2, 8]);

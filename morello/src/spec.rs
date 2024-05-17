@@ -21,7 +21,7 @@ use anyhow::Context;
 use itertools::Either;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec, ToSmallVec};
+
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
@@ -64,7 +64,7 @@ pub enum LogicalSpec<Tgt: Target> {
 pub struct PrimitiveBasics {
     pub typ: PrimitiveSpecType,
     pub spec_shape: Shape,
-    pub dtypes: SmallVec<[Dtype; 3]>,
+    pub dtypes: Vec<Dtype>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -81,12 +81,12 @@ pub enum PrimitiveSpecType {
 /// Each dimension of an input tensor/tiling may have a binding to an output
 /// tensor dimension. This means that loops should zip those dimensions of each
 /// tensor to ensure data dependencies are correct. As an example, a matrix
-/// multiplication will give the bindings `smallvec![Some(0), None]` and
-/// `smallvec![None, Some(1)]` for each of its inputs, indicating that the first
+/// multiplication will give the bindings `vec![Some(0), None]` and
+/// `vec![None, Some(1)]` for each of its inputs, indicating that the first
 /// dimension of the first input (the m dimension) is bound to the m dimension
 /// of the output, and so on for the n dimension.
 #[derive(Debug)]
-pub struct TilingInference(pub Vec<(Tiling, SmallVec<[Option<u8>; 5]>)>);
+pub struct TilingInference(pub Vec<(Tiling, Vec<Option<u8>>)>);
 
 /// A [BiMap] which extends [LogicalSpecSurMap] with memory limits dimensions.
 ///
@@ -200,7 +200,7 @@ impl PrimitiveBasics {
                 debug_assert_eq!(new_operands[0].0[0], new_operands[2].0[0]);
                 debug_assert_eq!(new_operands[1].0[1], new_operands[2].0[1]);
                 debug_assert_eq!(new_operands[0].0[1], new_operands[1].0[0]);
-                self.spec_shape = smallvec![
+                self.spec_shape = vec![
                     new_operands[0].0[0],
                     new_operands[0].0[1],
                     new_operands[1].0[1],
@@ -214,7 +214,7 @@ impl PrimitiveBasics {
                     panic!()
                 };
                 assert_eq!(c, alt_c);
-                self.spec_shape = smallvec![b, f, c, h, w, fh, fw];
+                self.spec_shape = vec![b, f, c, h, w, fh, fw];
                 // TODO: Assert output shape is expected.
             }
             PrimitiveSpecType::Move => {
@@ -239,13 +239,13 @@ impl PrimitiveBasics {
         operand_auxes.into_iter().cloned().collect()
     }
 
-    pub fn parameter_shapes(&self) -> SmallVec<[Shape; 3]> {
+    pub fn parameter_shapes(&self) -> Vec<Shape> {
         match self.typ {
             PrimitiveSpecType::Matmul { .. } => {
                 let [m, k, n] = self.spec_shape[..] else {
                     panic!("Matmul spec_shape must have length 3")
                 };
-                smallvec![smallvec![m, k], smallvec![k, n], smallvec![m, n]]
+                vec![vec![m, k], vec![k, n], vec![m, n]]
             }
             PrimitiveSpecType::Conv { .. } => {
                 let [b, f, c, h, w, fh, fw] = self.spec_shape[..] else {
@@ -259,19 +259,19 @@ impl PrimitiveBasics {
                     fh,
                     fw
                 );
-                let img = smallvec![b, c, h, w];
-                let filt = smallvec![f, c, fh, fw];
+                let img = vec![b, c, h, w];
+                let filt = vec![f, c, fh, fw];
                 let out = conv_infer_output_shape(&img, &filt);
-                smallvec![img, filt, out]
+                vec![img, filt, out]
             }
             PrimitiveSpecType::Move => {
-                smallvec![self.spec_shape.clone(), self.spec_shape.clone()]
+                vec![self.spec_shape.clone(), self.spec_shape.clone()]
             }
-            PrimitiveSpecType::Zero => smallvec![self.spec_shape.clone()],
+            PrimitiveSpecType::Zero => vec![self.spec_shape.clone()],
         }
     }
 
-    pub fn parameter_dtypes(&self) -> SmallVec<[Dtype; 3]> {
+    pub fn parameter_dtypes(&self) -> Vec<Dtype> {
         self.dtypes.clone()
     }
 
@@ -287,17 +287,17 @@ impl PrimitiveBasics {
             ) => TilingInference(vec![
                 (
                     Tiling::new_sliding(
-                        smallvec![smaller_output.shape()[0], spec_shape[1]],
-                        smallvec![smaller_output.step_sizes()[0], spec_shape[1]],
+                        vec![smaller_output.shape()[0], spec_shape[1]],
+                        vec![smaller_output.step_sizes()[0], spec_shape[1]],
                     ),
-                    smallvec![Some(0), None],
+                    vec![Some(0), None],
                 ),
                 (
                     Tiling::new_sliding(
-                        smallvec![spec_shape[1], smaller_output.shape()[1]],
-                        smallvec![spec_shape[1], smaller_output.step_sizes()[1]],
+                        vec![spec_shape[1], smaller_output.shape()[1]],
+                        vec![spec_shape[1], smaller_output.step_sizes()[1]],
                     ),
-                    smallvec![None, Some(1)],
+                    vec![None, Some(1)],
                 ),
             ]),
             (
@@ -335,8 +335,8 @@ impl PrimitiveBasics {
                 new_filters_steps[0] = smaller_output.step_sizes()[1];
 
                 // Construct the bindings Vecs.
-                let image_bindings = smallvec![Some(0), None, None, None];
-                let filter_bindings = smallvec![None, Some(1), None, None];
+                let image_bindings = vec![Some(0), None, None, None];
+                let filter_bindings = vec![None, Some(1), None, None];
 
                 TilingInference(vec![
                     (
@@ -376,18 +376,18 @@ impl PrimitiveBasics {
         }
     }
 
-    pub fn parameter_dim_axes(&self) -> Vec<SmallVec<[u8; 4]>> {
+    pub fn parameter_dim_axes(&self) -> Vec<Vec<u8>> {
         match self.typ {
             PrimitiveSpecType::Matmul { .. } => {
-                vec![smallvec![0, 2], smallvec![2, 1], smallvec![0, 1]]
+                vec![vec![0, 2], vec![2, 1], vec![0, 1]]
             }
             PrimitiveSpecType::Conv { .. } => {
                 // Only correct for 2 spatial dimensions.
                 // TODO: Extend this to arbitrary number of spatial dimensions.
                 let (b, f, c, h, w, fh, fw) = (0, 1, 2, 3, 4, 5, 6);
-                let img = smallvec![b, c, h, w];
-                let filt = smallvec![f, c, fh, fw];
-                let out = smallvec![b, f, h, w];
+                let img = vec![b, c, h, w];
+                let filt = vec![f, c, fh, fw];
+                let out = vec![b, f, h, w];
                 vec![img, filt, out]
             }
             PrimitiveSpecType::Move { .. } | PrimitiveSpecType::Zero { .. } => self
@@ -504,14 +504,14 @@ impl PrimitiveSpecType {
                 let ([m, _k], [_, n]) = (inputs[0], inputs[1]) else {
                     panic!("Matmul inputs must have 2 dimensions each");
                 };
-                smallvec![*m, *n]
+                vec![*m, *n]
             }
             PrimitiveSpecType::Conv { .. } => {
                 let ([b, _, h, w], [f, _, fh, fw]) = (inputs[0], inputs[1]) else {
                     panic!("Conv inputs must have 4 dimensions each");
                 };
                 debug_assert!(h.get() >= fh.get() && w.get() >= fw.get());
-                smallvec![
+                vec![
                     *b,
                     *f,
                     DimSize::new(1 + h.get() - fh.get()).unwrap(),
@@ -520,7 +520,7 @@ impl PrimitiveSpecType {
             }
             PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
                 // The shape and dtype match for moves and zero.
-                inputs[0].to_smallvec()
+                inputs[0].to_vec()
             }
         }
     }
@@ -572,7 +572,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    pub fn parameters(&self) -> SmallVec<[TensorSpec<Tgt>; 3]> {
+    pub fn parameters(&self) -> Vec<TensorSpec<Tgt>> {
         match self {
             LogicalSpec::Primitive(basics, auxes, _) => match basics.typ {
                 PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => basics
@@ -627,7 +627,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    pub fn inputs(&self) -> SmallVec<[TensorSpec<Tgt>; 3]> {
+    pub fn inputs(&self) -> Vec<TensorSpec<Tgt>> {
         let mut operands = self.parameters();
         operands.remove(self.output_idx());
         operands
@@ -969,13 +969,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     // TODO: Can we replace this entirely with Spec shapes?
-    pub fn operands_dim_axes(&self) -> Vec<SmallVec<[u8; 4]>> {
+    pub fn operands_dim_axes(&self) -> Vec<Vec<u8>> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => basics.parameter_dim_axes(),
             LogicalSpec::Compose { components, .. } => {
                 let mut max_seen = 0;
-                let mut accum: Vec<SmallVec<[u8; 4]>> = Vec::new();
-                let mut last_out_subs: Option<SmallVec<[u8; 4]>> = None;
+                let mut accum: Vec<Vec<u8>> = Vec::new();
+                let mut last_out_subs: Option<Vec<u8>> = None;
 
                 for compose_subspec in components.iter().rev() {
                     let mut kls_axes = Self::increment_dims_axes(
@@ -1014,10 +1014,10 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    fn increment_dims_axes(subs: &[SmallVec<[u8; 4]>], inc: &mut u8) -> Vec<SmallVec<[u8; 4]>> {
+    fn increment_dims_axes(subs: &[Vec<u8>], inc: &mut u8) -> Vec<Vec<u8>> {
         let mut result = Vec::new();
         for dims in subs {
-            let mut subresult = SmallVec::with_capacity(dims.len());
+            let mut subresult = Vec::with_capacity(dims.len());
             for &d in dims {
                 *inc = (*inc).max(d);
                 subresult.push(d + *inc);
@@ -1028,13 +1028,10 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         result
     }
 
-    fn sub_axis(
-        source: &[SmallVec<[u8; 4]>],
-        substitutions: &HashMap<u8, u8>,
-    ) -> Vec<SmallVec<[u8; 4]>> {
+    fn sub_axis(source: &[Vec<u8>], substitutions: &HashMap<u8, u8>) -> Vec<Vec<u8>> {
         let mut result = Vec::new();
         for dims in source {
-            let mut subresult = SmallVec::with_capacity(dims.len());
+            let mut subresult = Vec::with_capacity(dims.len());
             for &d in dims {
                 subresult.push(*substitutions.get(&d).unwrap_or(&d));
             }
@@ -1250,7 +1247,7 @@ where
     Aa: Clone,
 {
     type Domain = LogicalSpec<Tgt>;
-    type Codomain = ((SpecKey, SmallVec<[Aa; 3]>), SmallVec<[BimapInt; 10]>);
+    type Codomain = ((SpecKey, Vec<Aa>), Vec<BimapInt>);
     type DomainIter = Box<dyn Iterator<Item = Self::Domain>>;
 
     fn apply(&self, spec: &LogicalSpec<Tgt>) -> Self::Codomain {
@@ -1313,7 +1310,7 @@ where
 
 impl BiMap for PrimitiveBasicsBimap {
     type Domain = PrimitiveBasics;
-    type Codomain = (SpecKey, SmallVec<[BimapInt; 10]>);
+    type Codomain = (SpecKey, Vec<BimapInt>);
 
     fn apply(&self, basics: &PrimitiveBasics) -> Self::Codomain {
         let PrimitiveBasics {
@@ -1342,7 +1339,7 @@ impl BiMap for PrimitiveBasicsBimap {
                 )
             }
             PrimitiveSpecType::Conv { accum } => {
-                let mut v: SmallVec<_> = once(!accum as _).chain(shifted_shape).collect();
+                let mut v: Vec<_> = once(!accum as _).chain(shifted_shape).collect();
                 // Conv's image dimensions must be larger than or equal to the corresponding filter
                 // dimensions (the final two dimensions in `v`/`shifted_shape`), so we'll subtract
                 // the the filter sizes from the image sizes, thereby normalizing the image dims. to
@@ -1379,7 +1376,7 @@ impl BiMap for PrimitiveBasicsBimap {
                     _ => unreachable!(),
                 };
 
-                let mut spec_shape: SmallVec<[BimapInt; 10]> = v.iter().skip(1).copied().collect();
+                let mut spec_shape: Vec<BimapInt> = v.iter().skip(1).copied().collect();
                 // Reverse the normalization of image dimensions (see `apply`).
                 if matches!(key, SpecKey::Conv { .. }) {
                     spec_shape[3] += spec_shape[5];
@@ -1428,7 +1425,7 @@ impl BiMap for PrimitiveBasicsBimap {
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Zero,
                     spec_shape: unshifted_shape.map(|d| DimSize::new(d).unwrap()).collect(),
-                    dtypes: smallvec![*dtype],
+                    dtypes: vec![*dtype],
                 }
             }
         };
@@ -1497,7 +1494,7 @@ fn gen_tile_sizes<Tgt: Target>(
             if drop_given && d == one_dim {
                 None
             } else {
-                Some(smallvec![d])
+                Some(vec![d])
             }
         }));
     }
@@ -1508,7 +1505,7 @@ fn gen_tile_sizes<Tgt: Target>(
             gen_tile_sizes::<Tgt>(&tensor_shape[1..], false, multi_dim).flat_map(move |rest| {
                 let tensor_shape = tensor_shape.clone();
                 dim_range(tensor_shape[0], true).flat_map(move |d| {
-                    let mut new_shape = smallvec![d];
+                    let mut new_shape = vec![d];
                     new_shape.extend(rest.clone());
                     if drop_given && tensor_shape == new_shape[..] {
                         None
@@ -1519,7 +1516,7 @@ fn gen_tile_sizes<Tgt: Target>(
             }),
         )
     } else {
-        let tensor_shape = tensor_shape.to_smallvec();
+        let tensor_shape = tensor_shape.to_vec();
         let own_shape_iter = if !drop_given
             && tensor_shape
                 .iter()
@@ -1632,13 +1629,13 @@ pub mod macros {
         ($dim:expr; $n:expr) => {{
             use $crate::spec::macros::internal::IntoDimSize;
             // Bind to a variable with an explicit type to help out type inference.
-            let sv: $crate::common::Shape = smallvec::smallvec![ ($dim).into_dim_size(); $n ];
+            let sv: $crate::common::Shape = vec![ ($dim).into_dim_size(); $n ];
             sv
         }};
         ($($dim:expr),*$(,)*) => {{
             use $crate::spec::macros::internal::IntoDimSize;
             // Bind to a variable with an explicit type to help out type inference.
-            let sv: $crate::common::Shape = smallvec::smallvec![ $( ($dim).into_dim_size() ),* ];
+            let sv: $crate::common::Shape = vec![ $( ($dim).into_dim_size() ),* ];
             sv
         }};
     }
@@ -1778,7 +1775,6 @@ mod tests {
     use crate::{layout::row_major, target::CpuMemoryLevel::GL};
     use crate::{lspec, shape};
     use proptest::prelude::*;
-    use smallvec::smallvec;
 
     #[test]
     fn test_lspec_1() {
@@ -1814,7 +1810,7 @@ mod tests {
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Matmul { accum: true },
                 spec_shape: shape![2, 3, 3],
-                dtypes: smallvec![Dtype::Uint8, Dtype::Sint8, Dtype::Uint16],
+                dtypes: vec![Dtype::Uint8, Dtype::Sint8, Dtype::Uint16],
             },
             vec![lhs, rhs, out],
             true,
@@ -1990,7 +1986,7 @@ mod tests {
                         let basics = PrimitiveBasics {
                             typ: PrimitiveSpecType::Move,
                             spec_shape: Shape::from(shape.into_iter().map(|x| DimSize::new(x).unwrap()).collect::<Vec<_>>()),
-                            dtypes: smallvec![dtype, dtype],
+                            dtypes: vec![dtype, dtype],
                         };
                         let auxes_strategy = basics
                             .parameter_shapes()

@@ -8,7 +8,7 @@ use crate::tensorspec::TensorSpec;
 use crate::views::{Param, Tile, View};
 
 use itertools::Itertools;
-use smallvec::SmallVec;
+
 use std::collections::HashMap;
 use std::{iter, slice};
 
@@ -44,7 +44,7 @@ pub struct Loop<Tgt: Target> {
 
 #[derive(Debug, Clone)]
 pub struct LoopTile<Tgt: Target> {
-    pub axes: SmallVec<[u8; 5]>,
+    pub axes: Vec<u8>,
     pub tile: Tile<Param<Tgt>>,
 }
 

@@ -9,7 +9,7 @@ use crate::{
 };
 
 use auto_impl::auto_impl;
-use smallvec::{smallvec, SmallVec};
+
 use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
@@ -62,11 +62,11 @@ pub trait ViewExt: View {
     where
         Self: Sized,
     {
-        let dims_smallvec = dims.into_iter().collect::<SmallVec<_>>();
-        let spec = self.spec().squeeze_dims(&dims_smallvec);
+        let dims_vec = dims.into_iter().collect::<Vec<_>>();
+        let spec = self.spec().squeeze_dims(&dims_vec);
         SqueezeDimsView {
             inner: self,
-            dims: dims_smallvec,
+            dims: dims_vec,
             spec,
         }
     }
@@ -83,7 +83,7 @@ pub trait ViewExt: View {
         let [h, w] = self.shape() else {
             panic!("Cannot transpose a tensor with shape {:?}", self.shape());
         };
-        let shape = smallvec![*w, *h];
+        let shape = vec![*w, *h];
 
         let (transposed_layout, new_contig) = self
             .spec()
@@ -137,7 +137,7 @@ impl<V: View> CacheView<V> {
 #[derive(Debug, Clone)]
 pub struct Tile<V: View> {
     shape: Shape,
-    step_sizes: SmallVec<[DimSize; 5]>,
+    step_sizes: Vec<DimSize>,
     pub view: V,
     expr_term_id: OpaqueSymbol,
     spec: TensorSpec<V::Tgt>,
@@ -146,7 +146,7 @@ pub struct Tile<V: View> {
 #[derive(Debug)]
 pub struct SqueezeDimsView<V: View> {
     pub inner: V,
-    pub dims: SmallVec<[u8; 4]>,
+    pub dims: Vec<u8>,
     spec: TensorSpec<V::Tgt>,
 }
 

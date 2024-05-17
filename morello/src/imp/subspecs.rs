@@ -8,7 +8,7 @@ use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View};
 
 use itertools::Itertools;
-use smallvec::SmallVec;
+
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 // TODO: Do we still want to be generic over the specific Spec?
 #[derive(Debug, Clone)]
-pub struct SpecApp<Tgt, P>(pub P, pub SmallVec<[Rc<dyn View<Tgt = Tgt>>; 3]>)
+pub struct SpecApp<Tgt, P>(pub P, pub Vec<Rc<dyn View<Tgt = Tgt>>>)
 where
     Tgt: Target,
     P: Borrow<Spec<Tgt>> + Clone;
@@ -34,7 +34,7 @@ where
         let cast_args = args
             .into_iter()
             .map(|v| Rc::new(v) as _)
-            .collect::<SmallVec<_>>();
+            .collect::<Vec<_>>();
         Self(spec, cast_args)
     }
 }

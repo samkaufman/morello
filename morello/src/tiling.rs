@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+
 use std::fmt::Debug;
 
 use crate::common::{DimSize, Shape};
@@ -8,7 +8,7 @@ use crate::views::{Tile, TileError, View};
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Tiling {
     shape: Shape,
-    step_sizes: SmallVec<[DimSize; 5]>,
+    step_sizes: Vec<DimSize>,
 }
 
 /// A tiling over either Spec or operand shapes.

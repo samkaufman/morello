@@ -7,7 +7,7 @@ use log::{debug, info};
 use nonzero::nonzero as nz;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
-use smallvec::{smallvec, SmallVec};
+
 use std::collections::HashSet;
 use std::{iter, path};
 
@@ -101,16 +101,16 @@ fn main_per_db(args: &Args, db: &RocksDatabase) {
                     LogicalSpec::Primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::Conv { accum: false },
-                            spec_shape: smallvec![
+                            spec_shape: vec![
                                 args.batch,
                                 args.filters,
                                 args.channels,
                                 args.size,
                                 args.size,
                                 fs,
-                                fs
+                                fs,
                             ],
-                            dtypes: smallvec![Dtype::Uint32; 3],
+                            dtypes: vec![Dtype::Uint32; 3],
                         },
                         vec![a.clone(), a.clone(), a.clone()],
                         true,
@@ -230,7 +230,7 @@ fn logical_specs_to_compute(
         for pt in morello::utils::sum_seqs(&bound_pt, stage) {
             let mut task = vec![];
             // TODO: Factor out below key
-            for sp in SurMap::apply_inverse(&surmap, &(spec_key.clone(), SmallVec::from_vec(pt))) {
+            for sp in SurMap::apply_inverse(&surmap, &(spec_key.clone(), pt)) {
                 if sp.is_canonical() {
                     task.push(sp);
                 }

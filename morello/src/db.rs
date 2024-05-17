@@ -19,7 +19,7 @@ use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
 use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Prehasher};
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+
 use wtinylfu::WTinyLfuCache;
 
 use std::collections::HashMap;
@@ -28,10 +28,10 @@ use std::ops::{Deref, DerefMut, Range};
 use std::path;
 use std::sync::Arc;
 
-type DbKey = (TableKey, SmallVec<[BimapInt; 10]>); // TODO: Rename to BlockKey for consistency?
-type TableKey = (SpecKey, SmallVec<[(Layout, u8, Option<NonZeroU32>); 3]>);
+type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
+type TableKey = (SpecKey, Vec<(Layout, u8, Option<NonZeroU32>)>);
 type SuperBlockKey = DbKey;
-type SuperBlock = HashMap<SmallVec<[BimapInt; 10]>, DbBlock>;
+type SuperBlock = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionIdx = u16;
 
 // TODO: Select these at runtime.
@@ -62,7 +62,7 @@ struct ShardArray([Mutex<Shard>; CONCURRENT_CACHE_SHARDS]);
 pub struct PageId<'a> {
     db: &'a RocksDatabase,
     pub(crate) table_key: TableKey,
-    pub(crate) superblock_id: SmallVec<[BimapInt; 10]>,
+    pub(crate) superblock_id: Vec<BimapInt>,
 }
 
 struct Shard {
@@ -106,7 +106,7 @@ pub struct WholeBlock {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActionCostVec(pub SmallVec<[(ActionIdx, Cost); 1]>);
+pub struct ActionCostVec(pub Vec<(ActionIdx, Cost)>);
 
 pub enum GetPreference<T, V> {
     Hit(T),
@@ -156,7 +156,7 @@ impl RocksDatabase {
         }
     }
 
-    pub fn get_impl<Tgt>(&self, query: &Spec<Tgt>) -> Option<SmallVec<[ImplNode<Tgt>; 1]>>
+    pub fn get_impl<Tgt>(&self, query: &Spec<Tgt>) -> Option<Vec<ImplNode<Tgt>>>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -177,14 +177,14 @@ impl RocksDatabase {
                         .collect::<Vec<_>>();
                     root.replace_children(new_children.into_iter())
                 })
-                .collect::<SmallVec<_>>(),
+                .collect::<Vec<_>>(),
         )
     }
 
     pub fn get_with_preference<Tgt>(
         &self,
         query: &Spec<Tgt>,
-    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
+    ) -> GetPreference<ActionCostVec, Vec<ActionIdx>>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -241,7 +241,7 @@ impl RocksDatabase {
         }
     }
 
-    pub fn put<Tgt>(&self, spec: Spec<Tgt>, decisions: SmallVec<[(ActionIdx, Cost); 1]>)
+    pub fn put<Tgt>(&self, spec: Spec<Tgt>, decisions: Vec<(ActionIdx, Cost)>)
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -275,7 +275,7 @@ impl RocksDatabase {
             let block_pt = joined_row
                 .iter()
                 .map(|(b, _)| *b)
-                .collect::<SmallVec<[BimapInt; 10]>>();
+                .collect::<Vec<BimapInt>>();
             // TODO: Factor out this tuple construction
             let mut superblock_guard = self.load_live_superblock_mut(
                 &self
@@ -609,7 +609,7 @@ impl DbBlock {
         _containing_db: &RocksDatabase,
         _query: &Spec<Tgt>,
         inner_pt: &[u8],
-    ) -> GetPreference<ActionCostVec, SmallVec<[ActionIdx; 1]>>
+    ) -> GetPreference<ActionCostVec, Vec<ActionIdx>>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -618,10 +618,7 @@ impl DbBlock {
         match self {
             DbBlock::Whole(b) => {
                 // TODO: Propogate an action index preference.
-                let inner_pt_usize = inner_pt
-                    .iter()
-                    .map(|v| *v as usize)
-                    .collect::<SmallVec<[_; 10]>>();
+                let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
                 match b.get(&inner_pt_usize) {
                     Some(r) => GetPreference::Hit(r),
                     None => GetPreference::Miss(None),
@@ -743,20 +740,20 @@ impl WholeBlock {
 }
 
 impl Deref for ActionCostVec {
-    type Target = SmallVec<[(ActionIdx, Cost); 1]>;
+    type Target = Vec<(ActionIdx, Cost)>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl AsRef<SmallVec<[(ActionIdx, Cost); 1]>> for ActionCostVec {
-    fn as_ref(&self) -> &SmallVec<[(ActionIdx, Cost); 1]> {
+impl AsRef<Vec<(ActionIdx, Cost)>> for ActionCostVec {
+    fn as_ref(&self) -> &Vec<(ActionIdx, Cost)> {
         self.deref()
     }
 }
 
-fn superblockify_pt(block_pt: &[BimapInt]) -> SmallVec<[BimapInt; 10]> {
+fn superblockify_pt(block_pt: &[BimapInt]) -> Vec<BimapInt> {
     block_pt.iter().map(|&i| i / SUPERBLOCK_FACTOR).collect()
 }
 
@@ -826,8 +823,8 @@ where
     })
 }
 
-fn db_shape<Tgt: Target>(rank: usize) -> SmallVec<[Option<NonZeroUsize>; 10]> {
-    let mut shape = smallvec::smallvec![None; rank];
+fn db_shape<Tgt: Target>(rank: usize) -> Vec<Option<NonZeroUsize>> {
+    let mut shape = vec![None; rank];
     let MemoryLimits::Standard(m) = Tgt::max_mem();
     for (level_idx, dest_idx) in ((rank - m.len())..rank).enumerate() {
         shape[dest_idx] =
@@ -837,11 +834,9 @@ fn db_shape<Tgt: Target>(rank: usize) -> SmallVec<[Option<NonZeroUsize>; 10]> {
 }
 
 /// Converts a given global coordinate into block and within-block coordinates.
-fn blockify_point(
-    mut pt: SmallVec<[BimapInt; 10]>,
-) -> (SmallVec<[BimapInt; 10]>, SmallVec<[u8; 10]>) {
+fn blockify_point(mut pt: Vec<BimapInt>) -> (Vec<BimapInt>, Vec<u8>) {
     let rank = pt.len();
-    let mut inner_pt = SmallVec::with_capacity(rank);
+    let mut inner_pt = Vec::with_capacity(rank);
     for (i, d) in pt.iter_mut().enumerate() {
         let (outer, inner) = db_key_scale(i, *d, rank);
         *d = outer;
@@ -850,11 +845,11 @@ fn blockify_point(
     (pt, inner_pt)
 }
 
-pub fn deblockify_points(a: &[BimapInt], b: &[u8]) -> SmallVec<[BimapInt; 10]> {
+pub fn deblockify_points(a: &[BimapInt], b: &[u8]) -> Vec<BimapInt> {
     debug_assert_eq!(a.len(), b.len());
 
     let rank = a.len();
-    let mut result = SmallVec::with_capacity(rank);
+    let mut result = Vec::with_capacity(rank);
     for i in 0..rank {
         let s = block_size_dim(i, rank);
         result.push(s * a[i] + BimapInt::from(b[i]));
@@ -868,11 +863,8 @@ pub fn deblockify_points(a: &[BimapInt], b: &[u8]) -> SmallVec<[BimapInt; 10]> {
 fn put_range_to_fill<Tgt, B>(
     bimap: &B,
     spec: &Spec<Tgt>,
-    impls: &SmallVec<[(ActionIdx, Cost); 1]>,
-) -> (
-    TableKey,
-    (SmallVec<[BimapInt; 10]>, SmallVec<[BimapInt; 10]>),
-)
+    impls: &Vec<(ActionIdx, Cost)>,
+) -> (TableKey, (Vec<BimapInt>, Vec<BimapInt>))
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -982,7 +974,7 @@ where
         ImplNode::SpecApp(s) => lookup(s),
         _ => {
             let children = imp.children();
-            let mut child_costs: SmallVec<[_; 3]> = SmallVec::with_capacity(children.len());
+            let mut child_costs: Vec<_> = Vec::with_capacity(children.len());
             for c in children {
                 child_costs.push(compute_cost(c, lookup));
             }
@@ -1303,8 +1295,8 @@ mod tests {
             }
             _ => {
                 let old_children = partial_impl.children();
-                let mut new_children = SmallVec::<[_; 3]>::with_capacity(old_children.len());
-                let mut new_children_costs = SmallVec::<[_; 3]>::with_capacity(old_children.len());
+                let mut new_children = Vec::with_capacity(old_children.len());
+                let mut new_children_costs = Vec::with_capacity(old_children.len());
                 for child in old_children {
                     let (c1, c2) = complete_impl(child)?;
                     new_children.push(c1);

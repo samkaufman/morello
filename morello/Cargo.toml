@@ -29,7 +29,6 @@ rle_vec = { git = "https://github.com/samkaufman/rle_vec.git", branch = "morello
     "serialize",
 ] }
 serde = { version = "1.0.160", features = ["derive"] }
-smallvec = { version = "1.10.0", features = ["serde"] }
 tempfile = "3"
 thiserror = "1.0.47"
 nonzero = "0.2.0"

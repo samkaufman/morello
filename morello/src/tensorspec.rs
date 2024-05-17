@@ -1,7 +1,7 @@
 use anyhow::Context;
 use itertools::iproduct;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::num::NonZeroU32;
@@ -34,7 +34,7 @@ pub struct TensorSpecAux<Tgt: Target> {
 }
 
 pub struct TensorSpecAuxSurMap<Tgt: Target> {
-    tensor_shape: SmallVec<[DimSize; 3]>, // TODO: Make into &'a [DimSize]
+    tensor_shape: Vec<DimSize>, // TODO: Make into &'a [DimSize]
     tensor_dtype: Dtype,
     phantom: std::marker::PhantomData<Tgt>,
 }
@@ -344,7 +344,7 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
             // As a special case, `packings` is empty if there are no packed dims.
             // (This avoids potentially spilling onto the heap for unpacked
             // layouts.)
-            let mut packings = SmallVec::<[_; 4]>::new();
+            let mut packings = Vec::new();
             for (logical_dim, s) in dims.as_slice() {
                 if matches!(s, PhysDim::Packed(_)) {
                     if packings.is_empty() {

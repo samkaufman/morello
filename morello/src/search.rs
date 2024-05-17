@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-use smallvec::{smallvec, SmallVec};
+
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -70,7 +70,7 @@ enum WorkingPartialImpl<Tgt: Target> {
 pub struct ImplReducer {
     results: ImplReducerResults,
     top_k: usize,
-    preferences: SmallVec<[ActionIdx; 1]>,
+    preferences: Vec<ActionIdx>,
 }
 
 #[derive(Debug)]
@@ -85,7 +85,7 @@ pub fn top_down<Tgt>(
     goal: &Spec<Tgt>,
     top_k: usize,
     jobs: Option<NonZeroUsize>,
-) -> (SmallVec<[(ActionIdx, Cost); 1]>, u64, u64)
+) -> (Vec<(ActionIdx, Cost)>, u64, u64)
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -698,7 +698,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
             if *partial_impls_incomplete == 0 {
                 // TODO: Check that the final costs are below `task_goal`'s peaks.
                 // TODO: Make sure completions prop. up the request DAG.
-                let tmp_replacement = ImplReducer::new(0, SmallVec::new());
+                let tmp_replacement = ImplReducer::new(0, Vec::new());
                 let removed_reducer: ImplReducer = replace(reducer, tmp_replacement);
                 let final_result = removed_reducer.finalize();
                 search.db.put(task_goal.clone(), final_result.clone());
@@ -709,7 +709,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
 }
 
 impl ImplReducer {
-    pub fn new(top_k: usize, preferences: SmallVec<[ActionIdx; 1]>) -> Self {
+    pub fn new(top_k: usize, preferences: Vec<ActionIdx>) -> Self {
         debug_assert!(preferences.len() <= top_k);
         debug_assert!(
             preferences.iter().all_unique(),
@@ -776,10 +776,10 @@ impl ImplReducer {
         }
     }
 
-    fn finalize(self) -> SmallVec<[(ActionIdx, Cost); 1]> {
+    fn finalize(self) -> Vec<(ActionIdx, Cost)> {
         match self.results {
-            ImplReducerResults::One(None) => smallvec![],
-            ImplReducerResults::One(Some((cost, action_idx))) => smallvec![(action_idx, cost)],
+            ImplReducerResults::One(None) => vec![],
+            ImplReducerResults::One(Some((cost, action_idx))) => vec![(action_idx, cost)],
             ImplReducerResults::Many(actions) => actions
                 .into_iter()
                 .map(|(cost, action_idx)| (action_idx, cost))
@@ -815,7 +815,7 @@ where
                 .children()
                 .iter()
                 .map(|child| compute_impl_cost(child, costs))
-                .collect::<SmallVec<[_; 1]>>();
+                .collect::<Vec<_>>();
             Cost::from_child_costs(imp, &child_costs)
         }
     }
@@ -836,7 +836,7 @@ mod tests {
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::sample::select;
-    use smallvec::smallvec;
+
     use std::rc::Rc;
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);
@@ -899,7 +899,7 @@ mod tests {
         fn test_implreducer_can_sort_any_top_k_actions(
             (top_k, mut action_costs) in arb_top_k_and_action_costs()
         ) {
-            let preferences = smallvec![];
+            let preferences = vec![];
             let mut reducer = ImplReducer::new(top_k, preferences);
 
             for (cost, action_idx) in &action_costs {
@@ -946,17 +946,17 @@ mod tests {
     #[test]
     fn test_implreducer_no_actions() {
         let top_k = 1;
-        let preferences = smallvec![];
+        let preferences = vec![];
         let reducer = ImplReducer::new(top_k, preferences);
 
-        let expected: SmallVec<[_; 1]> = smallvec![];
+        let expected: Vec<_> = vec![];
         assert_eq!(reducer.finalize(), expected);
     }
 
     #[test]
     fn test_implreducer_exactly_one_action() {
         let top_k = 1;
-        let preferences = smallvec![];
+        let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -965,14 +965,14 @@ mod tests {
         reducer.insert(0, cost1.clone());
         reducer.insert(2, cost1.clone());
 
-        let expected: SmallVec<[_; 1]> = smallvec![(0, cost1)];
+        let expected: Vec<_> = vec![(0, cost1)];
         assert_eq!(reducer.finalize(), expected);
     }
 
     #[test]
     fn test_implreducer_sort_by_cost() {
         let top_k = 3;
-        let preferences = smallvec![];
+        let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -983,14 +983,14 @@ mod tests {
         reducer.insert(1, cost3.clone());
         reducer.insert(2, cost2.clone());
 
-        let expected: SmallVec<[_; 1]> = smallvec![(0, cost1), (2, cost2), (1, cost3)];
+        let expected: Vec<_> = vec![(0, cost1), (2, cost2), (1, cost3)];
         assert_eq!(reducer.finalize(), expected);
     }
 
     #[test]
     fn test_implreducer_sort_by_action_idx() {
         let top_k = 3;
-        let preferences = smallvec![];
+        let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -999,15 +999,14 @@ mod tests {
         reducer.insert(0, cost1.clone());
         reducer.insert(2, cost1.clone());
 
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(0, cost1.clone()), (1, cost1.clone()), (2, cost1.clone())];
+        let expected: Vec<_> = vec![(0, cost1.clone()), (1, cost1.clone()), (2, cost1.clone())];
         assert_eq!(reducer.finalize(), expected);
     }
 
     #[test]
     fn test_implreducer_sort_by_cost_then_action_idx() {
         let top_k = 3;
-        let preferences = smallvec![];
+        let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -1017,15 +1016,14 @@ mod tests {
         reducer.insert(0, cost2.clone());
         reducer.insert(2, cost1.clone());
 
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(1, cost1.clone()), (2, cost1.clone()), (0, cost2)];
+        let expected: Vec<_> = vec![(1, cost1.clone()), (2, cost1.clone()), (0, cost2)];
         assert_eq!(reducer.finalize(), expected);
     }
 
     #[test]
     fn test_implreducer_preference_replacement() {
         let top_k = 3;
-        let preferences = smallvec![0, 2, 3];
+        let preferences = vec![0, 2, 3];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -1035,15 +1033,14 @@ mod tests {
         reducer.insert(2, cost1.clone());
         reducer.insert(3, cost1.clone());
 
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(0, cost1.clone()), (1, cost1.clone()), (3, cost1)];
+        let expected: Vec<_> = vec![(0, cost1.clone()), (1, cost1.clone()), (3, cost1)];
         assert_eq!(reducer.finalize(), expected);
     }
 
     #[test]
     fn test_implreducer_preference_replacement_and_sort_by_cost() {
         let top_k = 3;
-        let preferences = smallvec![0, 2, 3];
+        let preferences = vec![0, 2, 3];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -1054,15 +1051,14 @@ mod tests {
         reducer.insert(2, cost2.clone());
         reducer.insert(3, cost1.clone());
 
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(3, cost1.clone()), (0, cost2.clone()), (1, cost2)];
+        let expected: Vec<_> = vec![(3, cost1.clone()), (0, cost2.clone()), (1, cost2)];
         assert_eq!(reducer.finalize(), expected);
     }
 
     #[test]
     fn test_implreducer_preference_replacement_and_sort_by_cost_then_action_idx() {
         let top_k = 3;
-        let preferences = smallvec![3, u16::MAX, 0];
+        let preferences = vec![3, u16::MAX, 0];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -1076,15 +1072,14 @@ mod tests {
         reducer.insert(3, cost1.clone());
         // 3, 2, 1 -> 2, 3, 1
 
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(2, cost1.clone()), (3, cost1.clone()), (1, cost2)];
+        let expected: Vec<_> = vec![(2, cost1.clone()), (3, cost1.clone()), (1, cost2)];
         assert_eq!(reducer.finalize(), expected);
     }
 
     #[test]
     fn test_implreducer_cost_replacement() {
         let top_k = 3;
-        let preferences = smallvec![];
+        let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -1096,14 +1091,14 @@ mod tests {
         reducer.insert(2, cost3.clone());
         reducer.insert(3, cost2.clone());
 
-        let expected: SmallVec<[_; 1]> = smallvec![(0, cost1), (3, cost2), (1, cost3)];
+        let expected: Vec<_> = vec![(0, cost1), (3, cost2), (1, cost3)];
         assert_eq!(reducer.finalize(), expected);
     }
 
     #[test]
     fn test_implreducer_no_cost_replacement() {
         let top_k = 3;
-        let preferences = smallvec![];
+        let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
         let cost1 = create_simple_cost(1);
@@ -1114,8 +1109,7 @@ mod tests {
         reducer.insert(2, cost1.clone());
         reducer.insert(3, cost2.clone());
 
-        let expected: SmallVec<[_; 1]> =
-            smallvec![(0, cost1.clone()), (1, cost1.clone()), (2, cost1.clone())];
+        let expected: Vec<_> = vec![(0, cost1.clone()), (1, cost1.clone()), (2, cost1.clone())];
         assert_eq!(reducer.finalize(), expected, "no replacement should occur");
     }
 

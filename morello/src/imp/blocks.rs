@@ -1,4 +1,3 @@
-use smallvec::SmallVec;
 use std::collections::HashMap;
 
 use crate::cost::MainCost;
@@ -13,8 +12,8 @@ use crate::views::{Param, View};
 #[derive(Debug, Clone)]
 pub struct Block<Tgt: Target> {
     pub stages: Vec<ImplNode<Tgt>>,
-    pub bindings: Vec<SmallVec<[u8; 3]>>,
-    pub parameters: SmallVec<[TensorSpec<Tgt>; 3]>,
+    pub bindings: Vec<Vec<u8>>,
+    pub parameters: Vec<TensorSpec<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
 }
 

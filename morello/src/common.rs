@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::num::NonZeroU32;
 
 pub type DimSize = NonZeroU32;
-pub type Shape = smallvec::SmallVec<[DimSize; 5]>;
+pub type Shape = Vec<DimSize>;
 pub type Contig = u8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]

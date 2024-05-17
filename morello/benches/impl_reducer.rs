@@ -1,5 +1,5 @@
 use iai_callgrind::main;
-use smallvec::smallvec;
+
 use std::hint::black_box;
 
 use morello::cost::Cost;
@@ -9,7 +9,7 @@ use morello::search::ImplReducer;
 
 #[export_name = "morello_bench_impl_reducer::init_reduce_costs"]
 fn init_reduce_costs(k: u16) -> (Vec<(ActionIdx, Cost)>, ImplReducer) {
-    let reducer = ImplReducer::new(usize::from(k), smallvec![]);
+    let reducer = ImplReducer::new(usize::from(k), vec![]);
     // Generate some "random" entries to reduce.
     let entries = (0..k + 10000)
         .map(|i| {
