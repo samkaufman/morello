@@ -263,6 +263,10 @@ impl<T> NDArray<T> {
         T: Clone + Eq,
         I: Clone + Iterator<Item = T>,
     {
+        if let Some(filled) = filled {
+            assert_eq!(dim_ranges.len(), filled.shape().len());
+        }
+
         // Update dim_ranges with a Range for the k dimension, which will be (partially) filled with
         // repeated copies out of inner_slice_iter.
         let k = u32::try_from(self.shape[self.shape.len() - 1]).unwrap();
@@ -274,9 +278,13 @@ impl<T> NDArray<T> {
         // could accomplish by moving the k dimension to the front of the shape.
         if k == 1 {
             if let Some(single_value) = inner_slice_iter.next() {
+                // A value of 1 in `filled` means that there are zero actions. 0 means empty.  So
+                // this will fill through anywhere there isn't at least one action, which is safe.
                 // TODO: The following `1` should be a function of the index in the iterator, not
                 //   a constant. (It's okay to fill in parts of the table which are blocked by a
                 //   too-low `filled` value.)
+                // TODO: This is really a database-specific detail, not an NDArray detail. It
+                //   shouldn't be decided here.
                 self.fill_region_ext(&dim_ranges_ext, single_value, filled.map(|f| (1, f)));
             }
             return;
