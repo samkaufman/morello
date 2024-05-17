@@ -457,12 +457,12 @@ impl Kernel for CpuKernel {
                 let layout0 = Layout::new(vec![
                     (0, PhysDim::Dynamic),
                     (1, PhysDim::Dynamic),
-                    (1, PhysDim::OddEven(nz!(16u32)))
+                    (1, PhysDim::OddEven(nz!(16u32))),
                 ]);
                 let layout1 = Layout::new(vec![
                     (1, PhysDim::Dynamic),
                     (0, PhysDim::Dynamic),
-                    (0, PhysDim::OddEven(nz!(16u32)))
+                    (0, PhysDim::OddEven(nz!(16u32))),
                 ]);
                 dotproductloop_applies(operands, Dtype::Float32, &[layout0, layout1])
             }
