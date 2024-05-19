@@ -9,7 +9,7 @@ use crate::{
     tensorspec::TensorSpec,
 };
 use ndarray::prelude::*;
-use ndarray_conv::{Conv2DExt, PaddingMode, PaddingSize};
+use ndarray_conv::{ConvExt, ConvMode, PaddingMode};
 use num_traits::AsPrimitive;
 use std::process::Command;
 use std::{
@@ -118,8 +118,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     vec![lhs.into_dyn(), rhs.into_dyn(), out.into_dyn()]
                 }
                 PrimitiveSpecType::Conv { accum } => {
-                    use ndarray_conv::*;
-
                     let [lhs, rhs, out] = args
                         .try_into()
                         .unwrap_or_else(|_| panic!("expected 3 args"));
@@ -142,11 +140,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                             for f in 0..rhs.shape()[0] {
                                 let single_img_ch = lhs.slice_copy(s![b, c, .., ..]);
                                 let filter_ch = rhs.slice_copy(s![f, c, .., ..]);
-                                out.slice_mut(s![b, c, .., ..]).assign(
-                                    &single_img_ch
-                                        .conv_2d(&filter_ch, PaddingSize::Valid)
-                                        .unwrap(),
-                                );
+                                out.slice_mut(s![b, c, .., ..])
+                                    .assign(&single_img_ch.conv_2d(&filter_ch));
                             }
                         }
                     }
@@ -336,36 +331,40 @@ impl DynArray<Ix2> {
         }
     }
 
-    pub fn conv_2d(
-        &self,
-        kernel: &DynArray<Ix2>,
-        conv_type: PaddingSize<2>,
-    ) -> Option<DynArray<Ix2>> {
+    pub fn conv_2d(&self, kernel: &DynArray<Ix2>) -> DynArray<Ix2> {
         match (self, kernel) {
             (DynArray::Uint8(img), DynArray::Uint8(ker)) => img
-                .conv_2d(ker, conv_type, PaddingMode::Zeros)
-                .map(DynArray::Uint8),
+                .conv(ker, ConvMode::Same, PaddingMode::Zeros)
+                .map(DynArray::Uint8)
+                .unwrap(),
             (DynArray::Sint8(img), DynArray::Sint8(ker)) => img
-                .conv_2d(ker, conv_type, PaddingMode::Zeros)
-                .map(DynArray::Sint8),
+                .conv(ker, ConvMode::Same, PaddingMode::Zeros)
+                .map(DynArray::Sint8)
+                .unwrap(),
             (DynArray::Uint16(img), DynArray::Uint16(ker)) => img
-                .conv_2d(ker, conv_type, PaddingMode::Zeros)
-                .map(DynArray::Uint16),
+                .conv(ker, ConvMode::Same, PaddingMode::Zeros)
+                .map(DynArray::Uint16)
+                .unwrap(),
             (DynArray::Sint16(img), DynArray::Sint16(ker)) => img
-                .conv_2d(ker, conv_type, PaddingMode::Zeros)
-                .map(DynArray::Sint16),
+                .conv(ker, ConvMode::Same, PaddingMode::Zeros)
+                .map(DynArray::Sint16)
+                .unwrap(),
             (DynArray::Uint32(img), DynArray::Uint32(ker)) => img
-                .conv_2d(ker, conv_type, PaddingMode::Zeros)
-                .map(DynArray::Uint32),
+                .conv(ker, ConvMode::Same, PaddingMode::Zeros)
+                .map(DynArray::Uint32)
+                .unwrap(),
             (DynArray::Sint32(img), DynArray::Sint32(ker)) => img
-                .conv_2d(ker, conv_type, PaddingMode::Zeros)
-                .map(DynArray::Sint32),
+                .conv(ker, ConvMode::Same, PaddingMode::Zeros)
+                .map(DynArray::Sint32)
+                .unwrap(),
             (DynArray::Float32(img), DynArray::Float32(ker)) => img
-                .conv_2d(ker, conv_type, PaddingMode::Zeros)
-                .map(DynArray::Float32),
+                .conv(ker, ConvMode::Same, PaddingMode::Zeros)
+                .map(DynArray::Float32)
+                .unwrap(),
             (DynArray::Bfloat16(img), DynArray::Bfloat16(ker)) => img
-                .conv_2d(ker, conv_type, PaddingMode::Zeros)
-                .map(DynArray::Bfloat16),
+                .conv(ker, ConvMode::Same, PaddingMode::Zeros)
+                .map(DynArray::Bfloat16)
+                .unwrap(),
             _ => panic!("Mismatched types"),
         }
     }
