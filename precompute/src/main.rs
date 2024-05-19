@@ -190,7 +190,6 @@ fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
             stage_idx,
             stage_start.elapsed()
         );
-        info!("Database stats: {}", db.stats_str());
 
         write_stages_completed(&fingerprint, db_path, stage_idx + 1);
 

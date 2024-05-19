@@ -42,6 +42,7 @@ const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 
 pub struct FilesDatabase {
+    dir_handle: Arc<DirPathHandle>,
     binary_scale_shapes: bool,
     k: u8,
     shards: ShardArray,
@@ -123,6 +124,7 @@ impl FilesDatabase {
             Mutex::new(Shard::new(i, Arc::clone(&dir_handle)))
         }));
         Self {
+            dir_handle,
             binary_scale_shapes,
             k,
             shards,
@@ -307,52 +309,6 @@ impl FilesDatabase {
         Some(self.k.into())
     }
 
-    pub fn stats_str(&self) -> String {
-        // let start = Instant::now();
-        // let mut runs_filled = 0;
-        // let mut lens_filled = 0;
-        // let mut runs_main_costs = 0;
-        // let mut lens_main_costs = 0;
-        // let mut runs_peaks = 0;
-        // let mut lens_peaks = 0;
-        // let mut runs_depths_actions = 0;
-        // let mut lens_depths_actions = 0;
-        // for block in &self.blocks {
-        //     match block.value() {
-        //         DbBlock::Whole(e) => {
-        //             runs_filled += e.filled.runs_len();
-        //             lens_filled += e.filled.len();
-        //             runs_main_costs += e.main_costs.runs_len();
-        //             lens_main_costs += e.main_costs.len();
-        //             runs_peaks += e.peaks.runs_len();
-        //             lens_peaks += e.peaks.len();
-        //             runs_depths_actions += e.depths_actions.runs_len();
-        //             lens_depths_actions += e.depths_actions.len();
-        //         }
-        //     }
-        // }
-        // let stat_duration = start.elapsed();
-        // format!(
-        //     "blocks={} \
-        //     runs_filled={} runs_main_costs={} runs_peaks={} \
-        //     runs_depthsactions={} cr_filled={:.5} \
-        //     cr_main_costs={:.5} cr_peaks={:.5} cr_depthsactions={:.5} statms={}",
-        //     self.blocks.len(),
-        //     runs_filled,
-        //     runs_main_costs,
-        //     runs_peaks,
-        //     runs_depths_actions,
-        //     runs_filled as f32 / lens_filled as f32,
-        //     runs_main_costs as f32 / lens_main_costs as f32,
-        //     runs_peaks as f32 / lens_peaks as f32,
-        //     runs_depths_actions as f32 / lens_depths_actions as f32,
-        //     stat_duration.as_millis(),
-        // )
-
-        // TODO: Reimplement.
-        "".to_owned()
-    }
-
     pub fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
     where
         Tgt: Target,
@@ -405,6 +361,90 @@ impl FilesDatabase {
 
     fn shard_index(&self, key: &Prehashed<SuperBlockKey>) -> usize {
         *Prehashed::as_hash(key) as usize % self.shards.0.len()
+    }
+
+    /// Write statistics about the database to stdout.
+    ///
+    /// This may be expensive and multi-threaded.
+    #[cfg(feature = "db-stats")]
+    pub fn analyze(&self, skip_read_errors: bool) {
+        // TODO: What to do about missing superblocks, if anything?
+
+        fn visit_dir(
+            root: &path::Path,
+            path: &path::Path,
+            writer: &mut csv::Writer<std::io::Stdout>,
+            skip_read_errors: bool,
+        ) {
+            // Since we don't revisit blocks, bypass the in-mem. cache and read from disk.
+            for file_entry in fs::read_dir(path).unwrap() {
+                let file_entry = file_entry.unwrap();
+                let entry_path = file_entry.path();
+                if entry_path.is_dir() {
+                    visit_dir(root, &file_entry.path(), writer, skip_read_errors);
+                    continue;
+                }
+
+                let shortened_entry_path_str = entry_path.strip_prefix(root).unwrap();
+                let entry_path_str = format!("{}", shortened_entry_path_str.display());
+
+                let superblock_file = fs::File::open(entry_path).unwrap();
+                let buf_reader = std::io::BufReader::new(superblock_file);
+
+                let superblock: SuperBlock = match bincode::deserialize_from(buf_reader) {
+                    Ok(superblock) => superblock,
+                    Err(e) => {
+                        if skip_read_errors {
+                            log::warn!("Error reading superblock: {:?}", e);
+                            continue;
+                        }
+                        panic!("Error reading superblock: {:?}", e);
+                    }
+                };
+
+                for (block_pt, block) in &superblock {
+                    let DbBlock::Whole(e) = block;
+                    writer
+                        .write_record([
+                            &entry_path_str,
+                            &format!("{:?}", block_pt),
+                            &e.filled.runs_len().to_string(),
+                            &e.filled.len().to_string(),
+                            &e.main_costs.runs_len().to_string(),
+                            &e.main_costs.len().to_string(),
+                            &e.peaks.runs_len().to_string(),
+                            &e.peaks.len().to_string(),
+                            &e.depths_actions.runs_len().to_string(),
+                            &e.depths_actions.len().to_string(),
+                        ])
+                        .unwrap();
+                }
+            }
+        }
+
+        let mut writer = csv::Writer::from_writer(std::io::stdout());
+        writer
+            .write_record([
+                "superblock_path",
+                "block_pt",
+                "runs_filled",
+                "lens_filled",
+                "runs_main_costs",
+                "lens_main_costs",
+                "runs_peaks",
+                "lens_peaks",
+                "runs_depths_actions",
+                "lens_depths_actions",
+            ])
+            .unwrap();
+
+        visit_dir(
+            self.dir_handle.path(),
+            self.dir_handle.path(),
+            &mut writer,
+            skip_read_errors,
+        );
+        writer.flush().unwrap();
     }
 }
 

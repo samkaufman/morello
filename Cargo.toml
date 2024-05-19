@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "morello",
+    "dbstats",
     "frontend",
     "precompute"
 ]
