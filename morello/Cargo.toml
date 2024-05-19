@@ -44,7 +44,7 @@ strum = { version = "0.26.2", features = ["derive"] }
 [dev-dependencies]
 iai-callgrind = "0.4.0"
 proptest = "1.2.0"
-proptest-derive = "0.3.0"
+proptest-derive = "0.4.0"
 
 [[bench]]
 name = "impl_reducer"
