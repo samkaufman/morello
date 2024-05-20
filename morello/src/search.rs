@@ -827,19 +827,19 @@ mod tests {
     use crate::common::DimSize;
     use crate::db::RocksDatabase;
     use crate::layout::row_major;
-    use crate::lspec;
     use crate::memorylimits::{MemVec, MemoryLimits};
     use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{CpuMemoryLevel::GL, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use crate::utils::{bit_length, bit_length_inverse};
+    use crate::{dimsize, lspec};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::sample::select;
 
     use std::rc::Rc;
 
-    const TEST_SMALL_SIZE: DimSize = nz!(2u32);
+    const TEST_SMALL_SIZE: DimSize = dimsize!(2);
     const TEST_SMALL_MEM: u64 = 2048;
 
     proptest! {

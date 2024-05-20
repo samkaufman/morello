@@ -119,15 +119,14 @@ impl Tiling {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shape;
+    use crate::{dimsize, shape};
     use itertools::Itertools;
-    use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::proptest;
     use std::cmp::max;
 
     const ALLOW_ARBITRARY_SLIDES: bool = false;
-    const MAX_ORIGIN_SIZE: DimSize = nz!(20u32);
+    const MAX_ORIGIN_SIZE: DimSize = dimsize!(20);
 
     /// A Strategy for generating valid Shapes.
     fn shape_strategy(max_size: DimSize, max_dims: u8) -> impl Strategy<Value = Shape> {
@@ -137,7 +136,7 @@ mod tests {
 
     /// A Strategy for generating valid Tilings.
     fn tiling_strategy(dims: u8) -> impl Strategy<Value = Tiling> {
-        shape_strategy(nz!(4u32), dims)
+        shape_strategy(dimsize!(4), dims)
             .prop_flat_map(|shp| {
                 let rank = shp.len();
                 if ALLOW_ARBITRARY_SLIDES {
@@ -181,7 +180,13 @@ mod tests {
 
     #[test]
     fn test_tiling_sliding() {
-        const OUTER_SHAPE: [DimSize; 5] = [nz!(1u32), nz!(4u32), nz!(2u32), nz!(4u32), nz!(4u32)];
+        const OUTER_SHAPE: [DimSize; 5] = [
+            dimsize!(1),
+            dimsize!(4),
+            dimsize!(2),
+            dimsize!(4),
+            dimsize!(4),
+        ];
         let t = Tiling::new_sliding(shape![1, 3, 1, 3, 3], shape![1, 3, 2, 1, 1]);
         assert_eq!(t.steps_dim(0, OUTER_SHAPE[0]), 1);
         assert_eq!(t.steps_dim(1, OUTER_SHAPE[1]), 2);

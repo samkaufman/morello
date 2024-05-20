@@ -2,7 +2,6 @@ use morello::codegen::{CodeGen, CpuCodeGenThreadStyle};
 use morello::common::{DimSize, Dtype};
 use morello::cost::Cost;
 use morello::layout::{col_major, row_major, Layout, PhysDim};
-use morello::lspec;
 use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
@@ -13,15 +12,14 @@ use morello::target::{
 };
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
-
-use nonzero::nonzero as nz;
+use morello::{dimsize, lspec};
 
 use std::io;
 
 fn main() {
-    const M: DimSize = nz!(1u32);
-    const K: DimSize = nz!(2048u32);
-    const N: DimSize = nz!(16384u32);
+    const M: DimSize = dimsize!(1);
+    const K: DimSize = dimsize!(2048);
+    const N: DimSize = dimsize!(16384);
 
     // Let's construct a multi-threaded matrix-matrix multiplication which takes two bf16
     // matrices and produces a f32 matrix.
@@ -39,7 +37,7 @@ fn main() {
     let interleaved = Layout::new(vec![
         (0, PhysDim::Dynamic),
         (1, PhysDim::Dynamic),
-        (1, PhysDim::OddEven(nz!(16u32))),
+        (1, PhysDim::OddEven(dimsize!(16))),
     ]);
 
     let implementation = spec
@@ -53,14 +51,19 @@ fn main() {
         .subschedule(&[0], &|z| {
             z.tile_out(&[1, 16], false)
                 .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
-                .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(16u32)))
+                .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(dimsize!(16)))
                 .subschedule(&[0], &|z| z.place(CpuKernel::VectorAssign))
                 .subschedule(&[1], &|z| {
-                    z.move_param(1, CpuMemoryLevel::VRF, interleaved.clone(), Some(nz!(8u32)))
-                        .subschedule(&[0], &|z| z.place(CpuKernel::VectorInterleaveBf16F32))
-                        .subschedule(&[1], &|z| {
-                            z.tile_out(&[1, 8], false).place(CpuKernel::VectorAssign)
-                        })
+                    z.move_param(
+                        1,
+                        CpuMemoryLevel::VRF,
+                        interleaved.clone(),
+                        Some(dimsize!(8)),
+                    )
+                    .subschedule(&[0], &|z| z.place(CpuKernel::VectorInterleaveBf16F32))
+                    .subschedule(&[1], &|z| {
+                        z.tile_out(&[1, 8], false).place(CpuKernel::VectorAssign)
+                    })
                 })
         })
         .subschedule(&[1], &|body| {

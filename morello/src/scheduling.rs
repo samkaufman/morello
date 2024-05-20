@@ -1,4 +1,3 @@
-use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 
 use std::fmt::Display;
@@ -7,6 +6,7 @@ use std::{iter, mem};
 
 use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Dtype, Shape};
+use crate::dimsize;
 use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{Loop, LoopTile};
@@ -376,9 +376,7 @@ impl<Tgt: Target> Action<Tgt> {
                     let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
                         if level == &l {
                             u64::from(next_to_outer_basics.dtypes[ntob_out_idx].size())
-                                * u64::from(
-                                    output_shape.into_iter().map(|d| d.get()).product::<u32>(),
-                                )
+                                * u64::from(output_shape.iter().map(|d| d.get()).product::<u32>())
                         } else {
                             0u64
                         }
@@ -454,7 +452,7 @@ impl<Tgt: Target> Action<Tgt> {
                 let [outer_image_tile, outer_filters_tile] = [0, 1].map(|idx| {
                     let shape = operands[idx].shape()[..2]
                         .iter()
-                        .chain(iter::repeat(&nz!(1u32)).take((rank - 2).into()))
+                        .chain(iter::repeat(&dimsize!(1)).take((rank - 2).into()))
                         .copied()
                         .collect::<Shape>();
                     let step_sizes = shape.clone();

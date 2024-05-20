@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use std::{collections::HashSet, fmt::Display, hash::Hash};
 
-#[cfg(any(debug_assertions, test))]
+#[cfg(test)]
 use nonzero::nonzero as nz;
 
 use crate::{
@@ -583,7 +583,7 @@ impl Layout {
             for (_, size) in dims {
                 debug_assert_ne!(
                     size,
-                    &PhysDim::Packed(nz!(1u32)),
+                    &PhysDim::Packed(crate::dimsize!(1)),
                     "Size-1 packing in layout: {:?}",
                     dims
                 );
@@ -741,13 +741,13 @@ pub mod macros {
         };
         ( @inner ($dim:expr, PhysDim::OddEven($ds:expr)) ) => {{
             use $crate::layout::PhysDim;
-            use $crate::spec::macros::internal::IntoDimSize;
-            ($dim, PhysDim::OddEven(($ds).into_dim_size()))
+            use $crate::dimsize;
+            ($dim, PhysDim::OddEven(dimsize!($ds)))
         }};
         ( @inner ($dim:expr, PhysDim::Packed($ds:expr)) ) => {{
             use $crate::layout::PhysDim;
-            use $crate::spec::macros::internal::IntoDimSize;
-            ($dim, PhysDim::Packed(($ds).into_dim_size()))
+            use $crate::dimsize;
+            ($dim, PhysDim::Packed(dimsize!($ds)))
         }};
         ( @inner ($dim:expr, PhysDim::Dynamic) ) => {{
             use $crate::layout::PhysDim;

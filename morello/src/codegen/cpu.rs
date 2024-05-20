@@ -1,5 +1,4 @@
 use itertools::{Either, Itertools};
-use nonzero::nonzero as nz;
 use std::collections::HashMap;
 use std::fmt::{self, Write};
 use std::iter;
@@ -18,7 +17,6 @@ use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferVar;
 use crate::pprint::{pprint_write, ImplPrintStyle};
-use crate::shape;
 use crate::target::cpu::{DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE};
 use crate::target::{
     cpu::{DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_STRIP_SIZE},
@@ -26,6 +24,7 @@ use crate::target::{
 };
 use crate::utils::{indent, LinePrefixWrite, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
+use crate::{dimsize, shape};
 
 const STACK_CUTOFF: u32 = 256;
 
@@ -951,7 +950,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
                         let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
 
-                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, dimsize!(8));
                         let vbf16 = get_vector(
                             Tgt::vec_types(),
                             Dtype::Bfloat16,
@@ -1063,7 +1062,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             })
                             .collect::<Vec<_>>();
 
-                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, dimsize!(8));
                         let vbf16 = get_vector(
                             Tgt::vec_types(),
                             Dtype::Bfloat16,
@@ -1183,7 +1182,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             })
                             .collect::<Vec<_>>();
 
-                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, dimsize!(8));
                         let vbf16 = get_vector(
                             Tgt::vec_types(),
                             Dtype::Bfloat16,
@@ -1358,13 +1357,13 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         let intermediate_dtype = arguments[0].spec().dtype();
                         let intermediate_lower = self.make_buffer(
                             &shape![1, 32],
-                            Some(nz!(32u32)),
+                            Some(dimsize!(32)),
                             intermediate_dtype,
                             VRF,
                         );
                         let intermediate_higher = self.make_buffer(
                             &shape![1, 32],
-                            Some(nz!(32u32)),
+                            Some(dimsize!(32)),
                             intermediate_dtype,
                             VRF,
                         );
@@ -1426,7 +1425,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
                         let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
 
-                        let vf8 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        let vf8 = get_vector(Tgt::vec_types(), Dtype::Float32, dimsize!(8));
                         writeln!(
                             w,
                             "{0}{2} = ({1}){shift_fn}(*({3}*)(&{4}), 16);",

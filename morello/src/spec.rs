@@ -39,7 +39,7 @@ const MULTI_DIM_TILING: bool = false;
 const MOVE_RESULTS_CAPACITY: usize = 16;
 
 #[cfg(test)]
-const ARBITRARY_SPEC_MAX_SIZE: DimSize = nonzero::nonzero!(8u32);
+const ARBITRARY_SPEC_MAX_SIZE: DimSize = crate::dimsize!(8);
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
 #[serde(bound = "")]
@@ -461,7 +461,7 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
                     .into_iter()
                     .map(|x| DimSize::new(x).unwrap())
                     .collect(),
-                dtypes: dtypes.into(),
+                dtypes,
             })
             .boxed()
     }
@@ -1625,17 +1625,33 @@ pub mod macros {
     }
 
     #[macro_export]
+    macro_rules! dimsize {
+        (0) => {
+            compile_error!("0 is not allowed for DimSize.")
+        };
+        ($dim:literal) => {{
+            const _: () = {
+                let _x: u32 = $dim;
+            };
+            unsafe { std::num::NonZeroU32::new_unchecked($dim) }
+        }};
+        ($dim:expr) => {{
+            use $crate::spec::macros::internal::IntoDimSize;
+            ($dim).into_dim_size()
+        }};
+    }
+    pub use dimsize;
+
+    #[macro_export]
     macro_rules! shape {
         ($dim:expr; $n:expr) => {{
-            use $crate::spec::macros::internal::IntoDimSize;
             // Bind to a variable with an explicit type to help out type inference.
-            let sv: $crate::common::Shape = vec![ ($dim).into_dim_size(); $n ];
+            let sv: $crate::common::Shape = vec![ $crate::dimsize!($dim); $n ];
             sv
         }};
-        ($($dim:expr),*$(,)*) => {{
-            use $crate::spec::macros::internal::IntoDimSize;
+        ($($dim:expr),*$(,)?) => {{
             // Bind to a variable with an explicit type to help out type inference.
-            let sv: $crate::common::Shape = vec![ $( ($dim).into_dim_size() ),* ];
+            let sv: $crate::common::Shape = vec![ $( $crate::dimsize!($dim) ),* ];
             sv
         }};
     }
@@ -1650,12 +1666,24 @@ pub mod macros {
         }};
         ( @inner $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),*, $s:literal ) ) => {{
             use $crate::spec::macros::internal::IntoDimSize;
+            lspec!(@primitive $typ(
+                ($shp).into_iter().map(|x| x.into_dim_size()).collect(),
+                $( ($($opterms)*) ),* , $s
+            ))
+        }};
+        ( @inner $typ:tt( [$($ds:expr),*$(,)?], $( ($($opterms:tt)*) ),*, $s:literal ) ) => {
+            lspec!(@primitive $typ(
+                vec![ $( $crate::dimsize!($ds) ),* ],
+                $( ($($opterms)*) ),* , $s
+            ))
+        };
 
+        ( @primitive $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),*, $s:literal ) ) => {{
             let auxes = [ $( lspec!(@tensorspecaux_tup $($opterms)*) ),* ];
             let dtypes = auxes.iter().map(|v| v.0.clone()).collect();
             let basics = PrimitiveBasics {
                 typ: lspec!(@primitive_spec_type $typ),
-                spec_shape: ($shp).into_iter().map(|x| x.into_dim_size()).collect(),
+                spec_shape: $shp,
                 dtypes,
             };
             LogicalSpec::Primitive(

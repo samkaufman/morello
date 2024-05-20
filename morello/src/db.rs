@@ -235,7 +235,7 @@ impl RocksDatabase {
         let (table_key, global_pt_lhs) = bimap.apply(lhs);
         let (block_pt, _) = blockify_point(global_pt_lhs);
         PageId {
-            db: &self,
+            db: self,
             table_key,
             superblock_id: superblockify_pt(&block_pt),
         }
@@ -1094,7 +1094,7 @@ mod tests {
 
             // Put all decisions into database.
             for d in decision.visit_decisions() {
-                db.put(d.spec.clone(), d.actions_costs.clone().into());
+                db.put(d.spec.clone(), d.actions_costs.clone());
             }
 
             let peaks = if let Some((_, c)) = decision.actions_costs.first() {
@@ -1111,7 +1111,7 @@ mod tests {
                     bit_length(p)..=bit_length(l)
                 })
                 .multi_cartesian_product();
-            let expected = ActionCostVec(decision.actions_costs.into());
+            let expected = ActionCostVec(decision.actions_costs);
             for limit_to_check_bits in filled_limits_iter {
                 let limit_to_check_vec = limit_to_check_bits.iter().copied().map(bit_length_inverse).collect::<Vec<_>>();
                 let limit_to_check = MemoryLimits::Standard(MemVec::new(limit_to_check_vec.try_into().unwrap()));
