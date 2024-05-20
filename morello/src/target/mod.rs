@@ -89,3 +89,13 @@ pub enum TargetId {
     X86,
     Arm,
 }
+
+impl Default for TargetId {
+    fn default() -> Self {
+        match std::env::consts::ARCH {
+            "x86" | "x86_64" => TargetId::X86,
+            "arm" | "aarch64" => TargetId::Arm,
+            arch => unimplemented!("Architecture {} not supported", arch),
+        }
+    }
+}
