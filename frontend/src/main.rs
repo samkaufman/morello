@@ -56,7 +56,7 @@ struct Args {
     impl_style: ImplPrintStyle,
 
     /// Target architecture
-    #[arg(long, value_enum, default_value_t = TargetId::X86)]
+    #[arg(long, value_enum, default_value_t = TargetId::default())]
     target: TargetId,
 
     /// Number of parallel jobs for top-down search
