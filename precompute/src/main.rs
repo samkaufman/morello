@@ -63,6 +63,10 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
+
+    #[cfg(feature = "db-stats")]
+    log::info!("DB statistic collection enabled");
+
     let db = FilesDatabase::new(args.db.as_deref(), true, K);
     main_per_db(&args, &db, args.db.as_deref());
 

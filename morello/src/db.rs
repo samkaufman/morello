@@ -102,6 +102,9 @@ pub struct WholeBlock {
     pub main_costs: NDArray<MainCost>,
     pub peaks: NDArray<MemVec>,
     pub depths_actions: NDArray<(u8, ActionIdx)>,
+    #[cfg(feature = "db-stats")]
+    #[serde(skip)]
+    access_counts: Mutex<Option<NDArray<bool>>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -510,6 +513,22 @@ impl Shard {
                         }
                         Ok(ShardThreadMsg::Put(key, value)) => {
                             let path = superblock_file_path(db_root.path(), &key);
+
+                            #[cfg(feature = "db-stats")]
+                            {
+                                log::debug!("Evicting superblock; accesses: {}", {
+                                    let (num_accessed, total) = value
+                                        .values()
+                                        .map(|b| {
+                                            let DbBlock::Whole(e) = b;
+                                            e.accesses()
+                                        })
+                                        .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
+                                    let pct = num_accessed as f64 / total as f64;
+                                    format!("{pct:.4} ({num_accessed} of {total})")
+                                });
+                            }
+
                             let serialized = bincode::serialize(&value).unwrap();
                             if let Some(parent) = path.parent() {
                                 fs::create_dir_all(parent).unwrap();
@@ -635,10 +654,10 @@ impl DbBlock {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
         match self {
             DbBlock::Whole(b) => {
                 // TODO: Propogate an action index preference.
-                let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
                 match b.get(&inner_pt_usize) {
                     Some(r) => GetPreference::Hit(r),
                     None => GetPreference::Miss(None),
@@ -665,6 +684,8 @@ impl WholeBlock {
             main_costs: NDArray::new(&shape_with_k),
             peaks: NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
             depths_actions: NDArray::new(&shape_with_k),
+            #[cfg(feature = "db-stats")]
+            access_counts: Mutex::new(Some(NDArray::new_with_value(shape, false))),
         }
     }
 
@@ -718,9 +739,19 @@ impl WholeBlock {
             value.0.iter().map(|(a, c)| (c.depth, *a)),
             Some(&self.filled),
         );
+
+        #[cfg(feature = "db-stats")]
+        {
+            let mut guard = self.access_counts.lock();
+            let l =
+                guard.get_or_insert_with(|| NDArray::new_with_value(self.filled.shape(), false));
+            l.fill_region(dim_ranges, true);
+        }
     }
 
     pub(crate) fn get(&self, pt: &[usize]) -> Option<ActionCostVec> {
+        self.log_access(pt);
+
         let f = self.filled[pt];
         if f == 0 {
             return None;
@@ -749,6 +780,39 @@ impl WholeBlock {
 
     pub fn shape(&self) -> &[usize] {
         self.filled.shape()
+    }
+
+    fn log_access(&self, pt: &[usize]) {
+        #[cfg(feature = "db-stats")]
+        {
+            let mut guard = self.access_counts.lock();
+            let l =
+                guard.get_or_insert_with(|| NDArray::new_with_value(self.filled.shape(), false));
+            l.set_pt(pt, true);
+        }
+    }
+
+    #[cfg(feature = "db-stats")]
+    pub fn accesses(&self) -> (usize, usize) {
+        let guard = self.access_counts.lock();
+        let Some(l) = guard.as_ref() else {
+            let shape = self.filled.shape();
+            let volume = shape.iter().product();
+            return (0, volume);
+        };
+        let total = l.data.len();
+        let read = l
+            .data
+            .runs()
+            .filter_map(|r| {
+                if *r.value {
+                    Some(usize::try_from(r.len).unwrap())
+                } else {
+                    None
+                }
+            })
+            .sum();
+        (read, total)
     }
 }
 
