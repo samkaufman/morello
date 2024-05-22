@@ -461,7 +461,7 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
                     .into_iter()
                     .map(|x| DimSize::new(x).unwrap())
                     .collect(),
-                dtypes: dtypes.into(),
+                dtypes,
             })
             .boxed()
     }
@@ -2263,7 +2263,7 @@ mod tests {
         let actual: Vec<Shape> = gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim)
             .map(|s| {
                 assert_eq!(s.len(), d);
-                s.into_iter().collect::<Vec<_>>().into()
+                s
             })
             .sorted()
             .collect::<Vec<_>>();

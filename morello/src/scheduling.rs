@@ -376,9 +376,7 @@ impl<Tgt: Target> Action<Tgt> {
                     let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
                         if level == &l {
                             u64::from(next_to_outer_basics.dtypes[ntob_out_idx].size())
-                                * u64::from(
-                                    output_shape.into_iter().map(|d| d.get()).product::<u32>(),
-                                )
+                                * u64::from(output_shape.iter().map(|d| d.get()).product::<u32>())
                         } else {
                             0u64
                         }
