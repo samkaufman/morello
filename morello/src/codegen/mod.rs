@@ -152,15 +152,15 @@ where
         let clang_proc = clang_cmd
             .args(Self::cli_vec_flags())
             .args(CLI_FLAGS)
-            .arg(binary_path.to_string_lossy().to_string())
-            .arg(source_path.to_string_lossy().to_string())
+            .arg(binary_path.to_string_lossy().as_ref())
+            .arg(source_path.to_string_lossy().as_ref())
             .output()?;
 
         if !clang_proc.status.success() {
             bail!(
                 "Clang exited with {}\n{}",
                 clang_proc.status,
-                String::from_utf8_lossy(&clang_proc.stderr).into_owned()
+                String::from_utf8_lossy(&clang_proc.stderr).as_ref()
             );
         } else {
             // We still want to see warnings.
