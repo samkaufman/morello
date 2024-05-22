@@ -5,6 +5,10 @@ members = [
     "frontend",
     "precompute"
 ]
+default-members = [
+    "morello",
+    "frontend"
+]
 resolver = "2"
 
 [profile.dev]
