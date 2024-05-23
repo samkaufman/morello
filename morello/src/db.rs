@@ -4,7 +4,6 @@ use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap};
 use crate::grid::linear::BimapInt;
-use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};

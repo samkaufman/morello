@@ -18,6 +18,7 @@ use crate::spec::Spec;
 use crate::target::Target;
 
 type RequestId = (usize, usize);
+type WorkingPartialImplHandle<Tgt> = (Spec<Tgt>, RequestId);
 
 struct TopDownSearch<'d> {
     db: &'d RocksDatabase,
@@ -35,8 +36,8 @@ struct BlockSearch<'a, 'd, Tgt: Target> {
     // (Specs + RequestIds). The latter might be out-of-date by the time they are
     // resolved; for example, when another resolution removes that SpecTask from
     // `working_set` when a WorkingPartialImpl became Unsat.
-    working_block_requests: HashMap<Spec<Tgt>, Vec<(Spec<Tgt>, RequestId)>>,
-    subblock_requests: Vec<HashMap<Spec<Tgt>, Vec<(Spec<Tgt>, RequestId)>>>,
+    working_block_requests: HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>,
+    subblock_requests: Vec<HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>>,
 }
 
 /// On-going synthesis of a [Spec]. (Essentially a coroutine.)
@@ -397,7 +398,7 @@ where
 
     fn resolve_subblock_request(
         &mut self,
-        subblock: &mut HashMap<Spec<Tgt>, Vec<(Spec<Tgt>, RequestId)>>,
+        subblock: &mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>,
         subspec: &Spec<Tgt>,
         results: ActionCostVec,
     ) {
@@ -413,8 +414,8 @@ where
 
     fn inner_resolve_subblock_request(
         working_set: &mut HashMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
-        subblock: &mut HashMap<Spec<Tgt>, Vec<(Spec<Tgt>, RequestId)>>,
-        next_subblock: Option<&mut HashMap<Spec<Tgt>, Vec<(Spec<Tgt>, RequestId)>>>,
+        subblock: &mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>,
+        next_subblock: Option<&mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>>,
         subspec: &Spec<Tgt>,
         results: ActionCostVec,
         search: &'a TopDownSearch<'d>,
@@ -585,7 +586,9 @@ impl<Tgt: Target> SpecTask<Tgt> {
     ///
     /// This will return `None` when all dependencies are resolved and the goal is computed.
     /// The caller should continue to call [next_request_batch] if an empty iterator is returned.
-    fn next_request_batch(&mut self) -> Option<impl Iterator<Item = (Spec<Tgt>, RequestId)> + '_> {
+    fn next_request_batch(
+        &mut self,
+    ) -> Option<impl Iterator<Item = WorkingPartialImplHandle<Tgt>> + '_> {
         // TODO: Define behavior for and document returning duplicates from this function.
 
         let SpecTask::Running {
@@ -603,7 +606,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
 
         let subspec_idx = *request_batches_returned;
         *request_batches_returned += 1;
-        let to_return: Vec<(Spec<Tgt>, RequestId)> = partial_impls
+        let to_return: Vec<WorkingPartialImplHandle<Tgt>> = partial_impls
             .iter()
             .enumerate()
             .filter_map(|(i, p)| {
