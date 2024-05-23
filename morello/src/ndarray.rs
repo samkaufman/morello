@@ -287,10 +287,6 @@ impl<T> NDArray<T> {
             }
         });
     }
-
-    pub fn shrink_to_fit(&mut self) {
-        self.data.shrink_to_fit();
-    }
 }
 
 impl<T> Index<&[usize]> for NDArray<T> {

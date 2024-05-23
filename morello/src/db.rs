@@ -727,13 +727,6 @@ impl WholeBlock {
         ))
     }
 
-    pub(crate) fn compact(&mut self) {
-        self.filled.shrink_to_fit();
-        self.main_costs.shrink_to_fit();
-        self.peaks.shrink_to_fit();
-        self.depths_actions.shrink_to_fit();
-    }
-
     pub fn shape(&self) -> &[usize] {
         self.filled.shape()
     }
