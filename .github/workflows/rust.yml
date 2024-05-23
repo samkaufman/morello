@@ -60,12 +60,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo run --bin precompute -- --stages 100 2
 
-  format:
+  clippy-and-format:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile default --no-self-update
-      - run: cargo fmt --all -- --check
+      - name: Check that code has no Clippy warnings
+        run: cargo clippy --all-targets --all-features -- --deny warnings
+      - name: Check that code is formatted
+        run: cargo fmt --all -- --check
 
   bench:
     runs-on: ubuntu-22.04
