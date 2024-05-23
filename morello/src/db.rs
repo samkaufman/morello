@@ -957,25 +957,6 @@ pub fn iter_blocks_in_single_dim_range(
     prefix.into_iter().chain(full_blocks_iter).chain(suffix)
 }
 
-/// Compute the cost of an incomplete Impl.
-fn compute_cost<Tgt, F>(imp: &ImplNode<Tgt>, lookup: &F) -> Cost
-where
-    Tgt: Target,
-    F: Fn(&SpecApp<Tgt, Spec<Tgt>>) -> Cost,
-{
-    match imp {
-        ImplNode::SpecApp(s) => lookup(s),
-        _ => {
-            let children = imp.children();
-            let mut child_costs: Vec<_> = Vec::with_capacity(children.len());
-            for c in children {
-                child_costs.push(compute_cost(c, lookup));
-            }
-            Cost::from_child_costs(imp, &child_costs)
-        }
-    }
-}
-
 fn make_key(table_key: &TableKey, block_pt: &[BimapInt]) -> String {
     // TODO: Use a faster (non-String?) and more stable encoding.
     format!("{table_key:?}/{block_pt:?}")
