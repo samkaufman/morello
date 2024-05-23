@@ -198,6 +198,7 @@ mod tests {
             // Naively, concretely traverse each tile and see if/when we hit a boundary,
             // test that number of full steps we traversed matches. Do this for each
             // dimension.
+            #[allow(clippy::needless_range_loop)]
             for dim in 0..tiling.shape().len() {
                 let mut steps_began = 0;
                 for (tile_idx, pt_idx) in (0..).cartesian_product(0..tiling.shape()[dim].get()) {
@@ -225,6 +226,7 @@ mod tests {
             // Naively, concretely traverse each tile and see if/when we hit a boundary,
             // that boundary has the advertised size in the origin shape. Do this for
             // each dimension.
+            #[allow(clippy::needless_range_loop)]
             for dim in 0..tiling.shape().len() {
                 for (tile_idx, pt_idx) in (0..).cartesian_product(0..tiling.shape()[dim].get()) {
                     let origin_idx = tile_idx * tiling.step_sizes[dim].get() + pt_idx;

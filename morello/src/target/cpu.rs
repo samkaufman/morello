@@ -1146,12 +1146,10 @@ mod tests {
     use super::*;
     use crate::{
         common::{DimSize, Dtype},
-        expr::{NonAffineExpr, Substitute},
-        layout::{col_major, row_major, BufferVar, Layout},
+        layout::{col_major, row_major, Layout},
         target::X86Target,
         tensorspec::TensorSpec,
     };
-    use itertools::Itertools;
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use std::collections::HashSet;
@@ -1271,20 +1269,20 @@ mod tests {
         assert_eq!(layouts.len(), layouts_set.len());
     }
 
-    fn eval_all_index_expr_points(expr: &NonAffineExpr<BufferVar>, shape: &[DimSize]) -> Vec<i32> {
-        let mut results = vec![];
-        for pt in shape.iter().map(|&d| 0..d.get()).multi_cartesian_product() {
-            let evaluated: NonAffineExpr<&str> = expr.clone().map_vars(&mut |var| match var {
-                BufferVar::TileIdx(_, _) => panic!("TileIdx in index expression"),
-                BufferVar::Pt(dim, _) => NonAffineExpr::constant(pt[dim as usize] as i32),
-            });
-            assert!(
-                evaluated.0.is_empty(),
-                "Non-constant index expression: {:?}",
-                evaluated
-            );
-            results.push(evaluated.1);
-        }
-        results
-    }
+    // fn eval_all_index_expr_points(expr: &NonAffineExpr<BufferVar>, shape: &[DimSize]) -> Vec<i32> {
+    //     let mut results = vec![];
+    //     for pt in shape.iter().map(|&d| 0..d.get()).multi_cartesian_product() {
+    //         let evaluated: NonAffineExpr<&str> = expr.clone().map_vars(&mut |var| match var {
+    //             BufferVar::TileIdx(_, _) => panic!("TileIdx in index expression"),
+    //             BufferVar::Pt(dim, _) => NonAffineExpr::constant(pt[dim as usize] as i32),
+    //         });
+    //         assert!(
+    //             evaluated.0.is_empty(),
+    //             "Non-constant index expression: {:?}",
+    //             evaluated
+    //         );
+    //         results.push(evaluated.1);
+    //     }
+    //     results
+    // }
 }

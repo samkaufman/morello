@@ -1228,60 +1228,24 @@ mod tests {
     }
 
     // TODO: Implement arb_spec_and_decision_pair and use that everywhere instead.
-    fn arb_spec_and_decision_pair<Tgt: Target>(
-    ) -> impl Strategy<Value = (Decision<Tgt>, Decision<Tgt>)> {
-        arb_spec_and_decision().prop_flat_map(|first| {
-            let second_term = prop_oneof![
-                2 => Just(first.clone()),
-                2 => {
-                    use crate::memorylimits::arb_memorylimits;
-                    let MemoryLimits::Standard(max_memory) = Tgt::max_mem();
-                    let first_logical = first.spec.0.clone();
-                    arb_memorylimits::<Tgt>(&max_memory).prop_map(move |spec_limits| {
-                        recursively_decide_actions(&Spec(first_logical.clone(), spec_limits))
-                    })
-                },
-                1 => arb_spec_and_decision(),
-            ];
-            (Just(first), second_term).boxed()
-        })
-    }
-
-    /// Return some complete Impl for the given Spec.
-    fn complete_impl<Tgt: Target>(partial_impl: &ImplNode<Tgt>) -> Option<(ImplNode<Tgt>, Cost)> {
-        match partial_impl {
-            ImplNode::SpecApp(spec_app) => {
-                for action in spec_app.0 .0.actions() {
-                    match action.apply(&spec_app.0) {
-                        Ok(applied) => {
-                            if let Some(completed) = complete_impl(&applied) {
-                                return Some(completed);
-                            }
-                        }
-                        Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => {}
-                        Err(ApplyError::SpecNotCanonical) => {
-                            panic!("Spec-to-complete must be canon")
-                        }
-                    }
-                }
-                None
-            }
-            _ => {
-                let old_children = partial_impl.children();
-                let mut new_children = Vec::with_capacity(old_children.len());
-                let mut new_children_costs = Vec::with_capacity(old_children.len());
-                for child in old_children {
-                    let (c1, c2) = complete_impl(child)?;
-                    new_children.push(c1);
-                    new_children_costs.push(c2);
-                }
-                Some((
-                    partial_impl.replace_children(new_children.into_iter()),
-                    Cost::from_child_costs(partial_impl, &new_children_costs),
-                ))
-            }
-        }
-    }
+    // fn arb_spec_and_decision_pair<Tgt: Target>(
+    // ) -> impl Strategy<Value = (Decision<Tgt>, Decision<Tgt>)> {
+    //     arb_spec_and_decision().prop_flat_map(|first| {
+    //         let second_term = prop_oneof![
+    //             2 => Just(first.clone()),
+    //             2 => {
+    //                 use crate::memorylimits::arb_memorylimits;
+    //                 let MemoryLimits::Standard(max_memory) = Tgt::max_mem();
+    //                 let first_logical = first.spec.0.clone();
+    //                 arb_memorylimits::<Tgt>(&max_memory).prop_map(move |spec_limits| {
+    //                     recursively_decide_actions(&Spec(first_logical.clone(), spec_limits))
+    //                 })
+    //             },
+    //             1 => arb_spec_and_decision(),
+    //         ];
+    //         (Just(first), second_term).boxed()
+    //     })
+    // }
 
     /// Will return a [Decision] by choosing the first action for the Spec (if any) and recursively
     /// choosing the first action for all child Specs in the resulting partial Impl.
