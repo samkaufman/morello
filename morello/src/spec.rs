@@ -13,12 +13,11 @@ use crate::target::Target;
 use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::{
-    bit_length_inverse, bit_length_u32, is_power_of_two_u32, join_into_string,
+    bit_length_inverse, bit_length_u32, iter_multidim_range, join_into_string,
     prev_power_of_two_u32,
 };
 
-use itertools::Either;
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
@@ -811,7 +810,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let serial_only = self.serial_only();
         let output = self.output();
         let multi_dim = MULTI_DIM_TILING || !serial_only;
-        gen_tile_sizes::<Tgt>(output.shape(), true, multi_dim).flat_map(move |tile_shape| {
+        gen_tile_sizes(output.shape(), true, multi_dim).flat_map(move |tile_shape| {
             let left = once(Action::TileOut {
                 output_shape: tile_shape.clone(),
                 parallel: false,
@@ -1486,14 +1485,16 @@ pub fn arb_canonical_logical_spec<Tgt: Target>(
 }
 
 // TODO: Modify to return an `impl Iterator` of some kind instead of a `Box`.
-fn gen_tile_sizes<Tgt: Target>(
+fn gen_tile_sizes(
     tensor_shape: &[DimSize],
     drop_given: bool,
     multi_dim: bool,
 ) -> Box<dyn Iterator<Item = Shape>> {
     if tensor_shape.is_empty() {
         return Box::new(iter::empty());
-    } else if tensor_shape.len() == 1 {
+    }
+
+    if tensor_shape.len() == 1 {
         let one_dim = tensor_shape[0];
         return Box::new(dim_range(one_dim, true).filter_map(move |d| {
             if drop_given && d == one_dim {
@@ -1505,43 +1506,46 @@ fn gen_tile_sizes<Tgt: Target>(
     }
 
     if multi_dim {
-        let tensor_shape = tensor_shape.to_vec();
-        Box::new(
-            gen_tile_sizes::<Tgt>(&tensor_shape[1..], false, multi_dim).flat_map(move |rest| {
-                let tensor_shape = tensor_shape.clone();
-                dim_range(tensor_shape[0], true).flat_map(move |d| {
-                    let mut new_shape = vec![d];
-                    new_shape.extend(rest.clone());
-                    if drop_given && tensor_shape == new_shape[..] {
-                        None
-                    } else {
-                        Some(new_shape)
-                    }
-                })
-            }),
-        )
-    } else {
-        let tensor_shape = tensor_shape.to_vec();
-        let own_shape_iter = if !drop_given
-            && tensor_shape
-                .iter()
-                .map(|d: &DimSize| d.get())
-                .all(is_power_of_two_u32)
-        {
-            Either::Left(once(tensor_shape.clone()))
-        } else {
-            Either::Right(iter::empty())
-        };
-        let smaller_tiles_iter = (0..tensor_shape.len()).flat_map(move |dim| {
-            let tensor_shape = tensor_shape.clone();
-            dim_range(tensor_shape[dim], false).map(move |d| {
-                let mut new_shape = tensor_shape.clone();
-                new_shape[dim] = d;
-                new_shape
+        let strides = (1..tensor_shape.len())
+            .map(|i| {
+                tensor_shape[i..]
+                    .iter()
+                    .map(|d| usize::try_from(d.get()).unwrap())
+                    .product::<usize>()
             })
+            .chain(std::iter::once(1))
+            .collect::<Vec<_>>();
+        let dim_ranges = tensor_shape
+            .iter()
+            .map(|d| 1..(d.get() + 1))
+            .collect::<Vec<_>>();
+        let mut pts = Vec::<Shape>::new(); // TODO: Compute capacity ahead of time.
+        iter_multidim_range(&dim_ranges, &strides, |_, pt| {
+            pts.push(pt.iter().map(|&p| DimSize::new(p).unwrap()).collect());
         });
-        Box::new(smaller_tiles_iter.chain(own_shape_iter))
+        pts.sort_by_key(|pt| pt.iter().map(|d| d.get()).product::<u32>());
+        debug_assert_eq!(pts.last().unwrap(), tensor_shape);
+        if drop_given {
+            pts.pop();
+        }
+        return Box::new(pts.into_iter());
     }
+
+    let mut results = vec![];
+    let max_dim = tensor_shape.iter().copied().max().unwrap();
+    let mut tensor_buf: Shape = tensor_shape.to_vec();
+    for d in dim_range(max_dim, true) {
+        for i in 0..tensor_shape.len() {
+            if d > tensor_shape[i] || d == tensor_shape[i] && (drop_given || i != 0) {
+                continue;
+            }
+            tensor_buf[i] = d;
+            results.push(tensor_buf.clone());
+            tensor_buf[i] = tensor_shape[i];
+        }
+    }
+    results.sort_by_key(|pt| pt.iter().map(|d| d.get()).product::<u32>());
+    Box::new(results.into_iter())
 }
 
 pub fn gen_vector_sizes(dtype: Dtype, vector_bytes: &[u32]) -> impl Iterator<Item = DimSize> + '_ {
@@ -1825,10 +1829,10 @@ mod tests {
 
     #[test]
     fn test_gen_tile_sizes_empty() {
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, false).count(), 0);
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], true, false).count(), 0);
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, true).count(), 0);
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, false).count(), 0);
+        assert_eq!(gen_tile_sizes(&[], false, false).count(), 0);
+        assert_eq!(gen_tile_sizes(&[], true, false).count(), 0);
+        assert_eq!(gen_tile_sizes(&[], false, true).count(), 0);
+        assert_eq!(gen_tile_sizes(&[], false, false).count(), 0);
     }
 
     #[test]
@@ -1899,17 +1903,42 @@ mod tests {
 
     #[test]
     fn test_gen_tile_sizes_dim_2_single_dim_non_powers_of_two() {
-        for drop_given in [true, false] {
-            assert_gen_tile_sizes(
-                shape![2, 3],
-                [shape![1, 3], shape![2, 1], shape![2, 2]],
-                drop_given,
-                false,
-            );
-        }
+        assert_gen_tile_sizes(
+            shape![2, 3],
+            [shape![1, 3], shape![2, 1], shape![2, 2]],
+            true,
+            false,
+        );
+        assert_gen_tile_sizes(
+            shape![2, 3],
+            [shape![1, 3], shape![2, 1], shape![2, 2], shape![2, 3]],
+            false,
+            false,
+        );
     }
 
     proptest! {
+        #[test]
+        fn test_gen_tile_sizes_increase_in_volume(
+            // TODO: Gen proper shapes
+            h in 1u32..=8,
+            w in 1u32..=8,
+            drop_given in any::<bool>(),
+            // TODO: Add multi_dim
+        ) {
+            let outer_shape: [DimSize; 2] = [h.try_into().unwrap(), w.try_into().unwrap()];
+            let mut tile_iter =  gen_tile_sizes(&outer_shape, drop_given, false);
+            if let Some(mut last_shape) = tile_iter.next() {
+                let mut last_shape_volume = last_shape.iter().map(|d| d.get()).product::<u32>();
+                for shape in tile_iter {
+                    let volume = shape.iter().map(|d| d.get()).product();
+                    prop_assert!(last_shape_volume <= volume, "got {:?} then {:?}", last_shape, shape);
+                    last_shape = shape;
+                    last_shape_volume = volume;
+                }
+            }
+        }
+
         #[test]
         fn test_no_action_panics_x86(spec in any::<Spec<X86Target>>()) {
             shared_test_no_action_panics(spec);
@@ -2265,7 +2294,7 @@ mod tests {
         let d = expected.first().map_or(0, |shape| shape.len());
         assert!(expected.iter().all(|shape| shape.len() == d));
 
-        let actual: Vec<Shape> = gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim)
+        let actual: Vec<Shape> = gen_tile_sizes(&tensor_shape, drop_given, multi_dim)
             .map(|s| {
                 assert_eq!(s.len(), d);
                 s
