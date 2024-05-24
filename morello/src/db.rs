@@ -26,6 +26,7 @@ use std::io::Write;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
+use std::sync::Arc;
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
 type TableKey = (SpecKey, Vec<(Layout, u8, Option<NonZeroU32>)>);
@@ -73,6 +74,13 @@ enum ShardThreadResponse {
     Loaded(Prehashed<SuperBlockKey>, SuperBlock),
 }
 
+/// Contains a path to a directory or a [tempfile::TempDir]. This facilitates deleting the
+/// temporary directory on drop.
+enum DirPathHandle {
+    Persisted(path::PathBuf),
+    TempDir(tempfile::TempDir),
+}
+
 /// Stores a [Database] block. This may be a single value if all block entries have been filled with
 /// the same [ActionCostVec], or an n-dimensional array along with a count of identical entries
 /// accumulated until the first differing entry.
@@ -105,13 +113,14 @@ pub enum GetPreference<T, V> {
 
 impl FilesDatabase {
     pub fn new(file_path: Option<&path::Path>, binary_scale_shapes: bool, k: u8) -> Self {
-        let resolved_file_path = file_path
-            .map(|p| p.to_owned())
-            .unwrap_or_else(|| tempfile::TempDir::new().unwrap().into_path());
-        log::info!("Opening database at: {}", resolved_file_path.display());
+        let dir_handle = Arc::new(match file_path {
+            Some(path) => DirPathHandle::Persisted(path.to_owned()),
+            None => DirPathHandle::TempDir(tempfile::TempDir::new().unwrap()),
+        });
+        log::info!("Opening database at: {}", dir_handle.path().display());
 
         let shards = ShardArray(std::array::from_fn(|i| {
-            Mutex::new(Shard::new(i, &resolved_file_path))
+            Mutex::new(Shard::new(i, Arc::clone(&dir_handle)))
         }));
         Self {
             binary_scale_shapes,
@@ -429,8 +438,7 @@ impl<'a> PageId<'a> {
 }
 
 impl Shard {
-    fn new(idx: usize, db_root: &Path) -> Self {
-        let db_root = db_root.to_owned();
+    fn new(idx: usize, db_root: Arc<DirPathHandle>) -> Self {
         let (command_tx, command_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
         let (response_tx, response_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
 
@@ -440,7 +448,7 @@ impl Shard {
                 .spawn(move || loop {
                     match command_rx.recv() {
                         Ok(ShardThreadMsg::Get(key)) => {
-                            let path = superblock_file_path(&db_root, &key);
+                            let path = superblock_file_path(db_root.path(), &key);
                             let result = match fs::File::open(&path) {
                                 Ok(file) => {
                                     let buf_reader = std::io::BufReader::new(file);
@@ -453,7 +461,7 @@ impl Shard {
                                 .unwrap();
                         }
                         Ok(ShardThreadMsg::Put(key, value)) => {
-                            let path = superblock_file_path(&db_root, &key);
+                            let path = superblock_file_path(db_root.path(), &key);
                             let serialized = bincode::serialize(&value).unwrap();
                             if let Some(parent) = path.parent() {
                                 fs::create_dir_all(parent).unwrap();
@@ -555,6 +563,15 @@ impl Drop for Shard {
         self.thread_tx.send(ShardThreadMsg::Exit).unwrap();
         self.process_bg_thread_msgs_until_close();
         self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+impl DirPathHandle {
+    fn path(&self) -> &path::Path {
+        match self {
+            DirPathHandle::Persisted(p) => p.as_ref(),
+            DirPathHandle::TempDir(t) => t.path(),
+        }
     }
 }
 
