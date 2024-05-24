@@ -1,8 +1,6 @@
-use anyhow::{bail, Result};
-
-pub fn clang_path() -> Result<String> {
+pub fn clang_path() -> Option<String> {
     match std::env::var("CLANG") {
-        Ok(v) => Ok(v),
-        Err(_) => bail!("Environment variable CLANG is not set"),
+        Ok(v) => Some(v),
+        Err(_) => None,
     }
 }

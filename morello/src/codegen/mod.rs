@@ -16,14 +16,12 @@ use crate::target::{Target, TargetId};
 use crate::utils::ToWriteFmt;
 use crate::views::Tensor;
 
-use anyhow::{bail, Error, Result};
 use log::{debug, info};
 use std::cmp::max;
 use std::fmt;
-use std::io;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{self, Command, Output};
 use std::rc::Rc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -39,8 +37,33 @@ const ARM_CLI_VEC_FLAGS: [&str; 1] = ["-fopenmp"];
 const MIN_SAMPLES: u32 = 3;
 const MIN_TRIAL_TIME_SECS: f32 = 2.5;
 
+#[derive(thiserror::Error, Debug)]
+pub enum BuildError {
+    #[error("IO error: {0}")]
+    IoError(#[from] io::Error),
+    #[error("Compiler could not be found")]
+    MissingCompiler,
+    #[error("Compiler exited with status code: {status}")]
+    CompilerFailed {
+        status: process::ExitStatus,
+        stderr: String,
+    },
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum RunError {
+    #[error("IO error: {0}")]
+    IoError(#[from] io::Error),
+    #[error("Generated program exited with status code: {0}")]
+    BadExitStatus(process::ExitStatus),
+    #[error("Couldn't interpret generated program output: {0}")]
+    MalformedOutput(String),
+    #[error("Couldn't build: {0}")]
+    BuildError(#[from] BuildError),
+}
+
 pub trait CodeGen<Tgt: Target> {
-    fn compiler_path() -> Result<String> {
+    fn compiler_path() -> Option<String> {
         clang_path()
     }
 
@@ -67,10 +90,10 @@ pub trait CodeGen<Tgt: Target> {
         out: &mut W,
     ) -> fmt::Result;
 
-    fn build(&self, benchmark: bool) -> Result<BuiltArtifact>;
+    fn build(&self, benchmark: bool) -> Result<BuiltArtifact, BuildError>;
 
     /// Estimate a good number of inner loop iterations.
-    fn estimate_optimal_iters(&self) -> Result<u32> {
+    fn estimate_optimal_iters(&self) -> Result<u32, RunError> {
         // Collect a single rough sample.
         let time_check_artifact = self.build(true)?;
         let rough_secs = time_check_artifact.measure_time(1)?;
@@ -83,7 +106,11 @@ pub trait CodeGen<Tgt: Target> {
     }
 
     /// Benchmark `repeat` times.
-    fn bench(&self, inner_loop_iters: u32, repeat: Option<usize>) -> Result<RobustTimingResult> {
+    fn bench(
+        &self,
+        inner_loop_iters: u32,
+        repeat: Option<usize>,
+    ) -> Result<RobustTimingResult, RunError> {
         let repeat = repeat.unwrap_or(10); // default: 10
 
         // Run main benchmark loop.
@@ -137,15 +164,20 @@ where
         Ok(())
     }
 
-    fn build(&self, benchmark: bool) -> Result<BuiltArtifact> {
+    fn build(&self, benchmark: bool) -> Result<BuiltArtifact, BuildError> {
         let dirname = tempdir()?.into_path();
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
 
         let source_file = std::fs::File::create(&source_path)?;
-        self.emit(benchmark, None, &mut ToWriteFmt(source_file))?;
+        // TODO: The following may not prop. IO errors hidden by ToWriteFmt.
+        self.emit(benchmark, None, &mut ToWriteFmt(source_file))
+            .expect("codegen should not fail");
 
-        let mut clang_cmd = Command::new(Self::compiler_path()?);
+        let Some(compiler_path) = Self::compiler_path() else {
+            return Err(BuildError::MissingCompiler);
+        };
+        let mut clang_cmd = Command::new(compiler_path);
         if do_color() {
             clang_cmd.arg("-fcolor-diagnostics");
         }
@@ -157,13 +189,13 @@ where
             .output()?;
 
         if !clang_proc.status.success() {
-            bail!(
-                "Clang exited with {}\n{}",
-                clang_proc.status,
-                String::from_utf8_lossy(&clang_proc.stderr).as_ref()
-            );
+            return Err(BuildError::CompilerFailed {
+                status: clang_proc.status,
+                stderr: String::from_utf8_lossy(&clang_proc.stderr).into(),
+            });
         } else {
             // We still want to see warnings.
+            // TODO: Capture this for the caller.
             io::stderr().write_all(&clang_proc.stderr)?;
         }
 
@@ -199,29 +231,28 @@ impl BuiltArtifact {
         &self.parameter_dtypes
     }
 
-    pub fn run(&self) -> Result<Output> {
-        Command::new(&self.binary_path)
-            .output()
-            .map_err(|e| e.into())
+    pub fn run(&self) -> Result<Output, RunError> {
+        Ok(Command::new(&self.binary_path).output()?)
     }
 
     /// Executes and benchmarks an Impl on the local machine using Clang.
     ///
     /// Measured by executing the kernel `steps` times and returning the total
     /// runtime of the loop in seconds.
-    pub fn measure_time(&self, steps: u32) -> Result<Duration> {
+    pub fn measure_time(&self, steps: u32) -> Result<Duration, RunError> {
         let output = Command::new(&self.binary_path)
             .arg(steps.to_string())
             .output()?;
         if !output.status.success() {
-            io::stderr().write_all(&output.stderr)?;
-            bail!("Failed to run the generated code: {}", output.status);
+            io::stderr().write_all(&output.stderr).unwrap();
+            return Err(RunError::BadExitStatus(output.status));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut lines = stdout.lines();
         let first_line = lines.next().unwrap();
         parse_benchmark_output(first_line)
+            .map_err(|_| RunError::MalformedOutput(String::from_utf8_lossy(&output.stderr).into()))
     }
 }
 
@@ -245,27 +276,31 @@ impl RobustTimingResult {
     }
 }
 
-fn parse_benchmark_output(output: &str) -> Result<Duration> {
+fn parse_benchmark_output(output: &str) -> Result<Duration, ()> {
     let mut outs = output.split_whitespace();
     if outs.next() != Some("cpu:") {
-        bail!("expected \"cpu:\" prefix in benchmark output");
+        return Err(());
     }
 
-    let s_str = outs
-        .next()
-        .ok_or("invalid output format")
-        .map_err(Error::msg)?;
-    let ns_str = outs
-        .next()
-        .ok_or("invalid output format")
-        .map_err(Error::msg)?;
+    let Some(s_str) = outs.next() else {
+        return Err(());
+    };
+    let Some(ns_str) = outs.next() else {
+        return Err(());
+    };
     if !s_str.ends_with('s') || !ns_str.ends_with("ns") {
-        bail!("invalid time unit");
+        return Err(());
     }
 
     let s = s_str.trim_end_matches('s');
     let ns = ns_str.trim_end_matches("ns");
-    Ok(Duration::new(s.parse::<u64>()?, ns.parse::<u32>()?))
+    let Ok(s_parsed) = s.parse::<u64>() else {
+        return Err(());
+    };
+    let Ok(ns_parsed) = ns.parse::<u32>() else {
+        return Err(());
+    };
+    Ok(Duration::new(s_parsed, ns_parsed))
 }
 
 #[cfg(test)]
@@ -289,9 +324,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "expected \"cpu:\" prefix in benchmark output")]
     fn test_parse_benchmark_output_missing_cpu_prefix() {
-        parse_benchmark_output("10s 500ns").unwrap();
+        assert!(parse_benchmark_output("10s 500ns").is_err());
     }
 
     #[test]
@@ -303,44 +337,37 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid digit found in string")]
     fn test_parse_benchmark_output_negative_values() {
-        parse_benchmark_output("cpu: -10s -500ns").unwrap();
+        assert!(parse_benchmark_output("cpu: -10s -500ns").is_err());
     }
 
     #[test]
-    #[should_panic(expected = "invalid time unit")]
     fn test_parse_benchmark_output_missing_time_unit() {
-        parse_benchmark_output("cpu: 10 500").unwrap();
+        assert!(parse_benchmark_output("cpu: 10 500").is_err());
     }
 
     #[test]
-    #[should_panic(expected = "invalid digit found in string")]
     fn test_parse_benchmark_output_invalid_time_value() {
-        parse_benchmark_output("cpu: ten_s 500ns").unwrap();
+        assert!(parse_benchmark_output("cpu: ten_s 500ns").is_err());
     }
 
     #[test]
-    #[should_panic(expected = "expected \"cpu:\" prefix in benchmark output")]
     fn test_parse_benchmark_output_empty_string() {
-        parse_benchmark_output("").unwrap();
+        assert!(parse_benchmark_output("").is_err());
     }
 
     #[test]
-    #[should_panic(expected = "invalid output format")]
     fn test_parse_benchmark_output_missing_ns_part() {
-        parse_benchmark_output("cpu: 10s").unwrap();
+        assert!(parse_benchmark_output("cpu: 10s").is_err());
     }
 
     #[test]
-    #[should_panic(expected = "invalid output format")]
     fn test_parse_benchmark_output_missing_s_part() {
-        parse_benchmark_output("cpu: 500ns").unwrap();
+        assert!(parse_benchmark_output("cpu: 500ns").is_err());
     }
 
     #[test]
-    #[should_panic(expected = "expected \"cpu:\" prefix in benchmark output")]
     fn test_parse_benchmark_output_whitespace_only_input() {
-        parse_benchmark_output("   ").unwrap();
+        assert!(parse_benchmark_output("   ").is_err());
     }
 }

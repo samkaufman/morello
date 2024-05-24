@@ -10,14 +10,13 @@ use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
 use crate::scheduling::Action;
 use crate::target::MemoryLevel;
 use crate::target::Target;
-use crate::tensorspec::{TensorSpec, TensorSpecAux};
+use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::{
     bit_length_inverse, bit_length_u32, is_power_of_two_u32, join_into_string,
     prev_power_of_two_u32,
 };
 
-use anyhow::Context;
 use itertools::Either;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -107,8 +106,14 @@ pub struct PrimitiveBasicsBimap {
     pub binary_scale_shapes: bool,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum CanonicalizeError {
+    #[error("Failed to canonicalize the TensorSpecAux: {0}")]
+    TensorSpecAuxCanonicalizeError(tensorspec::CanonicalizeError),
+}
+
 impl<Tgt: Target> Spec<Tgt> {
-    pub fn canonicalize(&mut self) -> anyhow::Result<()> {
+    pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
         let parameters = self.0.parameters();
         let levels = parameters.iter().map(|p| p.level()).collect::<Vec<_>>();
         self.1.zero_levels_slower_than_all::<Tgt>(&levels);
@@ -644,19 +649,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    pub fn canonicalize(&mut self) -> anyhow::Result<()> {
+    pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
         match self {
             LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
                 PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
                     for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
                         aux.canonicalize(shp)
-                            .context("Failed to canonicalize the TensorSpecAux")?;
+                            .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
                     }
                 }
                 PrimitiveSpecType::Move => {
                     for aux in primitive_aux.iter_mut() {
                         aux.canonicalize(&basics.spec_shape)
-                            .context("Failed to canonicalize the TensorSpecAux")?;
+                            .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
                     }
 
                     // It source and destination are fully contiguous and the dtypes and layouts
@@ -681,7 +686,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Zero => {
                     primitive_aux[0]
                         .canonicalize(&basics.spec_shape)
-                        .context("Failed to canonicalize the TensorSpecAux")?;
+                        .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
                 }
             },
             LogicalSpec::Compose { .. } => todo!(),

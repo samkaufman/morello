@@ -801,7 +801,6 @@ dependencies = [
 name = "morello"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "atty",
  "auto_impl",
  "bincode",

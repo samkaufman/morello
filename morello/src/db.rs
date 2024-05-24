@@ -12,7 +12,6 @@ use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
-use anyhow::Result;
 use divrem::DivRem;
 use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
@@ -117,7 +116,7 @@ impl RocksDatabase {
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
         k: u8,
-    ) -> Result<Self> {
+    ) -> Result<Self, rocksdb::Error> {
         let resolved_file_path = file_path
             .map(|p| p.to_owned())
             .unwrap_or_else(|| tempfile::TempDir::new().unwrap().into_path());

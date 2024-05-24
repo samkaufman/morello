@@ -41,6 +41,12 @@ pub enum DynArrayViewMut<'a, D> {
     Bfloat16(ArrayViewMut<'a, half::bf16, D>),
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum RunError {
+    #[error("IO error: {0}")]
+    IoError(#[from] io::Error),
+}
+
 impl BuiltArtifact {
     /// Check whether the artifact correctly implements a [Spec].
     ///
@@ -67,7 +73,7 @@ impl BuiltArtifact {
     pub fn run_with_input_data(
         &self,
         arguments: &[DynArray<IxDyn>],
-    ) -> anyhow::Result<DynArray<IxDyn>> {
+    ) -> Result<DynArray<IxDyn>, RunError> {
         assert_eq!(arguments.len(), self.parameter_dtypes().len());
 
         // Write tensor data to temporary files. These will be loaded by the generated
@@ -76,7 +82,12 @@ impl BuiltArtifact {
         for arg in arguments {
             let mut buffered_writer = BufWriter::new(tempfile::NamedTempFile::new()?);
             write_inputs(arg, &mut buffered_writer)?;
-            files.push(buffered_writer.into_inner()?);
+            buffered_writer.flush()?;
+            files.push(
+                buffered_writer
+                    .into_inner()
+                    .expect("already flushed, so into_inner should be safe"),
+            );
         }
 
         // Pass the filename as an argument.

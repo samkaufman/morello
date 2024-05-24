@@ -1,4 +1,3 @@
-use anyhow::Context;
 use itertools::iproduct;
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +46,12 @@ pub struct TensorSpecAuxNonDepBimap<Tgt: Target> {
 #[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct TensorSpecArbMaxShape(pub Shape);
+
+#[derive(thiserror::Error, Debug)]
+pub enum CanonicalizeError {
+    #[error("Layout does not apply: {0}")]
+    LayoutError(#[from] LayoutError),
+}
 
 impl<Tgt: Target> TensorSpec<Tgt> {
     pub fn new_canon(
@@ -196,7 +201,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         Ok(())
     }
 
-    pub fn canonicalize(&mut self) -> anyhow::Result<()> {
+    pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
         self.aux.canonicalize(&self.shape)
     }
 
@@ -315,9 +320,7 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
             })
             .prop_filter_map("TensorSpec was not canonical", |(shp, dtype, aux)| {
                 let mut tensor_spec = TensorSpec::new_noncanon_with_aux(shp.0, dtype, aux);
-                let canon_result = tensor_spec
-                    .canonicalize()
-                    .with_context(|| format!("Couldn't canonicalize {}", tensor_spec));
+                let canon_result = tensor_spec.canonicalize();
                 canon_result.ok().map(|_| tensor_spec)
             })
             .boxed()
@@ -325,11 +328,8 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
 }
 
 impl<Tgt: Target> TensorSpecAux<Tgt> {
-    pub(crate) fn canonicalize(&mut self, shape: &Shape) -> anyhow::Result<()> {
-        let (new_layout, new_contig) = self
-            .layout
-            .update_for_tiling(shape, shape, self.contig)
-            .context("Updating with no-op tiling should never fail")?;
+    pub(crate) fn canonicalize(&mut self, shape: &Shape) -> Result<(), CanonicalizeError> {
+        let (new_layout, new_contig) = self.layout.update_for_tiling(shape, shape, self.contig)?;
         self.layout = new_layout;
         self.contig = new_contig;
         Ok(())

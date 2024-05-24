@@ -9,7 +9,6 @@ clap = ["dep:clap"]
 verification = ["dep:ndarray", "dep:num-traits", "dep:ndarray-conv"]
 
 [dependencies]
-anyhow = { version = "1.0", features = ["backtrace"] }
 atty = "0.2"
 auto_impl = "1.1.0"
 bincode = "1.3.3"
