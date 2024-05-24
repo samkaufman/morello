@@ -28,7 +28,7 @@ use tempfile::tempdir;
 
 pub use self::cpu::CpuCodeGenThreadStyle;
 
-const CLI_FLAGS: [&str; 4] = ["-std=gnu99", "-O3", "-rtlib=compiler-rt", "-o"];
+const CLI_FLAGS: [&str; 3] = ["-std=gnu99", "-rtlib=compiler-rt", "-o"];
 
 // TODO: Avoid -fopenmp if we're not using an OpenMP pool.
 const X86_CLI_VEC_FLAGS: [&str; 2] = ["-fopenmp", "-mavx2"];
@@ -91,6 +91,7 @@ pub trait CodeGen<Tgt: Target> {
     ) -> fmt::Result;
 
     fn build(&self, benchmark: bool) -> Result<BuiltArtifact, BuildError>;
+    fn build_with_args(&self, benchmark: bool, args: &[&str]) -> Result<BuiltArtifact, BuildError>;
 
     /// Estimate a good number of inner loop iterations.
     fn estimate_optimal_iters(&self) -> Result<u32, RunError> {
@@ -165,6 +166,10 @@ where
     }
 
     fn build(&self, benchmark: bool) -> Result<BuiltArtifact, BuildError> {
+        self.build_with_args(benchmark, &["-O3"])
+    }
+
+    fn build_with_args(&self, benchmark: bool, args: &[&str]) -> Result<BuiltArtifact, BuildError> {
         let dirname = tempdir()?.into_path();
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
@@ -181,13 +186,15 @@ where
         if do_color() {
             clang_cmd.arg("-fcolor-diagnostics");
         }
-        let clang_proc = clang_cmd
+        clang_cmd
             .args(Self::cli_vec_flags())
+            .args(args)
             .args(CLI_FLAGS)
             .arg(binary_path.to_string_lossy().as_ref())
-            .arg(source_path.to_string_lossy().as_ref())
-            .output()?;
+            .arg(source_path.to_string_lossy().as_ref());
 
+        log::debug!("Compiling with command: {:?}", clang_cmd);
+        let clang_proc = clang_cmd.output()?;
         if !clang_proc.status.success() {
             return Err(BuildError::CompilerFailed {
                 status: clang_proc.status,

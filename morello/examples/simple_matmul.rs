@@ -153,7 +153,7 @@ fn main() {
     #[cfg(feature = "verification")]
     {
         let artifact = implementation.build(false).unwrap();
-        if !artifact.check_correctness(&spec) {
+        if !artifact.check_correctness(&spec, &implementation) {
             panic!("Generated code returned incorrect output");
         }
     }

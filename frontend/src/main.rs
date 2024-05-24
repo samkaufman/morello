@@ -270,7 +270,7 @@ where
         println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));
     }
     #[cfg(feature = "verification")]
-    if !args.skip_check && !built_artifact.check_correctness(&spec) {
+    if !args.skip_check && !built_artifact.check_correctness(&spec, synthesized_impl) {
         panic!("Generated code returned incorrect output");
     }
 
