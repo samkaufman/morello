@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::{iter, path};
 
 use morello::common::{DimSize, Dtype};
-use morello::db::RocksDatabase;
+use morello::db::FilesDatabase;
 use morello::grid::general::SurMap;
 use morello::layout::row_major;
 use morello::lspec;
@@ -57,13 +57,13 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
-    let db = RocksDatabase::try_new(args.db.as_deref(), true, K)?;
+    let db = FilesDatabase::new(args.db.as_deref(), true, K);
     main_per_db(&args, &db);
 
     Ok(())
 }
 
-fn main_per_db(args: &Args, db: &RocksDatabase) {
+fn main_per_db(args: &Args, db: &FilesDatabase) {
     let MemoryLimits::Standard(top) = X86Target::max_mem();
 
     // TODO: Most of the following details aren't used in computing the bound.

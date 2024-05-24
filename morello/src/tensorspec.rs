@@ -165,7 +165,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.aux.aligned
     }
 
-    pub fn level(&self) -> <Tgt as Target>::Level {
+    pub const fn level(&self) -> <Tgt as Target>::Level {
         self.aux.level
     }
 

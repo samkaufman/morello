@@ -2,7 +2,7 @@ use iai_callgrind::{library_benchmark, library_benchmark_group, main, LibraryBen
 use nonzero::nonzero as nz;
 use std::hint::black_box;
 
-use morello::db::RocksDatabase;
+use morello::db::FilesDatabase;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
@@ -23,7 +23,7 @@ fn matmul_spec<Tgt: Target>(size: u32) -> Spec<Tgt> {
 }
 
 fn synth(goal: &Spec<X86Target>) {
-    let db = RocksDatabase::try_new(None, true, 1).unwrap();
+    let db = FilesDatabase::new(None, true, 1);
     morello::search::top_down(&db, black_box(goal), 1, Some(nz!(1usize)));
 }
 

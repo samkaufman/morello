@@ -11,7 +11,7 @@ use std::{io, path};
 use morello::codegen::CodeGen;
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
-use morello::db::RocksDatabase;
+use morello::db::FilesDatabase;
 use morello::layout::{col_major, row_major};
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::target::{
@@ -137,14 +137,14 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     color::set_color_mode(args.color);
-    let db = RocksDatabase::try_new(args.db.as_deref(), BINARY_SCALE_SHAPES, K)?;
+    let db = FilesDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES, K);
     match &args.target {
         TargetId::X86 => main_per_db::<X86Target>(&args, &db),
         TargetId::Arm => main_per_db::<ArmTarget>(&args, &db),
     }
 }
 
-fn main_per_db<Tgt>(args: &Args, db: &RocksDatabase) -> Result<()>
+fn main_per_db<Tgt>(args: &Args, db: &FilesDatabase) -> Result<()>
 where
     Tgt: CpuTarget,
 {
