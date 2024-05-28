@@ -4,6 +4,7 @@ use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::iter;
 use std::mem::{replace, take};
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -12,8 +13,7 @@ use crate::cost::Cost;
 use crate::db::{ActionCostVec, ActionIdx, FilesDatabase, GetPreference};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::imp::{Impl, ImplExt, ImplNode};
-use crate::scheduling::ApplyError;
+use crate::scheduling::{ActionSolver, ApplyError};
 use crate::spec::Spec;
 use crate::target::Target;
 
@@ -58,7 +58,7 @@ enum SpecTask<Tgt: Target> {
 #[derive(Debug)]
 enum WorkingPartialImpl<Tgt: Target> {
     Constructing {
-        partial_impl: ImplNode<Tgt>,
+        solver: ActionSolver<Tgt>,
         subspecs: Vec<Spec<Tgt>>,
         subspec_costs: Vec<Option<Cost>>, // empty = unsat; all Some = ready-to-complete
         producing_action_idx: ActionIdx,
@@ -558,13 +558,9 @@ impl<Tgt: Target> SpecTask<Tgt> {
 
         for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
             let action = &all_actions[action_idx];
-            match action.apply(&goal) {
-                Ok(partial_impl) => {
-                    let mut partial_impl_subspecs = Vec::new();
-                    partial_impl.visit_subspecs(|s| {
-                        partial_impl_subspecs.push(s.clone());
-                        true
-                    });
+            match action.solver(&goal) {
+                Ok(solver) => {
+                    let partial_impl_subspecs = solver.subspecs().collect::<Vec<_>>();
 
                     let subspec_count = partial_impl_subspecs.len();
                     max_children = max_children.max(subspec_count);
@@ -575,11 +571,11 @@ impl<Tgt: Target> SpecTask<Tgt> {
                     if partial_impl_subspecs.is_empty() {
                         reducer.insert(
                             u16::try_from(action_idx).unwrap(),
-                            Cost::from_impl(&partial_impl),
+                            solver.compute_cost(iter::empty()),
                         );
                     } else {
                         partial_impls.push(WorkingPartialImpl::Constructing {
-                            partial_impl,
+                            solver,
                             subspecs: partial_impl_subspecs,
                             subspec_costs: vec![None; subspec_count],
                             producing_action_idx: action_idx.try_into().unwrap(),
@@ -669,7 +665,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
         let entry = partial_impls.get_mut(working_impl_idx).unwrap();
         match entry {
             WorkingPartialImpl::Constructing {
-                partial_impl,
+                solver,
                 subspecs: _,
                 subspec_costs,
                 producing_action_idx,
@@ -685,8 +681,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
                         finished = true;
                         reducer.insert(
                             *producing_action_idx,
-                            compute_impl_cost(
-                                partial_impl,
+                            solver.compute_cost(
                                 // TODO: Move rather than clone the child_costs.
                                 &mut subspec_costs.iter().map(|c| c.as_ref().unwrap().clone()),
                             ),
@@ -813,24 +808,6 @@ impl<'a, Tgt: Target> RequestsMapRef<'a, Tgt> {
         match self {
             RequestsMapRef::Internal(m) => m.remove(&working_set.get_index_of(key).unwrap()),
             RequestsMapRef::External(m) => m.remove(key),
-        }
-    }
-}
-
-fn compute_impl_cost<Tgt, I>(imp: &ImplNode<Tgt>, costs: &mut I) -> Cost
-where
-    Tgt: Target,
-    I: Iterator<Item = Cost>,
-{
-    match imp {
-        ImplNode::SpecApp(_) => costs.next().unwrap(),
-        _ => {
-            let child_costs = imp
-                .children()
-                .iter()
-                .map(|child| compute_impl_cost(child, costs))
-                .collect::<Vec<_>>();
-            Cost::from_child_costs(imp, &child_costs)
         }
     }
 }

@@ -130,10 +130,13 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     /// Returns true if this TensorSpec can be tiled to the given shape.
     pub fn is_valid_tile_shape(&self, shape: &[DimSize], parallel_loop: bool) -> bool {
-        debug_assert_eq!(shape.len(), self.shape.len());
-        debug_assert!(shape.iter().zip(self.shape.iter()).all(|(i, o)| i <= o));
+        let original_shape = self.shape();
+        let level = self.level();
 
-        if parallel_loop && !self.level().can_parallel_tile() && shape != self.shape() {
+        debug_assert_eq!(original_shape.len(), shape.len());
+        debug_assert!(shape.iter().zip(original_shape).all(|(i, o)| i <= o));
+
+        if parallel_loop && !level.can_parallel_tile() && original_shape != shape {
             return false;
         }
         if shape.iter().all(|d| d.get() == 1) {

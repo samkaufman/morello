@@ -104,15 +104,7 @@ impl<Tgt: Target> Impl<Tgt> for MoveLet<Tgt> {
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
-        let introduced_spec = self.introduced.spec();
-        let bytes_consumed = introduced_spec.bytes_used();
-        MemoryAllocation::Simple(Tgt::levels().map(|level| {
-            if introduced_spec.level() == level {
-                bytes_consumed
-            } else {
-                0u64
-            }
-        }))
+        movelet_memory_allocation(self.introduced.spec())
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
@@ -209,7 +201,7 @@ impl<V: View + 'static> TensorOrCacheView<V> {
     }
 }
 
-pub fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tgt>) -> MainCost {
+pub(crate) fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tgt>) -> MainCost {
     let src_hit_cost = src.level().cache_hit_cost();
     let dest_hit_cost = dest.level().cache_hit_cost();
 
@@ -232,4 +224,17 @@ pub fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tgt>) -> 
         cost *= 2;
     }
     cost
+}
+
+pub(crate) fn movelet_memory_allocation<Tgt: Target>(
+    introduced_spec: &TensorSpec<Tgt>,
+) -> MemoryAllocation {
+    let bytes_consumed = introduced_spec.bytes_used();
+    MemoryAllocation::Simple(Tgt::levels().map(|level| {
+        if introduced_spec.level() == level {
+            bytes_consumed
+        } else {
+            0u64
+        }
+    }))
 }

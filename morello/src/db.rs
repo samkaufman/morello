@@ -1283,9 +1283,9 @@ where
     match imp {
         ImplNode::SpecApp(p) => db
             .get_impl(&p.0)
-            .expect("Database should have the sub-Spec entry")
+            .unwrap_or_else(|| panic!("Database should have the sub-Spec: {}", p.0))
             .first()
-            .expect("Database sub-Spec should be satisfiable")
+            .unwrap_or_else(|| panic!("Database sub-Spec should be satisfiable: {}", p.0))
             .clone(),
         _ => imp.replace_children(imp.children().iter().map(|c| construct_impl(db, c))),
     }

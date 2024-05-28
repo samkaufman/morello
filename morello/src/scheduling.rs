@@ -1,3 +1,4 @@
+use itertools::Either;
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 
@@ -7,13 +8,14 @@ use std::{iter, mem};
 
 use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Dtype, Shape};
+use crate::cost::Cost;
 use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
-use crate::imp::loops::{Loop, LoopTile};
+use crate::imp::loops::{compute_loop_main_cost, Loop, LoopTile};
 use crate::imp::moves::{MoveLet, TensorOrCacheView};
 use crate::imp::pipeline::Pipeline;
 use crate::imp::subspecs::SpecApp;
-use crate::imp::ImplNode;
+use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
@@ -51,6 +53,15 @@ pub enum Action<Tgt: Target> {
     Place(Tgt::Kernel),
 }
 
+#[derive(Debug)]
+pub enum ActionSolver<Tgt: Target> {
+    PrimitiveTileOut {
+        outer_spec: Spec<Tgt>,
+        body_spec: Spec<Tgt>,
+    },
+    Fallback(ImplNode<Tgt>),
+}
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub enum TileOut {
     SingleLoop {
@@ -65,6 +76,7 @@ pub enum TileOut {
 }
 
 #[derive(thiserror::Error, Debug)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub enum ApplyError {
     #[error("Cannot apply action to non-canonical Spec")]
     SpecNotCanonical,
@@ -75,6 +87,7 @@ pub enum ApplyError {
 }
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub enum ActionNotApplicableReason {
     TileShapeMatchesOriginal,
     TileShapeIsLarger,
@@ -113,24 +126,12 @@ impl<Tgt: Target> Action<Tgt> {
                         Action::TileOut(tileout) => {
                             let current_output = &operands[logical_spec.output_idx()];
                             let current_out_shape = current_output.shape();
+                            let rank = current_out_shape.len();
 
-                            let mut output_shape_owned = vec![];
-                            let (output_shape, parallel) = match tileout {
-                                TileOut::SingleLoop {
-                                    dim,
-                                    size,
-                                    parallel,
-                                } => {
-                                    output_shape_owned.extend_from_slice(current_out_shape);
-                                    output_shape_owned[*dim as usize] = *size;
-                                    (&output_shape_owned, *parallel)
-                                }
-                                TileOut::MultiLoop {
-                                    output_shape,
-                                    parallel,
-                                } => (output_shape, *parallel),
-                            };
+                            let output_shape = tileout.tiled_output_shape(current_out_shape);
+                            let parallel = tileout.parallel();
 
+                            // TODO: Move assertions into solver() as well.
                             assert!(
                                 !(parallel && logical_spec.serial_only()),
                                 "Serial-only Spec prevents parallel tiling"
@@ -142,36 +143,20 @@ impl<Tgt: Target> Action<Tgt> {
                                 current_out_shape.len(),
                                 output_shape.len()
                             );
-
-                            if current_out_shape == &output_shape[..] {
-                                return Err(ApplyError::ActionNotApplicable(
-                                    ActionNotApplicableReason::TileShapeMatchesOriginal,
-                                ));
-                            }
-                            if output_shape
-                                .iter()
-                                .enumerate()
-                                .any(|(dim, dim_size)| *dim_size > current_out_shape[dim])
-                            {
-                                return Err(ApplyError::ActionNotApplicable(
-                                    ActionNotApplicableReason::TileShapeIsLarger,
-                                ));
-                            }
-
-                            // Abort if it's invalid to tile the original output tensor
-                            // to the new shape (e.g., the new shape is larger).
-                            if !current_output.is_valid_tile_shape(output_shape, parallel) {
-                                return Err(ApplyError::ActionNotApplicable(
-                                    ActionNotApplicableReason::TileShapeInvalid,
-                                ));
-                            }
+                            check_tile_out_applies(
+                                current_out_shape,
+                                &output_shape,
+                                current_output,
+                                parallel,
+                            )?;
 
                             // Tiling happens in three steps:
                             // 1. Construct the simple tile corresponding to the new output shape.
                             let out_idx: u8 = logical_spec.output_idx().try_into().unwrap();
-                            let smaller_output_tiling = Tiling::new_simple(output_shape.clone());
+                            let smaller_output_tiling =
+                                Tiling::new_simple(output_shape.either_into());
                             let smaller_output = LoopTile {
-                                axes: (0..u8::try_from(output_shape.len()).unwrap()).collect(),
+                                axes: (0..u8::try_from(rank).unwrap()).collect(),
                                 tile: smaller_output_tiling
                                     .apply(Param::new(out_idx, current_output.clone()))
                                     .map_err(tile_to_apply_err)?,
@@ -184,7 +169,7 @@ impl<Tgt: Target> Action<Tgt> {
                             // 3. Reify the tilings into Tiles we'll store with this action. Tiles
                             //    objects track the index and shape of the Impl parameter being
                             //    tiled.
-                            let mut next_fresh_loop_dim = u8::try_from(output_shape.len()).unwrap();
+                            let mut next_fresh_loop_dim = u8::try_from(rank).unwrap();
                             let mut new_tiles: Vec<LoopTile<Tgt>> = vec![];
                             for (
                                 operand_idx,
@@ -757,9 +742,279 @@ impl<Tgt: Target> Action<Tgt> {
             }
         }
     }
+
+    /// Returns a value which produces sub-Spec requests and compute a [Cost].
+    ///
+    /// This is functionally equivalent to calling [apply] to produce a partial Impl and then
+    /// gathering its sub-Specs and computing a cost, but is usually faster.
+    ///
+    /// The caller must ensure that `spec` is in canonical form.
+    pub fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+        if let (Action::TileOut(tileout), LogicalSpec::Primitive(basics, ..)) = (self, &spec.0) {
+            let output_tensor = spec.0.parameters().swap_remove(spec.0.output_idx());
+            let untiled_output_shape = output_tensor.shape();
+            let tile_shape = tileout.tiled_output_shape(untiled_output_shape);
+            let parallel = tileout.parallel();
+
+            check_tile_out_applies(untiled_output_shape, &tile_shape, &output_tensor, parallel)?;
+
+            match basics.typ {
+                PrimitiveSpecType::Matmul { .. } => {
+                    return Ok(ActionSolver::PrimitiveTileOut {
+                        outer_spec: spec.clone(),
+                        body_spec: ActionSolver::tiled_subspec_fast(
+                            [(0, 0), (2, 1)].into_iter(),
+                            spec,
+                            &tile_shape,
+                            parallel,
+                        )?,
+                    });
+                }
+                PrimitiveSpecType::Zero | PrimitiveSpecType::Move => {
+                    let rank = basics.spec_shape.len();
+                    return Ok(ActionSolver::PrimitiveTileOut {
+                        outer_spec: spec.clone(),
+                        body_spec: ActionSolver::tiled_subspec_fast(
+                            (0..rank).map(|i| (i, i)),
+                            spec,
+                            &tile_shape,
+                            parallel,
+                        )?,
+                    });
+                }
+                _ => {}
+            }
+        };
+
+        self.apply(spec)
+            .map(|applied| ActionSolver::Fallback(applied))
+    }
+}
+
+// TODO: Rename to `ActionSolver`?
+impl<Tgt: Target> ActionSolver<Tgt> {
+    pub fn subspecs(&self) -> impl Iterator<Item = Spec<Tgt>> {
+        match self {
+            ActionSolver::PrimitiveTileOut {
+                outer_spec: _,
+                body_spec,
+            } => {
+                // TODO: Avoid this clone
+                vec![body_spec.clone()].into_iter()
+            }
+            ActionSolver::Fallback(partial_impl) => {
+                let mut partial_impl_subspecs = Vec::new();
+                collect_nested_specs(partial_impl, &mut partial_impl_subspecs);
+                partial_impl_subspecs.into_iter()
+            }
+        }
+    }
+
+    pub fn compute_cost<I>(&self, mut child_costs: I) -> Cost
+    where
+        I: Iterator<Item = Cost>,
+    {
+        match self {
+            ActionSolver::PrimitiveTileOut {
+                outer_spec,
+                body_spec,
+            } => {
+                let parallel = !outer_spec.0.serial_only() && body_spec.0.serial_only();
+                match &outer_spec.0 {
+                    LogicalSpec::Primitive(
+                        PrimitiveBasics {
+                            typ:
+                                PrimitiveSpecType::Matmul { .. }
+                                | PrimitiveSpecType::Move
+                                | PrimitiveSpecType::Zero,
+                            spec_shape,
+                            ..
+                        },
+                        ..,
+                    ) => {
+                        let LogicalSpec::Primitive(
+                            PrimitiveBasics {
+                                spec_shape: body_shape,
+                                ..
+                            },
+                            ..,
+                        ) = &body_spec.0
+                        else {
+                            unreachable!();
+                        };
+
+                        let mut steps = 1;
+                        let mut full_steps = 1;
+                        for (o, t) in spec_shape.iter().zip(body_shape) {
+                            steps *= o.get().div_ceil(t.get());
+                            full_steps *= o.get() / t.get();
+                        }
+                        let mut cost = child_costs.next().unwrap();
+                        cost.main =
+                            compute_loop_main_cost::<Tgt>(steps, full_steps, parallel, cost.main);
+                        cost.depth += 1;
+                        cost
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            ActionSolver::Fallback(partial_impl) => {
+                compute_impl_cost(partial_impl, &mut child_costs)
+            }
+        }
+    }
+
+    fn tiled_subspec_fast<B>(
+        binds: B,
+        original_spec: &Spec<Tgt>,
+        tile_shape: &[DimSize],
+        parallel: bool,
+    ) -> Result<Spec<Tgt>, ApplyError>
+    where
+        B: Iterator<Item = (usize, usize)> + ExactSizeIterator,
+    {
+        let mut new_spec = original_spec.clone();
+        match &mut new_spec.0 {
+            LogicalSpec::Primitive(PrimitiveBasics { spec_shape, .. }, _, serial_only) => {
+                for (o, t) in binds {
+                    spec_shape[o] = tile_shape[t];
+                }
+                *serial_only = *serial_only || parallel;
+            }
+            _ => unreachable!(),
+        }
+
+        let outer_parameters = original_spec.0.parameters();
+        let new_parameters = new_spec.0.parameters();
+        let LogicalSpec::Primitive(_, new_auxes, _) = &mut new_spec.0 else {
+            unreachable!();
+        };
+
+        // TODO: Should the following be optimized with `tile_shape_is_valid`?
+        for ((outer, inner), new_aux) in outer_parameters
+            .into_iter()
+            .zip(new_parameters)
+            .zip(new_auxes)
+        {
+            if outer.shape() == inner.shape() {
+                continue;
+            }
+
+            // TODO: Need is_valid_tile_shape if we're calling update_for_tiling?
+            if !outer.is_valid_tile_shape(inner.shape(), parallel) {
+                return Err(ApplyError::ActionNotApplicable(
+                    ActionNotApplicableReason::TileShapeInvalid,
+                ));
+            }
+            let Ok((new_layout, new_contig)) = outer.layout().update_for_tiling(
+                outer.shape(),
+                inner.shape(),
+                outer.contiguous_abs(),
+            ) else {
+                todo!();
+            };
+            new_aux.aligned = aligned_approx(inner.shape(), inner.shape(), &outer).unwrap();
+            new_aux.layout = new_layout;
+            new_aux.contig = new_contig;
+        }
+
+        if new_spec.canonicalize().is_err() {
+            return Err(ApplyError::ActionNotApplicable(
+                ActionNotApplicableReason::TileShapeInvalid,
+            ));
+        }
+
+        Ok(new_spec)
+    }
+}
+
+fn check_tile_out_applies<Tgt: Target>(
+    current_out_shape: &[DimSize],
+    output_shape: &[DimSize],
+    current_output: &TensorSpec<Tgt>,
+    parallel: bool,
+) -> Result<(), ApplyError> {
+    if current_out_shape == output_shape {
+        return Err(ApplyError::ActionNotApplicable(
+            ActionNotApplicableReason::TileShapeMatchesOriginal,
+        ));
+    }
+    if output_shape
+        .iter()
+        .enumerate()
+        .any(|(dim, dim_size)| *dim_size > current_out_shape[dim])
+    {
+        return Err(ApplyError::ActionNotApplicable(
+            ActionNotApplicableReason::TileShapeIsLarger,
+        ));
+    }
+
+    // Abort if it's invalid to tile the original output tensor
+    // to the new shape (e.g., the new shape is larger).
+    if !current_output.is_valid_tile_shape(output_shape, parallel) {
+        return Err(ApplyError::ActionNotApplicable(
+            ActionNotApplicableReason::TileShapeInvalid,
+        ));
+    }
+
+    Ok(())
+}
+
+// TODO: Can we replace this function with a more general `utils` crate fn. or something?
+/// Push all nested [Spec]s in an Impl into a given [Vec], left to right.
+fn collect_nested_specs<Tgt: Target>(imp: &ImplNode<Tgt>, out: &mut Vec<Spec<Tgt>>) {
+    match imp {
+        ImplNode::SpecApp(spec_app) => {
+            out.push(spec_app.0.clone());
+        }
+        _ => {
+            for child in imp.children() {
+                collect_nested_specs(child, out);
+            }
+        }
+    }
+}
+
+fn compute_impl_cost<Tgt, I>(imp: &ImplNode<Tgt>, costs: &mut I) -> Cost
+where
+    Tgt: Target,
+    I: Iterator<Item = Cost>,
+{
+    match imp {
+        ImplNode::SpecApp(_) => costs.next().unwrap(),
+        _ => {
+            let child_costs = imp
+                .children()
+                .iter()
+                .map(|child| compute_impl_cost(child, costs))
+                .collect::<Vec<_>>();
+            Cost::from_child_costs(imp, &child_costs)
+        }
+    }
 }
 
 impl TileOut {
+    pub fn tiled_output_shape(
+        &self,
+        untiled_output_shape: &[DimSize],
+    ) -> Either<Vec<DimSize>, &[DimSize]> {
+        match self {
+            TileOut::SingleLoop {
+                dim,
+                size,
+                parallel: _,
+            } => {
+                let mut output_shape_owned = untiled_output_shape.to_vec();
+                output_shape_owned[*dim as usize] = *size;
+                Either::Left(output_shape_owned)
+            }
+            TileOut::MultiLoop {
+                output_shape,
+                parallel: _,
+            } => Either::Right(output_shape),
+        }
+    }
+
     pub fn parallel(&self) -> bool {
         match self {
             TileOut::SingleLoop { parallel, .. } | TileOut::MultiLoop { parallel, .. } => *parallel,
@@ -893,6 +1148,49 @@ fn tile_to_apply_err(err: TileError) -> ApplyError {
     match err {
         TileError::LayoutIncompatible(_) => {
             ApplyError::ActionNotApplicable(ActionNotApplicableReason::LayoutIncompatible)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{memorylimits::MemVec, spec::arb_canonical_spec, target::X86Target};
+    use proptest::prelude::*;
+
+    proptest! {
+        // TODO: Add an ARM variant
+        #[test]
+        fn test_fast_path_is_equivalent_to_slow(spec in arb_canonical_spec::<X86Target>(None, None)) {
+            for action in spec.0.actions(None) {
+                match (action.solver(&spec), action.apply(&spec)) {
+                    (Ok(solver), Ok(applied)) => {
+                        let subspecs = solver.subspecs().collect::<Vec<_>>();
+                        let mut applied_subspecs = Vec::new();
+                        collect_nested_specs(&applied, &mut applied_subspecs);
+                        prop_assert_eq!(&subspecs, &applied_subspecs);
+
+                        // Generate some quick-n'-dirty sub-Spec costs and confirm that the fast
+                        // and slow paths yield the same final cost.
+                        let subspec_costs = (0..u8::try_from(subspecs.len()).unwrap())
+                            .map(|subspec_idx| {
+                                Cost {
+                                    main: subspec_idx.into(),
+                                    peaks: MemVec::zero::<X86Target>(),
+                                    depth: subspec_idx,
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        let solver_cost = solver.compute_cost(subspec_costs.iter().cloned());
+                        let applied_cost = compute_impl_cost(&applied, &mut subspec_costs.into_iter());
+                        prop_assert_eq!(solver_cost, applied_cost);
+                    },
+                    (Err(a), Err(b)) => prop_assert_eq!(a, b),
+                    (l, r) => {
+                        prop_assert!(false, "solver returned {l:?} but apply returned {r:?}");
+                    }
+                }
+            }
         }
     }
 }

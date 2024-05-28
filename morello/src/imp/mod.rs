@@ -3,9 +3,7 @@ use enum_dispatch::enum_dispatch;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use crate::target::LEVEL_COUNT;
 use crate::tensorspec::TensorSpec;
-use crate::utils::next_binary_power;
 use crate::views::{Param, View};
 use crate::{
     cost::MainCost,
@@ -77,8 +75,6 @@ pub trait ImplExt<Tgt: Target>: Impl<Tgt> {
     /// memory.
     fn peak_memory(&self) -> MemVec;
 
-    fn peak_memory_from_child_peaks(&self, child_peaks: &[MemVec]) -> MemVec;
-
     /// Call the given function on all nested [Spec]s.
     ///
     /// Traversal is short-circuited if the function returns `false`.
@@ -109,62 +105,8 @@ impl<Tgt: Target, T: Impl<Tgt>> ImplExt<Tgt> for T {
         for child in children {
             child_peaks.push(child.peak_memory());
         }
-        self.peak_memory_from_child_peaks(&child_peaks)
-    }
-
-    fn peak_memory_from_child_peaks(&self, child_peaks: &[MemVec]) -> MemVec {
-        let mut peak = MemVec::zero::<Tgt>();
-        match self.memory_allocated() {
-            MemoryAllocation::Simple(own) => {
-                for child_peak in child_peaks {
-                    for (i, o) in own.iter().enumerate() {
-                        peak.set_unscaled(
-                            i,
-                            next_binary_power(
-                                peak.get_unscaled(i).max(o + child_peak.get_unscaled(i)),
-                            ),
-                        );
-                    }
-                }
-            }
-            MemoryAllocation::Inner(child_adds) => {
-                debug_assert_eq!(child_peaks.len(), child_adds.len());
-                for (child_peak, own_child_alloc) in child_peaks.iter().zip(&child_adds) {
-                    for (i, o) in own_child_alloc.iter().enumerate() {
-                        peak.set_unscaled(
-                            i,
-                            next_binary_power(
-                                peak.get_unscaled(i).max(child_peak.get_unscaled(i) + *o),
-                            ),
-                        )
-                    }
-                }
-            }
-            MemoryAllocation::Pipeline {
-                intermediate_consumption,
-            } => {
-                debug_assert_eq!(child_peaks.len() + 1, intermediate_consumption.len());
-                let z = [0; LEVEL_COUNT];
-                let mut preceding_consumption = &z;
-                let mut following_consumption = &intermediate_consumption[0];
-                for (child_idx, child_peak) in child_peaks.iter().enumerate() {
-                    for i in 0..peak.len() {
-                        peak.set_unscaled(
-                            i,
-                            next_binary_power(peak.get_unscaled(i).max(
-                                preceding_consumption[i]
-                                    + child_peak.get_unscaled(i)
-                                    + following_consumption[i],
-                            )),
-                        );
-                    }
-                    preceding_consumption = following_consumption;
-                    following_consumption =
-                        intermediate_consumption.get(child_idx + 1).unwrap_or(&z);
-                }
-            }
-        }
-        peak
+        self.memory_allocated()
+            .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
     }
 
     fn visit_subspecs(&self, mut f: impl FnMut(&Spec<Tgt>) -> bool) -> bool {

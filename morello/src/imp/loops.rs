@@ -86,17 +86,12 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        let (factor, overhead) = if self.parallel {
-            let processors = u32::from(Tgt::processors());
-            let steps = self.steps();
-            let main_steps = self.full_steps();
-            let boundary_steps = steps - main_steps;
-            let per_thread_factor = main_steps.div_ceil(processors) + boundary_steps;
-            (per_thread_factor, PAR_TILE_OVERHEAD)
-        } else {
-            (self.steps(), 0)
-        };
-        child_costs[0].saturating_mul(factor) + overhead
+        compute_loop_main_cost::<Tgt>(
+            self.steps(),
+            self.full_steps(),
+            self.parallel,
+            child_costs[0],
+        )
     }
 
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
@@ -158,30 +153,45 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
 impl<Tgt: Target> Loop<Tgt> {
     pub fn steps(&self) -> u32 {
         first_dim_per_axis(self)
-            .map(|(loop_tile, dim_idx, _)| loop_tile.tile.steps_dim(dim_idx))
+            .map(|(loop_tile, dim_idx)| loop_tile.tile.steps_dim(dim_idx))
             .product()
     }
 
     pub fn full_steps(&self) -> u32 {
         first_dim_per_axis(self)
-            .map(|(loop_tile, dim_idx, _)| loop_tile.tile.full_steps_dim(dim_idx))
+            .map(|(loop_tile, dim_idx)| loop_tile.tile.full_steps_dim(dim_idx))
             .product()
     }
 }
 
+pub(crate) fn compute_loop_main_cost<Tgt: Target>(
+    steps: u32,
+    full_steps: u32,
+    parallel: bool,
+    body_cost: MainCost,
+) -> MainCost {
+    let (factor, overhead) = if parallel {
+        let processors = u32::from(Tgt::processors());
+        let boundary_steps = steps - full_steps;
+        let per_thread_factor = full_steps.div_ceil(processors) + boundary_steps;
+        (per_thread_factor, PAR_TILE_OVERHEAD)
+    } else {
+        (steps, 0)
+    };
+    body_cost.saturating_mul(factor) + overhead
+}
+
 /// Yields the first tile and tile dimension seen for each unique axis.
-fn first_dim_per_axis<Tgt: Target>(
-    imp: &Loop<Tgt>,
-) -> impl Iterator<Item = (&LoopTile<Tgt>, u8, u8)> {
+fn first_dim_per_axis<Tgt: Target>(imp: &Loop<Tgt>) -> impl Iterator<Item = (&LoopTile<Tgt>, u8)> {
     imp.tiles
         .iter()
         .flat_map(|loop_tile| {
             loop_tile
                 .axes
                 .iter()
-                .copied()
                 .enumerate()
-                .map(move |(i, s)| (loop_tile, u8::try_from(i).unwrap(), s))
+                .map(move |(i, s)| (loop_tile, u8::try_from(i).unwrap(), *s))
         })
         .unique_by(|(_, _, axis)| *axis)
+        .map(|(i, s, _)| (i, s))
 }

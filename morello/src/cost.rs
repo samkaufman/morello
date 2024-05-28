@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::imp::{Impl, ImplExt};
+use crate::imp::Impl;
 use crate::memorylimits::MemVec;
 use crate::target::Target;
 use crate::utils::snap_memvec_up;
@@ -49,7 +49,11 @@ impl Cost {
             .collect::<Vec<_>>();
         let main_cost: MainCost = imp.compute_main_cost(&child_main_costs);
         // TODO: Handle other kinds of memory, not just standard/TinyMap peaks.
-        let raised_peaks = snap_memvec_up(imp.peak_memory_from_child_peaks(&child_peaks), false);
+        let raised_peaks = snap_memvec_up(
+            imp.memory_allocated()
+                .peak_memory_from_child_peaks::<Tgt>(&child_peaks),
+            false,
+        );
         Cost {
             main: main_cost,
             peaks: raised_peaks,
