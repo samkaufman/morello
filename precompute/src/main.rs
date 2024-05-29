@@ -308,11 +308,7 @@ fn write_stages_completed(
     };
     fs::create_dir_all(db_path).unwrap();
     let path = db_path.join(META_FILENAME);
-    let file = fs::File::create(&path).unwrap();
+    let file = fs::File::create(path).unwrap();
     let buf_writer = std::io::BufWriter::new(file);
-    bincode::serialize_into(
-        buf_writer,
-        &(current_job_fingerprint.clone(), stages_completed),
-    )
-    .unwrap();
+    bincode::serialize_into(buf_writer, &(current_job_fingerprint, stages_completed)).unwrap();
 }
