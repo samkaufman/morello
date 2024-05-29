@@ -7,7 +7,9 @@ edition = "2021"
 
 [dependencies]
 morello = { path = "../morello", features = [ "clap" ] }
+adler = "1.0.2"
 anyhow = { version = "1.0", features = ["backtrace"] }
+bincode = "1.3.3"
 clap = { version = "4.2.5", features = ["derive"] }
 env_logger = "0.11.3"
 log = "0.4.0"

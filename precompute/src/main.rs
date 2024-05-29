@@ -1,6 +1,7 @@
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 
+use adler::Adler32;
 use anyhow::Result;
 use clap::Parser;
 use log::{debug, info};
@@ -9,7 +10,8 @@ use rand::seq::SliceRandom;
 use rayon::prelude::*;
 
 use std::collections::HashSet;
-use std::{iter, path};
+use std::hash::{Hash, Hasher};
+use std::{fs, iter, path};
 
 use morello::common::{DimSize, Dtype};
 use morello::db::FilesDatabase;
@@ -32,6 +34,10 @@ use morello::utils::bit_length;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+type JobFingerprint = (usize, u64);
+
+const META_FILENAME: &str = "PRECOMPUTE";
+const DB_PROGRESS_VERSION: usize = 1;
 const K: u8 = 1;
 
 #[derive(clap::Parser)]
@@ -58,12 +64,12 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     let db = FilesDatabase::new(args.db.as_deref(), true, K);
-    main_per_db(&args, &db);
+    main_per_db(&args, &db, args.db.as_deref());
 
     Ok(())
 }
 
-fn main_per_db(args: &Args, db: &FilesDatabase) {
+fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
     let MemoryLimits::Standard(top) = X86Target::max_mem();
 
     // TODO: Most of the following details aren't used in computing the bound.
@@ -120,8 +126,26 @@ fn main_per_db(args: &Args, db: &FilesDatabase) {
         });
     }
 
+    let fingerprint: JobFingerprint = {
+        let mut progress_fingerprint_hasher = Adler32::new();
+        bounds.hash(&mut progress_fingerprint_hasher);
+        (DB_PROGRESS_VERSION, progress_fingerprint_hasher.finish())
+    };
+    let stages_completed = read_stages_to_skip(&fingerprint, db_path);
+    if stages_completed != 0 {
+        info!("First {} stages already computed", stages_completed);
+    }
+    if args.stages.map(|s| s <= stages_completed) == Some(true) {
+        return;
+    }
+
     let mut rng = rand::thread_rng();
-    for (stage_idx, stage) in bounds.iter().flat_map(logical_specs_to_compute).enumerate() {
+    for (stage_idx, stage) in bounds
+        .iter()
+        .flat_map(logical_spec_goals)
+        .enumerate()
+        .skip(stages_completed)
+    {
         info!(
             "Beginning stage {}, which has peak parallelism of {}",
             stage_idx,
@@ -168,7 +192,9 @@ fn main_per_db(args: &Args, db: &FilesDatabase) {
         );
         info!("Database stats: {}", db.stats_str());
 
-        if Some(stage_idx) == args.stages {
+        write_stages_completed(&fingerprint, db_path, stage_idx + 1);
+
+        if Some(stage_idx) >= args.stages {
             info!("Stopping early because --stages was passed");
             break;
         }
@@ -209,7 +235,7 @@ fn next_limits<'a>(
 }
 
 /// Yield an [Iterator] over all [LogicalSpec]s to compute, in dependency order.
-fn logical_specs_to_compute(
+fn logical_spec_goals(
     bound_spec: &LogicalSpec<X86Target>,
 ) -> impl Iterator<Item = Vec<Vec<LogicalSpec<X86Target>>>> {
     let surmap = LogicalSpecSurMap::new(
@@ -244,4 +270,49 @@ fn logical_specs_to_compute(
             Some(tasks)
         }
     })
+}
+
+fn read_stages_to_skip(
+    current_job_fingerprint: &JobFingerprint,
+    db_path: Option<&path::Path>,
+) -> usize {
+    let Some(db_path) = db_path else {
+        return 0;
+    };
+    if !db_path.is_dir() {
+        return 0;
+    }
+    let path = db_path.join(META_FILENAME);
+    if !path.exists() {
+        return 0;
+    }
+
+    let file = fs::File::open(&path).unwrap();
+    let buf_reader = std::io::BufReader::new(file);
+    let (read_fingerprint, stages_completed): (JobFingerprint, usize) =
+        bincode::deserialize_from(buf_reader).unwrap();
+
+    if current_job_fingerprint != &read_fingerprint {
+        return 0;
+    }
+    stages_completed
+}
+
+fn write_stages_completed(
+    current_job_fingerprint: &JobFingerprint,
+    db_path: Option<&path::Path>,
+    stages_completed: usize,
+) {
+    let Some(db_path) = db_path else {
+        return;
+    };
+    fs::create_dir_all(db_path).unwrap();
+    let path = db_path.join(META_FILENAME);
+    let file = fs::File::create(&path).unwrap();
+    let buf_writer = std::io::BufWriter::new(file);
+    bincode::serialize_into(
+        buf_writer,
+        &(current_job_fingerprint.clone(), stages_completed),
+    )
+    .unwrap();
 }
