@@ -103,6 +103,7 @@ pub enum CpuKernel {
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize)]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum CpuMemoryLevel {
     RF,
     VRF,

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3cc0c925258b779a1ccdfbcfc91d944685e8d2a11ab8b9906180d3bc01fcddad # shrinks to limits = Standard(MemVec([0, 0, 0, 0])), bounds = []
+cc b8b7954448671d244d88975e5eb4f08877ccaa73c57af9b135d0b0991b6a55e0 # shrinks to limits = Standard(MemVec([0, 0, 0, 0])), bounds = []
