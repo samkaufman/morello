@@ -1,10 +1,9 @@
-#[cfg(not(target_env = "msvc"))]
-use tikv_jemallocator::Jemalloc;
-
-use anyhow::Result;
 use clap::Parser;
 use morello::db::FilesDatabase;
 use std::path;
+
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -15,8 +14,6 @@ const K: u8 = 1;
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(long)]
-    db: path::PathBuf, // TODO: Make the only arg.
     #[arg(
         short,
         long,
@@ -24,6 +21,7 @@ struct Args {
         help = "Continue after an error reading a superblock."
     )]
     keep_going: bool,
+    db: path::PathBuf,
 }
 
 fn main() {
