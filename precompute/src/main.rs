@@ -194,9 +194,11 @@ fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
 
         write_stages_completed(&fingerprint, db_path, stage_idx + 1);
 
-        if Some(stage_idx) >= args.stages {
-            info!("Stopping early because --stages was passed");
-            break;
+        if let Some(max_stages) = args.stages {
+            if stage_idx >= max_stages {
+                info!("Stopping early because --stages was passed");
+                break;
+            }
         }
     }
 }
