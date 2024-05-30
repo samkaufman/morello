@@ -12,7 +12,7 @@ use crate::cost::Cost;
 use crate::db::{ActionCostVec, ActionIdx, FilesDatabase, GetPreference};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::imp::{Impl, ImplNode};
+use crate::imp::{Impl, ImplExt, ImplNode};
 use crate::scheduling::ApplyError;
 use crate::spec::Spec;
 use crate::target::Target;
@@ -546,7 +546,10 @@ impl<Tgt: Target> SpecTask<Tgt> {
             match action.apply(&goal) {
                 Ok(partial_impl) => {
                     let mut partial_impl_subspecs = Vec::new();
-                    collect_nested_specs(&partial_impl, &mut partial_impl_subspecs);
+                    partial_impl.visit_subspecs(|s| {
+                        partial_impl_subspecs.push(s.clone());
+                        true
+                    });
 
                     let subspec_count = partial_impl_subspecs.len();
                     max_children = max_children.max(subspec_count);
@@ -794,21 +797,6 @@ impl ImplReducer {
                 .into_iter()
                 .map(|(cost, action_idx)| (action_idx, cost))
                 .collect(),
-        }
-    }
-}
-
-// TODO: Can we replace this function with a more general `utils` crate fn. or something?
-/// Push all nested [Spec]s in an Impl into a given [Vec], left to right.
-fn collect_nested_specs<Tgt: Target>(imp: &ImplNode<Tgt>, out: &mut Vec<Spec<Tgt>>) {
-    match imp {
-        ImplNode::SpecApp(spec_app) => {
-            out.push(spec_app.0.clone());
-        }
-        _ => {
-            for child in imp.children() {
-                collect_nested_specs(child, out);
-            }
         }
     }
 }
