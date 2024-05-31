@@ -452,7 +452,15 @@ impl Shard {
                             let result = match fs::File::open(&path) {
                                 Ok(file) => {
                                     let buf_reader = std::io::BufReader::new(file);
-                                    bincode::deserialize_from(buf_reader).unwrap()
+                                    match bincode::deserialize_from(buf_reader) {
+                                        Ok(superblock) => superblock,
+                                        Err(e) => {
+                                            log::error!(
+                                                "Continuing after error reading superblock; {e:?}"
+                                            );
+                                            HashMap::new()
+                                        }
+                                    }
                                 }
                                 Err(_) => HashMap::new(),
                             };
