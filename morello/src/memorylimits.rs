@@ -370,3 +370,73 @@ pub fn arb_memorylimits_ext(
         MemoryLimits::Standard(MemVec::new(linear_v.try_into().unwrap()))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::target::{ArmTarget, CpuMemoryLevel, X86Target};
+    use proptest::prelude::*;
+
+    #[test]
+    fn test_zero_levels_slower_than_all_x86() {
+        shared_test_zero_levels_slower_than_all::<X86Target>();
+    }
+
+    #[test]
+    fn test_zero_levels_slower_than_all_arm() {
+        shared_test_zero_levels_slower_than_all::<ArmTarget>();
+    }
+
+    proptest! {
+        #[test]
+        fn test_zero_levels_slow_than_all_consistent_with_any_nonzero_x86(
+            limits in arb_memorylimits::<X86Target>(&MemVec::new([1; LEVEL_COUNT])),
+            bounds in prop::collection::vec(any::<CpuMemoryLevel>(), 0..=3)
+        ) {
+            shared_test_zero_levels_slow_than_all_consistent_with_any_nonzero::<X86Target>(
+                limits, &bounds
+            );
+        }
+
+        #[test]
+        fn test_zero_levels_slow_than_all_consistent_with_any_nonzero_arm(
+            limits in arb_memorylimits::<ArmTarget>(&MemVec::new([1; LEVEL_COUNT])),
+            bounds in prop::collection::vec(any::<CpuMemoryLevel>(), 0..=3)
+        ) {
+            shared_test_zero_levels_slow_than_all_consistent_with_any_nonzero::<ArmTarget>(
+                limits, &bounds
+            );
+        }
+    }
+
+    fn shared_test_zero_levels_slower_than_all<Tgt>()
+    where
+        Tgt: Target<Level = CpuMemoryLevel>,
+    {
+        let mut levels = MemoryLimits::Standard(MemVec::new([8, 8, 8, 8]));
+        levels.zero_levels_slower_than_all::<Tgt>(&[CpuMemoryLevel::GL]);
+        assert_eq!(levels, MemoryLimits::Standard(MemVec::new([8, 8, 8, 8])));
+
+        levels = MemoryLimits::Standard(MemVec::new([8, 8, 8, 8]));
+        levels.zero_levels_slower_than_all::<Tgt>(&[CpuMemoryLevel::L1]);
+        assert_eq!(levels, MemoryLimits::Standard(MemVec::new([8, 8, 8, 0])));
+
+        // Notice that VRF is *not* slwoer than RF. This maps to an assumption that we can move from
+        // RF to VRF.
+        levels = MemoryLimits::Standard(MemVec::new([8, 8, 8, 8]));
+        levels.zero_levels_slower_than_all::<Tgt>(&[CpuMemoryLevel::RF]);
+        assert_eq!(levels, MemoryLimits::Standard(MemVec::new([8, 8, 0, 0])));
+    }
+
+    fn shared_test_zero_levels_slow_than_all_consistent_with_any_nonzero<Tgt: Target>(
+        limits: MemoryLimits,
+        bounds: &[Tgt::Level],
+    ) {
+        let mut zeroed_limits = limits.clone();
+        zeroed_limits.zero_levels_slower_than_all::<Tgt>(bounds);
+        assert_eq!(
+            zeroed_limits == limits,
+            !limits.any_nonzero_levels_slower_than::<Tgt>(bounds)
+        );
+    }
+}

@@ -1,5 +1,5 @@
 use crate::common::{DimSize, Dtype};
-use crate::db::RocksDatabase;
+use crate::db::FilesDatabase;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
@@ -42,7 +42,7 @@ pub trait SchedulingSugar<Tgt: Target> {
     ) -> ImplNode<Tgt>;
     fn spatial_split(&self) -> ImplNode<Tgt>;
     fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt>;
-    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -144,7 +144,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         Action::Place(kernel_type).apply(self).unwrap()
     }
 
-    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -224,7 +224,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.place(kernel_type))
     }
 
-    fn synthesize(&self, db: &RocksDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
