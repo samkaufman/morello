@@ -609,8 +609,8 @@ impl Shard {
 
                             let result = match fs::File::open(&path) {
                                 Ok(file) => {
-                                    let buf_reader = std::io::BufReader::new(file);
-                                    match bincode::deserialize_from(buf_reader) {
+                                    let zstd_reader = zstd::Decoder::new(file).unwrap();
+                                    match bincode::deserialize_from(zstd_reader) {
                                         Ok(superblock) => superblock,
                                         Err(e) => {
                                             log::error!(
@@ -644,14 +644,13 @@ impl Shard {
                                 });
                             }
 
-                            let serialized = bincode::serialize(&value).unwrap();
                             if let Some(parent) = path.parent() {
                                 fs::create_dir_all(parent).unwrap();
                             }
                             let file = fs::File::create(&path).unwrap();
-                            let mut buf_writer = std::io::BufWriter::new(file);
-                            buf_writer.write_all(&serialized).unwrap();
-                            buf_writer.flush().unwrap();
+                            let mut zstd_writer = zstd::Encoder::new(file, 0).unwrap();
+                            bincode::serialize_into(&mut zstd_writer, &value).unwrap();
+                            zstd_writer.finish().unwrap();
 
                             #[cfg(feature = "db-stats")]
                             {
