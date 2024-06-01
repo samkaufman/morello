@@ -23,13 +23,13 @@ use wtinylfu::WTinyLfuCache;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
 use std::sync::Arc;
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
-type TableKey = (SpecKey, Vec<(Layout, u8, Option<NonZeroU32>)>);
+type TableKey = (SpecKey, Vec<(Layout, u8, u32)>);
 type SuperBlockKey = DbKey;
 type SuperBlock = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionIdx = u16;
@@ -1055,18 +1055,11 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::Zero { dtype } => root.join("Zero").join(dtype.to_string()),
     };
-    let a = table_key_rest.iter().map(|(l, _, _)| l).join("_");
-    let b = table_key_rest.iter().map(|(_, d, _)| d).join("_");
-    let c = table_key_rest
-        .iter()
-        .map(|(_, _, v)| v.map(|z| z.get()).unwrap_or(0))
-        .join("_");
-    let block_pt_file_name = block_pt.iter().map(|p| p.to_string()).join("_");
     spec_key_dir_name
-        .join(a)
-        .join(b)
-        .join(c)
-        .join(block_pt_file_name)
+        .join(table_key_rest.iter().map(|(l, _, _)| l).join("_"))
+        .join(table_key_rest.iter().map(|(_, d, _)| d).join("_"))
+        .join(table_key_rest.iter().map(|(_, _, v)| v).join("_"))
+        .join(block_pt.iter().map(|p| p.to_string()).join("_"))
 }
 
 // For some reason, [Prehashed]'s [Clone] impl requires that the value be [Copy].

@@ -487,14 +487,14 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
-    type Codomain = ((Layout, u8, Option<NonZeroU32>), [BimapInt; 2]);
+    type Codomain = ((Layout, u8, u32), [BimapInt; 2]);
 
     fn apply(&self, aux: &TensorSpecAux<Tgt>) -> Self::Codomain {
         (
             (
                 aux.layout.clone(),
                 BiMap::apply(&Tgt::Level::bimap(), &aux.level),
-                aux.vector_size.map(|v| NonZeroU32::try_from(v).unwrap()),
+                aux.vector_size.map(|v| v.get()).unwrap_or(0),
             ),
             [aux.contig.into(), aux.aligned as _],
         )
@@ -510,7 +510,7 @@ where
             contig: (*contig).try_into().unwrap(),
             aligned: *aligned_val != 0,
             level,
-            vector_size: *vector_size,
+            vector_size: NonZeroU32::new(*vector_size).map(Some).unwrap_or(None),
         }
     }
 }
