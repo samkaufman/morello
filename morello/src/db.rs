@@ -26,6 +26,7 @@ use std::io::Write;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
+use std::sync::atomic::{self, AtomicU64};
 use std::sync::Arc;
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
@@ -44,6 +45,17 @@ pub struct FilesDatabase {
     k: u8,
     shards: ShardVec,
     prehasher: DefaultPrehasher,
+    #[cfg(feature = "db-stats")]
+    stats: Arc<FilesDatabaseStats>,
+}
+
+#[cfg(feature = "db-stats")]
+#[derive(Debug, Default)]
+pub struct FilesDatabaseStats {
+    disk_bytes_read: AtomicU64,
+    disk_bytes_written: AtomicU64,
+    gets: AtomicU64,
+    puts: AtomicU64,
 }
 
 struct ShardVec(Vec<Mutex<Shard>>);
@@ -125,6 +137,8 @@ impl FilesDatabase {
         });
         log::info!("Opening database at: {}", dir_handle.path().display());
 
+        let stats = Arc::new(FilesDatabaseStats::default());
+
         let cache_per_shard_samples = (shard_count / 4).max(1);
         let cache_per_shard_size = (shard_count - cache_per_shard_samples).max(1);
         let shards = ShardVec(
@@ -135,6 +149,8 @@ impl FilesDatabase {
                         Arc::clone(&dir_handle),
                         cache_per_shard_size,
                         cache_per_shard_samples,
+                        #[cfg(feature = "db-stats")]
+                        Arc::clone(&stats),
                     ))
                 })
                 .collect(),
@@ -145,6 +161,8 @@ impl FilesDatabase {
             k,
             shards,
             prehasher: DefaultPrehasher::default(),
+            #[cfg(feature = "db-stats")]
+            stats,
         }
     }
 
@@ -194,6 +212,8 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        self.stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
+
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
         let (block_pt, inner_pt) = blockify_point(global_pt);
@@ -262,6 +282,8 @@ impl FilesDatabase {
             spec,
             decisions
         );
+
+        self.stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
 
         let bimap = self.spec_bimap();
         let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
@@ -377,6 +399,25 @@ impl FilesDatabase {
 
     fn shard_index(&self, key: &Prehashed<SuperBlockKey>) -> usize {
         *Prehashed::as_hash(key) as usize % self.shards.0.len()
+    }
+
+    /// Return a string describing some basic counts.
+    #[cfg(feature = "db-stats")]
+    pub fn basic_stats(&self) -> String {
+        let stats = &self.stats;
+        let gets = stats.gets.load(atomic::Ordering::SeqCst);
+        let puts = stats.puts.load(atomic::Ordering::SeqCst);
+        let read = stats.disk_bytes_read.load(atomic::Ordering::SeqCst);
+        let written = stats.disk_bytes_written.load(atomic::Ordering::SeqCst);
+        format!(
+            "gets={}, puts={}, bytes_read={} ({}/get), bytes_written={} ({}/put)",
+            gets,
+            puts,
+            read,
+            read.checked_div(gets).unwrap_or(0),
+            written,
+            written.checked_div(puts).unwrap_or(0),
+        )
     }
 
     /// Write statistics about the database to stdout.
@@ -499,6 +540,7 @@ impl Shard {
         db_root: Arc<DirPathHandle>,
         cache_per_shard_size: usize,
         cache_per_shard_samples: usize,
+        #[cfg(feature = "db-stats")] stats: Arc<FilesDatabaseStats>,
     ) -> Self {
         let (command_tx, command_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
         let (response_tx, response_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
@@ -510,6 +552,16 @@ impl Shard {
                     match command_rx.recv() {
                         Ok(ShardThreadMsg::Get(key)) => {
                             let path = superblock_file_path(db_root.path(), &key);
+
+                            #[cfg(feature = "db-stats")]
+                            {
+                                if let Ok(metadata) = path.metadata() {
+                                    stats
+                                        .disk_bytes_read
+                                        .fetch_add(metadata.len(), atomic::Ordering::Relaxed);
+                                }
+                            }
+
                             let result = match fs::File::open(&path) {
                                 Ok(file) => {
                                     let buf_reader = std::io::BufReader::new(file);
@@ -555,6 +607,14 @@ impl Shard {
                             let mut buf_writer = std::io::BufWriter::new(file);
                             buf_writer.write_all(&serialized).unwrap();
                             buf_writer.flush().unwrap();
+
+                            #[cfg(feature = "db-stats")]
+                            {
+                                stats.disk_bytes_written.fetch_add(
+                                    path.metadata().unwrap().len(),
+                                    atomic::Ordering::Relaxed,
+                                );
+                            }
                         }
                         Ok(ShardThreadMsg::Exit) => break,
                         Err(_) => unreachable!("expected Exit first"),

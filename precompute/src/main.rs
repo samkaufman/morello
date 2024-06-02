@@ -197,6 +197,9 @@ fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
             stage_start.elapsed()
         );
 
+        #[cfg(feature = "db-stats")]
+        info!("Stat totals: {}", db.basic_stats());
+
         write_stages_completed(&fingerprint, db_path, stage_idx + 1);
 
         if let Some(max_stages) = args.stages {
