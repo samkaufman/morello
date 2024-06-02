@@ -81,3 +81,25 @@ impl<T: SurMap> BiMap for BimapEnforcer<T> {
         result
     }
 }
+
+/// Tuples of [BiMap]s are [BiMap]s.
+impl<T: BiMap, U: BiMap> BiMap for (T, U) {
+    type Domain = (<T as BiMap>::Domain, <U as BiMap>::Domain);
+    type Codomain = (<T as BiMap>::Codomain, <U as BiMap>::Codomain);
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        (
+            <T as BiMap>::apply(&self.0, &t.0),
+            <U as BiMap>::apply(&self.1, &t.1),
+        )
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
+        (
+            <T as BiMap>::apply_inverse(&self.0, &i.0),
+            <U as BiMap>::apply_inverse(&self.1, &i.1),
+        )
+    }
+}
+
+// TODO: Add implementations for 3- and larger tuples with some kind of macro.
