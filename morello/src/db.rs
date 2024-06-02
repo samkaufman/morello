@@ -35,9 +35,6 @@ type SuperBlock = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionIdx = u16;
 
 // TODO: Select these at runtime.
-const CONCURRENT_CACHE_SHARDS: usize = 256;
-const CACHE_PER_SHARD_SIZE: usize = 128;
-const CACHE_PER_SHARD_SAMPLES: usize = 8;
 const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 
@@ -45,11 +42,11 @@ pub struct FilesDatabase {
     dir_handle: Arc<DirPathHandle>,
     binary_scale_shapes: bool,
     k: u8,
-    shards: ShardArray,
+    shards: ShardVec,
     prehasher: DefaultPrehasher,
 }
 
-struct ShardArray([Mutex<Shard>; CONCURRENT_CACHE_SHARDS]);
+struct ShardVec(Vec<Mutex<Shard>>);
 
 pub struct PageId<'a> {
     db: &'a FilesDatabase,
@@ -116,16 +113,32 @@ pub enum GetPreference<T, V> {
 }
 
 impl FilesDatabase {
-    pub fn new(file_path: Option<&path::Path>, binary_scale_shapes: bool, k: u8) -> Self {
+    pub fn new(
+        file_path: Option<&path::Path>,
+        binary_scale_shapes: bool,
+        k: u8,
+        shard_count: usize,
+    ) -> Self {
         let dir_handle = Arc::new(match file_path {
             Some(path) => DirPathHandle::Persisted(path.to_owned()),
             None => DirPathHandle::TempDir(tempfile::TempDir::new().unwrap()),
         });
         log::info!("Opening database at: {}", dir_handle.path().display());
 
-        let shards = ShardArray(std::array::from_fn(|i| {
-            Mutex::new(Shard::new(i, Arc::clone(&dir_handle)))
-        }));
+        let cache_per_shard_samples = (shard_count / 4).max(1);
+        let cache_per_shard_size = (shard_count - cache_per_shard_samples).max(1);
+        let shards = ShardVec(
+            (0..shard_count)
+                .map(|i| {
+                    Mutex::new(Shard::new(
+                        i,
+                        Arc::clone(&dir_handle),
+                        cache_per_shard_size,
+                        cache_per_shard_samples,
+                    ))
+                })
+                .collect(),
+        );
         Self {
             dir_handle,
             binary_scale_shapes,
@@ -481,7 +494,12 @@ impl<'a> PageId<'a> {
 }
 
 impl Shard {
-    fn new(idx: usize, db_root: Arc<DirPathHandle>) -> Self {
+    fn new(
+        idx: usize,
+        db_root: Arc<DirPathHandle>,
+        cache_per_shard_size: usize,
+        cache_per_shard_samples: usize,
+    ) -> Self {
         let (command_tx, command_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
         let (response_tx, response_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
 
@@ -546,7 +564,7 @@ impl Shard {
         );
 
         Self {
-            cache: WTinyLfuCache::new(CACHE_PER_SHARD_SIZE, CACHE_PER_SHARD_SAMPLES),
+            cache: WTinyLfuCache::new(cache_per_shard_size, cache_per_shard_samples),
             outstanding_gets: new_prehashed_set(),
             thread,
             thread_tx: command_tx,
@@ -1164,7 +1182,7 @@ mod tests {
         #[test]
         fn test_put_then_get_fills_across_memory_limits(decision in arb_spec_and_decision::<X86Target>()) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = FilesDatabase::new(None, false, 1);
+            let db = FilesDatabase::new(None, false, 1, 2);
 
             // Put all decisions into database.
             for d in decision.visit_decisions() {

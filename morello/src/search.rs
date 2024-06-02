@@ -848,7 +848,7 @@ mod tests {
         fn test_can_synthesize_any_canonical_spec(
             spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = FilesDatabase::new(None, false, 1);
+            let db = FilesDatabase::new(None, false, 1, 2);
             top_down(&db, &spec, 1, Some(nz!(1usize)));
         }
 
@@ -858,7 +858,7 @@ mod tests {
             spec_pair in lower_and_higher_canonical_specs::<X86Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
-            let db = FilesDatabase::new(None, false, 1);
+            let db = FilesDatabase::new(None, false, 1, 2);
 
             // Solve the first, lower Spec.
             let (lower_result_vec, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
@@ -881,7 +881,7 @@ mod tests {
         fn test_synthesis_at_peak_memory_yields_same_decision(
             spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = FilesDatabase::new(None, false, 1);
+            let db = FilesDatabase::new(None, false, 1, 2);
             let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
             let first_peak = if let Some(first_sol) = first_solutions.first() {
                 first_sol.1.peaks.clone()
@@ -1118,7 +1118,7 @@ mod tests {
             MemoryLimits::Standard(MemVec::new_from_binary_scaled([0, 5, 7, 6])),
         );
 
-        let db = FilesDatabase::new(None, false, 1);
+        let db = FilesDatabase::new(None, false, 1, 2);
         let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
         let first_peak = if let Some(first_sol) = first_solutions.first() {
             first_sol.1.peaks.clone()

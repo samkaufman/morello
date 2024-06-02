@@ -47,6 +47,8 @@ struct Args {
     stages: Option<usize>,
     #[arg(long)]
     db: Option<path::PathBuf>,
+    #[arg(long, default_value = "32", help = "Cache size in database pages.")]
+    cache_size: usize,
     #[arg(long, default_value = "false")]
     include_conv: bool,
     #[arg(long, short, default_value = "1")]
@@ -67,7 +69,7 @@ fn main() -> Result<()> {
     #[cfg(feature = "db-stats")]
     log::info!("DB statistic collection enabled");
 
-    let db = FilesDatabase::new(args.db.as_deref(), true, K);
+    let db = FilesDatabase::new(args.db.as_deref(), true, K, args.cache_size);
     main_per_db(&args, &db, args.db.as_deref());
 
     Ok(())
