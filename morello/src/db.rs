@@ -137,6 +137,7 @@ impl FilesDatabase {
         });
         log::info!("Opening database at: {}", dir_handle.path().display());
 
+        #[cfg(feature = "db-stats")]
         let stats = Arc::new(FilesDatabaseStats::default());
 
         let cache_per_shard_samples = (shard_count / 4).max(1);
@@ -212,6 +213,7 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        #[cfg(feature = "db-stats")]
         self.stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
 
         let bimap = self.spec_bimap();
@@ -283,6 +285,7 @@ impl FilesDatabase {
             decisions
         );
 
+        #[cfg(feature = "db-stats")]
         self.stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
 
         let bimap = self.spec_bimap();
