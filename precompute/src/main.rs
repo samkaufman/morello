@@ -11,6 +11,8 @@ use rayon::prelude::*;
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{self, AtomicU64};
+use std::time::{Duration, Instant};
 use std::{fs, iter, path};
 
 use morello::common::{DimSize, Dtype};
@@ -170,7 +172,10 @@ fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
             info!("Example problem Spec: {}", example_spec);
         }
 
-        let stage_start = std::time::Instant::now();
+        #[cfg(feature = "db-stats")]
+        let total_synthesis_ms = AtomicU64::new(0);
+
+        let stage_start = Instant::now();
         nonempty_tasks.into_par_iter().for_each(|task| {
             let mut stage = task
                 .into_iter()
@@ -178,8 +183,16 @@ fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
                 .collect::<Vec<_>>();
             let mut next_stage = HashSet::new();
 
+            #[cfg(feature = "db-stats")]
+            let mut synthesis_time = Duration::ZERO;
             while !stage.is_empty() {
+                #[cfg(feature = "db-stats")]
+                let synthesis_start = Instant::now();
                 let stage_results = top_down_many(db, &stage, 1, Some(nz!(1usize))).0;
+                #[cfg(feature = "db-stats")]
+                {
+                    synthesis_time += synthesis_start.elapsed();
+                }
                 for (spec, result) in stage.iter().zip(stage_results) {
                     if let [(_, only_result_cost)] = &result[..] {
                         next_stage.extend(
@@ -191,6 +204,12 @@ fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
                 // TODO: Just swap data structures.
                 stage = next_stage.drain().collect();
             }
+
+            #[cfg(feature = "db-stats")]
+            total_synthesis_ms.fetch_add(
+                synthesis_time.as_millis().try_into().unwrap(),
+                atomic::Ordering::Relaxed,
+            );
         });
         info!(
             "Stage (without saving) {} took {:?}",
@@ -199,7 +218,15 @@ fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
         );
 
         #[cfg(feature = "db-stats")]
-        info!("Stat totals: {}", db.basic_stats());
+        {
+            info!("DB stats: {}", db.basic_stats());
+            let stime = total_synthesis_ms.load(atomic::Ordering::Relaxed);
+            let btime = db.blocking_ms();
+            info!(
+                "synthesis: {stime}ms; blocking: {btime}ms ({:.0}%)",
+                100.0 * btime as f64 / stime as f64
+            );
+        }
 
         write_stages_completed(&fingerprint, db_path, stage_idx + 1);
 
