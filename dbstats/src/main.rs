@@ -22,13 +22,13 @@ struct Args {
     )]
     keep_going: bool,
     db: path::PathBuf,
-    #[arg(long, default_value = "32", help = "Cache size in database pages.")]
+    #[arg(long, default_value = "128", help = "Cache size in database pages.")]
     cache_size: usize,
 }
 
 fn main() {
     env_logger::init();
     let args = Args::parse();
-    let db = FilesDatabase::new(Some(&args.db), true, K, args.cache_size);
+    let db = FilesDatabase::new(Some(&args.db), true, K, args.cache_size, 1);
     db.analyze(args.keep_going);
 }

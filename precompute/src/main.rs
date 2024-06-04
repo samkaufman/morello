@@ -65,11 +65,12 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
+    let threads = rayon::current_num_threads();
 
     #[cfg(feature = "db-stats")]
     log::info!("DB statistic collection enabled");
 
-    let db = FilesDatabase::new(args.db.as_deref(), true, K, args.cache_size);
+    let db = FilesDatabase::new(args.db.as_deref(), true, K, args.cache_size, threads);
     main_per_db(&args, &db, args.db.as_deref());
 
     Ok(())

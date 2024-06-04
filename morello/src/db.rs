@@ -35,6 +35,8 @@ type SuperBlockKey = DbKey;
 type SuperBlock = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionIdx = u16;
 
+/// The number of shards/locks per thread.
+const THREAD_SHARDS: usize = 2;
 // TODO: Select these at runtime.
 const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
@@ -129,7 +131,8 @@ impl FilesDatabase {
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
         k: u8,
-        shard_count: usize,
+        cache_size: usize,
+        thread_count: usize,
     ) -> Self {
         let dir_handle = Arc::new(match file_path {
             Some(path) => DirPathHandle::Persisted(path.to_owned()),
@@ -140,8 +143,19 @@ impl FilesDatabase {
         #[cfg(feature = "db-stats")]
         let stats = Arc::new(FilesDatabaseStats::default());
 
-        let cache_per_shard_samples = (shard_count / 4).max(1);
-        let cache_per_shard_size = (shard_count - cache_per_shard_samples).max(1);
+        let shard_count = thread_count * THREAD_SHARDS;
+        let cache_size_per_shard = cache_size / shard_count;
+        let cache_per_shard_samples = (cache_size_per_shard / 4).max(1);
+        let cache_per_shard_size = cache_size_per_shard
+            .saturating_sub(cache_per_shard_samples)
+            .max(1);
+        // TODO: Print the effective cache size
+        let actual_total_cache_size =
+            shard_count * (cache_per_shard_size + cache_per_shard_samples);
+        if actual_total_cache_size != cache_size {
+            log::warn!("Database using cache size: {}", actual_total_cache_size);
+        }
+
         let shards = ShardVec(
             (0..shard_count)
                 .map(|i| {
@@ -1245,7 +1259,7 @@ mod tests {
         #[test]
         fn test_put_then_get_fills_across_memory_limits(decision in arb_spec_and_decision::<X86Target>()) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = FilesDatabase::new(None, false, 1, 2);
+            let db = FilesDatabase::new(None, false, 1, 2, 1);
 
             // Put all decisions into database.
             for d in decision.visit_decisions() {
