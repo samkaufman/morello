@@ -73,12 +73,12 @@ fn main() -> Result<()> {
     log::info!("DB statistic collection enabled");
 
     let db = FilesDatabase::new(args.db.as_deref(), true, K, args.cache_size, threads);
-    main_per_db(&args, &db, args.db.as_deref());
+    main_per_db(&args, db, args.db.as_deref());
 
     Ok(())
 }
 
-fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
+fn main_per_db(args: &Args, db: FilesDatabase, db_path: Option<&path::Path>) {
     let MemoryLimits::Standard(top) = X86Target::max_mem();
 
     // TODO: Most of the following details aren't used in computing the bound.
@@ -188,7 +188,7 @@ fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
             while !stage.is_empty() {
                 #[cfg(feature = "db-stats")]
                 let synthesis_start = Instant::now();
-                let stage_results = top_down_many(db, &stage, 1, Some(nz!(1usize))).0;
+                let stage_results = top_down_many(&db, &stage, 1, Some(nz!(1usize))).0;
                 #[cfg(feature = "db-stats")]
                 {
                     synthesis_time += synthesis_start.elapsed();
@@ -226,6 +226,7 @@ fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
                 "synthesis: {stime}ms; blocking: {btime}ms ({:.0}%)",
                 100.0 * btime as f64 / stime as f64
             );
+            db.reset_basic_stats();
         }
 
         write_stages_completed(&fingerprint, db_path, stage_idx + 1);

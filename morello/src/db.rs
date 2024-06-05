@@ -443,6 +443,16 @@ impl FilesDatabase {
     }
 
     #[cfg(feature = "db-stats")]
+    pub fn reset_basic_stats(&mut self) {
+        let stats = &mut self.stats;
+        stats.gets.store(0, atomic::Ordering::SeqCst);
+        stats.puts.store(0, atomic::Ordering::SeqCst);
+        stats.disk_bytes_read.store(0, atomic::Ordering::SeqCst);
+        stats.disk_bytes_written.store(0, atomic::Ordering::SeqCst);
+        stats.blocking_ms.store(0, atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "db-stats")]
     pub fn blocking_ms(&self) -> u64 {
         self.stats.blocking_ms.load(atomic::Ordering::SeqCst)
     }
@@ -679,7 +689,7 @@ impl Shard {
                 atomic::Ordering::Relaxed,
             );
         }
-        // TODO: Accumulate the wait.
+
         received
     }
 
