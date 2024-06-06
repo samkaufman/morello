@@ -42,7 +42,7 @@ Morello logs useful, additional information via the [log](https://docs.rs/log/la
 While Morello is primarily intended as a synthesizer, its IR can also be a convenient
 way of manually lowering a specification to C. An example of manually scheduling a
 matrix multiplication is given in
-[examples/simple_matmul.rs](examples/simple_matmul.rs). To run it:
+[morello/examples/simple_matmul.rs](morello/examples/simple_matmul.rs). To run it:
 
 ```bash
 cargo r --example simple_matmul

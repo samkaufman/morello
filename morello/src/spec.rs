@@ -426,7 +426,7 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
         use proptest::prelude::*;
 
-        let max_size = args.unwrap_or(ARBITRARY_SPEC_MAX_SIZE);
+        let max_size = args.unwrap_or(ARBITRARY_SPEC_MAX_SIZE).get();
 
         any::<PrimitiveSpecType>()
             .prop_flat_map(|typ| {
@@ -436,27 +436,25 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
             .prop_flat_map(move |(typ, dtypes)| {
                 let shape_strategy = match typ {
                     PrimitiveSpecType::Matmul { accum: _ } => {
-                        proptest::collection::vec(1..=max_size.get(), 3).boxed()
+                        proptest::collection::vec(1..=max_size, 3).boxed()
                     }
-                    PrimitiveSpecType::Conv { accum: _ } => {
-                        (1..=max_size.get(), 1..=max_size.get())
-                            .prop_flat_map(move |(h, w)| {
-                                (
-                                    1..max_size.get(),
-                                    1..8u32,
-                                    1..4u32,
-                                    Just(h),
-                                    Just(w),
-                                    1..=h,
-                                    1..=w,
-                                )
-                            })
-                            .prop_map(|(b, f, c, h, w, fh, fw)| vec![b, f, c, h, w, fh, fw])
-                            .boxed()
-                    }
+                    PrimitiveSpecType::Conv { accum: _ } => (1..=max_size, 1..=max_size)
+                        .prop_flat_map(move |(h, w)| {
+                            (
+                                1..max_size,
+                                1..8u32,
+                                1..4u32,
+                                Just(h),
+                                Just(w),
+                                1..=h,
+                                1..=w,
+                            )
+                        })
+                        .prop_map(|(b, f, c, h, w, fh, fw)| vec![b, f, c, h, w, fh, fw])
+                        .boxed(),
                     PrimitiveSpecType::Move | PrimitiveSpecType::Zero => (1..=4usize)
                         .prop_flat_map(move |tensor_rank| {
-                            proptest::collection::vec(1..=max_size.get(), tensor_rank)
+                            proptest::collection::vec(1..=max_size, tensor_rank)
                         })
                         .boxed(),
                 };
