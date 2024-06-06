@@ -47,6 +47,8 @@ struct Args {
     stages: Option<usize>,
     #[arg(long)]
     db: Option<path::PathBuf>,
+    #[arg(long, default_value = "32", help = "Cache size in database pages.")]
+    cache_size: usize,
     #[arg(long, default_value = "false")]
     include_conv: bool,
     #[arg(long, short, default_value = "1")]
@@ -63,7 +65,12 @@ struct Args {
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
-    let db = FilesDatabase::new(args.db.as_deref(), true, K);
+    let threads = rayon::current_num_threads();
+
+    #[cfg(feature = "db-stats")]
+    log::info!("DB statistic collection enabled");
+
+    let db = FilesDatabase::new(args.db.as_deref(), true, K, args.cache_size, threads);
     main_per_db(&args, &db, args.db.as_deref());
 
     Ok(())
@@ -190,7 +197,9 @@ fn main_per_db(args: &Args, db: &FilesDatabase, db_path: Option<&path::Path>) {
             stage_idx,
             stage_start.elapsed()
         );
-        info!("Database stats: {}", db.stats_str());
+
+        #[cfg(feature = "db-stats")]
+        info!("Stat totals: {}", db.basic_stats());
 
         write_stages_completed(&fingerprint, db_path, stage_idx + 1);
 

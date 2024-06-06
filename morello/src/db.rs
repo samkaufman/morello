@@ -23,32 +23,44 @@ use wtinylfu::WTinyLfuCache;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
+use std::sync::atomic::{self, AtomicU64};
 use std::sync::Arc;
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
-type TableKey = (SpecKey, Vec<(Layout, u8, Option<NonZeroU32>)>);
+type TableKey = (SpecKey, Vec<(Layout, u8, u32)>);
 type SuperBlockKey = DbKey;
 type SuperBlock = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionIdx = u16;
 
+/// The number of shards/locks per thread.
+const THREAD_SHARDS: usize = 2;
 // TODO: Select these at runtime.
-const CONCURRENT_CACHE_SHARDS: usize = 256;
-const CACHE_PER_SHARD_SIZE: usize = 128;
-const CACHE_PER_SHARD_SAMPLES: usize = 8;
 const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 
 pub struct FilesDatabase {
+    dir_handle: Arc<DirPathHandle>,
     binary_scale_shapes: bool,
     k: u8,
-    shards: ShardArray,
+    shards: ShardVec,
     prehasher: DefaultPrehasher,
+    #[cfg(feature = "db-stats")]
+    stats: Arc<FilesDatabaseStats>,
 }
 
-struct ShardArray([Mutex<Shard>; CONCURRENT_CACHE_SHARDS]);
+#[cfg(feature = "db-stats")]
+#[derive(Debug, Default)]
+pub struct FilesDatabaseStats {
+    disk_bytes_read: AtomicU64,
+    disk_bytes_written: AtomicU64,
+    gets: AtomicU64,
+    puts: AtomicU64,
+}
+
+struct ShardVec(Vec<Mutex<Shard>>);
 
 pub struct PageId<'a> {
     db: &'a FilesDatabase,
@@ -101,6 +113,9 @@ pub struct WholeBlock {
     pub main_costs: NDArray<MainCost>,
     pub peaks: NDArray<MemVec>,
     pub depths_actions: NDArray<(u8, ActionIdx)>,
+    #[cfg(feature = "db-stats")]
+    #[serde(skip)]
+    access_counts: Mutex<Option<NDArray<bool>>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,21 +127,57 @@ pub enum GetPreference<T, V> {
 }
 
 impl FilesDatabase {
-    pub fn new(file_path: Option<&path::Path>, binary_scale_shapes: bool, k: u8) -> Self {
+    pub fn new(
+        file_path: Option<&path::Path>,
+        binary_scale_shapes: bool,
+        k: u8,
+        cache_size: usize,
+        thread_count: usize,
+    ) -> Self {
         let dir_handle = Arc::new(match file_path {
             Some(path) => DirPathHandle::Persisted(path.to_owned()),
             None => DirPathHandle::TempDir(tempfile::TempDir::new().unwrap()),
         });
         log::info!("Opening database at: {}", dir_handle.path().display());
 
-        let shards = ShardArray(std::array::from_fn(|i| {
-            Mutex::new(Shard::new(i, Arc::clone(&dir_handle)))
-        }));
+        #[cfg(feature = "db-stats")]
+        let stats = Arc::new(FilesDatabaseStats::default());
+
+        let shard_count = thread_count * THREAD_SHARDS;
+        let cache_size_per_shard = cache_size / shard_count;
+        let cache_per_shard_samples = (cache_size_per_shard / 4).max(1);
+        let cache_per_shard_size = cache_size_per_shard
+            .saturating_sub(cache_per_shard_samples)
+            .max(1);
+        // TODO: Print the effective cache size
+        let actual_total_cache_size =
+            shard_count * (cache_per_shard_size + cache_per_shard_samples);
+        if actual_total_cache_size != cache_size {
+            log::warn!("Database using cache size: {}", actual_total_cache_size);
+        }
+
+        let shards = ShardVec(
+            (0..shard_count)
+                .map(|i| {
+                    Mutex::new(Shard::new(
+                        i,
+                        Arc::clone(&dir_handle),
+                        cache_per_shard_size,
+                        cache_per_shard_samples,
+                        #[cfg(feature = "db-stats")]
+                        Arc::clone(&stats),
+                    ))
+                })
+                .collect(),
+        );
         Self {
+            dir_handle,
             binary_scale_shapes,
             k,
             shards,
             prehasher: DefaultPrehasher::default(),
+            #[cfg(feature = "db-stats")]
+            stats,
         }
     }
 
@@ -176,6 +227,9 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        #[cfg(feature = "db-stats")]
+        self.stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
+
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
         let (block_pt, inner_pt) = blockify_point(global_pt);
@@ -245,6 +299,9 @@ impl FilesDatabase {
             decisions
         );
 
+        #[cfg(feature = "db-stats")]
+        self.stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
+
         let bimap = self.spec_bimap();
         let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
 
@@ -307,52 +364,6 @@ impl FilesDatabase {
         Some(self.k.into())
     }
 
-    pub fn stats_str(&self) -> String {
-        // let start = Instant::now();
-        // let mut runs_filled = 0;
-        // let mut lens_filled = 0;
-        // let mut runs_main_costs = 0;
-        // let mut lens_main_costs = 0;
-        // let mut runs_peaks = 0;
-        // let mut lens_peaks = 0;
-        // let mut runs_depths_actions = 0;
-        // let mut lens_depths_actions = 0;
-        // for block in &self.blocks {
-        //     match block.value() {
-        //         DbBlock::Whole(e) => {
-        //             runs_filled += e.filled.runs_len();
-        //             lens_filled += e.filled.len();
-        //             runs_main_costs += e.main_costs.runs_len();
-        //             lens_main_costs += e.main_costs.len();
-        //             runs_peaks += e.peaks.runs_len();
-        //             lens_peaks += e.peaks.len();
-        //             runs_depths_actions += e.depths_actions.runs_len();
-        //             lens_depths_actions += e.depths_actions.len();
-        //         }
-        //     }
-        // }
-        // let stat_duration = start.elapsed();
-        // format!(
-        //     "blocks={} \
-        //     runs_filled={} runs_main_costs={} runs_peaks={} \
-        //     runs_depthsactions={} cr_filled={:.5} \
-        //     cr_main_costs={:.5} cr_peaks={:.5} cr_depthsactions={:.5} statms={}",
-        //     self.blocks.len(),
-        //     runs_filled,
-        //     runs_main_costs,
-        //     runs_peaks,
-        //     runs_depths_actions,
-        //     runs_filled as f32 / lens_filled as f32,
-        //     runs_main_costs as f32 / lens_main_costs as f32,
-        //     runs_peaks as f32 / lens_peaks as f32,
-        //     runs_depths_actions as f32 / lens_depths_actions as f32,
-        //     stat_duration.as_millis(),
-        // )
-
-        // TODO: Reimplement.
-        "".to_owned()
-    }
-
     pub fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
     where
         Tgt: Target,
@@ -406,6 +417,109 @@ impl FilesDatabase {
     fn shard_index(&self, key: &Prehashed<SuperBlockKey>) -> usize {
         *Prehashed::as_hash(key) as usize % self.shards.0.len()
     }
+
+    /// Return a string describing some basic counts.
+    #[cfg(feature = "db-stats")]
+    pub fn basic_stats(&self) -> String {
+        let stats = &self.stats;
+        let gets = stats.gets.load(atomic::Ordering::SeqCst);
+        let puts = stats.puts.load(atomic::Ordering::SeqCst);
+        let read = stats.disk_bytes_read.load(atomic::Ordering::SeqCst);
+        let written = stats.disk_bytes_written.load(atomic::Ordering::SeqCst);
+        format!(
+            "gets={}, puts={}, bytes_read={} ({}/get), bytes_written={} ({}/put)",
+            gets,
+            puts,
+            read,
+            read.checked_div(gets).unwrap_or(0),
+            written,
+            written.checked_div(puts).unwrap_or(0),
+        )
+    }
+
+    /// Write statistics about the database to stdout.
+    ///
+    /// This may be expensive and multi-threaded.
+    #[cfg(feature = "db-stats")]
+    pub fn analyze(&self, skip_read_errors: bool) {
+        // TODO: What to do about missing superblocks, if anything?
+
+        fn visit_dir(
+            root: &path::Path,
+            path: &path::Path,
+            writer: &mut csv::Writer<std::io::Stdout>,
+            skip_read_errors: bool,
+        ) {
+            // Since we don't revisit blocks, bypass the in-mem. cache and read from disk.
+            for file_entry in fs::read_dir(path).unwrap() {
+                let file_entry = file_entry.unwrap();
+                let entry_path = file_entry.path();
+                if entry_path.is_dir() {
+                    visit_dir(root, &file_entry.path(), writer, skip_read_errors);
+                    continue;
+                }
+
+                let shortened_entry_path_str = entry_path.strip_prefix(root).unwrap();
+                let entry_path_str = format!("{}", shortened_entry_path_str.display());
+
+                let superblock_file = fs::File::open(entry_path).unwrap();
+                let buf_reader = std::io::BufReader::new(superblock_file);
+
+                let superblock: SuperBlock = match bincode::deserialize_from(buf_reader) {
+                    Ok(superblock) => superblock,
+                    Err(e) => {
+                        if skip_read_errors {
+                            log::warn!("Error reading superblock: {:?}", e);
+                            continue;
+                        }
+                        panic!("Error reading superblock: {:?}", e);
+                    }
+                };
+
+                for (block_pt, block) in &superblock {
+                    let DbBlock::Whole(e) = block;
+                    writer
+                        .write_record([
+                            &entry_path_str,
+                            &format!("{:?}", block_pt),
+                            &e.filled.runs_len().to_string(),
+                            &e.filled.len().to_string(),
+                            &e.main_costs.runs_len().to_string(),
+                            &e.main_costs.len().to_string(),
+                            &e.peaks.runs_len().to_string(),
+                            &e.peaks.len().to_string(),
+                            &e.depths_actions.runs_len().to_string(),
+                            &e.depths_actions.len().to_string(),
+                        ])
+                        .unwrap();
+                }
+            }
+        }
+
+        let mut writer = csv::Writer::from_writer(std::io::stdout());
+        writer
+            .write_record([
+                "superblock_path",
+                "block_pt",
+                "runs_filled",
+                "lens_filled",
+                "runs_main_costs",
+                "lens_main_costs",
+                "runs_peaks",
+                "lens_peaks",
+                "runs_depths_actions",
+                "lens_depths_actions",
+            ])
+            .unwrap();
+
+        visit_dir(
+            self.dir_handle.path(),
+            self.dir_handle.path(),
+            &mut writer,
+            skip_read_errors,
+        );
+        writer.flush().unwrap();
+    }
 }
 
 impl Drop for FilesDatabase {
@@ -438,7 +552,13 @@ impl<'a> PageId<'a> {
 }
 
 impl Shard {
-    fn new(idx: usize, db_root: Arc<DirPathHandle>) -> Self {
+    fn new(
+        idx: usize,
+        db_root: Arc<DirPathHandle>,
+        cache_per_shard_size: usize,
+        cache_per_shard_samples: usize,
+        #[cfg(feature = "db-stats")] stats: Arc<FilesDatabaseStats>,
+    ) -> Self {
         let (command_tx, command_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
         let (response_tx, response_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
 
@@ -449,10 +569,28 @@ impl Shard {
                     match command_rx.recv() {
                         Ok(ShardThreadMsg::Get(key)) => {
                             let path = superblock_file_path(db_root.path(), &key);
+
+                            #[cfg(feature = "db-stats")]
+                            {
+                                if let Ok(metadata) = path.metadata() {
+                                    stats
+                                        .disk_bytes_read
+                                        .fetch_add(metadata.len(), atomic::Ordering::Relaxed);
+                                }
+                            }
+
                             let result = match fs::File::open(&path) {
                                 Ok(file) => {
                                     let buf_reader = std::io::BufReader::new(file);
-                                    bincode::deserialize_from(buf_reader).unwrap()
+                                    match bincode::deserialize_from(buf_reader) {
+                                        Ok(superblock) => superblock,
+                                        Err(e) => {
+                                            log::error!(
+                                                "Continuing after error reading superblock; {e:?}"
+                                            );
+                                            HashMap::new()
+                                        }
+                                    }
                                 }
                                 Err(_) => HashMap::new(),
                             };
@@ -462,6 +600,22 @@ impl Shard {
                         }
                         Ok(ShardThreadMsg::Put(key, value)) => {
                             let path = superblock_file_path(db_root.path(), &key);
+
+                            #[cfg(feature = "db-stats")]
+                            {
+                                log::debug!("Evicting superblock; accesses: {}", {
+                                    let (num_accessed, total) = value
+                                        .values()
+                                        .map(|b| {
+                                            let DbBlock::Whole(e) = b;
+                                            e.accesses()
+                                        })
+                                        .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
+                                    let pct = num_accessed as f64 / total as f64;
+                                    format!("{pct:.4} ({num_accessed} of {total})")
+                                });
+                            }
+
                             let serialized = bincode::serialize(&value).unwrap();
                             if let Some(parent) = path.parent() {
                                 fs::create_dir_all(parent).unwrap();
@@ -470,6 +624,14 @@ impl Shard {
                             let mut buf_writer = std::io::BufWriter::new(file);
                             buf_writer.write_all(&serialized).unwrap();
                             buf_writer.flush().unwrap();
+
+                            #[cfg(feature = "db-stats")]
+                            {
+                                stats.disk_bytes_written.fetch_add(
+                                    path.metadata().unwrap().len(),
+                                    atomic::Ordering::Relaxed,
+                                );
+                            }
                         }
                         Ok(ShardThreadMsg::Exit) => break,
                         Err(_) => unreachable!("expected Exit first"),
@@ -479,7 +641,7 @@ impl Shard {
         );
 
         Self {
-            cache: WTinyLfuCache::new(CACHE_PER_SHARD_SIZE, CACHE_PER_SHARD_SAMPLES),
+            cache: WTinyLfuCache::new(cache_per_shard_size, cache_per_shard_samples),
             outstanding_gets: new_prehashed_set(),
             thread,
             thread_tx: command_tx,
@@ -587,10 +749,10 @@ impl DbBlock {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
         match self {
             DbBlock::Whole(b) => {
                 // TODO: Propogate an action index preference.
-                let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
                 match b.get(&inner_pt_usize) {
                     Some(r) => GetPreference::Hit(r),
                     None => GetPreference::Miss(None),
@@ -617,6 +779,8 @@ impl WholeBlock {
             main_costs: NDArray::new(&shape_with_k),
             peaks: NDArray::new_with_value(&shape_with_k, MemVec::zero::<Tgt>()),
             depths_actions: NDArray::new(&shape_with_k),
+            #[cfg(feature = "db-stats")]
+            access_counts: Mutex::new(Some(NDArray::new_with_value(shape, false))),
         }
     }
 
@@ -670,9 +834,19 @@ impl WholeBlock {
             value.0.iter().map(|(a, c)| (c.depth, *a)),
             Some(&self.filled),
         );
+
+        #[cfg(feature = "db-stats")]
+        {
+            let mut guard = self.access_counts.lock();
+            let l =
+                guard.get_or_insert_with(|| NDArray::new_with_value(self.filled.shape(), false));
+            l.fill_region(dim_ranges, true);
+        }
     }
 
     pub(crate) fn get(&self, pt: &[usize]) -> Option<ActionCostVec> {
+        self.log_access(pt);
+
         let f = self.filled[pt];
         if f == 0 {
             return None;
@@ -701,6 +875,39 @@ impl WholeBlock {
 
     pub fn shape(&self) -> &[usize] {
         self.filled.shape()
+    }
+
+    fn log_access(&self, pt: &[usize]) {
+        #[cfg(feature = "db-stats")]
+        {
+            let mut guard = self.access_counts.lock();
+            let l =
+                guard.get_or_insert_with(|| NDArray::new_with_value(self.filled.shape(), false));
+            l.set_pt(pt, true);
+        }
+    }
+
+    #[cfg(feature = "db-stats")]
+    pub fn accesses(&self) -> (usize, usize) {
+        let guard = self.access_counts.lock();
+        let Some(l) = guard.as_ref() else {
+            let shape = self.filled.shape();
+            let volume = shape.iter().product();
+            return (0, volume);
+        };
+        let total = l.data.len();
+        let read = l
+            .data
+            .runs()
+            .filter_map(|r| {
+                if *r.value {
+                    Some(usize::try_from(r.len).unwrap())
+                } else {
+                    None
+                }
+            })
+            .sum();
+        (read, total)
     }
 }
 
@@ -943,18 +1150,11 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::Zero { dtype } => root.join("Zero").join(dtype.to_string()),
     };
-    let a = table_key_rest.iter().map(|(l, _, _)| l).join("_");
-    let b = table_key_rest.iter().map(|(_, d, _)| d).join("_");
-    let c = table_key_rest
-        .iter()
-        .map(|(_, _, v)| v.map(|z| z.get()).unwrap_or(0))
-        .join("_");
-    let block_pt_file_name = block_pt.iter().map(|p| p.to_string()).join("_");
     spec_key_dir_name
-        .join(a)
-        .join(b)
-        .join(c)
-        .join(block_pt_file_name)
+        .join(table_key_rest.iter().map(|(l, _, _)| l).join("_"))
+        .join(table_key_rest.iter().map(|(_, d, _)| d).join("_"))
+        .join(table_key_rest.iter().map(|(_, _, v)| v).join("_"))
+        .join(block_pt.iter().map(|p| p.to_string()).join("_"))
 }
 
 // For some reason, [Prehashed]'s [Clone] impl requires that the value be [Copy].
@@ -1059,7 +1259,7 @@ mod tests {
         #[test]
         fn test_put_then_get_fills_across_memory_limits(decision in arb_spec_and_decision::<X86Target>()) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = FilesDatabase::new(None, false, 1);
+            let db = FilesDatabase::new(None, false, 1, 2, 1);
 
             // Put all decisions into database.
             for d in decision.visit_decisions() {

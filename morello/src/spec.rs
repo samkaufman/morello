@@ -106,6 +106,8 @@ pub struct PrimitiveBasicsBimap {
     pub binary_scale_shapes: bool,
 }
 
+pub struct ShapeBimap(pub bool);
+
 #[derive(thiserror::Error, Debug)]
 pub enum CanonicalizeError {
     #[error("Failed to canonicalize the TensorSpecAux: {0}")]
@@ -1405,36 +1407,53 @@ impl BiMap for PrimitiveBasicsBimap {
                     dtypes: dtypes.as_slice().into(),
                 }
             }
-            SpecKey::Move { dtypes } => {
-                let unshifted_shape = v.iter().map(|&d| {
-                    if self.binary_scale_shapes {
-                        u32::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
-                    } else {
-                        d + 1
-                    }
-                });
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Move,
-                    spec_shape: unshifted_shape.map(|d| DimSize::new(d).unwrap()).collect(),
-                    dtypes: dtypes.as_slice().into(),
-                }
-            }
-            SpecKey::Zero { dtype } => {
-                let unshifted_shape = v.iter().map(|&d| {
-                    if self.binary_scale_shapes {
-                        u32::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
-                    } else {
-                        d + 1
-                    }
-                });
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Zero,
-                    spec_shape: unshifted_shape.map(|d| DimSize::new(d).unwrap()).collect(),
-                    dtypes: vec![*dtype],
-                }
-            }
+            SpecKey::Move { dtypes } => PrimitiveBasics {
+                typ: PrimitiveSpecType::Move,
+                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
+                dtypes: dtypes.as_slice().into(),
+            },
+            SpecKey::Zero { dtype } => PrimitiveBasics {
+                typ: PrimitiveSpecType::Zero,
+                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
+                dtypes: vec![*dtype],
+            },
         };
         basics
+    }
+}
+
+impl BiMap for ShapeBimap {
+    type Domain = Vec<DimSize>;
+    type Codomain = Vec<BimapInt>;
+
+    fn apply(&self, shape: &Self::Domain) -> Self::Codomain {
+        shape
+            .iter()
+            .map(|d| d.get())
+            .map(|d| {
+                if self.0 {
+                    if !d.is_power_of_two() {
+                        panic!("Given non-zero/power-of-two shape {}", d);
+                    }
+                    bit_length_u32(prev_power_of_two_u32(d - 1))
+                } else {
+                    d - 1
+                }
+            })
+            .collect()
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
+        i.iter()
+            .map(|&d| {
+                DimSize::new(if self.0 {
+                    u32::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
+                } else {
+                    d + 1
+                })
+                .unwrap()
+            })
+            .collect()
     }
 }
 

@@ -25,7 +25,7 @@ jobs:
           sudo apt-get install -y libomp-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo check
-      - run: cargo test -- --include-ignored
+      - run: cargo test --all-features -- --include-ignored
       - run: cargo build
       - run: cargo run --example simple_matmul
       - name: Smoke-test 1x1x1 matrix multiplication synthesis & run
@@ -52,13 +52,20 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - run: cargo build --no-default-features
 
+  build-with-db-stats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      - run: cargo build -F db-stats
+
   smoke-test-precompute:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@v2
-      - run: cargo run --bin precompute -- --stages 100 2
+      - run: cargo run -p precompute -- --stages 100 2
 
   clippy-and-format:
     runs-on: ubuntu-latest

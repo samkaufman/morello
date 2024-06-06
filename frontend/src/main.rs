@@ -39,6 +39,9 @@ struct Args {
     #[arg(long, short)]
     db: Option<path::PathBuf>,
 
+    #[arg(long, default_value = "128", help = "Cache size in database pages.")]
+    cache_size: usize,
+
     /// Color mode
     #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
     color: ColorMode,
@@ -137,7 +140,14 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     color::set_color_mode(args.color);
-    let db = FilesDatabase::new(args.db.as_deref(), BINARY_SCALE_SHAPES, K);
+    let threads = rayon::current_num_threads();
+    let db = FilesDatabase::new(
+        args.db.as_deref(),
+        BINARY_SCALE_SHAPES,
+        K,
+        args.cache_size,
+        threads,
+    );
     match &args.target {
         TargetId::X86 => main_per_db::<X86Target>(&args, &db),
         TargetId::Arm => main_per_db::<ArmTarget>(&args, &db),

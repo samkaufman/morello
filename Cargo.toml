@@ -1,8 +1,13 @@
 [workspace]
 members = [
     "morello",
+    "dbstats",
     "frontend",
     "precompute"
+]
+default-members = [
+    "morello",
+    "frontend"
 ]
 resolver = "2"
 
