@@ -44,7 +44,7 @@ const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 
 pub struct FilesDatabase {
-    #[allow(dead_code)] // intentionally never read
+    #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
     dir_handle: Arc<DirPathHandle>,
     binary_scale_shapes: bool,
     k: u8,
