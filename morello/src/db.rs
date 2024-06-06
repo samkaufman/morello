@@ -26,12 +26,13 @@ use std::io::Write;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
-use std::sync::atomic::{self, AtomicU64};
 use std::sync::{mpsc, Arc};
-use std::time::Instant;
 
-// #[cfg(feature = "db-stats")]
-// use std::sync::atomic::{self, AtomicU64};
+#[cfg(feature = "db-stats")]
+use {
+    std::sync::atomic::{self, AtomicU64},
+    std::time::Instant,
+};
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
 type TableKey = (SpecKey, Vec<(Layout, u8, u32)>);
