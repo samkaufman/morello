@@ -26,9 +26,13 @@ use std::io::Write;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
-use std::sync::atomic::{self, AtomicU64};
 use std::sync::{mpsc, Arc};
-use std::time::Instant;
+
+#[cfg(feature = "db-stats")]
+use {
+    std::sync::atomic::{self, AtomicU64},
+    std::time::Instant,
+};
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
 type TableKey = (SpecKey, Vec<(Layout, u8, u32)>);
@@ -43,6 +47,7 @@ const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 
 pub struct FilesDatabase {
+    #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
     dir_handle: Arc<DirPathHandle>,
     binary_scale_shapes: bool,
     k: u8,
@@ -889,6 +894,7 @@ impl WholeBlock {
     }
 
     pub(crate) fn get(&self, pt: &[usize]) -> Option<ActionCostVec> {
+        #[cfg(feature = "db-stats")]
         self.log_access(pt);
 
         let f = self.filled[pt];
@@ -921,14 +927,11 @@ impl WholeBlock {
         self.filled.shape()
     }
 
+    #[cfg(feature = "db-stats")]
     fn log_access(&self, pt: &[usize]) {
-        #[cfg(feature = "db-stats")]
-        {
-            let mut guard = self.access_counts.lock();
-            let l =
-                guard.get_or_insert_with(|| NDArray::new_with_value(self.filled.shape(), false));
-            l.set_pt(pt, true);
-        }
+        let mut guard = self.access_counts.lock();
+        let l = guard.get_or_insert_with(|| NDArray::new_with_value(self.filled.shape(), false));
+        l.set_pt(pt, true);
     }
 
     #[cfg(feature = "db-stats")]

@@ -52,6 +52,8 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - run: cargo install cargo-all-features
       - run: cargo build-all-features
+        env:
+          RUSTFLAGS: --deny warnings
 
   smoke-test-precompute:
     runs-on: ubuntu-latest

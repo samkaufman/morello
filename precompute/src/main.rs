@@ -11,9 +11,14 @@ use rayon::prelude::*;
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{self, AtomicU64};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use std::{fs, iter, path};
+
+#[cfg(feature = "db-stats")]
+use {
+    std::sync::atomic::{self, AtomicU64},
+    std::time::Duration,
+};
 
 use morello::common::{DimSize, Dtype};
 use morello::db::FilesDatabase;
