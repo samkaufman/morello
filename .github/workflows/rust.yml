@@ -45,19 +45,13 @@ jobs:
         env:
           CLANG: /opt/homebrew/opt/llvm/bin/clang
 
-  build-without-verification:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --no-self-update
-      - run: cargo build --no-default-features
-
-  build-with-db-stats:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install stable --profile minimal --no-self-update
-      - run: cargo build -F db-stats
+      - run: cargo install cargo-all-features
+      - run: cargo build-all-features
 
   smoke-test-precompute:
     runs-on: ubuntu-latest
