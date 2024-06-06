@@ -26,10 +26,12 @@ use std::io::Write;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
-use std::sync::Arc;
-
-#[cfg(feature = "db-stats")]
 use std::sync::atomic::{self, AtomicU64};
+use std::sync::{mpsc, Arc};
+use std::time::Instant;
+
+// #[cfg(feature = "db-stats")]
+// use std::sync::atomic::{self, AtomicU64};
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
 type TableKey = (SpecKey, Vec<(Layout, u8, u32)>);
@@ -61,6 +63,8 @@ pub struct FilesDatabaseStats {
     disk_bytes_written: AtomicU64,
     gets: AtomicU64,
     puts: AtomicU64,
+    /// Total time spent waiting for a database thread.
+    blocking_ms: AtomicU64,
 }
 
 struct ShardVec(Vec<Mutex<Shard>>);
@@ -75,8 +79,10 @@ struct Shard {
     cache: WTinyLfuCache<Prehashed<SuperBlockKey>, SuperBlock>,
     outstanding_gets: PrehashedSet<SuperBlockKey>,
     thread: Option<std::thread::JoinHandle<()>>,
-    thread_tx: std::sync::mpsc::SyncSender<ShardThreadMsg>,
-    thread_rx: std::sync::mpsc::Receiver<ShardThreadResponse>,
+    thread_tx: mpsc::SyncSender<ShardThreadMsg>,
+    thread_rx: mpsc::Receiver<ShardThreadResponse>,
+    #[cfg(feature = "db-stats")]
+    stats: Arc<FilesDatabaseStats>,
 }
 
 enum ShardThreadMsg {
@@ -440,6 +446,21 @@ impl FilesDatabase {
         )
     }
 
+    #[cfg(feature = "db-stats")]
+    pub fn reset_basic_stats(&mut self) {
+        let stats = &mut self.stats;
+        stats.gets.store(0, atomic::Ordering::SeqCst);
+        stats.puts.store(0, atomic::Ordering::SeqCst);
+        stats.disk_bytes_read.store(0, atomic::Ordering::SeqCst);
+        stats.disk_bytes_written.store(0, atomic::Ordering::SeqCst);
+        stats.blocking_ms.store(0, atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "db-stats")]
+    pub fn blocking_ms(&self) -> u64 {
+        self.stats.blocking_ms.load(atomic::Ordering::SeqCst)
+    }
+
     /// Write statistics about the database to stdout.
     ///
     /// This may be expensive and multi-threaded.
@@ -562,8 +583,11 @@ impl Shard {
         cache_per_shard_samples: usize,
         #[cfg(feature = "db-stats")] stats: Arc<FilesDatabaseStats>,
     ) -> Self {
-        let (command_tx, command_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
-        let (response_tx, response_rx) = std::sync::mpsc::sync_channel(CHANNEL_SIZE);
+        let (command_tx, command_rx) = mpsc::sync_channel(CHANNEL_SIZE);
+        let (response_tx, response_rx) = mpsc::sync_channel(CHANNEL_SIZE);
+
+        #[cfg(feature = "db-stats")]
+        let stats2 = Arc::clone(&stats);
 
         let thread = Some(
             std::thread::Builder::new()
@@ -649,11 +673,32 @@ impl Shard {
             thread,
             thread_tx: command_tx,
             thread_rx: response_rx,
+            #[cfg(feature = "db-stats")]
+            stats: stats2,
         }
     }
 
+    /// Calls `self.thread_rx.recv()`, logging time taken if `db-stats` is enabled.
+    fn blocking_recv(&mut self) -> Result<ShardThreadResponse, mpsc::RecvError> {
+        #[cfg(feature = "db-stats")]
+        let start = Instant::now();
+
+        let received = self.thread_rx.recv();
+
+        #[cfg(feature = "db-stats")]
+        {
+            let wait_duration = start.elapsed();
+            self.stats.blocking_ms.fetch_add(
+                wait_duration.as_millis().try_into().unwrap(),
+                atomic::Ordering::Relaxed,
+            );
+        }
+
+        received
+    }
+
     fn process_bg_thread_msgs_until_close(&mut self) {
-        while let Ok(msg) = self.thread_rx.recv() {
+        while let Ok(msg) = self.blocking_recv() {
             self.process_bg_thread_msg_inner(msg);
         }
     }
@@ -663,7 +708,7 @@ impl Shard {
     where
         F: FnMut(&ShardThreadResponse) -> bool,
     {
-        while let Ok(msg) = self.thread_rx.recv() {
+        while let Ok(msg) = self.blocking_recv() {
             let should_continue = cond(&msg);
             self.process_bg_thread_msg_inner(msg);
             if !should_continue {
