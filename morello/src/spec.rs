@@ -96,12 +96,14 @@ pub struct SpecSurMap<Tgt: Target, F, A, Aa> {
     pub memory_limits_bimap: MemoryLimitsBimap<Tgt>,
 }
 
+#[derive(Clone)]
 pub struct LogicalSpecSurMap<Tgt, F, A, Aa> {
     pub primitive_basics_bimap: PrimitiveBasicsBimap,
     pub aux_surmap_fn: F,
     marker: std::marker::PhantomData<(Tgt, A, Aa)>,
 }
 
+#[derive(Clone)]
 pub struct PrimitiveBasicsBimap {
     pub binary_scale_shapes: bool,
 }
@@ -1253,7 +1255,7 @@ where
 {
     type Domain = LogicalSpec<Tgt>;
     type Codomain = ((SpecKey, Vec<Aa>), Vec<BimapInt>);
-    type DomainIter = Box<dyn Iterator<Item = Self::Domain>>;
+    type DomainIter = Box<dyn Iterator<Item = Self::Domain> + Send>;
 
     fn apply(&self, spec: &LogicalSpec<Tgt>) -> Self::Codomain {
         match spec {

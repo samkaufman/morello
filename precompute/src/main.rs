@@ -4,13 +4,13 @@ use tikv_jemallocator::Jemalloc;
 use adler::Adler32;
 use anyhow::Result;
 use clap::Parser;
-use log::{debug, info};
+use log::info;
 use nonzero::nonzero as nz;
-use rand::seq::SliceRandom;
 use rayon::prelude::*;
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::iter::Peekable;
 use std::time::Instant;
 use std::{fs, iter, path};
 
@@ -21,8 +21,10 @@ use {
 };
 
 use morello::common::{DimSize, Dtype};
+use morello::datadeps::SpecKey;
 use morello::db::FilesDatabase;
 use morello::grid::general::SurMap;
+use morello::grid::linear::BimapInt;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::memorylimits::{MemVec, MemoryLimits};
@@ -35,7 +37,7 @@ use morello::target::{
     Target, X86Target,
 };
 use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
-use morello::utils::bit_length;
+use morello::utils::{bit_length, SumSeqs};
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -67,6 +69,109 @@ struct Args {
     #[arg(long, default_value = "3")]
     filters_size: Vec<DimSize>,
     size: DimSize,
+}
+
+struct LogicalSpecGoals<S: SurMap> {
+    logical_spec_surmap: S,
+    bound: S::Codomain,
+    stage: u32,
+    done: bool,
+}
+
+struct TaskDiagonal<S, K, I> {
+    logical_spec_surmap: S,
+    spec_key: K,
+    sum_seqs_iter: I,
+}
+
+struct TaskIter<S: SurMap>(S::DomainIter);
+
+impl<S> LogicalSpecGoals<S>
+where
+    S: SurMap<Domain = LogicalSpec<X86Target>>,
+{
+    fn new(surmap: S, bound_spec: &LogicalSpec<X86Target>) -> Self {
+        let bound = surmap.apply(bound_spec);
+        Self {
+            logical_spec_surmap: surmap,
+            bound,
+            stage: 0,
+            done: false,
+        }
+    }
+}
+
+impl<S> Iterator for LogicalSpecGoals<S>
+where
+    S: SurMap<Domain = LogicalSpec<X86Target>, Codomain = ((SpecKey, Vec<()>), Vec<BimapInt>)>,
+    S: Clone,
+{
+    type Item = Peekable<TaskDiagonal<S, (SpecKey, Vec<()>), SumSeqs>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        let (spec_key, bound_pt) = &self.bound;
+        let mut diagonal_iter = TaskDiagonal {
+            logical_spec_surmap: self.logical_spec_surmap.clone(),
+            spec_key: spec_key.clone(),
+            sum_seqs_iter: morello::utils::sum_seqs(bound_pt, self.stage),
+        }
+        .peekable();
+
+        self.stage += 1;
+        if diagonal_iter.peek().is_none() {
+            self.done = true;
+            return None;
+        }
+        Some(diagonal_iter)
+    }
+}
+
+impl<S> TaskIter<S>
+where
+    S: SurMap,
+{
+    fn new(surmap: &S, co: &S::Codomain) -> Self {
+        let inner = surmap.apply_inverse(co);
+        Self(inner)
+    }
+}
+
+impl<S, K, I> Iterator for TaskDiagonal<S, K, I>
+where
+    S: SurMap<Domain = LogicalSpec<X86Target>, Codomain = (K, Vec<BimapInt>)>,
+    K: Clone,
+    I: Iterator<Item = Vec<u32>>,
+{
+    type Item = TaskIter<S>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let pt = self.sum_seqs_iter.next()?;
+        Some(TaskIter::new(
+            &self.logical_spec_surmap,
+            &(self.spec_key.clone(), pt),
+        ))
+    }
+}
+
+impl<S, Ck> Iterator for TaskIter<S>
+where
+    S: SurMap<Domain = LogicalSpec<X86Target>, Codomain = (Ck, Vec<BimapInt>)>,
+    Ck: Clone,
+{
+    type Item = LogicalSpec<X86Target>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let sp = self.0.next()?;
+            if sp.is_canonical() {
+                return Some(sp);
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -157,27 +262,37 @@ fn main_per_db(
         return;
     }
 
-    let mut rng = rand::thread_rng();
+    let surmap = LogicalSpecSurMap::new(
+        PrimitiveBasicsBimap {
+            binary_scale_shapes: true,
+        },
+        TensorSpecAuxSurMap::new,
+    );
+
     for (stage_idx, stage) in bounds
         .iter()
-        .flat_map(logical_spec_goals)
+        .flat_map(|bound_spec| LogicalSpecGoals::new(surmap.clone(), bound_spec))
         .enumerate()
         .skip(stages_completed)
     {
+        let mut stage = stage
+            .filter_map(|task| {
+                let mut p = task.peekable();
+                if p.peek().is_some() {
+                    Some(p)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
         info!(
             "Beginning stage {}, which has peak parallelism of {}",
             stage_idx,
             stage.len()
         );
 
-        let nonempty_tasks = stage
-            .into_iter()
-            .filter(|v| !v.is_empty())
-            .collect::<Vec<_>>();
-        if let Some(example_spec) = nonempty_tasks
-            .choose(&mut rng)
-            .and_then(|v| v.choose(&mut rng))
-        {
+        if let Some(example_spec) = stage.first_mut().and_then(|v| v.peek()) {
             info!("Example problem Spec: {}", example_spec);
         }
 
@@ -185,7 +300,7 @@ fn main_per_db(
         let total_synthesis_ms = AtomicU64::new(0);
 
         let stage_start = Instant::now();
-        nonempty_tasks.into_par_iter().for_each(|task| {
+        stage.into_par_iter().for_each(|task| {
             let mut stage = task
                 .into_iter()
                 .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
@@ -294,10 +409,6 @@ fn logical_spec_goals(
     );
 
     let (spec_key, bound_pt) = SurMap::apply(&surmap, bound_spec);
-    debug!(
-        "Grid shape is {:?}",
-        bound_pt.iter().map(|d| d + 1).collect::<Vec<_>>()
-    );
     let mut stage = 0u32;
     iter::from_fn(move || {
         let mut tasks = vec![];

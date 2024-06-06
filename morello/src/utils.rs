@@ -21,6 +21,8 @@ pub struct ToWriteFmt<T: io::Write>(pub T);
 // Wraps a [fmt::Write] to prepend [str] to each line.
 pub struct LinePrefixWrite<'a, W: fmt::Write>(W, &'a str, bool);
 
+pub struct SumSeqs(Box<dyn Iterator<Item = Vec<u32>> + Send>);
+
 impl<T: io::Write> fmt::Write for ToWriteFmt<T> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.0.write_all(s.as_bytes()).map_err(|_| fmt::Error)
@@ -48,6 +50,18 @@ impl<'a, W: fmt::Write> fmt::Write for LinePrefixWrite<'a, W> {
         }
         self.2 = s.ends_with('\n');
         Ok(())
+    }
+}
+
+impl Iterator for SumSeqs {
+    type Item = Vec<u32>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
     }
 }
 
@@ -160,16 +174,16 @@ pub fn factors(x: usize) -> Vec<usize> {
     result
 }
 
-pub fn sum_seqs(maxes: &[u32], total: u32) -> Box<dyn Iterator<Item = Vec<u32>>> {
+pub fn sum_seqs(maxes: &[u32], total: u32) -> SumSeqs {
     let maxes = maxes.to_vec();
     let len = maxes.len();
     if len == 0 {
-        Box::new(iter::empty())
+        SumSeqs(Box::new(iter::empty()))
     } else if len == 1 {
         if maxes[0] >= total {
-            Box::new(iter::once(vec![total]))
+            SumSeqs(Box::new(iter::once(vec![total])))
         } else {
-            Box::new(iter::empty())
+            SumSeqs(Box::new(iter::empty()))
         }
     } else {
         let obligation = total.saturating_sub(maxes[1..].iter().sum::<u32>());
@@ -184,7 +198,7 @@ pub fn sum_seqs(maxes: &[u32], total: u32) -> Box<dyn Iterator<Item = Vec<u32>>>
             })
         });
 
-        Box::new(flat_map_iter)
+        SumSeqs(Box::new(flat_map_iter))
     }
 }
 

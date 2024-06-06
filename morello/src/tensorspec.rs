@@ -32,13 +32,14 @@ pub struct TensorSpecAux<Tgt: Target> {
     pub vector_size: Option<DimSize>, // # number of values in a vector register
 }
 
+#[derive(Clone)]
 pub struct TensorSpecAuxSurMap<Tgt: Target> {
     tensor_shape: Vec<DimSize>, // TODO: Make into &'a [DimSize]
     tensor_dtype: Dtype,
     phantom: std::marker::PhantomData<Tgt>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TensorSpecAuxNonDepBimap<Tgt: Target> {
     phantom: std::marker::PhantomData<Tgt>,
 }
