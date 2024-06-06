@@ -78,7 +78,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn main_per_db(args: &Args, db: FilesDatabase, db_path: Option<&path::Path>) {
+fn main_per_db(
+    args: &Args,
+    #[allow(unused_mut)] mut db: FilesDatabase, // mut when db-stats enabled
+    db_path: Option<&path::Path>,
+) {
     let MemoryLimits::Standard(top) = X86Target::max_mem();
 
     // TODO: Most of the following details aren't used in computing the bound.
