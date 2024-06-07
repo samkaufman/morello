@@ -22,7 +22,7 @@ use wtinylfu::WTinyLfuCache;
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
@@ -45,6 +45,8 @@ const THREAD_SHARDS: usize = 2;
 // TODO: Select these at runtime.
 const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
+/// Compress superblocks when writing to disk.
+const COMPRESS_SUPERBLOCKS: bool = true;
 
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
@@ -637,9 +639,15 @@ impl Shard {
                                 fs::create_dir_all(parent).unwrap();
                             }
                             let file = fs::File::create(&path).unwrap();
-                            let mut zstd_writer = zstd::Encoder::new(file, 0).unwrap();
-                            bincode::serialize_into(&mut zstd_writer, &value).unwrap();
-                            zstd_writer.finish().unwrap();
+                            if COMPRESS_SUPERBLOCKS {
+                                let mut zstd_writer = zstd::Encoder::new(file, 0).unwrap();
+                                bincode::serialize_into(&mut zstd_writer, &value).unwrap();
+                                zstd_writer.finish().unwrap();
+                            } else {
+                                let mut buf_writer = BufWriter::new(file);
+                                bincode::serialize_into(&mut buf_writer, &value).unwrap();
+                                buf_writer.flush().unwrap();
+                            }
 
                             #[cfg(feature = "db-stats")]
                             {
