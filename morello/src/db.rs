@@ -22,7 +22,7 @@ use wtinylfu::WTinyLfuCache;
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{BufReader, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
@@ -608,18 +608,7 @@ impl Shard {
                             }
 
                             let result = match fs::File::open(&path) {
-                                Ok(file) => {
-                                    let zstd_reader = zstd::Decoder::new(file).unwrap();
-                                    match bincode::deserialize_from(zstd_reader) {
-                                        Ok(superblock) => superblock,
-                                        Err(e) => {
-                                            log::error!(
-                                                "Continuing after error reading superblock; {e:?}"
-                                            );
-                                            HashMap::new()
-                                        }
-                                    }
-                                }
+                                Ok(file) => read_any_format(file),
                                 Err(_) => HashMap::new(),
                             };
                             response_tx
@@ -968,6 +957,31 @@ impl Deref for ActionCostVec {
 impl AsRef<Vec<(ActionIdx, Cost)>> for ActionCostVec {
     fn as_ref(&self) -> &Vec<(ActionIdx, Cost)> {
         self.deref()
+    }
+}
+
+/// Tries to read a zstd-compressed file. If that fails, tries to read it uncompressed.
+fn read_any_format(file: fs::File) -> HashMap<Vec<u32>, DbBlock> {
+    let mut zstd_reader = zstd::Decoder::new(file).unwrap();
+    match bincode::deserialize_from(&mut zstd_reader) {
+        Ok(superblock) => superblock,
+        Err(zstd_error) => {
+            // Couldn't read as zstd? Try reading uncompressed.
+            let mut file = zstd_reader.finish();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            let buf_reader = BufReader::new(file);
+            match bincode::deserialize_from(buf_reader) {
+                Ok(superblock) => superblock,
+                Err(uncompressed_error) => {
+                    log::error!(
+                        "Continuing after errors reading superblock; {:?} and {:?}",
+                        zstd_error,
+                        uncompressed_error
+                    );
+                    HashMap::new()
+                }
+            }
+        }
     }
 }
 
