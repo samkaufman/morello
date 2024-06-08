@@ -2,7 +2,7 @@
 #![cfg(feature = "verification")]
 
 use crate::{
-    codegen::BuiltArtifact,
+    codegen::{self, BuildError, BuiltArtifact, CodeGen},
     common::{DimSize, Dtype},
     spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},
     target::Target,
@@ -17,6 +17,19 @@ use std::{
     str::FromStr,
 };
 use tempfile::NamedTempFile;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum VerificationError {
+    #[error("Couldn't run output match check: {0}")]
+    OutputMatchRunFailed(RunError),
+    #[error("Output does not match expected result")]
+    OutputMismatch,
+    #[error("Build with AddressSanitizer failed: {0}")]
+    ASanBuildFailed(BuildError),
+    #[error("Run with AddressSanitizer failed: {0}")]
+    ASanRunFailed(codegen::RunError),
+}
 
 #[derive(Clone)]
 pub enum DynArray<D> {
@@ -52,19 +65,40 @@ impl BuiltArtifact {
     ///
     /// This method can be used for a little extra defense against bugs in Morello or the underlying
     /// C compiler.
-    pub fn check_correctness<Tgt: Target>(&self, spec: &Spec<Tgt>) -> bool {
-        let test_result = match &spec.0 {
-            LogicalSpec::Primitive(PrimitiveBasics { .. }, _, _) => {
-                test_artifact_correct_inner(spec, self)
-            }
-            LogicalSpec::Compose { .. } => todo!(),
+    pub fn check_correctness<Tgt: Target>(
+        &self,
+        spec: &Spec<Tgt>,
+        codegen: &impl CodeGen<Tgt>,
+    ) -> bool {
+        let tests = || -> Result<(), VerificationError> {
+            match &spec.0 {
+                LogicalSpec::Primitive(PrimitiveBasics { .. }, _, _) => {
+                    test_artifact_correct_inner(spec, self)?
+                }
+                LogicalSpec::Compose { .. } => todo!(),
+            };
+            self.recompile_and_run_with_address_sanitizer(codegen)?;
+            Ok(())
         };
-        if test_result {
-            log::debug!("Artifact passed correctness check");
-        } else {
-            log::debug!("Artifact failed correctness check");
-        }
-        test_result
+
+        let test_result = tests();
+        match test_result {
+            Ok(()) => log::debug!("Artifact passed correctness check"),
+            Err(ref e) => log::debug!("Artifact failed correctness check: {}", e),
+        };
+        test_result.is_ok()
+    }
+
+    fn recompile_and_run_with_address_sanitizer<Tgt: Target>(
+        &self,
+        codegen: &impl CodeGen<Tgt>,
+    ) -> Result<(), VerificationError> {
+        codegen
+            .build_with_args(false, &["-O0", "-g", "-fsanitize=address"])
+            .map_err(VerificationError::ASanBuildFailed)?
+            .run()
+            .map(|_| ())
+            .map_err(VerificationError::ASanRunFailed)
     }
 
     /// Run the binary with provided input data and return the output.
@@ -464,7 +498,10 @@ where
     }
 }
 
-fn test_artifact_correct_inner<Tgt>(spec: &Spec<Tgt>, built_artifact: &BuiltArtifact) -> bool
+fn test_artifact_correct_inner<Tgt>(
+    spec: &Spec<Tgt>,
+    built_artifact: &BuiltArtifact,
+) -> Result<(), VerificationError>
 where
     Tgt: Target,
 {
@@ -479,12 +516,16 @@ where
     // isn't given to the generated program.
     let lowered_output = built_artifact
         .run_with_input_data(&concrete_tensors)
-        .unwrap();
+        .map_err(VerificationError::OutputMatchRunFailed)?;
 
     // Compute expected output
     concrete_tensors = spec.0.execute(concrete_tensors);
 
-    lowered_output == concrete_tensors[spec.0.output_idx()]
+    if lowered_output == concrete_tensors[spec.0.output_idx()] {
+        Ok(())
+    } else {
+        Err(VerificationError::OutputMismatch)
+    }
 }
 
 fn make_array_input_dyn<Tgt: Target>(input: &TensorSpec<Tgt>) -> DynArray<IxDyn> {
