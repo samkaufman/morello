@@ -397,40 +397,6 @@ fn next_limits<'a>(
     })
 }
 
-/// Yield an [Iterator] over all [LogicalSpec]s to compute, in dependency order.
-fn logical_spec_goals(
-    bound_spec: &LogicalSpec<X86Target>,
-) -> impl Iterator<Item = Vec<Vec<LogicalSpec<X86Target>>>> {
-    let surmap = LogicalSpecSurMap::new(
-        PrimitiveBasicsBimap {
-            binary_scale_shapes: true,
-        },
-        TensorSpecAuxSurMap::new,
-    );
-
-    let (spec_key, bound_pt) = SurMap::apply(&surmap, bound_spec);
-    let mut stage = 0u32;
-    iter::from_fn(move || {
-        let mut tasks = vec![];
-        for pt in morello::utils::sum_seqs(&bound_pt, stage) {
-            let mut task = vec![];
-            // TODO: Factor out below key
-            for sp in SurMap::apply_inverse(&surmap, &(spec_key.clone(), pt)) {
-                if sp.is_canonical() {
-                    task.push(sp);
-                }
-            }
-            tasks.push(task);
-        }
-        stage += 1;
-        if tasks.is_empty() {
-            None
-        } else {
-            Some(tasks)
-        }
-    })
-}
-
 fn read_stages_to_skip(
     current_job_fingerprint: &JobFingerprint,
     db_path: Option<&path::Path>,
