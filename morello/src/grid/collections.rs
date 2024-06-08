@@ -1,5 +1,6 @@
 use super::general::BiMap;
 
+/// A [BiMap] which applies the wrapped [BiMap] to each element of a [Vec].
 pub struct MapBiMap<T>(T);
 
 impl<T: BiMap> BiMap for MapBiMap<T> {
