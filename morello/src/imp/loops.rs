@@ -164,7 +164,7 @@ impl<Tgt: Target> Loop<Tgt> {
 
     pub fn full_steps(&self) -> u32 {
         first_dim_per_axis(self)
-            .map(|(loop_tile, dim_idx, _)| loop_tile.tile.steps_dim(dim_idx))
+            .map(|(loop_tile, dim_idx, _)| loop_tile.tile.full_steps_dim(dim_idx))
             .product()
     }
 }

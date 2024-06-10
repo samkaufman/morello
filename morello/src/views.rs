@@ -330,6 +330,11 @@ impl<V: View> Tile<V> {
         divrem::DivCeil::div_ceil(origin_size.get(), self.step_sizes[usize::from(dim)].get())
     }
 
+    pub fn full_steps_dim(&self, dim: u8) -> u32 {
+        let origin_size = self.view.shape()[usize::from(dim)];
+        origin_size.get() / self.step_sizes[usize::from(dim)].get()
+    }
+
     /// Replace points in the given indexing expression with tile coordinate-adjusted points.
     pub fn compose_buffer_indexing_expr(
         &self,
