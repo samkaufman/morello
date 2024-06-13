@@ -1,5 +1,7 @@
-use crate::grid::linear::BimapInt;
+use itertools::Itertools;
+use std::iter;
 
+use crate::grid::linear::BimapInt;
 pub trait SurMap {
     type Domain;
     type Codomain;
@@ -34,14 +36,14 @@ pub struct BimapEnforcer<T: SurMap>(T);
 impl<T: BiMap> SurMap for T {
     type Domain = <T as BiMap>::Domain;
     type Codomain = <T as BiMap>::Codomain;
-    type DomainIter = std::iter::Once<Self::Domain>;
+    type DomainIter = iter::Once<Self::Domain>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
         <Self as BiMap>::apply(self, t)
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
-        std::iter::once(<Self as BiMap>::apply_inverse(self, i))
+        iter::once(<Self as BiMap>::apply_inverse(self, i))
     }
 }
 
@@ -82,23 +84,28 @@ impl<T: SurMap> BiMap for BimapEnforcer<T> {
     }
 }
 
-/// Tuples of [BiMap]s are [BiMap]s.
-impl<T: BiMap, U: BiMap> BiMap for (T, U) {
-    type Domain = (<T as BiMap>::Domain, <U as BiMap>::Domain);
-    type Codomain = (<T as BiMap>::Codomain, <U as BiMap>::Codomain);
+/// Tuples of [SurMap]s are [SurMap]s. Inversion takes the Cartesian product.
+impl<T, U> SurMap for (T, U)
+where
+    T: SurMap,
+    U: SurMap,
+    T::Domain: Clone,
+    U::DomainIter: Clone,
+{
+    type Domain = (<T as SurMap>::Domain, <U as SurMap>::Domain);
+    type Codomain = (<T as SurMap>::Codomain, <U as SurMap>::Codomain);
+    type DomainIter = itertools::Product<<T as SurMap>::DomainIter, <U as SurMap>::DomainIter>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
         (
-            <T as BiMap>::apply(&self.0, &t.0),
-            <U as BiMap>::apply(&self.1, &t.1),
+            <T as SurMap>::apply(&self.0, &t.0),
+            <U as SurMap>::apply(&self.1, &t.1),
         )
     }
 
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
-        (
-            <T as BiMap>::apply_inverse(&self.0, &i.0),
-            <U as BiMap>::apply_inverse(&self.1, &i.1),
-        )
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+        <T as SurMap>::apply_inverse(&self.0, &i.0)
+            .cartesian_product(<U as SurMap>::apply_inverse(&self.1, &i.1))
     }
 }
 
