@@ -78,10 +78,10 @@ struct LogicalSpecGoals<S: SurMap> {
     done: bool,
 }
 
-struct TaskDiagonal<S, K, I> {
+struct TaskDiagonal<S, K> {
     logical_spec_surmap: S,
     spec_key: K,
-    sum_seqs_iter: I,
+    sum_seqs_iter: SumSeqs,
 }
 
 struct TaskIter<S: SurMap>(S::DomainIter);
@@ -106,7 +106,7 @@ where
     S: SurMap<Domain = LogicalSpec<X86Target>, Codomain = ((SpecKey, Vec<()>), Vec<BimapInt>)>,
     S: Clone,
 {
-    type Item = Peekable<TaskDiagonal<S, (SpecKey, Vec<()>), SumSeqs>>;
+    type Item = Peekable<TaskDiagonal<S, (SpecKey, Vec<()>)>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -140,11 +140,10 @@ where
     }
 }
 
-impl<S, K, I> Iterator for TaskDiagonal<S, K, I>
+impl<S, K> Iterator for TaskDiagonal<S, K>
 where
     S: SurMap<Domain = LogicalSpec<X86Target>, Codomain = (K, Vec<BimapInt>)>,
     K: Clone,
-    I: Iterator<Item = Vec<u32>>,
 {
     type Item = TaskIter<S>;
 
