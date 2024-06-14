@@ -15,7 +15,6 @@ use crate::utils::sum_seqs;
 ///   s.apply_inverse(&vec![1, 0]).collect::<Vec<_>>(),
 ///   vec![vec![2, 0], vec![2, 1], vec![3, 0], vec![3, 1]]);
 /// ```
-
 pub struct DownscaleSurMap<'a>(pub &'a [BimapInt]);
 
 impl<'a> SurMap for DownscaleSurMap<'a> {
