@@ -21,7 +21,12 @@ pub struct ToWriteFmt<T: io::Write>(pub T);
 // Wraps a [fmt::Write] to prepend [str] to each line.
 pub struct LinePrefixWrite<'a, W: fmt::Write>(W, &'a str, bool);
 
-pub struct SumSeqs(Box<dyn Iterator<Item = Vec<u32>> + Send>);
+pub struct SumSeqs(Box<dyn Iterator<Item = Vec<u32>> + Send>, bool);
+
+pub struct Diagonals {
+    maxes: Vec<u32>,
+    stage: u32,
+}
 
 impl<T: io::Write> fmt::Write for ToWriteFmt<T> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
@@ -53,6 +58,12 @@ impl<'a, W: fmt::Write> fmt::Write for LinePrefixWrite<'a, W> {
     }
 }
 
+impl SumSeqs {
+    pub fn is_empty(&self) -> bool {
+        self.1
+    }
+}
+
 impl Iterator for SumSeqs {
     type Item = Vec<u32>;
 
@@ -62,6 +73,19 @@ impl Iterator for SumSeqs {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.0.size_hint()
+    }
+}
+
+impl Iterator for Diagonals {
+    type Item = SumSeqs;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let diagonal = sum_seqs(&self.maxes, self.stage);
+        if diagonal.is_empty() {
+            return None;
+        }
+        self.stage += 1;
+        Some(diagonal)
     }
 }
 
@@ -174,31 +198,41 @@ pub fn factors(x: usize) -> Vec<usize> {
     result
 }
 
+pub fn diagonals(maxes: &[u32]) -> Diagonals {
+    Diagonals {
+        maxes: maxes.to_vec(),
+        stage: 0,
+    }
+}
+
 pub fn sum_seqs(maxes: &[u32], total: u32) -> SumSeqs {
     let maxes = maxes.to_vec();
     let len = maxes.len();
     if len == 0 {
-        SumSeqs(Box::new(iter::empty()))
+        SumSeqs(Box::new(iter::empty()), true)
     } else if len == 1 {
         if maxes[0] >= total {
-            SumSeqs(Box::new(iter::once(vec![total])))
+            SumSeqs(Box::new(iter::once(vec![total])), false)
         } else {
-            SumSeqs(Box::new(iter::empty()))
+            SumSeqs(Box::new(iter::empty()), true)
         }
     } else {
         let obligation = total.saturating_sub(maxes[1..].iter().sum::<u32>());
         let min_value = u32::min(maxes[0], total);
 
-        let flat_map_iter = (obligation..=min_value).flat_map(move |v| {
-            let maxes_tail = &maxes[1..];
-            sum_seqs(maxes_tail, total - v).map(move |mut suffix| {
-                let mut prefix = vec![v];
-                prefix.append(&mut suffix);
-                prefix
+        let mut flat_map_iter = (obligation..=min_value)
+            .flat_map(move |v| {
+                let maxes_tail = &maxes[1..];
+                sum_seqs(maxes_tail, total - v).map(move |mut suffix| {
+                    let mut prefix = vec![v];
+                    prefix.append(&mut suffix);
+                    prefix
+                })
             })
-        });
+            .peekable();
+        let is_empty = flat_map_iter.peek().is_none();
 
-        SumSeqs(Box::new(flat_map_iter))
+        SumSeqs(Box::new(flat_map_iter), is_empty)
     }
 }
 

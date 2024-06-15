@@ -1,7 +1,5 @@
-use std::iter;
-
 use super::{general::SurMap, linear::BimapInt};
-use crate::utils::sum_seqs;
+use crate::utils::diagonals;
 
 /// A [SurMap] to and from tilings.
 ///
@@ -9,7 +7,7 @@ use crate::utils::sum_seqs;
 /// ```
 /// # use morello::grid::downscale::DownscaleSurMap;
 /// # use crate::morello::grid::general::SurMap;
-/// let s = DownscaleSurMap { tile_shape: &[2, 2] };
+/// let s = DownscaleSurMap(&[2, 2]);
 /// assert_eq!(s.apply(&vec![2, 0]), [1, 0]);
 /// assert_eq!(
 ///   s.apply_inverse(&vec![1, 0]).collect::<Vec<_>>(),
@@ -34,25 +32,16 @@ impl<'a> SurMap for DownscaleSurMap<'a> {
         let tile_shape_inclusive = self.0.iter().map(|s| *s - 1).collect::<Vec<_>>();
         let tile_offset = i.iter().zip(self.0).map(|(i, s)| i * s).collect::<Vec<_>>();
 
-        let mut diagonal_idx = 0u32;
         Box::new(
-            iter::from_fn(move || {
-                let mut diag = sum_seqs(&tile_shape_inclusive, diagonal_idx).peekable();
-                if diag.peek().is_some() {
-                    diagonal_idx += 1;
-                    Some(diag)
-                } else {
-                    None
-                }
-            })
-            .flatten()
-            .map(move |mut within_tile_pt| {
-                // Shift within-tile point by tile offset
-                for (o, p) in tile_offset.iter().zip(&mut within_tile_pt) {
-                    *p += o;
-                }
-                within_tile_pt
-            }),
+            diagonals(&tile_shape_inclusive)
+                .flatten()
+                .map(move |mut within_tile_pt| {
+                    // Shift within-tile point by tile offset
+                    for (o, p) in tile_offset.iter().zip(&mut within_tile_pt) {
+                        *p += o;
+                    }
+                    within_tile_pt
+                }),
         )
     }
 }

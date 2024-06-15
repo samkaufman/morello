@@ -1349,7 +1349,7 @@ impl BiMap for PrimitiveBasicsBimap {
                 let mut v: Vec<_> = once(!accum as _).chain(shifted_shape).collect();
                 // Conv's image dimensions must be larger than or equal to the corresponding filter
                 // dimensions (the final two dimensions in `v`/`shifted_shape`), so we'll subtract
-                // the the filter sizes from the image sizes, thereby normalizing the image dims. to
+                // the filter sizes from the image sizes, thereby normalizing the image dims. to
                 // zero.
                 v[4] -= v[6];
                 v[5] -= v[7];

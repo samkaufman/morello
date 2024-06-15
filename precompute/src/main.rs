@@ -10,7 +10,8 @@ use rayon::prelude::*;
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::iter::Peekable;
+use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Instant;
 use std::{fs, iter, path};
 
@@ -21,8 +22,9 @@ use {
 };
 
 use morello::common::{DimSize, Dtype};
-use morello::datadeps::SpecKey;
 use morello::db::FilesDatabase;
+use morello::grid::compose::Compose;
+use morello::grid::downscale::DownscaleSurMap;
 use morello::grid::general::SurMap;
 use morello::grid::linear::BimapInt;
 use morello::layout::row_major;
@@ -37,7 +39,7 @@ use morello::target::{
     Target, X86Target,
 };
 use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
-use morello::utils::{bit_length, SumSeqs};
+use morello::utils::{bit_length, diagonals};
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -48,6 +50,7 @@ type JobFingerprint = (usize, u64);
 const META_FILENAME: &str = "PRECOMPUTE";
 const DB_PROGRESS_VERSION: usize = 1;
 const K: u8 = 1;
+const TWOS: [u32; 32] = [2; 32];
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -71,104 +74,50 @@ struct Args {
     size: DimSize,
 }
 
-struct LogicalSpecGoals<S: SurMap> {
-    logical_spec_surmap: S,
-    bound: ((SpecKey, Vec<()>), Vec<BimapInt>), // TODO: Factor out the key
-    stage: u32,
-    done: bool,
-}
+struct ApplyRhs<S, T>(pub S, pub PhantomData<T>);
 
-struct TaskDiagonal<S> {
-    logical_spec_surmap: S,
-    spec_key: (SpecKey, Vec<()>), // TODO: Take reference
-    sum_seqs_iter: SumSeqs,
-}
+struct MaxVec<'a, S>(pub S, pub Arc<Vec<BimapInt>>, pub PhantomData<&'a ()>);
 
-struct TaskIter<S: SurMap>(S::DomainIter);
-
-impl<S> LogicalSpecGoals<S>
-where
-    S: SurMap<Domain = LogicalSpec<X86Target>, Codomain = ((SpecKey, Vec<()>), Vec<BimapInt>)>,
-{
-    fn new(surmap: S, bound_spec: &LogicalSpec<X86Target>) -> Self {
-        let bound = surmap.apply(bound_spec);
-        Self {
-            logical_spec_surmap: surmap,
-            bound,
-            stage: 0,
-            done: false,
-        }
-    }
-}
-
-impl<S> Iterator for LogicalSpecGoals<S>
-where
-    S: SurMap<Domain = LogicalSpec<X86Target>, Codomain = ((SpecKey, Vec<()>), Vec<BimapInt>)>,
-    S: Clone,
-{
-    type Item = Peekable<TaskDiagonal<S>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-
-        let (spec_key, bound_pt) = &self.bound;
-        let mut diagonal_iter = TaskDiagonal {
-            logical_spec_surmap: self.logical_spec_surmap.clone(),
-            spec_key: spec_key.clone(),
-            sum_seqs_iter: morello::utils::sum_seqs(bound_pt, self.stage),
-        }
-        .peekable();
-
-        self.stage += 1;
-        if diagonal_iter.peek().is_none() {
-            self.done = true;
-            return None;
-        }
-        Some(diagonal_iter)
-    }
-}
-
-impl<S> TaskIter<S>
+impl<S, T> SurMap for ApplyRhs<S, T>
 where
     S: SurMap,
+    S::DomainIter: Send + 'static,
+    T: Clone + Send + 'static,
 {
-    fn new(surmap: &S, co: &S::Codomain) -> Self {
-        let inner = surmap.apply_inverse(co);
-        Self(inner)
+    type Domain = (T, S::Domain);
+    type Codomain = (T, S::Codomain);
+    type DomainIter = Box<dyn Iterator<Item = Self::Domain> + Send>;
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        (t.0.clone(), self.0.apply(&t.1))
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+        let lhs = i.0.clone();
+        Box::new(self.0.apply_inverse(&i.1).map(move |u| (lhs.clone(), u)))
     }
 }
 
-impl<S> Iterator for TaskDiagonal<S>
+impl<'a, S> SurMap for MaxVec<'a, S>
 where
-    S: SurMap<Domain = LogicalSpec<X86Target>, Codomain = ((SpecKey, Vec<()>), Vec<BimapInt>)>,
+    S: SurMap<Domain = Vec<BimapInt>, Codomain = Vec<BimapInt>> + Sync,
+    S::DomainIter: Send + 'a,
 {
-    type Item = TaskIter<S>;
+    type Domain = S::Domain;
+    type Codomain = S::Codomain;
+    type DomainIter = Box<dyn Iterator<Item = Self::Domain> + Send + 'a>;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let pt = self.sum_seqs_iter.next()?;
-        Some(TaskIter::new(
-            &self.logical_spec_surmap,
-            &(self.spec_key.clone(), pt),
-        ))
-    }
-}
-
-impl<S, Ck> Iterator for TaskIter<S>
-where
-    S: SurMap<Domain = LogicalSpec<X86Target>, Codomain = (Ck, Vec<BimapInt>)>,
-    Ck: Clone,
-{
-    type Item = LogicalSpec<X86Target>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let sp = self.0.next()?;
-            if sp.is_canonical() {
-                return Some(sp);
-            }
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        if t.iter().zip(&*self.1).any(|(v, m)| v > m) {
+            panic!("input exceeds max");
         }
+        self.0.apply(t)
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+        let a = self.0.apply_inverse(i);
+        let maxes = Arc::clone(&self.1);
+        Box::new(a.filter(move |d| d.iter().zip(&*maxes).all(|(v, m)| v <= m)))
     }
 }
 
@@ -195,6 +144,142 @@ fn main_per_db(
 
     // TODO: Most of the following details aren't used in computing the bound.
     // It could be simplified.
+    let bounds = goal_bounds(args);
+
+    let fingerprint: JobFingerprint = {
+        let mut progress_fingerprint_hasher = Adler32::new();
+        bounds.hash(&mut progress_fingerprint_hasher);
+        (DB_PROGRESS_VERSION, progress_fingerprint_hasher.finish())
+    };
+    let stages_completed = read_stages_to_skip(&fingerprint, db_path);
+    if stages_completed != 0 {
+        info!("First {} stages already computed", stages_completed);
+    }
+    if args.stages.map(|s| s <= stages_completed) == Some(true) {
+        return;
+    }
+
+    let mut stage_idx = 0;
+    for bound_spec in &bounds {
+        let unscaled_surmap = LogicalSpecSurMap::new(
+            PrimitiveBasicsBimap {
+                binary_scale_shapes: true,
+            },
+            TensorSpecAuxSurMap::new,
+        );
+        let (key, unscaled_bound_pt) = unscaled_surmap.apply(bound_spec);
+        let surmap = Compose(
+            unscaled_surmap,
+            ApplyRhs(downscaler(unscaled_bound_pt), PhantomData),
+        );
+        let (_, bound_pt) = surmap.apply(bound_spec);
+
+        for stage in diagonals(&bound_pt) {
+            // Construct the TaskIters, dropping empties. Materializing these up front simplifies
+            // parallelization, makes out following "has a peak parallelism of" log message more
+            // meaningful, and simplifies logging an example Spec.
+            let mut stage = stage
+                .filter_map(|task_pt| {
+                    let mut p = surmap
+                        .apply_inverse(&(key.clone(), task_pt))
+                        .filter(|l| l.is_canonical())
+                        .peekable();
+                    p.peek()?;
+                    Some(p)
+                })
+                .collect::<Vec<_>>();
+
+            info!(
+                "Beginning stage {stage_idx}, which has peak parallelism of {}",
+                stage.len()
+            );
+
+            if let Some(example_spec) = stage.first_mut().and_then(|v| v.peek()) {
+                info!("Example problem Spec: {}", example_spec);
+            }
+
+            #[cfg(feature = "db-stats")]
+            let total_synthesis_ms = AtomicU64::new(0);
+
+            let stage_start = Instant::now();
+            stage.into_par_iter().for_each(|task| {
+                let mut stage = task
+                    .into_iter()
+                    .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
+                    .collect::<Vec<_>>();
+                let mut next_stage = HashSet::new();
+
+                #[cfg(feature = "db-stats")]
+                let mut synthesis_time = Duration::ZERO;
+                while !stage.is_empty() {
+                    // Check that stage is all unique
+                    {
+                        let mut stage_set = HashSet::new();
+                        for spec in &stage {
+                            if !stage_set.insert(spec) {
+                                panic!("Duplicate spec in stage: {:?}", spec);
+                            }
+                        }
+                    }
+
+                    #[cfg(feature = "db-stats")]
+                    let synthesis_start = Instant::now();
+                    let stage_results = top_down_many(&db, &stage, 1, Some(nz!(1usize))).0;
+                    #[cfg(feature = "db-stats")]
+                    {
+                        synthesis_time += synthesis_start.elapsed();
+                    }
+                    for (spec, result) in stage.iter().zip(stage_results) {
+                        if let [(_, only_result_cost)] = &result[..] {
+                            next_stage.extend(
+                                next_limits(&spec.1, &only_result_cost.peaks)
+                                    .map(|l| Spec(spec.0.clone(), MemoryLimits::Standard(l))),
+                            );
+                        }
+                    }
+                    // TODO: Just swap data structures.
+                    stage = next_stage.drain().collect();
+                }
+
+                #[cfg(feature = "db-stats")]
+                total_synthesis_ms.fetch_add(
+                    synthesis_time.as_millis().try_into().unwrap(),
+                    atomic::Ordering::Relaxed,
+                );
+            });
+            info!(
+                "Stage (without saving) {} took {:?}",
+                stage_idx,
+                stage_start.elapsed()
+            );
+
+            #[cfg(feature = "db-stats")]
+            {
+                info!("DB stats: {}", db.basic_stats());
+                let stime = total_synthesis_ms.load(atomic::Ordering::Relaxed);
+                let btime = db.blocking_ms();
+                info!(
+                    "synthesis: {stime}ms; blocking: {btime}ms ({:.0}%)",
+                    100.0 * btime as f64 / stime as f64
+                );
+                db.reset_basic_stats();
+            }
+
+            write_stages_completed(&fingerprint, db_path, stage_idx + 1);
+
+            if let Some(max_stages) = args.stages {
+                if stage_idx >= max_stages {
+                    info!("Stopping early because --stages was passed");
+                    return;
+                }
+            }
+
+            stage_idx += 1;
+        }
+    }
+}
+
+fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
     let mut bounds = vec![];
     let move_needed_rank = if args.include_conv { 4 } else { 2 };
     bounds.extend((1..=move_needed_rank).flat_map(|rank| [move_top(args.size, rank)]));
@@ -246,120 +331,7 @@ fn main_per_db(
                 .collect::<Vec<_>>()
         });
     }
-
-    let fingerprint: JobFingerprint = {
-        let mut progress_fingerprint_hasher = Adler32::new();
-        bounds.hash(&mut progress_fingerprint_hasher);
-        (DB_PROGRESS_VERSION, progress_fingerprint_hasher.finish())
-    };
-    let stages_completed = read_stages_to_skip(&fingerprint, db_path);
-    if stages_completed != 0 {
-        info!("First {} stages already computed", stages_completed);
-    }
-    if args.stages.map(|s| s <= stages_completed) == Some(true) {
-        return;
-    }
-
-    let surmap = LogicalSpecSurMap::new(
-        PrimitiveBasicsBimap {
-            binary_scale_shapes: true,
-        },
-        TensorSpecAuxSurMap::new,
-    );
-
-    for (stage_idx, stage) in bounds
-        .iter()
-        .flat_map(|bound_spec| LogicalSpecGoals::new(surmap.clone(), bound_spec))
-        .enumerate()
-        .skip(stages_completed)
-    {
-        let mut stage = stage
-            .filter_map(|task| {
-                let mut p = task.peekable();
-                if p.peek().is_some() {
-                    Some(p)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        info!(
-            "Beginning stage {}, which has peak parallelism of {}",
-            stage_idx,
-            stage.len()
-        );
-
-        if let Some(example_spec) = stage.first_mut().and_then(|v| v.peek()) {
-            info!("Example problem Spec: {}", example_spec);
-        }
-
-        #[cfg(feature = "db-stats")]
-        let total_synthesis_ms = AtomicU64::new(0);
-
-        let stage_start = Instant::now();
-        stage.into_par_iter().for_each(|task| {
-            let mut stage = task
-                .into_iter()
-                .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
-                .collect::<Vec<_>>();
-            let mut next_stage = HashSet::new();
-
-            #[cfg(feature = "db-stats")]
-            let mut synthesis_time = Duration::ZERO;
-            while !stage.is_empty() {
-                #[cfg(feature = "db-stats")]
-                let synthesis_start = Instant::now();
-                let stage_results = top_down_many(&db, &stage, 1, Some(nz!(1usize))).0;
-                #[cfg(feature = "db-stats")]
-                {
-                    synthesis_time += synthesis_start.elapsed();
-                }
-                for (spec, result) in stage.iter().zip(stage_results) {
-                    if let [(_, only_result_cost)] = &result[..] {
-                        next_stage.extend(
-                            next_limits(&spec.1, &only_result_cost.peaks)
-                                .map(|l| Spec(spec.0.clone(), MemoryLimits::Standard(l))),
-                        );
-                    }
-                }
-                // TODO: Just swap data structures.
-                stage = next_stage.drain().collect();
-            }
-
-            #[cfg(feature = "db-stats")]
-            total_synthesis_ms.fetch_add(
-                synthesis_time.as_millis().try_into().unwrap(),
-                atomic::Ordering::Relaxed,
-            );
-        });
-        info!(
-            "Stage (without saving) {} took {:?}",
-            stage_idx,
-            stage_start.elapsed()
-        );
-
-        #[cfg(feature = "db-stats")]
-        {
-            info!("DB stats: {}", db.basic_stats());
-            let stime = total_synthesis_ms.load(atomic::Ordering::Relaxed);
-            let btime = db.blocking_ms();
-            info!(
-                "synthesis: {stime}ms; blocking: {btime}ms ({:.0}%)",
-                100.0 * btime as f64 / stime as f64
-            );
-            db.reset_basic_stats();
-        }
-
-        write_stages_completed(&fingerprint, db_path, stage_idx + 1);
-
-        if let Some(max_stages) = args.stages {
-            if stage_idx >= max_stages {
-                info!("Stopping early because --stages was passed");
-                break;
-            }
-        }
-    }
+    bounds
 }
 
 /// Returns a logical Move Spec of given size and rank.
@@ -434,4 +406,14 @@ fn write_stages_completed(
     let file = fs::File::create(path).unwrap();
     let buf_writer = std::io::BufWriter::new(file);
     bincode::serialize_into(buf_writer, &(current_job_fingerprint, stages_completed)).unwrap();
+}
+
+fn downscaler<'a>(unscaled_bound: Vec<BimapInt>) -> MaxVec<'a, DownscaleSurMap<'static>> {
+    let rank = unscaled_bound.len();
+    debug_assert!(rank <= TWOS.len());
+    MaxVec(
+        DownscaleSurMap(&TWOS[..rank]),
+        Arc::new(unscaled_bound),
+        PhantomData,
+    )
 }

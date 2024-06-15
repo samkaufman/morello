@@ -376,7 +376,8 @@ impl FilesDatabase {
         Some(self.k.into())
     }
 
-    pub fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
+    /// Return a bidirectional map from [Spec]s to tuples of table keys and their coordinates.
+    fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
