@@ -1,5 +1,4 @@
 //! Extends [crate::codegen::BuiltArtifact] with methods to check correctness of lowered code.
-#![cfg(feature = "verification")]
 
 use crate::{
     codegen::BuiltArtifact,

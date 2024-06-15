@@ -365,7 +365,7 @@ where
                         }
                         SpecTask::Complete(subtask_result, _) => {
                             let cost = subtask_result.iter().next().map(|v| v.1.clone());
-                            task.resolve_request(request_id, cost, spec, self.search);
+                            task.resolve_request(request_id, cost);
                             // At this point, the task_ref might have completed (be
                             // `SpecTask::Complete`). We want to propagate the completion to any
                             // tasks waiting within the working set, but we don't want to recurse
@@ -392,7 +392,6 @@ where
             None,
             subspec,
             results,
-            self.search,
         );
     }
 
@@ -408,7 +407,6 @@ where
             Some(&mut self.working_block_requests),
             subspec,
             results,
-            self.search,
         );
     }
 
@@ -418,7 +416,6 @@ where
         next_subblock: Option<&mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>>,
         subspec: &Spec<Tgt>,
         results: ActionCostVec,
-        search: &'a TopDownSearch<'d>,
     ) {
         let Some(rs) = subblock.remove(subspec) else {
             return;
@@ -433,7 +430,7 @@ where
                 let mut requester = requester_task.borrow_mut();
                 // The SpecTask might already be Complete if it was unsat'ed by a prior resolution.
                 if matches!(&*requester, SpecTask::Running { .. }) {
-                    requester.resolve_request(request_id, cost.clone(), &wb_spec, search);
+                    requester.resolve_request(request_id, cost.clone());
                     if let SpecTask::Complete(completed_requester_results, _) = &*requester {
                         // TODO: Avoid this clone by consuming the sub-block. (Do at the call site.)
                         let cloned_results = completed_requester_results.clone();
@@ -444,7 +441,6 @@ where
                             None,
                             &wb_spec,
                             cloned_results,
-                            search,
                         );
                     }
                 }
@@ -615,8 +611,6 @@ impl<Tgt: Target> SpecTask<Tgt> {
         &mut self,
         id: RequestId,
         cost: Option<Cost>, // `None` means that the Spec was unsat
-        task_goal: &Spec<Tgt>,
-        search: &TopDownSearch<'_>,
     ) where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
