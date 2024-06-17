@@ -440,13 +440,21 @@ impl FilesDatabase {
         let read = stats.disk_bytes_read.load(atomic::Ordering::SeqCst);
         let written = stats.disk_bytes_written.load(atomic::Ordering::SeqCst);
         format!(
-            "gets={}, puts={}, bytes_read={} ({}/get), bytes_written={} ({}/put)",
+            "gets={}, puts={}, bytes_read={}{}, bytes_written={}{}",
             gets,
             puts,
             read,
-            read.checked_div(gets).unwrap_or(0),
+            if gets > 0 {
+                format!(" ({:.3}/get)", read as f32 / gets as f32)
+            } else {
+                "".to_string()
+            },
             written,
-            written.checked_div(puts).unwrap_or(0),
+            if puts > 0 {
+                format!(" ({:.3}/put)", written as f32 / puts as f32)
+            } else {
+                "".to_string()
+            },
         )
     }
 
