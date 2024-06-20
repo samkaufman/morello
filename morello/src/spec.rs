@@ -5,6 +5,7 @@ use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
+use crate::grid::tablemeta::{DimensionType, TableMeta};
 use crate::layout::row_major;
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
 use crate::scheduling::Action;
@@ -96,6 +97,7 @@ pub struct SpecSurMap<Tgt: Target, F, A, Aa> {
     pub memory_limits_bimap: MemoryLimitsBimap<Tgt>,
 }
 
+// TODO: Rename to LogicalSpecMap
 #[derive(Clone)]
 pub struct LogicalSpecSurMap<Tgt, F, A, Aa> {
     pub primitive_basics_bimap: PrimitiveBasicsBimap,
@@ -1315,6 +1317,36 @@ where
     }
 }
 
+impl<Tgt, F, A, Aa, const N: usize> TableMeta for LogicalSpecSurMap<Tgt, F, A, Aa>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    F: Fn(&[DimSize], Dtype) -> A,
+    A: SurMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, [BimapInt; N])> + TableMeta,
+    A::DomainIter: 'static,
+    Aa: Clone,
+{
+    fn dimension_types(&self, spec: &LogicalSpec<Tgt>) -> Vec<DimensionType> {
+        match spec {
+            LogicalSpec::Primitive(basics, auxes, _) => {
+                let mut pt_types = self.primitive_basics_bimap.dimension_types(basics);
+                auxes
+                    .iter()
+                    .zip(basics.parameter_shapes())
+                    .zip(&basics.dtypes)
+                    .for_each(|((tensor_aux, tensor_shape), dtype)| {
+                        let aux_bimap = (self.aux_surmap_fn)(&tensor_shape, *dtype);
+                        pt_types.extend(aux_bimap.dimension_types(tensor_aux));
+                    });
+                pt_types.push(DimensionType::SerialOnly);
+                pt_types
+            }
+            LogicalSpec::Compose { .. } => todo!(),
+        }
+    }
+}
+
 impl BiMap for PrimitiveBasicsBimap {
     type Domain = PrimitiveBasics;
     type Codomain = (SpecKey, Vec<BimapInt>);
@@ -1325,6 +1357,7 @@ impl BiMap for PrimitiveBasicsBimap {
             spec_shape,
             dtypes,
         } = basics;
+        // TODO: Can we compose with ShapeBimap here instead?
         let shifted_shape = spec_shape.iter().map(|d| d.get()).map(|d| {
             if self.binary_scale_shapes {
                 if !d.is_power_of_two() {
@@ -1419,6 +1452,26 @@ impl BiMap for PrimitiveBasicsBimap {
             },
         };
         basics
+    }
+}
+
+impl TableMeta for PrimitiveBasicsBimap {
+    fn dimension_types(&self, basics: &Self::Domain) -> Vec<DimensionType> {
+        let PrimitiveBasics {
+            typ,
+            spec_shape,
+            dtypes: _,
+        } = basics;
+        match typ {
+            PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => {
+                iter::once(DimensionType::Accum)
+                    .chain(iter::repeat(DimensionType::Shape).take(spec_shape.len()))
+                    .collect()
+            }
+            PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
+                vec![DimensionType::Shape; spec_shape.len()]
+            }
+        }
     }
 }
 

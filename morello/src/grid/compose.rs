@@ -1,4 +1,7 @@
-use super::general::SurMap;
+use super::{
+    general::{BiMap, SurMap},
+    tablemeta::{DimensionType, TableMeta},
+};
 use std::iter::FusedIterator;
 
 pub struct Compose<A, B>(pub A, pub B);
@@ -31,6 +34,33 @@ where
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         ComposeDomainIter::new(self, self.0.clone(), &self.1, i)
+    }
+}
+
+impl<A, B> BiMap for Compose<A, B>
+where
+    A: BiMap<Codomain = B::Domain> + Clone,
+    B: BiMap,
+{
+    type Domain = A::Domain;
+    type Codomain = B::Codomain;
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        self.1.apply(&self.0.apply(t))
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
+        self.0.apply_inverse(&self.1.apply_inverse(i))
+    }
+}
+
+impl<A, B> TableMeta for Compose<A, B>
+where
+    A: SurMap<Codomain = B::Domain> + Clone,
+    B: SurMap + TableMeta,
+{
+    fn dimension_types(&self, input: &Self::Domain) -> Vec<DimensionType> {
+        self.1.dimension_types(&self.0.apply(input))
     }
 }
 

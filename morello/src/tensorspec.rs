@@ -9,6 +9,7 @@ use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
+use crate::grid::tablemeta::{DimensionType, TableMeta};
 use crate::layout::{row_major, Layout, LayoutError, PhysDim};
 use crate::target::{MemoryLevel, Target};
 use crate::utils::join_into_string;
@@ -478,6 +479,17 @@ where
                     })
             }),
         )
+    }
+}
+
+impl<Tgt> TableMeta for TensorSpecAuxSurMap<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+{
+    fn dimension_types(&self, _: &Self::Domain) -> Vec<DimensionType> {
+        vec![DimensionType::Level]
     }
 }
 

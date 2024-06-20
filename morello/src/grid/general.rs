@@ -1,7 +1,8 @@
 use itertools::Itertools;
 use std::iter;
 
-use crate::grid::linear::BimapInt;
+use super::tablemeta::{DimensionType, TableMeta};
+
 pub trait SurMap {
     type Domain;
     type Codomain;
@@ -17,13 +18,6 @@ pub trait BiMap {
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain;
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain;
-}
-
-pub trait IntBiMap: SurMap {
-    type Domain;
-
-    fn apply(&self, t: &<Self as IntBiMap>::Domain) -> BimapInt;
-    fn apply_inverse(&self, i: BimapInt) -> <Self as IntBiMap>::Domain;
 }
 
 pub trait AsBimap: SurMap {
@@ -44,19 +38,6 @@ impl<T: BiMap> SurMap for T {
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         iter::once(<Self as BiMap>::apply_inverse(self, i))
-    }
-}
-
-impl<T: IntBiMap> BiMap for T {
-    type Domain = <T as IntBiMap>::Domain;
-    type Codomain = BimapInt;
-
-    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
-        <Self as IntBiMap>::apply(self, t)
-    }
-
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
-        <Self as IntBiMap>::apply_inverse(self, *i)
     }
 }
 
@@ -81,6 +62,12 @@ impl<T: SurMap> BiMap for BimapEnforcer<T> {
         let result = i.next().unwrap();
         debug_assert!(i.next().is_none());
         result
+    }
+}
+
+impl<T: TableMeta + SurMap> TableMeta for BimapEnforcer<T> {
+    fn dimension_types(&self, input: &Self::Domain) -> Vec<DimensionType> {
+        self.0.dimension_types(input)
     }
 }
 

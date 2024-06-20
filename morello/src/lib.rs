@@ -7,7 +7,7 @@ pub mod cost;
 pub mod datadeps;
 pub mod db;
 pub mod expr;
-pub mod grid;
+mod grid;
 pub mod imp;
 pub mod layout;
 pub mod memorylimits;

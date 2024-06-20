@@ -27,6 +27,7 @@ use morello::grid::compose::Compose;
 use morello::grid::downscale::DownscaleSurMap;
 use morello::grid::general::SurMap;
 use morello::grid::linear::BimapInt;
+use morello::grid::tablemeta::{DimensionType, TableMeta};
 use morello::layout::row_major;
 use morello::lspec;
 use morello::memorylimits::{MemVec, MemoryLimits};
@@ -168,11 +169,18 @@ fn main_per_db(
             TensorSpecAuxSurMap::new,
         );
         let (key, unscaled_bound_pt) = unscaled_surmap.apply(bound_spec);
+        let mapped_dim_types = unscaled_surmap.dimension_types(bound_spec);
         let surmap = Compose(
             unscaled_surmap,
             ApplyRhs(downscaler(unscaled_bound_pt), PhantomData),
         );
         let (_, bound_pt) = surmap.apply(bound_spec);
+
+        // TODO: Remove
+        println!(
+            "For bound {}, dimension types are: {:?}",
+            bound_spec, mapped_dim_types
+        );
 
         for stage in diagonals(&bound_pt) {
             // Construct the TaskIters, dropping empties. Materializing these up front simplifies

@@ -1,6 +1,10 @@
 pub mod canon;
 pub mod collections;
 pub mod compose;
+pub mod concat;
 pub mod downscale;
+pub mod lens;
 pub mod general;
 pub mod linear;
+pub mod papply;
+pub mod tablemeta;

@@ -1,5 +1,6 @@
 use crate::grid::general::BiMap;
 use crate::grid::linear::BimapInt;
+use crate::grid::tablemeta::{DimensionType, TableMeta};
 use crate::utils::{bit_length, bit_length_inverse};
 use crate::{
     target::{Target, LEVEL_COUNT},
@@ -340,6 +341,12 @@ impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
         // Convert array from BimapInt to u8.
         let a = std::array::from_fn(|idx| i[idx].try_into().unwrap());
         MemoryLimits::Standard(MemVec::new_from_binary_scaled(a))
+    }
+}
+
+impl<Tgt: Target> TableMeta for MemoryLimitsBimap<Tgt> {
+    fn dimension_types(&self, _: &Self::Domain) -> Vec<DimensionType> {
+        vec![DimensionType::MemoryLimits; LEVEL_COUNT]
     }
 }
 

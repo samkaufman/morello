@@ -2,8 +2,13 @@ use crate::common::DimSize;
 use crate::cost::{Cost, MainCost};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
+use crate::grid::compose::Compose;
+use crate::grid::concat::ConcatFixedRight;
 use crate::grid::general::{AsBimap, BiMap};
+use crate::grid::lens::LensRhs;
 use crate::grid::linear::BimapInt;
+use crate::grid::papply::PApplyRhs;
+use crate::grid::tablemeta::DimensionType;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
@@ -23,6 +28,7 @@ use wtinylfu::WTinyLfuCache;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
@@ -47,6 +53,19 @@ const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 /// Compress superblocks when writing to disk.
 const COMPRESS_SUPERBLOCKS: bool = true;
+
+const TABLE_DIM_ORDER: [DimensionType; 10] = [
+    DimensionType::Other,
+    DimensionType::Accum,
+    DimensionType::Shape,
+    DimensionType::Dtype,
+    DimensionType::Contig,
+    DimensionType::Aligned,
+    DimensionType::Level,
+    DimensionType::Layout,
+    DimensionType::VectorSize,
+    DimensionType::SerialOnly,
+];
 
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
@@ -244,6 +263,13 @@ impl FilesDatabase {
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
+
+        // TODO: Remove
+        println!(
+            "Get of {query} had dimension types: {:?}",
+            bimap.dimension_types(query)
+        );
+
         let (block_pt, inner_pt) = blockify_point(global_pt);
 
         let superblock_pt = superblockify_pt(&block_pt);
@@ -383,16 +409,18 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
     {
-        let surmap = SpecSurMap::<Tgt, _, _, _> {
-            logical_spec_surmap: LogicalSpecSurMap::new(
-                PrimitiveBasicsBimap {
-                    binary_scale_shapes: self.binary_scale_shapes,
-                },
-                |_: &[DimSize], _| TensorSpecAuxNonDepBimap::<Tgt>::default(),
-            ),
-            memory_limits_bimap: MemoryLimitsBimap::default(),
-        };
-        surmap.into_bimap()
+        let logical_map = LogicalSpecSurMap::new(
+            PrimitiveBasicsBimap {
+                binary_scale_shapes: self.binary_scale_shapes,
+            },
+            |_: &[DimSize], _| TensorSpecAuxNonDepBimap::<Tgt>::default(),
+        );
+        let memory_limits_map = MemoryLimitsBimap::default();
+        let concatenation = ConcatFixedRight::new(LEVEL_COUNT);
+        Compose(
+            logical_map,
+            LensRhs(PApplyRhs(concatenation, memory_limits_map), PhantomData),
+        )
     }
 
     fn load_live_superblock<'a>(

@@ -4,6 +4,7 @@ use std::num::NonZeroU32;
 
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
+use crate::grid::tablemeta::{DimensionType, TableMeta};
 
 pub type DimSize = NonZeroU32;
 pub type Shape = Vec<DimSize>;
@@ -92,6 +93,12 @@ impl BiMap for DtypeBimap {
             7 => Dtype::Bfloat16,
             _ => panic!(),
         }
+    }
+}
+
+impl TableMeta for DtypeBimap {
+    fn dimension_types(&self, _: &Self::Domain) -> Vec<DimensionType> {
+        vec![DimensionType::Dtype]
     }
 }
 
