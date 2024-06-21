@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::num::NonZeroU32;
 
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::BiMap;
+use crate::grid::general::SurMap;
 use crate::grid::tablemeta::{DimensionType, TableMeta};
 
 pub type DimSize = NonZeroU32;
@@ -64,9 +64,10 @@ impl Display for Dtype {
     }
 }
 
-impl BiMap for DtypeBimap {
+impl SurMap for DtypeBimap {
     type Domain = Dtype;
     type Codomain = u8;
+    type DomainIter = [Dtype; 1];
 
     fn apply(&self, dtype: &Self::Domain) -> Self::Codomain {
         match dtype {
@@ -81,8 +82,8 @@ impl BiMap for DtypeBimap {
         }
     }
 
-    fn apply_inverse(&self, v: &Self::Codomain) -> Self::Domain {
-        match *v {
+    fn apply_inverse(&self, v: &Self::Codomain) -> Self::DomainIter {
+        [match *v {
             0 => Dtype::Uint8,
             1 => Dtype::Sint8,
             2 => Dtype::Uint16,
@@ -92,7 +93,7 @@ impl BiMap for DtypeBimap {
             6 => Dtype::Float32,
             7 => Dtype::Bfloat16,
             _ => panic!(),
-        }
+        }]
     }
 }
 

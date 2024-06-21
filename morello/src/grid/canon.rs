@@ -1,8 +1,8 @@
-use super::general::BiMap;
+use super::general::{IntoSingleItemIter, SurMap};
 use super::linear::BoolBimap;
 
 pub trait CanonicalBimap {
-    type Bimap: BiMap<Domain = Self>;
+    type Bimap: SurMap<Domain = Self, DomainIter: IntoSingleItemIter>;
     fn bimap() -> Self::Bimap;
 }
 

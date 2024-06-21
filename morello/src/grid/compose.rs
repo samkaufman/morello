@@ -1,9 +1,16 @@
 use super::{
-    general::{BiMap, SurMap},
+    general::{IntoSingleItemIter, SurMap},
     tablemeta::{DimensionType, TableMeta},
 };
 use std::iter::FusedIterator;
 
+pub trait ComposeExt {
+    fn compose<O: SurMap>(self, other: O) -> Compose<Self, O>
+    where
+        Self: Sized;
+}
+
+#[derive(Clone)]
 pub struct Compose<A, B>(pub A, pub B);
 
 pub enum ComposeDomainIter<A, B>
@@ -13,10 +20,19 @@ where
 {
     Active {
         intermediate_map: A, // TODO: Take ref. instead of clone
-        inner_iter: B::DomainIter,
-        outer_iter: A::DomainIter,
+        inner_iter: <B::DomainIter as IntoIterator>::IntoIter,
+        outer_iter: <A::DomainIter as IntoIterator>::IntoIter,
     },
     Done,
+}
+
+impl<T: SurMap> ComposeExt for T {
+    fn compose<O: SurMap>(self, other: O) -> Compose<Self, O>
+    where
+        Self: Sized,
+    {
+        Compose(self, other)
+    }
 }
 
 impl<A, B> SurMap for Compose<A, B>
@@ -37,23 +53,6 @@ where
     }
 }
 
-impl<A, B> BiMap for Compose<A, B>
-where
-    A: BiMap<Codomain = B::Domain> + Clone,
-    B: BiMap,
-{
-    type Domain = A::Domain;
-    type Codomain = B::Codomain;
-
-    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
-        self.1.apply(&self.0.apply(t))
-    }
-
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
-        self.0.apply_inverse(&self.1.apply_inverse(i))
-    }
-}
-
 impl<A, B> TableMeta for Compose<A, B>
 where
     A: SurMap<Codomain = B::Domain> + Clone,
@@ -70,10 +69,10 @@ where
     B: SurMap,
 {
     fn new(compose: &Compose<A, B>, a: A, b: &B, initial_co: &B::Codomain) -> Self {
-        let mut inner_iter = b.apply_inverse(initial_co);
+        let mut inner_iter = b.apply_inverse(initial_co).into_iter();
         match inner_iter.next() {
             Some(first_intermediate_value) => {
-                let outer_iter = a.apply_inverse(&first_intermediate_value);
+                let outer_iter = a.apply_inverse(&first_intermediate_value).into_iter();
                 ComposeDomainIter::Active {
                     intermediate_map: compose.0.clone(),
                     inner_iter,
@@ -105,7 +104,9 @@ where
 
                 match inner_iter.next() {
                     Some(next_inner_value) => {
-                        *outer_iter = intermediate_map.apply_inverse(&next_inner_value);
+                        *outer_iter = intermediate_map
+                            .apply_inverse(&next_inner_value)
+                            .into_iter();
                     }
                     None => {
                         *self = ComposeDomainIter::Done;
@@ -122,6 +123,15 @@ impl<A, B> FusedIterator for ComposeDomainIter<A, B>
 where
     A: SurMap<Codomain = B::Domain>,
     B: SurMap,
+{
+}
+
+impl<A, B> IntoSingleItemIter for ComposeDomainIter<A, B>
+where
+    A: SurMap<Codomain = B::Domain>,
+    A::DomainIter: IntoSingleItemIter,
+    B: SurMap,
+    B::DomainIter: IntoSingleItemIter,
 {
 }
 

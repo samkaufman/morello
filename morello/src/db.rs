@@ -2,18 +2,16 @@ use crate::common::DimSize;
 use crate::cost::{Cost, MainCost};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::compose::Compose;
-use crate::grid::concat::ConcatFixedRight;
-use crate::grid::general::{AsBimap, BiMap};
-use crate::grid::lens::LensRhs;
+use crate::grid::compose::ComposeExt;
+use crate::grid::general::SurMap;
+use crate::grid::lens::{LensLhs, LensRhs};
 use crate::grid::linear::BimapInt;
-use crate::grid::papply::PApplyRhs;
-use crate::grid::tablemeta::DimensionType;
+use crate::grid::tablemeta::{DimensionType, TableBiMap};
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::ndarray::NDArray;
-use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
+use crate::spec::{LogicalSpec, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
@@ -67,6 +65,9 @@ const TABLE_DIM_ORDER: [DimensionType; 10] = [
     DimensionType::SerialOnly,
 ];
 
+trait CloneableTableBiMap: TableBiMap + Clone {}
+impl<T: TableBiMap + Clone> CloneableTableBiMap for T {}
+
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
     dir_handle: Arc<DirPathHandle>,
@@ -106,6 +107,14 @@ struct Shard {
     #[cfg(feature = "db-stats")]
     stats: Arc<FilesDatabaseStats>,
 }
+
+/// A bijection between `Spec(a, b)`` and `(a, b)`.
+#[derive(Default, Clone, Copy)]
+struct SpecToTuple<Tgt: Target>(PhantomData<Tgt>);
+
+// TODO: Ideally we build this from simpler combinators.
+#[derive(Default, Clone)]
+struct ConcatNestedVecsFixedRhs<Tgt, const N: usize>(PhantomData<Tgt>);
 
 enum ShardThreadMsg {
     Get(Prehashed<SuperBlockKey>),
@@ -216,7 +225,7 @@ impl FilesDatabase {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
         match self.get_with_preference(query) {
             GetPreference::Hit(v) => Some(v),
@@ -228,7 +237,7 @@ impl FilesDatabase {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
         let root_results = self.get(query)?;
         let actions = query.0.actions();
@@ -256,19 +265,13 @@ impl FilesDatabase {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
         #[cfg(feature = "db-stats")]
         self.stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
-
-        // TODO: Remove
-        println!(
-            "Get of {query} had dimension types: {:?}",
-            bimap.dimension_types(query)
-        );
 
         let (block_pt, inner_pt) = blockify_point(global_pt);
 
@@ -286,7 +289,7 @@ impl FilesDatabase {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(query);
@@ -307,7 +310,7 @@ impl FilesDatabase {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
         let bimap = self.spec_bimap();
         let (table_key, global_pt_lhs) = bimap.apply(lhs);
@@ -323,7 +326,7 @@ impl FilesDatabase {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
         // Check that all costs in decisions have peak memory less than or equal to spec's
         // memory limits.
@@ -403,24 +406,43 @@ impl FilesDatabase {
     }
 
     /// Return a bidirectional map from [Spec]s to tuples of table keys and their coordinates.
-    fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
+    fn spec_bimap<Tgt>(
+        &self,
+    ) -> impl SurMap<Domain = Spec<Tgt>, Codomain = DbKey, DomainIter = [Spec<Tgt>; 1]>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Domain = Tgt::Level, Codomain = u8>,
     {
-        let logical_map = LogicalSpecSurMap::new(
+        // TODO: Store in FilesDatabase?
+        SpecToTuple::<Tgt>::default()
+            .compose(LensLhs::new(self.logicalspec_bimap()))
+            .compose(LensRhs::new(MemoryLimitsBimap::<Tgt>::default()))
+            .compose(ConcatNestedVecsFixedRhs::<Tgt, LEVEL_COUNT>::default())
+            // TODO: Add Permute
+            .into_bimap()
+    }
+
+    fn logicalspec_bimap<Tgt>(
+        &self,
+    ) -> impl CloneableTableBiMap<
+        Domain = LogicalSpec<Tgt>,
+        Codomain = ((SpecKey, Vec<(Layout, u8, u32)>), Vec<BimapInt>),
+        // DomainIter = Box<(dyn Iterator<Item = LogicalSpec<Tgt>> + Send + 'static)>,
+        DomainIter = [LogicalSpec<Tgt>; 1],
+    >
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Domain = Tgt::Level, Codomain = u8>,
+    {
+        LogicalSpecSurMap::new(
             PrimitiveBasicsBimap {
                 binary_scale_shapes: self.binary_scale_shapes,
             },
             |_: &[DimSize], _| TensorSpecAuxNonDepBimap::<Tgt>::default(),
-        );
-        let memory_limits_map = MemoryLimitsBimap::default();
-        let concatenation = ConcatFixedRight::new(LEVEL_COUNT);
-        Compose(
-            logical_map,
-            LensRhs(PApplyRhs(concatenation, memory_limits_map), PhantomData),
         )
+        .into_bimap()
     }
 
     fn load_live_superblock<'a>(
@@ -603,7 +625,7 @@ impl<'a> PageId<'a> {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
         let bimap = self.db.spec_bimap();
         let (table_key, global_pt) = bimap.apply(spec);
@@ -810,6 +832,43 @@ impl Drop for Shard {
     }
 }
 
+impl<Tgt: Target> SurMap for SpecToTuple<Tgt> {
+    type Domain = Spec<Tgt>;
+    type Codomain = (LogicalSpec<Tgt>, MemoryLimits);
+    type DomainIter = [Self::Domain; 1];
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        (t.0.clone(), t.1.clone())
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+        [Spec(i.0.clone(), i.1.clone())]
+    }
+}
+
+impl<Tgt: Target, const N: usize> SurMap for ConcatNestedVecsFixedRhs<Tgt, N> {
+    type Domain = (
+        ((SpecKey, Vec<(Layout, u8, u32)>), Vec<BimapInt>),
+        Vec<BimapInt>,
+    );
+    type Codomain = ((SpecKey, Vec<(Layout, u8, u32)>), Vec<BimapInt>);
+    type DomainIter = [Self::Domain; 1];
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        debug_assert_eq!(t.1.len(), N);
+        (t.0 .0.clone(), {
+            let mut v = t.0 .1.clone();
+            v.extend_from_slice(&t.1);
+            v
+        })
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+        let (v0, v1) = i.1.split_at(i.1.len() - N);
+        [((i.0.clone(), v0.to_vec()), v1.to_vec())]
+    }
+}
+
 impl DirPathHandle {
     fn path(&self) -> &path::Path {
         match self {
@@ -829,7 +888,7 @@ impl DbBlock {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
         let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
         match self {
@@ -1038,7 +1097,7 @@ fn construct_impl<Tgt>(db: &FilesDatabase, imp: &ImplNode<Tgt>) -> ImplNode<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
 {
     match imp {
         ImplNode::SpecApp(p) => db
@@ -1145,8 +1204,8 @@ fn put_range_to_fill<Tgt, B>(
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
+    <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
+    B: SurMap<Domain = Spec<Tgt>, Codomain = DbKey>,
 {
     // Compute the per-level maximum limits of the solutions. This lower bounds the range.
     let mut per_level_peaks = [0; LEVEL_COUNT];

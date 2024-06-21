@@ -7,7 +7,7 @@ pub mod cost;
 pub mod datadeps;
 pub mod db;
 pub mod expr;
-mod grid;
+pub mod grid; // TODO: Make private to library.
 pub mod imp;
 pub mod layout;
 pub mod memorylimits;

@@ -15,14 +15,14 @@ where
 {
     type Domain = A;
     type Codomain = S::Codomain;
-    type DomainIter = PApplyRhsDomainIter<S::DomainIter>;
+    type DomainIter = PApplyRhsDomainIter<<S::DomainIter as IntoIterator>::IntoIter>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
         self.0.apply(&(t.clone(), self.1.clone()))
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
-        PApplyRhsDomainIter(self.0.apply_inverse(i))
+        PApplyRhsDomainIter(self.0.apply_inverse(i).into_iter())
     }
 }
 

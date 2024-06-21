@@ -1,73 +1,44 @@
-use itertools::Itertools;
 use std::iter;
+
+use itertools::Itertools;
 
 use super::tablemeta::{DimensionType, TableMeta};
 
 pub trait SurMap {
     type Domain;
     type Codomain;
-    type DomainIter: Iterator<Item = Self::Domain>;
+    type DomainIter: IntoIterator<Item = Self::Domain>; // TODO: Rename Preimage
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain;
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter;
-}
 
-pub trait BiMap {
-    type Domain;
-    type Codomain;
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter; // TODO: Rename: preimage
 
-    fn apply(&self, t: &Self::Domain) -> Self::Codomain;
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain;
-}
-
-pub trait AsBimap: SurMap {
-    type Wrapper: BiMap<Domain = Self::Domain, Codomain = Self::Codomain>;
-    fn into_bimap(self) -> Self::Wrapper;
-}
-
-pub struct BimapEnforcer<T: SurMap>(T);
-
-impl<T: BiMap> SurMap for T {
-    type Domain = <T as BiMap>::Domain;
-    type Codomain = <T as BiMap>::Codomain;
-    type DomainIter = iter::Once<Self::Domain>;
-
-    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
-        <Self as BiMap>::apply(self, t)
-    }
-
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
-        iter::once(<Self as BiMap>::apply_inverse(self, i))
+    // TODO: This can lead to needlessly nested IntoBimaps.
+    fn into_bimap(self) -> IntoBimap<Self>
+    where
+        Self: Sized,
+    {
+        IntoBimap(self)
     }
 }
 
-impl<T: SurMap> AsBimap for T {
-    type Wrapper = BimapEnforcer<T>;
-
-    fn into_bimap(self) -> Self::Wrapper {
-        BimapEnforcer(self)
-    }
+// TODO: Rename back to BiMap
+pub trait BiMapExt: SurMap {
+    fn invert(&self, i: &Self::Codomain) -> Self::Domain;
 }
 
-impl<T: SurMap> BiMap for BimapEnforcer<T> {
-    type Domain = <T as SurMap>::Domain;
-    type Codomain = <T as SurMap>::Codomain;
+#[derive(Clone)]
+pub struct IntoBimap<T>(T);
 
-    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
-        <T as SurMap>::apply(&self.0, t)
-    }
+pub trait IntoSingleItemIter: IntoIterator {}
 
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
-        let mut i = <T as SurMap>::apply_inverse(&self.0, i);
-        let result = i.next().unwrap();
-        debug_assert!(i.next().is_none());
-        result
-    }
-}
-
-impl<T: TableMeta + SurMap> TableMeta for BimapEnforcer<T> {
-    fn dimension_types(&self, input: &Self::Domain) -> Vec<DimensionType> {
-        self.0.dimension_types(input)
+impl<T> BiMapExt for T
+where
+    T: SurMap,
+    T::DomainIter: IntoSingleItemIter,
+{
+    fn invert(&self, i: &Self::Codomain) -> Self::Domain {
+        self.apply_inverse(i).into_iter().next().unwrap()
     }
 }
 
@@ -77,11 +48,14 @@ where
     T: SurMap,
     U: SurMap,
     T::Domain: Clone,
-    U::DomainIter: Clone,
+    <U::DomainIter as IntoIterator>::IntoIter: Clone,
 {
     type Domain = (<T as SurMap>::Domain, <U as SurMap>::Domain);
     type Codomain = (<T as SurMap>::Codomain, <U as SurMap>::Codomain);
-    type DomainIter = itertools::Product<<T as SurMap>::DomainIter, <U as SurMap>::DomainIter>;
+    type DomainIter = itertools::Product<
+        <T::DomainIter as IntoIterator>::IntoIter,
+        <U::DomainIter as IntoIterator>::IntoIter,
+    >;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
         (
@@ -92,8 +66,35 @@ where
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         <T as SurMap>::apply_inverse(&self.0, &i.0)
-            .cartesian_product(<U as SurMap>::apply_inverse(&self.1, &i.1))
+            .into_iter()
+            .cartesian_product(self.1.apply_inverse(&i.1))
     }
 }
 
 // TODO: Add implementations for 3- and larger tuples with some kind of macro.
+
+impl<T: SurMap> SurMap for IntoBimap<T> {
+    type Domain = T::Domain;
+    type Codomain = T::Codomain;
+    type DomainIter = [T::Domain; 1];
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        self.0.apply(t)
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+        let Ok(single_item) = self.0.apply_inverse(i).into_iter().exactly_one() else {
+            panic!("preimage did not contain a single item");
+        };
+        [single_item; 1]
+    }
+}
+
+impl<T: TableMeta> TableMeta for IntoBimap<T> {
+    fn dimension_types(&self, input: &Self::Domain) -> Vec<DimensionType> {
+        self.0.dimension_types(input)
+    }
+}
+
+impl<T> IntoSingleItemIter for iter::Once<T> {}
+impl<T> IntoSingleItemIter for [T; 1] {}

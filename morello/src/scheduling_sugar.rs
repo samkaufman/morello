@@ -1,7 +1,7 @@
 use crate::common::{DimSize, Dtype};
 use crate::db::FilesDatabase;
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::BiMap;
+use crate::grid::general::BiMapExt;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::scheduling::Action;
@@ -46,7 +46,7 @@ pub trait SchedulingSugar<Tgt: Target> {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Codomain = u8>;
 }
 
 pub trait Subschedule<Tgt: Target> {
@@ -148,7 +148,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Codomain = u8>,
     {
         top_down(db, self, 1, jobs);
         match db.get_impl(self).unwrap().first() {
@@ -228,7 +228,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Codomain = u8>,
     {
         apply_to_leaf_spec(self, |spec| spec.synthesize(db, jobs))
     }

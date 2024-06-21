@@ -1,10 +1,10 @@
-use super::general::{BiMap, SurMap};
+use super::general::{BiMapExt, SurMap};
 
 pub trait TableMeta: SurMap {
     fn dimension_types(&self, input: &Self::Domain) -> Vec<DimensionType>;
 }
 
-pub trait TableBiMap: BiMap + TableMeta {}
+pub trait TableBiMap: BiMapExt + TableMeta {}
 
 pub trait TableSurMap: SurMap + TableMeta {}
 
@@ -23,5 +23,5 @@ pub enum DimensionType {
     MemoryLimits,
 }
 
-impl<T> TableBiMap for T where T: BiMap + TableMeta {}
+impl<T> TableBiMap for T where T: BiMapExt + TableMeta {}
 impl<T> TableSurMap for T where T: SurMap + TableMeta {}

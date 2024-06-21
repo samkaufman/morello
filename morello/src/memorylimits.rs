@@ -1,4 +1,4 @@
-use crate::grid::general::BiMap;
+use crate::grid::general::SurMap;
 use crate::grid::linear::BimapInt;
 use crate::grid::tablemeta::{DimensionType, TableMeta};
 use crate::utils::{bit_length, bit_length_inverse};
@@ -51,7 +51,7 @@ pub enum MemoryAllocation {
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub struct MemVec([u8; LEVEL_COUNT]);
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct MemoryLimitsBimap<Tgt: Target> {
     phantom: std::marker::PhantomData<Tgt>,
 }
@@ -324,9 +324,10 @@ impl Display for MemVec {
     }
 }
 
-impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
+impl<Tgt: Target> SurMap for MemoryLimitsBimap<Tgt> {
     type Domain = MemoryLimits;
     type Codomain = Vec<BimapInt>;
+    type DomainIter = [MemoryLimits; 1];
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
         match t {
@@ -337,10 +338,10 @@ impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
         }
     }
 
-    fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         // Convert array from BimapInt to u8.
         let a = std::array::from_fn(|idx| i[idx].try_into().unwrap());
-        MemoryLimits::Standard(MemVec::new_from_binary_scaled(a))
+        [MemoryLimits::Standard(MemVec::new_from_binary_scaled(a))]
     }
 }
 

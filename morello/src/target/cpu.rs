@@ -2,7 +2,7 @@ use crate::codegen::c_utils::VecType;
 use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::BiMap;
+use crate::grid::general::SurMap;
 use crate::layout::{col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
@@ -901,9 +901,10 @@ impl Display for CpuMemoryLevel {
     }
 }
 
-impl BiMap for CpuMemoryLevelBimap {
+impl SurMap for CpuMemoryLevelBimap {
     type Domain = CpuMemoryLevel;
     type Codomain = u8;
+    type DomainIter = [CpuMemoryLevel; 1];
 
     fn apply(&self, level: &CpuMemoryLevel) -> u8 {
         match level {
@@ -914,14 +915,14 @@ impl BiMap for CpuMemoryLevelBimap {
         }
     }
 
-    fn apply_inverse(&self, i: &u8) -> CpuMemoryLevel {
-        match *i {
+    fn apply_inverse(&self, i: &u8) -> [CpuMemoryLevel; 1] {
+        [match *i {
             0 => CpuMemoryLevel::RF,
             1 => CpuMemoryLevel::VRF,
             2 => CpuMemoryLevel::L1,
             3 => CpuMemoryLevel::GL,
             _ => panic!("Invalid index: {}", i),
-        }
+        }]
     }
 }
 

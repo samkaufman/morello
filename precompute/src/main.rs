@@ -27,7 +27,7 @@ use morello::grid::compose::Compose;
 use morello::grid::downscale::DownscaleSurMap;
 use morello::grid::general::SurMap;
 use morello::grid::linear::BimapInt;
-use morello::grid::tablemeta::{DimensionType, TableMeta};
+use morello::grid::tablemeta::TableMeta;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::memorylimits::{MemVec, MemoryLimits};
@@ -82,7 +82,7 @@ struct MaxVec<'a, S>(pub S, pub Arc<Vec<BimapInt>>, pub PhantomData<&'a ()>);
 impl<S, T> SurMap for ApplyRhs<S, T>
 where
     S: SurMap,
-    S::DomainIter: Send + 'static,
+    <S::DomainIter as IntoIterator>::IntoIter: Send + 'static,
     T: Clone + Send + 'static,
 {
     type Domain = (T, S::Domain);
@@ -95,14 +95,19 @@ where
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let lhs = i.0.clone();
-        Box::new(self.0.apply_inverse(&i.1).map(move |u| (lhs.clone(), u)))
+        Box::new(
+            self.0
+                .apply_inverse(&i.1)
+                .into_iter()
+                .map(move |u| (lhs.clone(), u)),
+        )
     }
 }
 
 impl<'a, S> SurMap for MaxVec<'a, S>
 where
     S: SurMap<Domain = Vec<BimapInt>, Codomain = Vec<BimapInt>> + Sync,
-    S::DomainIter: Send + 'a,
+    <S::DomainIter as IntoIterator>::IntoIter: Send + 'a,
 {
     type Domain = S::Domain;
     type Codomain = S::Codomain;
@@ -118,7 +123,10 @@ where
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let a = self.0.apply_inverse(i);
         let maxes = Arc::clone(&self.1);
-        Box::new(a.filter(move |d| d.iter().zip(&*maxes).all(|(v, m)| v <= m)))
+        Box::new(
+            a.into_iter()
+                .filter(move |d| d.iter().zip(&*maxes).all(|(v, m)| v <= m)),
+        )
     }
 }
 

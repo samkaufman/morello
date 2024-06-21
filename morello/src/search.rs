@@ -11,7 +11,7 @@ use std::rc::Rc;
 use crate::cost::Cost;
 use crate::db::{ActionCostVec, ActionIdx, FilesDatabase, GetPreference};
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::BiMap;
+use crate::grid::general::BiMapExt;
 use crate::imp::{Impl, ImplExt, ImplNode};
 use crate::scheduling::ApplyError;
 use crate::spec::Spec;
@@ -91,7 +91,7 @@ pub fn top_down<Tgt>(
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Codomain = u8>,
 {
     // TODO: Just return the ActionCostVec directly
     let (r, h, m) = top_down_many(db, &[goal.clone()], top_k, jobs);
@@ -107,7 +107,7 @@ pub fn top_down_many<'d, Tgt>(
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Codomain = u8>,
 {
     assert!(db.max_k().map_or(true, |k| k >= top_k));
     if top_k > 1 {
@@ -195,7 +195,7 @@ impl<'a, 'd, Tgt> BlockSearch<'a, 'd, Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Codomain = u8>,
 {
     fn synthesize(
         goals: &[Spec<Tgt>],
@@ -512,7 +512,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Codomain = u8>,
     {
         let mut reducer = ImplReducer::new(search.top_k, preferences.unwrap_or_default());
         let mut max_children = 0;
@@ -614,7 +614,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
     ) where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Codomain = u8>,
     {
         let SpecTask::Running {
             reducer,

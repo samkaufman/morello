@@ -7,7 +7,7 @@ use std::num::NonZeroU32;
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::{BiMap, SurMap};
+use crate::grid::general::{BiMapExt, SurMap};
 use crate::grid::linear::BimapInt;
 use crate::grid::tablemeta::{DimensionType, TableMeta};
 use crate::layout::{row_major, Layout, LayoutError, PhysDim};
@@ -439,19 +439,19 @@ impl<Tgt> SurMap for TensorSpecAuxSurMap<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Domain = Tgt::Level, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
     type Codomain = ((), [BimapInt; 1]);
     type DomainIter = Box<dyn Iterator<Item = Self::Domain> + 'static>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
-        ((), [BiMap::apply(&Tgt::Level::bimap(), &t.level).into()])
+        ((), [Tgt::Level::bimap().apply(&t.level).into()])
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let ((), [level_int]) = i;
-        let level = BiMap::apply_inverse(&Tgt::Level::bimap(), &(*level_int).try_into().unwrap());
+        let level = Tgt::Level::bimap().invert(&(*level_int).try_into().unwrap());
         let dtype_bytes = u32::from(self.tensor_dtype.size());
         let vector_bytes = level.vector_bytes();
         let mut vector_options = vector_bytes
@@ -486,45 +486,57 @@ impl<Tgt> TableMeta for TensorSpecAuxSurMap<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Domain = Tgt::Level, Codomain = u8>,
 {
     fn dimension_types(&self, _: &Self::Domain) -> Vec<DimensionType> {
         vec![DimensionType::Level]
     }
 }
 
-impl<Tgt> BiMap for TensorSpecAuxNonDepBimap<Tgt>
+impl<Tgt> SurMap for TensorSpecAuxNonDepBimap<Tgt>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Domain = Tgt::Level, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
     type Codomain = ((Layout, u8, u32), [BimapInt; 2]);
+    type DomainIter = [Self::Domain; 1];
 
     fn apply(&self, aux: &TensorSpecAux<Tgt>) -> Self::Codomain {
         (
             (
                 aux.layout.clone(),
-                BiMap::apply(&Tgt::Level::bimap(), &aux.level),
+                Tgt::Level::bimap().apply(&aux.level),
                 aux.vector_size.map(|v| v.get()).unwrap_or(0),
             ),
             [aux.contig.into(), aux.aligned as _],
         )
     }
 
-    fn apply_inverse(&self, v: &Self::Codomain) -> Self::Domain {
+    fn apply_inverse(&self, v: &Self::Codomain) -> Self::DomainIter {
         let ((layout, level_val, vector_size), [contig, aligned_val]) = v;
 
         // `unwrap_or_else` rather than `unwrap` to avoid needing a Debug bound
-        let level = BiMap::apply_inverse(&Tgt::Level::bimap(), level_val);
-        TensorSpecAux {
+        let level = Tgt::Level::bimap().invert(level_val);
+        [TensorSpecAux {
             layout: layout.clone(),
             contig: (*contig).try_into().unwrap(),
             aligned: *aligned_val != 0,
             level,
             vector_size: NonZeroU32::new(*vector_size).map(Some).unwrap_or(None),
-        }
+        }]
+    }
+}
+
+impl<Tgt> TableMeta for TensorSpecAuxNonDepBimap<Tgt>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Domain = Tgt::Level, Codomain = u8>,
+{
+    fn dimension_types(&self, _: &Self::Domain) -> Vec<DimensionType> {
+        vec![DimensionType::Contig, DimensionType::Aligned]
     }
 }
 
