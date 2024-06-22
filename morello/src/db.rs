@@ -3,9 +3,10 @@ use crate::cost::{Cost, MainCost};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::compose::ComposeExt;
-use crate::grid::general::SurMap;
+use crate::grid::general::{BiMapExt, SurMap, SurMapExt};
 use crate::grid::lens::{LensLhs, LensRhs};
 use crate::grid::linear::BimapInt;
+use crate::grid::permute::Permute;
 use crate::grid::tablemeta::{DimensionType, TableBiMap};
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
@@ -17,14 +18,14 @@ use crate::tensorspec::TensorSpecAuxNonDepBimap;
 
 use divrem::DivRem;
 use itertools::Itertools;
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{Mutex, MutexGuard, RwLock};
 use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Prehasher};
 use serde::{Deserialize, Serialize};
-
 use wtinylfu::WTinyLfuCache;
 
 use std::collections::HashMap;
 use std::fs;
+use std::hash::Hash;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
@@ -75,6 +76,7 @@ pub struct FilesDatabase {
     k: u8,
     shards: ShardVec,
     prehasher: DefaultPrehasher,
+    keyed_permute_fn: KeyedPermute<TableKey>,
     #[cfg(feature = "db-stats")]
     stats: Arc<FilesDatabaseStats>,
 }
@@ -115,6 +117,10 @@ struct SpecToTuple<Tgt: Target>(PhantomData<Tgt>);
 // TODO: Ideally we build this from simpler combinators.
 #[derive(Default, Clone)]
 struct ConcatNestedVecsFixedRhs<Tgt, const N: usize>(PhantomData<Tgt>);
+
+struct KeyedPermute<K> {
+    indices: RwLock<HashMap<K, Permute<BimapInt>>>,
+}
 
 enum ShardThreadMsg {
     Get(Prehashed<SuperBlockKey>),
@@ -216,6 +222,7 @@ impl FilesDatabase {
             k,
             shards,
             prehasher: DefaultPrehasher::default(),
+            keyed_permute_fn: KeyedPermute::default(),
             #[cfg(feature = "db-stats")]
             stats,
         }
@@ -306,7 +313,7 @@ impl FilesDatabase {
         }
     }
 
-    pub fn page_id<Tgt>(&self, lhs: &Spec<Tgt>) -> PageId
+    pub fn page_id<Tgt>(&self, lhs: &Spec<Tgt>) -> PageId<'_>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -408,31 +415,29 @@ impl FilesDatabase {
     /// Return a bidirectional map from [Spec]s to tuples of table keys and their coordinates.
     fn spec_bimap<Tgt>(
         &self,
-    ) -> impl SurMap<Domain = Spec<Tgt>, Codomain = DbKey, DomainIter = [Spec<Tgt>; 1]>
+    ) -> impl SurMap<Domain = Spec<Tgt>, Codomain = DbKey, DomainIter = [Spec<Tgt>; 1]> + '_
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Domain = Tgt::Level, Codomain = u8>,
     {
-        // TODO: Store in FilesDatabase?
         SpecToTuple::<Tgt>::default()
             .compose(LensLhs::new(self.logicalspec_bimap()))
             .compose(LensRhs::new(MemoryLimitsBimap::<Tgt>::default()))
             .compose(ConcatNestedVecsFixedRhs::<Tgt, LEVEL_COUNT>::default())
-            // TODO: Add Permute
+            .compose(&self.keyed_permute_fn)
             .into_bimap()
     }
 
-    fn logicalspec_bimap<Tgt>(
+    fn logicalspec_bimap<Tgt: Target>(
         &self,
     ) -> impl CloneableTableBiMap<
         Domain = LogicalSpec<Tgt>,
         Codomain = ((SpecKey, Vec<(Layout, u8, u32)>), Vec<BimapInt>),
         // DomainIter = Box<(dyn Iterator<Item = LogicalSpec<Tgt>> + Send + 'static)>,
         DomainIter = [LogicalSpec<Tgt>; 1],
-    >
+    > + '_
     where
-        Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Domain = Tgt::Level, Codomain = u8>,
     {
@@ -866,6 +871,58 @@ impl<Tgt: Target, const N: usize> SurMap for ConcatNestedVecsFixedRhs<Tgt, N> {
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let (v0, v1) = i.1.split_at(i.1.len() - N);
         [((i.0.clone(), v0.to_vec()), v1.to_vec())]
+    }
+}
+
+impl<K: Eq + Hash + Clone> KeyedPermute<K> {
+    fn visit_permute_fn<F: FnOnce(&Permute<BimapInt>) -> R, R>(
+        &self,
+        k: &K,
+        value_len: usize,
+        f: F,
+    ) -> R {
+        // First, check if the permutation is already in the cache without grabbing a write lock.
+        // This should be the fast path.
+        let read_guard = self.indices.read();
+        if let Some(permute_fn) = read_guard.get(k) {
+            return f(permute_fn);
+        }
+        drop(read_guard);
+
+        let mut write_guard = self.indices.write();
+        let permute_fn = write_guard.entry(k.clone()).or_insert({
+            // TODO: Compute a real permutation, not this identity.
+            Permute::new((0..value_len).collect())
+        });
+        f(permute_fn)
+    }
+}
+
+impl<K: Eq + Hash + Clone> SurMap for KeyedPermute<K> {
+    type Domain = (K, Vec<BimapInt>);
+    type Codomain = (K, Vec<BimapInt>);
+    type DomainIter = [(K, Vec<BimapInt>); 1];
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        (
+            t.0.clone(),
+            self.visit_permute_fn(&t.0, t.1.len(), |permute_fn| permute_fn.apply(&t.1)),
+        )
+    }
+
+    fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
+        [(
+            i.0.clone(),
+            self.visit_permute_fn(&i.0, i.1.len(), |permute_fn| permute_fn.invert(&i.1)),
+        )]
+    }
+}
+
+impl<K> Default for KeyedPermute<K> {
+    fn default() -> Self {
+        Self {
+            indices: RwLock::new(HashMap::new()),
+        }
     }
 }
 

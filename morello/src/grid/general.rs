@@ -1,9 +1,11 @@
 use std::iter;
 
+use auto_impl::auto_impl;
 use itertools::Itertools;
 
 use super::tablemeta::{DimensionType, TableMeta};
 
+#[auto_impl(&, &mut, Box, Arc, Rc)]
 pub trait SurMap {
     type Domain;
     type Codomain;
@@ -12,14 +14,13 @@ pub trait SurMap {
     fn apply(&self, t: &Self::Domain) -> Self::Codomain;
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter; // TODO: Rename: preimage
+}
 
+pub trait SurMapExt: SurMap {
     // TODO: This can lead to needlessly nested IntoBimaps.
     fn into_bimap(self) -> IntoBimap<Self>
     where
-        Self: Sized,
-    {
-        IntoBimap(self)
-    }
+        Self: Sized;
 }
 
 // TODO: Rename back to BiMap
@@ -27,10 +28,19 @@ pub trait BiMapExt: SurMap {
     fn invert(&self, i: &Self::Codomain) -> Self::Domain;
 }
 
+pub trait IntoSingleItemIter: IntoIterator {}
+
 #[derive(Clone)]
 pub struct IntoBimap<T>(T);
 
-pub trait IntoSingleItemIter: IntoIterator {}
+impl<T: SurMap> SurMapExt for T {
+    fn into_bimap(self) -> IntoBimap<Self>
+    where
+        Self: Sized,
+    {
+        IntoBimap(self)
+    }
+}
 
 impl<T> BiMapExt for T
 where
