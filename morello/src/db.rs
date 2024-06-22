@@ -69,6 +69,9 @@ const TABLE_DIM_ORDER: [DimensionType; 10] = [
 trait CloneableTableBiMap: TableBiMap + Clone {}
 impl<T: TableBiMap + Clone> CloneableTableBiMap for T {}
 
+trait CloneableBiMap: BiMapExt + Clone {}
+impl<T: BiMapExt + Clone> CloneableBiMap for T {}
+
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
     dir_handle: Arc<DirPathHandle>,
@@ -76,7 +79,7 @@ pub struct FilesDatabase {
     k: u8,
     shards: ShardVec,
     prehasher: DefaultPrehasher,
-    keyed_permute_fn: KeyedPermute<TableKey>,
+    keyed_permute_fn: KeyedPermute,
     #[cfg(feature = "db-stats")]
     stats: Arc<FilesDatabaseStats>,
 }
@@ -118,8 +121,8 @@ struct SpecToTuple<Tgt: Target>(PhantomData<Tgt>);
 #[derive(Default, Clone)]
 struct ConcatNestedVecsFixedRhs<Tgt, const N: usize>(PhantomData<Tgt>);
 
-struct KeyedPermute<K> {
-    indices: RwLock<HashMap<K, Permute<BimapInt>>>,
+struct KeyedPermute {
+    indices: RwLock<HashMap<TableKey, Permute<BimapInt>>>,
 }
 
 enum ShardThreadMsg {
@@ -421,11 +424,23 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Domain = Tgt::Level, Codomain = u8>,
     {
+        self.spec_bimap_unshuffled()
+            .compose(&self.keyed_permute_fn)
+            .into_bimap()
+    }
+
+    fn spec_bimap_unshuffled<Tgt>(
+        &self,
+    ) -> impl CloneableBiMap<Domain = Spec<Tgt>, Codomain = DbKey, DomainIter = [Spec<Tgt>; 1]> + '_
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Domain = Tgt::Level, Codomain = u8>,
+    {
         SpecToTuple::<Tgt>::default()
             .compose(LensLhs::new(self.logicalspec_bimap()))
             .compose(LensRhs::new(MemoryLimitsBimap::<Tgt>::default()))
             .compose(ConcatNestedVecsFixedRhs::<Tgt, LEVEL_COUNT>::default())
-            .compose(&self.keyed_permute_fn)
             .into_bimap()
     }
 
@@ -874,15 +889,15 @@ impl<Tgt: Target, const N: usize> SurMap for ConcatNestedVecsFixedRhs<Tgt, N> {
     }
 }
 
-impl<K: Eq + Hash + Clone> KeyedPermute<K> {
+impl KeyedPermute {
     fn visit_permute_fn<F: FnOnce(&Permute<BimapInt>) -> R, R>(
         &self,
-        k: &K,
+        k: &TableKey,
         value_len: usize,
         f: F,
     ) -> R {
         // First, check if the permutation is already in the cache without grabbing a write lock.
-        // This should be the fast path.
+        // This should be the common, fast path.
         let read_guard = self.indices.read();
         if let Some(permute_fn) = read_guard.get(k) {
             return f(permute_fn);
@@ -891,17 +906,21 @@ impl<K: Eq + Hash + Clone> KeyedPermute<K> {
 
         let mut write_guard = self.indices.write();
         let permute_fn = write_guard.entry(k.clone()).or_insert({
-            // TODO: Compute a real permutation, not this identity.
-            Permute::new((0..value_len).collect())
+            Permute::new(Self::permutation_indices(k, value_len))
         });
         f(permute_fn)
     }
+
+    fn permutation_indices(_k: &TableKey, value_len: usize) -> Vec<usize> {
+        // TODO: Compute a real permutation, not this identity.
+        (0..value_len).collect()
+    }
 }
 
-impl<K: Eq + Hash + Clone> SurMap for KeyedPermute<K> {
-    type Domain = (K, Vec<BimapInt>);
-    type Codomain = (K, Vec<BimapInt>);
-    type DomainIter = [(K, Vec<BimapInt>); 1];
+impl SurMap for KeyedPermute {
+    type Domain = (TableKey, Vec<BimapInt>);
+    type Codomain = (TableKey, Vec<BimapInt>);
+    type DomainIter = [(TableKey, Vec<BimapInt>); 1];
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
         (
@@ -918,7 +937,7 @@ impl<K: Eq + Hash + Clone> SurMap for KeyedPermute<K> {
     }
 }
 
-impl<K> Default for KeyedPermute<K> {
+impl Default for KeyedPermute {
     fn default() -> Self {
         Self {
             indices: RwLock::new(HashMap::new()),
