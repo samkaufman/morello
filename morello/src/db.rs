@@ -7,7 +7,7 @@ use crate::grid::general::{BiMapExt, SurMap, SurMapExt};
 use crate::grid::lens::{LensLhs, LensRhs};
 use crate::grid::linear::BimapInt;
 use crate::grid::permute::Permute;
-use crate::grid::tablemeta::{DimensionType, TableBiMap};
+use crate::grid::tablemeta::{DimensionType, TableMeta};
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
@@ -24,14 +24,13 @@ use serde::{Deserialize, Serialize};
 use wtinylfu::WTinyLfuCache;
 
 use std::collections::HashMap;
-use std::fs;
-use std::hash::Hash;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
 use std::sync::{mpsc, Arc};
+use std::{fs, iter};
 
 #[cfg(feature = "db-stats")]
 use {
@@ -53,7 +52,7 @@ const CHANNEL_SIZE: usize = 2;
 /// Compress superblocks when writing to disk.
 const COMPRESS_SUPERBLOCKS: bool = true;
 
-const TABLE_DIM_ORDER: [DimensionType; 10] = [
+const TABLE_DIM_ORDER: [DimensionType; 11] = [
     DimensionType::Other,
     DimensionType::Accum,
     DimensionType::Shape,
@@ -64,13 +63,8 @@ const TABLE_DIM_ORDER: [DimensionType; 10] = [
     DimensionType::Layout,
     DimensionType::VectorSize,
     DimensionType::SerialOnly,
+    DimensionType::MemoryLimits,
 ];
-
-trait CloneableTableBiMap: TableBiMap + Clone {}
-impl<T: TableBiMap + Clone> CloneableTableBiMap for T {}
-
-trait CloneableBiMap: BiMapExt + Clone {}
-impl<T: BiMapExt + Clone> CloneableBiMap for T {}
 
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
@@ -280,8 +274,7 @@ impl FilesDatabase {
         #[cfg(feature = "db-stats")]
         self.stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
 
-        let bimap = self.spec_bimap();
-        let (table_key, global_pt) = bimap.apply(query);
+        let (table_key, global_pt) = self.spec_to_key(query);
 
         let (block_pt, inner_pt) = blockify_point(global_pt);
 
@@ -301,8 +294,7 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
-        let bimap = self.spec_bimap();
-        let (table_key, global_pt) = bimap.apply(query);
+        let (table_key, global_pt) = self.spec_to_key(query);
         let (block_pt, _) = blockify_point(global_pt);
 
         let superblock_pt = superblockify_pt(&block_pt);
@@ -322,8 +314,7 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
-        let bimap = self.spec_bimap();
-        let (table_key, global_pt_lhs) = bimap.apply(lhs);
+        let (table_key, global_pt_lhs) = self.spec_to_key(lhs);
         let (block_pt, _) = blockify_point(global_pt_lhs);
         PageId {
             db: self,
@@ -353,8 +344,7 @@ impl FilesDatabase {
         #[cfg(feature = "db-stats")]
         self.stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
 
-        let bimap = self.spec_bimap();
-        let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
+        let (db_key, (bottom, top)) = put_range_to_fill(&spec, &decisions, |k| self.spec_to_key(k));
 
         // Construct an iterator over all blocks to fill.
         let rank = bottom.len();
@@ -416,53 +406,46 @@ impl FilesDatabase {
     }
 
     /// Return a bidirectional map from [Spec]s to tuples of table keys and their coordinates.
-    fn spec_bimap<Tgt>(
-        &self,
-    ) -> impl SurMap<Domain = Spec<Tgt>, Codomain = DbKey, DomainIter = [Spec<Tgt>; 1]> + '_
+    fn spec_to_key<Tgt>(&self, spec: &Spec<Tgt>) -> DbKey
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Domain = Tgt::Level, Codomain = u8>,
     {
-        self.spec_bimap_unshuffled()
-            .compose(&self.keyed_permute_fn)
-            .into_bimap()
-    }
-
-    fn spec_bimap_unshuffled<Tgt>(
-        &self,
-    ) -> impl CloneableBiMap<Domain = Spec<Tgt>, Codomain = DbKey, DomainIter = [Spec<Tgt>; 1]> + '_
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Domain = Tgt::Level, Codomain = u8>,
-    {
-        SpecToTuple::<Tgt>::default()
-            .compose(LensLhs::new(self.logicalspec_bimap()))
-            .compose(LensRhs::new(MemoryLimitsBimap::<Tgt>::default()))
-            .compose(ConcatNestedVecsFixedRhs::<Tgt, LEVEL_COUNT>::default())
-            .into_bimap()
-    }
-
-    fn logicalspec_bimap<Tgt: Target>(
-        &self,
-    ) -> impl CloneableTableBiMap<
-        Domain = LogicalSpec<Tgt>,
-        Codomain = ((SpecKey, Vec<(Layout, u8, u32)>), Vec<BimapInt>),
-        // DomainIter = Box<(dyn Iterator<Item = LogicalSpec<Tgt>> + Send + 'static)>,
-        DomainIter = [LogicalSpec<Tgt>; 1],
-    > + '_
-    where
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Domain = Tgt::Level, Codomain = u8>,
-    {
-        LogicalSpecSurMap::new(
+        let logicalspec_map = LogicalSpecSurMap::new(
             PrimitiveBasicsBimap {
                 binary_scale_shapes: self.binary_scale_shapes,
             },
             |_: &[DimSize], _| TensorSpecAuxNonDepBimap::<Tgt>::default(),
-        )
-        .into_bimap()
+        );
+        let mut dim_types: Vec<DimensionType> = logicalspec_map.dimension_types(&spec.0);
+        dim_types.extend(iter::repeat(DimensionType::MemoryLimits).take(LEVEL_COUNT));
+
+        let inner_bimap = SpecToTuple::<Tgt>::default()
+            .compose(LensLhs::new(logicalspec_map.into_bimap()))
+            .compose(LensRhs::new(MemoryLimitsBimap::<Tgt>::default()));
+        let spec_bimap = inner_bimap
+            .compose(ConcatNestedVecsFixedRhs::<Tgt, LEVEL_COUNT>::default())
+            .compose(&self.keyed_permute_fn);
+        let mut unsorted_dbkey = spec_bimap.apply(spec);
+
+        // Compute the permutation
+        // TODO: Cache this.
+        let mut permutation = (0..unsorted_dbkey.1.len()).collect::<Vec<_>>();
+        permutation.sort_by_key(|&i| {
+            TABLE_DIM_ORDER
+                .iter()
+                .position(|&dt| dt == dim_types[i])
+                .unwrap_or_else(|| {
+                    panic!("Didn't find {:?} in order", dim_types[i]);
+                })
+        });
+
+        unsorted_dbkey.1 = permutation
+            .iter()
+            .map(|&idx| unsorted_dbkey.1[idx])
+            .collect();
+        unsorted_dbkey
     }
 
     fn load_live_superblock<'a>(
@@ -647,8 +630,7 @@ impl<'a> PageId<'a> {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
-        let bimap = self.db.spec_bimap();
-        let (table_key, global_pt) = bimap.apply(spec);
+        let (table_key, global_pt) = self.db.spec_to_key(spec);
         if self.table_key != table_key {
             return false;
         }
@@ -905,9 +887,9 @@ impl KeyedPermute {
         drop(read_guard);
 
         let mut write_guard = self.indices.write();
-        let permute_fn = write_guard.entry(k.clone()).or_insert({
-            Permute::new(Self::permutation_indices(k, value_len))
-        });
+        let permute_fn = write_guard
+            .entry(k.clone())
+            .or_insert(Permute::new(Self::permutation_indices(k, value_len)));
         f(permute_fn)
     }
 
@@ -1272,16 +1254,16 @@ pub fn deblockify_points(a: &[BimapInt], b: &[u8]) -> Vec<BimapInt> {
 /// Compute the bottom and top points (inclusive) to fill in a database table.
 ///
 /// Returned points are in global coordinates, not within-block coordinates.
-fn put_range_to_fill<Tgt, B>(
-    bimap: &B,
+fn put_range_to_fill<Tgt, M>(
     spec: &Spec<Tgt>,
     impls: &Vec<(ActionIdx, Cost)>,
+    mapper: M,
 ) -> (TableKey, (Vec<BimapInt>, Vec<BimapInt>))
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
-    B: SurMap<Domain = Spec<Tgt>, Codomain = DbKey>,
+    M: Fn(&Spec<Tgt>) -> DbKey,
 {
     // Compute the per-level maximum limits of the solutions. This lower bounds the range.
     let mut per_level_peaks = [0; LEVEL_COUNT];
@@ -1293,20 +1275,13 @@ where
 
     // Compute the complete upper and lower bounds from the given Spec and that Spec modified with
     // the peaks' bound (computed above).
-    let upper_inclusive = bimap.apply(spec);
+    let upper_inclusive = mapper(spec);
     let lower_inclusive = {
         let mut lower_bound_spec = spec.clone();
         lower_bound_spec.1 = MemoryLimits::Standard(MemVec::new(per_level_peaks));
-        bimap.apply(&lower_bound_spec)
+        mapper(&lower_bound_spec)
     };
-
-    // TODO: This computes the non-memory dimensions of the key/coordinates twice. Avoid that.
     debug_assert_eq!(upper_inclusive.0, lower_inclusive.0);
-    debug_assert_eq!(
-        upper_inclusive.1[..upper_inclusive.1.len() - LEVEL_COUNT],
-        lower_inclusive.1[..lower_inclusive.1.len() - LEVEL_COUNT]
-    );
-
     (upper_inclusive.0, (lower_inclusive.1, upper_inclusive.1))
 }
 
