@@ -39,7 +39,7 @@ use {
 };
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
-type TableKey = (SpecKey, Vec<(Layout, u8, u32)>);
+type TableKey = (SpecKey, Vec<(Layout,)>);
 type SuperBlockKey = DbKey;
 type SuperBlock = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionIdx = u16;
@@ -52,17 +52,19 @@ const CHANNEL_SIZE: usize = 2;
 /// Compress superblocks when writing to disk.
 const COMPRESS_SUPERBLOCKS: bool = true;
 
+// `Layout` and `Other` are probably unused. The former is factored out into the table key, so we
+// don't include below, and the latter is a placeholder for user-defined dimensions.
 const TABLE_DIM_ORDER: [DimensionType; 11] = [
     DimensionType::Other,
-    DimensionType::Accum,
-    DimensionType::Shape,
-    DimensionType::Dtype,
-    DimensionType::Contig,
-    DimensionType::Aligned,
-    DimensionType::Level,
     DimensionType::Layout,
-    DimensionType::VectorSize,
     DimensionType::SerialOnly,
+    DimensionType::Accum,
+    DimensionType::Dtype,
+    DimensionType::Aligned,
+    DimensionType::VectorSize,
+    DimensionType::Contig,
+    DimensionType::Level,
+    DimensionType::Shape,
     DimensionType::MemoryLimits,
 ];
 
@@ -430,17 +432,18 @@ impl FilesDatabase {
         let mut unsorted_dbkey = spec_bimap.apply(spec);
 
         // Compute the permutation
-        // TODO: Cache this.
+        // TODO: Cache permutations.
+        debug_assert_eq!(dim_types.len(), unsorted_dbkey.1.len());
         let mut permutation = (0..unsorted_dbkey.1.len()).collect::<Vec<_>>();
         permutation.sort_by_key(|&i| {
+            let dtype_to_move = dim_types[i];
             TABLE_DIM_ORDER
                 .iter()
-                .position(|&dt| dt == dim_types[i])
-                .unwrap_or_else(|| {
-                    panic!("Didn't find {:?} in order", dim_types[i]);
-                })
+                .position(|&dt| dt == dtype_to_move)
+                .expect("order undefined for dtype")
         });
 
+        // Sort the dimensions.
         unsorted_dbkey.1 = permutation
             .iter()
             .map(|&idx| unsorted_dbkey.1[idx])
@@ -849,11 +852,8 @@ impl<Tgt: Target> SurMap for SpecToTuple<Tgt> {
 }
 
 impl<Tgt: Target, const N: usize> SurMap for ConcatNestedVecsFixedRhs<Tgt, N> {
-    type Domain = (
-        ((SpecKey, Vec<(Layout, u8, u32)>), Vec<BimapInt>),
-        Vec<BimapInt>,
-    );
-    type Codomain = ((SpecKey, Vec<(Layout, u8, u32)>), Vec<BimapInt>);
+    type Domain = ((TableKey, Vec<BimapInt>), Vec<BimapInt>);
+    type Codomain = (TableKey, Vec<BimapInt>);
     type DomainIter = [Self::Domain; 1];
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
@@ -1366,9 +1366,7 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
         SpecKey::Zero { dtype } => root.join("Zero").join(dtype.to_string()),
     };
     spec_key_dir_name
-        .join(table_key_rest.iter().map(|(l, _, _)| l).join("_"))
-        .join(table_key_rest.iter().map(|(_, d, _)| d).join("_"))
-        .join(table_key_rest.iter().map(|(_, _, v)| v).join("_"))
+        .join(table_key_rest.iter().map(|(l,)| l).join("_"))
         .join(block_pt.iter().map(|p| p.to_string()).join("_"))
 }
 

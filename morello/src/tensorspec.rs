@@ -500,31 +500,32 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Domain = Tgt::Level, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
-    type Codomain = ((Layout, u8, u32), [BimapInt; 2]);
+    type Codomain = ((Layout,), [BimapInt; 4]);
     type DomainIter = [Self::Domain; 1];
 
     fn apply(&self, aux: &TensorSpecAux<Tgt>) -> Self::Codomain {
         (
-            (
-                aux.layout.clone(),
-                Tgt::Level::bimap().apply(&aux.level),
+            (aux.layout.clone(),),
+            [
+                Tgt::Level::bimap().apply(&aux.level).into(),
+                aux.contig.into(),
+                aux.aligned as _,
                 aux.vector_size.map(|v| v.get()).unwrap_or(0),
-            ),
-            [aux.contig.into(), aux.aligned as _],
+            ],
         )
     }
 
     fn apply_inverse(&self, v: &Self::Codomain) -> Self::DomainIter {
-        let ((layout, level_val, vector_size), [contig, aligned_val]) = v;
+        let ((ref layout,), [level_val, contig, aligned_val, vector_size]) = *v;
 
         // `unwrap_or_else` rather than `unwrap` to avoid needing a Debug bound
-        let level = Tgt::Level::bimap().invert(level_val);
+        let level = Tgt::Level::bimap().invert(&level_val.try_into().unwrap());
         [TensorSpecAux {
             layout: layout.clone(),
-            contig: (*contig).try_into().unwrap(),
-            aligned: *aligned_val != 0,
+            contig: contig.try_into().unwrap(),
+            aligned: aligned_val != 0,
             level,
-            vector_size: NonZeroU32::new(*vector_size).map(Some).unwrap_or(None),
+            vector_size: NonZeroU32::new(vector_size).map(Some).unwrap_or(None),
         }]
     }
 }
@@ -536,7 +537,12 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMapExt<Domain = Tgt::Level, Codomain = u8>,
 {
     fn dimension_types(&self, _: &Self::Domain) -> Vec<DimensionType> {
-        vec![DimensionType::Contig, DimensionType::Aligned]
+        vec![
+            DimensionType::Level,
+            DimensionType::Contig,
+            DimensionType::Aligned,
+            DimensionType::VectorSize,
+        ]
     }
 }
 
