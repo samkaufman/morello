@@ -46,8 +46,6 @@ pub type ActionIdx = u16;
 
 /// The number of shards/locks per thread.
 const THREAD_SHARDS: usize = 2;
-// TODO: Select these at runtime.
-const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 /// Compress superblocks when writing to disk.
 const COMPRESS_SUPERBLOCKS: bool = true;
@@ -67,6 +65,24 @@ const TABLE_DIM_ORDER: [DimensionType; 11] = [
     DimensionType::Shape,
     DimensionType::MemoryLimits,
 ];
+
+const fn key_tile_size(spec_key: &SpecKey) -> &'static [u32] {
+    match spec_key {
+        SpecKey::Matmul { dtypes: _ } => &[],
+        SpecKey::Conv { dtypes: _ } => &[],
+        SpecKey::Move { dtypes: _ } => &[2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+        SpecKey::Zero { dtype: _ } => &[2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    }
+}
+
+const fn superblock_size(spec_key: &SpecKey) -> &'static [u32] {
+    match spec_key {
+        SpecKey::Matmul { dtypes: _ } => &[],
+        SpecKey::Conv { dtypes: _ } => &[],
+        SpecKey::Move { dtypes: _ } => &[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        SpecKey::Zero { dtype: _ } => &[1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    }
+}
 
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
@@ -278,9 +294,9 @@ impl FilesDatabase {
 
         let (table_key, global_pt) = self.spec_to_key(query);
 
-        let (block_pt, inner_pt) = blockify_point(global_pt);
+        let (block_pt, inner_pt) = blockify_point(&table_key.0, global_pt);
 
-        let superblock_pt = superblockify_pt(&block_pt);
+        let superblock_pt = superblockify_pt(&table_key.0, &block_pt);
         let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
 
         let superblock: &SuperBlock = &self.load_live_superblock(&superblock_key);
@@ -297,9 +313,9 @@ impl FilesDatabase {
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
         let (table_key, global_pt) = self.spec_to_key(query);
-        let (block_pt, _) = blockify_point(global_pt);
+        let (block_pt, _) = blockify_point(&table_key.0, global_pt);
 
-        let superblock_pt = superblockify_pt(&block_pt);
+        let superblock_pt = superblockify_pt(&table_key.0, &block_pt);
         let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
 
         let shard = &self.shards.0[self.shard_index(&superblock_key)];
@@ -317,11 +333,12 @@ impl FilesDatabase {
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
         let (table_key, global_pt_lhs) = self.spec_to_key(lhs);
-        let (block_pt, _) = blockify_point(global_pt_lhs);
+        let (block_pt, _) = blockify_point(&table_key.0, global_pt_lhs);
+        let superblock_id = superblockify_pt(&table_key.0, &block_pt);
         PageId {
             db: self,
             table_key,
-            superblock_id: superblockify_pt(&block_pt),
+            superblock_id,
         }
     }
 
@@ -366,7 +383,7 @@ impl FilesDatabase {
             let mut superblock_guard = self.load_live_superblock_mut(
                 &self
                     .prehasher
-                    .prehash((db_key.clone(), superblockify_pt(&block_pt))),
+                    .prehash((db_key.clone(), superblockify_pt(&db_key.0, &block_pt))),
             );
 
             // If the superblock already contains the block, mutate in place and continue the loop.
@@ -637,8 +654,8 @@ impl<'a> PageId<'a> {
         if self.table_key != table_key {
             return false;
         }
-        let (block_pt, _) = blockify_point(global_pt);
-        self.superblock_id == superblockify_pt(&block_pt)
+        let (block_pt, _) = blockify_point(&table_key.0, global_pt);
+        self.superblock_id == superblockify_pt(&table_key.0, &block_pt)
     }
 }
 
@@ -1147,8 +1164,10 @@ fn read_any_format(file: fs::File) -> HashMap<Vec<u32>, DbBlock> {
     }
 }
 
-fn superblockify_pt(block_pt: &[BimapInt]) -> Vec<BimapInt> {
-    block_pt.iter().map(|&i| i / SUPERBLOCK_FACTOR).collect()
+fn superblockify_pt(spec_key: &SpecKey, block_pt: &[BimapInt]) -> Vec<BimapInt> {
+    let shape = superblock_size(spec_key);
+    debug_assert_eq!(shape.len(), block_pt.len());
+    block_pt.iter().zip(shape).map(|(i, f)| *i / *f).collect()
 }
 
 fn construct_impl<Tgt>(db: &FilesDatabase, imp: &ImplNode<Tgt>) -> ImplNode<Tgt>
@@ -1181,13 +1200,6 @@ fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
     } else {
         4
     }
-}
-
-/// Convert a single dimension of a global point to a block and within-block index.
-fn db_key_scale(dim: usize, value: BimapInt, dim_count: usize) -> (BimapInt, u8) {
-    // TODO: Autotune rather than hardcode these arbitrary dimensions.
-    let (quotient, remainder) = value.div_rem(&block_size_dim(dim, dim_count));
-    (quotient, remainder.try_into().unwrap())
 }
 
 /// Computes the shape of a block in the database.
@@ -1228,13 +1240,17 @@ fn db_shape<Tgt: Target>(rank: usize) -> Vec<Option<NonZeroUsize>> {
 }
 
 /// Converts a given global coordinate into block and within-block coordinates.
-fn blockify_point(mut pt: Vec<BimapInt>) -> (Vec<BimapInt>, Vec<u8>) {
+fn blockify_point(spec_key: &SpecKey, mut pt: Vec<BimapInt>) -> (Vec<BimapInt>, Vec<u8>) {
     let rank = pt.len();
+    let tile_shape = key_tile_size(spec_key);
+    debug_assert_eq!(tile_shape.len(), rank);
+
     let mut inner_pt = Vec::with_capacity(rank);
     for (i, d) in pt.iter_mut().enumerate() {
-        let (outer, inner) = db_key_scale(i, *d, rank);
+        // TODO: Autotune rather than hardcode these arbitrary dimensions.
+        let (outer, inner) = d.div_rem(tile_shape[i]);
         *d = outer;
-        inner_pt.push(inner);
+        inner_pt.push(inner.try_into().unwrap());
     }
     (pt, inner_pt)
 }
@@ -1437,6 +1453,16 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn test_block_and_superblock_tiling_dont_crash(
+            binary_scale_shapes in any::<bool>(), spec in any::<Spec<X86Target>>()
+        ) {
+            let db = FilesDatabase::new(None, binary_scale_shapes, 1, 128, 1);
+            let ((spec_key, _), global_pt) = db.spec_to_key(&spec);
+            let (block_pt, _) = blockify_point(&spec_key, global_pt);
+            superblockify_pt(&spec_key, &block_pt);
+        }
+
         #[test]
         fn test_iter_blocks_in_single_dim_range(
             start in 0..12u32, extent in 0..8u32, block_dim_size in 1..4u32
