@@ -1301,23 +1301,23 @@ where
     (upper_inclusive.0, (lower_inclusive.1, upper_inclusive.1))
 }
 
-/// Iterate blocks of an integer range.
+/// Chunk an integer range into tiled sub-ranges.
 ///
-/// Yields block indices along with a range of within-block indices. For example:
-/// ```
-/// # use morello::db::iter_blocks_in_single_dim_range;
-/// assert_eq!(iter_blocks_in_single_dim_range(0, 3, 4).collect::<Vec<_>>(),
-///           vec![(0, 0..4)]);
-/// assert_eq!(iter_blocks_in_single_dim_range(1, 7, 4).collect::<Vec<_>>(),
-///            vec![(0, 1..4), (1, 0..4)]);
-/// ```
-///
-/// Given indices `global_bottom` and `global_top` are inclusive, forming a
-/// closed range. For example, the following yields a single incomplete block:
+/// Given range indices are inclusive, forming a closed range. For example, the following yields a
+/// single incomplete block:
 /// ```
 /// # use morello::db::iter_blocks_in_single_dim_range;
 /// assert_eq!(iter_blocks_in_single_dim_range(4, 4, 4).collect::<Vec<_>>(),
 ///            vec![(1, 0..1)]);
+/// ```
+///
+/// This differs from normal chunking; sub-ranges will either start or stop on a multiple of a given
+/// tile size (or be the only sub-range) and are shifted to be within-tile ranges. For example,
+/// chunking `1..=7` with a tile size of 4 yields the sub-ranges `1..4` followed by `0..4`.
+/// ```
+/// # use morello::db::iter_blocks_in_single_dim_range;
+/// assert_eq!(iter_blocks_in_single_dim_range(1, 7, 4).collect::<Vec<_>>(),
+///            vec![(0, 1..4), (1, 0..4)]);
 /// ```
 // TODO: Make private. (Will break doctests.)
 pub fn iter_blocks_in_single_dim_range(
