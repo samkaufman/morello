@@ -403,10 +403,6 @@ impl FilesDatabase {
         }
     }
 
-    pub fn flush(&self) {
-        // Background thread writes flush immediately, so this is a no-op.
-    }
-
     pub fn max_k(&self) -> Option<usize> {
         Some(self.k.into())
     }
