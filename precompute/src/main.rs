@@ -77,6 +77,7 @@ struct Args {
 
 struct ApplyRhs<S, T>(pub S, pub PhantomData<T>);
 
+/// A SurMap which filters domain [Vec]s where any element exceeds the corresponding max.
 struct MaxVec<'a, S>(pub S, pub Arc<Vec<BimapInt>>, pub PhantomData<&'a ()>);
 
 impl<S, T> SurMap for ApplyRhs<S, T>

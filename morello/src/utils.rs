@@ -222,8 +222,7 @@ pub fn sum_seqs(maxes: &[u32], total: u32) -> SumSeqs {
 
         let mut flat_map_iter = (obligation..=min_value)
             .flat_map(move |v| {
-                let maxes_tail = &maxes[1..];
-                sum_seqs(maxes_tail, total - v).map(move |mut suffix| {
+                sum_seqs(&maxes[1..], total - v).map(move |mut suffix| {
                     let mut prefix = vec![v];
                     prefix.append(&mut suffix);
                     prefix

@@ -66,24 +66,6 @@ const TABLE_DIM_ORDER: [DimensionType; 11] = [
     DimensionType::MemoryLimits,
 ];
 
-const fn key_tile_size(spec_key: &SpecKey) -> &'static [u32] {
-    match spec_key {
-        SpecKey::Matmul { dtypes: _ } => &[],
-        SpecKey::Conv { dtypes: _ } => &[],
-        SpecKey::Move { dtypes: _ } => &[2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
-        SpecKey::Zero { dtype: _ } => &[2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
-    }
-}
-
-const fn superblock_size(spec_key: &SpecKey) -> &'static [u32] {
-    match spec_key {
-        SpecKey::Matmul { dtypes: _ } => &[],
-        SpecKey::Conv { dtypes: _ } => &[],
-        SpecKey::Move { dtypes: _ } => &[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-        SpecKey::Zero { dtype: _ } => &[1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-    }
-}
-
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
     dir_handle: Arc<DirPathHandle>,
@@ -292,11 +274,10 @@ impl FilesDatabase {
         #[cfg(feature = "db-stats")]
         self.stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
 
-        let (table_key, global_pt) = self.spec_to_key(query);
+        let ((table_key, global_pt), dimension_types) = self.spec_to_key(query);
+        let (block_pt, inner_pt) = blockify_point(&table_key.0, global_pt, &dimension_types);
 
-        let (block_pt, inner_pt) = blockify_point(&table_key.0, global_pt);
-
-        let superblock_pt = superblockify_pt(&table_key.0, &block_pt);
+        let superblock_pt = superblockify_point(&table_key.0, &block_pt, &dimension_types);
         let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
 
         let superblock: &SuperBlock = &self.load_live_superblock(&superblock_key);
@@ -312,10 +293,10 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
-        let (table_key, global_pt) = self.spec_to_key(query);
-        let (block_pt, _) = blockify_point(&table_key.0, global_pt);
+        let ((table_key, global_pt), dimension_types) = self.spec_to_key(query);
+        let (block_pt, _) = blockify_point(&table_key.0, global_pt, &dimension_types);
 
-        let superblock_pt = superblockify_pt(&table_key.0, &block_pt);
+        let superblock_pt = superblockify_point(&table_key.0, &block_pt, &dimension_types);
         let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
 
         let shard = &self.shards.0[self.shard_index(&superblock_key)];
@@ -332,9 +313,9 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
-        let (table_key, global_pt_lhs) = self.spec_to_key(lhs);
-        let (block_pt, _) = blockify_point(&table_key.0, global_pt_lhs);
-        let superblock_id = superblockify_pt(&table_key.0, &block_pt);
+        let ((table_key, global_pt_lhs), dimension_types) = self.spec_to_key(lhs);
+        let (block_pt, _) = blockify_point(&table_key.0, global_pt_lhs, &dimension_types);
+        let superblock_id = superblockify_point(&table_key.0, &block_pt, &dimension_types);
         PageId {
             db: self,
             table_key,
@@ -363,7 +344,8 @@ impl FilesDatabase {
         #[cfg(feature = "db-stats")]
         self.stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
 
-        let (db_key, (bottom, top)) = put_range_to_fill(&spec, &decisions, |k| self.spec_to_key(k));
+        let (db_key, (bottom, top), dimension_types) =
+            put_range_to_fill(&spec, &decisions, |k| self.spec_to_key(k));
 
         // Construct an iterator over all blocks to fill.
         let rank = bottom.len();
@@ -371,7 +353,10 @@ impl FilesDatabase {
             .into_iter()
             .zip(&top)
             .enumerate()
-            .map(|(dim, (b, t))| iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank)))
+            .map(|(dim, (b, t))| {
+                let block_dim_size = key_tile_size(&db_key.0, dimension_types[dim], dim);
+                iter_blocks_in_single_dim_range(b, *t, block_dim_size)
+            })
             .multi_cartesian_product();
 
         for joined_row in blocks_iter {
@@ -380,11 +365,11 @@ impl FilesDatabase {
                 .map(|(b, _)| *b)
                 .collect::<Vec<BimapInt>>();
             // TODO: Factor out this tuple construction
-            let mut superblock_guard = self.load_live_superblock_mut(
-                &self
-                    .prehasher
-                    .prehash((db_key.clone(), superblockify_pt(&db_key.0, &block_pt))),
-            );
+            // TODO: Factor out repeated loads for a superblock revisited during `blocks_iter` traversal.
+            let mut superblock_guard = self.load_live_superblock_mut(&self.prehasher.prehash((
+                db_key.clone(),
+                superblockify_point(&db_key.0, &block_pt, &dimension_types),
+            )));
 
             // If the superblock already contains the block, mutate in place and continue the loop.
             if let Some(live_block) = superblock_guard.get_mut(&block_pt) {
@@ -400,7 +385,9 @@ impl FilesDatabase {
 
             // If not, create the block and add it to the superblock.
             let db_shape = db_shape::<Tgt>(rank);
-            let bs = block_shape(&block_pt, &db_shape, block_size_dim);
+            let bs = block_shape(&block_pt, &db_shape, |dim| {
+                key_tile_size(&db_key.0, dimension_types[dim], dim)
+            });
             let block_shape_usize = bs.map(|v| v.try_into().unwrap()).collect::<Vec<_>>();
             let dim_ranges = joined_row
                 .iter()
@@ -424,8 +411,8 @@ impl FilesDatabase {
         Some(self.k.into())
     }
 
-    /// Return a bidirectional map from [Spec]s to tuples of table keys and their coordinates.
-    fn spec_to_key<Tgt>(&self, spec: &Spec<Tgt>) -> DbKey
+    /// Map a given [Spec] to a database key and the coordinates' dimension types.
+    fn spec_to_key<Tgt>(&self, spec: &Spec<Tgt>) -> (DbKey, Vec<DimensionType>)
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -460,12 +447,15 @@ impl FilesDatabase {
                 .expect("order undefined for dtype")
         });
 
-        // Sort the dimensions.
+        // Sort dimensions. We'll return the re-ordered database key coordinate as well as the
+        // re-ordered, corresponding DimensionTypes.
+        // TODO: Do all callers need DimensionTypes? If not, we can avoid making this final Vec.
         unsorted_dbkey.1 = permutation
             .iter()
             .map(|&idx| unsorted_dbkey.1[idx])
             .collect();
-        unsorted_dbkey
+        let reordered_dim_types = permutation.iter().map(|&idx| dim_types[idx]).collect();
+        (unsorted_dbkey, reordered_dim_types)
     }
 
     fn load_live_superblock<'a>(
@@ -650,12 +640,12 @@ impl<'a> PageId<'a> {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
     {
-        let (table_key, global_pt) = self.db.spec_to_key(spec);
+        let ((table_key, global_pt), dimension_types) = self.db.spec_to_key(spec);
         if self.table_key != table_key {
             return false;
         }
-        let (block_pt, _) = blockify_point(&table_key.0, global_pt);
-        self.superblock_id == superblockify_pt(&table_key.0, &block_pt)
+        let (block_pt, _) = blockify_point(&table_key.0, global_pt, &dimension_types);
+        self.superblock_id == superblockify_point(&table_key.0, &block_pt, &dimension_types)
     }
 }
 
@@ -1164,10 +1154,16 @@ fn read_any_format(file: fs::File) -> HashMap<Vec<u32>, DbBlock> {
     }
 }
 
-fn superblockify_pt(spec_key: &SpecKey, block_pt: &[BimapInt]) -> Vec<BimapInt> {
-    let shape = superblock_size(spec_key);
-    debug_assert_eq!(shape.len(), block_pt.len());
-    block_pt.iter().zip(shape).map(|(i, f)| *i / *f).collect()
+fn superblockify_point(
+    spec_key: &SpecKey,
+    block_pt: &[BimapInt],
+    dimension_types: &[DimensionType],
+) -> Vec<BimapInt> {
+    block_pt
+        .iter()
+        .enumerate()
+        .map(|(idx, p)| p / superblock_size(spec_key, dimension_types[idx], idx))
+        .collect()
 }
 
 fn construct_impl<Tgt>(db: &FilesDatabase, imp: &ImplNode<Tgt>) -> ImplNode<Tgt>
@@ -1187,19 +1183,18 @@ where
     }
 }
 
-fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
-    if dim == 0 || dim == 1 || dim == dim_count - 5 {
-        // The last case here is the serial_only dimension. Setting this to 1 will avoid empty
-        // rows when computing serial_only, which is a common setting.
-        // The first is just a shape dimension.
-        1
-    } else if dim == dim_count - 1 {
-        31
-    } else if dim < dim_count - 5 {
-        3
-    } else {
-        4
+const fn key_tile_size(spec_key: &SpecKey, dimension_type: DimensionType, dim: usize) -> u32 {
+    let _ = (spec_key, dim); // unused for now
+    match dimension_type {
+        DimensionType::MemoryLimits => 31,
+        DimensionType::Shape => 1,
+        _ => 2,
     }
+}
+
+const fn superblock_size(spec_key: &SpecKey, dimension_type: DimensionType, dim: usize) -> u32 {
+    let _ = (spec_key, dimension_type, dim); // unused for now
+    1
 }
 
 /// Computes the shape of a block in the database.
@@ -1213,12 +1208,11 @@ fn block_shape<'a, F>(
     block_max_size_fn: F,
 ) -> impl ExactSizeIterator<Item = BimapInt> + 'a
 where
-    F: Fn(usize, usize) -> u32 + 'a,
+    F: Fn(usize) -> u32 + 'a,
 {
-    let rank = db_shape.len();
-    assert_eq!(block_pt.len(), rank);
+    debug_assert_eq!(block_pt.len(), db_shape.len());
     db_shape.iter().enumerate().map(move |(i, db_max_option)| {
-        let full_block_size = block_max_size_fn(i, rank);
+        let full_block_size = block_max_size_fn(i);
         if let Some(db_max) = db_max_option {
             let remaining_size =
                 u32::try_from(db_max.get()).unwrap() - block_pt[i] * full_block_size;
@@ -1240,31 +1234,21 @@ fn db_shape<Tgt: Target>(rank: usize) -> Vec<Option<NonZeroUsize>> {
 }
 
 /// Converts a given global coordinate into block and within-block coordinates.
-fn blockify_point(spec_key: &SpecKey, mut pt: Vec<BimapInt>) -> (Vec<BimapInt>, Vec<u8>) {
+fn blockify_point(
+    spec_key: &SpecKey,
+    mut pt: Vec<BimapInt>,
+    dimension_types: &[DimensionType],
+) -> (Vec<BimapInt>, Vec<u8>) {
     let rank = pt.len();
-    let tile_shape = key_tile_size(spec_key);
-    debug_assert_eq!(tile_shape.len(), rank);
 
     let mut inner_pt = Vec::with_capacity(rank);
     for (i, d) in pt.iter_mut().enumerate() {
         // TODO: Autotune rather than hardcode these arbitrary dimensions.
-        let (outer, inner) = d.div_rem(tile_shape[i]);
+        let (outer, inner) = d.div_rem(key_tile_size(spec_key, dimension_types[i], i));
         *d = outer;
         inner_pt.push(inner.try_into().unwrap());
     }
     (pt, inner_pt)
-}
-
-pub fn deblockify_points(a: &[BimapInt], b: &[u8]) -> Vec<BimapInt> {
-    debug_assert_eq!(a.len(), b.len());
-
-    let rank = a.len();
-    let mut result = Vec::with_capacity(rank);
-    for i in 0..rank {
-        let s = block_size_dim(i, rank);
-        result.push(s * a[i] + BimapInt::from(b[i]));
-    }
-    result
 }
 
 /// Compute the bottom and top points (inclusive) to fill in a database table.
@@ -1274,12 +1258,12 @@ fn put_range_to_fill<Tgt, M>(
     spec: &Spec<Tgt>,
     impls: &Vec<(ActionIdx, Cost)>,
     mapper: M,
-) -> (TableKey, (Vec<BimapInt>, Vec<BimapInt>))
+) -> (TableKey, (Vec<BimapInt>, Vec<BimapInt>), Vec<DimensionType>)
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: SurMap<Codomain = u8>,
-    M: Fn(&Spec<Tgt>) -> DbKey,
+    M: Fn(&Spec<Tgt>) -> (DbKey, Vec<DimensionType>),
 {
     // Compute the per-level maximum limits of the solutions. This lower bounds the range.
     let mut per_level_peaks = [0; LEVEL_COUNT];
@@ -1291,14 +1275,18 @@ where
 
     // Compute the complete upper and lower bounds from the given Spec and that Spec modified with
     // the peaks' bound (computed above).
-    let upper_inclusive = mapper(spec);
+    let (upper_inclusive, dimension_types) = mapper(spec);
     let lower_inclusive = {
         let mut lower_bound_spec = spec.clone();
         lower_bound_spec.1 = MemoryLimits::Standard(MemVec::new(per_level_peaks));
-        mapper(&lower_bound_spec)
+        mapper(&lower_bound_spec).0
     };
     debug_assert_eq!(upper_inclusive.0, lower_inclusive.0);
-    (upper_inclusive.0, (lower_inclusive.1, upper_inclusive.1))
+    (
+        upper_inclusive.0,
+        (lower_inclusive.1, upper_inclusive.1),
+        dimension_types,
+    )
 }
 
 /// Chunk an integer range into tiled sub-ranges.
@@ -1433,19 +1421,19 @@ mod tests {
             .map(|v| Some(v.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(
-            block_shape(&[0, 0], &db_shape, |_, _| 2)
+            block_shape(&[0, 0], &db_shape, |_| 2)
                 .collect_vec()
                 .as_slice(),
             &[2, 2]
         );
         assert_eq!(
-            block_shape(&[1, 1], &db_shape, |_, _| 2)
+            block_shape(&[1, 1], &db_shape, |_| 2)
                 .collect_vec()
                 .as_slice(),
             &[2, 2]
         );
         assert_eq!(
-            block_shape(&[1, 3], &db_shape, |_, _| 2)
+            block_shape(&[1, 3], &db_shape, |_| 2)
                 .collect_vec()
                 .as_slice(),
             &[2, 1]
@@ -1458,9 +1446,9 @@ mod tests {
             binary_scale_shapes in any::<bool>(), spec in any::<Spec<X86Target>>()
         ) {
             let db = FilesDatabase::new(None, binary_scale_shapes, 1, 128, 1);
-            let ((spec_key, _), global_pt) = db.spec_to_key(&spec);
-            let (block_pt, _) = blockify_point(&spec_key, global_pt);
-            superblockify_pt(&spec_key, &block_pt);
+            let (((spec_key, _), global_pt), dimension_types) = db.spec_to_key(&spec);
+            let (block_pt, _) = blockify_point(&spec_key, global_pt, &dimension_types);
+            superblockify_point(&spec_key, &block_pt, &dimension_types);
         }
 
         #[test]
