@@ -3,7 +3,7 @@ use tikv_jemallocator::Jemalloc;
 
 use adler::Adler32;
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use log::info;
 use nonzero::nonzero as nz;
 use rayon::prelude::*;
@@ -62,8 +62,8 @@ struct Args {
     db: Option<path::PathBuf>,
     #[arg(long, default_value = "32", help = "Cache size in database pages.")]
     cache_size: usize,
-    #[arg(long, default_value = "false")]
-    include_conv: bool,
+    #[arg(long, default_value = "matmul")]
+    through: ThroughSpec,
     #[arg(long, short, default_value = "1")]
     batch: DimSize,
     #[arg(long, default_value = "4")]
@@ -73,6 +73,14 @@ struct Args {
     #[arg(long, default_value = "3")]
     filters_size: Vec<DimSize>,
     size: DimSize,
+}
+
+#[derive(ValueEnum, Debug, Clone, PartialEq, Eq)]
+enum ThroughSpec {
+    Move,
+    Zero,
+    Matmul,
+    Conv,
 }
 
 struct ApplyRhs<S, T>(pub S, pub PhantomData<T>);
@@ -298,8 +306,16 @@ fn main_per_db(
 
 fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
     let mut bounds = vec![];
-    let move_needed_rank = if args.include_conv { 4 } else { 2 };
+    let move_needed_rank = match args.through {
+        ThroughSpec::Conv => 4,
+        _ => 2,
+    };
+
     bounds.extend((1..=move_needed_rank).flat_map(|rank| [move_top(args.size, rank)]));
+    if args.through == ThroughSpec::Move {
+        return bounds;
+    }
+
     bounds.extend((1..=move_needed_rank).map(|rank| {
         lspec!(Zero(
             iter::repeat(args.size).take(rank.into()),
@@ -307,6 +323,10 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
             serial
         ))
     }));
+    if args.through == ThroughSpec::Zero {
+        return bounds;
+    }
+
     bounds.push(lspec!(Matmul(
         [args.size, args.size, args.size],
         (u32, CpuMemoryLevel::GL, row_major(2)),
@@ -314,40 +334,42 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
         (u32, CpuMemoryLevel::GL, row_major(2)),
         serial
     )));
-    if args.include_conv {
-        bounds.extend({
-            let layout = row_major(4);
-            let a = TensorSpecAux {
-                contig: layout.contiguous_full(),
-                aligned: true,
-                level: CpuMemoryLevel::GL,
-                layout,
-                vector_size: None,
-            };
-            args.filters_size
-                .iter()
-                .map(|&fs| {
-                    LogicalSpec::Primitive(
-                        PrimitiveBasics {
-                            typ: PrimitiveSpecType::Conv { accum: false },
-                            spec_shape: vec![
-                                args.batch,
-                                args.filters,
-                                args.channels,
-                                args.size,
-                                args.size,
-                                fs,
-                                fs,
-                            ],
-                            dtypes: vec![Dtype::Uint32; 3],
-                        },
-                        vec![a.clone(), a.clone(), a.clone()],
-                        true,
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
+    if args.through == ThroughSpec::Matmul {
+        return bounds;
     }
+
+    bounds.extend({
+        let layout = row_major(4);
+        let a = TensorSpecAux {
+            contig: layout.contiguous_full(),
+            aligned: true,
+            level: CpuMemoryLevel::GL,
+            layout,
+            vector_size: None,
+        };
+        args.filters_size
+            .iter()
+            .map(|&fs| {
+                LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Conv { accum: false },
+                        spec_shape: vec![
+                            args.batch,
+                            args.filters,
+                            args.channels,
+                            args.size,
+                            args.size,
+                            fs,
+                            fs,
+                        ],
+                        dtypes: vec![Dtype::Uint32; 3],
+                    },
+                    vec![a.clone(), a.clone(), a.clone()],
+                    true,
+                )
+            })
+            .collect::<Vec<_>>()
+    });
     bounds
 }
 
