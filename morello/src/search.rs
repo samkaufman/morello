@@ -32,6 +32,7 @@ struct TopDownSearch<'d> {
 struct BlockSearch<'a, 'd, Tgt: Target> {
     search: &'a TopDownSearch<'d>,
     working_set: HashMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
+    working_set_running: usize,
     // The following two fields map requested Specs (the keys) to the recipients
     // (Specs + RequestIds). The latter might be out-of-date by the time they are
     // resolved; for example, when another resolution removes that SpecTask from
@@ -207,6 +208,7 @@ where
         let mut block = BlockSearch {
             search,
             working_set: HashMap::with_capacity(goals.len()),
+            working_set_running: 0,
             working_block_requests: HashMap::new(),
             subblock_requests: Vec::new(),
         };
@@ -250,12 +252,15 @@ where
                 }
             }
 
-            // TODO: Replace the following scan of the working set with an integer counter.
-            if block
-                .working_set
-                .iter()
-                .all(|(_, v)| matches!(&*v.borrow(), SpecTask::Complete { .. }))
-            {
+            debug_assert_eq!(
+                block.working_set_running,
+                block
+                    .working_set
+                    .values()
+                    .filter(|v| matches!(&*v.borrow(), SpecTask::Running { .. }))
+                    .count()
+            );
+            if block.working_set_running == 0 {
                 break;
             }
 
@@ -327,7 +332,11 @@ where
                         SpecTask::Complete(v, true)
                     }
                     GetPreference::Miss(preferences) => {
-                        SpecTask::start(spec.clone(), preferences, self.search)
+                        let started = SpecTask::start(spec.clone(), preferences, self.search);
+                        if matches!(&started, SpecTask::Running { .. }) {
+                            self.working_set_running += 1;
+                        }
+                        started
                     }
                 };
                 // search.misses += 1;
@@ -374,6 +383,7 @@ where
                             // Instead, push thd completion into a queue (the `outbox`) we'll
                             // resolve later.
                             if let SpecTask::Complete(completed_task_results, _) = &*task {
+                                self.working_set_running -= 1;
                                 outbox.push((spec.clone(), completed_task_results.clone()));
                             }
                         }
@@ -387,7 +397,8 @@ where
 
     fn resolve_request_internal(&mut self, subspec: &Spec<Tgt>, results: ActionCostVec) {
         Self::inner_resolve_request(
-            &mut self.working_set,
+            &self.working_set,
+            &mut self.working_set_running,
             &mut self.working_block_requests,
             None,
             subspec,
@@ -402,7 +413,8 @@ where
         results: ActionCostVec,
     ) {
         Self::inner_resolve_request(
-            &mut self.working_set,
+            &self.working_set,
+            &mut self.working_set_running,
             subblock,
             Some(&mut self.working_block_requests),
             subspec,
@@ -411,7 +423,8 @@ where
     }
 
     fn inner_resolve_request(
-        working_set: &mut HashMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
+        working_set: &HashMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
+        working_set_running: &mut usize,
         subblock: &mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>,
         next_subblock: Option<&mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>>,
         subspec: &Spec<Tgt>,
@@ -433,10 +446,12 @@ where
                     requester.resolve_request(request_id, cost.clone());
                     if let SpecTask::Complete(completed_requester_results, _) = &*requester {
                         // TODO: Avoid this clone by consuming the sub-block. (Do at the call site.)
+                        *working_set_running -= 1;
                         let cloned_results = completed_requester_results.clone();
                         drop(requester);
                         Self::inner_resolve_request(
                             working_set,
+                            working_set_running,
                             resolved_next_subblock,
                             None,
                             &wb_spec,
