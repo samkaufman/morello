@@ -38,10 +38,6 @@ const MULTI_DIM_TILING: bool = false;
 /// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
 const MOVE_RESULTS_CAPACITY: usize = 16;
 
-/// Only search tile shapes with dimensions at most this many binarized powers smaller than the
-/// current Spec. If `None`, search all tiling sizes.
-const TILING_DEPTH_LIMIT: Option<NonZeroU32> = None;
-
 #[cfg(test)]
 const ARBITRARY_SPEC_MAX_SIZE: DimSize = nonzero::nonzero!(8u32);
 
@@ -741,8 +737,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         true
     }
 
-    pub fn actions(&self) -> impl ActionSeq<Tgt> + '_ {
-        let iter = self.tile_out_actions();
+    pub fn actions(&self, tiling_depth: Option<NonZeroU32>) -> impl ActionSeq<Tgt> + '_ {
+        let iter = self.tile_out_actions(tiling_depth);
         let iter = iter.chain(self.move_actions());
         let iter = iter.chain(Tgt::actions(self));
 
@@ -759,9 +755,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Matmul { accum } if !*accum => {
                     iter.chain(once(Action::ToAccum)).collect::<Vec<_>>()
                 }
-                PrimitiveSpecType::Matmul { accum } if *accum => {
-                    iter.chain(self.split_actions()).collect::<Vec<_>>()
-                }
+                PrimitiveSpecType::Matmul { accum } if *accum => iter
+                    .chain(self.split_actions(tiling_depth))
+                    .collect::<Vec<_>>(),
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
                         if self.can_spatial_split() {
@@ -814,11 +810,14 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         true
     }
 
-    fn tile_out_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
+    fn tile_out_actions(
+        &self,
+        depth: Option<NonZeroU32>,
+    ) -> impl Iterator<Item = Action<Tgt>> + '_ {
         let serial_only = self.serial_only();
         let output = self.output();
         let multi_dim = MULTI_DIM_TILING || !serial_only;
-        gen_tile_sizes::<Tgt>(output.shape(), true, multi_dim).flat_map(move |tile_shape| {
+        gen_tile_sizes::<Tgt>(output.shape(), true, multi_dim, depth).flat_map(move |tile_shape| {
             let left = once(Action::TileOut {
                 output_shape: tile_shape.clone(),
                 parallel: false,
@@ -834,7 +833,10 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         })
     }
 
-    fn split_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
+    fn split_actions(
+        &self,
+        tiling_depth: Option<NonZeroU32>,
+    ) -> impl Iterator<Item = Action<Tgt>> + '_ {
         let LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ, spec_shape, ..
@@ -855,7 +857,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         };
 
         let operands = self.parameters();
-        dim_range(orig_k, false)
+        dim_range(orig_k, false, tiling_depth)
             .filter(move |&new_k| {
                 // TODO: Shouldn't this be rejected during application instead?
                 operands[0].is_valid_tile_shape(&[m, new_k], false)
@@ -1514,12 +1516,13 @@ fn gen_tile_sizes<Tgt: Target>(
     tensor_shape: &[DimSize],
     drop_given: bool,
     multi_dim: bool,
+    depth: Option<NonZeroU32>,
 ) -> Box<dyn Iterator<Item = Shape>> {
     if tensor_shape.is_empty() {
         return Box::new(iter::empty());
     } else if tensor_shape.len() == 1 {
         let one_dim = tensor_shape[0];
-        return Box::new(dim_range(one_dim, true).filter_map(move |d| {
+        return Box::new(dim_range(one_dim, true, depth).filter_map(move |d| {
             if drop_given && d == one_dim {
                 None
             } else {
@@ -1531,18 +1534,20 @@ fn gen_tile_sizes<Tgt: Target>(
     if multi_dim {
         let tensor_shape = tensor_shape.to_vec();
         Box::new(
-            gen_tile_sizes::<Tgt>(&tensor_shape[1..], false, multi_dim).flat_map(move |rest| {
-                let tensor_shape = tensor_shape.clone();
-                dim_range(tensor_shape[0], true).flat_map(move |d| {
-                    let mut new_shape = vec![d];
-                    new_shape.extend(rest.clone());
-                    if drop_given && tensor_shape == new_shape[..] {
-                        None
-                    } else {
-                        Some(new_shape)
-                    }
-                })
-            }),
+            gen_tile_sizes::<Tgt>(&tensor_shape[1..], false, multi_dim, depth).flat_map(
+                move |rest| {
+                    let tensor_shape = tensor_shape.clone();
+                    dim_range(tensor_shape[0], true, depth).flat_map(move |d| {
+                        let mut new_shape = vec![d];
+                        new_shape.extend(rest.clone());
+                        if drop_given && tensor_shape == new_shape[..] {
+                            None
+                        } else {
+                            Some(new_shape)
+                        }
+                    })
+                },
+            ),
         )
     } else {
         let tensor_shape = tensor_shape.to_vec();
@@ -1558,7 +1563,7 @@ fn gen_tile_sizes<Tgt: Target>(
         };
         let smaller_tiles_iter = (0..tensor_shape.len()).flat_map(move |dim| {
             let tensor_shape = tensor_shape.clone();
-            dim_range(tensor_shape[dim], false).map(move |d| {
+            dim_range(tensor_shape[dim], false, depth).map(move |d| {
                 let mut new_shape = tensor_shape.clone();
                 new_shape[dim] = d;
                 new_shape
@@ -1599,13 +1604,17 @@ pub fn gen_vector_sizes_opt(
         .chain(iter_b.into_iter().flatten())
 }
 
-pub fn dim_range(dim_size: DimSize, include_end: bool) -> impl Iterator<Item = DimSize> {
-    let start = if let Some(depth) = TILING_DEPTH_LIMIT {
-        assert!(dim_size.is_power_of_two());
-        dim_size.trailing_zeros().saturating_sub(depth.get())
-    } else {
-        0
-    };
+pub fn dim_range(
+    dim_size: DimSize,
+    include_end: bool,
+    depth: Option<NonZeroU32>,
+) -> impl Iterator<Item = DimSize> {
+    let start = depth
+        .map(|d| {
+            assert!(dim_size.is_power_of_two());
+            dim_size.trailing_zeros().saturating_sub(d.get())
+        })
+        .unwrap_or(0);
     let it = (start..)
         .map(|power| 2u32.pow(power))
         .take_while(move |x| *x < dim_size.get())
@@ -1855,10 +1864,22 @@ mod tests {
 
     #[test]
     fn test_gen_tile_sizes_empty() {
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, false).count(), 0);
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], true, false).count(), 0);
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, true).count(), 0);
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, false).count(), 0);
+        assert_eq!(
+            gen_tile_sizes::<X86Target>(&[], false, false, None).count(),
+            0
+        );
+        assert_eq!(
+            gen_tile_sizes::<X86Target>(&[], true, false, None).count(),
+            0
+        );
+        assert_eq!(
+            gen_tile_sizes::<X86Target>(&[], false, true, None).count(),
+            0
+        );
+        assert_eq!(
+            gen_tile_sizes::<X86Target>(&[], false, false, None).count(),
+            0
+        );
     }
 
     #[test]
@@ -2061,7 +2082,7 @@ mod tests {
 
         #[test]
         fn test_move_actions_never_returns_within_level_copy(spec in any::<Spec<X86Target>>()) {
-            for action in spec.0.actions() {
+            for action in spec.0.actions(None) {
                 if let Ok(ImplNode::MoveLet(move_let)) = action.apply(&spec) {
                     assert_ne!(&move_let.source_spec, move_let.introduced.spec(),
                         "Copying MoveLet introduced by action {:?}", action);
@@ -2074,7 +2095,7 @@ mod tests {
             (spec, action, _, lower_limit) in arb_spec_action_and_lower_limit::<X86Target>()
         ) {
             let lower_spec = Spec(spec.0.clone(), lower_limit);
-            assert!(lower_spec.0.actions().into_iter().contains(&action),
+            assert!(lower_spec.0.actions(None).into_iter().contains(&action),
                 "Action {:?} was not present in lower-limits Spec {:?}",
                 action, lower_spec);
         }
@@ -2097,7 +2118,7 @@ mod tests {
         fn test_actions_produce_canonical_subspecs(
             spec in any::<Spec<X86Target>>()
         ) {
-            spec.0.actions().into_iter().for_each(|action| {
+            spec.0.actions(None).into_iter().for_each(|action| {
                 let Ok(applied) = action.apply(&spec) else {
                     return;
                 };
@@ -2134,7 +2155,7 @@ mod tests {
     }
 
     fn shared_test_no_action_panics<Tgt: Target>(spec: Spec<Tgt>) {
-        for action in spec.0.actions() {
+        for action in spec.0.actions(None) {
             let _ = action.apply(&spec);
         }
     }
@@ -2142,7 +2163,7 @@ mod tests {
     fn shared_test_no_action_produces_same_spec_with_higher_memory_limit<Tgt: Target>(
         spec: &Spec<Tgt>,
     ) {
-        spec.0.actions().into_iter().for_each(|action| {
+        spec.0.actions(None).into_iter().for_each(|action| {
             let Ok(applied) = action.apply(spec) else {
                 return;
             };
@@ -2182,7 +2203,7 @@ mod tests {
 
         // The list of actions depends only on the logical Spec. Filtering by memory limit happens
         // at application. So it's safe to just collect the list of actions once, up front.
-        let mut unseen_actions = logical_spec.actions().into_iter().collect::<Vec<_>>();
+        let mut unseen_actions = logical_spec.actions(None).into_iter().collect::<Vec<_>>();
 
         let mut shared_spec = Spec(logical_spec, MemoryLimits::Standard(MemVec::zero::<Tgt>()));
         let mut diagonal_idx = 0;
@@ -2228,7 +2249,7 @@ mod tests {
             .prop_filter_map("Spec had zero applicable actions", |spec| {
                 let applied_actions = spec
                     .0
-                    .actions()
+                    .actions(None)
                     .into_iter()
                     .filter_map(|a| match a.apply(&spec) {
                         Ok(applied) => Some((a, applied)),
@@ -2295,13 +2316,14 @@ mod tests {
         let d = expected.first().map_or(0, |shape| shape.len());
         assert!(expected.iter().all(|shape| shape.len() == d));
 
-        let actual: Vec<Shape> = gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim)
-            .map(|s| {
-                assert_eq!(s.len(), d);
-                s
-            })
-            .sorted()
-            .collect::<Vec<_>>();
+        let actual: Vec<Shape> =
+            gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim, None)
+                .map(|s| {
+                    assert_eq!(s.len(), d);
+                    s
+                })
+                .sorted()
+                .collect::<Vec<_>>();
         assert_eq!(
             actual, expected,
             "gen_tile_sizes({:?}, drop_given={}, serial={}) returned {:?}, expected {:?}",

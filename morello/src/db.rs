@@ -22,7 +22,7 @@ use wtinylfu::WTinyLfuCache;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
 use std::sync::{mpsc, Arc};
@@ -54,6 +54,7 @@ pub struct FilesDatabase {
     k: u8,
     shards: ShardVec,
     prehasher: DefaultPrehasher,
+    tiling_depth: Option<NonZeroU32>,
     #[cfg(feature = "db-stats")]
     stats: Arc<FilesDatabaseStats>,
 }
@@ -144,12 +145,38 @@ impl FilesDatabase {
         k: u8,
         cache_size: usize,
         thread_count: usize,
+        tiling_depth: Option<NonZeroU32>,
     ) -> Self {
         let dir_handle = Arc::new(match file_path {
-            Some(path) => DirPathHandle::Persisted(path.to_owned()),
+            Some(path) => {
+                fs::create_dir_all(path).unwrap();
+                DirPathHandle::Persisted(path.to_owned())
+            }
             None => DirPathHandle::TempDir(tempfile::TempDir::new().unwrap()),
         });
         log::info!("Opening database at: {}", dir_handle.path().display());
+
+        // Check that the intended tiling depth matches the one logged on disk (if any).
+        let tiling_depth_path = dir_handle.path().join("TILING_DEPTH");
+        if tiling_depth_path.exists() {
+            let raw_buf = fs::read_to_string(&tiling_depth_path).unwrap();
+            let buf = raw_buf.trim();
+            let file_depth = if buf == "ANY" {
+                None
+            } else {
+                Some(NonZeroU32::new(buf.parse::<u32>().unwrap()).unwrap())
+            };
+            if tiling_depth != file_depth {
+                panic!("Tiling depth mismatch: expected {tiling_depth:?}, found {file_depth:?}");
+            }
+        } else {
+            let mut file = fs::File::create(&tiling_depth_path).unwrap();
+            if let Some(depth) = tiling_depth {
+                writeln!(file, "{}", depth.get()).unwrap();
+            } else {
+                writeln!(file, "ANY").unwrap();
+            }
+        }
 
         #[cfg(feature = "db-stats")]
         let stats = Arc::new(FilesDatabaseStats::default());
@@ -187,6 +214,7 @@ impl FilesDatabase {
             k,
             shards,
             prehasher: DefaultPrehasher::default(),
+            tiling_depth,
             #[cfg(feature = "db-stats")]
             stats,
         }
@@ -211,7 +239,7 @@ impl FilesDatabase {
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let root_results = self.get(query)?;
-        let actions = query.0.actions();
+        let actions = query.0.actions(self.tiling_depth);
         Some(
             root_results
                 .as_ref()
@@ -392,6 +420,10 @@ impl FilesDatabase {
             memory_limits_bimap: MemoryLimitsBimap::default(),
         };
         surmap.into_bimap()
+    }
+
+    pub fn tiling_depth(&self) -> Option<NonZeroU32> {
+        self.tiling_depth
     }
 
     fn load_live_superblock<'a>(
@@ -1335,7 +1367,7 @@ mod tests {
         #[test]
         fn test_put_then_get_fills_across_memory_limits(decision in arb_spec_and_decision::<X86Target>()) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = FilesDatabase::new(None, false, 1, 2, 1);
+            let db = FilesDatabase::new(None, false, 1, 2, 1, None);
 
             // Put all decisions into database.
             for d in decision.visit_decisions() {
@@ -1463,7 +1495,7 @@ mod tests {
             .prop_flat_map(|spec| {
                 let valid_actions = spec
                     .0
-                    .actions()
+                    .actions(None)
                     .into_iter()
                     .enumerate()
                     .filter_map(|(i, a)| match a.apply(&spec) {
@@ -1524,7 +1556,7 @@ mod tests {
     fn recursively_decide_actions<Tgt: Target>(spec: &Spec<Tgt>) -> Decision<Tgt> {
         if let Some((action_idx, partial_impl)) = spec
             .0
-            .actions()
+            .actions(None)
             .into_iter()
             .enumerate()
             .filter_map(|(i, a)| match a.apply(spec) {

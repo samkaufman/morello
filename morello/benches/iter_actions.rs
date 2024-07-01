@@ -17,7 +17,7 @@ fn copy_actions_into_vec() {
         (u32, GL, rm2),
         serial
     ));
-    black_box(logical_spec.actions().into_iter().collect::<Vec<_>>());
+    black_box(logical_spec.actions(None).into_iter().collect::<Vec<_>>());
 }
 
 library_benchmark_group!(
