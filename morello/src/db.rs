@@ -17,7 +17,6 @@ use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
 use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Prehasher};
 use serde::{Deserialize, Serialize};
-
 use wtinylfu::WTinyLfuCache;
 
 use std::collections::HashMap;

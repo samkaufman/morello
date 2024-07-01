@@ -28,6 +28,7 @@ use std::iter::Iterator;
 use std::iter::{self, once};
 use std::marker::PhantomData;
 use std::mem;
+use std::num::NonZeroU32;
 use std::panic;
 use std::{assert_eq, debug_assert_eq};
 
@@ -36,6 +37,10 @@ const MULTI_DIM_TILING: bool = false;
 
 /// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
 const MOVE_RESULTS_CAPACITY: usize = 16;
+
+/// Only search tile shapes with dimensions at most this many binarized powers smaller than the
+/// current Spec. If `None`, search all tiling sizes.
+const TILING_DEPTH_LIMIT: Option<NonZeroU32> = None;
 
 #[cfg(test)]
 const ARBITRARY_SPEC_MAX_SIZE: DimSize = nonzero::nonzero!(8u32);
@@ -1595,7 +1600,13 @@ pub fn gen_vector_sizes_opt(
 }
 
 pub fn dim_range(dim_size: DimSize, include_end: bool) -> impl Iterator<Item = DimSize> {
-    let it = (0..)
+    let start = if let Some(depth) = TILING_DEPTH_LIMIT {
+        assert!(dim_size.is_power_of_two());
+        dim_size.trailing_zeros().saturating_sub(depth.get())
+    } else {
+        0
+    };
+    let it = (start..)
         .map(|power| 2u32.pow(power))
         .take_while(move |x| *x < dim_size.get())
         .map(|x| DimSize::new(x).unwrap());
