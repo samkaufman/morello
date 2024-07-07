@@ -742,6 +742,7 @@ dependencies = [
  "ndarray",
  "ndarray-conv",
  "nonzero",
+ "num-rational",
  "num-traits",
  "parking_lot",
  "prehash",
@@ -872,6 +873,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]

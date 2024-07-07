@@ -1,5 +1,5 @@
 use crate::common::DimSize;
-use crate::cost::{Cost, MainCost};
+use crate::cost::{Cost, CostIntensity, NormalizedCost};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap};
@@ -139,10 +139,10 @@ pub enum DbBlock {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WholeBlock {
-    pub filled: NDArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
-    pub main_costs: NDArray<MainCost>,
-    pub peaks: NDArray<MemVec>,
-    pub depths_actions: NDArray<(u8, ActionIdx)>,
+    filled: NDArray<u8>, // 0 is empty; otherwise n - 1 = # of actions.
+    main_costs: NDArray<CostIntensity>,
+    peaks: NDArray<MemVec>,
+    depths_actions: NDArray<(u8, ActionIdx)>,
     #[cfg(feature = "db-stats")]
     #[serde(skip)]
     access_counts: Mutex<Option<NDArray<bool>>>,
@@ -150,6 +150,9 @@ pub struct WholeBlock {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionCostVec(pub Vec<(ActionIdx, Cost)>);
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ActionNormalizedCostVec(pub Vec<(ActionIdx, NormalizedCost)>);
 
 pub enum GetPreference<T, V> {
     Hit(T),
@@ -388,6 +391,10 @@ impl FilesDatabase {
             .map(|(dim, (b, t))| iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank)))
             .multi_cartesian_product();
 
+        // Since this put is for a single Spec, we can normalize the cost with that Spec's volume.
+        let normalized_decisions =
+            ActionNormalizedCostVec::normalize(ActionCostVec(decisions), spec.0.volume());
+
         for joined_row in blocks_iter {
             let block_pt = joined_row
                 .iter()
@@ -409,7 +416,7 @@ impl FilesDatabase {
                     .collect::<Vec<_>>();
                 let DbBlock::Whole(e) = live_block;
                 // Examine the table before updating.
-                e.fill_region(self.k, &dim_ranges, &ActionCostVec(decisions.clone()));
+                e.fill_region(self.k, &dim_ranges, &normalized_decisions);
                 continue;
             }
 
@@ -425,7 +432,7 @@ impl FilesDatabase {
                 self.k,
                 &block_shape_usize,
                 &dim_ranges,
-                &ActionCostVec(decisions.clone()),
+                &normalized_decisions,
             )));
             superblock_guard.contents.insert(block_pt, new_block);
         }
@@ -884,7 +891,7 @@ impl DbBlock {
     pub fn get_with_preference<Tgt>(
         &self,
         _containing_db: &FilesDatabase,
-        _query: &Spec<Tgt>,
+        query: &Spec<Tgt>,
         inner_pt: &[u8],
     ) -> GetPreference<ActionCostVec, Vec<ActionIdx>>
     where
@@ -896,7 +903,7 @@ impl DbBlock {
         match self {
             DbBlock::Whole(b) => {
                 // TODO: Propogate an action index preference.
-                match b.get(&inner_pt_usize) {
+                match b.get(&inner_pt_usize, query.0.volume()) {
                     Some(r) => GetPreference::Hit(r),
                     None => GetPreference::Miss(None),
                 }
@@ -931,7 +938,7 @@ impl WholeBlock {
         k: u8,
         shape: &[usize],
         dim_ranges: &[Range<BimapInt>],
-        value: &ActionCostVec,
+        value: &ActionNormalizedCostVec,
     ) -> Self {
         let mut e = Self::empty::<Tgt>(k, shape);
         e.fill_region_without_updating_match(k, dim_ranges, value);
@@ -942,7 +949,7 @@ impl WholeBlock {
         &mut self,
         k: u8,
         dim_ranges: &[Range<BimapInt>],
-        value: &ActionCostVec,
+        value: &ActionNormalizedCostVec,
     ) {
         self.fill_region_without_updating_match(k, dim_ranges, value);
     }
@@ -951,7 +958,7 @@ impl WholeBlock {
         &mut self,
         k: u8,
         dim_ranges: &[Range<BimapInt>],
-        value: &ActionCostVec,
+        value: &ActionNormalizedCostVec,
     ) {
         let shape = self.filled.shape();
         debug_assert_eq!(dim_ranges.len(), shape.len());
@@ -961,10 +968,10 @@ impl WholeBlock {
         shape_with_k.push(k.into());
 
         self.filled
-            .fill_region(dim_ranges, u8::try_from(value.len()).unwrap() + 1);
+            .fill_region(dim_ranges, u8::try_from(value.0.len()).unwrap() + 1);
         self.main_costs.fill_broadcast_1d(
             dim_ranges,
-            value.0.iter().map(|(_, c)| c.main),
+            value.0.iter().map(|(_, c)| c.intensity),
             Some(&self.filled),
         );
         self.peaks.fill_broadcast_1d(
@@ -987,7 +994,7 @@ impl WholeBlock {
         }
     }
 
-    pub(crate) fn get(&self, pt: &[usize]) -> Option<ActionCostVec> {
+    pub(crate) fn get(&self, pt: &[usize], spec_volume: DimSize) -> Option<ActionCostVec> {
         #[cfg(feature = "db-stats")]
         self.log_access(pt);
 
@@ -1007,7 +1014,8 @@ impl WholeBlock {
                     (
                         action_idx,
                         Cost {
-                            main: self.main_costs[&pt_with_k],
+                            main: self.main_costs[&pt_with_k]
+                                .into_main_cost_for_volume(spec_volume),
                             peaks: self.peaks[&pt_with_k].clone(),
                             depth,
                         },
@@ -1079,6 +1087,18 @@ impl Deref for ActionCostVec {
 impl AsRef<Vec<(ActionIdx, Cost)>> for ActionCostVec {
     fn as_ref(&self) -> &Vec<(ActionIdx, Cost)> {
         self.deref()
+    }
+}
+
+impl ActionNormalizedCostVec {
+    pub fn normalize(action_costs: ActionCostVec, volume: DimSize) -> Self {
+        ActionNormalizedCostVec(
+            action_costs
+                .0
+                .into_iter()
+                .map(|(action_idx, cost)| (action_idx, NormalizedCost::new(cost, volume)))
+                .collect(),
+        )
     }
 }
 
@@ -1192,7 +1212,7 @@ fn analyze_visit_dir<Tgt>(
                     .map(|v| usize::try_from(*v).unwrap())
                     .collect::<Vec<_>>();
                 let spec = bimap.apply_inverse(&(table_key.clone(), shifted_local_pt));
-                if let Some(action_cost_vec) = e.get(&unshifted_local_pt_usize) {
+                if let Some(action_cost_vec) = e.get(&unshifted_local_pt_usize, spec.0.volume()) {
                     if action_cost_vec.len() > 1 {
                         log::warn!("k > 1 but only k = 1 supported");
                     }

@@ -1,10 +1,12 @@
 use std::cmp::Ordering;
 
+use crate::common::DimSize;
 use crate::imp::Impl;
 use crate::memorylimits::MemVec;
 use crate::target::Target;
 use crate::utils::snap_memvec_up;
 
+use num_rational::Ratio;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug, Deserialize, Serialize)]
@@ -14,6 +16,17 @@ pub struct Cost {
     pub peaks: MemVec,
     pub depth: u8,
 }
+
+#[derive(Clone, Eq, PartialEq, Debug, Deserialize, Serialize)]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
+pub(crate) struct NormalizedCost {
+    pub intensity: CostIntensity,
+    pub peaks: MemVec,
+    pub depth: u8,
+}
+
+#[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Deserialize, Serialize)]
+pub(crate) struct CostIntensity(Ratio<u32>);
 
 pub type MainCost = u32;
 
@@ -94,5 +107,43 @@ impl Ord for Cost {
         }
 
         self.depth.cmp(&other.depth)
+    }
+}
+
+impl NormalizedCost {
+    pub fn new(cost: Cost, volume: DimSize) -> Self {
+        NormalizedCost {
+            intensity: CostIntensity::new(cost.main, volume),
+            peaks: cost.peaks,
+            depth: cost.depth,
+        }
+    }
+}
+
+impl CostIntensity {
+    pub fn new(cost: MainCost, volume: DimSize) -> Self {
+        Self(Ratio::new(cost, volume.get()))
+    }
+
+    pub fn into_main_cost_for_volume(mut self, volume: DimSize) -> MainCost {
+        self.0 *= volume.get();
+        assert!(self.0.is_integer());
+        self.0.to_integer()
+    }
+}
+
+#[cfg(test)]
+impl proptest::arbitrary::Arbitrary for CostIntensity {
+    type Parameters = ();
+    type Strategy = proptest::strategy::BoxedStrategy<Self>;
+
+    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+
+        let original_main_cost = any::<MainCost>();
+        let volume = 1u32..;
+        (original_main_cost, volume)
+            .prop_map(|(main_cost, volume)| CostIntensity(Ratio::new(main_cost, volume)))
+            .boxed()
     }
 }

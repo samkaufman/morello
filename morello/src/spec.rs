@@ -1195,6 +1195,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
         cloned
     }
+
+    /// Returns the product of Spec dimensions.
+    pub fn volume(&self) -> DimSize {
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => {
+                DimSize::new(basics.spec_shape.iter().map(|d| d.get()).product()).unwrap()
+            }
+            LogicalSpec::Compose { .. } => todo!(),
+        }
+    }
 }
 
 impl<Tgt: Target> Display for LogicalSpec<Tgt> {

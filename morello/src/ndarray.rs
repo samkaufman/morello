@@ -1,8 +1,6 @@
 use crate::utils::iter_multidim_range;
-use divrem::DivRem;
 use rle_vec::RleVec;
 use serde::{Deserialize, Serialize};
-
 use std::ops::{Index, Range};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,55 +12,9 @@ pub struct NDArray<T> {
 }
 
 impl<T> NDArray<T> {
-    /// Return the index of an arbitrary value which matches `predicate`.
-    pub fn position<P>(&self, mut predicate: P) -> Option<Vec<usize>>
-    where
-        Self: Sized,
-        P: FnMut(&T) -> bool,
-    {
-        for (idx, val) in self.data.iter().enumerate() {
-            if predicate(val) {
-                let mut multidim_idx = Vec::with_capacity(self.shape.len());
-                let mut remaining = idx;
-                for &stride in &self.strides {
-                    let (d, r) = remaining.div_rem(stride);
-                    multidim_idx.push(d);
-                    remaining = r;
-                }
-                debug_assert_eq!(remaining, 0);
-                debug_assert_eq!(multidim_idx.len(), self.shape.len());
-                return Some(multidim_idx);
-            }
-        }
-        None
-    }
-
+    #[allow(dead_code)]
     pub fn runs_len(&self) -> usize {
         self.data.runs_len()
-    }
-
-    pub fn get_with_neighbor(&self, pt: &[usize]) -> (&T, Option<&T>) {
-        let data_idx = self.data_offset(pt);
-        let run_idx: usize = self
-            .data
-            .run_index(data_idx.try_into().unwrap())
-            .try_into()
-            .unwrap();
-        let center_run = rle_vec_get_run(&self.data, run_idx);
-        let center_value = center_run.value;
-        if self.data.runs_len() == 1 {
-            (center_value, None)
-        } else if run_idx == 0 {
-            (
-                center_value,
-                Some(rle_vec_get_run(&self.data, run_idx + 1).value),
-            )
-        } else {
-            (
-                center_value,
-                Some(rle_vec_get_run(&self.data, run_idx - 1).value),
-            )
-        }
     }
 }
 
@@ -72,11 +24,6 @@ impl<T: Clone + Eq> NDArray<T> {
         let mut buffer = RleVec::new();
         buffer.push_n(volume.try_into().unwrap(), value);
         Self::new_from_rlevec(shape, volume, buffer)
-    }
-
-    pub fn new_from_buffer(shape: &[usize], buffer: Vec<T>) -> Self {
-        let volume = shape.iter().product();
-        Self::new_from_rlevec(shape, volume, buffer.as_slice().into())
     }
 
     fn new_from_rlevec(shape: &[usize], volume: usize, buffer: RleVec<T>) -> Self {
@@ -89,6 +36,7 @@ impl<T: Clone + Eq> NDArray<T> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_pt(&mut self, pt: &[usize], value: T) {
         let index = self.data_offset(pt);
         self.data.set(index, value);
@@ -116,10 +64,6 @@ impl<T> NDArray<T> {
             .sum()
     }
 
-    pub fn strides(&self) -> &[usize] {
-        &self.strides
-    }
-
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
@@ -128,6 +72,7 @@ impl<T> NDArray<T> {
         self.shape.iter().product()
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.data.len()
     }
@@ -343,24 +288,9 @@ fn calculate_strides(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
-// TODO: This should be in the rle_vec crate
-fn rle_vec_get_run<T>(v: &RleVec<T>, run_idx: usize) -> rle_vec::Run<&T> {
-    v.runs().nth(run_idx).unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // TODO: proptest-ize this test.
-    #[test]
-    fn test_insert_single_value_and_retrieve_with_get_arbitrary() {
-        let insertion_point = vec![1, 1];
-        let mut arr = NDArray::new_with_value(&[4, 4], false);
-        arr.set_pt(&insertion_point, true);
-        let retrieved_idx = arr.position(|&v| v);
-        assert_eq!(retrieved_idx, Some(insertion_point));
-    }
 
     // TODO: proptest-ize this test, and test with non-None filled.
     #[test]
@@ -402,7 +332,11 @@ mod tests {
 
     #[test]
     fn test_fill_subarray_with_infill_4() {
-        let filled = NDArray::new_from_buffer(&[3, 3], vec![1, 1, 1, 1, 1, 0, 1, 0, 0]);
+        let shape: &[usize] = &[3, 3];
+        let buffer = [1, 1, 1, 1, 1, 0, 1, 0, 0];
+        let volume = shape.iter().product();
+        let filled = NDArray::new_from_rlevec(shape, volume, buffer.as_slice().into());
+
         let mut arr = NDArray::new_with_value(&[3, 3, 1], 0);
         arr.fill_region_ext(&[0..3, 1..2, 0..1], 1, Some((0, &filled)));
         assert_eq!(arr.data.to_vec(), vec![0, 1, 0, 0, 1, 1, 0, 1, 1]);
