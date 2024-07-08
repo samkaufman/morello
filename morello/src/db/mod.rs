@@ -13,6 +13,7 @@ use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
+use blocks::{RTreeBlock, RTreeBlockGeneric};
 
 use divrem::DivRem;
 use itertools::Itertools;
@@ -53,6 +54,7 @@ const SUPERBLOCK_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 /// Compress superblocks when writing to disk.
 const COMPRESS_SUPERBLOCKS: bool = true;
+const USE_RTREE: bool = true;
 
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
@@ -288,7 +290,7 @@ impl FilesDatabase {
         let Some(b) = superblock.contents.get(&block_pt) else {
             return GetPreference::Miss(None);
         };
-        b.get_with_preference(&query, &inner_pt)
+        b.get_with_preference(&query, &inner_pt, self.binary_scale_shapes)
     }
 
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
@@ -391,9 +393,8 @@ impl FilesDatabase {
                     .iter()
                     .map(|(_, r)| r.clone())
                     .collect::<Vec<_>>();
-                let DbBlock::Whole(e) = live_block;
                 // Examine the table before updating.
-                e.fill_region(self.k, &dim_ranges, &normalized_decisions);
+                live_block.fill_region(self.k, &dim_ranges, &normalized_decisions);
                 continue;
             }
 
@@ -405,12 +406,18 @@ impl FilesDatabase {
                 .iter()
                 .map(|(_, r)| r.clone())
                 .collect::<Vec<_>>();
-            let new_block = DbBlock::Whole(Box::new(WholeBlock::partially_filled::<Tgt>(
-                self.k,
-                &block_shape_usize,
-                &dim_ranges,
-                &normalized_decisions,
-            )));
+            let new_block = if USE_RTREE {
+                let mut tree = Box::new(RTreeBlock::empty(dim_ranges.len()));
+                tree.fill_region(self.k, &dim_ranges, &normalized_decisions);
+                DbBlock::RTree(tree)
+            } else {
+                DbBlock::Whole(Box::new(WholeBlock::partially_filled::<Tgt>(
+                    self.k,
+                    &block_shape_usize,
+                    &dim_ranges,
+                    &normalized_decisions,
+                )))
+            };
             superblock_guard.contents.insert(block_pt, new_block);
         }
     }
@@ -589,6 +596,7 @@ impl FilesDatabase {
             skip_read_errors,
             &self.spec_bimap(),
             tiling_depth,
+            self.binary_scale_shapes,
         );
 
         writers.page_writer.flush().unwrap();
@@ -684,17 +692,7 @@ impl Shard {
 
                             #[cfg(feature = "db-stats")]
                             {
-                                log::debug!("Evicting superblock; accesses: {}", {
-                                    let (num_accessed, total) = value
-                                        .values()
-                                        .map(|b| {
-                                            let DbBlock::Whole(e) = b;
-                                            e.accesses()
-                                        })
-                                        .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
-                                    let pct = num_accessed as f64 / total as f64;
-                                    format!("{pct:.4} ({num_accessed} of {total})")
-                                });
+                                log::debug!("Evicting superblock");
                             }
 
                             if let Some(parent) = path.parent() {
@@ -920,6 +918,7 @@ fn analyze_visit_dir<Tgt>(
     skip_read_errors: bool,
     bimap: &impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
     tiling_depth: Option<DimSize>,
+    binary_scale_shapes: bool,
 ) where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -951,6 +950,7 @@ fn analyze_visit_dir<Tgt>(
                 skip_read_errors,
                 bimap,
                 tiling_depth,
+                binary_scale_shapes,
             );
             continue;
         }
@@ -978,7 +978,9 @@ fn analyze_visit_dir<Tgt>(
         };
 
         for (block_pt, block) in &superblock {
-            let DbBlock::Whole(e) = block;
+            let DbBlock::Whole(e) = block else {
+                todo!("Update dbstats to support RTree-based blocks");
+            };
 
             block_actions.clear();
             block_action_costs.clear();
@@ -1000,7 +1002,11 @@ fn analyze_visit_dir<Tgt>(
                     .map(|v| usize::try_from(*v).unwrap())
                     .collect::<Vec<_>>();
                 let spec = bimap.apply_inverse(&(table_key.clone(), shifted_local_pt));
-                if let Some(action_cost_vec) = e.get(&unshifted_local_pt_usize, spec.0.volume()) {
+                if let Some(action_cost_vec) = e.get(
+                    &unshifted_local_pt_usize,
+                    spec.0.volume(),
+                    binary_scale_shapes,
+                ) {
                     if action_cost_vec.len() > 1 {
                         log::warn!("k > 1 but only k = 1 supported");
                     }

@@ -31,6 +31,7 @@ rayon = "1.7.0"
 rle_vec = { git = "https://github.com/samkaufman/rle_vec.git", branch = "morello-main", features = [
     "serialize",
 ] }
+rstar = { version = "0.12", features = ["serde"] }
 serde = { version = "1.0.160", features = ["derive"] }
 tempfile = "3"
 thiserror = "1.0.47"
@@ -41,6 +42,7 @@ prehash = "1.0.0"
 half = { version = "2.4.0", features = ["num-traits"] }
 strum = { version = "0.26.2", features = ["derive"] }
 zstd = "0.13.1"
+serde_with = "3.8.3"
 
 [dev-dependencies]
 iai-callgrind = "0.12.1"

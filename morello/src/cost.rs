@@ -25,7 +25,7 @@ pub(crate) struct NormalizedCost {
     pub depth: u8,
 }
 
-#[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Default, Hash, Clone, Copy, Eq, PartialEq, Debug, Deserialize, Serialize)]
 pub(crate) struct CostIntensity(Ratio<u32>);
 
 pub type MainCost = u32;
