@@ -1486,6 +1486,7 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
         .join(block_pt.iter().map(|p| p.to_string()).join("_"))
 }
 
+#[cfg(feature = "db-stats")]
 fn superblock_key_from_path(path: &path::Path) -> TableKey {
     let components = path.components().collect::<Vec<_>>();
     for start in 0..components.len() {
@@ -1496,6 +1497,7 @@ fn superblock_key_from_path(path: &path::Path) -> TableKey {
     panic!("Could not parse superblock key from path: {path:?}");
 }
 
+#[cfg(feature = "db-stats")]
 fn superblock_key_from_subpath(components: &[path::Component]) -> Result<TableKey, ()> {
     if components.len() < 5 {
         return Err(());
@@ -1552,6 +1554,7 @@ fn superblock_key_from_subpath(components: &[path::Component]) -> Result<TableKe
     ))
 }
 
+#[cfg(feature = "db-stats")]
 fn into_normal_component<'a>(component: &'a path::Component) -> Result<&'a str, ()> {
     match component {
         path::Component::Prefix(_)
@@ -1567,6 +1570,7 @@ fn into_normal_component<'a>(component: &'a path::Component) -> Result<&'a str, 
     }
 }
 
+#[cfg(feature = "db-stats")]
 fn parse_layouts_component(part: &str) -> Result<Vec<Layout>, ()> {
     let mut layouts = vec![];
     for layout_str in part.split('_') {
@@ -1622,6 +1626,7 @@ fn parse_layouts_component(part: &str) -> Result<Vec<Layout>, ()> {
     Ok(layouts)
 }
 
+#[cfg(feature = "db-stats")]
 fn parse_underscored_int_tuple(input: &str) -> Result<Vec<u32>, ()> {
     input
         .split('_')
