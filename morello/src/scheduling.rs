@@ -54,9 +54,16 @@ pub enum Action<Tgt: Target> {
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(test, derive(Hash))]
-pub struct TileOut {
-    pub output_shape: Shape,
-    pub parallel: bool,
+pub enum TileOut {
+    SingleLoop {
+        dim: u8,
+        size: DimSize,
+        parallel: bool,
+    },
+    MultiLoop {
+        output_shape: Shape,
+        parallel: bool,
+    },
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -71,6 +78,8 @@ pub enum ApplyError {
 
 #[derive(Debug)]
 pub enum ActionNotApplicableReason {
+    TileShapeMatchesOriginal,
+    TileShapeIsLarger,
     TileShapeInvalid,
     LayoutIncompatible,
     SelfMove,
@@ -80,7 +89,7 @@ pub enum ActionNotApplicableReason {
 impl<Tgt: Target> Action<Tgt> {
     pub fn child_count(&self) -> usize {
         match self {
-            Action::TileOut(TileOut { .. }) => 1,
+            Action::TileOut(..) => 1,
             Action::Split { .. } => 1,
             Action::ToAccum => 2,
             Action::SpatialSplit => 1,
@@ -99,19 +108,33 @@ impl<Tgt: Target> Action<Tgt> {
         let operands = logical_spec.parameters();
 
         match self {
-            Action::TileOut(TileOut { .. }) | Action::Split { .. } => {
+            Action::TileOut(..) | Action::Split { .. } => {
                 // TODO: Refactor this huge case body into flattened cases for TileOut and Split.
                 let (tiles, parallel) = {
                     match self {
-                        Action::TileOut(TileOut {
-                            output_shape,
-                            parallel,
-                        }) => {
+                        Action::TileOut(tileout) => {
                             let current_output = &operands[logical_spec.output_idx()];
-
                             let current_out_shape = current_output.shape();
+
+                            let mut output_shape_owned = vec![];
+                            let (output_shape, parallel) = match tileout {
+                                TileOut::SingleLoop {
+                                    dim,
+                                    size,
+                                    parallel,
+                                } => {
+                                    output_shape_owned.extend_from_slice(current_out_shape);
+                                    output_shape_owned[*dim as usize] = *size;
+                                    (&output_shape_owned, *parallel)
+                                }
+                                TileOut::MultiLoop {
+                                    output_shape,
+                                    parallel,
+                                } => (output_shape, *parallel),
+                            };
+
                             assert!(
-                                !(*parallel && logical_spec.serial_only()),
+                                !(parallel && logical_spec.serial_only()),
                                 "Serial-only Spec prevents parallel tiling"
                             );
                             assert_eq!(
@@ -121,20 +144,25 @@ impl<Tgt: Target> Action<Tgt> {
                                 current_out_shape.len(),
                                 output_shape.len()
                             );
-                            assert!(output_shape
+
+                            if current_out_shape == &output_shape[..] {
+                                return Err(ApplyError::ActionNotApplicable(
+                                    ActionNotApplicableReason::TileShapeMatchesOriginal,
+                                ));
+                            }
+                            if output_shape
                                 .iter()
                                 .enumerate()
-                                .all(|(dim, dim_size)| *dim_size <= current_out_shape[dim]));
-                            assert_ne!(
-                                current_out_shape,
-                                &output_shape[..],
-                                "Cannot tile to same shape: {:?}",
-                                output_shape
-                            );
+                                .any(|(dim, dim_size)| *dim_size > current_out_shape[dim])
+                            {
+                                return Err(ApplyError::ActionNotApplicable(
+                                    ActionNotApplicableReason::TileShapeIsLarger,
+                                ));
+                            }
 
                             // Abort if it's invalid to tile the original output tensor
                             // to the new shape (e.g., the new shape is larger).
-                            if !current_output.is_valid_tile_shape(output_shape, *parallel) {
+                            if !current_output.is_valid_tile_shape(output_shape, parallel) {
                                 return Err(ApplyError::ActionNotApplicable(
                                     ActionNotApplicableReason::TileShapeInvalid,
                                 ));
@@ -170,7 +198,7 @@ impl<Tgt: Target> Action<Tgt> {
                                 }
 
                                 let tiling_shape = updated_input_tiling.shape();
-                                if !original_input.is_valid_tile_shape(tiling_shape, *parallel) {
+                                if !original_input.is_valid_tile_shape(tiling_shape, parallel) {
                                     return Err(ApplyError::ActionNotApplicable(
                                         ActionNotApplicableReason::TileShapeInvalid,
                                     ));
@@ -211,7 +239,7 @@ impl<Tgt: Target> Action<Tgt> {
                                 }
                             }
                             new_tiles.push(smaller_output);
-                            (new_tiles, *parallel)
+                            (new_tiles, parallel)
                         }
                         Action::Split { k } => match logical_spec {
                             LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
@@ -267,7 +295,7 @@ impl<Tgt: Target> Action<Tgt> {
                 inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
                 inner_spec.canonicalize().unwrap();
                 match self {
-                    Action::TileOut(TileOut { .. }) => {}
+                    Action::TileOut(..) => {}
                     Action::Split { .. } => {
                         if !matches!(
                             &inner_spec,
@@ -726,9 +754,23 @@ impl<Tgt: Target> Action<Tgt> {
     }
 }
 
+impl TileOut {
+    pub fn parallel(&self) -> bool {
+        match self {
+            TileOut::SingleLoop { parallel, .. } | TileOut::MultiLoop { parallel, .. } => *parallel,
+        }
+    }
+}
+
 impl Display for ActionNotApplicableReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ActionNotApplicableReason::TileShapeMatchesOriginal => {
+                write!(f, "Tile shape matches original")
+            }
+            ActionNotApplicableReason::TileShapeIsLarger => {
+                write!(f, "Tile shape is larger than original")
+            }
             ActionNotApplicableReason::TileShapeInvalid => {
                 write!(f, "Invalid tile shape")
             }

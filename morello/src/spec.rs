@@ -635,6 +635,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
+    pub fn parameter_shapes(&self) -> Vec<Shape> {
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => basics.parameter_shapes(),
+            LogicalSpec::Compose { .. } => todo!(),
+        }
+    }
+
     pub fn inputs(&self) -> Vec<TensorSpec<Tgt>> {
         let mut operands = self.parameters();
         operands.remove(self.output_idx());
@@ -810,27 +817,60 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         true
     }
 
+    // TODO: Avoid boxed trait object return type
     fn tile_out_actions(
         &self,
         depth: Option<NonZeroU32>,
-    ) -> impl Iterator<Item = Action<Tgt>> + '_ {
+    ) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
         let serial_only = self.serial_only();
-        let output = self.output();
+        let output_shape = self.parameter_shapes().swap_remove(self.output_idx());
         let multi_dim = MULTI_DIM_TILING || !serial_only;
-        gen_tile_sizes::<Tgt>(output.shape(), true, multi_dim, depth).flat_map(move |tile_shape| {
-            let left = once(Action::TileOut(TileOut {
-                output_shape: tile_shape.clone(),
-                parallel: false,
-            }));
-            let mut right = None;
-            if !serial_only {
-                right = Some(Action::TileOut(TileOut {
-                    output_shape: tile_shape,
-                    parallel: true,
-                }));
-            }
-            left.into_iter().chain(right)
-        })
+        if multi_dim {
+            // TODO: Simplfy following, knowing multi_dim is true.
+            Box::new(
+                gen_tile_sizes::<Tgt>(&output_shape, true, multi_dim, depth).flat_map(
+                    move |tile_shape| {
+                        let left = once(Action::TileOut(TileOut::MultiLoop {
+                            output_shape: tile_shape.clone(),
+                            parallel: false,
+                        }));
+                        let mut right = None;
+                        if !serial_only {
+                            right = Some(Action::TileOut(TileOut::MultiLoop {
+                                output_shape: tile_shape,
+                                parallel: true,
+                            }));
+                        }
+                        left.into_iter().chain(right)
+                    },
+                ),
+            )
+        } else {
+            // Yield all output tilings up to the *maximum* dimension size so that the actions have
+            // relatively stable order between Specs.
+            let output_tensor_rank = output_shape.len();
+            let max_dim_size =
+                DimSize::try_from(output_shape.iter().map(|d| d.get()).max().unwrap()).unwrap();
+            Box::new(dim_range(max_dim_size, true, depth).flat_map(move |size| {
+                (0..output_tensor_rank).flat_map(move |dim| {
+                    let dim = u8::try_from(dim).unwrap();
+                    let left = once(Action::TileOut(TileOut::SingleLoop {
+                        dim,
+                        size,
+                        parallel: false,
+                    }));
+                    let mut right = None;
+                    if !serial_only {
+                        right = Some(Action::TileOut(TileOut::SingleLoop {
+                            dim,
+                            size,
+                            parallel: true,
+                        }));
+                    }
+                    left.into_iter().chain(right)
+                })
+            }))
+        }
     }
 
     fn split_actions(
@@ -1517,7 +1557,7 @@ fn gen_tile_sizes<Tgt: Target>(
     drop_given: bool,
     multi_dim: bool,
     depth: Option<NonZeroU32>,
-) -> Box<dyn Iterator<Item = Shape>> {
+) -> Box<dyn Iterator<Item = Shape> + 'static> {
     if tensor_shape.is_empty() {
         return Box::new(iter::empty());
     } else if tensor_shape.len() == 1 {
@@ -2063,7 +2103,7 @@ mod tests {
             let LogicalSpec::Primitive(PrimitiveBasics { spec_shape, ..}, _, _) = &spec.0 else {
                 unreachable!();
             };
-            let tile_out_result = Action::TileOut(TileOut { output_shape: shape![1; spec_shape.len()], parallel: false  })
+            let tile_out_result = Action::TileOut(TileOut::MultiLoop { output_shape: shape![1; spec_shape.len()], parallel: false })
                 .apply(&spec).unwrap_or_else(|_| panic!("Couldn't tile Spec {} to single value", spec));
             let ImplNode::SpecApp(child_spec_app) = &tile_out_result.children()[0] else {
                 panic!("First child was not a SpecApp; was: {:?}", tile_out_result.children()[0]);
@@ -2226,7 +2266,7 @@ mod tests {
                             unseen_actions.swap_remove(i);
                             // TODO: Should we also assert that applying the same action at each level
                             //   doesn't actually accumulate additional memory?.
-                            // TODO: Can we asssert that the change in peak memory is exactly the
+                            // TODO: Can we assert that the change in peak memory is exactly the
                             //   additional amount at the limit?.
                             // TODO: Assert here that the min of each level-wise limit is zero.
                             assert_eq!(&applied.peak_memory(), limits_memvec);

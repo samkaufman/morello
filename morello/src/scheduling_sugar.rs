@@ -60,7 +60,7 @@ pub trait Subschedule<Tgt: Target> {
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt> {
-        Action::TileOut(TileOut {
+        Action::TileOut(TileOut::MultiLoop {
             output_shape: output_shape
                 .iter()
                 .map(|&d| DimSize::new(d).unwrap())
