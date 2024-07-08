@@ -1,11 +1,11 @@
-use crate::common::{DimSize, Dtype};
+use crate::common::DimSize;
 use crate::cost::{Cost, MainCost};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap};
 use crate::grid::linear::BimapInt;
 use crate::imp::{Impl, ImplNode};
-use crate::layout::{row_major, Layout, PhysDim};
+use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::ndarray::NDArray;
 use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
@@ -29,10 +29,14 @@ use std::sync::{mpsc, Arc};
 
 #[cfg(feature = "db-stats")]
 use {
+    crate::common::Dtype,
     std::collections::HashSet,
     std::sync::atomic::{self, AtomicU64},
     std::time::Instant,
 };
+
+#[cfg(any(feature = "db-stats", test))]
+use crate::layout::{row_major, PhysDim};
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
 type TableKey = (SpecKey, Vec<(Layout, u8, u32)>);
@@ -1570,7 +1574,7 @@ fn into_normal_component<'a>(component: &'a path::Component) -> Result<&'a str, 
     }
 }
 
-#[cfg(feature = "db-stats")]
+#[cfg(any(feature = "db-stats", test))]
 fn parse_layouts_component(part: &str) -> Result<Vec<Layout>, ()> {
     let mut layouts = vec![];
     for layout_str in part.split('_') {
