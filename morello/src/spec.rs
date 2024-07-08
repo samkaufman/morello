@@ -745,8 +745,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     pub fn actions(&self, tiling_depth: Option<NonZeroU32>) -> impl ActionSeq<Tgt> + '_ {
-        let iter = self.tile_out_actions(tiling_depth);
-        let iter = iter.chain(self.move_actions());
+        let iter = self.move_actions();
+        let iter = iter.chain(self.tile_out_actions(tiling_depth));
         let iter = iter.chain(Tgt::actions(self));
 
         match &self {
@@ -962,10 +962,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             for layout in Tgt::move_destination_layouts(operand.shape(), operand_dtype) {
                 // TODO: Prevent moving into packed layouts where strip size equals the whole dim.
                 for level in Tgt::possible_destination_levels(operand.level()) {
-                    if !operand.can_move_to(&layout, &level) {
-                        continue;
-                    }
-
                     for &destination_dtype in
                         iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
                     {

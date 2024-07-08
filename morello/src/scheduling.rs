@@ -559,6 +559,13 @@ impl<Tgt: Target> Action<Tgt> {
             } => {
                 let outer_moved_operand_spec = &operands[usize::from(*source_idx)];
 
+                if !outer_moved_operand_spec.can_move_to(destination_layout, destination_level) {
+                    return Err(ApplyError::ActionNotApplicable(
+                        // TODO: Replace Other with a new ActionNotApplicableReason variant.
+                        ActionNotApplicableReason::Other,
+                    ));
+                }
+
                 let new_spec = movelet_inner_tensorspec(
                     outer_moved_operand_spec,
                     *destination_dtype,
