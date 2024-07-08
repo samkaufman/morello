@@ -28,8 +28,7 @@ use crate::views::{CacheView, Param, Tensor, Tile, TileError, View, ViewExt};
 /// [Action]s contain the minimal amount of information needed to distinguish a one scheduling
 /// decision from another, which makes it appropriate for storing in a database so that the
 /// corresponding Impl node can be computed given the Spec.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[cfg_attr(test, derive(Hash))]
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub enum Action<Tgt: Target> {
     TileOut(TileOut),
     Split {
@@ -52,8 +51,7 @@ pub enum Action<Tgt: Target> {
     Place(Tgt::Kernel),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[cfg_attr(test, derive(Hash))]
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub enum TileOut {
     SingleLoop {
         dim: u8,

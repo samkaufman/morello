@@ -7,7 +7,7 @@ use crate::utils::snap_memvec_up;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Eq, PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, Eq, PartialEq, Hash, Debug, Deserialize, Serialize)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub struct Cost {
     pub main: MainCost,

@@ -42,6 +42,7 @@ pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'st
     Clone,
     Copy,
     Debug,
+    Hash,
     Serialize,
     Deserialize,
     PartialEq,
@@ -49,7 +50,7 @@ pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'st
     strum::VariantArray,
     strum::IntoStaticStr,
 )]
-#[cfg_attr(test, derive(Hash, proptest_derive::Arbitrary))]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum CpuKernel {
     /// Simple scalar multiplication (`+=`).
     MultAdd,

@@ -1,11 +1,11 @@
-use crate::common::DimSize;
+use crate::common::{DimSize, Dtype};
 use crate::cost::{Cost, MainCost};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap};
 use crate::grid::linear::BimapInt;
 use crate::imp::{Impl, ImplNode};
-use crate::layout::Layout;
+use crate::layout::{row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::ndarray::NDArray;
 use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
@@ -29,6 +29,7 @@ use std::sync::{mpsc, Arc};
 
 #[cfg(feature = "db-stats")]
 use {
+    std::collections::HashSet,
     std::sync::atomic::{self, AtomicU64},
     std::time::Instant,
 };
@@ -94,6 +95,13 @@ struct Shard {
     stats: Arc<FilesDatabaseStats>,
 }
 
+#[cfg(feature = "db-stats")]
+struct AnalyzeWriters {
+    page_writer: csv::Writer<fs::File>,
+    block_writer: csv::Writer<fs::File>,
+    block_action_writer: csv::Writer<fs::File>,
+}
+
 enum ShardThreadMsg {
     Get(Prehashed<SuperBlockKey>),
     Put(SuperBlockKey, SuperBlockContents),
@@ -142,6 +150,13 @@ pub struct ActionCostVec(pub Vec<(ActionIdx, Cost)>);
 pub enum GetPreference<T, V> {
     Hit(T),
     Miss(Option<V>),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Error reading page; zstd error: '{zstd_error}', plain error: '{plain_error}'")]
+struct ReadAnyFormatError {
+    zstd_error: bincode::Error,
+    plain_error: bincode::Error,
 }
 
 impl FilesDatabase {
@@ -529,84 +544,68 @@ impl FilesDatabase {
     ///
     /// This may be expensive and multi-threaded.
     #[cfg(feature = "db-stats")]
-    pub fn analyze(&self, skip_read_errors: bool) {
-        // TODO: What to do about missing superblocks, if anything?
+    pub fn analyze<Tgt>(&self, output_dir: &path::Path, sample: usize, skip_read_errors: bool)
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    {
+        // Read the tiling depth for applying actions.
+        // TODO: Share code for loading this file.
+        let tiling_depth_path = self.dir_handle.path().join("TILING_DEPTH");
+        let tiling_depth_path_raw_buf = fs::read_to_string(tiling_depth_path).unwrap();
+        let tiling_depth_buf = tiling_depth_path_raw_buf.trim();
+        let tiling_depth = if tiling_depth_buf == "ANY" {
+            None
+        } else {
+            Some(NonZeroU32::new(tiling_depth_buf.parse::<u32>().unwrap()).unwrap())
+        };
 
-        fn visit_dir(
-            root: &path::Path,
-            path: &path::Path,
-            writer: &mut csv::Writer<std::io::Stdout>,
-            skip_read_errors: bool,
-        ) {
-            // Since we don't revisit blocks, bypass the in-mem. cache and read from disk.
-            for file_entry in fs::read_dir(path).unwrap() {
-                let file_entry = file_entry.unwrap();
-                let entry_path = file_entry.path();
-                if entry_path.is_dir() {
-                    visit_dir(root, &file_entry.path(), writer, skip_read_errors);
-                    continue;
-                }
+        let page_csv_path = output_dir.join("pages.csv");
+        let block_csv_path = output_dir.join("blocks.csv");
+        let block_action_csv_path = output_dir.join("block_actions.csv");
 
-                let shortened_entry_path_str = entry_path.strip_prefix(root).unwrap();
-                let entry_path_str = format!("{}", shortened_entry_path_str.display());
-
-                let superblock_file = fs::File::open(entry_path).unwrap();
-                let buf_reader = std::io::BufReader::new(superblock_file);
-
-                let superblock: SuperBlockContents = match bincode::deserialize_from(buf_reader) {
-                    Ok(superblock) => superblock,
-                    Err(e) => {
-                        if skip_read_errors {
-                            log::warn!("Error reading superblock: {:?}", e);
-                            continue;
-                        }
-                        panic!("Error reading superblock: {:?}", e);
-                    }
-                };
-
-                for (block_pt, block) in &superblock {
-                    let DbBlock::Whole(e) = block;
-                    writer
-                        .write_record([
-                            &entry_path_str,
-                            &format!("{:?}", block_pt),
-                            &e.filled.runs_len().to_string(),
-                            &e.filled.len().to_string(),
-                            &e.main_costs.runs_len().to_string(),
-                            &e.main_costs.len().to_string(),
-                            &e.peaks.runs_len().to_string(),
-                            &e.peaks.len().to_string(),
-                            &e.depths_actions.runs_len().to_string(),
-                            &e.depths_actions.len().to_string(),
-                        ])
-                        .unwrap();
-                }
-            }
-        }
-
-        let mut writer = csv::Writer::from_writer(std::io::stdout());
-        writer
+        let mut writers = AnalyzeWriters {
+            page_writer: csv::Writer::from_path(page_csv_path.clone()).unwrap(),
+            block_writer: csv::Writer::from_path(block_csv_path.clone()).unwrap(),
+            block_action_writer: csv::Writer::from_path(block_action_csv_path.clone()).unwrap(),
+        };
+        writers
+            .page_writer
+            .write_record(["superblock_path", "unique_actions", "unique_action_costs"])
+            .unwrap();
+        writers
+            .block_writer
             .write_record([
                 "superblock_path",
                 "block_pt",
                 "runs_filled",
-                "lens_filled",
                 "runs_main_costs",
-                "lens_main_costs",
                 "runs_peaks",
-                "lens_peaks",
                 "runs_depths_actions",
-                "lens_depths_actions",
+                "unique_actions",
+                "unique_action_costs",
+                "volume",
             ])
             .unwrap();
+        writers
+            .block_action_writer
+            .write_record(["superblock_path", "block_pt", "action"])
+            .unwrap();
 
-        visit_dir(
+        analyze_visit_dir::<Tgt>(
             self.dir_handle.path(),
             self.dir_handle.path(),
-            &mut writer,
+            &mut writers,
+            sample,
             skip_read_errors,
+            &self.spec_bimap(),
+            tiling_depth,
         );
-        writer.flush().unwrap();
+
+        writers.page_writer.flush().unwrap();
+        writers.block_writer.flush().unwrap();
+        writers.block_action_writer.flush().unwrap();
     }
 }
 
@@ -674,13 +673,20 @@ impl Shard {
                                 }
                             }
 
-                            let result = SuperBlock {
-                                contents: match fs::File::open(&path) {
-                                    Ok(file) => read_any_format(file),
-                                    Err(_) => HashMap::new(),
+                            let result = SuperBlock { contents: match fs::File::open(&path) {
+                                Ok(file) => match read_any_format(file) {
+                                    Ok(r) => r,
+                                    Err(ReadAnyFormatError{ zstd_error, plain_error }) => {
+                                        log::error!(
+                                            "Continuing after errors reading superblock; {:?} and {:?}",
+                                            zstd_error,
+                                            plain_error
+                                        );
+                                        HashMap::new()
+                                    }
                                 },
-                                modified: false,
-                            };
+                                Err(_) => HashMap::new(),
+                            }, modified: false };
                             response_tx
                                 .send(ShardThreadResponse::Loaded(key, result))
                                 .unwrap();
@@ -1073,27 +1079,190 @@ impl AsRef<Vec<(ActionIdx, Cost)>> for ActionCostVec {
 }
 
 /// Tries to read a zstd-compressed file. If that fails, tries to read it uncompressed.
-fn read_any_format(file: fs::File) -> HashMap<Vec<u32>, DbBlock> {
+fn read_any_format(file: fs::File) -> Result<SuperBlockContents, ReadAnyFormatError> {
     let mut zstd_reader = zstd::Decoder::new(file).unwrap();
     match bincode::deserialize_from(&mut zstd_reader) {
-        Ok(superblock) => superblock,
+        Ok(superblock) => Ok(superblock),
         Err(zstd_error) => {
             // Couldn't read as zstd? Try reading uncompressed.
             let mut file = zstd_reader.finish();
             file.seek(SeekFrom::Start(0)).unwrap();
             let buf_reader = BufReader::new(file);
             match bincode::deserialize_from(buf_reader) {
-                Ok(superblock) => superblock,
-                Err(uncompressed_error) => {
-                    log::error!(
-                        "Continuing after errors reading superblock; {:?} and {:?}",
-                        zstd_error,
-                        uncompressed_error
-                    );
-                    HashMap::new()
-                }
+                Ok(superblock) => Ok(superblock),
+                Err(plain_error) => Err(ReadAnyFormatError {
+                    zstd_error,
+                    plain_error,
+                }),
             }
         }
+    }
+}
+
+#[cfg(feature = "db-stats")]
+fn analyze_visit_dir<Tgt>(
+    root: &path::Path,
+    path: &path::Path,
+    writers: &mut AnalyzeWriters,
+    sample: usize,
+    skip_read_errors: bool,
+    bimap: &impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
+    tiling_depth: Option<DimSize>,
+) where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+{
+    let mut page_actions = HashSet::new();
+    let mut page_action_costs = HashSet::new();
+    let mut block_actions = HashSet::new();
+    let mut block_action_costs = HashSet::new();
+
+    // Since we don't revisit blocks, bypass the in-mem. cache and read from disk.
+    for file_entry in fs::read_dir(path).unwrap() {
+        page_actions.clear();
+        page_action_costs.clear();
+
+        let file_entry = file_entry.unwrap();
+        match file_entry.path().file_name().unwrap().to_str() {
+            Some("PRECOMPUTE") | Some("TILING_DEPTH") => continue,
+            _ => {}
+        }
+
+        let entry_path = file_entry.path();
+        if entry_path.is_dir() {
+            analyze_visit_dir::<Tgt>(
+                root,
+                &file_entry.path(),
+                writers,
+                sample,
+                skip_read_errors,
+                bimap,
+                tiling_depth,
+            );
+            continue;
+        }
+
+        // Choose with 1/sample probability to skip this file.
+        if sample > 1 && rand::random::<usize>() % sample != 0 {
+            continue;
+        }
+
+        let shortened_entry_path_str = entry_path.strip_prefix(root).unwrap();
+        let entry_path_str = format!("{}", shortened_entry_path_str.display());
+
+        let table_key = superblock_key_from_path(shortened_entry_path_str);
+
+        let superblock_file = fs::File::open(entry_path).unwrap();
+        let superblock = match read_any_format(superblock_file) {
+            Ok(r) => r,
+            Err(e) => {
+                if skip_read_errors {
+                    log::warn!("Error reading superblock: {:?}", e);
+                    continue;
+                }
+                panic!("Error reading superblock: {:?}", e);
+            }
+        };
+
+        for (block_pt, block) in &superblock {
+            let DbBlock::Whole(e) = block;
+
+            block_actions.clear();
+            block_action_costs.clear();
+
+            // Print all (partial) Impls.
+            let rank = block_pt.len();
+            let db_shape = db_shape::<Tgt>(rank);
+            let bs = block_shape(block_pt, &db_shape, block_size_dim).collect::<Vec<_>>();
+            let block_top = bs.iter().map(|d| *d - 1).collect::<Vec<_>>();
+            for unshifted_local_pt in crate::utils::diagonals(&block_top).flatten() {
+                let shifted_local_pt = unshifted_local_pt
+                    .iter()
+                    .zip(block_pt)
+                    .zip(&bs)
+                    .map(|((l, b), shp)| l + shp * b)
+                    .collect::<Vec<_>>();
+                let unshifted_local_pt_usize = unshifted_local_pt
+                    .iter()
+                    .map(|v| usize::try_from(*v).unwrap())
+                    .collect::<Vec<_>>();
+                let spec = bimap.apply_inverse(&(table_key.clone(), shifted_local_pt));
+                if let Some(action_cost_vec) = e.get(&unshifted_local_pt_usize) {
+                    if action_cost_vec.len() > 1 {
+                        log::warn!("k > 1 but only k = 1 supported");
+                    }
+                    if let Some((action_idx, cost)) = action_cost_vec.first() {
+                        let action = spec
+                            .0
+                            .actions(tiling_depth)
+                            .into_iter()
+                            .nth((*action_idx).into())
+                            .unwrap();
+                        if block_actions.insert(Some(action.clone())) {
+                            writers
+                                .block_action_writer
+                                .write_record([
+                                    &entry_path_str,
+                                    &format!("{:?}", block_pt),
+                                    &format!("{:?}", action),
+                                ])
+                                .unwrap();
+                        }
+                        block_action_costs.insert(Some((action.clone(), cost.clone())));
+                    } else {
+                        if block_actions.insert(None) {
+                            writers
+                                .block_action_writer
+                                .write_record([&entry_path_str, &format!("{:?}", block_pt), "_"])
+                                .unwrap();
+                        }
+                        block_action_costs.insert(None);
+                    }
+                    block_actions.insert(action_cost_vec.iter().next().map(|&(action_idx, _)| {
+                        spec.0
+                            .actions(tiling_depth)
+                            .into_iter()
+                            .nth(action_idx.into())
+                            .unwrap()
+                    }));
+                }
+            }
+
+            page_actions.extend(block_actions.iter().cloned());
+            page_action_costs.extend(block_action_costs.iter().cloned());
+
+            // We're printing only a `volume` column, so the expectation is that these are
+            // equal (by definition).
+            assert_eq!(e.filled.len(), e.main_costs.len());
+            assert_eq!(e.filled.len(), e.peaks.len());
+            assert_eq!(e.filled.len(), e.depths_actions.len());
+
+            // Write the CSV line.
+            writers
+                .block_writer
+                .write_record([
+                    &entry_path_str,
+                    &format!("{:?}", block_pt),
+                    &e.filled.runs_len().to_string(),
+                    &e.main_costs.runs_len().to_string(),
+                    &e.peaks.runs_len().to_string(),
+                    &e.depths_actions.runs_len().to_string(),
+                    &block_actions.len().to_string(),
+                    &block_action_costs.len().to_string(),
+                    &e.depths_actions.len().to_string(),
+                ])
+                .unwrap();
+        }
+
+        writers
+            .page_writer
+            .write_record([
+                entry_path_str,
+                page_actions.len().to_string(),
+                page_action_costs.len().to_string(),
+            ])
+            .unwrap();
     }
 }
 
@@ -1187,18 +1356,6 @@ fn blockify_point(mut pt: Vec<BimapInt>) -> (Vec<BimapInt>, Vec<u8>) {
         inner_pt.push(inner);
     }
     (pt, inner_pt)
-}
-
-pub fn deblockify_points(a: &[BimapInt], b: &[u8]) -> Vec<BimapInt> {
-    debug_assert_eq!(a.len(), b.len());
-
-    let rank = a.len();
-    let mut result = Vec::with_capacity(rank);
-    for i in 0..rank {
-        let s = block_size_dim(i, rank);
-        result.push(s * a[i] + BimapInt::from(b[i]));
-    }
-    result
 }
 
 /// Compute the bottom and top points (inclusive) to fill in a database table.
@@ -1329,6 +1486,149 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
         .join(block_pt.iter().map(|p| p.to_string()).join("_"))
 }
 
+fn superblock_key_from_path(path: &path::Path) -> TableKey {
+    let components = path.components().collect::<Vec<_>>();
+    for start in 0..components.len() {
+        if let Ok(k) = superblock_key_from_subpath(&components[start..]) {
+            return k;
+        }
+    }
+    panic!("Could not parse superblock key from path: {path:?}");
+}
+
+fn superblock_key_from_subpath(components: &[path::Component]) -> Result<TableKey, ()> {
+    if components.len() < 5 {
+        return Err(());
+    }
+
+    // Collect dtypes.
+    let mut dtypes = vec![];
+    for subpart in into_normal_component(&components[1])?.split('_') {
+        match subpart {
+            "u8" => dtypes.push(Dtype::Uint8),
+            "i8" => dtypes.push(Dtype::Sint8),
+            "u16" => dtypes.push(Dtype::Uint16),
+            "i16" => dtypes.push(Dtype::Sint16),
+            "u32" => dtypes.push(Dtype::Uint32),
+            "i32" => dtypes.push(Dtype::Sint32),
+            "f32" => dtypes.push(Dtype::Float32),
+            "bf16" => dtypes.push(Dtype::Bfloat16),
+            _ => return Err(()),
+        }
+    }
+
+    // Collect SpecKey.
+    let spec_key = match into_normal_component(&components[0])? {
+        "Matmul" => SpecKey::Matmul {
+            dtypes: dtypes.try_into().unwrap(),
+        },
+        "Conv" => SpecKey::Conv {
+            dtypes: dtypes.try_into().unwrap(),
+        },
+        "Move" => SpecKey::Move {
+            dtypes: dtypes.try_into().unwrap(),
+        },
+        "Zero" => SpecKey::Zero {
+            dtype: dtypes.into_iter().exactly_one().unwrap(),
+        },
+        _ => return Err(()),
+    };
+
+    // Collect Layouts.
+    let layouts: Vec<Layout> = parse_layouts_component(into_normal_component(&components[2])?)?;
+
+    // Collect levels-as-integers and vector sizes-as-integers.
+    let levels = parse_underscored_int_tuple(into_normal_component(&components[3])?)?;
+    let vector_sizes = parse_underscored_int_tuple(into_normal_component(&components[4])?)?;
+
+    Ok((
+        spec_key,
+        layouts
+            .into_iter()
+            .zip(levels.into_iter().map(|x| x.try_into().unwrap()))
+            .zip(vector_sizes)
+            .map(|((la, le), v)| (la, le, v))
+            .collect(),
+    ))
+}
+
+fn into_normal_component<'a>(component: &'a path::Component) -> Result<&'a str, ()> {
+    match component {
+        path::Component::Prefix(_)
+        | path::Component::RootDir
+        | path::Component::CurDir
+        | path::Component::ParentDir => Err(()),
+        path::Component::Normal(part) => {
+            let Some(part) = part.to_str() else {
+                return Err(());
+            };
+            Ok(part)
+        }
+    }
+}
+
+fn parse_layouts_component(part: &str) -> Result<Vec<Layout>, ()> {
+    let mut layouts = vec![];
+    for layout_str in part.split('_') {
+        if layout_str.len() < 2 {
+            return Err(());
+        }
+
+        if layout_str == "RM" {
+            // TODO: Use the correct tensor rank
+            layouts.push(row_major(2));
+        } else if layout_str.starts_with('[') {
+            let mut layout_core = vec![];
+            for physical_idx_str in layout_str[1..layout_str.len() - 1].split(',') {
+                let physical_idx = physical_idx_str.parse().map_err(|_| ())?;
+                layout_core.push((physical_idx, PhysDim::Dynamic));
+            }
+            layouts.push(Layout::new(layout_core));
+        } else {
+            let mut layout_split = layout_str
+                .trim_start_matches("<[")
+                .trim_end_matches("]>")
+                .split("], [");
+
+            let left = layout_split.next().unwrap();
+            let mut order = vec![];
+            for o_str in left.split(',') {
+                order.push(o_str.parse().map_err(|_| ())?);
+            }
+
+            let right = layout_split.exactly_one().unwrap();
+            let mut physdims = vec![];
+            for physdim_str in right.split(", ") {
+                if physdim_str == "Dynamic" {
+                    physdims.push(PhysDim::Dynamic);
+                } else if physdim_str.starts_with("Packed(") {
+                    let packed_size = physdim_str[7..physdim_str.len() - 1]
+                        .parse()
+                        .map_err(|_| ())?;
+                    physdims.push(PhysDim::Packed(packed_size));
+                } else if physdim_str.starts_with("OddEven(") {
+                    let oddeven_size = physdim_str[8..physdim_str.len() - 1]
+                        .parse()
+                        .map_err(|_| ())?;
+                    physdims.push(PhysDim::OddEven(oddeven_size));
+                } else {
+                    return Err(());
+                }
+            }
+
+            layouts.push(Layout::new(order.into_iter().zip(physdims).collect()));
+        }
+    }
+    Ok(layouts)
+}
+
+fn parse_underscored_int_tuple(input: &str) -> Result<Vec<u32>, ()> {
+    input
+        .split('_')
+        .map(|s| s.parse().map_err(|_| ()))
+        .collect()
+}
+
 // For some reason, [Prehashed]'s [Clone] impl requires that the value be [Copy].
 fn prehashed_clone<T: Clone>(value: &Prehashed<T>) -> Prehashed<T> {
     let (inner, h) = Prehashed::as_parts(value);
@@ -1392,6 +1692,21 @@ mod tests {
                 .collect_vec()
                 .as_slice(),
             &[2, 1]
+        );
+    }
+
+    #[test]
+    fn test_parse_layouts_component() {
+        assert_eq!(
+            parse_layouts_component("[1,0]_<[0,1,0], [Dynamic, Dynamic, OddEven(16)]>"),
+            Ok(vec![
+                Layout::new(vec![(1, PhysDim::Dynamic), (0, PhysDim::Dynamic)]),
+                Layout::new(vec![
+                    (0, PhysDim::Dynamic),
+                    (1, PhysDim::Dynamic),
+                    (0, PhysDim::OddEven(DimSize::new(16).unwrap()))
+                ])
+            ])
         );
     }
 

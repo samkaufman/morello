@@ -18,7 +18,9 @@ use crate::{codegen::c_utils::VecType, common::Dtype};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+
 use std::fmt::{Debug, Display};
+use std::hash::Hash;
 
 // TODO: This should be generic per Target. Right now, all targets must have 4 levels!
 pub const LEVEL_COUNT: usize = 4;
@@ -67,7 +69,7 @@ pub trait MemoryLevel:
     }
 }
 
-pub trait Kernel: PartialEq + Eq + Copy + Clone + Debug {
+pub trait Kernel: PartialEq + Eq + Copy + Clone + Hash + Debug {
     fn argument_count(&self) -> u8;
 
     // TODO: Make into `applies_to_spec`
