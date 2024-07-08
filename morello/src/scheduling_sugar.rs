@@ -4,7 +4,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
-use crate::scheduling::Action;
+use crate::scheduling::{Action, TileOut};
 use crate::search::top_down;
 use crate::spec::Spec;
 use crate::target::Target;
@@ -60,13 +60,13 @@ pub trait Subschedule<Tgt: Target> {
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt> {
-        Action::TileOut {
+        Action::TileOut(TileOut {
             output_shape: output_shape
                 .iter()
                 .map(|&d| DimSize::new(d).unwrap())
                 .collect(),
             parallel,
-        }
+        })
         .apply(self)
         .unwrap()
     }

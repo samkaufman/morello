@@ -31,10 +31,7 @@ use crate::views::{CacheView, Param, Tensor, Tile, TileError, View, ViewExt};
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[cfg_attr(test, derive(Hash))]
 pub enum Action<Tgt: Target> {
-    TileOut {
-        output_shape: Shape,
-        parallel: bool,
-    },
+    TileOut(TileOut),
     Split {
         k: DimSize,
     },
@@ -53,6 +50,13 @@ pub enum Action<Tgt: Target> {
     },
     SpatialSplit,
     Place(Tgt::Kernel),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(test, derive(Hash))]
+pub struct TileOut {
+    pub output_shape: Shape,
+    pub parallel: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -76,7 +80,7 @@ pub enum ActionNotApplicableReason {
 impl<Tgt: Target> Action<Tgt> {
     pub fn child_count(&self) -> usize {
         match self {
-            Action::TileOut { .. } => 1,
+            Action::TileOut(TileOut { .. }) => 1,
             Action::Split { .. } => 1,
             Action::ToAccum => 2,
             Action::SpatialSplit => 1,
@@ -95,14 +99,14 @@ impl<Tgt: Target> Action<Tgt> {
         let operands = logical_spec.parameters();
 
         match self {
-            Action::TileOut { .. } | Action::Split { .. } => {
+            Action::TileOut(TileOut { .. }) | Action::Split { .. } => {
                 // TODO: Refactor this huge case body into flattened cases for TileOut and Split.
                 let (tiles, parallel) = {
                     match self {
-                        Action::TileOut {
+                        Action::TileOut(TileOut {
                             output_shape,
                             parallel,
-                        } => {
+                        }) => {
                             let current_output = &operands[logical_spec.output_idx()];
 
                             let current_out_shape = current_output.shape();
@@ -263,7 +267,7 @@ impl<Tgt: Target> Action<Tgt> {
                 inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
                 inner_spec.canonicalize().unwrap();
                 match self {
-                    Action::TileOut { .. } => {}
+                    Action::TileOut(TileOut { .. }) => {}
                     Action::Split { .. } => {
                         if !matches!(
                             &inner_spec,

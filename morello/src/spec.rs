@@ -7,7 +7,7 @@ use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
 use crate::layout::row_major;
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
-use crate::scheduling::Action;
+use crate::scheduling::{Action, TileOut};
 use crate::target::MemoryLevel;
 use crate::target::Target;
 use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
@@ -818,16 +818,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let output = self.output();
         let multi_dim = MULTI_DIM_TILING || !serial_only;
         gen_tile_sizes::<Tgt>(output.shape(), true, multi_dim, depth).flat_map(move |tile_shape| {
-            let left = once(Action::TileOut {
+            let left = once(Action::TileOut(TileOut {
                 output_shape: tile_shape.clone(),
                 parallel: false,
-            });
+            }));
             let mut right = None;
             if !serial_only {
-                right = Some(Action::TileOut {
+                right = Some(Action::TileOut(TileOut {
                     output_shape: tile_shape,
                     parallel: true,
-                });
+                }));
             }
             left.into_iter().chain(right)
         })
@@ -2063,7 +2063,7 @@ mod tests {
             let LogicalSpec::Primitive(PrimitiveBasics { spec_shape, ..}, _, _) = &spec.0 else {
                 unreachable!();
             };
-            let tile_out_result = Action::TileOut { output_shape: shape![1; spec_shape.len()], parallel: false }
+            let tile_out_result = Action::TileOut(TileOut { output_shape: shape![1; spec_shape.len()], parallel: false  })
                 .apply(&spec).unwrap_or_else(|_| panic!("Couldn't tile Spec {} to single value", spec));
             let ImplNode::SpecApp(child_spec_app) = &tile_out_result.children()[0] else {
                 panic!("First child was not a SpecApp; was: {:?}", tile_out_result.children()[0]);
