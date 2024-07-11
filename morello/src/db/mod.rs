@@ -1106,15 +1106,8 @@ where
 }
 
 fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
-    if dim == 0 || dim == 1 || dim == dim_count - 5 {
-        // The last case here is the serial_only dimension. Setting this to 1 will avoid empty
-        // rows when computing serial_only, which is a common setting.
-        // The first is just a shape dimension.
-        1
-    } else if dim == dim_count - 1 {
+    if dim >= dim_count - LEVEL_COUNT {
         31
-    } else if dim < dim_count - 5 {
-        3
     } else {
         4
     }
