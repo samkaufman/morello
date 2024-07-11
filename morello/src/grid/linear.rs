@@ -1,7 +1,7 @@
 use crate::grid::general::IntBiMap;
 
 pub type BimapInt = u32;
-pub type BimapSInt = i32;
+pub type BimapSInt = i64;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BoolBimap;
