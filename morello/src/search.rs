@@ -311,13 +311,13 @@ where
         final_results
     }
 
+    /// Update with a [Spec]'s next batch of requests, once per loop iteration.
     fn visit_spec_internal(
         &mut self,
         spec: &Spec<Tgt>,
         visited_in_stage: &mut HashSet<Spec<Tgt>>,
         outbox: &mut Vec<(Spec<Tgt>, ActionCostVec)>,
     ) -> Rc<RefCell<SpecTask<Tgt>>> {
-        debug_assert!(self.working_set.is_empty() || self.spec_in_working_set(spec));
         let task = self.get_task_internal(spec);
         if !visited_in_stage.contains(spec) {
             visited_in_stage.insert(spec.clone());
@@ -471,14 +471,14 @@ where
     }
 
     /// Update `working_block_requests` with a new request for the internal `subspec`.
+    ///
+    /// Both `spec` and `subspec` must be in the working set.
     fn add_request_mapping_internal(
         &mut self,
         spec: &Spec<Tgt>,
         subspec: &Spec<Tgt>,
         request_id: RequestId,
     ) {
-        debug_assert!(self.spec_in_working_set(spec));
-        debug_assert!(self.spec_in_working_set(subspec));
         self.working_block_requests
             .entry(subspec.clone())
             .or_default()
@@ -486,14 +486,14 @@ where
     }
 
     /// Update `subblock_requests` with a new request for the external `subspec`.
+    ///
+    /// `spec` must be in the working set and `subspec` must not be.
     fn add_request_mapping_external(
         &mut self,
         spec: &Spec<Tgt>,
         subspec: &Spec<Tgt>,
         request_id: RequestId,
     ) {
-        debug_assert!(self.spec_in_working_set(spec));
-        debug_assert!(!self.spec_in_working_set(subspec));
         let subspec_page = self.search.db.page_id(subspec);
         let request_set = match self
             .subblock_requests
@@ -513,12 +513,6 @@ where
             .entry(subspec.clone())
             .or_default()
             .push((spec.clone(), request_id));
-    }
-
-    fn spec_in_working_set(&self, spec: &Spec<Tgt>) -> bool {
-        // TODO: Store the PageId instead of computing
-        let ws_rep = self.working_set.keys().next().unwrap();
-        self.search.db.page_id(ws_rep).contains(spec)
     }
 }
 
