@@ -387,7 +387,7 @@ where
                             // tasks waiting within the working set, but we don't want to recurse
                             // into a Spec we're already borrowing lower on the current stack.
                             // That's overly complicated and will lead to a RefCell borrow panic.
-                            // Instead, push thd completion into a queue (the `outbox`) we'll
+                            // Instead, push the completion into a queue (the `outbox`) we'll
                             // resolve later.
                             if let SpecTask::Complete(completed_task_results, _) = &*task {
                                 self.working_set_running -= 1;
