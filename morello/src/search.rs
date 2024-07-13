@@ -1117,7 +1117,7 @@ mod tests {
     ) {
         let spec = Spec::<X86Target>(
             logical_spec,
-            MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 5, 7, 6])),
+            MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 5, 7, 0])),
         );
         let db = FilesDatabase::new(None, false, 1, 128, 1);
         let (action_costs, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));

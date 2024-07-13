@@ -269,8 +269,11 @@ impl FilesDatabase {
         #[cfg(feature = "db-stats")]
         self.stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
 
+        let mut query = query.clone();
+        query.canonicalize().unwrap();
+
         let bimap = self.spec_bimap();
-        let (table_key, global_pt) = bimap.apply(query);
+        let (table_key, global_pt) = bimap.apply(&query);
         let (block_pt, inner_pt) = blockify_point(global_pt);
 
         let superblock_pt = superblockify_pt(&block_pt);
@@ -280,7 +283,7 @@ impl FilesDatabase {
         let Some(b) = superblock.get(&block_pt) else {
             return GetPreference::Miss(None);
         };
-        b.get_with_preference(self, query, &inner_pt)
+        b.get_with_preference(self, &query, &inner_pt)
     }
 
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
@@ -289,8 +292,11 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        let mut query = query.clone();
+        query.canonicalize().unwrap();
+
         let bimap = self.spec_bimap();
-        let (table_key, global_pt) = bimap.apply(query);
+        let (table_key, global_pt) = bimap.apply(&query);
         let (block_pt, _) = blockify_point(global_pt);
 
         let superblock_pt = superblockify_pt(&block_pt);
@@ -310,6 +316,8 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        assert!(lhs.is_canonical());
+
         let bimap = self.spec_bimap();
         let (table_key, global_pt_lhs) = bimap.apply(lhs);
         let (block_pt, _) = blockify_point(global_pt_lhs);
@@ -320,12 +328,14 @@ impl FilesDatabase {
         }
     }
 
-    pub fn put<Tgt>(&self, spec: Spec<Tgt>, decisions: Vec<(ActionIdx, Cost)>)
+    pub fn put<Tgt>(&self, mut spec: Spec<Tgt>, decisions: Vec<(ActionIdx, Cost)>)
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        spec.canonicalize().unwrap();
+
         // Check that all costs in decisions have peak memory less than or equal to spec's
         // memory limits.
         debug_assert!(
@@ -608,6 +618,8 @@ impl<'a> PageId<'a> {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        assert!(spec.is_canonical());
+
         let bimap = self.db.spec_bimap();
         let (table_key, global_pt) = bimap.apply(spec);
         if self.table_key != table_key {
