@@ -815,7 +815,10 @@ mod tests {
     use crate::lspec;
     use crate::memorylimits::{MemVec, MemoryLimits};
     use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-    use crate::target::{CpuMemoryLevel::GL, X86Target};
+    use crate::target::{
+        CpuMemoryLevel::{GL, L1, RF},
+        X86Target,
+    };
     use crate::tensorspec::TensorSpecAux;
     use crate::utils::{bit_length, bit_length_inverse};
     use nonzero::nonzero as nz;
@@ -1096,6 +1099,35 @@ mod tests {
 
         let expected: Vec<_> = vec![(0, cost1.clone()), (1, cost1.clone()), (2, cost1.clone())];
         assert_eq!(reducer.finalize(), expected, "no replacement should occur");
+    }
+
+    // TODO: Add a variant which checks that all Impls have their deps, not just the solution.
+    #[test]
+    fn test_synthesis_puts_all_dependencies_of_optimal_solution() {
+        shared_test_synthesis_puts_all_dependencies_of_optimal_solution(lspec!(Move(
+            [2, 2],
+            (u8, L1, row_major(2), ua),
+            (u8, RF, row_major(2), ua),
+            serial
+        )));
+    }
+
+    fn shared_test_synthesis_puts_all_dependencies_of_optimal_solution(
+        logical_spec: LogicalSpec<X86Target>,
+    ) {
+        let spec = Spec::<X86Target>(
+            logical_spec,
+            MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 5, 7, 6])),
+        );
+        let db = FilesDatabase::new(None, false, 1, 128, 1);
+        let (action_costs, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
+
+        // Check that the synthesized Impl, include all sub-Impls are in the database. `get_impl`
+        // requires all dependencies, so we use that.
+        assert!(
+            db.get_impl(&spec).is_some(),
+            "No Impl stored for Spec: {spec}; top_down returned: {action_costs:?}"
+        );
     }
 
     #[test]
