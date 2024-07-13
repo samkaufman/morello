@@ -214,13 +214,8 @@ where
         };
         let mut visited_in_stage = HashSet::new();
         let mut outbox = Vec::new();
-        let mut final_result_tasks = Vec::with_capacity(goals.len());
         for g in goals {
-            final_result_tasks.push(block.visit_spec_internal(
-                g,
-                &mut visited_in_stage,
-                &mut outbox,
-            ));
+            block.visit_spec_internal(g, &mut visited_in_stage, &mut outbox);
         }
 
         loop {
@@ -286,22 +281,34 @@ where
         );
         debug_assert!(block.subblock_requests.is_empty());
 
-        // Extract final results from the completed tasks. (This leaves tasks in an invalid state,
-        // but they'll be dropped immediately.) Put clones into the database and return.
-        final_result_tasks
-            .into_iter()
-            .zip(goals)
-            .map(|(task, spec)| {
+        // Gather all tasks requested by synthesize. This removes from the working set.
+        let final_results = goals
+            .iter()
+            .map(|g| {
+                let task = block.working_set.remove(g).unwrap();
                 let SpecTask::Complete(task_result, from_db) = &mut *task.borrow_mut() else {
                     unreachable!("Expected goal to be complete.");
                 };
                 let action_costs = take(task_result);
                 if !*from_db {
-                    search.db.put(spec.clone(), action_costs.0.clone());
+                    search.db.put(g.clone(), action_costs.0.clone());
                 }
                 action_costs
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        // Anything left in the working set is not a goal but should still be put
+        for (spec, task) in block.working_set.drain() {
+            let SpecTask::Complete(task_result, from_db) = &mut *task.borrow_mut() else {
+                unreachable!("Expected goal to be complete.");
+            };
+            let action_costs = take(task_result);
+            if !*from_db {
+                search.db.put(spec.clone(), action_costs.0.clone());
+            }
+        }
+
+        final_results
     }
 
     fn visit_spec_internal(
@@ -1117,9 +1124,10 @@ mod tests {
     ) {
         let spec = Spec::<X86Target>(
             logical_spec,
-            MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 5, 7, 0])),
+            MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 1, 1, 0])),
         );
-        let db = FilesDatabase::new(None, false, 1, 128, 1);
+        let db = FilesDatabase::new(None, false, 1, 128, 1, None);
+
         let (action_costs, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
 
         // Check that the synthesized Impl, include all sub-Impls are in the database. `get_impl`
