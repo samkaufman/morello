@@ -193,6 +193,11 @@ fn main_per_db(
         let (_, bound_pt) = surmap.apply(bound_spec);
 
         for stage in diagonals(&bound_pt) {
+            if stage_idx < stages_completed {
+                stage_idx += 1;
+                continue;
+            }
+
             // Construct the TaskIters, dropping empties. Materializing these up front simplifies
             // parallelization, makes out following "has a peak parallelism of" log message more
             // meaningful, and simplifies logging an example Spec.
