@@ -1465,12 +1465,13 @@ mod tests {
     use itertools::Itertools;
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
+    use std::fmt;
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);
     const TEST_SMALL_MEM: u64 = 256;
 
     // TODO: What about leaves!? This shouldn't be called `Decision`.
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     struct Decision<Tgt: Target> {
         spec: Spec<Tgt>,
         actions_costs: Vec<(ActionIdx, Cost)>,
@@ -1488,6 +1489,21 @@ mod tests {
                     .flat_map(|c| c.consume_decisions())
                     .chain(std::iter::once((self.spec, self.actions_costs))),
             )
+        }
+    }
+
+    impl<Tgt: Target> fmt::Debug for Decision<Tgt> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Decision")
+                .field("spec", &self.spec)
+                .field("actions_costs", &self.actions_costs)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl<Tgt: Target> fmt::Display for Decision<Tgt> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{} := {:?}", self.spec, self.actions_costs)
         }
     }
 
