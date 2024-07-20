@@ -1581,6 +1581,21 @@ mod tests {
             }
         }
 
+        #[test]
+        fn test_simple_put_then_get_works(
+            decision in arb_spec_and_decision::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+        ) {
+            let top_spec = decision.spec.clone();
+            let top_actions_costs = decision.actions_costs.clone();
+            let db = FilesDatabase::new(None, false, 1, 2, 1, None);
+            for (spec, actions_costs) in decision.consume_decisions() {
+                db.put(spec, actions_costs);
+            }
+            let expected = ActionCostVec(top_actions_costs);
+            let get_result = db.get(&top_spec).expect("Spec should be in database");
+            assert_eq!(get_result, expected, "Entries differed at {}", top_spec);
+        }
+
         // TODO: Add tests for top-2, etc. Impls
         #[test]
         fn test_put_then_get_fills_across_memory_limits(
