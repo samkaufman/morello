@@ -54,7 +54,7 @@ where
     // Set up table
     let mut table = prettytable::Table::new();
     let titles = match style {
-        ImplPrintStyle::Full => row!["Impl", "Logical Spec", "Cost"],
+        ImplPrintStyle::Full => row!["Impl", "Logical Spec", "Cost", "Peaks", "Depth"],
         ImplPrintStyle::Compact => row!["Impl"],
     };
     table.set_titles(titles);
@@ -109,9 +109,12 @@ fn pprint_inner<'a, Tgt>(
         let main_str = format!("{indent_str}{line_top}");
         let mut r;
 
+        let cost = fill_costs_table_entry(costs_table, imp);
         let mut extra_column_values = vec![
             "".to_owned(),
-            fill_costs_table_entry(costs_table, imp).main.to_string(),
+            cost.main.to_string(),
+            cost.peaks.to_string(),
+            cost.depth.to_string(),
         ];
         if let Some(spec) = imp.spec() {
             extra_column_values[0] = spec.to_string();
