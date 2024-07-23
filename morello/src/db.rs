@@ -113,7 +113,7 @@ enum DirPathHandle {
 /// overwritten with an identical value. In that case, `matches` will be `None` and all values
 /// would need to be scanned to determine whether they are all identical and, to set `matches`, how
 /// many there are.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub enum DbBlock {
     Whole(Box<WholeBlock>),
@@ -405,8 +405,12 @@ impl FilesDatabase {
         }
     }
 
-    pub fn flush(&self) {
-        // Background thread writes flush immediately, so this is a no-op.
+    /// Saves anything cached in memory to disk.
+    pub fn save(&self) {
+        for shard in &self.shards.0 {
+            let shard_guard = shard.lock();
+            shard_guard.save();
+        }
     }
 
     pub fn max_k(&self) -> Option<usize> {
@@ -806,6 +810,16 @@ impl Shard {
             .unwrap();
     }
 
+    fn save(&self) {
+        for (k, v) in self.cache.iter() {
+            // Clone so that the background thread has an immutable copy of the data to write, even
+            // if the calling or another thread would update data in the cache.
+            // TODO: Instead sync with the background thread and guarantee this is unchanging since
+            //       we have the `&self` reference.
+            self.async_put(Prehashed::as_inner(k).clone(), v.clone());
+        }
+    }
+
     fn drain_cache(&mut self) -> impl Iterator<Item = (SuperBlockKey, SuperBlock)> + '_ {
         std::iter::from_fn(move || {
             if let Some(popped) = self.cache.pop_lru_window() {
@@ -1003,6 +1017,22 @@ impl WholeBlock {
             })
             .sum();
         (read, total)
+    }
+}
+
+impl Clone for WholeBlock {
+    fn clone(&self) -> Self {
+        #[cfg(feature = "db-stats")]
+        let access_counts_guard = self.access_counts.lock();
+
+        Self {
+            filled: self.filled.clone(),
+            main_costs: self.main_costs.clone(),
+            peaks: self.peaks.clone(),
+            depths_actions: self.depths_actions.clone(),
+            #[cfg(feature = "db-stats")]
+            access_counts: Mutex::new(access_counts_guard.clone()),
+        }
     }
 }
 

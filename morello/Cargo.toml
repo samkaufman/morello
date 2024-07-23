@@ -33,7 +33,7 @@ serde = { version = "1.0.160", features = ["derive"] }
 tempfile = "3"
 thiserror = "1.0.47"
 nonzero = "0.2.0"
-wtinylfu = "0.1.0"
+wtinylfu = { git = "https://github.com/samkaufman/wtinylfu.git", branch = "master" }
 parking_lot = "0.12.1"
 prehash = "1.0.0"
 half = { version = "2.4.0", features = ["num-traits"] }

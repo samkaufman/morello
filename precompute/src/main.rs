@@ -283,7 +283,10 @@ fn main_per_db(
                 db.reset_basic_stats();
             }
 
+            let save_start = Instant::now();
+            db.save();
             write_stages_completed(&fingerprint, db_path, stage_idx + 1);
+            info!("Saving took {:?}", save_start.elapsed());
 
             if let Some(max_stages) = args.stages {
                 if stage_idx >= max_stages {
