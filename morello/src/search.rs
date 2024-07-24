@@ -281,31 +281,18 @@ where
         );
         debug_assert!(block.subblock_requests.is_empty());
 
+        // After this point, we'll be removing entries from working_set, so
+        // WorkingPartialImplHandles will not be valid.
+
         // Gather all tasks requested by synthesize. This removes from the working set.
         let final_results = goals
             .iter()
-            .map(|g| {
-                let task = block.working_set.remove(g).unwrap();
-                let SpecTask::Complete(task_result, from_db) = &mut *task.borrow_mut() else {
-                    unreachable!("Expected goal to be complete.");
-                };
-                let action_costs = take(task_result);
-                if !*from_db {
-                    search.db.put(g.clone(), action_costs.0.clone());
-                }
-                action_costs
-            })
+            .map(|g| process_complete_task(search, g, block.working_set.remove(g).unwrap()))
             .collect::<Vec<_>>();
 
         // Anything left in the working set is not a goal but should still be put
         for (spec, task) in block.working_set.drain() {
-            let SpecTask::Complete(task_result, from_db) = &mut *task.borrow_mut() else {
-                unreachable!("Expected goal to be complete.");
-            };
-            let action_costs = take(task_result);
-            if !*from_db {
-                search.db.put(spec.clone(), action_costs.0.clone());
-            }
+            process_complete_task(search, &spec, task);
         }
 
         final_results
@@ -807,6 +794,26 @@ where
     }
 }
 
+fn process_complete_task<Tgt>(
+    search: &TopDownSearch<'_>,
+    spec: &Spec<Tgt>,
+    task: Rc<RefCell<SpecTask<Tgt>>>,
+) -> ActionCostVec
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+{
+    let SpecTask::Complete(task_result, from_db) = &mut *task.borrow_mut() else {
+        unreachable!("Expected goal to be complete.");
+    };
+    let action_costs = take(task_result);
+    if !*from_db {
+        search.db.put(spec.clone(), action_costs.0.clone());
+    }
+    action_costs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,7 +832,6 @@ mod tests {
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::sample::select;
-
     use std::rc::Rc;
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);
