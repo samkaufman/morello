@@ -1,8 +1,8 @@
+use indexmap::IndexMap;
 use itertools::Itertools;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
 use std::cell::RefCell;
-use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem::{replace, take};
 use std::num::NonZeroUsize;
@@ -18,7 +18,7 @@ use crate::spec::Spec;
 use crate::target::Target;
 
 type RequestId = (usize, usize);
-type WorkingPartialImplHandle<Tgt> = (Spec<Tgt>, RequestId);
+type WorkingPartialImplHandle = (usize, RequestId);
 
 struct TopDownSearch<'d> {
     db: &'d FilesDatabase,
@@ -31,14 +31,14 @@ struct TopDownSearch<'d> {
 
 struct BlockSearch<'a, 'd, Tgt: Target> {
     search: &'a TopDownSearch<'d>,
-    working_set: HashMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
+    working_set: IndexMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
     working_set_running: usize,
     // The following two fields map requested Specs (the keys) to the recipients
     // (Specs + RequestIds). The latter might be out-of-date by the time they are
     // resolved; for example, when another resolution removes that SpecTask from
     // `working_set` when a WorkingPartialImpl became Unsat.
-    working_block_requests: HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>,
-    subblock_requests: Vec<HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>>,
+    working_block_requests: HashMap<usize, Vec<WorkingPartialImplHandle>>,
+    subblock_requests: Vec<HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>>>,
 }
 
 /// On-going synthesis of a [Spec]. (Essentially a coroutine.)
@@ -80,6 +80,11 @@ pub struct ImplReducer {
 enum ImplReducerResults {
     One(Option<(Cost, ActionIdx)>),
     Many(BTreeSet<(Cost, ActionIdx)>),
+}
+
+enum RequestsMapRef<'a, Tgt: Target> {
+    Internal(&'a mut HashMap<usize, Vec<WorkingPartialImplHandle>>),
+    External(&'a mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>>),
 }
 
 // Computes an optimal Impl for `goal` and stores it in `db`.
@@ -207,7 +212,7 @@ where
 
         let mut block = BlockSearch {
             search,
-            working_set: HashMap::with_capacity(goals.len()),
+            working_set: IndexMap::with_capacity(goals.len()),
             working_set_running: 0,
             working_block_requests: HashMap::new(),
             subblock_requests: Vec::new(),
@@ -262,12 +267,19 @@ where
             let ws_vec = block
                 .working_set
                 .iter()
-                .filter(|(_, task)| matches!(*task.borrow(), SpecTask::Running { .. }))
-                .map(|(spec, task)| (spec.clone(), Rc::clone(task)))
+                .enumerate()
+                .filter(|(_, (_, task))| matches!(*task.borrow(), SpecTask::Running { .. }))
+                .map(|(spec_idx, (spec, task))| (spec_idx, spec.clone(), Rc::clone(task)))
                 .collect::<Vec<_>>();
             visited_in_stage.clear();
-            for (spec, task_ref) in ws_vec {
-                block.visit_next_request_batch(&spec, task_ref, &mut visited_in_stage, &mut outbox);
+            for (spec_idx, spec, task_ref) in ws_vec {
+                block.visit_next_request_batch(
+                    spec_idx,
+                    &spec,
+                    task_ref,
+                    &mut visited_in_stage,
+                    &mut outbox,
+                );
             }
         }
         debug_assert!(
@@ -287,11 +299,11 @@ where
         // Gather all tasks requested by synthesize. This removes from the working set.
         let final_results = goals
             .iter()
-            .map(|g| process_complete_task(search, g, block.working_set.remove(g).unwrap()))
+            .map(|g| process_complete_task(search, g, block.working_set.swap_remove(g).unwrap()))
             .collect::<Vec<_>>();
 
         // Anything left in the working set is not a goal but should still be put
-        for (spec, task) in block.working_set.drain() {
+        for (spec, task) in block.working_set.drain(..) {
             process_complete_task(search, &spec, task);
         }
 
@@ -304,20 +316,26 @@ where
         spec: &Spec<Tgt>,
         visited_in_stage: &mut HashSet<Spec<Tgt>>,
         outbox: &mut Vec<(Spec<Tgt>, ActionCostVec)>,
-    ) -> Rc<RefCell<SpecTask<Tgt>>> {
-        let task = self.get_task_internal(spec);
+    ) -> (usize, Rc<RefCell<SpecTask<Tgt>>>) {
+        let (spec_working_set_index, task) = self.get_task_internal(spec);
         if !visited_in_stage.contains(spec) {
             visited_in_stage.insert(spec.clone());
-            self.visit_next_request_batch(spec, Rc::clone(&task), visited_in_stage, outbox);
+            self.visit_next_request_batch(
+                spec_working_set_index,
+                spec,
+                Rc::clone(&task),
+                visited_in_stage,
+                outbox,
+            );
         }
-        task
+        (spec_working_set_index, task)
     }
 
-    /// Return a working set task. If none exists for the [Spec], start one.
-    fn get_task_internal(&mut self, spec: &Spec<Tgt>) -> Rc<RefCell<SpecTask<Tgt>>> {
+    /// Return a working set task and its index. If none exists for the [Spec], start one.
+    fn get_task_internal(&mut self, spec: &Spec<Tgt>) -> (usize, Rc<RefCell<SpecTask<Tgt>>>) {
         match self.working_set.entry(spec.clone()) {
-            Entry::Occupied(e) => Rc::clone(e.get()),
-            Entry::Vacant(e) => {
+            indexmap::map::Entry::Occupied(e) => (e.index(), Rc::clone(e.get())),
+            indexmap::map::Entry::Vacant(e) => {
                 // Check the database and immediately return if present.
                 let task = match self.search.db.get_with_preference(spec) {
                     GetPreference::Hit(v) => {
@@ -334,15 +352,17 @@ where
                     }
                 };
                 // search.misses += 1;
+                let entry_index = e.index();
                 let task_rc = Rc::new(RefCell::new(task));
                 e.insert(Rc::clone(&task_rc));
-                task_rc
+                (entry_index, task_rc)
             }
         }
     }
 
     fn visit_next_request_batch(
         &mut self,
+        working_set_spec_idx: usize,
         spec: &Spec<Tgt>,
         task_ref: Rc<RefCell<SpecTask<Tgt>>>,
         visited_in_stage: &mut HashSet<Spec<Tgt>>,
@@ -359,12 +379,17 @@ where
         if let Some(next_batch) = task.next_request_batch().map(|v| v.collect::<Vec<_>>()) {
             for (subspec, request_id) in next_batch {
                 if page_id.contains(&subspec) {
-                    let subtask = self.visit_spec_internal(&subspec, visited_in_stage, outbox);
+                    let (subspec_idx, subtask) =
+                        self.visit_spec_internal(&subspec, visited_in_stage, outbox);
                     let subtask_ref = subtask.borrow();
                     match &*subtask_ref {
                         SpecTask::Running { .. } => {
                             drop(subtask_ref);
-                            self.add_request_mapping_internal(spec, &subspec, request_id);
+                            self.add_request_mapping_internal(
+                                working_set_spec_idx,
+                                subspec_idx,
+                                request_id,
+                            );
                         }
                         SpecTask::Complete(subtask_result, _) => {
                             let cost = subtask_result.iter().next().map(|v| v.1.clone());
@@ -383,7 +408,7 @@ where
                         }
                     };
                 } else {
-                    self.add_request_mapping_external(spec, &subspec, request_id);
+                    self.add_request_mapping_external(working_set_spec_idx, &subspec, request_id);
                 }
             }
         }
@@ -393,7 +418,7 @@ where
         Self::inner_resolve_request(
             &self.working_set,
             &mut self.working_set_running,
-            &mut self.working_block_requests,
+            RequestsMapRef::Internal(&mut self.working_block_requests),
             None,
             subspec,
             results,
@@ -402,14 +427,14 @@ where
 
     fn resolve_request_external(
         &mut self,
-        subblock: &mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>,
+        subblock: &mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>>,
         subspec: &Spec<Tgt>,
         results: ActionCostVec,
     ) {
         Self::inner_resolve_request(
             &self.working_set,
             &mut self.working_set_running,
-            subblock,
+            RequestsMapRef::External(subblock),
             Some(&mut self.working_block_requests),
             subspec,
             results,
@@ -417,67 +442,70 @@ where
     }
 
     fn inner_resolve_request(
-        working_set: &HashMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
+        working_set: &IndexMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
         working_set_running: &mut usize,
-        subblock: &mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>,
-        next_subblock: Option<&mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle<Tgt>>>>,
+        mut subblock: RequestsMapRef<Tgt>,
+        next_subblock: Option<&mut HashMap<usize, Vec<WorkingPartialImplHandle>>>,
         subspec: &Spec<Tgt>,
         results: ActionCostVec,
     ) {
-        let Some(rs) = subblock.remove(subspec) else {
+        let Some(rs) = subblock.remove(subspec, working_set) else {
             return;
         };
 
-        let resolved_next_subblock = next_subblock.unwrap_or(subblock);
+        let mut resolved_next_subblock = next_subblock
+            .map(RequestsMapRef::Internal)
+            .unwrap_or(subblock);
 
         let cost = results.0.into_iter().next().map(|v| v.1);
-        for (wb_spec, request_id) in rs {
-            // `wb_spec` should be in the working set unless its partial Impls became unsat.
-            if let Some(requester_task) = working_set.get(&wb_spec) {
-                let mut requester = requester_task.borrow_mut();
-                // The SpecTask might already be Complete if it was unsat'ed by a prior resolution.
-                if matches!(&*requester, SpecTask::Running { .. }) {
-                    requester.resolve_request(request_id, cost.clone());
-                    if let SpecTask::Complete(completed_requester_results, _) = &*requester {
-                        // TODO: Avoid this clone by consuming the sub-block. (Do at the call site.)
-                        *working_set_running -= 1;
-                        let cloned_results = completed_requester_results.clone();
-                        drop(requester);
-                        Self::inner_resolve_request(
-                            working_set,
-                            working_set_running,
-                            resolved_next_subblock,
-                            None,
-                            &wb_spec,
-                            cloned_results,
-                        );
-                    }
+        for (requester_wb_spec_idx, request_id) in rs {
+            let (wb_spec, requester_task) = working_set.get_index(requester_wb_spec_idx).unwrap();
+            let mut requester = requester_task.borrow_mut();
+            // The SpecTask might already be Complete if it was unsat'ed by a prior resolution.
+            if matches!(&*requester, SpecTask::Running { .. }) {
+                requester.resolve_request(request_id, cost.clone());
+                if let SpecTask::Complete(completed_requester_results, _) = &*requester {
+                    // TODO: Avoid this clone by consuming the sub-block. (Do at the call site.)
+                    *working_set_running -= 1;
+                    let cloned_results = completed_requester_results.clone();
+                    drop(requester);
+                    Self::inner_resolve_request(
+                        working_set,
+                        working_set_running,
+                        // TODO: Can we get rid of the following match? This is just a
+                        match &mut resolved_next_subblock {
+                            RequestsMapRef::Internal(m) => RequestsMapRef::Internal(m),
+                            RequestsMapRef::External(m) => RequestsMapRef::External(m),
+                        },
+                        None,
+                        wb_spec,
+                        cloned_results,
+                    );
                 }
             }
         }
     }
 
-    /// Update `working_block_requests` with a new request for the internal `subspec`.
+    /// Update `working_block_requests` with a new request for an internal sub-Spec.
     ///
-    /// Both `spec` and `subspec` must be in the working set.
+    /// Both Specs must be in the working set.
     fn add_request_mapping_internal(
         &mut self,
-        spec: &Spec<Tgt>,
-        subspec: &Spec<Tgt>,
+        requester_index: usize,
+        requested_index: usize,
         request_id: RequestId,
     ) {
         self.working_block_requests
-            .entry(subspec.clone())
+            .entry(requested_index)
             .or_default()
-            .push((spec.clone(), request_id));
+            .push((requester_index, request_id));
     }
 
-    /// Update `subblock_requests` with a new request for the external `subspec`.
-    ///
-    /// `spec` must be in the working set and `subspec` must not be.
+    /// Update `subblock_requests` with a new request for the external `subspec` by a task in the
+    /// working set.
     fn add_request_mapping_external(
         &mut self,
-        spec: &Spec<Tgt>,
+        working_set_spec_idx: usize,
         subspec: &Spec<Tgt>,
         request_id: RequestId,
     ) {
@@ -490,7 +518,9 @@ where
             Some(s) => s,
             None => {
                 if self.subblock_requests.is_empty() {
-                    self.search.db.prefetch(spec);
+                    let requesting_spec =
+                        self.working_set.get_index(working_set_spec_idx).unwrap().0;
+                    self.search.db.prefetch(requesting_spec);
                 }
                 self.subblock_requests.push(HashMap::new());
                 self.subblock_requests.last_mut().unwrap()
@@ -499,7 +529,7 @@ where
         request_set
             .entry(subspec.clone())
             .or_default()
-            .push((spec.clone(), request_id));
+            .push((working_set_spec_idx, request_id));
     }
 }
 
@@ -579,9 +609,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
     ///
     /// This will return `None` when all dependencies are resolved and the goal is computed.
     /// The caller should continue to call [next_request_batch] if an empty iterator is returned.
-    fn next_request_batch(
-        &mut self,
-    ) -> Option<impl Iterator<Item = WorkingPartialImplHandle<Tgt>> + '_> {
+    fn next_request_batch(&mut self) -> Option<impl Iterator<Item = (Spec<Tgt>, RequestId)> + '_> {
         // TODO: Define behavior for and document returning duplicates from this function.
 
         let SpecTask::Running {
@@ -772,6 +800,19 @@ impl ImplReducer {
                 .into_iter()
                 .map(|(cost, action_idx)| (action_idx, cost))
                 .collect(),
+        }
+    }
+}
+
+impl<'a, Tgt: Target> RequestsMapRef<'a, Tgt> {
+    fn remove(
+        &mut self,
+        key: &Spec<Tgt>,
+        working_set: &IndexMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
+    ) -> Option<Vec<WorkingPartialImplHandle>> {
+        match self {
+            RequestsMapRef::Internal(m) => m.remove(&working_set.get_index_of(key).unwrap()),
+            RequestsMapRef::External(m) => m.remove(key),
         }
     }
 }
