@@ -36,7 +36,7 @@ use {
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
 type TableKey = (SpecKey, Vec<(Layout, u8, u32)>);
 type SuperBlockKey = DbKey;
-type SuperBlock = HashMap<Vec<BimapInt>, DbBlock>;
+type SuperBlockContents = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionIdx = u16;
 
 /// The number of shards/locks per thread.
@@ -78,6 +78,12 @@ pub struct PageId<'a> {
     pub(crate) superblock_id: Vec<BimapInt>,
 }
 
+#[derive(Debug, Clone)]
+struct SuperBlock {
+    contents: SuperBlockContents,
+    modified: bool,
+}
+
 struct Shard {
     cache: WTinyLfuCache<Prehashed<SuperBlockKey>, SuperBlock>,
     outstanding_gets: PrehashedSet<SuperBlockKey>,
@@ -90,7 +96,7 @@ struct Shard {
 
 enum ShardThreadMsg {
     Get(Prehashed<SuperBlockKey>),
-    Put(SuperBlockKey, SuperBlock),
+    Put(SuperBlockKey, SuperBlockContents),
     Exit,
 }
 
@@ -280,7 +286,7 @@ impl FilesDatabase {
         let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
 
         let superblock: &SuperBlock = &self.load_live_superblock(&superblock_key);
-        let Some(b) = superblock.get(&block_pt) else {
+        let Some(b) = superblock.contents.get(&block_pt) else {
             return GetPreference::Miss(None);
         };
         b.get_with_preference(self, &query, &inner_pt)
@@ -374,9 +380,10 @@ impl FilesDatabase {
                     .prehasher
                     .prehash((db_key.clone(), superblockify_pt(&block_pt))),
             );
+            superblock_guard.modified = true;
 
             // If the superblock already contains the block, mutate in place and continue the loop.
-            if let Some(live_block) = superblock_guard.get_mut(&block_pt) {
+            if let Some(live_block) = superblock_guard.contents.get_mut(&block_pt) {
                 let dim_ranges = joined_row
                     .iter()
                     .map(|(_, r)| r.clone())
@@ -401,14 +408,14 @@ impl FilesDatabase {
                 &dim_ranges,
                 &ActionCostVec(decisions.clone()),
             )));
-            superblock_guard.insert(block_pt, new_block);
+            superblock_guard.contents.insert(block_pt, new_block);
         }
     }
 
     /// Saves anything cached in memory to disk.
     pub fn save(&self) {
         for shard in &self.shards.0 {
-            let shard_guard = shard.lock();
+            let mut shard_guard = shard.lock();
             shard_guard.save();
         }
     }
@@ -546,7 +553,7 @@ impl FilesDatabase {
                 let superblock_file = fs::File::open(entry_path).unwrap();
                 let buf_reader = std::io::BufReader::new(superblock_file);
 
-                let superblock: SuperBlock = match bincode::deserialize_from(buf_reader) {
+                let superblock: SuperBlockContents = match bincode::deserialize_from(buf_reader) {
                     Ok(superblock) => superblock,
                     Err(e) => {
                         if skip_read_errors {
@@ -609,7 +616,9 @@ impl Drop for FilesDatabase {
             let mut shard_guard = shard.lock();
             let drained = shard_guard.drain_cache().collect::<Vec<_>>();
             for (k, v) in drained {
-                shard_guard.async_put(k, v);
+                if v.modified {
+                    shard_guard.async_put(k, v.contents);
+                }
             }
         }
     }
@@ -665,9 +674,12 @@ impl Shard {
                                 }
                             }
 
-                            let result = match fs::File::open(&path) {
-                                Ok(file) => read_any_format(file),
-                                Err(_) => HashMap::new(),
+                            let result = SuperBlock {
+                                contents: match fs::File::open(&path) {
+                                    Ok(file) => read_any_format(file),
+                                    Err(_) => HashMap::new(),
+                                },
+                                modified: false,
                             };
                             response_tx
                                 .send(ShardThreadResponse::Loaded(key, result))
@@ -783,7 +795,9 @@ impl Shard {
         let was_present = self.outstanding_gets.remove(&key);
         debug_assert!(was_present);
         if let Some((evicted_key, evicted_value)) = self.cache.push(key, new_value) {
-            self.async_put(Prehashed::into_inner(evicted_key), evicted_value);
+            if evicted_value.modified {
+                self.async_put(Prehashed::into_inner(evicted_key), evicted_value.contents);
+            }
         }
     }
 
@@ -804,19 +818,27 @@ impl Shard {
         true
     }
 
-    fn async_put(&self, key: SuperBlockKey, value: SuperBlock) {
+    fn async_put(&self, key: SuperBlockKey, value: SuperBlockContents) {
         self.thread_tx
             .send(ShardThreadMsg::Put(key, value))
             .unwrap();
     }
 
-    fn save(&self) {
-        for (k, v) in self.cache.iter() {
+    fn save(&mut self) {
+        let tx = self.thread_tx.clone();
+        for (k, v) in self.cache.iter_mut() {
             // Clone so that the background thread has an immutable copy of the data to write, even
             // if the calling or another thread would update data in the cache.
             // TODO: Instead sync with the background thread and guarantee this is unchanging since
             //       we have the `&self` reference.
-            self.async_put(Prehashed::as_inner(k).clone(), v.clone());
+            if v.modified {
+                v.modified = false;
+                tx.send(ShardThreadMsg::Put(
+                    Prehashed::as_inner(k).clone(),
+                    v.contents.clone(),
+                ))
+                .unwrap();
+            }
         }
     }
 
