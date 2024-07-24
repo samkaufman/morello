@@ -226,7 +226,7 @@ fn main_per_db(
 
             let stage_start = Instant::now();
             stage.into_par_iter().for_each(|task| {
-                let mut stage = task
+                let mut worklist = task
                     .into_iter()
                     .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
                     .collect::<Vec<_>>();
@@ -234,11 +234,11 @@ fn main_per_db(
 
                 #[cfg(feature = "db-stats")]
                 let mut synthesis_time = Duration::ZERO;
-                while !stage.is_empty() {
+                while !worklist.is_empty() {
                     // Check that stage is all unique
                     {
                         let mut stage_set = HashSet::new();
-                        for spec in &stage {
+                        for spec in &worklist {
                             if !stage_set.insert(spec) {
                                 panic!("Duplicate spec in stage: {:?}", spec);
                             }
@@ -247,12 +247,12 @@ fn main_per_db(
 
                     #[cfg(feature = "db-stats")]
                     let synthesis_start = Instant::now();
-                    let stage_results = top_down_many(&db, &stage, 1, Some(nz!(1usize))).0;
+                    let stage_results = top_down_many(&db, &worklist, 1, Some(nz!(1usize))).0;
                     #[cfg(feature = "db-stats")]
                     {
                         synthesis_time += synthesis_start.elapsed();
                     }
-                    for (spec, result) in stage.iter().zip(stage_results) {
+                    for (spec, result) in worklist.iter().zip(stage_results) {
                         if let [(_, only_result_cost)] = &result[..] {
                             next_stage.extend(
                                 next_limits(&spec.1, &only_result_cost.peaks)
@@ -261,7 +261,7 @@ fn main_per_db(
                         }
                     }
                     // TODO: Just swap data structures.
-                    stage = next_stage.drain().collect();
+                    worklist = next_stage.drain().collect();
                 }
 
                 #[cfg(feature = "db-stats")]

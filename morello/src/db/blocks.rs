@@ -13,14 +13,13 @@ use crate::{
     target::{Target, LEVEL_COUNT},
 };
 use enum_dispatch::enum_dispatch;
-use itertools::Itertools;
 use rstar::{Envelope, Point, PointDistance, RTree, RTreeObject, RTreeParams, AABB};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::fmt::Debug;
 use std::ops::Range;
 
-#[cfg(feature = "db-stats")]
+#[cfg(any(feature = "db-stats", test))]
 use parking_lot::Mutex;
 
 /// A trait abstracting over concrete-sized RTreeBlockInner variants.
@@ -628,6 +627,7 @@ fn all_dimensions_adjacent_or_overlap<const D: usize>(
 mod tests {
     use super::*;
     use crate::target::X86Target;
+    use itertools::Itertools;
     use proptest::strategy::{Just, Strategy};
     use proptest::{prop_assert_eq, proptest};
 

@@ -220,7 +220,15 @@ where
         let mut visited_in_stage = HashSet::new();
         let mut outbox = Vec::new();
         for g in goals {
-            block.visit_spec_internal(g, &mut visited_in_stage, &mut outbox);
+            let (spec_working_set_index, task) = block.get_task_internal(g);
+            visited_in_stage.insert(g.clone());
+            block.visit_next_request_batch(
+                spec_working_set_index,
+                g,
+                Rc::clone(&task),
+                &mut visited_in_stage,
+                &mut outbox,
+            );
         }
 
         loop {
@@ -310,27 +318,6 @@ where
         final_results
     }
 
-    /// Update with a [Spec]'s next batch of requests, once per loop iteration.
-    fn visit_spec_internal(
-        &mut self,
-        spec: &Spec<Tgt>,
-        visited_in_stage: &mut HashSet<Spec<Tgt>>,
-        outbox: &mut Vec<(Spec<Tgt>, ActionCostVec)>,
-    ) -> (usize, Rc<RefCell<SpecTask<Tgt>>>) {
-        let (spec_working_set_index, task) = self.get_task_internal(spec);
-        if !visited_in_stage.contains(spec) {
-            visited_in_stage.insert(spec.clone());
-            self.visit_next_request_batch(
-                spec_working_set_index,
-                spec,
-                Rc::clone(&task),
-                visited_in_stage,
-                outbox,
-            );
-        }
-        (spec_working_set_index, task)
-    }
-
     /// Return a working set task and its index. If none exists for the [Spec], start one.
     fn get_task_internal(&mut self, spec: &Spec<Tgt>) -> (usize, Rc<RefCell<SpecTask<Tgt>>>) {
         match self.working_set.entry(spec.clone()) {
@@ -379,8 +366,18 @@ where
         if let Some(next_batch) = task.next_request_batch().map(|v| v.collect::<Vec<_>>()) {
             for (subspec, request_id) in next_batch {
                 if page_id.contains(&subspec) {
-                    let (subspec_idx, subtask) =
-                        self.visit_spec_internal(&subspec, visited_in_stage, outbox);
+                    let (subspec_idx, subtask) = self.get_task_internal(&subspec);
+                    if !visited_in_stage.contains(spec) {
+                        visited_in_stage.insert(subspec.clone());
+                        self.visit_next_request_batch(
+                            subspec_idx,
+                            &subspec,
+                            Rc::clone(&subtask),
+                            visited_in_stage,
+                            outbox,
+                        );
+                    }
+
                     let subtask_ref = subtask.borrow();
                     match &*subtask_ref {
                         SpecTask::Running { .. } => {

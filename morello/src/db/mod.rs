@@ -669,20 +669,20 @@ impl Shard {
                                 }
                             }
 
-                            let result = SuperBlock { contents: match fs::File::open(&path) {
+                            let result = match fs::File::open(&path) {
                                 Ok(file) => match read_any_format(file) {
                                     Ok(r) => r,
-                                    Err(ReadAnyFormatError{ zstd_error, plain_error }) => {
+                                    Err(ReadAnyFormatError { zstd_error, plain_error }) => {
                                         log::error!(
                                             "Continuing after errors reading superblock; {:?} and {:?}",
                                             zstd_error,
                                             plain_error
                                         );
-                                        HashMap::new()
+                                        SuperBlock { contents: HashMap::new(), modified: false }
                                     }
                                 },
-                                Err(_) => HashMap::new(),
-                            }, modified: false };
+                                Err(_) => SuperBlock { contents: HashMap::new(), modified: false },
+                            };
                             response_tx
                                 .send(ShardThreadResponse::Loaded(key, result))
                                 .unwrap();
@@ -889,24 +889,30 @@ impl ActionNormalizedCostVec {
 }
 
 /// Tries to read a zstd-compressed file. If that fails, tries to read it uncompressed.
-fn read_any_format(file: fs::File) -> Result<SuperBlockContents, ReadAnyFormatError> {
+fn read_any_format(file: fs::File) -> Result<SuperBlock, ReadAnyFormatError> {
     let mut zstd_reader = zstd::Decoder::new(file).unwrap();
-    match bincode::deserialize_from(&mut zstd_reader) {
-        Ok(superblock) => Ok(superblock),
+    let contents: SuperBlockContents = match bincode::deserialize_from(&mut zstd_reader) {
+        Ok(contents) => contents,
         Err(zstd_error) => {
             // Couldn't read as zstd? Try reading uncompressed.
             let mut file = zstd_reader.finish();
             file.seek(SeekFrom::Start(0)).unwrap();
             let buf_reader = BufReader::new(file);
             match bincode::deserialize_from(buf_reader) {
-                Ok(superblock) => Ok(superblock),
-                Err(plain_error) => Err(ReadAnyFormatError {
-                    zstd_error,
-                    plain_error,
-                }),
+                Ok(superblock) => superblock,
+                Err(plain_error) => {
+                    return Err(ReadAnyFormatError {
+                        zstd_error,
+                        plain_error,
+                    })
+                }
             }
         }
-    }
+    };
+    Ok(SuperBlock {
+        contents,
+        modified: false,
+    })
 }
 
 #[cfg(feature = "db-stats")]
@@ -977,7 +983,7 @@ fn analyze_visit_dir<Tgt>(
             }
         };
 
-        for (block_pt, block) in &superblock {
+        for (block_pt, block) in &superblock.contents {
             let DbBlock::Whole(e) = block else {
                 todo!("Update dbstats to support RTree-based blocks");
             };
