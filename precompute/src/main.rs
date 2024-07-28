@@ -1,3 +1,5 @@
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif_log_bridge::LogWrapper;
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 
@@ -56,6 +58,8 @@ const TWOS: [u32; 32] = [2; 32];
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    #[arg(short, help = "Show a progress bar.")]
+    progress_bar: bool,
     #[arg(long, help = "Maximum number of stages to run.")]
     stages: Option<usize>,
     #[arg(long)]
@@ -133,13 +137,22 @@ where
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
     let args = Args::parse();
-    let threads = rayon::current_num_threads();
+
+    let multi_opt = if args.progress_bar {
+        let logger = env_logger::Builder::from_env(env_logger::Env::default()).build();
+        let multi = MultiProgress::new();
+        LogWrapper::new(multi.clone(), logger).try_init().unwrap();
+        Some(multi)
+    } else {
+        env_logger::init();
+        None
+    };
 
     #[cfg(feature = "db-stats")]
     log::info!("DB statistic collection enabled");
 
+    let threads = rayon::current_num_threads();
     let db = FilesDatabase::new(
         args.db.as_deref(),
         true,
@@ -148,7 +161,7 @@ fn main() -> Result<()> {
         threads,
         args.tiling_depth,
     );
-    main_per_db(&args, db, args.db.as_deref());
+    main_per_db(&args, db, args.db.as_deref(), multi_opt);
 
     Ok(())
 }
@@ -157,6 +170,7 @@ fn main_per_db(
     args: &Args,
     #[allow(unused_mut)] mut db: FilesDatabase, // mut when db-stats enabled
     db_path: Option<&path::Path>,
+    multi_opt: Option<MultiProgress>,
 ) {
     let MemoryLimits::Standard(top) = X86Target::max_mem();
 
@@ -192,9 +206,37 @@ fn main_per_db(
         );
         let (_, bound_pt) = surmap.apply(bound_spec);
 
-        for stage in diagonals(&bound_pt) {
+        // TODO: Implement `len` for Diagonals so we don't need to collect just to get a count.
+        let stages = diagonals(&bound_pt).collect::<Vec<_>>();
+
+        let table_progress_bar = multi_opt.as_ref().map(|m| {
+            let bar = ProgressBar::new(stages.len().try_into().unwrap());
+            bar.set_style(
+                ProgressStyle::with_template(
+                    "table: [{elapsed:>5}] {bar:20} {percent}% {pos:>9}/{len:9}",
+                )
+                .unwrap(),
+            );
+            m.add(bar)
+        });
+
+        for stage in stages {
+            let stage_progress_bar = multi_opt.as_ref().map(|m| {
+                let bar = ProgressBar::new(0);
+                bar.set_style(
+                    ProgressStyle::with_template(
+                        "stage: [{elapsed:>5}] {bar:20} {percent}% {pos:>9}/{len:9} ({per_sec:.2}) {msg}",
+                    )
+                    .unwrap(),
+                );
+                m.add(bar)
+            });
+
             if stage_idx < stages_completed {
                 stage_idx += 1;
+                if let Some(pb) = &table_progress_bar {
+                    pb.inc(1);
+                }
                 continue;
             }
 
@@ -230,6 +272,9 @@ fn main_per_db(
                     .into_iter()
                     .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
                     .collect::<Vec<_>>();
+                if let Some(pb) = &stage_progress_bar {
+                    pb.inc_length(worklist.len().try_into().unwrap());
+                }
                 let mut next_stage = HashSet::new();
 
                 #[cfg(feature = "db-stats")]
@@ -248,6 +293,13 @@ fn main_per_db(
                     #[cfg(feature = "db-stats")]
                     let synthesis_start = Instant::now();
                     let stage_results = top_down_many(&db, &worklist, 1, Some(nz!(1usize))).0;
+                    if let Some(pb) = &stage_progress_bar {
+                        pb.inc(stage_results.len().try_into().unwrap());
+                    }
+                    if let Some(pb) = &table_progress_bar {
+                        pb.tick();
+                    }
+
                     #[cfg(feature = "db-stats")]
                     {
                         synthesis_time += synthesis_start.elapsed();
@@ -259,6 +311,9 @@ fn main_per_db(
                                     .map(|l| Spec(spec.0.clone(), MemoryLimits::Standard(l))),
                             );
                         }
+                    }
+                    if let Some(pb) = &stage_progress_bar {
+                        pb.inc_length(next_stage.len().try_into().unwrap());
                     }
                     // TODO: Just swap data structures.
                     worklist = next_stage.drain().collect();
@@ -288,6 +343,10 @@ fn main_per_db(
                 db.reset_basic_stats();
             }
 
+            if let Some(pb) = stage_progress_bar {
+                pb.finish_and_clear();
+            }
+
             let save_start = Instant::now();
             db.save();
             write_stages_completed(&fingerprint, db_path, stage_idx + 1);
@@ -301,6 +360,13 @@ fn main_per_db(
             }
 
             stage_idx += 1;
+            if let Some(pb) = &table_progress_bar {
+                pb.inc(1);
+            }
+        }
+
+        if let Some(pb) = table_progress_bar {
+            pb.finish_and_clear();
         }
     }
 }
