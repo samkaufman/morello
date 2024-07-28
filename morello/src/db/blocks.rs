@@ -17,7 +17,8 @@ use rstar::{Envelope, Point, PointDistance, RTree, RTreeObject, RTreeParams, AAB
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::fmt::Debug;
-use std::ops::Range;
+use std::hash::Hash;
+use std::{collections::HashSet, ops::Range};
 
 #[cfg(any(feature = "db-stats", test))]
 use parking_lot::Mutex;
@@ -106,7 +107,7 @@ pub struct RTreeBlockInner<const D: usize> {
     tree: RTree<RTreeBlockRect<D>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct RTreeBlockRect<const D: usize> {
     top: RTreePt<D>,
     bottom: RTreePt<D>, // peak memory can be derived from bottom
@@ -115,10 +116,19 @@ struct RTreeBlockRect<const D: usize> {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct RTreePt<const D: usize> {
     #[serde_as(as = "[_; D]")] // TODO: Use manual serde impls instead of serde_as.
     arr: [BimapSInt; D],
+}
+
+/// Accumulates references to [rstar::RTreeObject]s to remove, then can be used as a
+/// [rstar::SelectionFunction].
+#[derive(Debug)]
+struct BatchRemoveSelFn<O: rstar::RTreeObject> {
+    // TODO: Own references, not clones.
+    to_remove: HashSet<O>,
+    envelope: Option<O::Envelope>,
 }
 
 impl DbBlock {
@@ -512,13 +522,65 @@ impl<const D: usize> Point for RTreePt<D> {
     }
 }
 
+impl<O> BatchRemoveSelFn<O>
+where
+    O: rstar::RTreeObject,
+{
+    fn clear(&mut self) {
+        self.to_remove.clear();
+        self.envelope = None;
+    }
+}
+
+impl<O> BatchRemoveSelFn<O>
+where
+    O: rstar::RTreeObject + Eq + Hash,
+{
+    fn queue_removal(&mut self, candidate: O) {
+        if let Some(e) = &mut self.envelope {
+            e.merge(&candidate.envelope());
+        } else {
+            self.envelope = Some(candidate.envelope());
+        }
+        self.to_remove.insert(candidate);
+    }
+}
+
+impl<O> Default for BatchRemoveSelFn<O>
+where
+    O: rstar::RTreeObject,
+{
+    fn default() -> Self {
+        BatchRemoveSelFn {
+            to_remove: HashSet::new(),
+            envelope: None,
+        }
+    }
+}
+
+impl<O> rstar::SelectionFunction<O> for &BatchRemoveSelFn<O>
+where
+    O: rstar::RTreeObject + Eq + Hash,
+{
+    fn should_unpack_parent(&self, envelope: &<O as RTreeObject>::Envelope) -> bool {
+        self.envelope
+            .as_ref()
+            .map(|e| e.intersects(envelope))
+            .unwrap_or(false)
+    }
+
+    fn should_unpack_leaf(&self, leaf: &O) -> bool {
+        self.to_remove.contains(leaf)
+    }
+}
+
 fn rtree_merge_insert<const D: usize, Params: RTreeParams>(
     tree: &mut RTree<RTreeBlockRect<D>, Params>,
     new_rect: RTreeBlockRect<D>,
 ) {
     // Find the first rectangle which matches except for one dimension which is larger or
     // matches (and has the same cost).
-    let mut to_remove = vec![];
+    let mut to_remove = BatchRemoveSelFn::default();
     let mut to_insert = new_rect;
     let mut should_repeat = true;
     let mut skip_insert = false;
@@ -551,7 +613,7 @@ fn rtree_merge_insert<const D: usize, Params: RTreeParams>(
             let candidate_envelope = candidate.envelope();
             if insert_envelope.contains_envelope(&candidate_envelope) {
                 // TODO: Avoid the following clone.
-                to_remove.push(candidate.clone());
+                to_remove.queue_removal(candidate.clone());
                 // Assert the MainCost, but not the later tuple elements, are unchanged.
                 // TODO: Remove the following assert and lift short-circuit.
                 assert_eq!(
@@ -576,12 +638,17 @@ fn rtree_merge_insert<const D: usize, Params: RTreeParams>(
                 to_insert.top = merged_envelope.upper();
                 to_insert.bottom = merged_envelope.lower();
 
-                to_remove.push(candidate.clone()); // TODO: Avoid clone.
+                to_remove.queue_removal(candidate.clone());
             }
         }
-        for r in to_remove.drain(..) {
-            tree.remove(&r);
+
+        let mut remove_count = 0usize;
+        let expected_removals = to_remove.to_remove.len();
+        for _ in tree.drain_with_selection_function(&to_remove) {
+            remove_count += 1;
         }
+        assert_eq!(expected_removals, remove_count);
+        to_remove.clear();
     }
 
     if !skip_insert {
