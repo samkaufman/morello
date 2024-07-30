@@ -445,8 +445,8 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
                         .prop_flat_map(move |(h, w)| {
                             (
                                 1..max_size,
-                                1..8u32,
-                                1..4u32,
+                                1..max_size,
+                                1..max_size,
                                 Just(h),
                                 Just(w),
                                 1..=h,

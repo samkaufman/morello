@@ -876,7 +876,7 @@ mod tests {
     use std::rc::Rc;
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);
-    const TEST_SMALL_MEM: u64 = 2048;
+    const TEST_SMALL_MEM: u64 = 256;
 
     proptest! {
         // TODO: Add an ARM variant!
