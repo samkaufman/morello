@@ -53,6 +53,7 @@ type JobFingerprint = (usize, u64);
 const META_FILENAME: &str = "PRECOMPUTE";
 const DB_PROGRESS_VERSION: usize = 1;
 const K: u8 = 1;
+const SUBWORKLIST_MAX_SIZE: usize = 5000;
 const TWOS: [u32; 32] = [2; 32];
 
 #[derive(clap::Parser)]
@@ -292,12 +293,23 @@ fn main_per_db(
 
                     #[cfg(feature = "db-stats")]
                     let synthesis_start = Instant::now();
-                    let stage_results = top_down_many(&db, &worklist, 1, Some(nz!(1usize))).0;
-                    if let Some(pb) = &stage_progress_bar {
-                        pb.inc(stage_results.len().try_into().unwrap());
-                    }
-                    if let Some(pb) = &table_progress_bar {
-                        pb.tick();
+
+                    let mut subworklist_offset = 0;
+                    let mut stage_results = Vec::with_capacity(worklist.len());
+                    while subworklist_offset < worklist.len() {
+                        let subworklist = &worklist[subworklist_offset
+                            ..worklist
+                                .len()
+                                .min(subworklist_offset + SUBWORKLIST_MAX_SIZE)];
+                        stage_results
+                            .extend(top_down_many(&db, subworklist, 1, Some(nz!(1usize))).0);
+                        if let Some(pb) = &stage_progress_bar {
+                            pb.inc(subworklist.len().try_into().unwrap());
+                        }
+                        if let Some(pb) = &table_progress_bar {
+                            pb.tick();
+                        }
+                        subworklist_offset += subworklist.len();
                     }
 
                     #[cfg(feature = "db-stats")]
