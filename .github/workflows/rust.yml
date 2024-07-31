@@ -14,6 +14,16 @@ env:
   CLANG: clang
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      - run: cargo install cargo-all-features
+      - run: cargo build-all-features
+        env:
+          RUSTFLAGS: --deny warnings
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -24,36 +34,53 @@ jobs:
           sudo apt update
           sudo apt-get install -y libomp-dev
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check
       - run: cargo test --all-features -- --include-ignored
-      - run: cargo build
-      - run: cargo run --example simple_matmul
-      - name: Smoke-test 1x1x1 matrix multiplication synthesis & run
-        run: cargo run run matmul 1
-
-  smoke-test-arm:
-    runs-on: macos-14
+  
+  smoke-test-example-simple_matmul:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Install llvm & libomp
-        run: brew install llvm libomp
+        run: |
+          brew install llvm@17 libomp
+          echo "CLANG=/opt/homebrew/opt/llvm@17/bin/clang" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=/opt/homebrew/opt/libomp/lib" >> "$GITHUB_ENV"
+        if: runner.os == 'macOS'
+      - name: Install libomp
+        run: |
+          sudo apt update
+          sudo apt-get install -y libomp-dev
+        if: runner.os == 'Linux'
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build
-      - name: Smoke-test 1x1x1 matrix multiplication synthesis & run
-        run: cargo run -- --target arm run matmul 1
-        env:
-          CLANG: /opt/homebrew/opt/llvm/bin/clang
-
-  build:
-    runs-on: ubuntu-latest
+      - run: cargo run --example simple_matmul
+  
+  smoke-test-frontend:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --no-self-update
-      - run: cargo install cargo-all-features
-      - run: cargo build-all-features
-        env:
-          RUSTFLAGS: --deny warnings
+      - name: Install llvm & libomp
+        run: brew install llvm@17 libomp
+        if: runner.os == 'macOS'
+      - name: Set CLANG to Homebrew installation
+        run: echo "CLANG=/opt/homebrew/opt/llvm@17/bin/clang" >> "$GITHUB_ENV"
+        if: runner.os == 'macOS'
+      - name: Install libomp
+        run: |
+          sudo apt update
+          sudo apt-get install -y libomp-dev
+        if: runner.os == 'Linux'
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+      - name: Smoke-test 1x1x1 matrix multiplication synthesis & run
+        run: cargo run -- run matmul 1
 
   smoke-test-precompute:
     runs-on: ubuntu-latest
