@@ -8,7 +8,7 @@ use log::info;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::{io, path};
 
-use morello::codegen::CodeGen;
+use morello::codegen::{BuildError, CodeGen};
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
 use morello::db::FilesDatabase;
@@ -280,7 +280,15 @@ where
         return Ok(());
     }
 
-    let built_artifact = synthesized_impl.build(false)?;
+    let built_artifact = match synthesized_impl.build(false) {
+        Ok(a) => a,
+        Err(e) => {
+            if let BuildError::CompilerFailed { ref stderr, .. } = e {
+                eprintln!("Compiler stderr:\n\n{}", &stderr);
+            }
+            return Err(e.into());
+        }
+    };
     let output = built_artifact.run()?;
     if let Subcommand::Run(_) = subcmd {
         println!("\nOutput:\n{}", String::from_utf8_lossy(&output.stdout));

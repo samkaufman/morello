@@ -43,6 +43,8 @@ pub enum BuildError {
     IoError(#[from] io::Error),
     #[error("Compiler could not be found")]
     MissingCompiler,
+    #[error("Compiler path was not given")]
+    CompilerPathNotSet,
     #[error("Compiler exited with status code: {status}")]
     CompilerFailed {
         status: process::ExitStatus,
@@ -169,24 +171,32 @@ where
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
 
-        let source_file = std::fs::File::create(&source_path)?;
+        let source_file = std::fs::File::create(&source_path)
+            .expect("should be able to create source file in just-created temp. dir.");
         // TODO: The following may not prop. IO errors hidden by ToWriteFmt.
         self.emit(benchmark, None, &mut ToWriteFmt(source_file))
             .expect("codegen should not fail");
 
         let Some(compiler_path) = Self::compiler_path() else {
-            return Err(BuildError::MissingCompiler);
+            return Err(BuildError::CompilerPathNotSet);
         };
         let mut clang_cmd = Command::new(compiler_path);
         if do_color() {
             clang_cmd.arg("-fcolor-diagnostics");
         }
-        let clang_proc = clang_cmd
+        let clang_proc_result = clang_cmd
             .args(Self::cli_vec_flags())
             .args(CLI_FLAGS)
             .arg(binary_path.to_string_lossy().as_ref())
             .arg(source_path.to_string_lossy().as_ref())
-            .output()?;
+            .output();
+        let clang_proc = match clang_proc_result {
+            Ok(r) => r,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(BuildError::MissingCompiler);
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         if !clang_proc.status.success() {
             return Err(BuildError::CompilerFailed {
@@ -196,7 +206,7 @@ where
         } else {
             // We still want to see warnings.
             // TODO: Capture this for the caller.
-            io::stderr().write_all(&clang_proc.stderr)?;
+            io::stderr().write_all(&clang_proc.stderr).unwrap();
         }
 
         Ok(BuiltArtifact::new(
