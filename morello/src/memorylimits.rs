@@ -171,6 +171,22 @@ impl PartialOrd for MemoryLimits {
             }
         }
     }
+
+    fn lt(&self, other: &Self) -> bool {
+        match (self, other) {
+            (MemoryLimits::Standard(limits_vec), MemoryLimits::Standard(other_limits_vec)) => {
+                limits_vec.lt(other_limits_vec)
+            }
+        }
+    }
+
+    fn gt(&self, other: &Self) -> bool {
+        match (self, other) {
+            (MemoryLimits::Standard(limits_vec), MemoryLimits::Standard(other_limits_vec)) => {
+                limits_vec.gt(other_limits_vec)
+            }
+        }
+    }
 }
 
 impl Display for MemoryLimits {
@@ -298,6 +314,34 @@ impl PartialOrd for MemVec {
         debug_assert_eq!(self.0.len(), other.0.len());
         self.0.iter().zip(&other.0).all(|(a, b)| a >= b)
     }
+
+    fn lt(&self, other: &Self) -> bool {
+        debug_assert_eq!(self.0.len(), other.0.len());
+        let mut found_diff = false;
+        for (l, r) in self.0.iter().zip(&other.0) {
+            if l > r {
+                return false;
+            }
+            if l < r {
+                found_diff = true;
+            }
+        }
+        found_diff
+    }
+
+    fn gt(&self, other: &Self) -> bool {
+        debug_assert_eq!(self.0.len(), other.0.len());
+        let mut found_diff = false;
+        for (l, r) in self.0.iter().zip(&other.0) {
+            if l < r {
+                return false;
+            }
+            if l > r {
+                found_diff = true;
+            }
+        }
+        found_diff
+    }
 }
 
 impl Sub for MemVec {
@@ -385,6 +429,29 @@ mod tests {
     #[test]
     fn test_zero_levels_slower_than_all_arm() {
         shared_test_zero_levels_slower_than_all::<ArmTarget>();
+    }
+
+    #[test]
+    fn test_memorylimits_standard_partialord() {
+        let a = MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 2, 3, 4]));
+        let b = MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 2, 3, 4]));
+        assert!(a >= b);
+        assert!(a <= b);
+        assert!(!a.lt(&b));
+        assert!(!a.gt(&b));
+
+        let b = MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 2, 3, 5]));
+        assert!(a < b);
+        assert!(a <= b);
+        assert!(!a.gt(&b));
+        assert!(!a.ge(&b));
+
+        let b = MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 2, 1, 5]));
+        assert!(!a.lt(&b));
+        assert!(!a.le(&b));
+        assert!(!a.gt(&b));
+        assert!(!a.ge(&b));
+        assert!(a.partial_cmp(&b).is_none())
     }
 
     proptest! {

@@ -45,8 +45,6 @@ const ARBITRARY_SPEC_MAX_SIZE: DimSize = nonzero::nonzero!(8u32);
 #[serde(bound = "")]
 pub struct Spec<Tgt: Target>(pub LogicalSpec<Tgt>, pub MemoryLimits);
 
-// The following should probably just be Spec::Primitive and Spec::Compose variants once
-// there are good conversions to/from image/filter shapes for Conv.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub enum LogicalSpec<Tgt: Target> {
