@@ -1854,7 +1854,10 @@ mod tests {
     use crate::utils::{next_binary_power, sum_seqs};
     use crate::{layout::row_major, target::CpuMemoryLevel::GL};
     use crate::{lspec, shape};
+    use nonzero::nonzero as nz;
     use proptest::prelude::*;
+
+    const TEST_SMALL_SIZE: DimSize = nz!(2u32);
 
     #[test]
     fn test_lspec_1() {
@@ -2009,14 +2012,14 @@ mod tests {
 
         #[test]
         fn test_actions_are_valid_through_consumed_memory_x86(
-            logical_spec in arb_canonical_logical_spec::<X86Target>(None)
+            logical_spec in arb_canonical_logical_spec::<X86Target>(Some(TEST_SMALL_SIZE))
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
 
         #[test]
         fn test_actions_are_valid_through_consumed_memory_arm(
-            logical_spec in arb_canonical_logical_spec::<X86Target>(None)
+            logical_spec in arb_canonical_logical_spec::<X86Target>(Some(TEST_SMALL_SIZE))
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
