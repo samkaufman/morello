@@ -1670,14 +1670,16 @@ mod tests {
         children: Vec<Decision<Tgt>>,
     }
 
+    type DecisionNode<Tgt> = (Spec<Tgt>, Vec<(ActionIdx, Cost)>);
+
     impl<Tgt: Target> Decision<Tgt> {
-        /// Return an [Iterator] which visits all nested Decisions bottom up.
-        fn visit_decisions(&self) -> Box<dyn Iterator<Item = &Decision<Tgt>> + '_> {
+        /// Yield all nested [Spec] and actions-costs, bottom-up.
+        fn consume_decisions(self) -> Box<dyn Iterator<Item = DecisionNode<Tgt>>> {
             Box::new(
                 self.children
-                    .iter()
-                    .flat_map(|c| c.visit_decisions())
-                    .chain(std::iter::once(self)),
+                    .into_iter()
+                    .flat_map(|c| c.consume_decisions())
+                    .chain(std::iter::once((self.spec, self.actions_costs))),
             )
         }
     }
@@ -1764,12 +1766,15 @@ mod tests {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
             let db = FilesDatabase::new(None, false, 1, 128, 1, None);
 
+            let top_logical_spec = decision.spec.0.clone();
+            let top_actions_costs = decision.actions_costs.clone();
+
             // Put all decisions into database.
-            for d in decision.visit_decisions() {
-                db.put(d.spec.clone(), d.actions_costs.clone());
+            for (spec, action_costs) in decision.consume_decisions() {
+                db.put(spec, action_costs);
             }
 
-            let peaks = if let Some((_, c)) = decision.actions_costs.first() {
+            let peaks = if let Some((_, c)) = top_actions_costs.first() {
                 c.peaks.clone()
             } else {
                 MemVec::zero::<X86Target>()
@@ -1783,11 +1788,11 @@ mod tests {
                     bit_length(p)..=bit_length(l)
                 })
                 .multi_cartesian_product();
-            let expected = ActionCostVec(decision.actions_costs);
+            let expected = ActionCostVec(top_actions_costs);
             for limit_to_check_bits in filled_limits_iter {
                 let limit_to_check_vec = limit_to_check_bits.iter().copied().map(bit_length_inverse).collect::<Vec<_>>();
                 let limit_to_check = MemoryLimits::Standard(MemVec::new(limit_to_check_vec.try_into().unwrap()));
-                let spec_to_check = Spec(decision.spec.0.clone(), limit_to_check);
+                let spec_to_check = Spec(top_logical_spec.clone(), limit_to_check);
                 let get_result = db.get(&spec_to_check).expect("Spec should be in database");
                 assert_eq!(get_result, expected, "Entries differed at {}", spec_to_check);
             }
