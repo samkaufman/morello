@@ -1755,7 +1755,7 @@ mod tests {
         #[test]
         fn test_put_then_get_fills_across_memory_limits(decision in arb_spec_and_decision::<X86Target>()) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = FilesDatabase::new(None, false, 1, 2, 1, None);
+            let db = FilesDatabase::new(None, false, 1, 128, 1, None);
 
             // Put all decisions into database.
             for d in decision.visit_decisions() {
