@@ -1656,7 +1656,11 @@ mod tests {
         utils::{bit_length, bit_length_inverse},
     };
     use itertools::Itertools;
+    use nonzero::nonzero as nz;
     use proptest::prelude::*;
+
+    const TEST_SMALL_SIZE: DimSize = nz!(2u32);
+    const TEST_SMALL_MEM: u64 = 256;
 
     // TODO: What about leaves!? This shouldn't be called `Decision`.
     #[derive(Debug, Clone)]
@@ -1742,7 +1746,8 @@ mod tests {
             start in 0..12u32, extent in 0..8u32, block_dim_size in 1..4u32
         ) {
             let end = start + extent;
-            let mut block_idxs = iter_blocks_in_single_dim_range(start, end, block_dim_size).map(|(block_idx, _)| block_idx);
+            let mut block_idxs =
+                iter_blocks_in_single_dim_range(start, end, block_dim_size).map(|(block_idx, _)| block_idx);
             if let Some(mut last_block_idx) = block_idxs.next() {
                 for block_idx in block_idxs {
                     assert!(block_idx == last_block_idx + 1);
@@ -1753,7 +1758,9 @@ mod tests {
 
         // TODO: Add tests for top-2, etc. Impls
         #[test]
-        fn test_put_then_get_fills_across_memory_limits(decision in arb_spec_and_decision::<X86Target>()) {
+        fn test_put_then_get_fills_across_memory_limits(
+            decision in arb_spec_and_decision::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+        ) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
             let db = FilesDatabase::new(None, false, 1, 128, 1, None);
 
@@ -1878,8 +1885,11 @@ mod tests {
         // }
     }
 
-    fn arb_spec_and_decision<Tgt: Target>() -> impl Strategy<Value = Decision<Tgt>> {
-        arb_canonical_spec::<Tgt>(None, None)
+    fn arb_spec_and_decision<Tgt: Target>(
+        max_size: Option<DimSize>,
+        max_memory: Option<u64>,
+    ) -> impl Strategy<Value = Decision<Tgt>> {
+        arb_canonical_spec::<Tgt>(max_size, max_memory)
             .prop_flat_map(|spec| {
                 let valid_actions = spec
                     .0
