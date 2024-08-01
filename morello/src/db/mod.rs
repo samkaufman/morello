@@ -1586,6 +1586,7 @@ mod tests {
         ) {
             let top_spec = decision.spec.clone();
             let top_actions_costs = decision.actions_costs.clone();
+            println!("test_simple_put_then_get_works: {}", top_spec);
             let db = FilesDatabase::new(None, false, 1, 2, 1, None);
             for (spec, actions_costs) in decision.consume_decisions() {
                 db.put(spec, actions_costs);
@@ -1607,8 +1608,13 @@ mod tests {
             let top_actions_costs = decision.actions_costs.clone();
 
             // Put all decisions into database.
+            let mut decisions_put = 0usize;
             for (spec, action_costs) in decision.consume_decisions() {
                 db.put(spec, action_costs);
+                decisions_put += 1;
+            }
+            if decisions_put >= 1000 {
+                println!("put {} decisions; top_logical_spec = {}", decisions_put, top_logical_spec);
             }
 
             let peaks = if let Some((_, c)) = top_actions_costs.first() {

@@ -860,6 +860,7 @@ mod tests {
         fn test_can_synthesize_any_canonical_spec(
             spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
+            println!("test_can_synthesize_any_canonical_spec: {spec}");
             let db = FilesDatabase::new(None, false, 1, 128, 1, None);
             top_down(&db, &spec, 1, Some(nz!(1usize)));
         }
@@ -870,6 +871,7 @@ mod tests {
             spec_pair in lower_and_higher_canonical_specs::<X86Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
+            println!("test_more_memory_never_worsens_solution_with_shared_db: {spec}; {raised_spec}");
             let db = FilesDatabase::new(None, false, 1, 128, 1, None);
 
             // Solve the first, lower Spec.
@@ -893,6 +895,7 @@ mod tests {
         fn test_synthesis_at_peak_memory_yields_same_decision(
             spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
+            println!("test_synthesis_at_peak_memory_yields_same_decision: {spec}");
             let db = FilesDatabase::new(None, false, 1, 128, 1, None);
             let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
             let first_peak = if let Some(first_sol) = first_solutions.first() {
@@ -1141,6 +1144,7 @@ mod tests {
             logical_spec,
             MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 1, 1, 0])),
         );
+        println!("shared_test_synthesis_puts_all_dependencies_of_optimal_solution: {spec}");
         let db = FilesDatabase::new(None, false, 1, 128, 1, None);
 
         let (action_costs, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));

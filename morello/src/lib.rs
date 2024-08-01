@@ -21,6 +21,7 @@ pub mod search;
 pub mod spec;
 pub mod target;
 pub mod tensorspec;
+pub mod test_init;
 pub mod tiling;
 pub mod utils;
 #[cfg(feature = "verification")]
