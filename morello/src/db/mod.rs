@@ -290,7 +290,7 @@ impl FilesDatabase {
         let Some(b) = superblock.contents.get(&block_pt) else {
             return GetPreference::Miss(None);
         };
-        b.get_with_preference(&query, &inner_pt, self.binary_scale_shapes)
+        b.get_with_preference(&query, &inner_pt)
     }
 
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
@@ -596,7 +596,6 @@ impl FilesDatabase {
             skip_read_errors,
             &self.spec_bimap(),
             tiling_depth,
-            self.binary_scale_shapes,
         );
 
         writers.page_writer.flush().unwrap();
@@ -924,7 +923,6 @@ fn analyze_visit_dir<Tgt>(
     skip_read_errors: bool,
     bimap: &impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
     tiling_depth: Option<DimSize>,
-    binary_scale_shapes: bool,
 ) where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -956,7 +954,6 @@ fn analyze_visit_dir<Tgt>(
                 skip_read_errors,
                 bimap,
                 tiling_depth,
-                binary_scale_shapes,
             );
             continue;
         }
@@ -1008,11 +1005,7 @@ fn analyze_visit_dir<Tgt>(
                     .map(|v| usize::try_from(*v).unwrap())
                     .collect::<Vec<_>>();
                 let spec = bimap.apply_inverse(&(table_key.clone(), shifted_local_pt));
-                if let Some(action_cost_vec) = e.get(
-                    &unshifted_local_pt_usize,
-                    spec.0.volume(),
-                    binary_scale_shapes,
-                ) {
+                if let Some(action_cost_vec) = e.get(&unshifted_local_pt_usize, spec.0.volume()) {
                     if action_cost_vec.len() > 1 {
                         log::warn!("k > 1 but only k = 1 supported");
                     }

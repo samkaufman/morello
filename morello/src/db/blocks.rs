@@ -10,7 +10,7 @@ use crate::{
     memorylimits::MemVec,
     ndarray::NDArray,
     spec::Spec,
-    target::{Target, LEVEL_COUNT},
+    target::Target,
 };
 use enum_dispatch::enum_dispatch;
 use rstar::{Envelope, Point, PointDistance, RTree, RTreeObject, RTreeParams, AABB};
@@ -26,12 +26,7 @@ use parking_lot::Mutex;
 /// A trait abstracting over concrete-sized RTreeBlockInner variants.
 #[enum_dispatch]
 pub(crate) trait RTreeBlockGeneric {
-    fn get<Tgt: Target>(
-        &self,
-        inner_pt: &[u8],
-        spec_volume: DimSize,
-        binary_scale_shapes: bool, // TODO: scaling flag shouldn't be needed by block.
-    ) -> Option<ActionCostVec>;
+    fn get<Tgt: Target>(&self, inner_pt: &[u8], spec_volume: DimSize) -> Option<ActionCostVec>;
 
     fn fill_region(
         &mut self,
@@ -136,7 +131,6 @@ impl DbBlock {
         &self,
         query: &Spec<Tgt>,
         inner_pt: &[u8],
-        binary_scale_shapes: bool,
     ) -> GetPreference<ActionCostVec, Vec<ActionIdx>>
     where
         Tgt: Target,
@@ -147,9 +141,9 @@ impl DbBlock {
             DbBlock::Whole(b) => {
                 // TODO: Propogate an action index preference.
                 let inner_pt_usize = inner_pt.iter().map(|v| *v as usize).collect::<Vec<_>>();
-                b.get(&inner_pt_usize, query.0.volume(), binary_scale_shapes)
+                b.get(&inner_pt_usize, query.0.volume())
             }
-            DbBlock::RTree(b) => b.get::<Tgt>(inner_pt, query.0.volume(), binary_scale_shapes),
+            DbBlock::RTree(b) => b.get::<Tgt>(inner_pt, query.0.volume()),
         };
         match block_result {
             Some(r) => GetPreference::Hit(r),
@@ -246,12 +240,7 @@ impl WholeBlock {
         }
     }
 
-    pub(crate) fn get(
-        &self,
-        pt: &[usize],
-        spec_volume: DimSize,
-        _binary_scale_shapes: bool,
-    ) -> Option<ActionCostVec> {
+    pub(crate) fn get(&self, pt: &[usize], spec_volume: DimSize) -> Option<ActionCostVec> {
         #[cfg(feature = "db-stats")]
         self.log_access(pt);
 
@@ -287,29 +276,6 @@ impl WholeBlock {
         let mut guard = self.access_counts.lock();
         let l = guard.get_or_insert_with(|| NDArray::new_with_value(self.filled.shape(), false));
         l.set_pt(pt, true);
-    }
-
-    #[cfg(feature = "db-stats")]
-    pub fn accesses(&self) -> (usize, usize) {
-        let guard = self.access_counts.lock();
-        let Some(l) = guard.as_ref() else {
-            let shape = self.filled.shape();
-            let volume = shape.iter().product();
-            return (0, volume);
-        };
-        let total = l.data.len();
-        let read = l
-            .data
-            .runs()
-            .filter_map(|r| {
-                if *r.value {
-                    Some(usize::try_from(r.len).unwrap())
-                } else {
-                    None
-                }
-            })
-            .sum();
-        (read, total)
     }
 }
 
@@ -368,12 +334,7 @@ impl RTreeBlock {
 }
 
 impl<const D: usize> RTreeBlockGeneric for RTreeBlockInner<D> {
-    fn get<Tgt: Target>(
-        &self,
-        inner_pt: &[u8],
-        spec_volume: DimSize,
-        binary_scale_shapes: bool,
-    ) -> Option<ActionCostVec> {
+    fn get<Tgt: Target>(&self, inner_pt: &[u8], spec_volume: DimSize) -> Option<ActionCostVec> {
         // TODO: Avoid conversion. Instead forward a slice right into locate_at_point.
         let mut arr = [Default::default(); D];
         for (i, v) in inner_pt.iter().enumerate() {
@@ -385,12 +346,6 @@ impl<const D: usize> RTreeBlockGeneric for RTreeBlockInner<D> {
         let v = self.tree.locate_at_point(&rtree_pt)?;
         Some(ActionCostVec(match &v.result {
             Some((cost_intensity, peaks, depth, action_idx)) => {
-                // let mut peaks: [u8; LEVEL_COUNT] = Default::default();
-                // let bottom_mem = v.bottom.memory_pt();
-                // debug_assert_eq!(peaks.len(), bottom_mem.len());
-                // for (i, &p) in bottom_mem.iter().enumerate() {
-                //     peaks[i] = p.try_into().unwrap();
-                // }
                 let cost = Cost {
                     main: cost_intensity.into_main_cost_for_volume(spec_volume),
                     // peaks: MemVec::new_from_binary_scaled(peaks),
@@ -480,13 +435,6 @@ impl<const D: usize> PointDistance for RTreeBlockRect<D> {
         } else {
             None
         }
-    }
-}
-
-impl<const D: usize> RTreePt<D> {
-    fn memory_pt(&self) -> &[BimapSInt] {
-        // TODO: Don't assume limits are the final dimensions.
-        &self.arr[D - LEVEL_COUNT..]
     }
 }
 
