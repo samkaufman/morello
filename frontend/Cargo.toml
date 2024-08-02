@@ -22,4 +22,4 @@ nonzero = "0.2.0"
 rayon = "1.10.0"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = "0.5"
+tikv-jemallocator = "0.6"
