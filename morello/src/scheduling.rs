@@ -8,21 +8,21 @@ use std::{iter, mem};
 
 use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Dtype, Shape};
-use crate::cost::Cost;
+use crate::cost::{Cost, MainCost};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{compute_loop_main_cost, Loop, LoopTile};
-use crate::imp::moves::{MoveLet, TensorOrCacheView};
+use crate::imp::moves::{move_cost, movelet_memory_allocation, MoveLet, TensorOrCacheView};
 use crate::imp::pipeline::Pipeline;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
-use crate::memorylimits::MemoryLimits;
+use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
-use crate::utils::prev_power_of_two;
+use crate::utils::{prev_power_of_two, snap_memvec_up};
 use crate::views::{CacheView, Param, Tensor, Tile, TileError, View, ViewExt};
 
 /// A scheduling decision which can be applied to a Spec to produce an Impl.
@@ -59,6 +59,13 @@ pub enum ActionSolver<Tgt: Target> {
         outer_spec: Spec<Tgt>,
         body_spec: Spec<Tgt>,
     },
+    Move {
+        prologue: Option<Spec<Tgt>>,
+        body: Spec<Tgt>,
+        epilogue: Option<Spec<Tgt>>,
+        base_main_cost: MainCost,
+        allocation: MemoryAllocation,
+    },
     Fallback(ImplNode<Tgt>),
 }
 
@@ -73,6 +80,16 @@ pub enum TileOut {
         output_shape: Shape,
         parallel: bool,
     },
+}
+
+/// Data useful to both a Move's [ActionSolver] or [ImplNode].
+struct MoveLetPlan<'a, Tgt: Target> {
+    outer_moved_operand_spec: &'a TensorSpec<Tgt>,
+    new_spec: TensorSpec<Tgt>,
+    prologue_spec: Option<Spec<Tgt>>,
+    epilogue_spec: Option<Spec<Tgt>>,
+    new_body_spec: Spec<Tgt>,
+    new_operands: Vec<TensorSpec<Tgt>>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -547,37 +564,22 @@ impl<Tgt: Target> Action<Tgt> {
                 destination_layout,
                 destination_vector_size,
             } => {
-                let outer_moved_operand_spec = &operands[usize::from(*source_idx)];
-
-                if !outer_moved_operand_spec.can_move_to(destination_layout, destination_level) {
-                    return Err(ApplyError::ActionNotApplicable(
-                        // TODO: Replace Other with a new ActionNotApplicableReason variant.
-                        ActionNotApplicableReason::Other,
-                    ));
-                }
-
-                let new_spec = movelet_inner_tensorspec(
+                let MoveLetPlan {
                     outer_moved_operand_spec,
+                    new_spec,
+                    prologue_spec,
+                    epilogue_spec,
+                    new_body_spec,
+                    new_operands,
+                } = plan_movelet(
+                    spec,
+                    &operands,
+                    *source_idx,
                     *destination_dtype,
-                    destination_level,
+                    *destination_level,
                     destination_layout,
                     *destination_vector_size,
-                );
-
-                assert!(
-                    destination_layout.applies_to_shape(new_spec.shape()),
-                    "Destination layout {:?} does not apply to shape {:?}",
-                    destination_layout,
-                    new_spec.shape()
-                );
-
-                // Filter cases where, after canonicalization, the source and destination
-                // TensorSpecs match (i.e., within-level copies).
-                if outer_moved_operand_spec == &new_spec {
-                    return Err(ApplyError::ActionNotApplicable(
-                        ActionNotApplicableReason::SelfMove,
-                    ));
-                }
+                )?;
 
                 let inner_moved_operand = if move_is_cache_miss(
                     outer_moved_operand_spec,
@@ -591,84 +593,27 @@ impl<Tgt: Target> Action<Tgt> {
                     TensorOrCacheView::Tensor(Rc::new(Tensor::new(new_spec)))
                 };
 
-                let lower_limits: MemoryLimits = {
-                    let additional = u64::from(destination_dtype.size())
-                        * u64::from(operands[usize::from(*source_idx)].volume().get());
-                    match &spec.1 {
-                        MemoryLimits::Standard(base) => {
-                            let updated_level_idx = Tgt::levels()
-                                .iter()
-                                .position(|l| l == destination_level)
-                                .unwrap();
-                            let mut new_limits = base.clone();
-                            let Some(level_updated) = new_limits
-                                .get_unscaled(updated_level_idx)
-                                .checked_sub(additional)
-                            else {
-                                return Err(ApplyError::OutOfMemory);
-                            };
-                            new_limits
-                                .set_unscaled(updated_level_idx, prev_power_of_two(level_updated));
-                            MemoryLimits::Standard(new_limits)
-                        }
-                    }
-                };
-
-                // Closure which makes a prologue or epilogue for this Spec.
-                let make_logue = |flip, f: &dyn Fn(_, _, _, _, _) -> bool| {
-                    if f(
-                        destination_level,
-                        destination_layout,
-                        *destination_dtype,
-                        *source_idx,
-                        logical_spec,
-                    ) {
-                        let mut left_spec = outer_moved_operand_spec;
-                        let mut right_spec = inner_moved_operand.spec();
-                        let mut args: [Rc<dyn View<Tgt = Tgt>>; 2] = [
-                            Rc::new(Param::new(0, outer_moved_operand_spec.clone())) as _,
-                            Rc::new(Param::new(1, inner_moved_operand.spec().clone())) as _,
-                        ];
-                        if flip {
-                            mem::swap(&mut left_spec, &mut right_spec);
-                            args.swap(0, 1);
-                        }
-                        let mut logue_spec = Spec(
-                            LogicalSpec::Primitive(
-                                PrimitiveBasics {
-                                    typ: PrimitiveSpecType::Move,
-                                    spec_shape: left_spec.shape().into(),
-                                    dtypes: vec![left_spec.dtype(), right_spec.dtype()],
-                                },
-                                vec![left_spec.aux.clone(), right_spec.aux.clone()],
-                                logical_spec.serial_only(),
-                            ),
-                            lower_limits.clone(),
-                        );
-                        logue_spec.canonicalize().unwrap();
-                        Some(SpecApp::new(logue_spec, args))
-                    } else {
-                        None
-                    }
-                };
-                let prologue = make_logue(false, &move_gens_prologue);
-                let epilogue = make_logue(true, &move_gens_epilogue);
+                let prologue = prologue_spec.map(|s| {
+                    let mut parameters = s.0.parameters();
+                    let right = Rc::new(Param::new(1, parameters.pop().unwrap()));
+                    let left = Rc::new(Param::new(0, parameters.pop().unwrap()));
+                    let args: [Rc<dyn View<Tgt = Tgt>>; 2] = [left as _, right as _];
+                    SpecApp::new(s.clone(), args)
+                });
+                let epilogue = epilogue_spec.map(|s| {
+                    let mut parameters = s.0.parameters();
+                    let right = Rc::new(Param::new(0, parameters.pop().unwrap()));
+                    let left = Rc::new(Param::new(1, parameters.pop().unwrap()));
+                    let args: [Rc<dyn View<Tgt = Tgt>>; 2] = [left as _, right as _];
+                    SpecApp::new(s.clone(), args)
+                });
 
                 let new_body_app = {
-                    let mut new_operands = operands.clone();
-                    new_operands[usize::from(*source_idx)] = inner_moved_operand.spec().clone();
-                    let new_inner_spec = {
-                        let mut new_spec = logical_spec.clone();
-                        new_spec.replace_io(&new_operands);
-                        new_spec
-                    };
-                    let mut spec = Spec(new_inner_spec, lower_limits.clone());
-                    spec.canonicalize().unwrap();
                     let inner_operands = new_operands.iter().enumerate().map(|(i, o)| {
                         Rc::new(Param::new(u8::try_from(i).unwrap(), o.clone()))
                             as Rc<dyn View<Tgt = Tgt>>
                     });
-                    SpecApp::new(spec, inner_operands)
+                    SpecApp::new(new_body_spec, inner_operands)
                 };
 
                 Ok(ImplNode::MoveLet(MoveLet::new(
@@ -756,40 +701,78 @@ impl<Tgt: Target> Action<Tgt> {
     /// The caller must ensure that `spec` is in canonical form. Passing a non-canonical form is a
     /// logic error.
     pub fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
-        if let (Action::TileOut(tileout), LogicalSpec::Primitive(basics, ..)) = (self, &spec.0) {
-            let output_tensor = spec.0.parameters().swap_remove(spec.0.output_idx());
-            let untiled_output_shape = output_tensor.shape();
-            let tile_shape = tileout.tiled_output_shape(untiled_output_shape);
-            let parallel = tileout.parallel();
+        match (self, &spec.0) {
+            (Action::TileOut(tileout), LogicalSpec::Primitive(basics, ..)) => {
+                let output_tensor = spec.0.parameters().swap_remove(spec.0.output_idx());
+                let untiled_output_shape = output_tensor.shape();
+                let tile_shape = tileout.tiled_output_shape(untiled_output_shape);
+                let parallel = tileout.parallel();
 
-            check_tile_out_applies(untiled_output_shape, &tile_shape, &output_tensor, parallel)?;
+                check_tile_out_applies(
+                    untiled_output_shape,
+                    &tile_shape,
+                    &output_tensor,
+                    parallel,
+                )?;
 
-            match basics.typ {
-                PrimitiveSpecType::Matmul { .. } => {
-                    return Ok(ActionSolver::PrimitiveTileOut {
-                        outer_spec: spec.clone(),
-                        body_spec: ActionSolver::tiled_subspec_fast(
-                            [(0, 0), (2, 1)].into_iter(),
-                            spec,
-                            &tile_shape,
-                            parallel,
-                        )?,
-                    });
+                match basics.typ {
+                    PrimitiveSpecType::Matmul { .. } => {
+                        return Ok(ActionSolver::PrimitiveTileOut {
+                            outer_spec: spec.clone(),
+                            body_spec: ActionSolver::tiled_subspec_fast(
+                                [(0, 0), (2, 1)].into_iter(),
+                                spec,
+                                &tile_shape,
+                                parallel,
+                            )?,
+                        });
+                    }
+                    PrimitiveSpecType::Zero | PrimitiveSpecType::Move => {
+                        let rank = basics.spec_shape.len();
+                        return Ok(ActionSolver::PrimitiveTileOut {
+                            outer_spec: spec.clone(),
+                            body_spec: ActionSolver::tiled_subspec_fast(
+                                (0..rank).map(|i| (i, i)),
+                                spec,
+                                &tile_shape,
+                                parallel,
+                            )?,
+                        });
+                    }
+                    _ => {}
                 }
-                PrimitiveSpecType::Zero | PrimitiveSpecType::Move => {
-                    let rank = basics.spec_shape.len();
-                    return Ok(ActionSolver::PrimitiveTileOut {
-                        outer_spec: spec.clone(),
-                        body_spec: ActionSolver::tiled_subspec_fast(
-                            (0..rank).map(|i| (i, i)),
-                            spec,
-                            &tile_shape,
-                            parallel,
-                        )?,
-                    });
-                }
-                _ => {}
             }
+            (
+                Action::Move {
+                    source_idx,
+                    destination_dtype,
+                    destination_level,
+                    destination_layout,
+                    destination_vector_size,
+                },
+                _,
+            ) => {
+                let operands = spec.0.parameters();
+                let plan = plan_movelet(
+                    spec,
+                    &operands,
+                    *source_idx,
+                    *destination_dtype,
+                    *destination_level,
+                    destination_layout,
+                    *destination_vector_size,
+                )?;
+                let base_main_cost = move_cost(plan.outer_moved_operand_spec, &plan.new_spec);
+                let allocation = movelet_memory_allocation(&plan.new_spec);
+                return Ok(ActionSolver::Move {
+                    prologue: plan.prologue_spec,
+                    body: plan.new_body_spec,
+                    epilogue: plan.epilogue_spec,
+                    base_main_cost,
+                    allocation,
+                });
+            }
+            _ => {}
         };
 
         self.apply_unchecked_canon(spec)
@@ -797,7 +780,6 @@ impl<Tgt: Target> Action<Tgt> {
     }
 }
 
-// TODO: Rename to `ActionSolver`?
 impl<Tgt: Target> ActionSolver<Tgt> {
     pub fn subspecs(&self) -> impl Iterator<Item = Spec<Tgt>> {
         match self {
@@ -807,6 +789,20 @@ impl<Tgt: Target> ActionSolver<Tgt> {
             } => {
                 // TODO: Avoid this clone
                 vec![body_spec.clone()].into_iter()
+            }
+            ActionSolver::Move {
+                prologue,
+                body,
+                epilogue,
+                base_main_cost: _,
+                allocation: _,
+            } => {
+                // TODO: Avoid these clones. Return an iterator of references.
+                let mut v: Vec<Spec<Tgt>> = Vec::with_capacity(3);
+                v.extend(prologue.clone());
+                v.push(body.clone());
+                v.extend(epilogue.clone());
+                v.into_iter()
             }
             ActionSolver::Fallback(partial_impl) => {
                 let mut partial_impl_subspecs = Vec::new();
@@ -863,6 +859,29 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                     }
                     _ => unreachable!(),
                 }
+            }
+            ActionSolver::Move {
+                prologue: _,
+                body: _,
+                epilogue: _,
+                base_main_cost,
+                allocation,
+            } => {
+                let mut main = *base_main_cost;
+                let mut child_peaks = vec![];
+                let mut depth = 0;
+                for child_cost in child_costs {
+                    main = main.saturating_add(child_cost.main);
+                    depth = depth.max(child_cost.depth);
+                    child_peaks.push(child_cost.peaks);
+                }
+                depth += 1;
+                // TODO: Is snap_memvec_up really needed or can we bake this into MemVec?
+                let peaks = snap_memvec_up(
+                    allocation.peak_memory_from_child_peaks::<Tgt>(&child_peaks),
+                    false,
+                );
+                Cost { main, peaks, depth }
             }
             ActionSolver::Fallback(partial_impl) => {
                 compute_impl_cost(partial_impl, &mut child_costs)
@@ -994,7 +1013,7 @@ where
                 .iter()
                 .map(|child| compute_impl_cost(child, costs))
                 .collect::<Vec<_>>();
-            Cost::from_child_costs(imp, &child_costs)
+            Cost::from_node_and_child_costs(imp, &child_costs)
         }
     }
 }
@@ -1052,6 +1071,120 @@ impl Display for ActionNotApplicableReason {
             ActionNotApplicableReason::Other => write!(f, "Unknown reason"),
         }
     }
+}
+
+fn plan_movelet<'a, Tgt: Target>(
+    spec: &Spec<Tgt>,
+    operands: &'a [TensorSpec<Tgt>],
+    source_idx: u8,
+    destination_dtype: Dtype,
+    destination_level: Tgt::Level,
+    destination_layout: &Layout,
+    destination_vector_size: Option<DimSize>,
+) -> Result<MoveLetPlan<'a, Tgt>, ApplyError> {
+    let outer_moved_operand_spec = &operands[usize::from(source_idx)];
+
+    if !outer_moved_operand_spec.can_move_to(destination_layout, &destination_level) {
+        return Err(ApplyError::ActionNotApplicable(
+            // TODO: Replace Other with a new ActionNotApplicableReason variant.
+            ActionNotApplicableReason::Other,
+        ));
+    }
+
+    let new_spec = movelet_inner_tensorspec(
+        outer_moved_operand_spec,
+        destination_dtype,
+        &destination_level,
+        destination_layout,
+        destination_vector_size,
+    );
+
+    assert!(
+        destination_layout.applies_to_shape(new_spec.shape()),
+        "Destination layout {:?} does not apply to shape {:?}",
+        destination_layout,
+        new_spec.shape()
+    );
+
+    // Filter cases where, after canonicalization, the source and destination
+    // TensorSpecs match (i.e., within-level copies).
+    if outer_moved_operand_spec == &new_spec {
+        return Err(ApplyError::ActionNotApplicable(
+            ActionNotApplicableReason::SelfMove,
+        ));
+    }
+
+    let lower_limits: MemoryLimits = {
+        let additional = u64::from(destination_dtype.size())
+            * u64::from(operands[usize::from(source_idx)].volume().get());
+        match &spec.1 {
+            MemoryLimits::Standard(base) => {
+                let updated_level_idx = Tgt::levels()
+                    .iter()
+                    .position(|l| l == &destination_level)
+                    .unwrap();
+                let mut new_limits = base.clone();
+                let Some(level_updated) = new_limits
+                    .get_unscaled(updated_level_idx)
+                    .checked_sub(additional)
+                else {
+                    return Err(ApplyError::OutOfMemory);
+                };
+                new_limits.set_unscaled(updated_level_idx, prev_power_of_two(level_updated));
+                MemoryLimits::Standard(new_limits)
+            }
+        }
+    };
+
+    // Closure which makes a prologue or epilogue sub-Spec.
+    let make_logue = |flip, f: &dyn Fn(_, _, _, _, _) -> bool| {
+        if f(
+            &destination_level,
+            destination_layout,
+            destination_dtype,
+            source_idx,
+            &spec.0,
+        ) {
+            let mut left_spec = outer_moved_operand_spec;
+            let mut right_spec = &new_spec;
+            if flip {
+                mem::swap(&mut left_spec, &mut right_spec);
+            }
+            let mut logue_spec = Spec(
+                LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Move,
+                        spec_shape: left_spec.shape().into(),
+                        dtypes: vec![left_spec.dtype(), right_spec.dtype()],
+                    },
+                    vec![left_spec.aux.clone(), right_spec.aux.clone()],
+                    spec.0.serial_only(),
+                ),
+                lower_limits.clone(),
+            );
+            logue_spec.canonicalize().unwrap();
+            Some(logue_spec)
+        } else {
+            None
+        }
+    };
+    let prologue_spec = make_logue(false, &move_gens_prologue);
+    let epilogue_spec = make_logue(true, &move_gens_epilogue);
+
+    let mut new_operands = operands.to_vec();
+    new_operands[usize::from(source_idx)] = new_spec.clone();
+    let mut new_body_spec = Spec(spec.0.clone(), lower_limits);
+    new_body_spec.0.replace_io(&new_operands);
+    new_body_spec.canonicalize().unwrap();
+
+    Ok(MoveLetPlan {
+        outer_moved_operand_spec,
+        new_spec,
+        prologue_spec,
+        epilogue_spec,
+        new_body_spec,
+        new_operands,
+    })
 }
 
 fn move_gens_prologue<Tgt: Target>(

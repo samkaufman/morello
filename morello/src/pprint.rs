@@ -166,7 +166,7 @@ fn fill_costs_table_entry<'a, Tgt: Target>(
             .iter()
             .map(|k| fill_costs_table_entry(table, k))
             .collect::<Vec<_>>();
-        let c = Cost::from_child_costs(imp, &child_costs);
+        let c = Cost::from_node_and_child_costs(imp, &child_costs);
         drop(child_costs);
         table.insert(imp_address, c.clone());
         c

@@ -44,13 +44,13 @@ impl Cost {
             .iter()
             .map(|k| Cost::from_impl(k))
             .collect::<Vec<_>>();
-        Cost::from_child_costs(imp, &child_costs)
+        Cost::from_node_and_child_costs(imp, &child_costs)
     }
 
     /// Compute the cost of an [Impl], given the costs of its children.
     ///
     /// Unlike [Cost::from_impl], this has constant time.
-    pub fn from_child_costs<Tgt, I>(imp: &I, child_costs: &[Cost]) -> Cost
+    pub fn from_node_and_child_costs<Tgt, I>(imp: &I, child_costs: &[Cost]) -> Cost
     where
         Tgt: Target,
         I: Impl<Tgt>,

@@ -1848,7 +1848,7 @@ mod tests {
             };
         }
 
-        let cost = Cost::from_child_costs(
+        let cost = Cost::from_node_and_child_costs(
             partial_impl,
             &children
                 .iter()
