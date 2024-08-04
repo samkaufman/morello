@@ -1,11 +1,11 @@
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use indicatif_log_bridge::LogWrapper;
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 
 use adler::Adler32;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif_log_bridge::LogWrapper;
 use log::info;
 use nonzero::nonzero as nz;
 use rayon::prelude::*;
@@ -37,10 +37,7 @@ use morello::search::top_down_many;
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
 };
-use morello::target::{
-    CpuMemoryLevel::{self, GL},
-    Target, X86Target,
-};
+use morello::target::{CpuMemoryLevel, Target, X86Target};
 use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
 use morello::utils::{bit_length, diagonals};
 
@@ -398,7 +395,7 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
     bounds.extend((1..=move_needed_rank).map(|rank| {
         lspec!(Zero(
             iter::repeat(args.size).take(rank.into()),
-            (u32, GL, row_major(rank)),
+            (u32, CpuMemoryLevel::GL, row_major(rank)),
             serial
         ))
     }));
@@ -457,7 +454,7 @@ fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
     lspec!(Move(
         iter::repeat(size).take(rank.into()),
         (u32, CpuMemoryLevel::GL, row_major(rank)),
-        (u32, CpuMemoryLevel::L1, row_major(rank)),
+        (u32, CpuMemoryLevel::GL, row_major(rank)),
         serial
     ))
 }
