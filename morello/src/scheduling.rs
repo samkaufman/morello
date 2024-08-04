@@ -114,7 +114,12 @@ impl<Tgt: Target> Action<Tgt> {
         if !spec.is_canonical() {
             return Err(ApplyError::SpecNotCanonical);
         }
+        self.apply_unchecked_canon(spec)
+    }
 
+    /// Like [Action::apply], but does not check if the Spec is canonical. Passing a non-canonical
+    /// Spec is a logic error.
+    pub fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 
@@ -745,10 +750,11 @@ impl<Tgt: Target> Action<Tgt> {
 
     /// Returns a value which produces sub-Spec requests and compute a [Cost].
     ///
-    /// This is functionally equivalent to calling [apply] to produce a partial Impl and then
-    /// gathering its sub-Specs and computing a cost, but is usually faster.
+    /// This is functionally equivalent to calling [Action::apply] to produce a partial Impl and
+    /// then gathering its sub-Specs and computing a cost, but is usually faster.
     ///
-    /// The caller must ensure that `spec` is in canonical form.
+    /// The caller must ensure that `spec` is in canonical form. Passing a non-canonical form is a
+    /// logic error.
     pub fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         if let (Action::TileOut(tileout), LogicalSpec::Primitive(basics, ..)) = (self, &spec.0) {
             let output_tensor = spec.0.parameters().swap_remove(spec.0.output_idx());
@@ -786,7 +792,7 @@ impl<Tgt: Target> Action<Tgt> {
             }
         };
 
-        self.apply(spec)
+        self.apply_unchecked_canon(spec)
             .map(|applied| ActionSolver::Fallback(applied))
     }
 }

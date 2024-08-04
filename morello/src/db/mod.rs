@@ -317,16 +317,19 @@ impl FilesDatabase {
         }
     }
 
-    pub fn page_id<Tgt>(&self, lhs: &Spec<Tgt>) -> PageId
+    /// Return the [PageId] to which the given canonical [Spec] belongs.
+    ///
+    /// Passing a non-canonical [Spec] is a logic error.
+    pub fn page_id<Tgt>(&self, spec: &Spec<Tgt>) -> PageId
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        assert!(lhs.is_canonical());
+        debug_assert!(spec.is_canonical());
 
         let bimap = self.spec_bimap();
-        let (table_key, global_pt_lhs) = bimap.apply(lhs);
+        let (table_key, global_pt_lhs) = bimap.apply(spec);
         let (block_pt, _) = blockify_point(global_pt_lhs);
         PageId {
             db: self,
@@ -619,13 +622,16 @@ impl Drop for FilesDatabase {
 }
 
 impl<'a> PageId<'a> {
+    /// Returns `true` if the page contains the given canonical [Spec].
+    ///
+    /// Passing a non-canonical [Spec] is a logic error.
     pub fn contains<Tgt>(&self, spec: &Spec<Tgt>) -> bool
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        assert!(spec.is_canonical());
+        debug_assert!(spec.is_canonical());
 
         let bimap = self.db.spec_bimap();
         let (table_key, global_pt) = bimap.apply(spec);
