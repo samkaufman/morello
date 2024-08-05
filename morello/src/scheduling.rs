@@ -115,18 +115,6 @@ pub enum ActionNotApplicableReason {
 }
 
 impl<Tgt: Target> Action<Tgt> {
-    pub fn child_count(&self) -> usize {
-        match self {
-            Action::TileOut(..) => 1,
-            Action::Split { .. } => 1,
-            Action::ToAccum => 2,
-            Action::SpatialSplit => 1,
-            Action::Place(_) => 0,
-            Action::Move { .. } => unimplemented!(),
-            Action::Peel { .. } => 2,
-        }
-    }
-
     pub fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         if !spec.is_canonical() {
             return Err(ApplyError::SpecNotCanonical);
