@@ -152,9 +152,15 @@ fn main() {
     // code builds and produces the correct results.
     #[cfg(feature = "verification")]
     {
-        let artifact = implementation.build(false).unwrap();
-        if !artifact.check_correctness(&spec) {
-            panic!("Generated code returned incorrect output");
+        match implementation.build(false) {
+            Ok(artifact) => {
+                if !artifact.check_correctness(&spec) {
+                    panic!("Generated code returned incorrect output");
+                }
+            }
+            Err(e) => {
+                panic!("Failed to build generated code: {}", e);
+            }
         }
     }
 
