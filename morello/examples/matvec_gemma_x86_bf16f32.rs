@@ -91,17 +91,23 @@ fn main() {
         .unwrap();
 
     // Benchmark.
-    const ITERS: u32 = 100;
-    let result = implementation.bench(ITERS, None).unwrap();
-    let kernel_runtime =
-        (result.best_inner_loop_runtime() / result.inner_loop_iterations).as_secs_f64();
-    let throughput =
-        result.inner_loop_iterations as f64 / result.best_inner_loop_runtime().as_secs_f64();
-    println!("\n// cost: {}", Cost::from_impl(&implementation).main);
-    println!("// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)",);
-    println!(
-        "// {:.4} gigaFLOPs/sec ({:.1}% of Zen 1 theoretical max.)",
-        (spec.flops().unwrap() as f64 * throughput) / 1_000_000_000.0,
-        (100.0 * spec.flops().unwrap() as f64 * throughput) / (52.0 * 1_000_000_000.0)
-    );
+    let skip_var = std::env::var("SKIP_BF16_EXECUTION");
+    match skip_var.as_ref().map(|s| s.as_str()) {
+        Ok("0") | Err(_) => {
+            const ITERS: u32 = 100;
+            let result = implementation.bench(ITERS, None).unwrap();
+            let kernel_runtime =
+                (result.best_inner_loop_runtime() / result.inner_loop_iterations).as_secs_f64();
+            let throughput = result.inner_loop_iterations as f64
+                / result.best_inner_loop_runtime().as_secs_f64();
+            println!("\n// cost: {}", Cost::from_impl(&implementation).main);
+            println!("// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)",);
+            println!(
+                "// {:.4} gigaFLOPs/sec ({:.1}% of Zen 1 theoretical max.)",
+                (spec.flops().unwrap() as f64 * throughput) / 1_000_000_000.0,
+                (100.0 * spec.flops().unwrap() as f64 * throughput) / (52.0 * 1_000_000_000.0)
+            );
+        }
+        _ => {}
+    }
 }

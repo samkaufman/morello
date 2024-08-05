@@ -36,7 +36,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features -- --include-ignored
   
-  smoke-test-example-simple_matmul_x86:
+  smoke-test-example:
+    strategy:
+      matrix:
+        example: [simple_matmul_x86, matvec_gemma_x86_bf16f32]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +49,11 @@ jobs:
           sudo apt update
           sudo apt-get install -y libomp-dev
       - uses: Swatinem/rust-cache@v2
-      - run: cargo run --example simple_matmul_x86
+        with:
+          key: ${{ matrix.example }}
+      - run: cargo run --example ${{ matrix.example }}
+        env:
+          SKIP_BF16_EXECUTION: 1
   
   smoke-test-frontend:
     strategy:
