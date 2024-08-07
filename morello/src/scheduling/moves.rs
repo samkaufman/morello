@@ -102,7 +102,7 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
         )))
     }
 
-    fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         let operands = spec.0.parameters();
         let plan = plan_movelet(
             spec,
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn test_subspecs_when_moving_into_degenerate_packed_layout_solver() {
         shared_test_subspecs_when_moving_into_degenerate_packed_layout(|spec, action| {
-            action.solver(spec).unwrap().subspecs().collect()
+            action.top_down_solver(spec).unwrap().subspecs().collect()
         })
     }
 

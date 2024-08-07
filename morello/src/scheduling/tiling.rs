@@ -161,7 +161,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         loop_spec_with_shrunken_tiles(operands, new_tiles, logical_spec, parallel, spec)
     }
 
-    fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         match &spec.0 {
             LogicalSpec::Primitive(basics, ..) => {
                 // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.

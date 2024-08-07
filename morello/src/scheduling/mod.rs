@@ -57,7 +57,7 @@ pub trait ActionT<Tgt: Target> {
     ///
     /// The caller must ensure that `spec` is in canonical form. Passing a non-canonical form is a
     /// logic error.
-    fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         self.apply_unchecked_canon(spec)
             .map(|applied| ActionSolver::Fallback(applied))
     }
@@ -603,7 +603,7 @@ mod tests {
         #[test]
         fn test_fast_path_is_equivalent_to_slow(spec in arb_canonical_spec::<X86Target>(None, None)) {
             for action in X86Target::actions(&spec.0, None) {
-                match (action.solver(&spec), action.apply(&spec)) {
+                match (action.top_down_solver(&spec), action.apply(&spec)) {
                     (Ok(solver), Ok(applied)) => {
                         let subspecs = solver.subspecs().collect::<Vec<_>>();
                         let mut applied_subspecs = Vec::new();

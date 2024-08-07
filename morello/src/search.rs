@@ -555,7 +555,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
 
         for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
             let action = &all_actions[action_idx];
-            match action.solver(&goal) {
+            match action.top_down_solver(&goal) {
                 Ok(solver) => {
                     let partial_impl_subspecs = solver.subspecs().collect::<Vec<_>>();
 
