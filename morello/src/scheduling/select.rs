@@ -1,7 +1,7 @@
 use crate::imp::kernels::KernelApp;
 use crate::imp::ImplNode;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
-use crate::scheduling::{ApplyError, NotApplicableReason};
+use crate::scheduling::{ApplyError, ActionT, NotApplicableReason};
 use crate::spec::Spec;
 use crate::target::{Kernel, Target};
 use crate::views::{Param, ViewE};
@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Select<Tgt: Target>(pub Tgt::Kernel, pub bool);
 
-impl<Tgt: Target> Select<Tgt> {
-    pub fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
+impl<Tgt: Target> ActionT<Tgt> for Select<Tgt> {
+    fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let Select(k, force) = self;
 
         let logical_spec = &spec.0;

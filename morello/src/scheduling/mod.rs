@@ -10,13 +10,14 @@ use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::utils::snap_memvec_up;
 use crate::views::{Param, Tensor, TileError, View, ViewE};
+use enum_dispatch::enum_dispatch;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 use bufferize::Bufferize;
 use moves::Move;
 use select::Select;
 use spatial_split::SpatialSplit;
-use std::fmt::Display;
 use tiling::{Split, TileOut};
 use to_accum::ToAccum;
 use to_max_and_denom::ToMaxAndDenominator;
@@ -31,12 +32,44 @@ pub mod to_accum;
 pub mod to_max_and_denom;
 pub mod to_softmax_parts;
 
+// TODO: Rename this. (`Action` should probably be X86-specific.)
+#[enum_dispatch]
+pub trait ActionT<Tgt: Target> {
+    fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
+        if !spec.is_canonical() {
+            return Err(ApplyError::SpecNotCanonical);
+        }
+        self.apply_unchecked_canon(spec)
+    }
+
+    /// Like [Action::apply], but does not check if the Spec is canonical. Passing a non-canonical
+    /// Spec is a logic error.
+    fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError>;
+
+    /// Returns a value which produces sub-Spec requests and compute a [Cost].
+    ///
+    /// This is functionally equivalent to calling [Action::apply] to produce a partial Impl and
+    /// then gathering its sub-Specs and computing a cost, but is usually faster.
+    ///
+    /// The caller must ensure that `spec` is in canonical form. Passing a non-canonical form is a
+    /// logic error.
+    fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+        self.apply_unchecked_canon(spec)
+            .map(|applied| ActionSolver::Fallback(applied))
+    }
+}
+
 /// A scheduling decision which can be applied to a Spec to produce an Impl.
 ///
 /// [Action]s contain the minimal amount of information needed to distinguish a one scheduling
 /// decision from another, which makes it appropriate for storing in a database so that the
 /// corresponding Impl node can be computed given the Spec.
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(bound(
+    deserialize = "Tgt::Kernel: Deserialize<'de>",
+    serialize = "Tgt::Kernel: Serialize"
+))]
+#[enum_dispatch(ActionT<Tgt>)]
 pub enum Action<Tgt: Target> {
     /// Tile the output tensor and its inputs to respect the updated inputs.
     TileOut(TileOut),
@@ -97,100 +130,6 @@ pub enum NotApplicableReason {
     MultipleOutputs,
     Other(Option<&'static str>),
 }
-
-impl<Tgt: Target> Action<Tgt> {
-    pub fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
-        if !spec.is_canonical() {
-            return Err(ApplyError::SpecNotCanonical);
-        }
-        self.apply_unchecked_canon(spec)
-    }
-
-    /// Like [Action::apply], but does not check if the Spec is canonical. Passing a non-canonical
-    /// Spec is a logic error.
-    pub fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
-        match self {
-            Action::TileOut(t) => t.apply_unchecked_canon(spec),
-            Action::Split(s) => s.apply_unchecked_canon(spec),
-            Action::Bufferize(b) => b.apply_unchecked_canon(spec),
-            Action::SpatialSplit(s) => s.apply_unchecked_canon(spec),
-            Action::Move(m) => m.apply_unchecked_canon(spec),
-            Action::ToAccum(a) => a.apply_unchecked_canon(spec),
-            Action::ToSoftmaxParts(a) => a.apply_unchecked_canon(spec),
-            Action::ToMaxAndDenominator(a) => a.apply_unchecked_canon(spec),
-            Action::Select(s) => s.apply_unchecked_canon(spec),
-        }
-    }
-
-    /// Returns a value which produces sub-Spec requests and compute a [Cost].
-    ///
-    /// This is functionally equivalent to calling [Action::apply] to produce a partial Impl and
-    /// then gathering its sub-Specs and computing a cost, but is usually faster.
-    ///
-    /// The caller must ensure that `spec` is in canonical form. Passing a non-canonical form is a
-    /// logic error.
-    pub fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
-        let specialized = match self {
-            Action::TileOut(a) => a.specialized_solver(spec)?,
-            Action::Move(m) => m.specialized_solver(spec)?,
-            _ => None,
-        };
-        specialized.map(Ok).unwrap_or_else(|| {
-            self.apply_unchecked_canon(spec)
-                .map(|applied| ActionSolver::Fallback(applied))
-        })
-    }
-}
-
-/// A macro to implement the [From] trait for the `Action` enum for multiple variants.
-///
-/// # Examples
-///
-/// ```rust
-/// impl_from_for_action! {
-///     VariantA(TypeA),
-///     VariantB(TypeB)
-/// }
-/// ```
-///
-/// This will generate the following implementations:
-///
-/// ```rust
-/// impl<Tgt: Target> From<TypeA> for Action<Tgt> {
-///     fn from(value: TypeA) -> Self {
-///         Action::VariantA(value)
-///     }
-/// }
-///
-/// impl<Tgt: Target> From<TypeB> for Action<Tgt> {
-///     fn from(value: TypeB) -> Self {
-///         Action::VariantB(value)
-///     }
-/// }
-/// ```
-macro_rules! impl_from_for_action {
-    ($($variant:ident($type:ty)),*) => {
-        $(
-            impl<Tgt: Target> From<$type> for Action<Tgt> {
-                fn from(value: $type) -> Self {
-                    Action::$variant(value)
-                }
-            }
-        )*
-    };
-}
-
-impl_from_for_action!(
-    TileOut(TileOut),
-    Split(Split),
-    Move(Move<Tgt>),
-    ToAccum(ToAccum),
-    ToSoftmaxParts(ToSoftmaxParts<Tgt>),
-    ToMaxAndDenominator(ToMaxAndDenominator),
-    Bufferize(Bufferize<Tgt>),
-    SpatialSplit(SpatialSplit),
-    Select(Select<Tgt>)
-);
 
 impl<Tgt: Target> ActionSolver<Tgt> {
     pub fn subspecs(&self) -> impl Iterator<Item = Spec<Tgt>> {

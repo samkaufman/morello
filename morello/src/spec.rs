@@ -1,5 +1,4 @@
-use super::common::{DimSize, Shape};
-use crate::common::Dtype;
+use crate::common::{DimSize, Shape, Dtype};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
@@ -2504,7 +2503,7 @@ mod tests {
     use crate::layout::row_major;
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
     use crate::scheduling::tiling::TileOut;
-    use crate::scheduling::{Action, ApplyError};
+    use crate::scheduling::{Action, ActionT as _, ApplyError};
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::target::CpuMemoryLevel::{GL, L1, RF};
     use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};

@@ -1468,7 +1468,7 @@ mod tests {
         common::{DimSize, Dtype},
         layout::{col_major, row_major, Layout},
         lspec,
-        scheduling::{moves::Move, ApplyError, NotApplicableReason},
+        scheduling::{moves::Move, ActionT, ApplyError, NotApplicableReason},
         spec::{arb_canonical_spec, Spec},
         target::{Target, X86Target},
         views::Param,

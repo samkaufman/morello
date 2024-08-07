@@ -14,6 +14,7 @@ use crate::scheduling::tiling::{Split, TileOut};
 use crate::scheduling::to_accum::ToAccum;
 use crate::scheduling::to_max_and_denom::ToMaxAndDenominator;
 use crate::scheduling::to_softmax_parts::ToSoftmaxParts;
+use crate::scheduling::ActionT as _;
 use crate::scheduling::{Action, ApplyError};
 use crate::search::top_down;
 use crate::spec::Spec;

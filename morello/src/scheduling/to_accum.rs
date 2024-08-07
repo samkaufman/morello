@@ -1,7 +1,7 @@
 use crate::imp::blocks::Block;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
-use crate::scheduling::{make_accum_inits_for_spec, ApplyError, NotApplicableReason};
+use crate::scheduling::{make_accum_inits_for_spec, ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::views::{Param, ViewE};
@@ -10,11 +10,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ToAccum {}
 
-impl ToAccum {
-    pub fn apply_unchecked_canon<Tgt: Target>(
-        &self,
-        spec: &Spec<Tgt>,
-    ) -> Result<ImplNode<Tgt>, ApplyError> {
+impl<Tgt: Target> ActionT<Tgt> for ToAccum {
+    fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 

@@ -4,7 +4,8 @@ use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::scheduling::{
-    check_tile_out_applies, tile_to_apply_err, ActionSolver, ApplyError, NotApplicableReason,
+    check_tile_out_applies, tile_to_apply_err, ActionSolver, ActionT, ApplyError,
+    NotApplicableReason,
 };
 use crate::scheduling_sugar::SchedulingSugar;
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
@@ -34,17 +35,16 @@ pub struct Split {
 }
 
 impl TileOut {
-    pub fn parallel(&self) -> bool {
+    fn parallel(&self) -> bool {
         match self {
-            TileOut::SingleLoop { parallel, .. } | TileOut::MultiLoop { parallel, .. } => *parallel,
+            TileOut::SingleLoop { parallel, .. } => *parallel,
+            TileOut::MultiLoop { parallel, .. } => *parallel,
         }
     }
+}
 
-    /// See [Action::apply_unchecked_canon].
-    pub fn apply_unchecked_canon<Tgt: Target>(
-        &self,
-        spec: &Spec<Tgt>,
-    ) -> Result<ImplNode<Tgt>, ApplyError> {
+impl<Tgt: Target> ActionT<Tgt> for TileOut {
+    fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 
@@ -155,10 +155,7 @@ impl TileOut {
         loop_spec_with_shrunken_tiles(operands, new_tiles, logical_spec, parallel, spec)
     }
 
-    pub fn specialized_solver<Tgt: Target>(
-        &self,
-        spec: &Spec<Tgt>,
-    ) -> Result<Option<ActionSolver<Tgt>>, ApplyError> {
+    fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         match &spec.0 {
             LogicalSpec::Primitive(basics, ..) => {
                 let Some(output_tensor) = spec.0.unique_output() else {
@@ -178,21 +175,23 @@ impl TileOut {
                 )?;
 
                 match basics.typ {
-                    PrimitiveSpecType::Matmul { .. } => Ok(Some(ActionSolver::PrimitiveTileOut {
-                        outer_spec: spec.clone(),
-                        body_spec: ActionSolver::tiled_subspec_fast(
-                            [(0, 0), (2, 1)].into_iter(),
-                            spec,
-                            &tile_shape,
-                            parallel,
-                        )?,
-                    })),
+                    PrimitiveSpecType::Matmul { .. } => {
+                        return Ok(ActionSolver::PrimitiveTileOut {
+                            outer_spec: spec.clone(),
+                            body_spec: ActionSolver::tiled_subspec_fast(
+                                [(0, 0), (2, 1)].into_iter(),
+                                spec,
+                                &tile_shape,
+                                parallel,
+                            )?,
+                        });
+                    }
                     PrimitiveSpecType::Move
                     | PrimitiveSpecType::Fill {
                         value: FillValue::Zero,
                     } => {
                         let rank = basics.spec_shape.len();
-                        Ok(Some(ActionSolver::PrimitiveTileOut {
+                        return Ok(ActionSolver::PrimitiveTileOut {
                             outer_spec: spec.clone(),
                             body_spec: ActionSolver::tiled_subspec_fast(
                                 (0..rank).map(|i| (i, i)),
@@ -200,16 +199,21 @@ impl TileOut {
                                 &tile_shape,
                                 parallel,
                             )?,
-                        }))
+                        });
                     }
-                    _ => Ok(None),
+                    _ => {}
                 }
             }
-            _ => Ok(None),
-        }
-    }
+            LogicalSpec::Compose { .. } => {}
+        };
 
-    pub(crate) fn tiled_output_shape(
+        self.apply_unchecked_canon(spec)
+            .map(|applied| ActionSolver::Fallback(applied))
+    }
+}
+
+impl TileOut {
+    fn tiled_output_shape(
         &self,
         untiled_output_shape: &[DimSize],
     ) -> Either<Vec<DimSize>, &[DimSize]> {
@@ -231,11 +235,8 @@ impl TileOut {
     }
 }
 
-impl Split {
-    pub fn apply_unchecked_canon<Tgt: Target>(
-        &self,
-        spec: &Spec<Tgt>,
-    ) -> Result<ImplNode<Tgt>, ApplyError> {
+impl<Tgt: Target> ActionT<Tgt> for Split {
+    fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 

@@ -13,7 +13,7 @@ use crate::cost::Cost;
 use crate::db::{ActionCostVec, ActionIdx, FilesDatabase, GetPreference};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::scheduling::{ActionSolver, ApplyError};
+use crate::scheduling::{ActionSolver, ActionT as _, ApplyError};
 use crate::spec::Spec;
 use crate::target::Target;
 

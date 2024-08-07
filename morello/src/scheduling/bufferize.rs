@@ -3,7 +3,9 @@ use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::{make_inner_compose, make_outer_compose, ApplyError, NotApplicableReason};
+use crate::scheduling::{
+    make_inner_compose, make_outer_compose, ActionT, ApplyError, NotApplicableReason,
+};
 use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
@@ -19,8 +21,8 @@ pub struct Bufferize<Tgt: Target> {
     pub vector_size: Option<DimSize>,
 }
 
-impl<Tgt: Target> Bufferize<Tgt> {
-    pub fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
+impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
+    fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
 
         let LogicalSpec::Compose {

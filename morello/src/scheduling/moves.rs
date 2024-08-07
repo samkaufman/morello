@@ -4,7 +4,7 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::{ActionSolver, ApplyError, NotApplicableReason};
+use crate::scheduling::{ActionSolver, ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
@@ -33,8 +33,8 @@ struct MoveLetPlan<'a, Tgt: Target> {
     is_cache_miss: bool,
 }
 
-impl<Tgt: Target> Move<Tgt> {
-    pub fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
+impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
+    fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 
@@ -102,10 +102,7 @@ impl<Tgt: Target> Move<Tgt> {
         )))
     }
 
-    pub fn specialized_solver(
-        &self,
-        spec: &Spec<Tgt>,
-    ) -> Result<Option<ActionSolver<Tgt>>, ApplyError> {
+    fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         let operands = spec.0.parameters();
         let plan = plan_movelet(
             spec,
@@ -118,13 +115,13 @@ impl<Tgt: Target> Move<Tgt> {
         )?;
         let base_main_cost = move_cost(plan.outer_moved_operand_spec, &plan.new_spec);
         let allocation = movelet_memory_allocation(&plan.new_spec);
-        Ok(Some(ActionSolver::Move {
+        Ok(ActionSolver::Move {
             prologue: plan.prologue_spec,
             body: plan.new_body_spec,
             epilogue: plan.epilogue_spec,
             base_main_cost,
             allocation,
-        }))
+        })
     }
 }
 

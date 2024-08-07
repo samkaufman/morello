@@ -4,7 +4,7 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::{ApplyError, NotApplicableReason};
+use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
@@ -23,8 +23,8 @@ pub struct ToSoftmaxParts<Tgt: Target> {
     pub denominator_vector_size: Option<DimSize>,
 }
 
-impl<Tgt: Target> ToSoftmaxParts<Tgt> {
-    pub fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
+impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
+    fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 

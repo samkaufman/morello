@@ -3,6 +3,7 @@ use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::scheduling::{
+    ActionT,
     tile_to_apply_err, ApplyError, NotApplicableReason,
 };
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
@@ -15,11 +16,8 @@ use std::iter;
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct SpatialSplit {}
 
-impl SpatialSplit {
-    pub fn apply_unchecked_canon<Tgt: Target>(
-        &self,
-        spec: &Spec<Tgt>,
-    ) -> Result<ImplNode<Tgt>, ApplyError> {
+impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
+    fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 
