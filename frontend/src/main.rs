@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::info;
 
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::{io, path};
 
 use morello::codegen::{BuildError, CodeGen};
@@ -37,11 +37,6 @@ struct Args {
 
     #[arg(long, default_value = "128", help = "Cache size in database pages.")]
     cache_size: usize,
-
-    /// Only search tile shapes with dimensions at most this many binarized powers smaller for each
-    /// Spec
-    #[arg(long)]
-    tiling_depth: Option<NonZeroU32>,
 
     /// Color mode
     #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
@@ -154,7 +149,6 @@ fn main() -> Result<()> {
         K,
         args.cache_size,
         threads,
-        args.tiling_depth,
     );
     match &args.target {
         TargetId::X86 => main_per_db::<X86Target>(&args, &db),

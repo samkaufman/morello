@@ -32,8 +32,7 @@ struct Args {
 fn main() {
     env_logger::init();
     let args = Args::parse();
-    // TODO: This should gather the tiling_depth from the existing database, not be `None`.
-    let db = FilesDatabase::new(Some(&args.db), true, K, args.cache_size, 1, None);
+    let db = FilesDatabase::new(Some(&args.db), true, K, args.cache_size, 1);
     fs::create_dir_all(&args.out).unwrap();
     db.analyze::<X86Target>(&args.out, args.sample, args.keep_going);
 }

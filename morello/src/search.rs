@@ -549,8 +549,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
         let mut partial_impls = Vec::new();
         let mut partial_impls_incomplete = 0;
 
-        let tiling_depth = search.db.tiling_depth();
-        let all_actions = Tgt::actions(&goal.0, tiling_depth).collect::<Vec<_>>();
+        let all_actions = Tgt::actions(&goal.0).collect::<Vec<_>>();
         let initial_skip = search.thread_idx * all_actions.len() / search.thread_count;
 
         for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
@@ -859,7 +858,7 @@ mod tests {
         fn test_can_synthesize_any_canonical_spec(
             spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = FilesDatabase::new(None, false, 1, 128, 1, None);
+            let db = FilesDatabase::new(None, false, 1, 128, 1);
             top_down(&db, &spec, 1, Some(nz!(1usize)));
         }
 
@@ -869,7 +868,7 @@ mod tests {
             spec_pair in lower_and_higher_canonical_specs::<X86Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
-            let db = FilesDatabase::new(None, false, 1, 128, 1, None);
+            let db = FilesDatabase::new(None, false, 1, 128, 1);
 
             // Solve the first, lower Spec.
             let (lower_result_vec, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
@@ -892,7 +891,7 @@ mod tests {
         fn test_synthesis_at_peak_memory_yields_same_decision(
             spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = FilesDatabase::new(None, false, 1, 128, 1, None);
+            let db = FilesDatabase::new(None, false, 1, 128, 1);
             let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
             let first_peak = if let Some(first_sol) = first_solutions.first() {
                 first_sol.1.peaks.clone()
@@ -1140,7 +1139,7 @@ mod tests {
             logical_spec,
             MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 1, 1, 0])),
         );
-        let db = FilesDatabase::new(None, false, 1, 128, 1, None);
+        let db = FilesDatabase::new(None, false, 1, 128, 1);
 
         let (action_costs, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
 
@@ -1159,7 +1158,7 @@ mod tests {
             MemoryLimits::Standard(MemVec::new_from_binary_scaled([0, 5, 7, 6])),
         );
 
-        let db = FilesDatabase::new(None, false, 1, 128, 1, None);
+        let db = FilesDatabase::new(None, false, 1, 128, 1);
         let (first_solutions, _, _) = top_down(&db, &spec, 1, Some(nz!(1usize)));
         let first_peak = if let Some(first_sol) = first_solutions.first() {
             first_sol.1.peaks.clone()

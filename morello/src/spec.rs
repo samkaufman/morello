@@ -19,7 +19,6 @@ use std::fmt::Display;
 use std::iter::once;
 use std::iter::Iterator;
 use std::marker::PhantomData;
-use std::num::NonZeroU32;
 use std::panic;
 use std::{assert_eq, debug_assert_eq};
 
@@ -2705,20 +2704,12 @@ pub fn arb_canonical_logical_spec<Tgt: Target>(
     )
 }
 
-pub(crate) fn dim_range(
-    dim_size: DimSize,
-    include_end: bool,
-    depth: Option<NonZeroU32>,
-) -> impl Iterator<Item = DimSize> {
-    let start = depth
-        .map(|d| dim_size.trailing_zeros().saturating_sub(d.get()))
-        .unwrap_or(0);
-    let it = (start..)
+pub fn dim_range(dim_size: DimSize, include_end: bool) -> impl Iterator<Item = DimSize> {
+    (0..)
         .map(|power| 2u32.pow(power))
         .take_while(move |x| *x < dim_size.get())
-        .map(|x| DimSize::new(x).unwrap());
-
-    it.chain(once(if include_end { Some(dim_size) } else { None }).flatten())
+        .map(|x| DimSize::new(x).unwrap())
+        .chain(once(if include_end { Some(dim_size) } else { None }).flatten())
 }
 
 // TODO: Drop in favor of primary output shape inference.
@@ -3207,20 +3198,20 @@ mod tests {
     #[test]
     fn test_dim_range_with_odd_max() {
         assert_eq!(
-            dim_range(nz!(3u32), false, None).collect::<Vec<_>>(),
+            dim_range(nz!(3u32), false).collect::<Vec<_>>(),
             vec![nz!(1u32), nz!(2u32)]
         );
         assert_eq!(
-            dim_range(nz!(3u32), true, None).collect::<Vec<_>>(),
+            dim_range(nz!(3u32), true).collect::<Vec<_>>(),
             vec![nz!(1u32), nz!(2u32), nz!(3u32)]
         );
 
         assert_eq!(
-            dim_range(nz!(7u32), false, None).collect::<Vec<_>>(),
+            dim_range(nz!(7u32), false).collect::<Vec<_>>(),
             vec![nz!(1u32), nz!(2u32), nz!(4u32)]
         );
         assert_eq!(
-            dim_range(nz!(7u32), true, None).collect::<Vec<_>>(),
+            dim_range(nz!(7u32), true).collect::<Vec<_>>(),
             vec![nz!(1u32), nz!(2u32), nz!(4u32), nz!(7u32)]
         );
     }
@@ -3389,7 +3380,7 @@ mod tests {
         fn test_move_actions_never_returns_within_level_copy(
             spec in arb_canonical_spec::<X86Target>(None, None)
         ) {
-            for action in X86Target::actions(&spec.0, None) {
+            for action in X86Target::actions(&spec.0) {
                 if let Ok(ImplNode::MoveLet(move_let)) = action.apply(&spec) {
                     assert_ne!(&move_let.source_spec, move_let.introduced.spec(),
                         "Copying MoveLet introduced by action {:?}", action);
@@ -3402,7 +3393,7 @@ mod tests {
             (spec, action, _, lower_limit) in arb_spec_action_and_lower_limit::<X86Target>()
         ) {
             let lower_spec = Spec(spec.0.clone(), lower_limit);
-            assert!(X86Target::actions(&lower_spec.0, None).contains(&action),
+            assert!(X86Target::actions(&lower_spec.0).contains(&action),
                 "Action {:?} was not present in lower-limits Spec {:?}",
                 action, lower_spec);
         }
@@ -3425,7 +3416,7 @@ mod tests {
         fn test_actions_produce_canonical_subspecs(
             spec in arb_canonical_spec::<X86Target>(None, None)
         ) {
-            X86Target::actions(&spec.0, None).for_each(|action| {
+            X86Target::actions(&spec.0).for_each(|action| {
                 println!("spec: {}\naction: {action:?}", spec.0);  // TODO: Remove
                 let Ok(applied) = action.apply(&spec) else {
                     return;
@@ -3582,7 +3573,7 @@ mod tests {
     }
 
     fn shared_test_no_action_panics<Tgt: Target>(spec: Spec<Tgt>) {
-        for action in Tgt::actions(&spec.0, None) {
+        for action in Tgt::actions(&spec.0) {
             let _ = action.apply(&spec);
         }
     }
@@ -3590,7 +3581,7 @@ mod tests {
     fn shared_test_no_action_produces_same_spec_with_higher_memory_limit<Tgt: Target>(
         spec: &Spec<Tgt>,
     ) {
-        Tgt::actions(&spec.0, None).for_each(|action| {
+        Tgt::actions(&spec.0).for_each(|action| {
             let Ok(applied) = action.apply(spec) else {
                 return;
             };
@@ -3630,7 +3621,7 @@ mod tests {
 
         // The list of actions depends only on the logical Spec. Filtering by memory limit happens
         // at application. So it's safe to just collect the list of actions once, up front.
-        let mut unseen_actions = Tgt::actions(&logical_spec, None).collect::<Vec<_>>();
+        let mut unseen_actions = Tgt::actions(&logical_spec).collect::<Vec<_>>();
 
         let mut shared_spec = Spec(logical_spec, MemoryLimits::Standard(MemVec::zero::<Tgt>()));
         let mut diagonal_idx = 0;
@@ -3674,7 +3665,7 @@ mod tests {
     ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt>, MemoryLimits)> {
         arb_canonical_spec::<Tgt>(None, None)
             .prop_filter_map("Spec had zero applicable actions", |spec| {
-                let applied_actions = Tgt::actions(&spec.0, None)
+                let applied_actions = Tgt::actions(&spec.0)
                     .filter_map(|a| match a.apply(&spec) {
                         Ok(applied) => Some((a, applied)),
                         Err(ApplyError::NotApplicable(_)) => None,

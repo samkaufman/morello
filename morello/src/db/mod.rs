@@ -27,7 +27,7 @@ use wtinylfu::WTinyLfuCache;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
 use std::sync::{mpsc, Arc};
@@ -65,7 +65,6 @@ pub struct FilesDatabase {
     k: u8,
     shards: ShardVec,
     prehasher: DefaultPrehasher,
-    tiling_depth: Option<NonZeroU32>,
     #[cfg(feature = "db-stats")]
     stats: Arc<FilesDatabaseStats>,
 }
@@ -154,7 +153,6 @@ impl FilesDatabase {
         k: u8,
         cache_size: usize,
         thread_count: usize,
-        tiling_depth: Option<NonZeroU32>,
     ) -> Self {
         let dir_handle = Arc::new(match file_path {
             Some(path) => {
@@ -164,28 +162,6 @@ impl FilesDatabase {
             None => DirPathHandle::TempDir(tempfile::TempDir::new().unwrap()),
         });
         log::info!("Opening database at: {}", dir_handle.path().display());
-
-        // Check that the intended tiling depth matches the one logged on disk (if any).
-        let tiling_depth_path = dir_handle.path().join("TILING_DEPTH");
-        if tiling_depth_path.exists() {
-            let raw_buf = fs::read_to_string(&tiling_depth_path).unwrap();
-            let buf = raw_buf.trim();
-            let file_depth = if buf == "ANY" {
-                None
-            } else {
-                Some(NonZeroU32::new(buf.parse::<u32>().unwrap()).unwrap())
-            };
-            if tiling_depth != file_depth {
-                panic!("Tiling depth mismatch: expected {tiling_depth:?}, found {file_depth:?}");
-            }
-        } else {
-            let mut file = fs::File::create(&tiling_depth_path).unwrap();
-            if let Some(depth) = tiling_depth {
-                writeln!(file, "{}", depth.get()).unwrap();
-            } else {
-                writeln!(file, "ANY").unwrap();
-            }
-        }
 
         #[cfg(feature = "db-stats")]
         let stats = Arc::new(FilesDatabaseStats::default());
@@ -223,7 +199,6 @@ impl FilesDatabase {
             k,
             shards,
             prehasher: DefaultPrehasher::default(),
-            tiling_depth,
             #[cfg(feature = "db-stats")]
             stats,
         }
@@ -248,7 +223,7 @@ impl FilesDatabase {
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let root_results = self.get(query)?;
-        let actions = Tgt::actions(&query.0, self.tiling_depth).collect::<Vec<_>>();
+        let actions = Tgt::actions(&query.0).collect::<Vec<_>>();
         Some(
             root_results
                 .as_ref()
@@ -458,10 +433,6 @@ impl FilesDatabase {
         surmap.into_bimap()
     }
 
-    pub fn tiling_depth(&self) -> Option<NonZeroU32> {
-        self.tiling_depth
-    }
-
     fn load_live_superblock<'a>(
         &'a self,
         key: &Prehashed<SuperBlockKey>,
@@ -550,17 +521,6 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
     {
-        // Read the tiling depth for applying actions.
-        // TODO: Share code for loading this file.
-        let tiling_depth_path = self.dir_handle.path().join("TILING_DEPTH");
-        let tiling_depth_path_raw_buf = fs::read_to_string(tiling_depth_path).unwrap();
-        let tiling_depth_buf = tiling_depth_path_raw_buf.trim();
-        let tiling_depth = if tiling_depth_buf == "ANY" {
-            None
-        } else {
-            Some(NonZeroU32::new(tiling_depth_buf.parse::<u32>().unwrap()).unwrap())
-        };
-
         let page_csv_path = output_dir.join("pages.csv");
         let block_csv_path = output_dir.join("blocks.csv");
         let block_action_csv_path = output_dir.join("block_actions.csv");
@@ -600,7 +560,6 @@ impl FilesDatabase {
             sample,
             skip_read_errors,
             &self.spec_bimap(),
-            tiling_depth,
         );
 
         writers.page_writer.flush().unwrap();
@@ -931,7 +890,6 @@ fn analyze_visit_dir<Tgt>(
     sample: usize,
     skip_read_errors: bool,
     bimap: &impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
-    tiling_depth: Option<DimSize>,
 ) where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -948,9 +906,8 @@ fn analyze_visit_dir<Tgt>(
         page_action_costs.clear();
 
         let file_entry = file_entry.unwrap();
-        match file_entry.path().file_name().unwrap().to_str() {
-            Some("PRECOMPUTE") | Some("TILING_DEPTH") => continue,
-            _ => {}
+        if let Some("PRECOMPUTE") = file_entry.path().file_name().unwrap().to_str() {
+            continue;
         }
 
         let entry_path = file_entry.path();
@@ -962,7 +919,6 @@ fn analyze_visit_dir<Tgt>(
                 sample,
                 skip_read_errors,
                 bimap,
-                tiling_depth,
             );
             continue;
         }
@@ -1019,9 +975,7 @@ fn analyze_visit_dir<Tgt>(
                         log::warn!("k > 1 but only k = 1 supported");
                     }
                     if let Some((action_idx, cost)) = action_cost_vec.first() {
-                        let action = Tgt::actions(&spec.0, tiling_depth)
-                            .nth((*action_idx).into())
-                            .unwrap();
+                        let action = Tgt::actions(&spec.0).nth((*action_idx).into()).unwrap();
                         if block_actions.insert(Some(action.clone())) {
                             writers
                                 .block_action_writer
@@ -1043,9 +997,7 @@ fn analyze_visit_dir<Tgt>(
                         block_action_costs.insert(None);
                     }
                     block_actions.insert(action_cost_vec.iter().next().map(|&(action_idx, _)| {
-                        Tgt::actions(&spec.0, tiling_depth)
-                            .nth(action_idx.into())
-                            .unwrap()
+                        Tgt::actions(&spec.0).nth(action_idx.into()).unwrap()
                     }));
                 }
             }
@@ -1658,7 +1610,7 @@ mod tests {
         ) {
             let top_spec = decision.spec.clone();
             let top_actions_costs = decision.actions_costs.clone();
-            let db = FilesDatabase::new(None, false, 1, 2, 1, None);
+            let db = FilesDatabase::new(None, false, 1, 2, 1);
             for (spec, actions_costs) in decision.consume_decisions() {
                 db.put(spec, actions_costs);
             }
@@ -1673,7 +1625,7 @@ mod tests {
             decision in arb_spec_and_decision::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = FilesDatabase::new(None, false, 1, 128, 1, None);
+            let db = FilesDatabase::new(None, false, 1, 128, 1);
 
             let top_logical_spec = decision.spec.0.clone();
             let top_actions_costs = decision.actions_costs.clone();
@@ -1805,7 +1757,7 @@ mod tests {
     ) -> impl Strategy<Value = Decision<Tgt>> {
         arb_canonical_spec::<Tgt>(max_size, max_memory)
             .prop_flat_map(|spec| {
-                let valid_actions = Tgt::actions(&spec.0, None)
+                let valid_actions = Tgt::actions(&spec.0)
                     .enumerate()
                     .filter_map(|(i, a)| match a.apply(&spec) {
                         Ok(applied) => Some((ActionIdx::from(u16::try_from(i).unwrap()), applied)),
@@ -1862,7 +1814,7 @@ mod tests {
     /// Will return a [Decision] by choosing the first action for the Spec (if any) and recursively
     /// choosing the first action for all child Specs in the resulting partial Impl.
     fn recursively_decide_actions<Tgt: Target>(spec: &Spec<Tgt>) -> Decision<Tgt> {
-        if let Some((action_idx, partial_impl)) = Tgt::actions(&spec.0, None)
+        if let Some((action_idx, partial_impl)) = Tgt::actions(&spec.0)
             .enumerate()
             .filter_map(|(i, a)| match a.apply(spec) {
                 Ok(imp) => Some((i, imp)),

@@ -1,9 +1,6 @@
 //! Scheduling actions shared between targets.
 
-use std::{
-    iter::{self, once},
-    num::NonZeroU32,
-};
+use std::iter::{self, once};
 
 use itertools::Either;
 
@@ -29,7 +26,6 @@ const MOVE_RESULTS_CAPACITY: usize = 16;
 // TODO: Avoid boxed trait object return type
 pub fn tile_out_actions<Tgt: Target>(
     spec: &LogicalSpec<Tgt>,
-    depth: Option<NonZeroU32>,
 ) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
     let serial_only = spec.serial_only();
     let Some(output_idx) = spec.unique_output_index() else {
@@ -40,22 +36,20 @@ pub fn tile_out_actions<Tgt: Target>(
     if multi_dim {
         // TODO: Simplfy following, knowing multi_dim is true.
         Box::new(
-            gen_tile_sizes::<Tgt>(&output_shape, true, multi_dim, depth).flat_map(
-                move |tile_shape| {
-                    let left = once(Action::TileOut(TileOut::MultiLoop {
-                        output_shape: tile_shape.clone(),
-                        parallel: false,
+            gen_tile_sizes::<Tgt>(&output_shape, true, multi_dim).flat_map(move |tile_shape| {
+                let left = once(Action::TileOut(TileOut::MultiLoop {
+                    output_shape: tile_shape.clone(),
+                    parallel: false,
+                }));
+                let mut right = None;
+                if !serial_only {
+                    right = Some(Action::TileOut(TileOut::MultiLoop {
+                        output_shape: tile_shape,
+                        parallel: true,
                     }));
-                    let mut right = None;
-                    if !serial_only {
-                        right = Some(Action::TileOut(TileOut::MultiLoop {
-                            output_shape: tile_shape,
-                            parallel: true,
-                        }));
-                    }
-                    left.into_iter().chain(right)
-                },
-            ),
+                }
+                left.into_iter().chain(right)
+            }),
         )
     } else {
         // Yield all output tilings up to the *maximum* dimension size so that the actions have
@@ -63,7 +57,7 @@ pub fn tile_out_actions<Tgt: Target>(
         let output_tensor_rank = output_shape.len();
         let max_dim_size =
             DimSize::try_from(output_shape.iter().map(|d| d.get()).max().unwrap()).unwrap();
-        Box::new(dim_range(max_dim_size, true, depth).flat_map(move |size| {
+        Box::new(dim_range(max_dim_size, true).flat_map(move |size| {
             (0..output_tensor_rank).flat_map(move |dim| {
                 let dim = u8::try_from(dim).unwrap();
                 let left = once(Action::TileOut(TileOut::SingleLoop {
@@ -87,7 +81,6 @@ pub fn tile_out_actions<Tgt: Target>(
 
 pub fn split_actions<Tgt: Target>(
     spec: &LogicalSpec<Tgt>,
-    tiling_depth: Option<NonZeroU32>,
 ) -> impl Iterator<Item = Action<Tgt>> + '_ {
     let LogicalSpec::Primitive(
         PrimitiveBasics {
@@ -109,7 +102,7 @@ pub fn split_actions<Tgt: Target>(
     };
 
     let operands = spec.parameters();
-    dim_range(orig_k, false, tiling_depth)
+    dim_range(orig_k, false)
         .filter(move |&new_k| {
             // TODO: Shouldn't this be rejected during application instead?
             operands[0].is_valid_tile_shape(&[b, m, new_k], false)
@@ -214,13 +207,12 @@ fn gen_tile_sizes<Tgt: Target>(
     tensor_shape: &[DimSize],
     drop_given: bool,
     multi_dim: bool,
-    depth: Option<NonZeroU32>,
 ) -> Box<dyn Iterator<Item = Shape> + 'static> {
     if tensor_shape.is_empty() {
         return Box::new(iter::empty());
     } else if tensor_shape.len() == 1 {
         let one_dim = tensor_shape[0];
-        return Box::new(dim_range(one_dim, true, depth).filter_map(move |d| {
+        return Box::new(dim_range(one_dim, true).filter_map(move |d| {
             if drop_given && d == one_dim {
                 None
             } else {
@@ -232,20 +224,18 @@ fn gen_tile_sizes<Tgt: Target>(
     if multi_dim {
         let tensor_shape = tensor_shape.to_vec();
         Box::new(
-            gen_tile_sizes::<Tgt>(&tensor_shape[1..], false, multi_dim, depth).flat_map(
-                move |rest| {
-                    let tensor_shape = tensor_shape.clone();
-                    dim_range(tensor_shape[0], true, depth).flat_map(move |d| {
-                        let mut new_shape = vec![d];
-                        new_shape.extend(rest.clone());
-                        if drop_given && tensor_shape == new_shape[..] {
-                            None
-                        } else {
-                            Some(new_shape)
-                        }
-                    })
-                },
-            ),
+            gen_tile_sizes::<Tgt>(&tensor_shape[1..], false, multi_dim).flat_map(move |rest| {
+                let tensor_shape = tensor_shape.clone();
+                dim_range(tensor_shape[0], true).flat_map(move |d| {
+                    let mut new_shape = vec![d];
+                    new_shape.extend(rest.clone());
+                    if drop_given && tensor_shape == new_shape[..] {
+                        None
+                    } else {
+                        Some(new_shape)
+                    }
+                })
+            }),
         )
     } else {
         let tensor_shape = tensor_shape.to_vec();
@@ -261,7 +251,7 @@ fn gen_tile_sizes<Tgt: Target>(
         };
         let smaller_tiles_iter = (0..tensor_shape.len()).flat_map(move |dim| {
             let tensor_shape = tensor_shape.clone();
-            dim_range(tensor_shape[dim], false, depth).map(move |d| {
+            dim_range(tensor_shape[dim], false).map(move |d| {
                 let mut new_shape = tensor_shape.clone();
                 new_shape[dim] = d;
                 new_shape
@@ -280,22 +270,10 @@ mod tests {
 
     #[test]
     fn test_gen_tile_sizes_empty() {
-        assert_eq!(
-            gen_tile_sizes::<X86Target>(&[], false, false, None).count(),
-            0
-        );
-        assert_eq!(
-            gen_tile_sizes::<X86Target>(&[], true, false, None).count(),
-            0
-        );
-        assert_eq!(
-            gen_tile_sizes::<X86Target>(&[], false, true, None).count(),
-            0
-        );
-        assert_eq!(
-            gen_tile_sizes::<X86Target>(&[], false, false, None).count(),
-            0
-        );
+        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, false).count(), 0);
+        assert_eq!(gen_tile_sizes::<X86Target>(&[], true, false).count(), 0);
+        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, true).count(), 0);
+        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, false).count(), 0);
     }
 
     #[test]
@@ -403,11 +381,10 @@ mod tests {
         let d = expected.first().map_or(0, |shape| shape.len());
         assert!(expected.iter().all(|shape| shape.len() == d));
 
-        let actual: Vec<Shape> =
-            gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim, None)
-                .inspect(|s| assert_eq!(s.len(), d))
-                .sorted()
-                .collect::<Vec<_>>();
+        let actual: Vec<Shape> = gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim)
+            .inspect(|s| assert_eq!(s.len(), d))
+            .sorted()
+            .collect::<Vec<_>>();
         assert_eq!(
             actual, expected,
             "gen_tile_sizes({:?}, drop_given={}, serial={}) returned {:?}, expected {:?}",

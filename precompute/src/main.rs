@@ -13,7 +13,6 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{fs, iter, path};
@@ -64,8 +63,6 @@ struct Args {
     db: Option<path::PathBuf>,
     #[arg(long, default_value = "32", help = "Cache size in database pages.")]
     cache_size: usize,
-    #[arg(long)]
-    tiling_depth: Option<NonZeroU32>,
     #[arg(long, default_value = "matmul")]
     through: ThroughSpec,
     #[arg(long, short, default_value = "1")]
@@ -151,14 +148,7 @@ fn main() -> Result<()> {
     info!("DB statistic collection enabled");
 
     let threads = rayon::current_num_threads();
-    let db = FilesDatabase::new(
-        args.db.as_deref(),
-        true,
-        K,
-        args.cache_size,
-        threads,
-        args.tiling_depth,
-    );
+    let db = FilesDatabase::new(args.db.as_deref(), true, K, args.cache_size, threads);
     main_per_db(&args, db, args.db.as_deref(), multi_opt);
 
     Ok(())

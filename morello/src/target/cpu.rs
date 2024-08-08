@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter::{self, once};
-use std::num::NonZeroU32;
 
 const INST_COST: MainCost = 100;
 const ASSIGN_INST_COST: MainCost = 1;
@@ -285,12 +284,9 @@ impl<T: CpuTarget> Target for T {
         result
     }
 
-    fn actions(
-        spec: &LogicalSpec<Self>,
-        tiling_depth: Option<NonZeroU32>,
-    ) -> Self::ActionsIter<'_> {
+    fn actions(spec: &LogicalSpec<Self>) -> Self::ActionsIter<'_> {
         let iter = move_actions(spec);
-        let iter = iter.chain(tile_out_actions(spec, tiling_depth));
+        let iter = iter.chain(tile_out_actions(spec));
 
         // OnePrefix is an unfortunate special case. The only viable action is applying
         // its no-op kernel.
@@ -419,7 +415,7 @@ impl<T: CpuTarget> Target for T {
                     Box::new(iter.chain(once(ToAccum::default().into())))
                 }
                 PrimitiveSpecType::Matmul { accum } if *accum => {
-                    Box::new(iter.chain(split_actions(spec, tiling_depth)))
+                    Box::new(iter.chain(split_actions(spec)))
                 }
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
@@ -1821,11 +1817,10 @@ mod tests {
         #[test]
         fn test_actions_include_move_actions_for_all_parameters(
             spec in arb_canonical_spec::<X86Target>(None, None),
-            tiling_depth in Just(None).prop_union(Just(Some(nz!(1u32)))).or(Just(Some(nz!(2u32)))),
         ) {
             let lspec = &spec.0;
             let mut seen_source_idxs = HashSet::new();
-            for action in X86Target::actions(lspec, tiling_depth) {
+            for action in X86Target::actions(lspec) {
                 if let Action::Move(Move { source_idx, .. }) = action {
                     seen_source_idxs.insert(source_idx);
                 }

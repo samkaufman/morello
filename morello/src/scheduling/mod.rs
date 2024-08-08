@@ -602,7 +602,7 @@ mod tests {
         // TODO: Add an ARM variant
         #[test]
         fn test_fast_path_is_equivalent_to_slow(spec in arb_canonical_spec::<X86Target>(None, None)) {
-            for action in X86Target::actions(&spec.0, None) {
+            for action in X86Target::actions(&spec.0) {
                 match (action.top_down_solver(&spec), action.apply(&spec)) {
                     (Ok(solver), Ok(applied)) => {
                         let subspecs = solver.subspecs().collect::<Vec<_>>();
@@ -652,7 +652,7 @@ mod tests {
     fn shared_test_actions_introduce_subspec_arguments_with_matching_parameters<Tgt: Target>(
         spec: Spec<Tgt>,
     ) -> Result<(), proptest::prelude::TestCaseError> {
-        for action in Tgt::actions(&spec.0, None) {
+        for action in Tgt::actions(&spec.0) {
             // Skip Moves since they sometimes introduce Move Specs with mismatched
             // TensorSpecs.
             if matches!(action, Action::Move { .. }) {

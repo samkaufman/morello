@@ -43,7 +43,7 @@ fn main() {
     let spec = Spec::<X86Target>(logical_spec, X86Target::max_mem());
     println!("Logical Spec: {}", spec.0);
 
-    let db = FilesDatabase::new(None, true, 1, 10_000, 1, None);
+    let db = FilesDatabase::new(None, true, 1, 10_000, 1);
 
     let implementation = spec
         // Tile across the batch dimension. (We cannot tile across the scan dimension.)

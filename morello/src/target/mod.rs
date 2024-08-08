@@ -21,7 +21,6 @@ use serde::Serialize;
 
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
-use std::num::NonZeroU32;
 
 // TODO: This should be generic per Target. Right now, all targets must have 4 levels!
 pub const LEVEL_COUNT: usize = 4;
@@ -50,8 +49,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn move_destination_layouts(shape: &[DimSize], dtype: Dtype) -> Vec<Layout>;
 
     /// Yield target-specific actions which apply to a given [LogicalSpec].
-    fn actions(spec: &LogicalSpec<Self>, tiling_depth: Option<NonZeroU32>)
-        -> Self::ActionsIter<'_>;
+    fn actions(spec: &LogicalSpec<Self>) -> Self::ActionsIter<'_>;
 
     /// Get corresponding [TargetId] enum
     fn target_id() -> TargetId;

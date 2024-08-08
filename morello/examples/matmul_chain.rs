@@ -151,7 +151,7 @@ fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
 
     const RANK: u8 = 3;
 
-    let db = FilesDatabase::new(None, true, 1, 10_000, 1, None);
+    let db = FilesDatabase::new(None, true, 1, 10_000, 1);
 
     spec.tile_out(&[1, 1, 2048])
         .to_softmax_parts(GL, row_major(RANK), None, GL, row_major(RANK), None)
