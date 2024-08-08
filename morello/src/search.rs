@@ -1,6 +1,5 @@
 use indexmap::IndexMap;
 use itertools::Itertools;
-use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -23,8 +22,6 @@ type WorkingPartialImplHandle = (usize, RequestId);
 struct TopDownSearch<'d> {
     db: &'d FilesDatabase,
     top_k: usize,
-    thread_idx: usize,
-    thread_count: usize,
     hits: u64,
     misses: u64,
 }
@@ -139,10 +136,6 @@ where
         grouped_canonical_goals.entry(key).or_default().push(idx);
     }
 
-    let thread_count = jobs
-        .map(|j| j.get())
-        .unwrap_or_else(rayon::current_num_threads);
-
     let mut combined_results = vec![Default::default(); canonical_goals.len()];
     let mut combined_hits = 0;
     let mut combined_misses = 0;
@@ -151,47 +144,18 @@ where
         goal_group.clear();
         goal_group.extend(page_group.iter().map(|&i| canonical_goals[i].clone()));
 
-        let (result, hits, misses) = if thread_count == 1 {
-            let search = TopDownSearch::<'d> {
-                db,
-                top_k,
-                thread_idx: 0,
-                thread_count: 1,
-                hits: 0,
-                misses: 1,
-            };
-            let r = BlockSearch::synthesize(&goal_group, &search, None);
-            (r, search.hits, search.misses)
-        } else {
-            let tasks = (0..thread_count)
-                .zip(std::iter::repeat(canonical_goals.clone()))
-                .collect::<Vec<_>>();
-            // Collect all and take the result from the first call so that we get
-            // deterministic results.
-            tasks
-                .into_par_iter()
-                .map(|(i, gs)| {
-                    let search = TopDownSearch::<'d> {
-                        db,
-                        top_k,
-                        thread_idx: i,
-                        thread_count,
-                        hits: 0,
-                        misses: 1,
-                    };
-                    let r = BlockSearch::synthesize(&gs, &search, None);
-                    (r, search.hits, search.misses)
-                })
-                .collect::<Vec<_>>()
-                .pop()
-                .unwrap()
+        let search = TopDownSearch::<'d> {
+            db,
+            top_k,
+            hits: 0,
+            misses: 1,
         };
-
+        let result = BlockSearch::synthesize(&goal_group, &search, None);
         for (r, i) in result.into_iter().zip(page_group) {
             combined_results[*i] = r;
         }
-        combined_hits += hits;
-        combined_misses += misses;
+        combined_hits += search.hits;
+        combined_misses += search.misses;
     }
 
     (combined_results, combined_hits, combined_misses)
@@ -549,11 +513,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
         let mut partial_impls = Vec::new();
         let mut partial_impls_incomplete = 0;
 
-        let all_actions = Tgt::actions(&goal.0).collect::<Vec<_>>();
-        let initial_skip = search.thread_idx * all_actions.len() / search.thread_count;
-
-        for action_num in (initial_skip..all_actions.len()).chain(0..initial_skip) {
-            let action = &all_actions[action_num];
+        for (action_num, action) in Tgt::actions(&goal.0).enumerate() {
             match action.top_down_solver(&goal) {
                 Ok(solver) => {
                     let partial_impl_subspecs = solver.subspecs().collect::<Vec<_>>();
