@@ -1,4 +1,4 @@
-use super::common_actions::{bufferize_actions, move_actions, split_actions, tile_out_actions};
+use super::common_actions::{move_actions, split_actions, tile_out_actions};
 use crate::codegen::c_utils::VecType;
 use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
@@ -6,6 +6,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::layout::{batched_col_major, col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
+use crate::scheduling::bufferize::Bufferize;
 use crate::scheduling::select::Select;
 use crate::scheduling::spatial_split::SpatialSplit;
 use crate::scheduling::to_accum::ToAccum;
@@ -13,7 +14,7 @@ use crate::scheduling::Action;
 use crate::shape;
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{Kernel, MemoryLevel, Target, TargetId, LEVEL_COUNT};
-use crate::tensorspec::{TensorSpec, TensorSpecAux};
+use crate::tensorspec::{gen_vector_sizes, TensorSpec, TensorSpecAux};
 use crate::views::View;
 
 use divrem::DivRem;
@@ -412,7 +413,7 @@ impl<T: CpuTarget> Target for T {
                 _serial_only,
             ) => match typ {
                 PrimitiveSpecType::Matmul { accum } if !*accum => {
-                    Box::new(iter.chain(once(ToAccum::default().into())))
+                    Box::new(iter.chain(once(ToAccum.into())))
                 }
                 PrimitiveSpecType::Matmul { accum } if *accum => {
                     Box::new(iter.chain(split_actions(spec)))
@@ -420,12 +421,12 @@ impl<T: CpuTarget> Target for T {
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
                         if spec.can_spatial_split() {
-                            Box::new(iter.chain(once(SpatialSplit::default().into())))
+                            Box::new(iter.chain(once(SpatialSplit.into())))
                         } else {
                             Box::new(iter)
                         }
                     } else {
-                        Box::new(iter.chain(once(ToAccum::default().into())))
+                        Box::new(iter.chain(once(ToAccum.into())))
                     }
                 }
                 _ => Box::new(iter),
@@ -1516,6 +1517,56 @@ impl CanonicalBimap for CpuMemoryLevel {
     fn bimap() -> Self::Bimap {
         CpuMemoryLevelBimap
     }
+}
+
+fn bufferize_actions<Tgt: Target>(
+    spec: &LogicalSpec<Tgt>,
+) -> impl Iterator<Item = Action<Tgt>> + '_ {
+    let LogicalSpec::Compose {
+        components,
+        operand_auxes: _,
+        serial_only: _,
+    } = spec
+    else {
+        panic!("bufferize_actions called on non-Compose Spec");
+    };
+
+    let mut results = vec![];
+
+    for index in 0..(components.len() - 1) {
+        let comp = &components[index + 1];
+        let comp_out_idx = comp.typ.unique_output_index().unwrap();
+        let intermediate_shape = comp.parameter_shape(comp_out_idx);
+        let intermediate_dtype = comp.dtypes[comp_out_idx];
+
+        for level in Tgt::levels() {
+            let vector_bytes = level.vector_bytes();
+
+            for layout in Tgt::move_destination_layouts(&intermediate_shape, intermediate_dtype) {
+                // TODO: Need to implement `can_move_to`-style logic here.
+
+                if !vector_bytes.is_empty() {
+                    for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
+                        results.push(Action::Bufferize(Bufferize {
+                            index,
+                            level,
+                            layout: layout.clone(),
+                            vector_size: Some(vector_size),
+                        }));
+                    }
+                } else {
+                    results.push(Action::Bufferize(Bufferize {
+                        index,
+                        level,
+                        layout,
+                        vector_size: None,
+                    }));
+                }
+            }
+        }
+    }
+
+    results.into_iter()
 }
 
 fn physicaltransposebyte_applies_to_operands<Tgt>(

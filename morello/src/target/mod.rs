@@ -1,5 +1,5 @@
 mod arm;
-mod common_actions;
+pub(crate) mod common_actions; // TODO: Drop pub(crate) once MoveSolver doesn't need this.
 pub(crate) mod cpu;
 mod x86;
 

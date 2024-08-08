@@ -1,26 +1,19 @@
 //! Scheduling actions shared between targets.
-
-use std::iter::{self, once};
-
-use itertools::Either;
-
-use super::{MemoryLevel, Target};
 use crate::{
     common::{DimSize, Shape},
     scheduling::{
-        bufferize::Bufferize,
         moves::Move,
-        tiling::{Split, TileOut},
+        tiling::{Split, TileOut, MULTI_DIM_TILING},
         Action,
     },
     spec::{dim_range, LogicalSpec, PrimitiveBasics, PrimitiveSpecType},
-    tensorspec::{gen_vector_sizes, gen_vector_sizes_opt},
+    target::{MemoryLevel, Target},
+    tensorspec::gen_vector_sizes_opt,
     utils::is_power_of_two_u32,
 };
+use itertools::Either;
+use std::iter::{self, once};
 
-/// Whether `tile_out` actions should tile in all dimensions per Spec.
-const MULTI_DIM_TILING: bool = false;
-/// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
 const MOVE_RESULTS_CAPACITY: usize = 16;
 
 // TODO: Avoid boxed trait object return type
@@ -109,56 +102,6 @@ pub fn split_actions<Tgt: Target>(
                 && operands[1].is_valid_tile_shape(&[b, new_k, n], false)
         })
         .map(|k| Action::Split(Split { k }))
-}
-
-pub fn bufferize_actions<Tgt: Target>(
-    spec: &LogicalSpec<Tgt>,
-) -> impl Iterator<Item = Action<Tgt>> + '_ {
-    let LogicalSpec::Compose {
-        components,
-        operand_auxes: _,
-        serial_only: _,
-    } = spec
-    else {
-        panic!("bufferize_actions called on non-Compose Spec");
-    };
-
-    let mut results = vec![];
-
-    for index in 0..(components.len() - 1) {
-        let comp = &components[index + 1];
-        let comp_out_idx = comp.typ.unique_output_index().unwrap();
-        let intermediate_shape = comp.parameter_shape(comp_out_idx);
-        let intermediate_dtype = comp.dtypes[comp_out_idx];
-
-        for level in Tgt::levels() {
-            let vector_bytes = level.vector_bytes();
-
-            for layout in Tgt::move_destination_layouts(&intermediate_shape, intermediate_dtype) {
-                // TODO: Need to implement `can_move_to`-style logic here.
-
-                if !vector_bytes.is_empty() {
-                    for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
-                        results.push(Action::Bufferize(Bufferize {
-                            index,
-                            level,
-                            layout: layout.clone(),
-                            vector_size: Some(vector_size),
-                        }));
-                    }
-                } else {
-                    results.push(Action::Bufferize(Bufferize {
-                        index,
-                        level,
-                        layout,
-                        vector_size: None,
-                    }));
-                }
-            }
-        }
-    }
-
-    results.into_iter()
 }
 
 pub fn move_actions<Tgt: Target>(

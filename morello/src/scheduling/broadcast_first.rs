@@ -3,7 +3,7 @@ use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
-use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{ActionT, ApplyError, BottomUpSolver, Cost, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
@@ -18,7 +18,12 @@ pub struct BroadcastFirst<Tgt: Target> {
     pub broadcast_vector_size: Option<DimSize>,
 }
 
+#[derive(Default)]
+pub struct BroadcastFirstSolver<Tgt>(std::marker::PhantomData<Tgt>);
+
 impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
+    type BSolver = BroadcastFirstSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let head = match &spec.0 {
             LogicalSpec::Primitive(basics, ..) => basics,
@@ -75,5 +80,25 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
             parameters: operands,
             spec: Some(spec.clone()),
         }))
+    }
+}
+
+impl<Tgt: Target> BottomUpSolver for BroadcastFirstSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Tgt>,
+        high: &Spec<Tgt>,
+    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+        todo!()
     }
 }

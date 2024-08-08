@@ -1,10 +1,11 @@
 use crate::common::{DimSize, Dtype};
+use crate::cost::Cost;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{ActionT, ApplyError, BottomUpSolver, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
@@ -33,7 +34,15 @@ pub struct ToSoftmaxPartsRecompute<Tgt: Target> {
     pub denominator_vector_size: Option<DimSize>,
 }
 
+#[derive(Default)]
+pub struct ToSoftmaxPartsSolver<Tgt>(std::marker::PhantomData<Tgt>);
+
+#[derive(Default)]
+pub struct ToSoftmaxPartsRecomputeSolver<Tgt>(std::marker::PhantomData<Tgt>);
+
 impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
+    type BSolver = ToSoftmaxPartsSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let LogicalSpec::Primitive(basics, _, _) = &spec.0 else {
             // TODO: Specialize NotApplicableReason.
@@ -116,6 +125,8 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
 }
 
 impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
+    type BSolver = ToSoftmaxPartsRecomputeSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let LogicalSpec::Primitive(basics, _, _) = &spec.0 else {
             // TODO: Specialize NotApplicableReason.
@@ -193,6 +204,46 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
             parameters: operands,
             spec: Some(spec.clone()),
         }))
+    }
+}
+
+impl<Tgt: Target> BottomUpSolver for ToSoftmaxPartsSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(&self, spec: &Spec<Self::Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Tgt>,
+        high: &Spec<Tgt>,
+    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+        todo!()
+    }
+}
+
+impl<Tgt: Target> BottomUpSolver for ToSoftmaxPartsRecomputeSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(&self, spec: &Spec<Self::Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Tgt>,
+        high: &Spec<Tgt>,
+    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+        todo!()
     }
 }
 

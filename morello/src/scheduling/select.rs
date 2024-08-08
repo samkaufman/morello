@@ -1,16 +1,22 @@
 use crate::imp::kernels::KernelApp;
 use crate::imp::ImplNode;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
-use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{ActionT, ApplyError, BottomUpSolver, NotApplicableReason};
 use crate::spec::Spec;
 use crate::target::{Kernel, Target};
 use crate::views::{Param, ViewE};
 use serde::{Deserialize, Serialize};
 
+// TODO: Remove 'force' bool from Select
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Select<Tgt: Target>(pub Tgt::Kernel, pub bool);
 
+#[derive(Default)]
+pub struct SelectSolver<Tgt>(std::marker::PhantomData<Tgt>);
+
 impl<Tgt: Target> ActionT<Tgt> for Select<Tgt> {
+    type BSolver = SelectSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let Select(k, force) = self;
 
@@ -52,5 +58,28 @@ impl<Tgt: Target> ActionT<Tgt> for Select<Tgt> {
             arguments,
             spec: Some(spec.clone()),
         }))
+    }
+}
+
+impl<Tgt: Target> BottomUpSolver for SelectSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(
+        &self,
+        spec: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)> {
+        todo!()
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Self::Tgt>,
+        high: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)> {
+        todo!()
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Self::Tgt>, cost: &crate::cost::Cost) {
+        todo!()
     }
 }
