@@ -117,42 +117,35 @@ where
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
 
-    let canonical_goals = goals
-        .iter()
-        .map(|g| {
-            let mut g = g.clone();
-            g.canonicalize()
-                .expect("should be possible to canonicalize goal Spec");
-            g
-        })
-        .collect::<Vec<_>>();
+    // Group goals by database page.
+    let mut grouped_canonical_goals = HashMap::<_, (Vec<_>, Vec<usize>)>::new();
+    for (idx, goal) in goals.iter().enumerate() {
+        let mut canonical_goal = goal.clone();
+        canonical_goal
+            .canonicalize()
+            .expect("should be possible to canonicalize goal Spec");
 
-    // Group goal Specs by database page.
-    let mut grouped_canonical_goals = HashMap::<_, Vec<usize>>::new();
-    for (idx, goal) in canonical_goals.iter().enumerate() {
-        let page = db.page_id(goal);
+        let page = db.page_id(&canonical_goal);
         let key = (page.table_key, page.superblock_id);
-        // TODO: prefetch here?
-        grouped_canonical_goals.entry(key).or_default().push(idx);
+        let group_tuple = grouped_canonical_goals.entry(key).or_default();
+        group_tuple.0.push(canonical_goal);
+        group_tuple.1.push(idx);
     }
 
-    let mut combined_results = vec![Default::default(); canonical_goals.len()];
+    // Synthesize each group with BlockSearch. Scatter results into combined_results.
+    let mut combined_results = vec![Default::default(); goals.len()];
     let mut combined_hits = 0;
     let mut combined_misses = 0;
-    let mut goal_group = Vec::new();
-    for page_group in grouped_canonical_goals.values() {
-        goal_group.clear();
-        goal_group.extend(page_group.iter().map(|&i| canonical_goals[i].clone()));
-
+    for (page_group, original_indices) in grouped_canonical_goals.values() {
         let search = TopDownSearch::<'d> {
             db,
             top_k,
             hits: 0,
             misses: 1,
         };
-        let result = BlockSearch::synthesize(&goal_group, &search, None);
-        for (r, i) in result.into_iter().zip(page_group) {
-            combined_results[*i] = r;
+        let result = BlockSearch::synthesize(page_group, &search, None);
+        for (r, &i) in result.into_iter().zip(original_indices) {
+            combined_results[i] = r;
         }
         combined_hits += search.hits;
         combined_misses += search.misses;
