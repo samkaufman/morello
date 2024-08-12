@@ -15,8 +15,8 @@ use crate::scheduling::ActionT as _;
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
-use blocks::{RTreeBlock, RTreeBlockGeneric};
 
+use blocks::RTreeBlock;
 use divrem::DivRem;
 use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
@@ -387,9 +387,11 @@ impl FilesDatabase {
                 .map(|(_, r)| r.clone())
                 .collect::<Vec<_>>();
             let new_block = if USE_RTREE {
-                let mut tree = Box::new(RTreeBlock::empty(dim_ranges.len()));
-                tree.fill_region(self.k, &dim_ranges, &normalized_decisions);
-                DbBlock::RTree(tree)
+                DbBlock::RTree(Box::new(RTreeBlock::with_single_rect(
+                    self.k,
+                    &dim_ranges,
+                    &normalized_decisions,
+                )))
             } else {
                 DbBlock::Whole(Box::new(WholeBlock::partially_filled::<Tgt>(
                     self.k,
