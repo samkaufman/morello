@@ -236,14 +236,9 @@ where
     info!("Synthesizing {}", spec);
 
     let start_time = std::time::Instant::now();
-    let (_, hits, misses) = morello::search::top_down(db, &spec, K.into());
+
+    morello::search::top_down(db, &spec, K.into());
     info!("top_down took {:?}", start_time.elapsed());
-    info!(
-        "top_down missed {} times ({:.2}% of {})",
-        misses,
-        misses as f32 / (hits + misses) as f32,
-        hits + misses
-    );
 
     let Some(results) = db.get_impl(&spec) else {
         panic!("No Impl found");

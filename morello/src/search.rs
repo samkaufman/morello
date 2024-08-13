@@ -24,8 +24,6 @@ struct TopDownSearch<'d> {
     top_k: usize,
     thread_idx: usize,
     thread_count: usize,
-    hits: u64,
-    misses: u64,
 }
 
 struct BlockSearch<'a, 'd, Tgt: Target> {
@@ -88,26 +86,25 @@ enum RequestsMapRef<'a, Tgt: Target> {
 }
 
 // Computes an optimal Impl for `goal` and stores it in `db`.
-pub fn top_down<Tgt>(
-    db: &FilesDatabase,
-    goal: &Spec<Tgt>,
-    top_k: usize,
-) -> (Vec<(ActionNum, Cost)>, u64, u64)
+pub fn top_down<Tgt>(db: &FilesDatabase, goal: &Spec<Tgt>, top_k: usize) -> Vec<(ActionNum, Cost)>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     // TODO: Just return the ActionCostVec directly
-    let (r, h, m) = top_down_many(db, slice::from_ref(goal), top_k);
-    (r.into_iter().next().unwrap().0, h, m)
+    top_down_many(db, slice::from_ref(goal), top_k)
+        .into_iter()
+        .next()
+        .unwrap()
+        .0
 }
 
 pub fn top_down_many<'d, Tgt>(
     db: &'d FilesDatabase,
     goals: &[Spec<Tgt>],
     top_k: usize,
-) -> (Vec<ActionCostVec>, u64, u64)
+) -> Vec<ActionCostVec>
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -135,27 +132,21 @@ where
 
     // Synthesize each group with BlockSearch. Scatter results into combined_results.
     let mut combined_results = vec![Default::default(); goals.len()];
-    let mut combined_hits = 0;
-    let mut combined_misses = 0;
     for (page_group, original_indices) in grouped_canonical_goals.values() {
         let search = TopDownSearch::<'d> {
             db,
             top_k,
             thread_idx: 0,
             thread_count: 1,
-            hits: 0,
-            misses: 1,
         };
         let result = BlockSearch::synthesize(page_group, &search, None);
 
         for (r, &i) in result.into_iter().zip(original_indices) {
             combined_results[i] = r;
         }
-        combined_hits += search.hits;
-        combined_misses += search.misses;
     }
 
-    (combined_results, combined_hits, combined_misses)
+    combined_results
 }
 
 impl<'a, 'd, Tgt> BlockSearch<'a, 'd, Tgt>
@@ -857,14 +848,14 @@ mod tests {
             let db = FilesDatabase::new(None, false, 1, 128, 1);
 
             // Solve the first, lower Spec.
-            let (lower_result_vec, _, _) = top_down(&db, &spec, 1);
+            let lower_result_vec = top_down(&db, &spec, 1);
 
             // If the lower spec can't be solved, then there is no way for the raised Spec to have
             // a worse solution, so we can return here.
             if let Some((_, lower_cost)) = lower_result_vec.first() {
                 // Check that the raised result has no lower cost and does not move from being
                 // possible to impossible.
-                let (raised_result, _, _) = top_down(&db, &raised_spec, 1);
+                let raised_result = top_down(&db, &raised_spec, 1);
                 let (_, raised_cost) = raised_result
                     .first()
                     .expect("raised result should be possible");
@@ -878,14 +869,14 @@ mod tests {
             spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let db = FilesDatabase::new(None, false, 1, 128, 1);
-            let (first_solutions, _, _) = top_down(&db, &spec, 1);
+            let first_solutions = top_down(&db, &spec, 1);
             let first_peak = if let Some(first_sol) = first_solutions.first() {
                 first_sol.1.peaks.clone()
             } else {
                 MemVec::zero::<X86Target>()
             };
             let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
-            let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1);
+            let lower_solutions = top_down(&db, &lower_spec, 1);
             assert_eq!(first_solutions, lower_solutions);
         }
 
@@ -1127,7 +1118,7 @@ mod tests {
         );
         let db = FilesDatabase::new(None, false, 1, 128, 1);
 
-        let (action_costs, _, _) = top_down(&db, &spec, 1);
+        let action_costs = top_down(&db, &spec, 1);
 
         // Check that the synthesized Impl, include all sub-Impls are in the database. `get_impl`
         // requires all dependencies, so we use that.
@@ -1145,14 +1136,14 @@ mod tests {
         );
 
         let db = FilesDatabase::new(None, false, 1, 128, 1);
-        let (first_solutions, _, _) = top_down(&db, &spec, 1);
+        let first_solutions = top_down(&db, &spec, 1);
         let first_peak = if let Some(first_sol) = first_solutions.first() {
             first_sol.1.peaks.clone()
         } else {
             MemVec::zero::<X86Target>()
         };
         let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
-        let (lower_solutions, _, _) = top_down(&db, &lower_spec, 1);
+        let lower_solutions = top_down(&db, &lower_spec, 1);
         assert_eq!(first_solutions, lower_solutions);
     }
 

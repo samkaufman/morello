@@ -300,7 +300,7 @@ fn main_per_db(
                             ..worklist
                                 .len()
                                 .min(subworklist_offset + SUBWORKLIST_MAX_SIZE)];
-                        stage_results.extend(top_down_many(&db, subworklist, 1).0);
+                        stage_results.extend(top_down_many(&db, subworklist, 1));
                         if let Some(pb) = &stage_progress_bar {
                             pb.inc(subworklist.len().try_into().unwrap());
                         }
