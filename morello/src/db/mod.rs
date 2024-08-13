@@ -44,7 +44,7 @@ use {
 use crate::layout::{row_major, PhysDim};
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
-type TableKey = (SpecKey, Vec<(Layout, u8, u32)>);
+type TableKey = (SpecKey, Vec<(Layout, u32)>);
 type SuperBlockKey = DbKey;
 type SuperBlockContents = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionIdx = u16;
@@ -1315,11 +1315,10 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
                     .join("_"),
             ),
     };
-    for (l, _, _) in table_key_rest {
+    for (l, _) in table_key_rest {
         path = path.join(l.to_string());
     }
-    path.join(table_key_rest.iter().map(|(_, d, _)| d).join("_"))
-        .join(table_key_rest.iter().map(|(_, _, v)| v).join("_"))
+    path.join(table_key_rest.iter().map(|(_, v)| v).join("_"))
         .join(block_pt.iter().map(|p| p.to_string()).join("_"))
 }
 
@@ -1374,22 +1373,9 @@ fn superblock_key_from_subpath(components: &[path::Component]) -> Result<TableKe
         _ => return Err(()),
     };
 
-    // Collect Layouts.
     let layouts: Vec<Layout> = parse_layouts_component(into_normal_component(&components[2])?)?;
-
-    // Collect levels-as-integers and vector sizes-as-integers.
-    let levels = parse_underscored_int_tuple(into_normal_component(&components[3])?)?;
     let vector_sizes = parse_underscored_int_tuple(into_normal_component(&components[4])?)?;
-
-    Ok((
-        spec_key,
-        layouts
-            .into_iter()
-            .zip(levels.into_iter().map(|x| x.try_into().unwrap()))
-            .zip(vector_sizes)
-            .map(|((la, le), v)| (la, le, v))
-            .collect(),
-    ))
+    Ok((spec_key, layouts.into_iter().zip(vector_sizes).collect()))
 }
 
 #[cfg(feature = "db-stats")]

@@ -555,30 +555,30 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
-    type Codomain = ((Layout, u8, u32), [BimapInt; 2]);
+    type Codomain = ((Layout, u32), [BimapInt; 3]);
 
     fn apply(&self, aux: &TensorSpecAux<Tgt>) -> Self::Codomain {
+        let level_int = BiMap::apply(&Tgt::Level::bimap(), &aux.level);
         (
             (
                 aux.layout.clone(),
-                BiMap::apply(&Tgt::Level::bimap(), &aux.level),
                 aux.vector_size.map(|v| v.get()).unwrap_or(0),
             ),
-            [aux.contig.into(), aux.aligned as _],
+            [level_int.into(), aux.contig.into(), aux.aligned as _],
         )
     }
 
     fn apply_inverse(&self, v: &Self::Codomain) -> Self::Domain {
-        let ((layout, level_val, vector_size), [contig, aligned_val]) = v;
+        let ((ref layout, vector_size), [level_val, contig, aligned_val]) = *v;
 
         // `unwrap_or_else` rather than `unwrap` to avoid needing a Debug bound
-        let level = BiMap::apply_inverse(&Tgt::Level::bimap(), level_val);
+        let level = BiMap::apply_inverse(&Tgt::Level::bimap(), &level_val.try_into().unwrap());
         TensorSpecAux {
             layout: layout.clone(),
-            contig: (*contig).try_into().unwrap(),
-            aligned: *aligned_val != 0,
+            contig: contig.try_into().unwrap(),
+            aligned: aligned_val != 0,
             level,
-            vector_size: NonZeroU32::new(*vector_size).map(Some).unwrap_or(None),
+            vector_size: NonZeroU32::new(vector_size).map(Some).unwrap_or(None),
         }
     }
 }
