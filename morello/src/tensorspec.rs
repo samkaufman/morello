@@ -1,11 +1,10 @@
-use itertools::iproduct;
+use itertools::{iproduct, Itertools};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::iter::once;
-use std::num::NonZeroU32;
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
@@ -41,9 +40,10 @@ pub struct TensorSpecAuxSurMap<Tgt: Target> {
     phantom: std::marker::PhantomData<Tgt>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct TensorSpecAuxNonDepBimap<Tgt: Target> {
-    phantom: std::marker::PhantomData<Tgt>,
+    pub dtype: Dtype,
+    pub phantom: std::marker::PhantomData<Tgt>,
 }
 
 #[cfg(test)]
@@ -128,11 +128,24 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         if shape.is_empty() {
             panic!("Invalid shape: {:?}", shape);
         }
-        if aux.vector_size.is_some() != aux.level.vector_rf() {
-            panic!(
-                "vector_size must be specified if and only if the bank ({:?}) is a vector register file", aux.level
-            )
-        }
+        match (aux.vector_size, aux.level.vector_bytes()) {
+            (None, []) => {}
+            (None, [_, ..]) | (Some(_), []) => {
+                panic!(
+                    "vector_size must be specified if and only if the bank ({:?}) is a vector register file", aux.level
+                );
+            }
+            (Some(vector_size), v) => {
+                let vector_bytes = vector_size.get() * u32::from(dtype.size());
+                if !v.contains(&vector_bytes) {
+                    // TODO: Remove vector_bytes from panic message
+                    panic!(
+                        "Invalid vector size {:?} (bytes: {}) for dtype {:?} and level {:?} (poss.: {:?})",
+                        vector_size, vector_bytes, dtype, aux.level, v
+                    );
+                }
+            }
+        };
         TensorSpec { shape, dtype, aux }
     }
 
@@ -382,17 +395,17 @@ fn arb_noncanon_tensorspec<Tgt: Target>(
         .iter()
         .map(|m| 1..=m.get())
         .collect::<Vec<_>>()
-        .prop_flat_map(|shp| {
-            let shp = TensorSpecArbMaxShape(Shape::from(
+        .prop_flat_map(|shp| (Just(shp), any::<Dtype>()))
+        .prop_flat_map(|(shp, dtype)| {
+            let shp = Shape::from(
                 shp.iter()
                     .map(|&x| DimSize::new(x).unwrap())
                     .collect::<Vec<_>>(),
-            ));
-            let aux_strategy = TensorSpecAux::arbitrary_with(shp.clone());
-            let dtype_strategy = any::<Dtype>();
-            (Just(shp), dtype_strategy, aux_strategy)
+            );
+            let aux_strategy = arb_tensorspecaux(&shp, dtype);
+            (Just(shp), Just(dtype), aux_strategy)
         })
-        .prop_map(|(shp, dtype, aux)| TensorSpec::new_noncanon_with_aux(shp.0, dtype, aux))
+        .prop_map(|(shp, dtype, aux)| TensorSpec::new_noncanon_with_aux(shp, dtype, aux))
 }
 
 impl<Tgt: Target> TensorSpecAux<Tgt> {
@@ -469,16 +482,20 @@ impl<Tgt: Target> Display for TensorSpecAux<Tgt> {
 
 #[cfg(test)]
 impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpecAux<Tgt> {
-    type Parameters = TensorSpecArbMaxShape;
+    type Parameters = (TensorSpecArbMaxShape, Option<Dtype>);
     type Strategy = proptest::strategy::BoxedStrategy<TensorSpecAux<Tgt>>;
 
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
         use proptest::prelude::*;
 
-        let shape = args.0;
-        any::<Dtype>()
-            .prop_flat_map(move |d| arb_tensorspecaux(&shape, d))
-            .boxed()
+        let (shape, dtype) = args;
+        if let Some(dtype) = dtype {
+            arb_tensorspecaux(&shape.0, dtype).boxed()
+        } else {
+            any::<Dtype>()
+                .prop_flat_map(move |d| arb_tensorspecaux(&shape.0, d))
+                .boxed()
+        }
     }
 }
 
@@ -548,6 +565,15 @@ where
     }
 }
 
+impl<Tgt: Target> TensorSpecAuxNonDepBimap<Tgt> {
+    pub fn new(dtype: Dtype) -> Self {
+        Self {
+            dtype,
+            phantom: std::marker::PhantomData,
+        }
+    }
+}
+
 impl<Tgt> BiMap for TensorSpecAuxNonDepBimap<Tgt>
 where
     Tgt: Target,
@@ -555,30 +581,55 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
-    type Codomain = ((Layout, u32), [BimapInt; 3]);
+    type Codomain = ((Layout,), [BimapInt; 4]);
 
     fn apply(&self, aux: &TensorSpecAux<Tgt>) -> Self::Codomain {
         let level_int = BiMap::apply(&Tgt::Level::bimap(), &aux.level);
+        let tgt_vector_bytes = Tgt::Level::vector_bytes(&aux.level);
+        debug_assert!(
+            tgt_vector_bytes.iter().tuple_windows().all(|(a, b)| a <= b),
+            "target's vector_bytes must be sorted"
+        );
+        let vector_size_idx = aux
+            .vector_size
+            .map(|v| {
+                let vector_bytes = v.get() * u32::from(self.dtype.size());
+                tgt_vector_bytes.binary_search(&vector_bytes).unwrap()
+            })
+            .unwrap_or(0);
         (
-            (
-                aux.layout.clone(),
-                aux.vector_size.map(|v| v.get()).unwrap_or(0),
-            ),
-            [level_int.into(), aux.contig.into(), aux.aligned as _],
+            (aux.layout.clone(),),
+            [
+                level_int.into(),
+                aux.contig.into(),
+                aux.aligned as _,
+                vector_size_idx.try_into().unwrap(),
+            ],
         )
     }
 
     fn apply_inverse(&self, v: &Self::Codomain) -> Self::Domain {
-        let ((ref layout, vector_size), [level_val, contig, aligned_val]) = *v;
+        let ((ref layout,), [level_val, contig, aligned_val, vector_size_idx]) = *v;
 
         // `unwrap_or_else` rather than `unwrap` to avoid needing a Debug bound
         let level = BiMap::apply_inverse(&Tgt::Level::bimap(), &level_val.try_into().unwrap());
+
+        let tgt_vector_bytes = Tgt::Level::vector_bytes(&level);
+        let vector_size = if tgt_vector_bytes.is_empty() {
+            assert_eq!(vector_size_idx, 0);
+            None
+        } else {
+            let b = tgt_vector_bytes[usize::try_from(vector_size_idx).unwrap()]
+                / u32::from(self.dtype.size());
+            Some(DimSize::new(b).unwrap())
+        };
+
         TensorSpecAux {
             layout: layout.clone(),
             contig: contig.try_into().unwrap(),
             aligned: aligned_val != 0,
             level,
-            vector_size: NonZeroU32::new(vector_size).map(Some).unwrap_or(None),
+            vector_size,
         }
     }
 }
@@ -700,6 +751,7 @@ fn arb_tensorspecaux<Tgt: Target>(
 
 #[cfg(test)]
 mod tests {
+    use super::TensorSpecAux;
     use super::*;
     use crate::common::Dtype;
     use crate::layout::{row_major, Layout, PhysDim};
@@ -822,6 +874,50 @@ mod tests {
         };
         tspec.canonicalize().unwrap();
         assert_eq!(tspec.aux.contig, 3);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_cannot_build_tensorspec_with_invalid_vector_size_canon() {
+        TensorSpec::<X86Target>::new_canon(
+            shape![1, 1, 1],
+            Dtype::Uint32,
+            0,
+            false,
+            CpuMemoryLevel::VRF,
+            layout![(0, PhysDim::Packed(4))],
+            Some(nz!(16u32)),
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_cannot_build_tensorspec_with_invalid_vector_size_noncanon() {
+        TensorSpec::<X86Target>::new_noncanon(
+            shape![1, 1, 1],
+            Dtype::Uint32,
+            0,
+            false,
+            CpuMemoryLevel::VRF,
+            layout![(0, PhysDim::Packed(4))],
+            Some(nz!(16u32)),
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_cannot_build_tensorspec_with_invalid_vector_size_noncanon_with_aux() {
+        TensorSpec::<X86Target>::new_noncanon_with_aux(
+            shape![1, 1, 1],
+            Dtype::Uint32,
+            TensorSpecAux {
+                contig: 0,
+                aligned: false,
+                level: CpuMemoryLevel::VRF,
+                layout: layout![(0, PhysDim::Packed(4))],
+                vector_size: Some(nz!(16u32)),
+            },
+        );
     }
 
     fn shared_tensorspec_canonicalize_should_be_idempodent<Tgt: Target>(

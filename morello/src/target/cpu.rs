@@ -1927,7 +1927,7 @@ mod tests {
             true,
             CpuMemoryLevel::VRF,
             row_major(2),
-            Some(nz!(16u32)),
+            Some(nz!(8u32)),
         );
         let arg1 = TensorSpec::new_canon(
             shape![2, 32],
@@ -1941,7 +1941,7 @@ mod tests {
         let parameter0: Param<X86Target> = Param::new(0, arg0);
         let parameter1: Param<X86Target> = Param::new(1, arg1);
         let cost = CpuKernel::VectorAssign.main_cost(&[parameter0, parameter1]);
-        assert_eq!(cost, 4 * ASSIGN_INST_COST);
+        assert_eq!(cost, 8 * ASSIGN_INST_COST);
     }
 
     fn assert_unique_layouts(layouts: &[Layout]) {

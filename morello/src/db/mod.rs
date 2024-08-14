@@ -27,6 +27,7 @@ use wtinylfu::WTinyLfuCache;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
@@ -44,7 +45,7 @@ use {
 use crate::layout::{row_major, PhysDim};
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
-type TableKey = (SpecKey, Vec<(Layout, u32)>);
+type TableKey = (SpecKey, Vec<(Layout,)>);
 type SuperBlockKey = DbKey;
 type SuperBlockContents = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionIdx = u16;
@@ -428,7 +429,7 @@ impl FilesDatabase {
                 PrimitiveBasicsBimap {
                     binary_scale_shapes: self.binary_scale_shapes,
                 },
-                |_: &[DimSize], _| TensorSpecAuxNonDepBimap::<Tgt>::default(),
+                |_: &[DimSize], dtype| TensorSpecAuxNonDepBimap::new(dtype),
             ),
             memory_limits_bimap: MemoryLimitsBimap::default(),
         };
@@ -1315,11 +1316,10 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
                     .join("_"),
             ),
     };
-    for (l, _) in table_key_rest {
+    for (l,) in table_key_rest {
         path = path.join(l.to_string());
     }
-    path.join(table_key_rest.iter().map(|(_, v)| v).join("_"))
-        .join(block_pt.iter().map(|p| p.to_string()).join("_"))
+    path.join(block_pt.iter().map(|p| p.to_string()).join("_"))
 }
 
 #[cfg(feature = "db-stats")]
@@ -1374,8 +1374,10 @@ fn superblock_key_from_subpath(components: &[path::Component]) -> Result<TableKe
     };
 
     let layouts: Vec<Layout> = parse_layouts_component(into_normal_component(&components[2])?)?;
-    let vector_sizes = parse_underscored_int_tuple(into_normal_component(&components[4])?)?;
-    Ok((spec_key, layouts.into_iter().zip(vector_sizes).collect()))
+    Ok((
+        spec_key,
+        layouts.into_iter().map(|layout| (layout,)).collect(),
+    ))
 }
 
 #[cfg(feature = "db-stats")]
@@ -1448,14 +1450,6 @@ fn parse_layouts_component(part: &str) -> Result<Vec<Layout>, ()> {
         }
     }
     Ok(layouts)
-}
-
-#[cfg(feature = "db-stats")]
-fn parse_underscored_int_tuple(input: &str) -> Result<Vec<u32>, ()> {
-    input
-        .split('_')
-        .map(|s| s.parse().map_err(|_| ()))
-        .collect()
 }
 
 // For some reason, [Prehashed]'s [Clone] impl requires that the value be [Copy].

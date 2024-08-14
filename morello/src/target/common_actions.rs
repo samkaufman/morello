@@ -6,7 +6,7 @@ use itertools::Either;
 
 use super::{MemoryLevel, Target};
 use crate::{
-    common::{DimSize, Shape},
+    common::{DimSize, Dtype, Shape},
     scheduling::{
         bufferize::Bufferize,
         moves::Move,
@@ -179,11 +179,11 @@ pub fn move_actions<Tgt: Target>(
                     iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
                 {
                     results.extend(
-                        gen_vector_sizes_opt(operand_dtype, level.vector_bytes()).map(
+                        gen_vector_sizes_opt(destination_dtype, level.vector_bytes()).map(
                             |vector_size| {
                                 // This may return Moves with identical source and destination
-                                // TensorSpecs (i.e., within-level copies). These will be filtered in
-                                // [apply_with_aux].
+                                // TensorSpecs (i.e., within-level copies). These will be filtered
+                                // in [apply_with_aux].
                                 Action::Move(Move {
                                     source_idx: i,
                                     destination_dtype,

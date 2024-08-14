@@ -1816,23 +1816,24 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     // in the case of the head component (it is not given for the others).  This is
                     // important when the head component is, for example, a Softmax where the input
                     // shape is compatible with many output shapes.
-                    let new_output_shape: Shape = if component_idx == 0 {
-                        new_operands.last().unwrap().shape().to_vec()
+                    let (new_output_shape, new_output_dtype) = if component_idx == 0 {
+                        let last_operand = new_operands.last().unwrap();
+                        (last_operand.shape().to_vec(), last_operand.dtype())
                     } else {
                         let inp_shapes = component_inputs
                             .iter()
                             .map(|t| t.0.as_slice())
                             .collect::<Vec<_>>();
-                        component
-                            .typ
-                            .infer_unique_output_shape(&inp_shapes)
-                            .unwrap()
+                        (
+                            component
+                                .typ
+                                .infer_unique_output_shape(&inp_shapes)
+                                .unwrap(),
+                            component.dtypes[component.typ.unique_output_index().unwrap()],
+                        )
                     };
                     let mut new_operands = component_inputs.clone();
-                    new_operands.push((
-                        new_output_shape,
-                        component.dtypes[component.typ.unique_output_index().unwrap()],
-                    ));
+                    new_operands.push((new_output_shape, new_output_dtype));
                     component.replace_io(
                         new_operands
                             .iter()
@@ -2540,7 +2541,10 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
                 let auxes_strategy = basics
                     .parameter_shapes()
                     .into_iter()
-                    .map(|s| any_with::<TensorSpecAux<Tgt>>(TensorSpecArbMaxShape(s)))
+                    .zip(&basics.dtypes)
+                    .map(|(s, &d)| {
+                        any_with::<TensorSpecAux<Tgt>>((TensorSpecArbMaxShape(s), Some(d)))
+                    })
                     .collect::<Vec<_>>();
                 (Just(basics), auxes_strategy, Just(serial_only))
             })
@@ -2567,7 +2571,10 @@ where
         .prop_flat_map(|components| {
             let auxes_strategies = compose_parameter_shapes(&components)
                 .into_iter()
-                .map(|shape| any_with::<TensorSpecAux<Tgt>>(TensorSpecArbMaxShape(shape)))
+                .zip(compose_parameter_dtypes(&components))
+                .map(|(shape, dtype)| {
+                    any_with::<TensorSpecAux<Tgt>>((TensorSpecArbMaxShape(shape), Some(dtype)))
+                })
                 .collect::<Vec<_>>();
             (Just(components), auxes_strategies, any::<bool>())
         })
@@ -2596,6 +2603,9 @@ fn arb_compose_component_innermost(
         .prop_filter("Must have a unique output to compose", |basics| {
             basics.typ.unique_output_index().is_some()
         })
+        .prop_filter("Must not cause side effects", |basics| {
+            !basics.causes_side_effects()
+        })
         .boxed()
 }
 
@@ -2603,6 +2613,7 @@ fn arb_compose_component_innermost(
 fn arb_compose_component_successor(
     predecessor: &PrimitiveBasics,
     allow_broadcast: bool,
+    allow_side_effects: bool,
 ) -> impl proptest::strategy::Strategy<Value = PrimitiveBasics> {
     use proptest::prelude::*;
 
@@ -2612,11 +2623,15 @@ fn arb_compose_component_successor(
     let mut allowed_types = vec![]; // TODO: Somehow gather these from type def.
     match shapes[out_idx].len() {
         3 => {
-            allowed_types.push(PrimitiveSpecType::Matmul { accum: true });
+            if allow_side_effects {
+                allowed_types.push(PrimitiveSpecType::Matmul { accum: true });
+            }
             allowed_types.push(PrimitiveSpecType::Matmul { accum: false });
         }
         4 => {
-            allowed_types.push(PrimitiveSpecType::Conv { accum: true });
+            if allow_side_effects {
+                allowed_types.push(PrimitiveSpecType::Conv { accum: true });
+            }
             allowed_types.push(PrimitiveSpecType::Conv { accum: false });
         }
         _ => {}
@@ -2630,6 +2645,9 @@ fn arb_compose_component_successor(
         allowed_types.push(PrimitiveSpecType::Softmax { scan_dim: dim });
         allowed_types.push(PrimitiveSpecType::SoftmaxComplete { scan_dim: dim });
         for accum in [true, false] {
+            if !allow_side_effects && accum {
+                continue;
+            }
             allowed_types.push(PrimitiveSpecType::Max { dim, accum });
             allowed_types.push(PrimitiveSpecType::SoftmaxDenominator {
                 scan_dim: dim,
@@ -2637,6 +2655,7 @@ fn arb_compose_component_successor(
             });
         }
     }
+    // TODO: Update this so we don't need to manually modify `allowed_types` all the time.
 
     any_with::<PrimitiveBasics>(PrimitiveBasicsArbParams {
         max_size: None,
@@ -2658,17 +2677,17 @@ fn arb_compose_components() -> impl proptest::strategy::Strategy<Value = Vec<Pri
     prop_oneof![
         arb_compose_component_innermost(false)
             .prop_flat_map(|c| {
-                let successor = arb_compose_component_successor(&c, true);
+                let successor = arb_compose_component_successor(&c, true, true);
                 (successor, Just(c))
             })
             .prop_map(|(s, c)| vec![s, c]),
         arb_compose_component_innermost(false)
             .prop_flat_map(|c| {
-                let successor = arb_compose_component_successor(&c, false);
+                let successor = arb_compose_component_successor(&c, false, false);
                 (successor, Just(c))
             })
             .prop_flat_map(|(s, c)| {
-                let successor2 = arb_compose_component_successor(&s, true);
+                let successor2 = arb_compose_component_successor(&s, true, true);
                 (successor2, Just(s), Just(c))
             })
             .prop_map(|(s2, s, c)| vec![s2, s, c]),
@@ -3328,7 +3347,7 @@ mod tests {
                         let auxes_strategy = basics
                             .parameter_shapes()
                             .into_iter()
-                            .map(|s| any_with::<TensorSpecAux<X86Target>>(TensorSpecArbMaxShape(s)))
+                            .map(|s| any_with::<TensorSpecAux<X86Target>>((TensorSpecArbMaxShape(s), Some(dtype))))
                             .collect::<Vec<_>>();
                         (Just(basics), auxes_strategy, any::<bool>())
                     })
@@ -3550,7 +3569,7 @@ mod tests {
                 PrimitiveBasicsBimap {
                     binary_scale_shapes,
                 },
-                |_: &[DimSize], _| TensorSpecAuxNonDepBimap::default(),
+                |_: &[DimSize], dt| TensorSpecAuxNonDepBimap::new(dt),
             ),
             memory_limits_bimap: MemoryLimitsBimap::default(),
         };
