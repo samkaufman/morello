@@ -109,40 +109,39 @@ fn main() {
 
     // Finally, we can lower that Impl to the following C kernel:
     //
-    //    void kernel(
-    //      uint32_t *__restrict__ aa,
-    //      uint32_t *__restrict__ ab,
-    //      uint32_t *__restrict__ ac
-    //    ) {
-    //      for (int ad = 0; ad < 4; ad++) {
-    //      for (int ae = 0; ae < 4; ae++) {
-    //        for (int af = 0; af < 16; af++) {
-    //        for (int ag = 0; ag < 16; ag++) {
-    //          uint32_t ah;
-    //          memset((void *)(&ah), 0, 4);
-    //          ac[(64 * af + 1024 * ad + ag + 16 * ae)] = ah;
-    //          for (int ai = 0; ai < 16; ai++) {
-    //            uint32_t aj[4] __attribute__((aligned (128)));
-    //            for (int ak = 0; ak < 4; ak++) {
-    //              aj[(ak)] = aa[(64 * af + 1024 * ad + ak + 4 * ai)];
-    //            }
-    //            uint32_t al[4] __attribute__((aligned (128)));
-    //            for (int am = 0; am < 4; am++) {
-    //              al[(am)] = ab[(64 * am + 256 * ai + ag + 16 * ae)];
-    //            }
-    //            uint32_t an;
-    //            an = ac[(64 * af + 1024 * ad + ag + 16 * ae)];
-    //            for (int ao = 0; ao < 4; ao++) {
-    //              an += aj[(ao)] * al[(ao)];  /* MultAdd */
-    //            }
-    //            ac[(64 * af + 1024 * ad + ag + 16 * ae)] = an;
-    //          }
-    //        }
-    //        }
-    //      }
-    //      }
-    //    }
-
+    //   void kernel(
+    //     const uint32_t *__restrict__ v000,
+    //     const uint32_t *__restrict__ v001,
+    //     uint32_t *__restrict__ v002
+    //   ) {
+    //     for (int v003 = 0; v003 < 4; v003++) {
+    //     for (int v004 = 0; v004 < 4; v004++) {
+    //       for (int v005 = 0; v005 < 16; v005++) {
+    //       for (int v006 = 0; v006 < 16; v006++) {
+    //         uint32_t v007;
+    //         memset((void *)(&v007), 0, 4);
+    //         v002[(64 * v005 + 1024 * v003 + v006 + 16 * v004)] = v007;
+    //         for (int v008 = 0; v008 < 16; v008++) {
+    //           uint32_t v009[4] __attribute__((aligned (128)));
+    //           for (int v010 = 0; v010 < 4; v010++) {
+    //             v009[(v010)] = v000[(64 * v005 + 1024 * v003 + v010 + 4 * v008)];
+    //           }
+    //           uint32_t v011[4] __attribute__((aligned (128)));
+    //           for (int v012 = 0; v012 < 4; v012++) {
+    //             v011[(v012)] = v001[(64 * v012 + 256 * v008 + v006 + 16 * v004)];
+    //           }
+    //           uint32_t v013;
+    //           v013 = v002[(64 * v005 + 1024 * v003 + v006 + 16 * v004)];
+    //           for (int v014 = 0; v014 < 4; v014++) {
+    //             v013 += v009[(v014)] * v011[(v014)];  /* MultAdd */
+    //           }
+    //           v002[(64 * v005 + 1024 * v003 + v006 + 16 * v004)] = v013;
+    //         }
+    //       }
+    //       }
+    //     }
+    //     }
+    //   }
     println!("\nThe above Impl lowered to C:");
     implementation
         .emit(false, None, &mut ToWriteFmt(io::stdout()))

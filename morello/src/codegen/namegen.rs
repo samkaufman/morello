@@ -1,5 +1,3 @@
-use crate::utils::ASCII_PAIRS;
-
 pub struct NameGenerator {
     names_generated: usize,
 }
@@ -10,11 +8,8 @@ impl NameGenerator {
     }
 
     pub fn fresh_name(&mut self) -> String {
-        let new_name = String::from_iter(ASCII_PAIRS[self.names_generated]);
+        let new_name = format!("n{:03}", self.names_generated);
         self.names_generated += 1;
-        if new_name == "do" {
-            return self.fresh_name();
-        }
         new_name
     }
 }
