@@ -20,14 +20,10 @@ use std::panic;
 
 fn main() {
     // First, we'll define the Spec for the program we will implement: a 64x64x64 matrix
-    // multiplication with unsigned, 8-bit integer inputs and output.
+    // multiplication with unsigned, 32-bit integer inputs and output.
     //
-    // This is a non-accumulating Spec (notice the `accum: false` below), which means that the
-    // implementation will set rather then add values to the output tensor. Additionally, extra
-    // details about each tensor are included in the `PrimitiveAux` structure: that the memory is
-    // assumed to be fully contiguous, aligned, in global memory (not a cache or registers), and
-    // laid out row-major. The `vector_size` field applies only to tensors in vector registers
-    // (VRF), so it is `None` below.
+    // This is a non-accumulating Spec (`Matmul` rather than `MatmulAccum`), which means that the
+    // implementation will set rather then add values to the output tensor.
     let layout = row_major(2);
 
     let spec = Spec::<X86Target>(
