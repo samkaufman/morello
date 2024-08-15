@@ -751,7 +751,6 @@ fn arb_tensorspecaux<Tgt: Target>(
 
 #[cfg(test)]
 mod tests {
-    use super::TensorSpecAux;
     use super::*;
     use crate::common::Dtype;
     use crate::layout::{row_major, Layout, PhysDim};
@@ -829,6 +828,21 @@ mod tests {
                     prop_assert!(!aux.is_canonical(&shape));
                 }
             }
+        }
+
+        #[test]
+        fn test_tensorspecauxnondepbimap_inverts(
+            (dtype, aux) in any::<Dtype>()
+                .prop_flat_map(|d| {
+                    (Just(d), any_with::<TensorSpecAux<X86Target>>((Default::default(), Some(d))))
+                })
+        ) {
+            let bimap = TensorSpecAuxNonDepBimap::<X86Target> {
+                dtype,
+                phantom: std::marker::PhantomData,
+            };
+            let output = BiMap::apply(&bimap, &aux);
+            assert_eq!(aux, BiMap::apply_inverse(&bimap, &output));
         }
     }
 
