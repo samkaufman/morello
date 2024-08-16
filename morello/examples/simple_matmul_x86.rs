@@ -2,6 +2,7 @@
 
 use morello::codegen::CodeGen;
 use morello::cost::Cost;
+use morello::imp::{Impl, ImplNode};
 use morello::layout::row_major;
 use morello::lspec;
 use morello::pprint::{pprint, ImplPrintStyle};
@@ -26,9 +27,12 @@ fn main() {
     // implementation will set rather then add values to the output tensor.
     let layout = row_major(2);
 
+    const M: u32 = 64;
+    const K: u32 = 64;
+    const N: u32 = 64;
     let spec = Spec::<X86Target>(
         lspec!(Matmul(
-            [64, 64, 64],
+            [M, K, N],
             (u32, GL, layout.clone()),
             (u32, GL, layout.clone()),
             (u32, GL, layout),
@@ -38,46 +42,82 @@ fn main() {
     );
     println!("Logical Spec: {}", spec.0);
 
-    // Manually schedule the matrix multiplication.
-    let implementation = spec
+    // First, tile to a 16x64x16 matmul and move all operands into the L1 cache.  Tiling will
+    // introduce two loops into the final C code, while the `.move_param` calls lower to nothing the
+    // final code. Moves into the L1 cache instead model the behavior of the hardware cache and, by
+    // changing the Spec, allow the remainder of the schedule to assume tensors are in L1.
+    let implementation_l1 = spec
         .tile_out(&[16, 16], false)
         .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
         .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
-        .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
+        .move_param(2, CpuMemoryLevel::L1, row_major(2), None);
+
+    // This results in the following Impl:
+    // ```
+    // tile (aa: (16×64, u32) <-[0, 2]- #0, ab: (64×16, u32, c1) <-[3, 1]- #1, ac: (16×16, u32, c1) <-[0, 1]- #2)
+    //   alloc ad: (16×64, u32, L1) <- aa
+    //     alloc ae: (64×16, u32, L1, c1) <- ab
+    //       alloc af: (16×16, u32, L1, c1) <- ac
+    //         Matmul((16×64, u32, L1), (64×16, u32, L1, c1), (16×16, u32, L1, c1), serial)(ad, ae, af)
+    // ```
+    // Notice it has one nested sub-Spec:
+    //   Matmul((16×64, u32, L1), (64×16, u32, L1, c1), (16×16, u32, L1, c1), serial)
+    //
+    // Next, tile that nested sub-Spec further to 1x64x1...
+    let implementation_smaller = implementation_l1
         .tile_out(&[1, 1], false)
-        .to_accum()
-        .subschedule(&[0], &|z| {
-            z.move_param(0, CpuMemoryLevel::RF, row_major(2), None)
-        })
-        .subschedule(&[0, 0], &|z| z.place(CpuKernel::MemsetZero))
-        .subschedule(&[0, 1], &|move_back| {
-            move_back.place(CpuKernel::ValueAssign)
-        })
-        .subschedule(&[1], &|bat| {
-            bat.split(4)
+        // ...then we'll convert our Matmul into a MatmulAccum. As the name suggests, a MatmulAccum
+        // adds, rather than assigns, into its output tensor. The `.to_accum` operator introduces a
+        // pipeline which implements Matmul by first applying a Zero to the output and then a
+        // MatmulAccum.
+        .to_accum();
+
+    // The resulting `implementation_smaller` is:
+    // ```
+    // tile (aa: (16×64, u32) <-[0, 2]- #0, ab: (64×16, u32, c1) <-[3, 1]- #1, ac: (16×16, u32, c1) <-[0, 1]- #2)
+    //   alloc ad: (16×64, u32, L1) <- aa
+    //     alloc ae: (64×16, u32, L1, c1) <- ab
+    //       alloc af: (16×16, u32, L1, c1) <- ac
+    //         tile (ag: (1×64, u32, L1) <-[0, 2]- ad, ah: (64×1, u32, L1, c1, ua) <-[3, 1]- ae, ai: (1×1, u32, L1, ua) <-[0, 1]- af)
+    //           (Zero((1×1, u32, L1, ua), serial), [64, 1024, 4096, 0])(ai)
+    //           (MatmulAccum((1×64, u32, L1), (64×1, u32, L1, c1, ua), (1×1, u32, L1, ua), serial), [64, 1024, 4096, 0])(ag, ah, ai)
+    // ```
+    //
+    // Notice it has two nested sub-Specs: Zero and the MatmulAccum.  We'll need to schedule each,
+    // which we can do with calls to `.subschedule([i], _)` where `i` is the index of the child.
+    // First, we schedule the Zero sub-Spec with `zero_schedule` (defined below):
+    let implementation = implementation_smaller
+        .subschedule(&[0], &zero_schedule)
+        // Second, we'll schedule the MatmulAccum:
+        .subschedule(&[1], &|mm_accum_spec_a| {
+            // Tile the 1x64x1 MatmulAccum to 1x4x1, introducing loop over the k dimension:
+            mm_accum_spec_a
+                .split(4)
+                // Move the 1x4 left-hand input tensor into the register. This results in two
+                // sub-Specs---a Move from L1 into RF and the continuation of the MatrmulAccum.
+                //
+                // Let's schedule the introduced Move sub-Spec with `move_schedule` (defined below).
                 .move_param(0, CpuMemoryLevel::RF, row_major(2), None)
-                .subschedule(&[0], &|move_a| {
-                    move_a
-                        .tile_out(&[1, 1], false)
-                        .place(CpuKernel::ValueAssign)
+                .subschedule(&[0], &move_schedule)
+                .subschedule(&[1], &|mm_accum_spec_b| {
+                    // Move the 4x1 right-hand input tensor into the register file:
+                    mm_accum_spec_b
+                        .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
+                        .subschedule(&[0], &move_schedule)
+                        .subschedule(&[1], &|mm_accum_spec_c| {
+                            mm_accum_spec_c
+                                // And finally we'll move the 1x1 output tensor into RF, scheduling
+                                // the load and store sub-Specs...
+                                .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
+                                .subschedule(&[0], &move_schedule)
+                                .subschedule(&[2], &move_schedule)
+                                // ...and compute the 1x1x1 matix multiply with `+= a * b`.
+                                .subschedule(&[1], &|s| s.split(1).place(CpuKernel::MultAdd))
+                        })
                 })
-                .subschedule(&[1], &|matmul_b| {
-                    matmul_b.move_param(1, CpuMemoryLevel::RF, row_major(2), None)
-                })
-                .subschedule(&[1, 0], &|move_ba| {
-                    move_ba
-                        .tile_out(&[1, 1], false)
-                        .place(CpuKernel::ValueAssign)
-                })
-                .subschedule(&[1, 1], &|matmul_bb| {
-                    matmul_bb.move_param(2, CpuMemoryLevel::RF, row_major(2), None)
-                })
-                .subschedule(&[1, 1, 0], &|s| s.place(CpuKernel::ValueAssign))
-                .subschedule(&[1, 1, 1], &|s| s.split(1).place(CpuKernel::MultAdd))
-                .subschedule(&[1, 1, 2], &|s| s.place(CpuKernel::ValueAssign))
         });
 
-    // The resulting implementation, as encoded in our Impl intermediate representation, is:
+    // The resulting implementation is:
     //   tile (aa: (16×64, u32) <-[0, 2]- #0, ab: (64×16, u32, c1) <-[3, 1]- #1, ac: (16×16, u32, c1) <-[0, 1]- #2)
     //     alloc ad: (16×64, u32, L1) <- aa
     //       alloc ae: (64×16, u32, L1, c1) <- ab
@@ -169,8 +209,70 @@ fn main() {
     println!("\n// cost: {}", Cost::from_impl(&implementation).main);
     println!("// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)");
     println!(
-        "// {:.4} gigaFLOPs/sec ({:.1}% of Zen 1 theoretical max.)",
+        "// {:.4} gigaFLOPs/sec",
         (spec.flops().unwrap() as f64 * throughput) / 1_000_000_000.0,
-        (100.0 * spec.flops().unwrap() as f64 * throughput) / (52.0 * 1_000_000_000.0)
     );
+}
+
+/// Schedules the given 1x1 Zero Spec.
+///
+/// Specifically, this moves the Zero's tensor from L1 into registers, which introduces two
+/// sub-Specs:
+///  Zero((1×1, u32, RF), serial)
+///  Move((1×1, u32, RF), (1×1, u32, L1, ua), serial)
+/// These are then implemented with kernels which lower to `memset` and `=` respectively, like so:
+/// ```
+//  uint32_t v;
+//  memset((void *)(&v), 0, 4);
+//  l1_tile[index] = v;
+/// ```
+fn zero_schedule(zero: &Spec<X86Target>) -> ImplNode<X86Target> {
+    zero.move_param(0, CpuMemoryLevel::RF, row_major(2), None)
+        .subschedule(&[0], &|z| z.place(CpuKernel::MemsetZero))
+        .subschedule(&[1], &|move_back| move_back.place(CpuKernel::ValueAssign))
+}
+
+/// Schedules the given Move Spec.
+///
+/// Specifically, this checks if the Move's tensor is a single value. If it is, it directly assigns
+/// the value using the `ValueAssign` kernel. If not, it tiles the tensor and then assigns the values
+/// using the `ValueAssign` kernel.
+fn move_schedule(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
+    let is_single_value = move_spec.0.parameter_shapes()[0]
+        .iter()
+        .all(|size| size.get() == 1);
+    if is_single_value {
+        move_spec.place(CpuKernel::ValueAssign)
+    } else {
+        move_spec
+            .tile_out(&[1, 1], false)
+            .place(CpuKernel::ValueAssign)
+    }
+}
+
+/// Extends scheduling language with some helpers.
+trait ImplNodeExt {
+    fn simple_move_schedule(&self, source_index: u8) -> ImplNode<X86Target>;
+}
+
+impl<T: SchedulingSugar<X86Target>> ImplNodeExt for T {
+    /// Moves the parameter identified by `source_index` into RF, then schedules each nested Move to
+    /// apply `=` to each element.
+    fn simple_move_schedule(&self, source_index: u8) -> ImplNode<X86Target> {
+        let mut imp = self.move_param(source_index, CpuMemoryLevel::RF, row_major(2), None);
+        let mut move_subspec_idxs = vec![];
+        for (i, child) in imp.children().iter().enumerate() {
+            if matches!(child, ImplNode::MoveLet(..)) {
+                move_subspec_idxs.push(i);
+            }
+        }
+        for i in move_subspec_idxs {
+            imp = imp.subschedule(&[i], &|move_spec| {
+                move_spec
+                    .tile_out(&[1, 1], false)
+                    .place(CpuKernel::ValueAssign)
+            });
+        }
+        imp
+    }
 }
