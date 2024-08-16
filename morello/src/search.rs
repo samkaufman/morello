@@ -127,7 +127,7 @@ where
             .expect("should be possible to canonicalize goal Spec");
 
         let page = db.page_id(&canonical_goal);
-        let key = (page.table_key, page.superblock_id);
+        let key = (page.table_key, page.page_id);
         let group_tuple = grouped_canonical_goals.entry(key).or_default();
         group_tuple.0.push(canonical_goal);
         group_tuple.1.push(idx);
