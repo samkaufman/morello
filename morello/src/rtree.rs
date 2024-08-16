@@ -13,6 +13,8 @@ use std::hash::Hash;
 /// A trait abstracting over differently ranked RTree<RTreeRect<_, T>> variants.
 #[enum_dispatch]
 trait RTreeGeneric<T> {
+    fn size(&self) -> usize;
+
     fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T>;
 
     // TODO: It would be nice to take low and high by value to avoid a clone.
@@ -37,6 +39,12 @@ macro_rules! rtreedyn_cases {
                 match rank {
                     $( $n => RTreeDyn::$name(Default::default()), )*
                     _ => panic!("Unsupported rank: {}", rank),
+                }
+            }
+
+            pub fn size(&self) -> usize {
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::size(t), )*
                 }
             }
 
@@ -97,6 +105,10 @@ struct BatchRemoveSelFn<O: rstar::RTreeObject> {
 impl<T> RTreeDyn<T> {}
 
 impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
+    fn size(&self) -> usize {
+        self.size()
+    }
+
     fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T> {
         self.locate_at_point(&RTreePt {
             arr: pt.try_into().unwrap(),
