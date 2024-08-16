@@ -18,7 +18,7 @@ struct Args {
         short,
         long,
         default_value = "false",
-        help = "Continue after an error reading a superblock."
+        help = "Continue after an error reading a page."
     )]
     keep_going: bool,
     #[arg(long, default_value = "128", help = "Cache size in database pages.")]

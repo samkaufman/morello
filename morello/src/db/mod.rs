@@ -40,17 +40,17 @@ use {
 
 type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
 type TableKey = (SpecKey, Vec<(Layout,)>);
-type SuperBlockKey = DbKey;
-type SuperBlockContents = HashMap<Vec<BimapInt>, DbBlock>;
+type PageKey = DbKey;
+type PageContents = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionNum = u16;
 
 /// The number of shards/locks per thread.
 const THREAD_SHARDS: usize = 2;
 // TODO: Select these at runtime.
-const SUPERBLOCK_FACTOR: BimapInt = 2;
+const PAGE_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
-/// Compress superblocks when writing to disk.
-const COMPRESS_SUPERBLOCKS: bool = true;
+/// Compress pages when writing to disk.
+const COMPRESS_PAGES: bool = true;
 
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
@@ -79,18 +79,18 @@ struct ShardVec(Vec<Mutex<Shard>>);
 pub struct PageId<'a> {
     db: &'a FilesDatabase,
     pub(crate) table_key: TableKey,
-    pub(crate) superblock_id: Vec<BimapInt>,
+    pub(crate) page_id: Vec<BimapInt>,
 }
 
 #[derive(Debug, Clone)]
-struct SuperBlock {
-    contents: SuperBlockContents,
+struct Page {
+    contents: PageContents,
     modified: bool,
 }
 
 struct Shard {
-    cache: WTinyLfuCache<Prehashed<SuperBlockKey>, SuperBlock>,
-    outstanding_gets: PrehashedSet<SuperBlockKey>,
+    cache: WTinyLfuCache<Prehashed<PageKey>, Page>,
+    outstanding_gets: PrehashedSet<PageKey>,
     thread: Option<std::thread::JoinHandle<()>>,
     thread_tx: mpsc::SyncSender<ShardThreadMsg>,
     thread_rx: mpsc::Receiver<ShardThreadResponse>,
@@ -106,13 +106,13 @@ struct AnalyzeWriters {
 }
 
 enum ShardThreadMsg {
-    Get(Prehashed<SuperBlockKey>),
-    Put(SuperBlockKey, SuperBlockContents),
+    Get(Prehashed<PageKey>),
+    Put(PageKey, PageContents),
     Exit,
 }
 
 enum ShardThreadResponse {
-    Loaded(Prehashed<SuperBlockKey>, SuperBlock),
+    Loaded(Prehashed<PageKey>, Page),
 }
 
 /// Contains a path to a directory or a [tempfile::TempDir]. This facilitates deleting the
@@ -254,11 +254,11 @@ impl FilesDatabase {
         let (table_key, global_pt) = bimap.apply(&query);
         let (block_pt, inner_pt) = blockify_point(global_pt);
 
-        let superblock_pt = superblockify_pt(&block_pt);
-        let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
+        let page_pt = block_pt_to_page_pt(&block_pt);
+        let page_key = self.prehasher.prehash((table_key, page_pt));
 
-        let superblock: &SuperBlock = &self.load_live_superblock(&superblock_key);
-        let Some(b) = superblock.contents.get(&block_pt) else {
+        let page: &Page = &self.load_live_page(&page_key);
+        let Some(b) = page.contents.get(&block_pt) else {
             return GetPreference::Miss(None);
         };
         b.get_with_preference(&query, &inner_pt)
@@ -277,14 +277,14 @@ impl FilesDatabase {
         let (table_key, global_pt) = bimap.apply(&query);
         let (block_pt, _) = blockify_point(global_pt);
 
-        let superblock_pt = superblockify_pt(&block_pt);
-        let superblock_key = self.prehasher.prehash((table_key, superblock_pt));
+        let page_pt = block_pt_to_page_pt(&block_pt);
+        let page_key = self.prehasher.prehash((table_key, page_pt));
 
-        let shard = &self.shards.0[self.shard_index(&superblock_key)];
+        let shard = &self.shards.0[self.shard_index(&page_key)];
         let mut shard_guard = shard.lock();
         shard_guard.process_available_bg_thread_msgs();
-        if shard_guard.cache.peek(&superblock_key).is_none() {
-            shard_guard.async_get(&superblock_key);
+        if shard_guard.cache.peek(&page_key).is_none() {
+            shard_guard.async_get(&page_key);
         }
     }
 
@@ -305,7 +305,7 @@ impl FilesDatabase {
         PageId {
             db: self,
             table_key,
-            superblock_id: superblockify_pt(&block_pt),
+            page_id: block_pt_to_page_pt(&block_pt),
         }
     }
 
@@ -352,15 +352,15 @@ impl FilesDatabase {
                 .map(|(b, _)| *b)
                 .collect::<Vec<BimapInt>>();
             // TODO: Factor out this tuple construction
-            let mut superblock_guard = self.load_live_superblock_mut(
+            let mut page_guard = self.load_live_page_mut(
                 &self
                     .prehasher
-                    .prehash((db_key.clone(), superblockify_pt(&block_pt))),
+                    .prehash((db_key.clone(), block_pt_to_page_pt(&block_pt))),
             );
-            superblock_guard.modified = true;
+            page_guard.modified = true;
 
-            // If the superblock already contains the block, mutate in place and continue the loop.
-            if let Some(live_block) = superblock_guard.contents.get_mut(&block_pt) {
+            // If the page already contains the block, mutate in place and continue the loop.
+            if let Some(live_block) = page_guard.contents.get_mut(&block_pt) {
                 let dim_ranges = joined_row
                     .iter()
                     .map(|(_, r)| r.clone())
@@ -370,7 +370,7 @@ impl FilesDatabase {
                 continue;
             }
 
-            // If not, create the block and add it to the superblock.
+            // If not, create the block and add it to the page.
             let dim_ranges = joined_row
                 .iter()
                 .map(|(_, r)| r.clone())
@@ -380,7 +380,7 @@ impl FilesDatabase {
                 &dim_ranges,
                 &normalized_decisions,
             )));
-            superblock_guard.contents.insert(block_pt, new_block);
+            page_guard.contents.insert(block_pt, new_block);
         }
     }
 
@@ -415,17 +415,14 @@ impl FilesDatabase {
         surmap.into_bimap()
     }
 
-    fn load_live_superblock<'a>(
-        &'a self,
-        key: &Prehashed<SuperBlockKey>,
-    ) -> impl Deref<Target = SuperBlock> + 'a {
-        self.load_live_superblock_mut(key)
+    fn load_live_page<'a>(&'a self, key: &Prehashed<PageKey>) -> impl Deref<Target = Page> + 'a {
+        self.load_live_page_mut(key)
     }
 
-    fn load_live_superblock_mut<'a>(
+    fn load_live_page_mut<'a>(
         &'a self,
-        key: &Prehashed<SuperBlockKey>,
-    ) -> impl DerefMut<Target = SuperBlock> + 'a {
+        key: &Prehashed<PageKey>,
+    ) -> impl DerefMut<Target = Page> + 'a {
         let shard = &self.shards.0[self.shard_index(key)];
         let mut shard_guard = shard.lock();
 
@@ -447,7 +444,7 @@ impl FilesDatabase {
         })
     }
 
-    fn shard_index(&self, key: &Prehashed<SuperBlockKey>) -> usize {
+    fn shard_index(&self, key: &Prehashed<PageKey>) -> usize {
         *Prehashed::as_hash(key) as usize % self.shards.0.len()
     }
 
@@ -512,17 +509,14 @@ impl FilesDatabase {
             block_writer: csv::Writer::from_path(block_csv_path.clone()).unwrap(),
             block_action_writer: csv::Writer::from_path(block_action_csv_path.clone()).unwrap(),
         };
-        writers
-            .page_writer
-            .write_record(["superblock_path"])
-            .unwrap();
+        writers.page_writer.write_record(["page_path"]).unwrap();
         writers
             .block_writer
-            .write_record(["superblock_path", "block_pt", "rects"])
+            .write_record(["page_path", "block_pt", "rects"])
             .unwrap();
         writers
             .block_action_writer
-            .write_record(["superblock_path", "block_pt", "action"])
+            .write_record(["page_path", "block_pt", "action"])
             .unwrap();
 
         analyze_visit_dir::<Tgt>(
@@ -571,7 +565,7 @@ impl PageId<'_> {
             return false;
         }
         let (block_pt, _) = blockify_point(global_pt);
-        self.superblock_id == superblockify_pt(&block_pt)
+        self.page_id == block_pt_to_page_pt(&block_pt)
     }
 }
 
@@ -595,7 +589,7 @@ impl Shard {
                 .spawn(move || loop {
                     match command_rx.recv() {
                         Ok(ShardThreadMsg::Get(key)) => {
-                            let path = superblock_file_path(db_root.path(), &key);
+                            let path = page_file_path(db_root.path(), &key);
 
                             #[cfg(feature = "db-stats")]
                             {
@@ -609,34 +603,43 @@ impl Shard {
                             let result = match fs::File::open(&path) {
                                 Ok(file) => match read_any_format(file) {
                                     Ok(r) => r,
-                                    Err(ReadAnyFormatError { zstd_error, plain_error }) => {
+                                    Err(ReadAnyFormatError {
+                                        zstd_error,
+                                        plain_error,
+                                    }) => {
                                         log::error!(
-                                            "Continuing after errors reading superblock; {:?} and {:?}",
+                                            "Continuing after errors reading page; {:?} and {:?}",
                                             zstd_error,
                                             plain_error
                                         );
-                                        SuperBlock { contents: HashMap::new(), modified: false }
+                                        Page {
+                                            contents: HashMap::new(),
+                                            modified: false,
+                                        }
                                     }
                                 },
-                                Err(_) => SuperBlock { contents: HashMap::new(), modified: false },
+                                Err(_) => Page {
+                                    contents: HashMap::new(),
+                                    modified: false,
+                                },
                             };
                             response_tx
                                 .send(ShardThreadResponse::Loaded(key, result))
                                 .unwrap();
                         }
                         Ok(ShardThreadMsg::Put(key, value)) => {
-                            let path = superblock_file_path(db_root.path(), &key);
+                            let path = page_file_path(db_root.path(), &key);
 
                             #[cfg(feature = "db-stats")]
                             {
-                                log::debug!("Evicting superblock");
+                                log::debug!("Evicting page");
                             }
 
                             if let Some(parent) = path.parent() {
                                 fs::create_dir_all(parent).unwrap();
                             }
                             let file = fs::File::create(&path).unwrap();
-                            if COMPRESS_SUPERBLOCKS {
+                            if COMPRESS_PAGES {
                                 let mut zstd_writer = zstd::Encoder::new(file, 0).unwrap();
                                 bincode::serialize_into(&mut zstd_writer, &value).unwrap();
                                 zstd_writer.finish().unwrap();
@@ -731,12 +734,12 @@ impl Shard {
         }
     }
 
-    /// Start a background task to load a superblock. Do nothing if request already enqueued.
+    /// Start a background task to load a page. Do nothing if request already enqueued.
     ///
     /// This updates does not update cache statistics.
     ///
     /// This may panic if the key is already in the cache.
-    fn async_get(&mut self, key: &Prehashed<SuperBlockKey>) -> bool {
+    fn async_get(&mut self, key: &Prehashed<PageKey>) -> bool {
         if self.outstanding_gets.contains(key) {
             return false;
         }
@@ -748,7 +751,7 @@ impl Shard {
         true
     }
 
-    fn async_put(&self, key: SuperBlockKey, value: SuperBlockContents) {
+    fn async_put(&self, key: PageKey, value: PageContents) {
         self.thread_tx
             .send(ShardThreadMsg::Put(key, value))
             .unwrap();
@@ -772,7 +775,7 @@ impl Shard {
         }
     }
 
-    fn drain_cache(&mut self) -> impl Iterator<Item = (SuperBlockKey, SuperBlock)> + '_ {
+    fn drain_cache(&mut self) -> impl Iterator<Item = (PageKey, Page)> + '_ {
         std::iter::from_fn(move || {
             if let Some(popped) = self.cache.pop_lru_window() {
                 return Some(popped);
@@ -827,9 +830,9 @@ impl ActionNormalizedCostVec {
 }
 
 /// Tries to read a zstd-compressed file. If that fails, tries to read it uncompressed.
-fn read_any_format(file: fs::File) -> Result<SuperBlock, ReadAnyFormatError> {
+fn read_any_format(file: fs::File) -> Result<Page, ReadAnyFormatError> {
     let mut zstd_reader = zstd::Decoder::new(file).unwrap();
-    let contents: SuperBlockContents = match bincode::deserialize_from(&mut zstd_reader) {
+    let contents: PageContents = match bincode::deserialize_from(&mut zstd_reader) {
         Ok(contents) => contents,
         Err(zstd_error) => {
             // Couldn't read as zstd? Try reading uncompressed.
@@ -837,7 +840,7 @@ fn read_any_format(file: fs::File) -> Result<SuperBlock, ReadAnyFormatError> {
             file.seek(SeekFrom::Start(0)).unwrap();
             let buf_reader = BufReader::new(file);
             match bincode::deserialize_from(buf_reader) {
-                Ok(superblock) => superblock,
+                Ok(page) => page,
                 Err(plain_error) => {
                     return Err(ReadAnyFormatError {
                         zstd_error,
@@ -847,7 +850,7 @@ fn read_any_format(file: fs::File) -> Result<SuperBlock, ReadAnyFormatError> {
             }
         }
     };
-    Ok(SuperBlock {
+    Ok(Page {
         contents,
         modified: false,
     })
@@ -886,19 +889,19 @@ fn analyze_visit_dir<Tgt>(
         let shortened_entry_path_str = entry_path.strip_prefix(root).unwrap();
         let entry_path_str = format!("{}", shortened_entry_path_str.display());
 
-        let superblock_file = fs::File::open(entry_path).unwrap();
-        let superblock = match read_any_format(superblock_file) {
+        let page_file = fs::File::open(entry_path).unwrap();
+        let page = match read_any_format(page_file) {
             Ok(r) => r,
             Err(e) => {
                 if skip_read_errors {
-                    log::warn!("Error reading superblock: {:?}", e);
+                    log::warn!("Error reading page: {:?}", e);
                     continue;
                 }
-                panic!("Error reading superblock: {e:?}");
+                panic!("Error reading page: {e:?}");
             }
         };
 
-        for (block_pt, block) in &superblock.contents {
+        for (block_pt, block) in &page.contents {
             let DbBlock::RTree(r) = block;
             writers
                 .block_writer
@@ -914,8 +917,8 @@ fn analyze_visit_dir<Tgt>(
     }
 }
 
-fn superblockify_pt(block_pt: &[BimapInt]) -> Vec<BimapInt> {
-    block_pt.iter().map(|&i| i / SUPERBLOCK_FACTOR).collect()
+fn block_pt_to_page_pt(block_pt: &[BimapInt]) -> Vec<BimapInt> {
+    block_pt.iter().map(|&i| i / PAGE_FACTOR).collect()
 }
 
 fn construct_impl<Tgt>(db: &FilesDatabase, imp: &ImplNode<Tgt>) -> ImplNode<Tgt>
@@ -1073,9 +1076,9 @@ pub fn iter_blocks_in_single_dim_range(
     prefix.into_iter().chain(full_blocks_iter).chain(suffix)
 }
 
-fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::PathBuf {
-    let ((spec_key, table_key_rest), block_pt) = superblock_key;
-    let mut path = match spec_key {
+fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
+    let ((spec_key, table_key_rest), block_pt) = page_key;
+    let mut spec_key_dir_name = match spec_key {
         SpecKey::OnePrefix { dtypes } => root
             .join("OnePrefix")
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
@@ -1153,9 +1156,9 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
             ),
     };
     for (l,) in table_key_rest {
-        path = path.join(l.to_string());
+        spec_key_dir_name = spec_key_dir_name.join(l.to_string());
     }
-    path.join(block_pt.iter().map(|p| p.to_string()).join("_"))
+    spec_key_dir_name.join(block_pt.iter().map(|p| p.to_string()).join("_"))
 }
 
 // For some reason, [Prehashed]'s [Clone] impl requires that the value be [Copy].
