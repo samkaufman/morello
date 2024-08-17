@@ -1,9 +1,9 @@
-mod blocks;
+mod pagecontents;
 
 use crate::common::DimSize;
 use crate::cost::{Cost, NormalizedCost};
 use crate::datadeps::SpecKey;
-use crate::db::blocks::DbBlock;
+use crate::db::pagecontents::PageContents;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap};
 use crate::grid::linear::BimapInt;
@@ -15,8 +15,8 @@ use crate::scheduling::ActionT as _;
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
+use pagecontents::RTreePageContents;
 
-use blocks::RTreeBlock;
 use divrem::DivRem;
 use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
@@ -24,7 +24,6 @@ use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Preh
 use serde::{Deserialize, Serialize};
 use wtinylfu::WTinyLfuCache;
 
-use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
@@ -38,16 +37,13 @@ use {
     std::time::Instant,
 };
 
-type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consistency?
+type DbKey = (TableKey, Vec<BimapInt>);
 type TableKey = (SpecKey, Vec<(Layout,)>);
 type PageKey = DbKey;
-type PageContents = HashMap<Vec<BimapInt>, DbBlock>;
 pub type ActionNum = u16;
 
 /// The number of shards/locks per thread.
 const THREAD_SHARDS: usize = 2;
-// TODO: Select these at runtime.
-const PAGE_FACTOR: BimapInt = 2;
 const CHANNEL_SIZE: usize = 2;
 /// Compress pages when writing to disk.
 const COMPRESS_PAGES: bool = true;
@@ -79,7 +75,7 @@ struct ShardVec(Vec<Mutex<Shard>>);
 pub struct PageId<'a> {
     db: &'a FilesDatabase,
     pub(crate) table_key: TableKey,
-    pub(crate) page_id: Vec<BimapInt>,
+    pub(crate) page_id: Vec<BimapInt>, // TODO: Rename to page_pt
 }
 
 #[derive(Debug, Clone)]
@@ -252,16 +248,12 @@ impl FilesDatabase {
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(&query);
-        let (block_pt, inner_pt) = blockify_point(global_pt);
+        let (page_pt, inner_pt) = blockify_point(global_pt);
 
-        let page_pt = block_pt_to_page_pt(&block_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
         let page: &Page = &self.load_live_page(&page_key);
-        let Some(b) = page.contents.get(&block_pt) else {
-            return GetPreference::Miss(None);
-        };
-        b.get_with_preference(&query, &inner_pt)
+        page.contents.get_with_preference(&query, &inner_pt)
     }
 
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
@@ -275,9 +267,7 @@ impl FilesDatabase {
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(&query);
-        let (block_pt, _) = blockify_point(global_pt);
-
-        let page_pt = block_pt_to_page_pt(&block_pt);
+        let (page_pt, _) = blockify_point(global_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
         let shard = &self.shards.0[self.shard_index(&page_key)];
@@ -301,11 +291,11 @@ impl FilesDatabase {
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt_lhs) = bimap.apply(spec);
-        let (block_pt, _) = blockify_point(global_pt_lhs);
+        let (page_pt, _) = blockify_point(global_pt_lhs);
         PageId {
             db: self,
             table_key,
-            page_id: block_pt_to_page_pt(&block_pt),
+            page_id: page_pt,
         }
     }
 
@@ -333,9 +323,9 @@ impl FilesDatabase {
         let bimap = self.spec_bimap();
         let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
 
-        // Construct an iterator over all blocks to fill.
+        // Construct an iterator over all pages (tiles) to fill.
         let rank = bottom.len();
-        let blocks_iter = bottom
+        let pages_iter = bottom
             .into_iter()
             .zip(&top)
             .enumerate()
@@ -346,41 +336,23 @@ impl FilesDatabase {
         let normalized_decisions =
             ActionNormalizedCostVec::normalize(ActionCostVec(decisions), spec.0.volume());
 
-        for joined_row in blocks_iter {
-            let block_pt = joined_row
+        for joined_row in pages_iter {
+            let page_pt = joined_row
                 .iter()
                 .map(|(b, _)| *b)
                 .collect::<Vec<BimapInt>>();
             // TODO: Factor out this tuple construction
-            let mut page_guard = self.load_live_page_mut(
-                &self
-                    .prehasher
-                    .prehash((db_key.clone(), block_pt_to_page_pt(&block_pt))),
-            );
+            let mut page_guard =
+                self.load_live_page_mut(&self.prehasher.prehash((db_key.clone(), page_pt.clone())));
             page_guard.modified = true;
 
-            // If the page already contains the block, mutate in place and continue the loop.
-            if let Some(live_block) = page_guard.contents.get_mut(&block_pt) {
-                let dim_ranges = joined_row
-                    .iter()
-                    .map(|(_, r)| r.clone())
-                    .collect::<Vec<_>>();
-                // Examine the table before updating.
-                live_block.fill_region(self.k, &dim_ranges, &normalized_decisions);
-                continue;
-            }
-
-            // If not, create the block and add it to the page.
             let dim_ranges = joined_row
                 .iter()
                 .map(|(_, r)| r.clone())
                 .collect::<Vec<_>>();
-            let new_block = DbBlock::RTree(Box::new(RTreeBlock::with_single_rect(
-                self.k,
-                &dim_ranges,
-                &normalized_decisions,
-            )));
-            page_guard.contents.insert(block_pt, new_block);
+            page_guard
+                .contents
+                .fill_region(self.k, &dim_ranges, &normalized_decisions);
         }
     }
 
@@ -512,7 +484,7 @@ impl FilesDatabase {
         writers.page_writer.write_record(["page_path"]).unwrap();
         writers
             .block_writer
-            .write_record(["page_path", "block_pt", "rects"])
+            .write_record(["page_path", "rects"])
             .unwrap();
         writers
             .block_action_writer
@@ -564,8 +536,8 @@ impl PageId<'_> {
         if self.table_key != table_key {
             return false;
         }
-        let (block_pt, _) = blockify_point(global_pt);
-        self.page_id == block_pt_to_page_pt(&block_pt)
+        let (page_pt, _) = blockify_point(global_pt);
+        self.page_id == page_pt
     }
 }
 
@@ -613,13 +585,17 @@ impl Shard {
                                             plain_error
                                         );
                                         Page {
-                                            contents: HashMap::new(),
+                                            contents: PageContents::RTree(Box::new(
+                                                RTreePageContents::empty(key.1.len()),
+                                            )),
                                             modified: false,
                                         }
                                     }
                                 },
                                 Err(_) => Page {
-                                    contents: HashMap::new(),
+                                    contents: PageContents::RTree(Box::new(
+                                        RTreePageContents::empty(key.1.len()),
+                                    )),
                                     modified: false,
                                 },
                             };
@@ -901,24 +877,14 @@ fn analyze_visit_dir<Tgt>(
             }
         };
 
-        for (block_pt, block) in &page.contents {
-            let DbBlock::RTree(r) = block;
-            writers
-                .block_writer
-                .write_record([
-                    &entry_path_str,
-                    &format!("{block_pt:?}"),
-                    &r.rect_count().to_string(),
-                ])
-                .unwrap();
-        }
+        let PageContents::RTree(r) = &page.contents;
+        writers
+            .block_writer
+            .write_record([&entry_path_str, &r.rect_count().to_string()])
+            .unwrap();
 
         writers.page_writer.write_record([entry_path_str]).unwrap();
     }
-}
-
-fn block_pt_to_page_pt(block_pt: &[BimapInt]) -> Vec<BimapInt> {
-    block_pt.iter().map(|&i| i / PAGE_FACTOR).collect()
 }
 
 fn construct_impl<Tgt>(db: &FilesDatabase, imp: &ImplNode<Tgt>) -> ImplNode<Tgt>
@@ -949,7 +915,7 @@ fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
     if dim >= dim_count - LEVEL_COUNT {
         31
     } else {
-        4
+        8
     }
 }
 

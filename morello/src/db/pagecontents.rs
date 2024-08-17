@@ -21,14 +21,14 @@ use std::ops::Range;
 /// would need to be scanned to determine whether they are all identical and, to set `matches`, how
 /// many there are.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DbBlock {
-    RTree(Box<RTreeBlock>),
+pub enum PageContents {
+    RTree(Box<RTreePageContents>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RTreeBlock(RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionNum)>>);
+pub struct RTreePageContents(RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionNum)>>);
 
-impl DbBlock {
+impl PageContents {
     pub(super) fn get_with_preference<Tgt>(
         &self,
         query: &Spec<Tgt>,
@@ -40,7 +40,7 @@ impl DbBlock {
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let block_result = match self {
-            DbBlock::RTree(b) => b.get(inner_pt, query.0.volume()),
+            PageContents::RTree(b) => b.get(inner_pt, query.0.volume()),
         };
         match block_result {
             Some(r) => GetPreference::Hit(r),
@@ -55,20 +55,14 @@ impl DbBlock {
         value: &ActionNormalizedCostVec,
     ) {
         match self {
-            DbBlock::RTree(b) => b.fill_region(k, dim_ranges, value),
+            PageContents::RTree(b) => b.fill_region(k, dim_ranges, value),
         }
     }
 }
 
-impl RTreeBlock {
-    pub fn with_single_rect(
-        k: u8,
-        dim_ranges: &[Range<BimapInt>],
-        value: &ActionNormalizedCostVec,
-    ) -> Self {
-        let mut tree_block = RTreeBlock(RTreeDyn::empty(dim_ranges.len()));
-        tree_block.fill_region(k, dim_ranges, value);
-        tree_block
+impl RTreePageContents {
+    pub fn empty(rank: usize) -> Self {
+        RTreePageContents(RTreeDyn::empty(rank))
     }
 
     #[cfg(feature = "db-stats")]
