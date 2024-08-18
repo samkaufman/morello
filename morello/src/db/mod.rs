@@ -17,7 +17,6 @@ use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 use pagecontents::RTreePageContents;
 
-use divrem::DivRem;
 use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
 use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Prehasher};
@@ -247,12 +246,16 @@ impl FilesDatabase {
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(&query);
-        let (page_pt, inner_pt) = blockify_point(global_pt);
+        let global_pt_u8 = global_pt
+            .iter()
+            .map(|&x| u8::try_from(x).unwrap())
+            .collect::<Vec<_>>();
 
+        let page_pt = blockify_point(&global_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
         let page: &Page = &self.load_live_page(&page_key);
-        page.contents.get_with_preference(&query, &inner_pt)
+        page.contents.get_with_preference(&query, &global_pt_u8)
     }
 
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
@@ -266,7 +269,7 @@ impl FilesDatabase {
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = bimap.apply(&query);
-        let (page_pt, _) = blockify_point(global_pt);
+        let page_pt = blockify_point(&global_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
         let shard = &self.shards.0[self.shard_index(&page_key)];
@@ -290,7 +293,7 @@ impl FilesDatabase {
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt_lhs) = bimap.apply(spec);
-        let (page_pt, _) = blockify_point(global_pt_lhs);
+        let page_pt = blockify_point(&global_pt_lhs);
         PageId {
             db: self,
             table_key,
@@ -322,7 +325,7 @@ impl FilesDatabase {
         self.stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
 
         let bimap = self.spec_bimap();
-        let (db_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
+        let (table_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
 
         // Construct an iterator over all pages (tiles) to fill.
         let rank = bottom.len();
@@ -337,20 +340,26 @@ impl FilesDatabase {
         let normalized_decisions =
             ActionNormalizedCostVec::normalize(ActionCostVec(decisions), spec.0.volume());
 
+        // Reuse the follow two values to avoid some allocations.
+        let mut key_tuple = (table_key, vec![]);
+        let mut dim_ranges = vec![];
         for joined_row in pages_iter {
-            let page_pt = joined_row
-                .iter()
-                .map(|(b, _)| *b)
-                .collect::<Vec<BimapInt>>();
-            // TODO: Factor out this tuple construction
-            let mut page_guard =
-                self.load_live_page_mut(&self.prehasher.prehash((db_key.clone(), page_pt.clone())));
-            page_guard.modified = true;
+            key_tuple.1.clear();
+            key_tuple.1.reserve_exact(joined_row.len());
+            dim_ranges.clear();
+            dim_ranges.reserve_exact(joined_row.len());
+            for (b, t) in joined_row {
+                key_tuple.1.push(b);
+                dim_ranges.push(t);
+            }
 
-            let dim_ranges = joined_row
-                .iter()
-                .map(|(_, r)| r.clone())
-                .collect::<Vec<_>>();
+            // Load `page_guard`. We do some awkward mutation of `key_tuple.1` to avoid cloning
+            // `table_key`/`key_tuple.0` on each iteration.
+            let key = self.prehasher.prehash(key_tuple);
+            let mut page_guard = self.load_live_page_mut(&key);
+            key_tuple = Prehashed::into_inner(key);
+
+            page_guard.modified = true;
             page_guard
                 .contents
                 .fill_region(self.k, &dim_ranges, &normalized_decisions);
@@ -537,7 +546,7 @@ impl PageId<'_> {
         if self.table_key != table_key {
             return false;
         }
-        let (page_pt, _) = blockify_point(global_pt);
+        let page_pt = blockify_point(&global_pt);
         self.page_id == page_pt
     }
 }
@@ -920,23 +929,50 @@ fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
     }
 }
 
-/// Convert a single dimension of a global point to a block and within-block index.
-fn db_key_scale(dim: usize, value: BimapInt, dim_count: usize) -> (BimapInt, u8) {
-    // TODO: Autotune rather than hardcode these arbitrary dimensions.
-    let (quotient, remainder) = value.div_rem(&block_size_dim(dim, dim_count));
-    (quotient, remainder.try_into().unwrap())
+/// Computes the shape of a block in the database.
+///
+/// Given a maximum block shape and the coordinate of that block in the database, this will
+/// truncate at the edges. If the given database shape is `None` in that dimension, that dimension
+/// will be the full block size.
+fn block_shape<'a, F>(
+    block_pt: &'a [u32],
+    db_shape: &'a [Option<NonZeroUsize>],
+    block_max_size_fn: F,
+) -> impl ExactSizeIterator<Item = BimapInt> + 'a
+where
+    F: Fn(usize, usize) -> u32 + 'a,
+{
+    let rank = db_shape.len();
+    assert_eq!(block_pt.len(), rank);
+    db_shape.iter().enumerate().map(move |(i, db_max_option)| {
+        let full_block_size = block_max_size_fn(i, rank);
+        if let Some(db_max) = db_max_option {
+            let remaining_size =
+                u32::try_from(db_max.get()).unwrap() - block_pt[i] * full_block_size;
+            remaining_size.min(full_block_size)
+        } else {
+            full_block_size
+        }
+    })
 }
 
-/// Converts a given global coordinate into block and within-block coordinates.
-fn blockify_point(mut pt: Vec<BimapInt>) -> (Vec<BimapInt>, Vec<u8>) {
-    let rank = pt.len();
-    let mut inner_pt = Vec::with_capacity(rank);
-    for (i, d) in pt.iter_mut().enumerate() {
-        let (outer, inner) = db_key_scale(i, *d, rank);
-        *d = outer;
-        inner_pt.push(inner);
+fn db_shape<Tgt: Target>(rank: usize) -> Vec<Option<NonZeroUsize>> {
+    let mut shape = vec![None; rank];
+    let MemoryLimits::Standard(m) = Tgt::max_mem();
+    for (level_idx, dest_idx) in ((rank - m.len())..rank).enumerate() {
+        shape[dest_idx] =
+            Some(NonZeroUsize::new((m.get_binary_scaled(level_idx) + 1).into()).unwrap());
     }
-    (pt, inner_pt)
+    shape
+}
+
+/// Compute the block coordinate from a global coordinate.
+fn blockify_point(pt: &[BimapInt]) -> Vec<BimapInt> {
+    let rank = pt.len();
+    pt.iter()
+        .enumerate()
+        .map(|(i, &d)| d / block_size_dim(i, rank))
+        .collect()
 }
 
 /// Compute the bottom and top points (inclusive) to fill in a database table.
@@ -982,22 +1018,24 @@ where
 
 /// Iterate blocks of an integer range.
 ///
-/// Yields block indices along with a range of within-block indices. For example:
+/// Yields block indices along with a range of split global indices (the ranges are no in the block
+/// coordinate space). For example:
 /// ```
 /// # use morello::db::iter_blocks_in_single_dim_range;
 /// assert_eq!(iter_blocks_in_single_dim_range(0, 3, 4).collect::<Vec<_>>(),
 ///           vec![(0, 0..4)]);
 /// assert_eq!(iter_blocks_in_single_dim_range(1, 7, 4).collect::<Vec<_>>(),
-///            vec![(0, 1..4), (1, 0..4)]);
+///            vec![(0, 1..4), (1, 4..8)]);
 /// ```
 ///
-/// Given indices `global_bottom` and `global_top` are inclusive, forming a
-/// closed range. For example, the following yields a single incomplete block:
+/// `global_bottom` and `global_top` are inclusive, forming a closed range. For example,
+/// the following yields a single range smaller than the block.
 /// ```
 /// # use morello::db::iter_blocks_in_single_dim_range;
 /// assert_eq!(iter_blocks_in_single_dim_range(4, 4, 4).collect::<Vec<_>>(),
-///            vec![(1, 0..1)]);
+///            vec![(1, 4..5)]);
 /// ```
+///
 // TODO: Make private. (Will break doctests.)
 pub fn iter_blocks_in_single_dim_range(
     global_bottom: BimapInt,
@@ -1008,42 +1046,20 @@ pub fn iter_blocks_in_single_dim_range(
     debug_assert!(global_bottom <= global_top);
 
     // Change global_top to a non-inclusive upper bound.
-    let global_top = global_top + 1;
-    debug_assert!(global_top > global_bottom);
+    let Some(global_top_noninc) = global_top.checked_add(1) else {
+        todo!("support global_top equal to MAX");
+    };
 
     // Compute half-open range of blocks.
     let block_bottom = global_bottom / block_dim_size;
-    let block_top = global_top.div_ceil(block_dim_size);
-    debug_assert!(block_top > block_bottom);
+    let block_top = global_top / block_dim_size;
 
-    let last_block_is_complete = global_top % block_dim_size == 0;
-    let one_block_only = block_bottom == block_top - 1;
-
-    let prefix: Option<(BimapInt, Range<_>)>;
-    let suffix: Option<(BimapInt, Range<_>)>;
-    let s = global_bottom % block_dim_size;
-    if one_block_only {
-        let e = (s + (global_top - global_bottom)).min(block_dim_size);
-        prefix = Some((block_bottom, s..e));
-        suffix = None;
-    } else {
-        let e = global_top % block_dim_size;
-        prefix = Some((block_bottom, s..block_dim_size));
-        if e == 0 {
-            suffix = None;
-        } else {
-            suffix = Some((block_top - 1, 0..e));
-        }
-    }
-
-    let mut block_top_full = block_top;
-    if !last_block_is_complete {
-        block_top_full -= 1;
-    }
-    let full_blocks_iter =
-        ((block_bottom + 1)..block_top_full).map(move |block_idx| (block_idx, 0..block_dim_size));
-
-    prefix.into_iter().chain(full_blocks_iter).chain(suffix)
+    (block_bottom..=block_top).map(move |block_idx| {
+        // Compute the largest possible range for the block, then clip to given bounds.
+        let start = (block_idx * block_dim_size).max(global_bottom);
+        let end = ((block_idx + 1) * block_dim_size).min(global_top_noninc);
+        (block_idx, start..end)
+    })
 }
 
 fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
@@ -1196,13 +1212,10 @@ mod tests {
         ) {
             let end = start + extent;
             let mut visited_indices = Vec::with_capacity(extent as usize + 1);
-            for (block_idx, within_block_range) in
+            for (_, within_block_range) in
                 iter_blocks_in_single_dim_range(start, end, block_dim_size)
             {
-                for wpi in within_block_range {
-                    let reversed_idx = block_dim_size * block_idx + wpi;
-                    visited_indices.push(reversed_idx);
-                }
+                visited_indices.extend(within_block_range);
             }
             assert_eq!(visited_indices, (start..=end).collect::<Vec<_>>());
         }
