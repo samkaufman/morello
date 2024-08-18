@@ -29,7 +29,7 @@ pub enum PageContents {
 pub struct RTreePageContents(RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionNum)>>);
 
 impl PageContents {
-    pub(super) fn get_with_preference<Tgt>(
+    pub fn get_with_preference<Tgt>(
         &self,
         query: &Spec<Tgt>,
         inner_pt: &[u8],
@@ -48,7 +48,7 @@ impl PageContents {
         }
     }
 
-    pub(super) fn fill_region(
+    pub fn fill_region(
         &mut self,
         k: u8,
         dim_ranges: &[Range<BimapInt>],
