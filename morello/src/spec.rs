@@ -3614,10 +3614,8 @@ mod tests {
         // If an action consumes x bytes, then it should be valid for any Spec with the same logical
         // Spec at that memory limit and up.
         let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem();
-        let mut maxes = Vec::with_capacity(maxes_vec.len());
-        for binary_scaled in maxes_vec.iter_binary_scaled() {
-            maxes.push(u32::from(binary_scaled));
-        }
+        let mut maxes = maxes_vec.iter_binary_scaled().collect::<Vec<_>>();
+
         // Zero out levels which are slower than all present operands' levels.
         let parameters = logical_spec.parameters();
         for (level_idx, level) in Tgt::levels().into_iter().enumerate() {
@@ -3636,13 +3634,8 @@ mod tests {
             let mut empty = true;
             for pt in sum_seqs(&maxes, diagonal_idx) {
                 empty = false;
-                shared_spec.1 = MemoryLimits::Standard(MemVec::new_from_binary_scaled(
-                    pt.iter()
-                        .map(|&p| u8::try_from(p).unwrap())
-                        .collect::<Vec<_>>()
-                        .try_into()
-                        .unwrap(),
-                ));
+                shared_spec.1 =
+                    MemoryLimits::Standard(MemVec::new_from_binary_scaled(pt.try_into().unwrap()));
                 let MemoryLimits::Standard(limits_memvec) = &shared_spec.1;
                 // TODO: Assert that nothing disappears?
                 for i in (0..unseen_actions.len()).rev() {

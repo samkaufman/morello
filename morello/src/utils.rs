@@ -1,5 +1,5 @@
 use crate::memorylimits::MemVec;
-
+use num_traits::PrimInt;
 use std::fmt;
 use std::io;
 use std::iter;
@@ -21,11 +21,11 @@ pub struct ToWriteFmt<T: io::Write>(pub T);
 // Wraps a [fmt::Write] to prepend [str] to each line.
 pub struct LinePrefixWrite<'a, W: fmt::Write>(W, &'a str, bool);
 
-pub struct SumSeqs(Box<dyn Iterator<Item = Vec<u32>> + Send>, bool);
+pub struct SumSeqs<T>(Box<dyn Iterator<Item = Vec<T>> + Send>, bool);
 
-pub struct Diagonals {
-    maxes: Vec<u32>,
-    stage: u32,
+pub struct Diagonals<T> {
+    maxes: Vec<T>,
+    stage: T,
 }
 
 impl<T: io::Write> fmt::Write for ToWriteFmt<T> {
@@ -58,14 +58,14 @@ impl<W: fmt::Write> fmt::Write for LinePrefixWrite<'_, W> {
     }
 }
 
-impl SumSeqs {
+impl<T> SumSeqs<T> {
     pub fn is_empty(&self) -> bool {
         self.1
     }
 }
 
-impl Iterator for SumSeqs {
-    type Item = Vec<u32>;
+impl<T> Iterator for SumSeqs<T> {
+    type Item = Vec<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
@@ -76,15 +76,15 @@ impl Iterator for SumSeqs {
     }
 }
 
-impl Iterator for Diagonals {
-    type Item = SumSeqs;
+impl<T: PrimInt + Send + 'static> Iterator for Diagonals<T> {
+    type Item = SumSeqs<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let diagonal = sum_seqs(&self.maxes, self.stage);
         if diagonal.is_empty() {
             return None;
         }
-        self.stage += 1;
+        self.stage = self.stage.add(T::one());
         Some(diagonal)
     }
 }
@@ -198,14 +198,14 @@ pub fn factors(x: usize) -> Vec<usize> {
     result
 }
 
-pub fn diagonals(maxes: &[u32]) -> Diagonals {
+pub fn diagonals<T: PrimInt>(maxes: &[T]) -> Diagonals<T> {
     Diagonals {
         maxes: maxes.to_vec(),
-        stage: 0,
+        stage: T::zero(),
     }
 }
 
-pub fn sum_seqs(maxes: &[u32], total: u32) -> SumSeqs {
+pub fn sum_seqs<T: PrimInt + Send + 'static>(maxes: &[T], total: T) -> SumSeqs<T> {
     let maxes = maxes.to_vec();
     let len = maxes.len();
     if len == 0 {
@@ -217,19 +217,33 @@ pub fn sum_seqs(maxes: &[u32], total: u32) -> SumSeqs {
             SumSeqs(Box::new(iter::empty()), true)
         }
     } else {
-        let obligation = total.saturating_sub(maxes[1..].iter().sum::<u32>());
-        let min_value = u32::min(maxes[0], total);
+        let mut obligation = total;
+        for &m in &maxes[1..] {
+            obligation = obligation.saturating_sub(m).max(T::zero());
+        }
+        let min_value = maxes[0].min(total);
 
-        let mut flat_map_iter = (obligation..=min_value)
-            .flat_map(move |v| {
-                let maxes_tail = &maxes[1..];
-                sum_seqs(maxes_tail, total - v).map(move |mut suffix| {
-                    let mut prefix = vec![v];
-                    prefix.append(&mut suffix);
-                    prefix
-                })
+        let mut flat_map_iter = std::iter::from_fn({
+            let mut i = obligation;
+            move || {
+                if i <= min_value {
+                    let r = Some(i);
+                    i = i.add(T::one());
+                    r
+                } else {
+                    None
+                }
+            }
+        })
+        .flat_map(move |v| {
+            let maxes_tail = &maxes[1..];
+            sum_seqs(maxes_tail, total - v).map(move |mut suffix| {
+                let mut prefix = vec![v];
+                prefix.append(&mut suffix);
+                prefix
             })
-            .peekable();
+        })
+        .peekable();
         let is_empty = flat_map_iter.peek().is_none();
 
         SumSeqs(Box::new(flat_map_iter), is_empty)
@@ -338,6 +352,38 @@ mod tests {
         assert_eq!(write.0, "--\n");
     }
 
+    #[test]
+    fn test_diagonals_1() {
+        let expected = vec![vec![vec![0, 0]]];
+        let got = diagonals(&[0, 0])
+            .map(|v| v.collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_diagonals_2() {
+        let expected = vec![vec![vec![0, 0]], vec![vec![0, 1]]];
+        let got = diagonals(&[0, 1])
+            .map(|v| v.collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_diagonals_3() {
+        let expected = vec![
+            vec![vec![0, 0]],
+            vec![vec![0, 1], vec![1, 0]],
+            vec![vec![1, 1], vec![2, 0]],
+            vec![vec![2, 1]],
+        ];
+        let got = diagonals(&[2, 1])
+            .map(|v| v.collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(got, expected);
+    }
+
     proptest! {
         #[test]
         fn test_iter_multidim_range_matches_itertools_product(
@@ -380,6 +426,17 @@ mod tests {
 
             assert_eq!(fast_pts, itertools_product_pts);
             assert_eq!(fast_indices, itertools_product_indices);
+        }
+
+        #[test]
+        fn test_diagonals_always_returns_positive_points(
+            maxes in proptest::collection::vec(0i8..=3, 1..=3)
+        ) {
+            for diag in diagonals(&maxes) {
+                for pt in diag {
+                    prop_assert!(pt.iter().all(|&v| v >= 0));
+                }
+            }
         }
     }
 }
