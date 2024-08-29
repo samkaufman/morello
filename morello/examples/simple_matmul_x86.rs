@@ -2,7 +2,7 @@
 
 use morello::codegen::CodeGen;
 use morello::cost::Cost;
-use morello::imp::{Impl, ImplNode};
+use morello::imp::ImplNode;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::pprint::{pprint, ImplPrintStyle};
@@ -247,32 +247,5 @@ fn move_schedule(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
         move_spec
             .tile_out(&[1, 1], false)
             .place(CpuKernel::ValueAssign)
-    }
-}
-
-/// Extends scheduling language with some helpers.
-trait ImplNodeExt {
-    fn simple_move_schedule(&self, source_index: u8) -> ImplNode<X86Target>;
-}
-
-impl<T: SchedulingSugar<X86Target>> ImplNodeExt for T {
-    /// Moves the parameter identified by `source_index` into RF, then schedules each nested Move to
-    /// apply `=` to each element.
-    fn simple_move_schedule(&self, source_index: u8) -> ImplNode<X86Target> {
-        let mut imp = self.move_param(source_index, CpuMemoryLevel::RF, row_major(2), None);
-        let mut move_subspec_idxs = vec![];
-        for (i, child) in imp.children().iter().enumerate() {
-            if matches!(child, ImplNode::MoveLet(..)) {
-                move_subspec_idxs.push(i);
-            }
-        }
-        for i in move_subspec_idxs {
-            imp = imp.subschedule(&[i], &|move_spec| {
-                move_spec
-                    .tile_out(&[1, 1], false)
-                    .place(CpuKernel::ValueAssign)
-            });
-        }
-        imp
     }
 }
