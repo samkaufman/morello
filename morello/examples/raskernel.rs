@@ -14,6 +14,7 @@ use morello::target::{
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
+use nonzero::nonzero as nz;
 use std::io;
 use std::panic;
 
@@ -43,12 +44,28 @@ fn main() {
     // final code. Moves into the L1 cache instead model the behavior of the hardware cache and, by
     // changing the Spec, allow the remainder of the schedule to assume tensors are in L1.
     let implementation = spec
-        .tile_out(&[16, 16], false)
+        .tile_out(&[8, 8], false)
         .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
         .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
         .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
         .to_accum()
-        .subschedule(&[1], &|s| s.split(4).split(1).place(CpuKernel::RasKernel));
+        .subschedule(&[1], &|matmulacc| {
+            matmulacc
+                .split(4)
+                .split(1)
+                .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
+                .subschedule(&[0], &|move_to_vrf_arg0| {
+                    move_to_vrf_arg0.place(CpuKernel::VectorAssign)
+                })
+                .subschedule(&[1], &|vrf_l1| {
+                    vrf_l1
+                        .move_param(1, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
+                        .subschedule(&[0], &|move_to_vrf_arg1| {
+                            move_to_vrf_arg1.place(CpuKernel::VectorAssign)
+                        })
+                        .subschedule(&[1], &|matmul| matmul.place(CpuKernel::RasKernel))
+                })
+        });
 
     println!("\nImpl resulting from manual scheduling:");
     pprint(&implementation, ImplPrintStyle::Compact);
