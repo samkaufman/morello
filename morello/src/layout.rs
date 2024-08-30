@@ -47,6 +47,14 @@ pub enum LayoutError {
     InvalidShape(Shape),
 }
 
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum StridesError {
+    #[error("Logical dimension {0} maps to multiple, non-sequential physical dimensions")]
+    NonseqPhysicalDims(u8),
+    #[error("Layout does not apply to shape {0:?}")]
+    InvalidShape(Shape),
+}
+
 impl Layout {
     pub fn new(dims: Vec<(u8, PhysDim)>) -> Layout {
         #[cfg(debug_assertions)]
@@ -199,6 +207,49 @@ impl Layout {
         dims.iter()
             .enumerate()
             .all(|(i, (d, s))| i == usize::from(*d) && *s == PhysDim::Dynamic)
+    }
+
+    /// Returns the step size over each logical dimension.
+    ///
+    /// For example,
+    /// ```
+    /// # use morello::layout::col_major;
+    /// # use nonzero::nonzero as nz;
+    /// let layout = col_major(2);
+    /// assert_eq!(
+    ///     layout.strides(&[nz!(4u32), nz!(6u32)]),
+    ///     Ok(vec![nz!(1u32), nz!(4u32)])
+    /// );
+    /// ```
+    ///
+    /// This function returns a [StridesError::NonseqPhysicalDims] for [Layout]s which map each
+    /// logical dimension to contiguous sequences of physical dimensions. Put another way, it is not
+    /// defined for layouts which "re-visit" a logical dimension while iterating over physical
+    /// dimensions.
+    pub fn strides(&self, logical_shape: &[DimSize]) -> Result<Shape, StridesError> {
+        let Layout(dims) = self;
+
+        if usize::from(*dims.iter().map(|(d, _)| d).max().unwrap()) + 1 != logical_shape.len() {
+            return Err(StridesError::InvalidShape(logical_shape.into()));
+        }
+
+        let mut seen = vec![false; logical_shape.len()];
+        let mut strides = vec![nz!(1u32); logical_shape.len()];
+        let mut last_stride = nz!(1u32);
+        for (logical_dim, _) in &dims.iter().rev().chunk_by(|(dim, _)| *dim) {
+            // We won't visit the chunk's contents. We're just interested in the dimension's
+            // physical order.
+            let logical_dim_usize = usize::from(logical_dim);
+            if seen[logical_dim_usize] {
+                return Err(StridesError::NonseqPhysicalDims(logical_dim));
+            }
+            strides[logical_dim_usize] = last_stride;
+            last_stride = last_stride
+                .checked_mul(logical_shape[logical_dim_usize])
+                .unwrap();
+            seen[logical_dim_usize] = true;
+        }
+        Ok(strides)
     }
 
     // TODO: Do we really need callers to build a HashSet?
@@ -1160,6 +1211,56 @@ mod tests {
         let pt1 = NonAffineExpr::from(BufferVar::Pt(1, expr_id.clone()));
         let expected = pt0.clone() * 8 + (pt1.clone() % 8) / 2 + (pt1 % 2) * 4;
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
+    }
+
+    #[test]
+    fn test_strides_ok_simple() {
+        let layout = row_major(2);
+        assert_eq!(
+            layout.strides(&[nz!(4u32), nz!(6u32)]),
+            Ok(vec![nz!(6u32), nz!(1u32)])
+        );
+    }
+
+    #[test]
+    fn test_strides_ok_dim2() {
+        let layout = Layout::new(vec![
+            (2, PhysDim::Dynamic),
+            (2, PhysDim::Packed(nz!(2u32))),
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (1, PhysDim::Packed(nz!(2u32))),
+        ]);
+        assert_eq!(
+            layout.strides(&[nz!(2u32), nz!(4u32), nz!(6u32)]),
+            Ok(vec![nz!(4u32), nz!(1u32), nz!(8u32)])
+        );
+    }
+
+    #[test]
+    fn test_strides_ok_multiple_in_sequence() {
+        let layout = Layout::new(vec![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (1, PhysDim::Packed(nz!(2u32))),
+        ]);
+        assert_eq!(
+            layout.strides(&[nz!(4u32), nz!(6u32)]),
+            Ok(vec![nz!(6u32), nz!(1u32)])
+        );
+    }
+
+    #[test]
+    fn test_strides_err_revisiting() {
+        let layout = Layout::new(vec![
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Packed(nz!(2u32))),
+        ]);
+        assert_eq!(
+            layout.strides(&[nz!(4u32), nz!(6u32)]),
+            Err(StridesError::NonseqPhysicalDims(1))
+        );
     }
 
     fn arb_shape_and_same_rank_layout() -> impl Strategy<Value = (Shape, Layout)> {
