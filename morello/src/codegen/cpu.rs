@@ -580,6 +580,51 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 spec: _,
             }) => {
                 match kernel_type {
+                    CpuKernel::RasKernel => {
+                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
+                            self.c_index_ptr(a, b, None)
+                        });
+
+                        let buffer_stride_a = {
+                            let backer = arguments[0].backing_tensor(&self.param_bindings).unwrap();
+                            let strides = backer
+                                .spec()
+                                .layout()
+                                .strides(backer.spec().shape())
+                                .unwrap();
+                            strides[0]
+                        };
+                        let buffer_stride_b = {
+                            let backer = arguments[1].backing_tensor(&self.param_bindings).unwrap();
+                            let strides = backer
+                                .spec()
+                                .layout()
+                                .strides(backer.spec().shape())
+                                .unwrap();
+                            strides[0]
+                        };
+                        let buffer_stride_c = {
+                            let backer = arguments[2].backing_tensor(&self.param_bindings).unwrap();
+                            let strides = backer
+                                .spec()
+                                .layout()
+                                .strides(backer.spec().shape())
+                                .unwrap();
+                            strides[0]
+                        };
+
+                        writeln!(
+                            w,
+                            "{}raskernel({}, {}, {}, {}, {}, {});",
+                            indent(depth),
+                            exprs[0],
+                            exprs[1],
+                            exprs[2],
+                            buffer_stride_a,
+                            buffer_stride_b,
+                            buffer_stride_c,
+                        )
+                    }
                     CpuKernel::MultAdd => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
@@ -1691,6 +1736,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         }
     }
 
+    /// Returns a C expression (as a string) which refers to the address of the buffer.
     fn c_index_ptr(
         &self,
         buffer: &CBuffer,

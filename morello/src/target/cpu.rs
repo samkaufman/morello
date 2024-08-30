@@ -100,6 +100,7 @@ pub enum CpuKernel {
     VectorZero,
     CastBf16F32,
     VectorCastBf16F32,
+    RasKernel,
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -265,7 +266,8 @@ impl<T: CpuTarget> Target for T {
                 let possible_kernels: &[CpuKernel] = match typ {
                     PrimitiveSpecType::Matmul { accum } => {
                         if *accum {
-                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 8] = [
+                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 9] = [
+                                CpuKernel::RasKernel,
                                 CpuKernel::MultAdd,
                                 CpuKernel::BroadcastVecMultAdd,
                                 CpuKernel::BroadcastVecMultAddBf16F32,
@@ -331,7 +333,8 @@ impl Kernel for CpuKernel {
             | CpuKernel::DotProductLoop
             | CpuKernel::DotProductLoopF32Bf16F32
             | CpuKernel::DotProductLoopF32InterleavedBf16F32
-            | CpuKernel::DotProductLoopBf16Bf16F32 => 3,
+            | CpuKernel::DotProductLoopBf16Bf16F32
+            | CpuKernel::RasKernel => 3,
             CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
             | CpuKernel::VectorInterleaveBf16F32
@@ -348,6 +351,7 @@ impl Kernel for CpuKernel {
     // TODO: Rename to parameters
     fn applies_to_parameters<Tgt: CpuTarget>(&self, operands: &[TensorSpec<Tgt>]) -> bool {
         match self {
+            CpuKernel::RasKernel => true,
             CpuKernel::MultAdd => {
                 operands.iter().all(|o| {
                     o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == nz!(1u32))
@@ -649,6 +653,7 @@ impl Kernel for CpuKernel {
     fn memory_allocated<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MemoryAllocation {
         match self {
             // TODO: Model memory correctly for BroadcastVecMultAddBf16F32
+            CpuKernel::RasKernel => MemoryAllocation::none(),
             CpuKernel::BroadcastVecMultAdd
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::BroadcastVecMultAddBf16F32 => {
@@ -706,6 +711,7 @@ impl Kernel for CpuKernel {
 
     fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost {
         match self {
+            CpuKernel::RasKernel => 200,
             CpuKernel::BroadcastVecMultAdd
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::BroadcastVecMultAddBf16F32 => {
