@@ -515,10 +515,7 @@ where
 
 fn tensorspec_aux_str<Tgt: Target>(aux: &TensorSpecAux<Tgt>) -> String {
     let mut parts = Vec::with_capacity(5);
-
-    if aux.level != Tgt::default_level() {
-        parts.push(aux.level.to_string());
-    }
+    parts.push(aux.level.to_string());
 
     if !aux.layout.is_row_major() {
         parts.push(aux.layout.to_string());
