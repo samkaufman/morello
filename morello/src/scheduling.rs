@@ -97,8 +97,8 @@ struct MoveLetPlan<'a, Tgt: Target> {
 pub enum ApplyError {
     #[error("Cannot apply action to non-canonical Spec")]
     SpecNotCanonical,
-    #[error("Insufficient memory to apply action")]
-    OutOfMemory,
+    #[error("Insufficient memory in {0} to apply action")]
+    OutOfMemory(String),
     #[error("Action does not apply to this Spec: {0}")]
     ActionNotApplicable(ActionNotApplicableReason),
 }
@@ -409,15 +409,12 @@ impl<Tgt: Target> Action<Tgt> {
 
                     // TODO: Use MemoryLimits::Pipeline where appropriate instead.
                     let mut m = MemoryLimits::Standard(match &spec.1 {
-                        MemoryLimits::Standard(v) => {
-                            let Some(r) = v
-                                .clone()
-                                .checked_sub_snap_down(&intermediate_mem_consumed_nondiscrete)
-                            else {
-                                return Err(ApplyError::OutOfMemory);
-                            };
-                            r
-                        }
+                        MemoryLimits::Standard(v) => v
+                            .clone()
+                            .checked_sub_snap_down(&intermediate_mem_consumed_nondiscrete)
+                            .map_err(|oom_idx| {
+                                ApplyError::OutOfMemory(Tgt::levels()[oom_idx].to_string())
+                            })?,
                     });
                     m.discretize();
                     m
@@ -1107,16 +1104,17 @@ fn plan_movelet<'a, Tgt: Target>(
             * u64::from(operands[usize::from(source_idx)].volume().get());
         match &spec.1 {
             MemoryLimits::Standard(base) => {
-                let updated_level_idx = Tgt::levels()
-                    .iter()
-                    .position(|l| l == &destination_level)
-                    .unwrap();
+                let levels = Tgt::levels();
+                let updated_level_idx =
+                    levels.iter().position(|l| l == &destination_level).unwrap();
                 let mut new_limits = base.clone();
                 let Some(level_updated) = new_limits
                     .get_unscaled(updated_level_idx)
                     .checked_sub(additional)
                 else {
-                    return Err(ApplyError::OutOfMemory);
+                    return Err(ApplyError::OutOfMemory(
+                        levels[updated_level_idx].to_string(),
+                    ));
                 };
                 new_limits.set_unscaled(updated_level_idx, prev_power_of_two(level_updated));
                 MemoryLimits::Standard(new_limits)

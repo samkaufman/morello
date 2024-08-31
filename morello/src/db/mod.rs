@@ -1747,7 +1747,7 @@ mod tests {
                     .filter_map(|(i, a)| match a.apply(&spec) {
                         Ok(applied) => Some((ActionIdx::from(u16::try_from(i).unwrap()), applied)),
                         Err(ApplyError::ActionNotApplicable(_)) => None,
-                        Err(ApplyError::OutOfMemory) => None,
+                        Err(ApplyError::OutOfMemory(_)) => None,
                         Err(ApplyError::SpecNotCanonical) => {
                             unreachable!("Non-canonical Specs should be filtered")
                         }
@@ -1807,7 +1807,7 @@ mod tests {
             .enumerate()
             .filter_map(|(i, a)| match a.apply(spec) {
                 Ok(imp) => Some((i, imp)),
-                Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => None,
+                Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory(_)) => None,
                 Err(ApplyError::SpecNotCanonical) => panic!(),
             })
             .next()

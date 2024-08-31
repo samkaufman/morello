@@ -60,23 +60,21 @@ pub trait Subschedule<Tgt: Target> {
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt> {
-        Action::TileOut(TileOut::MultiLoop {
+        let action = Action::TileOut(TileOut::MultiLoop {
             output_shape: output_shape
                 .iter()
                 .map(|&d| DimSize::new(d).unwrap())
                 .collect(),
             parallel,
-        })
-        .apply(self)
-        .unwrap()
+        });
+        apply_unwrap(self, action)
     }
 
     fn split(&self, k: u32) -> ImplNode<Tgt> {
-        Action::Split {
+        let action = Action::Split {
             k: DimSize::new(k).unwrap(),
-        }
-        .apply(self)
-        .unwrap()
+        };
+        apply_unwrap(self, action)
     }
 
     fn move_param(
@@ -87,15 +85,14 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         let destination_dtype = self.0.parameters()[usize::from(source_idx)].dtype();
-        Action::Move {
+        let action = Action::Move {
             source_idx,
             destination_dtype,
             destination_level,
             destination_layout,
             destination_vector_size,
-        }
-        .apply(self)
-        .unwrap()
+        };
+        apply_unwrap(self, action)
     }
 
     fn cast(
@@ -106,19 +103,19 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        Action::Move {
+        let action = Action::Move {
             source_idx,
             destination_dtype,
             destination_level,
             destination_layout,
             destination_vector_size,
-        }
-        .apply(self)
-        .unwrap()
+        };
+        apply_unwrap(self, action)
     }
 
     fn to_accum(&self) -> ImplNode<Tgt> {
-        Action::ToAccum.apply(self).unwrap()
+        let action = Action::ToAccum;
+        apply_unwrap(self, action)
     }
 
     fn peel(
@@ -127,21 +124,22 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         level: Tgt::Level,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        Action::Peel {
+        let action = Action::Peel {
             layout,
             level,
             vector_size,
-        }
-        .apply(self)
-        .unwrap()
+        };
+        apply_unwrap(self, action)
     }
 
     fn spatial_split(&self) -> ImplNode<Tgt> {
-        Action::SpatialSplit.apply(self).unwrap()
+        let action = Action::SpatialSplit;
+        apply_unwrap(self, action)
     }
 
     fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt> {
-        Action::Place(kernel_type).apply(self).unwrap()
+        let action = Action::Place(kernel_type);
+        apply_unwrap(self, action)
     }
 
     fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
@@ -272,5 +270,12 @@ where
             [child] => node.replace_children(iter::once(apply_to_leaf_spec(child, f))),
             _ => panic!("Ambiguous choice of child. Use `subschedule`."),
         },
+    }
+}
+
+fn apply_unwrap<Tgt: Target>(spec: &Spec<Tgt>, action: Action<Tgt>) -> ImplNode<Tgt> {
+    match action.apply(spec) {
+        Ok(result) => result,
+        Err(e) => panic!("{e}"),
     }
 }

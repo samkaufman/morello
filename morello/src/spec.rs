@@ -2278,7 +2278,7 @@ mod tests {
                             // TODO: Assert here that the min of each level-wise limit is zero.
                             assert_eq!(&applied.peak_memory(), limits_memvec);
                         }
-                        Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => {}
+                        Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory(_)) => {}
                         Err(ApplyError::SpecNotCanonical) => panic!(),
                     }
                 }
@@ -2300,7 +2300,9 @@ mod tests {
                     .into_iter()
                     .filter_map(|a| match a.apply(&spec) {
                         Ok(applied) => Some((a, applied)),
-                        Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory) => None,
+                        Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory(_)) => {
+                            None
+                        }
                         Err(ApplyError::SpecNotCanonical) => unreachable!(),
                     })
                     .collect::<Vec<_>>();

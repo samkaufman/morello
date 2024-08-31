@@ -88,14 +88,16 @@ fn main() {
             CpuCodeGenThreadStyle::Highway,
             &mut ToWriteFmt(io::stdout()),
         )
-        .unwrap();
+        .unwrap_or_else(|e| panic!("Failed to generate code: {}", e));
 
     // Benchmark.
     let skip_var = std::env::var("SKIP_BF16_EXECUTION");
     match skip_var.as_ref().map(|s| s.as_str()) {
         Ok("0") | Err(_) => {
             const ITERS: u32 = 100;
-            let result = implementation.bench(ITERS, None).unwrap();
+            let result = implementation
+                .bench(ITERS, None)
+                .unwrap_or_else(|e| panic!("Failed to benchmark: {}", e));
             let kernel_runtime =
                 (result.best_inner_loop_runtime() / result.inner_loop_iterations).as_secs_f64();
             let throughput = result.inner_loop_iterations as f64

@@ -137,7 +137,10 @@ impl MemoryLimits {
                 let mut result = Vec::with_capacity(cur_limit.len());
                 for child_allocation in per_child_diffs {
                     debug_assert_eq!(child_allocation.len(), cur_limit.len());
-                    let to_push = cur_limit.clone().checked_sub_snap_down(child_allocation)?;
+                    let to_push = cur_limit
+                        .clone()
+                        .checked_sub_snap_down(child_allocation)
+                        .ok()?;
                     let mut to_push = MemoryLimits::Standard(to_push);
                     to_push.discretize();
                     result.push(to_push);
@@ -294,16 +297,16 @@ impl MemVec {
         self.0[idx] = bit_length(value).try_into().unwrap();
     }
 
-    pub fn checked_sub_snap_down(self, rhs: &[u64; LEVEL_COUNT]) -> Option<MemVec> {
+    pub fn checked_sub_snap_down(self, rhs: &[u64; LEVEL_COUNT]) -> Result<MemVec, usize> {
         let mut result = self;
-        for (result_entry, &r) in result.0.iter_mut().zip(rhs) {
+        for (i, (result_entry, &r)) in result.0.iter_mut().zip(rhs).enumerate() {
             let cur = bit_length_inverse((*result_entry).into());
             if cur < r {
-                return None;
+                return Err(i);
             }
             *result_entry = bit_length(prev_power_of_two(cur - r)).try_into().unwrap();
         }
-        Some(result)
+        Ok(result)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
