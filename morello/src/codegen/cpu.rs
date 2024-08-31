@@ -1833,10 +1833,7 @@ fn get_vector(
                 && vec_type.value_cnt == u8::try_from(vector_size.get()).unwrap()
         })
         .unwrap_or_else(|| {
-            panic!(
-                "vec_types does not contain dtype {:?} and size {}; vec_types are: {:?}",
-                dtype, vector_size, vec_types
-            )
+            panic!("Vectors of type {dtype} and size {vector_size} are not supported")
         })
 }
 

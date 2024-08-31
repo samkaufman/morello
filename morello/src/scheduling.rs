@@ -111,6 +111,7 @@ pub enum ActionNotApplicableReason {
     TileShapeInvalid,
     LayoutIncompatible,
     SelfMove,
+    VectorSizeInvalid(Dtype, DimSize),
     Other,
 }
 
@@ -1053,6 +1054,12 @@ impl Display for ActionNotApplicableReason {
                     "Source and destination TensorSpecs were equal after canonicalization"
                 )
             }
+            ActionNotApplicableReason::VectorSizeInvalid(dtype, size) => {
+                write!(
+                    f,
+                    "Target does not support {dtype} vectors with {size} values"
+                )
+            }
             ActionNotApplicableReason::Other => write!(f, "Unknown reason"),
         }
     }
@@ -1074,6 +1081,16 @@ fn plan_movelet<'a, Tgt: Target>(
             // TODO: Replace Other with a new ActionNotApplicableReason variant.
             ActionNotApplicableReason::Other,
         ));
+    }
+
+    if let Some(vs) = destination_vector_size {
+        if !Tgt::vec_types().iter().any(|vec_type| {
+            vec_type.dtype == destination_dtype && u32::from(vec_type.value_cnt) == vs.get()
+        }) {
+            return Err(ApplyError::ActionNotApplicable(
+                ActionNotApplicableReason::VectorSizeInvalid(destination_dtype, vs),
+            ));
+        }
     }
 
     let new_spec = movelet_inner_tensorspec(
