@@ -1,4 +1,4 @@
-use morello::codegen::{CodeGen, CpuCodeGenThreadStyle};
+use morello::codegen::CodeGen;
 use morello::common::{DimSize, Dtype};
 use morello::cost::Cost;
 use morello::layout::{col_major, row_major, Layout, PhysDim};
