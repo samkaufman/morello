@@ -82,10 +82,9 @@ fn main() {
         });
 
     implementation
-        .emit_ext(
+        .emit(
             true,
             Some(ImplPrintStyle::Compact),
-            CpuCodeGenThreadStyle::Highway,
             &mut ToWriteFmt(io::stdout()),
         )
         .unwrap_or_else(|e| panic!("Failed to generate code: {}", e));
