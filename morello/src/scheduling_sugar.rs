@@ -246,6 +246,12 @@ impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt> {
             }
         } else if children.len() == 1 {
             self.replace_children(iter::once(children[0].subschedule(path, f)))
+        } else if path[0] >= children.len() {
+            panic!(
+                "subschedule path referenced child {} but only {} children",
+                path[0],
+                children.len()
+            );
         } else {
             self.replace_children(children.iter().enumerate().map(|(i, child)| {
                 if i == path[0] {
