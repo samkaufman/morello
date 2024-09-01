@@ -1304,7 +1304,7 @@ mod tests {
         // TODO: Add an ARM variant
         #[test]
         fn test_fast_path_is_equivalent_to_slow(spec in arb_canonical_spec::<X86Target>(None, None)) {
-            for action in spec.0.actions(None) {
+            for action in X86Target::actions(&spec.0, None) {
                 match (action.solver(&spec), action.apply(&spec)) {
                     (Ok(solver), Ok(applied)) => {
                         let subspecs = solver.subspecs().collect::<Vec<_>>();

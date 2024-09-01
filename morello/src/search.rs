@@ -550,7 +550,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
         let mut partial_impls_incomplete = 0;
 
         let tiling_depth = search.db.tiling_depth();
-        let all_actions = goal.0.actions(tiling_depth).into_iter().collect::<Vec<_>>();
+        let all_actions = Tgt::actions(&goal.0, tiling_depth).collect::<Vec<_>>();
         let initial_skip = search.thread_idx * all_actions.len() / search.thread_count;
 
         for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {

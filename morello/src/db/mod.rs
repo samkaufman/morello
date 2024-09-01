@@ -246,13 +246,13 @@ impl FilesDatabase {
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let root_results = self.get(query)?;
-        let actions = query.0.actions(self.tiling_depth);
+        let actions = Tgt::actions(&query.0, self.tiling_depth).collect::<Vec<_>>();
         Some(
             root_results
                 .as_ref()
                 .iter()
                 .map(|(action_idx, _cost)| {
-                    let root = actions[(*action_idx).into()].apply(query).unwrap();
+                    let root = actions[usize::from(*action_idx)].apply(query).unwrap();
                     let children = root.children();
                     let new_children = children
                         .iter()
@@ -1016,10 +1016,7 @@ fn analyze_visit_dir<Tgt>(
                         log::warn!("k > 1 but only k = 1 supported");
                     }
                     if let Some((action_idx, cost)) = action_cost_vec.first() {
-                        let action = spec
-                            .0
-                            .actions(tiling_depth)
-                            .into_iter()
+                        let action = Tgt::actions(&spec.0, tiling_depth)
                             .nth((*action_idx).into())
                             .unwrap();
                         if block_actions.insert(Some(action.clone())) {
@@ -1043,9 +1040,7 @@ fn analyze_visit_dir<Tgt>(
                         block_action_costs.insert(None);
                     }
                     block_actions.insert(action_cost_vec.iter().next().map(|&(action_idx, _)| {
-                        spec.0
-                            .actions(tiling_depth)
-                            .into_iter()
+                        Tgt::actions(&spec.0, tiling_depth)
                             .nth(action_idx.into())
                             .unwrap()
                     }));
@@ -1739,10 +1734,7 @@ mod tests {
     ) -> impl Strategy<Value = Decision<Tgt>> {
         arb_canonical_spec::<Tgt>(max_size, max_memory)
             .prop_flat_map(|spec| {
-                let valid_actions = spec
-                    .0
-                    .actions(None)
-                    .into_iter()
+                let valid_actions = Tgt::actions(&spec.0, None)
                     .enumerate()
                     .filter_map(|(i, a)| match a.apply(&spec) {
                         Ok(applied) => Some((ActionIdx::from(u16::try_from(i).unwrap()), applied)),
@@ -1800,10 +1792,7 @@ mod tests {
     /// Will return a [Decision] by choosing the first action for the Spec (if any) and recursively
     /// choosing the first action for all child Specs in the resulting partial Impl.
     fn recursively_decide_actions<Tgt: Target>(spec: &Spec<Tgt>) -> Decision<Tgt> {
-        if let Some((action_idx, partial_impl)) = spec
-            .0
-            .actions(None)
-            .into_iter()
+        if let Some((action_idx, partial_impl)) = Tgt::actions(&spec.0, None)
             .enumerate()
             .filter_map(|(i, a)| match a.apply(spec) {
                 Ok(imp) => Some((i, imp)),

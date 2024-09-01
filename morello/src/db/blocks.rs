@@ -20,7 +20,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::{collections::HashSet, ops::Range};
 
-#[cfg(any(feature = "db-stats", test))]
+#[cfg(feature = "db-stats")]
 use parking_lot::Mutex;
 
 /// A trait abstracting over concrete-sized RTreeBlockInner variants.

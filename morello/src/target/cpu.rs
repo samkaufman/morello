@@ -1,3 +1,4 @@
+use super::common_actions::{move_actions, peel_actions, split_actions, tile_out_actions};
 use crate::codegen::c_utils::VecType;
 use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
@@ -18,7 +19,8 @@ use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
-use std::iter;
+use std::iter::{self, once};
+use std::num::NonZeroU32;
 
 const INST_COST: MainCost = 100;
 const ASSIGN_INST_COST: MainCost = 1;
@@ -118,6 +120,7 @@ pub struct CpuMemoryLevelBimap;
 impl<T: CpuTarget> Target for T {
     type Level = CpuMemoryLevel;
     type Kernel = CpuKernel;
+    type ActionsIter<'a> = Box<dyn Iterator<Item = Action<Self>> + 'a>;
 
     fn line_size() -> u32 {
         32
@@ -259,56 +262,99 @@ impl<T: CpuTarget> Target for T {
         result
     }
 
-    fn actions(spec: &LogicalSpec<Self>) -> Box<dyn Iterator<Item = Action<Self>> + '_> {
-        match spec {
-            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
-                let possible_kernels: &[CpuKernel] = match typ {
-                    PrimitiveSpecType::Matmul { accum } => {
-                        if *accum {
-                            const MATMUL_ACCUM_KERNELS: [CpuKernel; 8] = [
-                                CpuKernel::MultAdd,
-                                CpuKernel::BroadcastVecMultAdd,
-                                CpuKernel::BroadcastVecMultAddBf16F32,
-                                CpuKernel::TwoVecBroadcastVecMultAddU8S8S16,
-                                CpuKernel::DotProductLoop,
-                                CpuKernel::DotProductLoopBf16Bf16F32,
-                                CpuKernel::DotProductLoopF32Bf16F32,
-                                CpuKernel::DotProductLoopF32InterleavedBf16F32,
-                            ];
-                            &MATMUL_ACCUM_KERNELS
-                        } else {
-                            &[]
-                        }
-                    }
-                    PrimitiveSpecType::Conv { .. } => &[],
-                    PrimitiveSpecType::Move { .. } => {
-                        const MOVE_KERNELS: [CpuKernel; 8] = [
-                            CpuKernel::ValueAssign,
-                            CpuKernel::VectorAssign,
-                            CpuKernel::PhysicalTransposeByte128,
-                            CpuKernel::PhysicalTransposeByte256,
-                            CpuKernel::VectorInterleaveBf16F32,
-                            CpuKernel::VectorDeinterleaveF32Bf16,
-                            CpuKernel::CastBf16F32,
-                            CpuKernel::VectorCastBf16F32,
+    fn actions(
+        spec: &LogicalSpec<Self>,
+        tiling_depth: Option<NonZeroU32>,
+    ) -> Self::ActionsIter<'_> {
+        let iter = move_actions(spec);
+        let iter = iter.chain(tile_out_actions(spec, tiling_depth));
+
+        let possible_kernels: &[CpuKernel] = match spec {
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, ..) => match typ {
+                PrimitiveSpecType::Matmul { accum } => {
+                    if *accum {
+                        const MATMUL_ACCUM_KERNELS: [CpuKernel; 8] = [
+                            CpuKernel::MultAdd,
+                            CpuKernel::BroadcastVecMultAdd,
+                            CpuKernel::BroadcastVecMultAddBf16F32,
+                            CpuKernel::TwoVecBroadcastVecMultAddU8S8S16,
+                            CpuKernel::DotProductLoop,
+                            CpuKernel::DotProductLoopBf16Bf16F32,
+                            CpuKernel::DotProductLoopF32Bf16F32,
+                            CpuKernel::DotProductLoopF32InterleavedBf16F32,
                         ];
-                        &MOVE_KERNELS
-                    }
-                    PrimitiveSpecType::Zero { .. } => {
-                        const ZERO_KERNELS: [CpuKernel; 2] =
-                            [CpuKernel::MemsetZero, CpuKernel::VectorZero];
-                        &ZERO_KERNELS
-                    }
-                };
-                Box::new(possible_kernels.iter().filter_map(move |mk| {
-                    if mk.applies_to_parameters(&spec.parameters()) {
-                        Some(Action::Place(*mk))
+                        &MATMUL_ACCUM_KERNELS
                     } else {
-                        None
+                        &[]
                     }
-                }))
+                }
+                PrimitiveSpecType::Conv { .. } => &[],
+                PrimitiveSpecType::Move { .. } => {
+                    const MOVE_KERNELS: [CpuKernel; 8] = [
+                        CpuKernel::ValueAssign,
+                        CpuKernel::VectorAssign,
+                        CpuKernel::PhysicalTransposeByte128,
+                        CpuKernel::PhysicalTransposeByte256,
+                        CpuKernel::VectorInterleaveBf16F32,
+                        CpuKernel::VectorDeinterleaveF32Bf16,
+                        CpuKernel::CastBf16F32,
+                        CpuKernel::VectorCastBf16F32,
+                    ];
+                    &MOVE_KERNELS
+                }
+                PrimitiveSpecType::Zero { .. } => {
+                    const ZERO_KERNELS: [CpuKernel; 2] =
+                        [CpuKernel::MemsetZero, CpuKernel::VectorZero];
+                    &ZERO_KERNELS
+                }
+            },
+            LogicalSpec::Compose { .. } => &[],
+        };
+        let iter = iter.chain(possible_kernels.iter().filter_map(move |mk| {
+            if mk.applies_to_parameters(&spec.parameters()) {
+                Some(Action::Place(*mk))
+            } else {
+                None
             }
-            LogicalSpec::Compose { .. } => Box::new(iter::empty()),
+        }));
+
+        match spec {
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ,
+                    spec_shape: _,
+                    dtypes: _,
+                },
+                _primitive_aux,
+                _serial_only,
+            ) => match typ {
+                PrimitiveSpecType::Matmul { accum } if !*accum => {
+                    Box::new(iter.chain(once(Action::ToAccum)))
+                }
+                PrimitiveSpecType::Matmul { accum } if *accum => {
+                    Box::new(iter.chain(split_actions(spec, tiling_depth)))
+                }
+                PrimitiveSpecType::Conv { accum } => {
+                    if *accum {
+                        if spec.can_spatial_split() {
+                            Box::new(iter.chain(once(Action::SpatialSplit)))
+                        } else {
+                            Box::new(iter)
+                        }
+                    } else {
+                        Box::new(iter.chain(once(Action::ToAccum)))
+                    }
+                }
+                _ => Box::new(iter),
+            },
+            LogicalSpec::Compose {
+                components: _,
+                operand_auxes: _,
+                serial_only: _,
+            } => {
+                // TODO: Add head reduce split actions as well.
+                Box::new(iter.chain(peel_actions(spec)))
+            }
         }
     }
 

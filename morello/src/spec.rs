@@ -1,5 +1,4 @@
 use super::common::{DimSize, Shape};
-use crate::action_seq::ActionSeq;
 use crate::common::Dtype;
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
@@ -7,36 +6,24 @@ use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
 use crate::layout::row_major;
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
-use crate::scheduling::{Action, TileOut};
-use crate::target::MemoryLevel;
 use crate::target::Target;
 use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
-use crate::utils::{
-    bit_length_inverse, bit_length_u32, is_power_of_two_u32, join_into_string,
-    prev_power_of_two_u32,
-};
+use crate::utils::{bit_length_inverse, bit_length_u32, join_into_string, prev_power_of_two_u32};
 
-use itertools::Either;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
+use std::iter::once;
 use std::iter::Iterator;
-use std::iter::{self, once};
 use std::marker::PhantomData;
 use std::mem;
 use std::num::NonZeroU32;
 use std::panic;
 use std::{assert_eq, debug_assert_eq};
-
-/// Whether `tile_out` actions should tile in all dimensions per Spec.
-const MULTI_DIM_TILING: bool = false;
-
-/// An empirically chosen initial capacity for the [LogicalSpec::move_actions] results buffer.
-const MOVE_RESULTS_CAPACITY: usize = 16;
 
 #[cfg(test)]
 const ARBITRARY_SPEC_MAX_SIZE: DimSize = nonzero::nonzero!(8u32);
@@ -742,52 +729,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         true
     }
 
-    pub fn actions(&self, tiling_depth: Option<NonZeroU32>) -> impl ActionSeq<Tgt> + '_ {
-        let iter = self.move_actions();
-        let iter = iter.chain(self.tile_out_actions(tiling_depth));
-        let iter = iter.chain(Tgt::actions(self));
-
-        match &self {
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ,
-                    spec_shape: _,
-                    dtypes: _,
-                },
-                _primitive_aux,
-                _serial_only,
-            ) => match typ {
-                PrimitiveSpecType::Matmul { accum } if !*accum => {
-                    iter.chain(once(Action::ToAccum)).collect::<Vec<_>>()
-                }
-                PrimitiveSpecType::Matmul { accum } if *accum => iter
-                    .chain(self.split_actions(tiling_depth))
-                    .collect::<Vec<_>>(),
-                PrimitiveSpecType::Conv { accum } => {
-                    if *accum {
-                        if self.can_spatial_split() {
-                            iter.chain(once(Action::SpatialSplit)).collect::<Vec<_>>()
-                        } else {
-                            iter.collect::<Vec<_>>()
-                        }
-                    } else {
-                        iter.chain(once(Action::ToAccum)).collect::<Vec<_>>()
-                    }
-                }
-                _ => iter.collect::<Vec<_>>(),
-            },
-            LogicalSpec::Compose {
-                components: _,
-                operand_auxes: _,
-                serial_only: _,
-            } => {
-                // TODO: Add head reduce split actions as well.
-                iter.chain(self.peel_actions()).collect::<Vec<_>>()
-            }
-        }
-    }
-
-    fn can_spatial_split(&self) -> bool {
+    pub(crate) fn can_spatial_split(&self) -> bool {
         let LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, primitive_aux, _) = self else {
             panic!("can_spatial_split called on non-Primitive spec");
         };
@@ -813,178 +755,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             }
         }
         true
-    }
-
-    // TODO: Avoid boxed trait object return type
-    fn tile_out_actions(
-        &self,
-        depth: Option<NonZeroU32>,
-    ) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
-        let serial_only = self.serial_only();
-        let output_shape = self.parameter_shapes().swap_remove(self.output_idx());
-        let multi_dim = MULTI_DIM_TILING || !serial_only;
-        if multi_dim {
-            // TODO: Simplfy following, knowing multi_dim is true.
-            Box::new(
-                gen_tile_sizes::<Tgt>(&output_shape, true, multi_dim, depth).flat_map(
-                    move |tile_shape| {
-                        let left = once(Action::TileOut(TileOut::MultiLoop {
-                            output_shape: tile_shape.clone(),
-                            parallel: false,
-                        }));
-                        let mut right = None;
-                        if !serial_only {
-                            right = Some(Action::TileOut(TileOut::MultiLoop {
-                                output_shape: tile_shape,
-                                parallel: true,
-                            }));
-                        }
-                        left.into_iter().chain(right)
-                    },
-                ),
-            )
-        } else {
-            // Yield all output tilings up to the *maximum* dimension size so that the actions have
-            // relatively stable order between Specs.
-            let output_tensor_rank = output_shape.len();
-            let max_dim_size =
-                DimSize::try_from(output_shape.iter().map(|d| d.get()).max().unwrap()).unwrap();
-            Box::new(dim_range(max_dim_size, true, depth).flat_map(move |size| {
-                (0..output_tensor_rank).flat_map(move |dim| {
-                    let dim = u8::try_from(dim).unwrap();
-                    let left = once(Action::TileOut(TileOut::SingleLoop {
-                        dim,
-                        size,
-                        parallel: false,
-                    }));
-                    let mut right = None;
-                    if !serial_only {
-                        right = Some(Action::TileOut(TileOut::SingleLoop {
-                            dim,
-                            size,
-                            parallel: true,
-                        }));
-                    }
-                    left.into_iter().chain(right)
-                })
-            }))
-        }
-    }
-
-    fn split_actions(
-        &self,
-        tiling_depth: Option<NonZeroU32>,
-    ) -> impl Iterator<Item = Action<Tgt>> + '_ {
-        let LogicalSpec::Primitive(
-            PrimitiveBasics {
-                typ, spec_shape, ..
-            },
-            ..,
-        ) = self
-        else {
-            panic!("split_actions called on non-primitive Spec");
-        };
-        let PrimitiveSpecType::Matmul { accum } = typ else {
-            panic!("split_actions called on non-Matmul");
-        };
-        if !accum {
-            panic!("split_actions called on non-accumulating Matmul");
-        }
-        let [m, orig_k, n] = spec_shape[..] else {
-            unreachable!();
-        };
-
-        let operands = self.parameters();
-        dim_range(orig_k, false, tiling_depth)
-            .filter(move |&new_k| {
-                // TODO: Shouldn't this be rejected during application instead?
-                operands[0].is_valid_tile_shape(&[m, new_k], false)
-                    && operands[1].is_valid_tile_shape(&[new_k, n], false)
-            })
-            .map(|k| Action::Split { k })
-    }
-
-    fn peel_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
-        let LogicalSpec::Compose {
-            components,
-            operand_auxes: _,
-            serial_only: _,
-        } = self
-        else {
-            panic!("peel_actions called on non-Compose Spec");
-        };
-
-        let mut results = vec![];
-
-        let o = components[1].parameter_shapes();
-        let comp_out_idx = components[1].typ.output_idx();
-        let intermediate_shape = &o[comp_out_idx];
-        let intermediate_dtype = components[1].dtypes[comp_out_idx];
-
-        for level in Tgt::levels() {
-            let vector_bytes = level.vector_bytes();
-
-            for layout in Tgt::move_destination_layouts(intermediate_shape, intermediate_dtype) {
-                // TODO: Need to implement `can_move_to`-style logic here.
-
-                if !vector_bytes.is_empty() {
-                    for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
-                        results.push(Action::Peel {
-                            layout: layout.clone(),
-                            level,
-                            vector_size: Some(vector_size),
-                        });
-                    }
-                } else {
-                    results.push(Action::Peel {
-                        layout: layout.clone(),
-                        level,
-                        vector_size: None,
-                    });
-                }
-            }
-        }
-
-        results.into_iter()
-    }
-
-    fn move_actions(&self) -> impl Iterator<Item = Action<Tgt>> + '_ {
-        // TODO: Don't accumulate. Return an iterator.
-        let mut results = Vec::with_capacity(MOVE_RESULTS_CAPACITY);
-
-        for (i, operand) in self.parameters().iter().enumerate() {
-            // Yield actions for movement with register file destination, which
-            // includes relayouts in registers and movements from level 1 to RF.
-            let i = u8::try_from(i).unwrap();
-            let operand_dtype = operand.dtype();
-            for layout in Tgt::move_destination_layouts(operand.shape(), operand_dtype) {
-                // TODO: Prevent moving into packed layouts where strip size equals the whole dim.
-                for level in Tgt::possible_destination_levels(operand.level()) {
-                    for &destination_dtype in
-                        iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
-                    {
-                        results.extend(
-                            gen_vector_sizes_opt(operand_dtype, level.vector_bytes()).map(
-                                |vector_size| {
-                                    // This may return Moves with identical source and destination
-                                    // TensorSpecs (i.e., within-level copies). These will be filtered in
-                                    // [apply_with_aux].
-                                    Action::Move {
-                                        source_idx: i,
-                                        destination_dtype,
-                                        destination_level: level,
-                                        destination_layout: layout.clone(),
-                                        destination_vector_size: vector_size,
-                                    }
-                                },
-                            ),
-                        )
-                    }
-                }
-            }
-        }
-
-        results.into_iter()
     }
 
     pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> TilingInference {
@@ -1555,99 +1325,6 @@ pub fn arb_canonical_logical_spec<Tgt: Target>(
     )
 }
 
-// TODO: Modify to return an `impl Iterator` of some kind instead of a `Box`.
-fn gen_tile_sizes<Tgt: Target>(
-    tensor_shape: &[DimSize],
-    drop_given: bool,
-    multi_dim: bool,
-    depth: Option<NonZeroU32>,
-) -> Box<dyn Iterator<Item = Shape> + 'static> {
-    if tensor_shape.is_empty() {
-        return Box::new(iter::empty());
-    } else if tensor_shape.len() == 1 {
-        let one_dim = tensor_shape[0];
-        return Box::new(dim_range(one_dim, true, depth).filter_map(move |d| {
-            if drop_given && d == one_dim {
-                None
-            } else {
-                Some(vec![d])
-            }
-        }));
-    }
-
-    if multi_dim {
-        let tensor_shape = tensor_shape.to_vec();
-        Box::new(
-            gen_tile_sizes::<Tgt>(&tensor_shape[1..], false, multi_dim, depth).flat_map(
-                move |rest| {
-                    let tensor_shape = tensor_shape.clone();
-                    dim_range(tensor_shape[0], true, depth).flat_map(move |d| {
-                        let mut new_shape = vec![d];
-                        new_shape.extend(rest.clone());
-                        if drop_given && tensor_shape == new_shape[..] {
-                            None
-                        } else {
-                            Some(new_shape)
-                        }
-                    })
-                },
-            ),
-        )
-    } else {
-        let tensor_shape = tensor_shape.to_vec();
-        let own_shape_iter = if !drop_given
-            && tensor_shape
-                .iter()
-                .map(|d: &DimSize| d.get())
-                .all(is_power_of_two_u32)
-        {
-            Either::Left(once(tensor_shape.clone()))
-        } else {
-            Either::Right(iter::empty())
-        };
-        let smaller_tiles_iter = (0..tensor_shape.len()).flat_map(move |dim| {
-            let tensor_shape = tensor_shape.clone();
-            dim_range(tensor_shape[dim], false, depth).map(move |d| {
-                let mut new_shape = tensor_shape.clone();
-                new_shape[dim] = d;
-                new_shape
-            })
-        });
-        Box::new(smaller_tiles_iter.chain(own_shape_iter))
-    }
-}
-
-pub fn gen_vector_sizes(dtype: Dtype, vector_bytes: &[u32]) -> impl Iterator<Item = DimSize> + '_ {
-    assert!(!vector_bytes.is_empty());
-    assert!(
-        vector_bytes
-            .iter()
-            .all(|&vb| vb % u32::from(dtype.size()) == 0),
-        "vector_bytes must be a multiple of dtype size"
-    );
-    vector_bytes.iter().map(move |&vb| {
-        let value_cnt = vb / u32::from(dtype.size());
-        DimSize::new(value_cnt).unwrap()
-    })
-}
-
-pub fn gen_vector_sizes_opt(
-    dtype: Dtype,
-    vector_bytes: &[u32],
-) -> impl Iterator<Item = Option<DimSize>> + '_ {
-    let mut iter_a = None;
-    let mut iter_b = None;
-    if vector_bytes.is_empty() {
-        iter_a = Some(once(None));
-    } else {
-        iter_b = Some(gen_vector_sizes(dtype, vector_bytes).map(Some));
-    }
-    iter_a
-        .into_iter()
-        .flatten()
-        .chain(iter_b.into_iter().flatten())
-}
-
 pub fn dim_range(
     dim_size: DimSize,
     include_end: bool,
@@ -1856,7 +1533,7 @@ mod tests {
     use super::*;
     use crate::imp::{visit_leaves, Impl, ImplExt, ImplNode};
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
-    use crate::scheduling::ApplyError;
+    use crate::scheduling::{Action, ApplyError, TileOut};
     use crate::target::{ArmTarget, Target, X86Target};
     use crate::tensorspec::TensorSpecArbMaxShape;
     use crate::utils::{next_binary_power, sum_seqs};
@@ -1864,6 +1541,7 @@ mod tests {
     use crate::{lspec, shape};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
+    use std::iter;
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);
 
@@ -1907,104 +1585,6 @@ mod tests {
             true,
         );
         assert_eq!(spec, expected);
-    }
-
-    #[test]
-    fn test_gen_tile_sizes_empty() {
-        assert_eq!(
-            gen_tile_sizes::<X86Target>(&[], false, false, None).count(),
-            0
-        );
-        assert_eq!(
-            gen_tile_sizes::<X86Target>(&[], true, false, None).count(),
-            0
-        );
-        assert_eq!(
-            gen_tile_sizes::<X86Target>(&[], false, true, None).count(),
-            0
-        );
-        assert_eq!(
-            gen_tile_sizes::<X86Target>(&[], false, false, None).count(),
-            0
-        );
-    }
-
-    #[test]
-    fn test_gen_tile_sizes_dim_1_multi_dim() {
-        shared_test_gen_tile_sizes_dim_1(true);
-    }
-
-    #[test]
-    fn test_gen_tile_sizes_dim_1_single_dim() {
-        shared_test_gen_tile_sizes_dim_1(false);
-    }
-
-    #[test]
-    fn test_gen_tile_sizes_dim_2_multi_dim() {
-        assert_gen_tile_sizes(
-            shape![2, 2],
-            [shape![1, 1], shape![1, 2], shape![2, 1], shape![2, 2]],
-            false,
-            true,
-        );
-        assert_gen_tile_sizes(
-            shape![2, 2],
-            [shape![1, 1], shape![1, 2], shape![2, 1]],
-            true,
-            true,
-        );
-    }
-
-    #[test]
-    fn test_gen_tile_sizes_dim_2_multi_dim_non_powers_of_two() {
-        assert_gen_tile_sizes(
-            shape![2, 3],
-            [
-                shape![1, 1],
-                shape![1, 2],
-                shape![1, 3],
-                shape![2, 1],
-                shape![2, 2],
-                shape![2, 3],
-            ],
-            false,
-            true,
-        );
-        assert_gen_tile_sizes(
-            shape![2, 3],
-            [
-                shape![1, 1],
-                shape![1, 2],
-                shape![1, 3],
-                shape![2, 1],
-                shape![2, 2],
-            ],
-            true,
-            true,
-        );
-    }
-
-    #[test]
-    fn test_gen_tile_sizes_dim_2_single_dim() {
-        assert_gen_tile_sizes(
-            shape![2, 2],
-            [shape![1, 2], shape![2, 1], shape![2, 2]],
-            false,
-            false,
-        );
-        assert_gen_tile_sizes(shape![2, 2], [shape![1, 2], shape![2, 1]], true, false);
-    }
-
-    #[test]
-    fn test_gen_tile_sizes_dim_2_single_dim_non_powers_of_two() {
-        for drop_given in [true, false] {
-            assert_gen_tile_sizes(
-                shape![2, 3],
-                [shape![1, 3], shape![2, 1], shape![2, 2]],
-                drop_given,
-                false,
-            );
-        }
     }
 
     proptest! {
@@ -2129,7 +1709,7 @@ mod tests {
 
         #[test]
         fn test_move_actions_never_returns_within_level_copy(spec in any::<Spec<X86Target>>()) {
-            for action in spec.0.actions(None) {
+            for action in X86Target::actions(&spec.0, None) {
                 if let Ok(ImplNode::MoveLet(move_let)) = action.apply(&spec) {
                     assert_ne!(&move_let.source_spec, move_let.introduced.spec(),
                         "Copying MoveLet introduced by action {:?}", action);
@@ -2142,7 +1722,7 @@ mod tests {
             (spec, action, _, lower_limit) in arb_spec_action_and_lower_limit::<X86Target>()
         ) {
             let lower_spec = Spec(spec.0.clone(), lower_limit);
-            assert!(lower_spec.0.actions(None).into_iter().contains(&action),
+            assert!(X86Target::actions(&lower_spec.0, None).contains(&action),
                 "Action {:?} was not present in lower-limits Spec {:?}",
                 action, lower_spec);
         }
@@ -2165,7 +1745,7 @@ mod tests {
         fn test_actions_produce_canonical_subspecs(
             spec in any::<Spec<X86Target>>()
         ) {
-            spec.0.actions(None).into_iter().for_each(|action| {
+            X86Target::actions(&spec.0, None).for_each(|action| {
                 let Ok(applied) = action.apply(&spec) else {
                     return;
                 };
@@ -2202,7 +1782,7 @@ mod tests {
     }
 
     fn shared_test_no_action_panics<Tgt: Target>(spec: Spec<Tgt>) {
-        for action in spec.0.actions(None) {
+        for action in Tgt::actions(&spec.0, None) {
             let _ = action.apply(&spec);
         }
     }
@@ -2210,7 +1790,7 @@ mod tests {
     fn shared_test_no_action_produces_same_spec_with_higher_memory_limit<Tgt: Target>(
         spec: &Spec<Tgt>,
     ) {
-        spec.0.actions(None).into_iter().for_each(|action| {
+        Tgt::actions(&spec.0, None).for_each(|action| {
             let Ok(applied) = action.apply(spec) else {
                 return;
             };
@@ -2250,7 +1830,7 @@ mod tests {
 
         // The list of actions depends only on the logical Spec. Filtering by memory limit happens
         // at application. So it's safe to just collect the list of actions once, up front.
-        let mut unseen_actions = logical_spec.actions(None).into_iter().collect::<Vec<_>>();
+        let mut unseen_actions = Tgt::actions(&logical_spec, None).collect::<Vec<_>>();
 
         let mut shared_spec = Spec(logical_spec, MemoryLimits::Standard(MemVec::zero::<Tgt>()));
         let mut diagonal_idx = 0;
@@ -2294,10 +1874,7 @@ mod tests {
     ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt>, MemoryLimits)> {
         arb_canonical_spec::<Tgt>(None, None)
             .prop_filter_map("Spec had zero applicable actions", |spec| {
-                let applied_actions = spec
-                    .0
-                    .actions(None)
-                    .into_iter()
+                let applied_actions = Tgt::actions(&spec.0, None)
                     .filter_map(|a| match a.apply(&spec) {
                         Ok(applied) => Some((a, applied)),
                         Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory(_)) => {
@@ -2336,47 +1913,5 @@ mod tests {
                     lower_limit_strategy,
                 )
             })
-    }
-
-    fn shared_test_gen_tile_sizes_dim_1(multi_dim: bool) {
-        assert_gen_tile_sizes(shape![1], [shape![1]], false, multi_dim);
-        assert_gen_tile_sizes(shape![1], [], true, multi_dim);
-        assert_gen_tile_sizes(
-            shape![16],
-            [shape![1], shape![2], shape![4], shape![8], shape![16]],
-            false,
-            multi_dim,
-        );
-        assert_gen_tile_sizes(
-            shape![16],
-            [shape![1], shape![2], shape![4], shape![8]],
-            true,
-            multi_dim,
-        );
-    }
-
-    fn assert_gen_tile_sizes(
-        tensor_shape: Shape,
-        expected: impl IntoIterator<Item = Shape>,
-        drop_given: bool,
-        multi_dim: bool,
-    ) {
-        let expected: Vec<Shape> = expected.into_iter().sorted().collect();
-        let d = expected.first().map_or(0, |shape| shape.len());
-        assert!(expected.iter().all(|shape| shape.len() == d));
-
-        let actual: Vec<Shape> =
-            gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim, None)
-                .map(|s| {
-                    assert_eq!(s.len(), d);
-                    s
-                })
-                .sorted()
-                .collect::<Vec<_>>();
-        assert_eq!(
-            actual, expected,
-            "gen_tile_sizes({:?}, drop_given={}, serial={}) returned {:?}, expected {:?}",
-            tensor_shape, drop_given, multi_dim, actual, expected
-        );
     }
 }

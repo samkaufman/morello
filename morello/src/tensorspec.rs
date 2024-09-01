@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::HashSet;
 use std::fmt::Display;
+use std::iter::once;
 use std::num::NonZeroU32;
 
 use crate::common::{Contig, DimSize, Dtype, Shape};
@@ -513,6 +514,40 @@ where
     }
 }
 
+pub(crate) fn gen_vector_sizes(
+    dtype: Dtype,
+    vector_bytes: &[u32],
+) -> impl Iterator<Item = DimSize> + '_ {
+    assert!(!vector_bytes.is_empty());
+    assert!(
+        vector_bytes
+            .iter()
+            .all(|&vb| vb % u32::from(dtype.size()) == 0),
+        "vector_bytes must be a multiple of dtype size"
+    );
+    vector_bytes.iter().map(move |&vb| {
+        let value_cnt = vb / u32::from(dtype.size());
+        DimSize::new(value_cnt).unwrap()
+    })
+}
+
+pub(crate) fn gen_vector_sizes_opt(
+    dtype: Dtype,
+    vector_bytes: &[u32],
+) -> impl Iterator<Item = Option<DimSize>> + '_ {
+    let mut iter_a = None;
+    let mut iter_b = None;
+    if vector_bytes.is_empty() {
+        iter_a = Some(once(None));
+    } else {
+        iter_b = Some(gen_vector_sizes(dtype, vector_bytes).map(Some));
+    }
+    iter_a
+        .into_iter()
+        .flatten()
+        .chain(iter_b.into_iter().flatten())
+}
+
 fn tensorspec_aux_str<Tgt: Target>(aux: &TensorSpecAux<Tgt>) -> String {
     let mut parts = Vec::with_capacity(5);
     parts.push(aux.level.to_string());
@@ -541,7 +576,6 @@ fn arb_tensorspecaux<Tgt: Target>(
     max_shape: &[DimSize],
     dtype: Dtype,
 ) -> impl proptest::strategy::Strategy<Value = TensorSpecAux<Tgt>> {
-    use crate::spec::gen_vector_sizes_opt;
     use proptest::prelude::*;
     use proptest::sample::select;
 

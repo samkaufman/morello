@@ -4,7 +4,7 @@ use std::hint::black_box;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use morello::target::{CpuMemoryLevel::GL, X86Target};
+use morello::target::{CpuMemoryLevel::GL, Target, X86Target};
 use morello::tensorspec::TensorSpecAux;
 
 #[library_benchmark]
@@ -17,7 +17,7 @@ fn copy_actions_into_vec() {
         (u32, GL, rm2),
         serial
     ));
-    black_box(logical_spec.actions(None).into_iter().collect::<Vec<_>>());
+    black_box(X86Target::actions(&logical_spec, None).collect::<Vec<_>>());
 }
 
 library_benchmark_group!(
