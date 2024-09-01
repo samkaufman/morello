@@ -45,7 +45,7 @@ zstd = "0.13.1"
 serde_with = "3.8.3"
 
 [dev-dependencies]
-iai-callgrind = "0.12.1"
+iai-callgrind = "0.13.1"
 proptest = "1.2.0"
 proptest-derive = "0.5.0"
 
