@@ -43,6 +43,7 @@ pub trait SchedulingSugar<Tgt: Target> {
     ) -> ImplNode<Tgt>;
     fn spatial_split(&self) -> ImplNode<Tgt>;
     fn place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
+    fn force_place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
     fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
     where
         Tgt: Target,
@@ -147,7 +148,12 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     }
 
     fn place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
-        let action = Action::Place(kernel.into());
+        let action = Action::Place(kernel.into(), false);
+        apply_unwrap(self, action)
+    }
+
+    fn force_place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
+        let action = Action::Place(kernel.into(), true);
         apply_unwrap(self, action)
     }
 
@@ -233,6 +239,10 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
 
     fn place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.place(kernel))
+    }
+
+    fn force_place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| spec.force_place(kernel))
     }
 
     fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>

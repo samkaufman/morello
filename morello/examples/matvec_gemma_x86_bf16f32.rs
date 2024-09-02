@@ -75,7 +75,7 @@ fn main() {
                 .subschedule(&[1], |body| {
                     body.move_param(0, CpuMemoryLevel::L1, col_major(2), None)
                         .subschedule(&[0], |z| z.place(CpuKernel::ValueAssign))
-                        .subschedule(&[1], |z| z.place(CpuKernel::ValueAssign))
+                        .subschedule(&[1], |z| z.force_place(CpuKernel::ValueAssign))
                 })
         });
 

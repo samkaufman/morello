@@ -50,7 +50,8 @@ pub enum Action<Tgt: Target> {
         vector_size: Option<DimSize>,
     },
     SpatialSplit,
-    Place(Tgt::Kernel),
+    // TODO: Remove 'force' bool from Place
+    Place(Tgt::Kernel, bool),
 }
 
 #[derive(Debug)]
@@ -681,8 +682,8 @@ impl<Tgt: Target> Action<Tgt> {
                     spec: Some(spec.clone()),
                 }))
             }
-            Action::Place(k) => {
-                if !k.applies_to_logical_spec(&spec.0) {
+            Action::Place(k, force) => {
+                if !force && !k.applies_to_logical_spec(&spec.0) {
                     // TODO: Use better error message-producing Error type.
                     return Err(ApplyError::ActionNotApplicable(
                         ActionNotApplicableReason::Other,
@@ -696,11 +697,16 @@ impl<Tgt: Target> Action<Tgt> {
                     .collect::<Vec<_>>();
 
                 // Check that the kernel doesn't violate memory limits.
-                match (k.memory_allocated(&arguments), &spec.1) {
-                    (MemoryAllocation::Inner(_) | MemoryAllocation::Pipeline { .. }, _) => {
+                match (force, k.memory_allocated(&arguments), &spec.1) {
+                    (true, _, _) => {}
+                    (false, MemoryAllocation::Inner(_) | MemoryAllocation::Pipeline { .. }, _) => {
                         panic!("Kernel::memory_allocated returned non-Standard MemoryAllocation")
                     }
-                    (MemoryAllocation::Simple(allocated), MemoryLimits::Standard(bounds)) => {
+                    (
+                        false,
+                        MemoryAllocation::Simple(allocated),
+                        MemoryLimits::Standard(bounds),
+                    ) => {
                         for (i, (a, b)) in allocated.iter().zip(bounds.iter()).enumerate() {
                             if *a > b {
                                 return Err(ApplyError::OutOfMemory(Tgt::levels()[i].to_string()));
