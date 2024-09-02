@@ -19,7 +19,7 @@ use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::{MemoryLevel, Target};
+use crate::target::{Kernel, MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
 use crate::utils::{prev_power_of_two, snap_memvec_up};
@@ -666,13 +666,30 @@ impl<Tgt: Target> Action<Tgt> {
             }
             Action::Place(k) => {
                 // TODO: Add: debug_assert!(k.applies_to_parameters(&operands));
+
+                let arguments = operands
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| Param::new(i.try_into().unwrap(), p.clone()))
+                    .collect::<Vec<_>>();
+
+                // Check that the kernel doesn't violate memory limits.
+                match (k.memory_allocated(&arguments), &spec.1) {
+                    (MemoryAllocation::Inner(_) | MemoryAllocation::Pipeline { .. }, _) => {
+                        panic!("Kernel::memory_allocated returned non-Standard MemoryAllocation")
+                    }
+                    (MemoryAllocation::Simple(allocated), MemoryLimits::Standard(bounds)) => {
+                        for (i, (a, b)) in allocated.iter().zip(bounds.iter()).enumerate() {
+                            if *a > b {
+                                return Err(ApplyError::OutOfMemory(Tgt::levels()[i].to_string()));
+                            }
+                        }
+                    }
+                };
+
                 Ok(ImplNode::Kernel(KernelApp {
                     kernel_type: *k,
-                    arguments: operands
-                        .iter()
-                        .enumerate()
-                        .map(|(i, p)| Param::new(i.try_into().unwrap(), p.clone()))
-                        .collect(),
+                    arguments,
                     spec: Some(spec.clone()),
                 }))
             }

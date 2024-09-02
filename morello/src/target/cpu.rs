@@ -1195,6 +1195,9 @@ mod tests {
     use crate::{
         common::{DimSize, Dtype},
         layout::{col_major, row_major, Layout},
+        lspec,
+        scheduling::ApplyError,
+        spec::Spec,
         target::X86Target,
         tensorspec::TensorSpec,
     };
@@ -1310,6 +1313,30 @@ mod tests {
             ),
         ];
         assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_parameters(&operands))
+    }
+
+    #[test]
+    fn test_kernel_memory_constrains_placement() {
+        let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+            [8, 8, 8],
+            (u8, CpuMemoryLevel::RF, row_major(2)),
+            (u8, CpuMemoryLevel::VRF, row_major(2), 16),
+            (u8, CpuMemoryLevel::VRF, row_major(2), 16),
+            serial
+        ));
+        let spec = Spec(
+            logical_spec,
+            MemoryLimits::Standard(MemVec::zero::<X86Target>()),
+        );
+        let act = Action::Place(CpuKernel::BroadcastVecMultAdd);
+        assert!(matches!(
+            act.apply(&spec).unwrap_err(),
+            ApplyError::OutOfMemory(_)
+        ));
+        assert!(matches!(
+            act.apply_unchecked_canon(&spec).unwrap_err(),
+            ApplyError::OutOfMemory(_)
+        ));
     }
 
     fn assert_unique_layouts(layouts: &[Layout]) {
