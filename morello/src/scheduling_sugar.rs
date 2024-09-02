@@ -16,7 +16,8 @@ use std::num::NonZeroUsize;
 /// These methods are intended to be used for manual scheduling by developers. Other clients should
 /// probably apply [Action]s directly.
 pub trait SchedulingSugar<Tgt: Target> {
-    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt>;
+    fn tile_out(&self, output_shape: &[u32]) -> ImplNode<Tgt>;
+    fn tile_out_parallel(&self, output_shape: &[u32]) -> ImplNode<Tgt>;
     fn split(&self, k: u32) -> ImplNode<Tgt>;
     fn move_param(
         &self,
@@ -56,13 +57,24 @@ pub trait Subschedule<Tgt: Target> {
 }
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
-    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt> {
+    fn tile_out(&self, output_shape: &[u32]) -> ImplNode<Tgt> {
         let action = Action::TileOut(TileOut::MultiLoop {
             output_shape: output_shape
                 .iter()
                 .map(|&d| DimSize::new(d).unwrap())
                 .collect(),
-            parallel,
+            parallel: false,
+        });
+        apply_unwrap(self, action)
+    }
+
+    fn tile_out_parallel(&self, output_shape: &[u32]) -> ImplNode<Tgt> {
+        let action = Action::TileOut(TileOut::MultiLoop {
+            output_shape: output_shape
+                .iter()
+                .map(|&d| DimSize::new(d).unwrap())
+                .collect(),
+            parallel: true,
         });
         apply_unwrap(self, action)
     }
@@ -154,8 +166,12 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
 }
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
-    fn tile_out(&self, output_shape: &[u32], parallel: bool) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.tile_out(output_shape, parallel))
+    fn tile_out(&self, output_shape: &[u32]) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| spec.tile_out(output_shape))
+    }
+
+    fn tile_out_parallel(&self, output_shape: &[u32]) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| spec.tile_out_parallel(output_shape))
     }
 
     fn split(&self, k: u32) -> ImplNode<Tgt> {

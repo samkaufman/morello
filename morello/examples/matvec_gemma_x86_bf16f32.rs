@@ -51,21 +51,19 @@ fn main() {
             None,
         )
         .subschedule(&[0], |z| {
-            z.tile_out(&[1, 16], false)
+            z.tile_out(&[1, 16])
                 .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
                 .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(16u32)))
                 .subschedule(&[0], |z| z.place(CpuKernel::VectorAssign))
                 .subschedule(&[1], |z| {
                     z.move_param(1, CpuMemoryLevel::VRF, interleaved.clone(), Some(nz!(8u32)))
                         .subschedule(&[0], |z| z.place(CpuKernel::VectorInterleaveBf16F32))
-                        .subschedule(&[1], |z| {
-                            z.tile_out(&[1, 8], false).place(CpuKernel::VectorAssign)
-                        })
+                        .subschedule(&[1], |z| z.tile_out(&[1, 8]).place(CpuKernel::VectorAssign))
                 })
         })
         .subschedule(&[1], |body| {
-            body.tile_out(&[1, 128], true)
-                .tile_out(&[1, 1], false)
+            body.tile_out_parallel(&[1, 128])
+                .tile_out(&[1, 1])
                 .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
                 .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
                 .subschedule(&[0], |z| z.to_accum())

@@ -47,7 +47,7 @@ fn main() {
     // final code. Moves into the L1 cache instead model the behavior of the hardware cache and, by
     // changing the Spec, allow the remainder of the schedule to assume tensors are in L1.
     let implementation_l1 = spec
-        .tile_out(&[16, 16], false)
+        .tile_out(&[16, 16])
         .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
         .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
         .move_param(2, CpuMemoryLevel::L1, row_major(2), None);
@@ -65,7 +65,7 @@ fn main() {
     //
     // Next, tile that nested sub-Spec further to 1x64x1...
     let implementation_smaller = implementation_l1
-        .tile_out(&[1, 1], false)
+        .tile_out(&[1, 1])
         // ...then we'll convert our Matmul into a MatmulAccum. As the name suggests, a MatmulAccum
         // adds, rather than assigns, into its output tensor. The `.to_accum` operator introduces a
         // pipeline which implements Matmul by first applying a Zero to the output and then a
@@ -246,8 +246,6 @@ fn move_schedule(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
     if is_single_value {
         move_spec.place(CpuKernel::ValueAssign)
     } else {
-        move_spec
-            .tile_out(&[1, 1], false)
-            .place(CpuKernel::ValueAssign)
+        move_spec.tile_out(&[1, 1]).place(CpuKernel::ValueAssign)
     }
 }
