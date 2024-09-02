@@ -4,7 +4,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
-use crate::scheduling::{Action, TileOut};
+use crate::scheduling::{Action, ApplyError, TileOut};
 use crate::search::top_down;
 use crate::spec::Spec;
 use crate::target::Target;
@@ -41,7 +41,7 @@ pub trait SchedulingSugar<Tgt: Target> {
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn spatial_split(&self) -> ImplNode<Tgt>;
-    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt>;
+    fn place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
     fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
     where
         Tgt: Target,
@@ -134,8 +134,8 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         apply_unwrap(self, action)
     }
 
-    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt> {
-        let action = Action::Place(kernel_type);
+    fn place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
+        let action = Action::Place(kernel.into());
         apply_unwrap(self, action)
     }
 
@@ -215,8 +215,8 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.spatial_split())
     }
 
-    fn place(&self, kernel_type: Tgt::Kernel) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.place(kernel_type))
+    fn place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| spec.place(kernel))
     }
 
     fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
@@ -287,6 +287,12 @@ where
 fn apply_unwrap<Tgt: Target>(spec: &Spec<Tgt>, action: Action<Tgt>) -> ImplNode<Tgt> {
     match action.apply(spec) {
         Ok(result) => result,
+        Err(ApplyError::OutOfMemory(lvl)) => {
+            panic!("Insufficient remaining memory in {lvl} to apply {action:?} to {spec}")
+        }
+        Err(ApplyError::ActionNotApplicable(_)) => {
+            panic!("Action {action:?} is not defined for {spec}")
+        }
         Err(e) => panic!("{e}"),
     }
 }

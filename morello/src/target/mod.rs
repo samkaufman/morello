@@ -13,7 +13,6 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
-use crate::tensorspec::TensorSpec;
 use crate::views::Param;
 use crate::{codegen::c_utils::VecType, common::Dtype};
 
@@ -30,7 +29,7 @@ pub const LEVEL_COUNT: usize = 4;
 // TODO: Do we need so many trait bounds, here or in [CpuTarget]?
 pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Level: MemoryLevel;
-    type Kernel: Kernel;
+    type Kernel: Kernel<Tgt = Self>;
     type ActionsIter<'a>: Iterator<Item = Action<Self>> + 'a;
 
     fn line_size() -> u32;
@@ -74,19 +73,22 @@ pub trait MemoryLevel:
 }
 
 pub trait Kernel: PartialEq + Eq + Copy + Clone + Hash + Debug {
+    type Tgt: Target;
+
     fn argument_count(&self) -> u8;
 
-    // TODO: Make into `applies_to_spec`
-    // TODO: Don't require CpuKernel
-    fn applies_to_parameters<Tgt: CpuTarget>(&self, parameters: &[TensorSpec<Tgt>]) -> bool;
+    fn applies_to_logical_spec(&self, logical_spec: &LogicalSpec<Self::Tgt>) -> bool;
 
     // TODO: Take something more generic than Param.
-    fn memory_allocated<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MemoryAllocation;
-    fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost;
+    fn memory_allocated(&self, parameters: &[Param<Self::Tgt>]) -> MemoryAllocation;
+    fn main_cost(&self, parameters: &[Param<Self::Tgt>]) -> MainCost;
 
     fn name(&self) -> &'static str;
 
-    fn all_kernels() -> &'static [Self];
+    // TODO: Remove after composing kernel code generators.
+    fn into_cpu_kernel(self) -> Option<CpuKernel> {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]

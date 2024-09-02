@@ -109,6 +109,7 @@ pub enum ActionNotApplicableReason {
     TileShapeMatchesOriginal,
     TileShapeIsLarger,
     TileShapeInvalid,
+    ParallelPrevented,
     LayoutIncompatible,
     SelfMove,
     VectorSizeInvalid(Dtype, DimSize),
@@ -143,10 +144,11 @@ impl<Tgt: Target> Action<Tgt> {
                             let parallel = tileout.parallel();
 
                             // TODO: Move assertions into solver() as well.
-                            assert!(
-                                !(parallel && logical_spec.serial_only()),
-                                "Serial-only Spec prevents parallel tiling"
-                            );
+                            if parallel && logical_spec.serial_only() {
+                                return Err(ApplyError::ActionNotApplicable(
+                                    ActionNotApplicableReason::ParallelPrevented,
+                                ));
+                            }
                             assert_eq!(
                                 output_shape.len(),
                                 current_out_shape.len(),
@@ -327,7 +329,10 @@ impl<Tgt: Target> Action<Tgt> {
                     serial_only,
                 } = logical_spec
                 else {
-                    panic!();
+                    // TODO: Use a more specific ActionNotApplicableReason.
+                    return Err(ApplyError::ActionNotApplicable(
+                        ActionNotApplicableReason::Other,
+                    ));
                 };
                 debug_assert!(components.len() >= 2);
 
@@ -457,10 +462,16 @@ impl<Tgt: Target> Action<Tgt> {
                     serial_only,
                 ) = logical_spec
                 else {
-                    panic!();
+                    // TODO: Use a more specific ActionNotApplicableReason.
+                    return Err(ApplyError::ActionNotApplicable(
+                        ActionNotApplicableReason::Other,
+                    ));
                 };
                 if !*conv_accum {
-                    panic!("Can only spatially split accumulating convolutions");
+                    // TODO: Use a more specific ActionNotApplicableReason.
+                    return Err(ApplyError::ActionNotApplicable(
+                        ActionNotApplicableReason::Other,
+                    ));
                 }
                 let rank: u8 = operands[0].shape.len().try_into().unwrap();
 
@@ -618,10 +629,16 @@ impl<Tgt: Target> Action<Tgt> {
                 };
                 let (PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum }) = typ
                 else {
-                    panic!();
+                    // TODO: Use a more specific ActionNotApplicableReason.
+                    return Err(ApplyError::ActionNotApplicable(
+                        ActionNotApplicableReason::Other,
+                    ));
                 };
                 if *accum {
-                    panic!("Spec is already accumulating");
+                    // TODO: Use a more specific ActionNotApplicableReason.
+                    return Err(ApplyError::ActionNotApplicable(
+                        ActionNotApplicableReason::Other,
+                    ));
                 }
 
                 let TensorSpec {
@@ -665,7 +682,12 @@ impl<Tgt: Target> Action<Tgt> {
                 }))
             }
             Action::Place(k) => {
-                // TODO: Add: debug_assert!(k.applies_to_parameters(&operands));
+                if !k.applies_to_logical_spec(&spec.0) {
+                    // TODO: Use better error message-producing Error type.
+                    return Err(ApplyError::ActionNotApplicable(
+                        ActionNotApplicableReason::Other,
+                    ));
+                }
 
                 let arguments = operands
                     .iter()
@@ -1061,6 +1083,9 @@ impl Display for ActionNotApplicableReason {
             }
             ActionNotApplicableReason::TileShapeInvalid => {
                 write!(f, "Invalid tile shape")
+            }
+            ActionNotApplicableReason::ParallelPrevented => {
+                write!(f, "Cannot implement serial-only Spec with parallel tile")
             }
             ActionNotApplicableReason::LayoutIncompatible => {
                 write!(f, "Layout does not apply to tile size")

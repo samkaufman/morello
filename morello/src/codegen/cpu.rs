@@ -5,9 +5,9 @@ use std::fmt::{self, Write};
 use std::iter;
 use std::rc::Rc;
 
+use super::c_utils::{c_type, printf_fmt, CBuffer, CExprVar, InitType, VecType};
+use super::header::HeaderEmitter;
 use super::namegen::NameGenerator;
-use crate::codegen::c_utils::{c_type, printf_fmt, CBuffer, CExprVar, InitType, VecType};
-use crate::codegen::header::HeaderEmitter;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term};
 use crate::imp::blocks::Block;
@@ -19,10 +19,12 @@ use crate::imp::ImplNode;
 use crate::layout::BufferVar;
 use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
-use crate::target::cpu::{DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE};
 use crate::target::{
-    cpu::{DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_STRIP_SIZE},
-    CpuKernel, CpuMemoryLevel, CpuTarget, Target,
+    cpu::{
+        DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE,
+        DOT_PRODUCT_STRIP_SIZE,
+    },
+    CpuKernel, CpuMemoryLevel, CpuTarget, Kernel, Target,
 };
 use crate::utils::{indent, LinePrefixWrite, ASCII_CHARS};
 use crate::views::{Param, Tensor, View};
@@ -579,7 +581,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 arguments,
                 spec: _,
             }) => {
-                match kernel_type {
+                match kernel_type.into_cpu_kernel().unwrap() {
                     CpuKernel::MultAdd => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)

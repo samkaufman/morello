@@ -36,6 +36,7 @@ pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: DimSize = nz!(16u32);
 pub(crate) const DOT_PRODUCT_BF16_ACCUM_COUNT: u32 = 4;
 
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
+    type Kernel: Kernel<Tgt = Self> + From<CpuKernel>;
     fn target_id() -> TargetId;
     fn vec_types() -> &'static [VecType; 16];
 }
@@ -119,7 +120,7 @@ pub struct CpuMemoryLevelBimap;
 
 impl<T: CpuTarget> Target for T {
     type Level = CpuMemoryLevel;
-    type Kernel = CpuKernel;
+    type Kernel = <Self as CpuTarget>::Kernel;
     type ActionsIter<'a> = Box<dyn Iterator<Item = Action<Self>> + 'a>;
 
     fn line_size() -> u32 {
@@ -311,8 +312,8 @@ impl<T: CpuTarget> Target for T {
             LogicalSpec::Compose { .. } => &[],
         };
         let iter = iter.chain(possible_kernels.iter().filter_map(move |mk| {
-            if mk.applies_to_parameters(&spec.parameters()) {
-                Some(Action::Place(*mk))
+            if mk.applies_to_logical_spec(spec) {
+                Some(Action::Place((*mk).into()))
             } else {
                 None
             }
@@ -367,8 +368,8 @@ impl<T: CpuTarget> Target for T {
     }
 }
 
-impl Kernel for CpuKernel {
-    fn argument_count(&self) -> u8 {
+impl CpuKernel {
+    pub fn argument_count(&self) -> u8 {
         match self {
             CpuKernel::MultAdd
             | CpuKernel::BroadcastVecMultAdd
@@ -392,14 +393,35 @@ impl Kernel for CpuKernel {
 
     // TODO: Make into `applies_to_spec`
     // TODO: Rename to parameters
-    fn applies_to_parameters<Tgt: CpuTarget>(&self, operands: &[TensorSpec<Tgt>]) -> bool {
+    pub fn applies_to_logical_spec<Tgt: CpuTarget>(&self, logical_spec: &LogicalSpec<Tgt>) -> bool {
+        // None of these kernels apply to Compose, so match Primitive only.
+        let LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ,
+                spec_shape: _,
+                dtypes: _,
+            },
+            _,
+            _,
+        ) = logical_spec
+        else {
+            return false;
+        };
+        let operands = logical_spec.parameters();
+
         match self {
             CpuKernel::MultAdd => {
-                operands.iter().all(|o| {
-                    o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == nz!(1u32))
-                }) && operands.iter().map(|o| o.dtype()).all_equal()
+                matches!(typ, PrimitiveSpecType::Matmul { accum: true })
+                    && operands.iter().all(|o| {
+                        o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == nz!(1u32))
+                    })
+                    && operands.iter().map(|o| o.dtype()).all_equal()
             }
             CpuKernel::BroadcastVecMultAdd => {
+                if !matches!(typ, PrimitiveSpecType::Matmul { accum: true }) {
+                    return false;
+                }
+
                 // Only integers and 32-bit floats, which Clang should be able to handle pretty well with
                 // its vector type extension.
                 let first_dtype = operands[0].dtype();
@@ -416,92 +438,99 @@ impl Kernel for CpuKernel {
                     return false;
                 }
                 operands.iter().skip(1).all(|o| o.dtype() == first_dtype)
-                    && shared_broadcastvecmult_applies_to_operands(operands)
+                    && shared_broadcastvecmult_applies_to_operands(&operands)
             }
             CpuKernel::BroadcastVecMultAddBf16F32 => {
-                operands[0].dtype() == Dtype::Bfloat16
+                matches!(typ, PrimitiveSpecType::Matmul { accum: true })
+                    && operands[0].dtype() == Dtype::Bfloat16
                     && operands[1].dtype() == Dtype::Bfloat16
                     && operands[2].dtype() == Dtype::Float32
                     && operands[1].vector_size() == operands[2].vector_size()
-                    && shared_broadcastvecmult_applies_to_operands(operands)
+                    && shared_broadcastvecmult_applies_to_operands(&operands)
             }
             CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => {
-                matches!(
-                    operands,
-                    [
-                        lhs @ TensorSpec {
-                            shape: lhs_shape,
-                            dtype: Dtype::Uint8,
-                            aux: TensorSpecAux {
-                                level: CpuMemoryLevel::L1,
-                                ..
+                matches!(typ, PrimitiveSpecType::Matmul { accum: true })
+                    && matches!(
+                        &operands[..],
+                        [
+                            lhs @ TensorSpec {
+                                shape: lhs_shape,
+                                dtype: Dtype::Uint8,
+                                aux: TensorSpecAux {
+                                    level: CpuMemoryLevel::L1,
+                                    ..
+                                },
                             },
-                        },
-                        rhs @ TensorSpec {
-                            shape: rhs_shape,
-                            dtype: Dtype::Sint8,
-                            aux: TensorSpecAux {
-                                level: CpuMemoryLevel::VRF,
-                                vector_size: Some(rhs_vector_size),
-                                ..
+                            rhs @ TensorSpec {
+                                shape: rhs_shape,
+                                dtype: Dtype::Sint8,
+                                aux: TensorSpecAux {
+                                    level: CpuMemoryLevel::VRF,
+                                    vector_size: Some(rhs_vector_size),
+                                    ..
+                                },
                             },
-                        },
-                        out @ TensorSpec {
-                            shape: out_shape,
-                            dtype: Dtype::Sint16,
-                            aux: TensorSpecAux {
-                                level: CpuMemoryLevel::VRF,
-                                ..
-                            },
-                        }
-                    ] if lhs_shape[..] == [nz!(1u32), nz!(2u32)]
-                      && rhs_shape[0] == nz!(2u32)
-                      && out_shape[0] == nz!(1u32)
-                      && rhs_shape[1].get() * 2 == rhs_vector_size.get()
-                      && out_shape[1].get() * 2 == rhs_vector_size.get()
-                      && rhs.layout() == &col_major(2) && out.layout().is_row_major()
-                      && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
-                )
+                            out @ TensorSpec {
+                                shape: out_shape,
+                                dtype: Dtype::Sint16,
+                                aux: TensorSpecAux {
+                                    level: CpuMemoryLevel::VRF,
+                                    ..
+                                },
+                            }
+                        ] if lhs_shape[..] == [nz!(1u32), nz!(2u32)]
+                          && rhs_shape[0] == nz!(2u32)
+                          && out_shape[0] == nz!(1u32)
+                          && rhs_shape[1].get() * 2 == rhs_vector_size.get()
+                          && out_shape[1].get() * 2 == rhs_vector_size.get()
+                          && rhs.layout() == &col_major(2) && out.layout().is_row_major()
+                          && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
+                    )
             }
             CpuKernel::DotProductLoop => {
-                matches!(
-                    operands,
-                    [
-                        lhs @ TensorSpec {
-                            shape: lhs_shape,
-                            dtype: Dtype::Float32,
-                            aux: TensorSpecAux {
-                                level: CpuMemoryLevel::L1,
-                                ..
+                matches!(typ, PrimitiveSpecType::Matmul { accum: true })
+                    && matches!(
+                        &operands[..],
+                        [
+                            lhs @ TensorSpec {
+                                shape: lhs_shape,
+                                dtype: Dtype::Float32,
+                                aux: TensorSpecAux {
+                                    level: CpuMemoryLevel::L1,
+                                    ..
+                                },
                             },
-                        },
-                        rhs @ TensorSpec {
-                            shape: _,
-                            dtype: Dtype::Float32,
-                            aux: TensorSpecAux {
-                                level: CpuMemoryLevel::L1, ..
+                            rhs @ TensorSpec {
+                                shape: _,
+                                dtype: Dtype::Float32,
+                                aux: TensorSpecAux {
+                                    level: CpuMemoryLevel::L1, ..
+                                },
                             },
-                        },
-                        TensorSpec {
-                            shape: out_shape,
-                            dtype: Dtype::Float32,
-                            aux: TensorSpecAux {
-                                level: CpuMemoryLevel::RF,
-                                ..
-                            },
-                        }
-                    ] if lhs_shape[1].get() % (DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT) == 0
-                      && out_shape[..] == [nz!(1u32), nz!(1u32)]
-                      && lhs.layout().is_row_major()
-                      && rhs.layout() == &col_major(2)
-                      && lhs.is_contiguous() && rhs.is_contiguous()
-                )
+                            TensorSpec {
+                                shape: out_shape,
+                                dtype: Dtype::Float32,
+                                aux: TensorSpecAux {
+                                    level: CpuMemoryLevel::RF,
+                                    ..
+                                },
+                            }
+                        ] if lhs_shape[1].get() % (DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT) == 0
+                          && out_shape[..] == [nz!(1u32), nz!(1u32)]
+                          && lhs.layout().is_row_major()
+                          && rhs.layout() == &col_major(2)
+                          && lhs.is_contiguous() && rhs.is_contiguous()
+                    )
             }
             CpuKernel::DotProductLoopF32Bf16F32 => {
-                dotproductloop_applies(operands, Dtype::Float32, &[row_major(2)])
+                matches!(typ, PrimitiveSpecType::Matmul { accum: true })
+                    && dotproductloop_applies(&operands, Dtype::Float32, &[row_major(2)])
             }
             CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
                 // TODO: Simplify with a closure instead of constructing all layouts AOT.
+                if !matches!(typ, PrimitiveSpecType::Matmul { accum: true }) {
+                    return false;
+                }
                 let layout0 = Layout::new(vec![
                     (0, PhysDim::Dynamic),
                     (1, PhysDim::Dynamic),
@@ -512,21 +541,26 @@ impl Kernel for CpuKernel {
                     (0, PhysDim::Dynamic),
                     (0, PhysDim::OddEven(nz!(16u32))),
                 ]);
-                dotproductloop_applies(operands, Dtype::Float32, &[layout0, layout1])
+                dotproductloop_applies(&operands, Dtype::Float32, &[layout0, layout1])
             }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
-                dotproductloop_applies(operands, Dtype::Bfloat16, &[row_major(2)])
+                matches!(typ, PrimitiveSpecType::Matmul { accum: true })
+                    && dotproductloop_applies(&operands, Dtype::Bfloat16, &[row_major(2)])
             }
             CpuKernel::PhysicalTransposeByte128 => {
-                physicaltransposebyte_applies_to_operands(operands, 16)
+                physicaltransposebyte_applies_to_operands(typ, &operands, 16)
             }
             CpuKernel::PhysicalTransposeByte256 => {
-                physicaltransposebyte_applies_to_operands(operands, 32)
+                physicaltransposebyte_applies_to_operands(typ, &operands, 32)
             }
             CpuKernel::VectorInterleaveBf16F32 => {
+                if !matches!(typ, PrimitiveSpecType::Move) {
+                    return false;
+                }
+
                 let leaved = PhysDim::OddEven(nz!(16u32));
                 matches!(
-                    operands,
+                    &operands[..],
                     [
                         src @ TensorSpec {
                             shape: src_shape,
@@ -562,11 +596,19 @@ impl Kernel for CpuKernel {
                 )
             }
             CpuKernel::VectorDeinterleaveF32Bf16 => {
+                if !matches!(typ, PrimitiveSpecType::Move) {
+                    return false;
+                }
+
                 // TODO: Fill in
                 false
             }
             CpuKernel::ValueAssign => {
                 debug_assert_eq!(operands.len(), 2);
+
+                if !matches!(typ, PrimitiveSpecType::Move) {
+                    return false;
+                }
 
                 if operands
                     .iter()
@@ -588,6 +630,9 @@ impl Kernel for CpuKernel {
                         .all(|o| o.level() == CpuMemoryLevel::RF || o.level() == CpuMemoryLevel::L1)
             }
             CpuKernel::VectorAssign => {
+                if !matches!(typ, PrimitiveSpecType::Move) {
+                    return false;
+                }
                 if operands.iter().any(|o| !o.is_contiguous()) {
                     return false;
                 }
@@ -619,64 +664,75 @@ impl Kernel for CpuKernel {
                 }
                 has_vrf
             }
-            CpuKernel::CastBf16F32 => matches!(
-                operands,
-                [
-                    TensorSpec {
-                        shape: lhs_shape,
-                        dtype: Dtype::Bfloat16,
-                        aux: TensorSpecAux {
-                            level: CpuMemoryLevel::RF,
-                            vector_size: None,
-                            ..
-                        },
-                    },
-                    TensorSpec {
-                        shape: rhs_shape,
-                        dtype: Dtype::Float32,
-                        aux: TensorSpecAux {
-                            level: CpuMemoryLevel::RF,
-                            vector_size: None,
-                            ..
-                        },
-                    }
-                ] if lhs_shape.iter().all(|d| d.get() == 1)
-                  && rhs_shape.iter().all(|d| d.get() == 1)
-            ),
-            CpuKernel::VectorCastBf16F32 => matches!(
-                operands,
-                [
-                    TensorSpec {
-                        shape: lhs_shape,
-                        dtype: Dtype::Bfloat16,
-                        aux: TensorSpecAux {
-                            level: CpuMemoryLevel::VRF,
-                            layout: lhs_layout,
-                            vector_size: Some(lhs_vector_size),
-                            ..
-                        },
-                    },
-                    TensorSpec {
-                        shape: rhs_shape,
-                        dtype: Dtype::Float32,
-                        aux: TensorSpecAux {
-                            level: CpuMemoryLevel::VRF,
-                            layout: rhs_layout,
-                            vector_size: Some(rhs_vector_size),
-                            ..
-                        },
-                    }
-                ] if lhs_shape == rhs_shape
-                  && lhs_shape.iter().all(|&d| d.get() == 1 || d.get() == 16)
-                  && lhs_shape.iter().filter(|&d| d.get() == 16).count() == 1
-                  && lhs_vector_size.get() == 16
-                  && rhs_vector_size.get() == 8
-                  && lhs_layout == rhs_layout
-            ),
+            CpuKernel::CastBf16F32 => {
+                matches!(typ, PrimitiveSpecType::Move)
+                    && matches!(
+                        &operands[..],
+                        [
+                            TensorSpec {
+                                shape: lhs_shape,
+                                dtype: Dtype::Bfloat16,
+                                aux: TensorSpecAux {
+                                    level: CpuMemoryLevel::RF,
+                                    vector_size: None,
+                                    ..
+                                },
+                            },
+                            TensorSpec {
+                                shape: rhs_shape,
+                                dtype: Dtype::Float32,
+                                aux: TensorSpecAux {
+                                    level: CpuMemoryLevel::RF,
+                                    vector_size: None,
+                                    ..
+                                },
+                            }
+                        ] if lhs_shape.iter().all(|d| d.get() == 1)
+                          && rhs_shape.iter().all(|d| d.get() == 1)
+                    )
+            }
+            CpuKernel::VectorCastBf16F32 => {
+                matches!(typ, PrimitiveSpecType::Move)
+                    && matches!(
+                        &operands[..],
+                        [
+                            TensorSpec {
+                                shape: lhs_shape,
+                                dtype: Dtype::Bfloat16,
+                                aux: TensorSpecAux {
+                                    level: CpuMemoryLevel::VRF,
+                                    layout: lhs_layout,
+                                    vector_size: Some(lhs_vector_size),
+                                    ..
+                                },
+                            },
+                            TensorSpec {
+                                shape: rhs_shape,
+                                dtype: Dtype::Float32,
+                                aux: TensorSpecAux {
+                                    level: CpuMemoryLevel::VRF,
+                                    layout: rhs_layout,
+                                    vector_size: Some(rhs_vector_size),
+                                    ..
+                                },
+                            }
+                        ] if lhs_shape == rhs_shape
+                          && lhs_shape.iter().all(|&d| d.get() == 1 || d.get() == 16)
+                          && lhs_shape.iter().filter(|&d| d.get() == 16).count() == 1
+                          && lhs_vector_size.get() == 16
+                          && rhs_vector_size.get() == 8
+                          && lhs_layout == rhs_layout
+                    )
+            }
             CpuKernel::MemsetZero => {
-                operands[0].level() == CpuMemoryLevel::RF && operands[0].is_contiguous()
+                matches!(typ, PrimitiveSpecType::Zero)
+                    && operands[0].level() == CpuMemoryLevel::RF
+                    && operands[0].is_contiguous()
             }
             CpuKernel::VectorZero => {
+                if !matches!(typ, PrimitiveSpecType::Zero) {
+                    return false;
+                }
                 if !operands[0].is_contiguous() {
                     return false;
                 }
@@ -692,7 +748,7 @@ impl Kernel for CpuKernel {
         }
     }
 
-    fn memory_allocated<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MemoryAllocation {
+    pub fn memory_allocated<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MemoryAllocation {
         match self {
             // TODO: Model memory correctly for BroadcastVecMultAddBf16F32
             CpuKernel::BroadcastVecMultAdd
@@ -750,7 +806,7 @@ impl Kernel for CpuKernel {
         }
     }
 
-    fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost {
+    pub fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost {
         match self {
             CpuKernel::BroadcastVecMultAdd
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
@@ -828,12 +884,8 @@ impl Kernel for CpuKernel {
         }
     }
 
-    fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         self.into()
-    }
-
-    fn all_kernels() -> &'static [Self] {
-        <Self as strum::VariantArray>::VARIANTS
     }
 }
 
@@ -981,12 +1033,17 @@ impl CanonicalBimap for CpuMemoryLevel {
 }
 
 fn physicaltransposebyte_applies_to_operands<Tgt>(
+    typ: &PrimitiveSpecType,
     operands: &[TensorSpec<Tgt>],
     vector_values: u32,
 ) -> bool
 where
     Tgt: Target<Level = CpuMemoryLevel>,
 {
+    if !matches!(typ, PrimitiveSpecType::Move) {
+        return false;
+    }
+
     for op in operands {
         match op {
             TensorSpec {
@@ -1199,7 +1256,6 @@ mod tests {
         scheduling::ApplyError,
         spec::Spec,
         target::X86Target,
-        tensorspec::TensorSpec,
     };
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
@@ -1280,45 +1336,21 @@ mod tests {
     }
 
     #[test]
-    fn test_twovecbroadcastvecmult_applies_to_operands_1() {
-        let rm2 = row_major(2);
-        let cm2 = col_major(2);
-        let operands = [
-            TensorSpec::<X86Target>::new_canon(
-                shape![1, 2],
-                Dtype::Uint8,
-                rm2.contiguous_full(),
-                true,
-                CpuMemoryLevel::L1,
-                rm2.clone(),
-                None,
-            ),
-            TensorSpec::<X86Target>::new_canon(
-                shape![2, 16],
-                Dtype::Sint8,
-                cm2.contiguous_full(),
-                true,
-                CpuMemoryLevel::VRF,
-                cm2,
-                Some(nz!(32u32)),
-            ),
-            TensorSpec::<X86Target>::new_canon(
-                shape![1, 16],
-                Dtype::Sint16,
-                rm2.contiguous_full(),
-                true,
-                CpuMemoryLevel::VRF,
-                rm2.clone(),
-                Some(nz!(16u32)),
-            ),
-        ];
-        assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_parameters(&operands))
+    fn test_twovecbroadcastvecmult_applies_to_operands() {
+        let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+            [1, 2, 16],
+            (u8, CpuMemoryLevel::L1, row_major(2)),
+            (i8, CpuMemoryLevel::VRF, col_major(2), 32),
+            (i16, CpuMemoryLevel::VRF, row_major(2), 16),
+            serial
+        ));
+        assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_logical_spec(&logical_spec));
     }
 
     #[test]
     fn test_kernel_memory_constrains_placement() {
         let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
-            [8, 8, 8],
+            [1, 1, 16],
             (u8, CpuMemoryLevel::RF, row_major(2)),
             (u8, CpuMemoryLevel::VRF, row_major(2), 16),
             (u8, CpuMemoryLevel::VRF, row_major(2), 16),
@@ -1328,7 +1360,7 @@ mod tests {
             logical_spec,
             MemoryLimits::Standard(MemVec::zero::<X86Target>()),
         );
-        let act = Action::Place(CpuKernel::BroadcastVecMultAdd);
+        let act = Action::Place(CpuKernel::BroadcastVecMultAdd.into());
         assert!(matches!(
             act.apply(&spec).unwrap_err(),
             ApplyError::OutOfMemory(_)
