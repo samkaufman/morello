@@ -87,9 +87,9 @@ fn main() {
     // which we can do with calls to `.subschedule([i], _)` where `i` is the index of the child.
     // First, we schedule the Zero sub-Spec with `zero_schedule` (defined below):
     let implementation = implementation_smaller
-        .subschedule(&[0], &zero_schedule)
+        .subschedule(&[0], zero_schedule)
         // Second, we'll schedule the MatmulAccum:
-        .subschedule(&[1], &|mm_accum_spec_a| {
+        .subschedule(&[1], |mm_accum_spec_a| {
             // Tile the 1x64x1 MatmulAccum to 1x4x1, introducing loop over the k dimension:
             mm_accum_spec_a
                 .split(4)
@@ -98,21 +98,21 @@ fn main() {
                 //
                 // Let's schedule the introduced Move sub-Spec with `move_schedule` (defined below).
                 .move_param(0, CpuMemoryLevel::RF, row_major(2), None)
-                .subschedule(&[0], &move_schedule)
-                .subschedule(&[1], &|mm_accum_spec_b| {
+                .subschedule(&[0], move_schedule)
+                .subschedule(&[1], |mm_accum_spec_b| {
                     // Move the 4x1 right-hand input tensor into the register file:
                     mm_accum_spec_b
                         .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
-                        .subschedule(&[0], &move_schedule)
-                        .subschedule(&[1], &|mm_accum_spec_c| {
+                        .subschedule(&[0], move_schedule)
+                        .subschedule(&[1], |mm_accum_spec_c| {
                             mm_accum_spec_c
                                 // And finally we'll move the 1x1 output tensor into RF, scheduling
                                 // the load and store sub-Specs...
                                 .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
-                                .subschedule(&[0], &move_schedule)
-                                .subschedule(&[2], &move_schedule)
+                                .subschedule(&[0], move_schedule)
+                                .subschedule(&[2], move_schedule)
                                 // ...and compute the 1x1x1 matix multiply with `+= a * b`.
-                                .subschedule(&[1], &|s| s.split(1).place(CpuKernel::MultAdd))
+                                .subschedule(&[1], |s| s.split(1).place(CpuKernel::MultAdd))
                         })
                 })
         });
@@ -230,8 +230,8 @@ fn main() {
 /// ```
 fn zero_schedule(zero: &Spec<X86Target>) -> ImplNode<X86Target> {
     zero.move_param(0, CpuMemoryLevel::RF, row_major(2), None)
-        .subschedule(&[0], &|z| z.place(CpuKernel::MemsetZero))
-        .subschedule(&[1], &|move_back| move_back.place(CpuKernel::ValueAssign))
+        .subschedule(&[0], |z| z.place(CpuKernel::MemsetZero))
+        .subschedule(&[1], |move_back| move_back.place(CpuKernel::ValueAssign))
 }
 
 /// Schedules the given Move Spec.

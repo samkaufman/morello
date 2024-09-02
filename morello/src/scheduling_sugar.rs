@@ -51,11 +51,8 @@ pub trait SchedulingSugar<Tgt: Target> {
 
 pub trait Subschedule<Tgt: Target> {
     /// Apply a function to schedule a nested sub-Spec.
-    fn subschedule(
-        &self,
-        path: &[usize],
-        f: &impl Fn(&Spec<Tgt>) -> ImplNode<Tgt>,
-    ) -> ImplNode<Tgt>;
+    fn subschedule(&self, path: &[usize], f: impl Fn(&Spec<Tgt>) -> ImplNode<Tgt>)
+        -> ImplNode<Tgt>;
 }
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
@@ -236,31 +233,39 @@ impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt> {
     fn subschedule(
         &self,
         path: &[usize],
-        f: &impl Fn(&Spec<Tgt>) -> ImplNode<Tgt>,
+        f: impl Fn(&Spec<Tgt>) -> ImplNode<Tgt>,
     ) -> ImplNode<Tgt> {
-        let children = self.children();
-        if children.is_empty() {
-            match self {
-                ImplNode::SpecApp(spec_app) => f(&spec_app.0),
-                _ => panic!("subschedule path chose non-Spec leaf: {:?}", self),
-            }
-        } else if children.len() == 1 {
-            self.replace_children(iter::once(children[0].subschedule(path, f)))
-        } else if path[0] >= children.len() {
-            panic!(
-                "subschedule path referenced child {} but only {} children",
-                path[0],
-                children.len()
-            );
-        } else {
-            self.replace_children(children.iter().enumerate().map(|(i, child)| {
-                if i == path[0] {
-                    child.subschedule(&path[1..], f)
-                } else {
-                    child.clone()
+        fn inner<Tgt: Target>(
+            this: &ImplNode<Tgt>,
+            path: &[usize],
+            f: &impl Fn(&Spec<Tgt>) -> ImplNode<Tgt>,
+        ) -> ImplNode<Tgt> {
+            let children = this.children();
+            if children.is_empty() {
+                match this {
+                    ImplNode::SpecApp(spec_app) => f(&spec_app.0),
+                    _ => panic!("subschedule path chose non-Spec leaf: {:?}", this),
                 }
-            }))
+            } else if children.len() == 1 {
+                this.replace_children(iter::once(inner(&children[0], path, f)))
+            } else if path[0] >= children.len() {
+                panic!(
+                    "subschedule path referenced child {} but only {} children",
+                    path[0],
+                    children.len()
+                );
+            } else {
+                this.replace_children(children.iter().enumerate().map(|(i, child)| {
+                    if i == path[0] {
+                        inner(child, &path[1..], f)
+                    } else {
+                        child.clone()
+                    }
+                }))
+            }
         }
+
+        inner(self, path, &f)
     }
 }
 
