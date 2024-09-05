@@ -741,6 +741,7 @@ impl Shard {
     }
 
     /// Calls `self.thread_rx.recv()`, logging time taken if `db-stats` is enabled.
+    #[allow(clippy::let_and_return)]
     fn blocking_recv(&mut self) -> Result<ShardThreadResponse, mpsc::RecvError> {
         #[cfg(feature = "db-stats")]
         let start = Instant::now();
