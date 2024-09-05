@@ -5,7 +5,6 @@ use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use morello::target::{CpuMemoryLevel::GL, Target, X86Target};
-use morello::tensorspec::TensorSpecAux;
 
 #[library_benchmark]
 fn copy_actions_into_vec() {

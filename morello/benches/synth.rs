@@ -7,7 +7,6 @@ use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{Target, X86Target};
-use morello::tensorspec::TensorSpecAux;
 
 #[export_name = "morello_bench_synth::matmul_spec"]
 fn matmul_spec<Tgt: Target>(size: u32) -> Spec<Tgt> {
