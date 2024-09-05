@@ -121,14 +121,6 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.aux.layout = new_layout;
     }
 
-    pub fn set_contiguous_abs(&mut self, contiguous_abs: Contig) {
-        self.aux.contig = contiguous_abs;
-    }
-
-    pub fn is_contiguous(&self) -> bool {
-        self.aux.contig == self.aux.layout.contiguous_full()
-    }
-
     /// Returns true if this TensorSpec can be tiled to the given shape.
     pub fn is_valid_tile_shape(&self, shape: &[DimSize], parallel_loop: bool) -> bool {
         let original_shape = self.shape();
@@ -166,8 +158,20 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.aux.contig
     }
 
+    pub fn set_contiguous_abs(&mut self, contiguous_abs: Contig) {
+        self.aux.contig = contiguous_abs;
+    }
+
+    pub fn is_contiguous(&self) -> bool {
+        self.aux.contig == self.aux.layout.contiguous_full()
+    }
+
     pub fn aligned(&self) -> bool {
         self.aux.aligned
+    }
+
+    pub fn set_aligned(&mut self, aligned: bool) {
+        self.aux.aligned = aligned;
     }
 
     pub const fn level(&self) -> <Tgt as Target>::Level {
@@ -608,10 +612,12 @@ fn arb_tensorspecaux<Tgt: Target>(
 
 #[cfg(test)]
 mod tests {
-    use crate::layout::Layout;
+    use crate::common::Dtype;
+    use crate::layout::{row_major, Layout, PhysDim};
     use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
     use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape};
     use crate::{layout, shape};
+    use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::proptest;
 
@@ -641,6 +647,26 @@ mod tests {
         ) {
             shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
         }
+    }
+
+    #[test]
+    fn test_tensorspec_canonicalize_drops_unused_dynamic_dimensions() {
+        let layout = Layout::new(vec![
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Packed(nz!(8u32))),
+        ]);
+        let tensorspec = TensorSpec::<X86Target>::new_canon(
+            shape![32, 8],
+            Dtype::Uint8,
+            layout.contiguous_full(),
+            true,
+            CpuMemoryLevel::GL,
+            layout,
+            None,
+        );
+        assert_eq!(tensorspec.layout(), &row_major(2));
+        assert_eq!(tensorspec.contiguous_abs(), row_major(2).contiguous_full());
     }
 
     // TODO: Rename

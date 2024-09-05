@@ -155,6 +155,10 @@ impl Layout {
         0..=self.contiguous_full()
     }
 
+    pub fn is_valid_contiguous_abs(&self, contig: Contig) -> bool {
+        contig <= self.contiguous_full()
+    }
+
     pub fn estimate_cache_lines<Tgt: Target>(
         &self,
         shape: &[DimSize],
@@ -249,6 +253,21 @@ impl Layout {
         )
     }
 
+    pub fn canonicalize(&self, shape: &[DimSize]) -> Result<Layout, LayoutError> {
+        // TODO: Can we remove this case without affecting behavior?
+        if shape.iter().all(|d| d.get() == 1) {
+            Ok(row_major(shape.len().try_into().unwrap()))
+        } else {
+            self.assert_no_consecutive_dimensions();
+            let mut new_layout = self.clone();
+            // TODO: Expanding is a waste, but it's necessary to return LayoutError::InvalidShape.
+            new_layout.expand_physical_shape(shape)?;
+            new_layout.drop_unneeded_packings(shape);
+            new_layout.reorder_size_one_dynamic_dimensions(shape)?;
+            Ok(new_layout)
+        }
+    }
+
     pub fn update_for_tiling(
         &self,
         parent_shape: &[DimSize],
@@ -272,8 +291,8 @@ impl Layout {
             );
             self.assert_no_consecutive_dimensions();
             let mut new_layout = self.clone();
-            let new_contig = new_layout.drop_unneeded_packings(tile_shape, new_contig);
-            new_layout.reorder_size_one_dynamic_dimensions(tile_shape);
+            let new_contig = new_layout.drop_unneeded_packings_with_contig(tile_shape, new_contig);
+            new_layout.reorder_size_one_dynamic_dimensions(tile_shape)?;
             let new_contig = new_layout.increase_contig_through_ones(tile_shape, new_contig);
             Ok((new_layout, new_contig))
         }
@@ -383,7 +402,60 @@ impl Layout {
         Contig::from(new_contig)
     }
 
-    fn drop_unneeded_packings(&mut self, tile_shape: &[DimSize], contig: Contig) -> Contig {
+    // TODO: Somehow merge with drop_unneeded_packings_with_contig
+    fn drop_unneeded_packings(&mut self, tile_shape: &[DimSize]) {
+        let Layout(dims) = self;
+
+        // Count the number of packings applied to each logical dimension.
+        let mut packings = vec![0; dims.len()];
+        for (logical_dim, s) in dims.as_slice() {
+            if matches!(s, PhysDim::Packed(_)) {
+                packings[usize::from(*logical_dim)] += 1;
+            }
+        }
+
+        // Walk from physically innermost to outermost, clearing packings unique to a logical
+        // dimension.
+        //
+        // Cleared packings are recorded in `logical_dims_noneified` to be used in the next step.
+        // Logical dimensions are mapped to the index of the cleared packing for that dimension.
+        let mut logical_dims_noneified = vec![None; dims.len()];
+        for idx in (0..dims.len()).rev() {
+            let (logical_dim, s) = dims[idx];
+            let logical_dim_usize = usize::from(logical_dim);
+            if packings[logical_dim_usize] != 1 {
+                continue;
+            }
+            match s {
+                PhysDim::Packed(fixed_size) if tile_shape[logical_dim_usize] == fixed_size => {
+                    dims[idx] = (logical_dim, PhysDim::Dynamic);
+                    logical_dims_noneified[logical_dim_usize] = Some(idx);
+                }
+                _ => {}
+            }
+        }
+
+        // Layouts only include a single dynamic size reference to a logical dimension. If any
+        // packings were cleared (changed to dynamic size) in the previous step, then any outer
+        // reference to that same dimension is removed.
+        let mut i = 0;
+        dims.retain(|(logical_dim, _)| {
+            let should_retain =
+                if let Some(noneified_idx) = logical_dims_noneified[usize::from(*logical_dim)] {
+                    i >= noneified_idx
+                } else {
+                    true
+                };
+            i += 1;
+            should_retain
+        });
+    }
+
+    fn drop_unneeded_packings_with_contig(
+        &mut self,
+        tile_shape: &[DimSize],
+        contig: Contig,
+    ) -> Contig {
         let Layout(dims) = self;
 
         let first_contig_idx = dims.len() - usize::from(contig);
@@ -447,8 +519,11 @@ impl Layout {
     }
 
     /// Canonicalize runs of physical dimension which have size 1 for the given `shape`.
-    fn reorder_size_one_dynamic_dimensions(&mut self, shape: &[DimSize]) {
-        let physical_shape = self.expand_physical_shape(shape).unwrap();
+    fn reorder_size_one_dynamic_dimensions(
+        &mut self,
+        shape: &[DimSize],
+    ) -> Result<(), LayoutError> {
+        let physical_shape = self.expand_physical_shape(shape)?;
 
         let Layout(dims) = self;
 
@@ -462,6 +537,7 @@ impl Layout {
             ones_slice.sort_by_key(|e| e.0);
             start = end + 1;
         }
+        Ok(())
     }
 
     pub(crate) fn has_noncanon_size_one_dynamic_dimensions(&self, shape: &[DimSize]) -> bool {
@@ -769,7 +845,8 @@ mod tests {
     use proptest::{
         arbitrary::{any, any_with},
         prelude::prop,
-        prop_assert_eq, prop_assume, proptest,
+        prop_assert, prop_assert_eq, prop_assume, proptest,
+        sample::select,
         strategy::{Just, Strategy},
     };
     use std::{collections::HashSet, num::NonZeroU8};
@@ -997,6 +1074,29 @@ mod tests {
                 visited
             );
         }
+
+        #[test]
+        fn test_drop_unneeded_packings_matches_with_and_without_contig(
+            (shape, mut layout, contig) in arb_shape_layout_contig()
+        ) {
+            let mut layout_b = layout.clone();
+            layout_b.drop_unneeded_packings(&shape);
+            layout.drop_unneeded_packings_with_contig(&shape, contig);
+            prop_assert_eq!(layout_b, layout);
+        }
+
+        #[test]
+        fn test_canonicalize_matches_update_for_tiling(
+            (shape, layout, contig) in arb_shape_layout_contig()
+        ) {
+            match (layout.canonicalize(&shape), layout.update_for_tiling(&shape, &shape, contig)) {
+                (Ok(l0), Ok((l1, _))) if l0 == l1 => {}
+                (Err(e0), Err(e1)) if e0 == e1 => {}
+                (a, b) => {
+                    prop_assert!(false, "{:?} != {:?}", a, b);
+                }
+            }
+        }
     }
 
     fn test_layout_fully_contiguous_or_not_strategy(
@@ -1175,6 +1275,13 @@ mod tests {
             };
             let all_layouts = any_with::<Layout>(bounds);
             (Just(Shape::from(shape)), all_layouts)
+        })
+    }
+
+    fn arb_shape_layout_contig() -> impl Strategy<Value = (Shape, Layout, Contig)> {
+        arb_shape_and_same_rank_layout().prop_flat_map(|(shape, layout)| {
+            let contigs = layout.all_contiguous_abs().collect::<Vec<_>>();
+            (Just(shape), Just(layout), select(contigs))
         })
     }
 }

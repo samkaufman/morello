@@ -91,6 +91,7 @@ struct MoveLetPlan<'a, Tgt: Target> {
     epilogue_spec: Option<Spec<Tgt>>,
     new_body_spec: Spec<Tgt>,
     new_operands: Vec<TensorSpec<Tgt>>,
+    is_cache_miss: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -245,7 +246,11 @@ impl<Tgt: Target> Action<Tgt> {
                                         let [lhs, rhs] = &operands[..2] else {
                                             panic!();
                                         };
-                                        assert!(*k < lhs.shape()[1]);
+                                        assert!(
+                                            *k < lhs.shape()[1],
+                                            "Cannot split to k={k} when inner dim. is not larger (it is {})",
+                                            lhs.shape()[1]
+                                        );
 
                                         let tiles = vec![
                                             LoopTile {
@@ -569,6 +574,7 @@ impl<Tgt: Target> Action<Tgt> {
                     epilogue_spec,
                     new_body_spec,
                     new_operands,
+                    is_cache_miss,
                 } = plan_movelet(
                     spec,
                     &operands,
@@ -579,12 +585,7 @@ impl<Tgt: Target> Action<Tgt> {
                     *destination_vector_size,
                 )?;
 
-                let inner_moved_operand = if move_is_cache_miss(
-                    outer_moved_operand_spec,
-                    *destination_dtype,
-                    destination_level,
-                    destination_layout,
-                ) {
+                let inner_moved_operand = if is_cache_miss {
                     let source = Param::new(*source_idx, outer_moved_operand_spec.clone());
                     TensorOrCacheView::CacheView(Rc::new(CacheView::new(source, new_spec)))
                 } else {
@@ -1141,18 +1142,47 @@ fn plan_movelet<'a, Tgt: Target>(
         }
     }
 
-    let new_spec = movelet_inner_tensorspec(
-        outer_moved_operand_spec,
+    let destination_layout_canonicalized = destination_layout
+        .canonicalize(outer_moved_operand_spec.shape())
+        .unwrap();
+    let mut new_spec = TensorSpec::<Tgt>::new_noncanon(
+        outer_moved_operand_spec.shape().into(),
         destination_dtype,
-        &destination_level,
-        destination_layout,
+        outer_moved_operand_spec.contiguous_abs(),
+        outer_moved_operand_spec.aligned(),
+        destination_level,
+        destination_layout_canonicalized,
         destination_vector_size,
     );
 
+    let is_cache_miss = move_is_cache_miss(
+        outer_moved_operand_spec,
+        destination_dtype,
+        &destination_level,
+        new_spec.layout(),
+    );
+    // If this is anything other than a simple cache miss, a new buffer will be allocated, so that
+    // buffer will be aligned and fully contiguous.
+    if !is_cache_miss {
+        new_spec.set_aligned(true);
+        new_spec.set_contiguous_abs(new_spec.layout().contiguous_full());
+        new_spec.canonicalize().unwrap();
+    }
+    debug_assert_eq!(
+        is_cache_miss,
+        move_is_cache_miss(
+            outer_moved_operand_spec,
+            new_spec.dtype(),
+            &new_spec.level(),
+            new_spec.layout(),
+        ),
+        "simple_cache_miss changes after updating alignment and contiguousness"
+    );
+
     assert!(
-        destination_layout.applies_to_shape(new_spec.shape()),
+        new_spec.layout().applies_to_shape(new_spec.shape()),
         "Destination layout {:?} does not apply to shape {:?}",
-        destination_layout,
+        new_spec.layout(),
         new_spec.shape()
     );
 
@@ -1188,14 +1218,8 @@ fn plan_movelet<'a, Tgt: Target>(
     };
 
     // Closure which makes a prologue or epilogue sub-Spec.
-    let make_logue = |flip, f: &dyn Fn(_, _, _, _, _) -> bool| {
-        if f(
-            &destination_level,
-            destination_layout,
-            destination_dtype,
-            source_idx,
-            &spec.0,
-        ) {
+    let make_logue = |flip, f: &dyn Fn(_, _, _) -> bool| {
+        if f(source_idx, &spec.0, is_cache_miss) {
             let mut left_spec = outer_moved_operand_spec;
             let mut right_spec = &new_spec;
             if flip {
@@ -1235,87 +1259,29 @@ fn plan_movelet<'a, Tgt: Target>(
         epilogue_spec,
         new_body_spec,
         new_operands,
+        is_cache_miss,
     })
 }
 
 fn move_gens_prologue<Tgt: Target>(
-    destination_level: &Tgt::Level,
-    destination_layout: &Layout,
-    destination_dtype: Dtype,
     source_idx: u8,
     logical_spec: &LogicalSpec<Tgt>,
+    is_cache_miss: bool,
 ) -> bool {
-    let source_idx_usize = usize::from(source_idx);
     let parameters = logical_spec.parameters();
     let is_output = usize::from(source_idx) == parameters.len() - 1;
     let is_read = !is_output || logical_spec.output_is_read();
-    is_read
-        && !move_is_cache_miss(
-            &parameters[source_idx_usize],
-            destination_dtype,
-            destination_level,
-            destination_layout,
-        )
+    is_read && !is_cache_miss
 }
 
 fn move_gens_epilogue<Tgt: Target>(
-    destination_level: &Tgt::Level,
-    destination_layout: &Layout,
-    destination_dtype: Dtype,
     source_idx: u8,
     logical_spec: &LogicalSpec<Tgt>,
+    is_cache_miss: bool,
 ) -> bool {
     let source_idx_usize = usize::from(source_idx);
-    let parameters = logical_spec.parameters();
     let is_output = source_idx_usize == logical_spec.operand_count() - 1;
-    is_output
-        && !move_is_cache_miss(
-            &parameters[source_idx_usize],
-            destination_dtype,
-            destination_level,
-            destination_layout,
-        )
-}
-
-pub(crate) fn movelet_inner_tensorspec<Tgt: Target>(
-    operand: &TensorSpec<Tgt>,
-    destination_dtype: Dtype,
-    destination_level: &Tgt::Level,
-    destination_layout: &Layout,
-    destination_vector_size: Option<DimSize>,
-) -> TensorSpec<Tgt> {
-    let simple_cache_miss = move_is_cache_miss(
-        operand,
-        destination_dtype,
-        destination_level,
-        destination_layout,
-    );
-
-    // When moving into an addressed bank, we'll generate an aligned destination.
-    // If it's into a cache level, alignment won't change.
-    let aligned = if !simple_cache_miss {
-        true
-    } else {
-        operand.aligned()
-    };
-
-    // Will the result be contiguous? If the move is into a cache, it might be.
-    // If it's into memory bank with its own address space, then yes.
-    let contiguous_abs = if !simple_cache_miss {
-        destination_layout.contiguous_full()
-    } else {
-        operand.contiguous_abs()
-    };
-
-    TensorSpec::<Tgt>::new_canon(
-        operand.shape().into(),
-        destination_dtype,
-        contiguous_abs,
-        aligned,
-        *destination_level,
-        destination_layout.clone(),
-        destination_vector_size,
-    )
+    is_output && !is_cache_miss
 }
 
 /// Returns `true` if the move is a simple cache miss.
@@ -1345,8 +1311,120 @@ fn tile_to_apply_err(err: TileError) -> ApplyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{memorylimits::MemVec, spec::arb_canonical_spec, target::X86Target};
+    use crate::{
+        layout::{col_major, row_major, PhysDim},
+        lspec,
+        memorylimits::MemVec,
+        spec::arb_canonical_spec,
+        target::{CpuMemoryLevel, X86Target},
+    };
     use proptest::prelude::*;
+
+    #[test]
+    fn test_subspecs_when_moving_into_degenerate_packed_layout_solver() {
+        shared_test_subspecs_when_moving_into_degenerate_packed_layout(|spec, action| {
+            action.solver(spec).unwrap().subspecs().collect()
+        })
+    }
+
+    #[test]
+    fn test_subspecs_when_moving_into_degenerate_packed_layout_apply() {
+        shared_test_subspecs_when_moving_into_degenerate_packed_layout(|spec, action| {
+            child_impls_into_specs(&action.apply(spec).unwrap())
+        })
+    }
+
+    #[test]
+    fn test_subspecs_when_moving_into_degenerate_packed_layout_apply_unchecked() {
+        shared_test_subspecs_when_moving_into_degenerate_packed_layout(|spec, action| {
+            child_impls_into_specs(&action.apply_unchecked_canon(spec).unwrap())
+        })
+    }
+
+    // TODO: Add a variant where only physically innermost dimension is contiguous.
+    #[test]
+    fn test_move_planning_into_cache_with_extra_degenerate_dims_preserves_layout_and_contig() {
+        let fixed_layout = col_major(2);
+        let degenerate_layout = Layout::new(vec![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(nz!(8u32))),
+        ]);
+        let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+            [8, 128, 8],
+            (f32, CpuMemoryLevel::GL, fixed_layout.clone()),
+            (f32, CpuMemoryLevel::GL, row_major(2)),
+            (f32, CpuMemoryLevel::GL, row_major(2))
+        ));
+        let spec = Spec(logical_spec, X86Target::max_mem());
+        let parameters = spec.0.parameters();
+        let plan = plan_movelet(
+            &spec,
+            &parameters,
+            0,
+            Dtype::Float32,
+            CpuMemoryLevel::L1,
+            &degenerate_layout,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.new_spec.layout(), &fixed_layout);
+        assert_eq!(
+            plan.new_spec.contiguous_abs(),
+            fixed_layout.contiguous_full()
+        );
+    }
+
+    fn child_impls_into_specs(imp: &ImplNode<X86Target>) -> Vec<Spec<X86Target>> {
+        imp.children()
+            .iter()
+            .map(|child| {
+                if let ImplNode::SpecApp(SpecApp(spec, _)) = child {
+                    spec.clone()
+                } else {
+                    panic!("expected a SpecApp child, got {:?}", child)
+                }
+            })
+            .collect()
+    }
+
+    fn shared_test_subspecs_when_moving_into_degenerate_packed_layout(
+        child_get: impl FnOnce(&Spec<X86Target>, Action<X86Target>) -> Vec<Spec<X86Target>>,
+    ) {
+        let logical: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+            [8, 128, 8],
+            (f32, CpuMemoryLevel::GL, col_major(2)),
+            (f32, CpuMemoryLevel::GL, row_major(2)),
+            (f32, CpuMemoryLevel::GL, row_major(2))
+        ));
+        let spec = Spec(logical, X86Target::max_mem());
+        let action = Action::Move {
+            source_idx: 0,
+            destination_dtype: Dtype::Float32,
+            destination_level: CpuMemoryLevel::L1,
+            destination_layout: Layout::new(vec![
+                (0, PhysDim::Dynamic),
+                (1, PhysDim::Dynamic),
+                (0, PhysDim::Packed(nz!(8u32))),
+            ]),
+            destination_vector_size: None,
+        };
+        match child_get(&spec, action).as_slice() {
+            [Spec(logical_spec, _)] => {
+                assert!(matches!(
+                    logical_spec,
+                    LogicalSpec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::Matmul { .. },
+                            ..
+                        },
+                        ..
+                    )
+                ));
+            }
+            children => panic!("expected one Matmul Spec child, got {:?}", children),
+        };
+    }
 
     proptest! {
         // TODO: Add an ARM variant
