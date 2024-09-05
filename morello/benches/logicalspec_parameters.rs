@@ -5,7 +5,6 @@ use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use morello::target::{Target, X86Target};
-use morello::tensorspec::TensorSpecAux;
 
 // TODO: Add a benchmark for Compose
 

@@ -393,10 +393,7 @@ mod tests {
 
         let actual: Vec<Shape> =
             gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim, None)
-                .map(|s| {
-                    assert_eq!(s.len(), d);
-                    s
-                })
+                .inspect(|s| assert_eq!(s.len(), d))
                 .sorted()
                 .collect::<Vec<_>>();
         assert_eq!(
