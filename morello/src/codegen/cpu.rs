@@ -882,6 +882,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
                         let vtype =
                             get_vector(Tgt::vec_types(), Dtype::Float32, DOT_PRODUCT_STRIP_SIZE);
+                        self.headers.vector_type_defs.insert(vtype);
                         writeln!(w, "{}// DotProductLoop", indent(depth))?;
                         for accum_name in &vector_accum_names {
                             writeln!(
