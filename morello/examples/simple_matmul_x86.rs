@@ -13,7 +13,6 @@ use morello::target::{
     CpuMemoryLevel::{self, GL},
     Target, X86Target,
 };
-use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
 use std::io;

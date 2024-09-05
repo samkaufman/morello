@@ -1467,7 +1467,7 @@ pub mod macros {
             };
             (
                 lspec!(@dt_convert $dt),
-                TensorSpecAux {
+                $crate::tensorspec::TensorSpecAux {
                     contig,
                     aligned: $a,
                     level: $level,

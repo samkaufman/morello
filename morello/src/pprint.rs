@@ -184,7 +184,6 @@ mod tests {
         CpuMemoryLevel::{GL, L1},
         X86Target,
     };
-    use crate::tensorspec::TensorSpecAux;
 
     #[test]
     fn test_can_pprint_a_specapp_with_no_aux() {

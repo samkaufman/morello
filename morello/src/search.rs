@@ -842,7 +842,6 @@ mod tests {
         CpuMemoryLevel::{GL, L1, RF},
         X86Target,
     };
-    use crate::tensorspec::TensorSpecAux;
     use crate::utils::{bit_length, bit_length_inverse};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
