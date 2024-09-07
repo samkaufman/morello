@@ -34,7 +34,8 @@ pub trait View: Debug {
         &self,
         env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
     ) -> NonAffineExpr<BufferVar> {
-        self.make_buffer_indexing_expr_with_layout(env, self.spec().layout())
+        let backing_layout = self.backing_tensor(env).unwrap().spec().layout();
+        self.make_buffer_indexing_expr_with_layout(env, backing_layout)
     }
 
     // TODO: Rename
