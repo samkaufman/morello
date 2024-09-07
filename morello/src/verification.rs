@@ -7,7 +7,7 @@ use crate::{
     target::Target,
     tensorspec::TensorSpec,
 };
-use ndarray::prelude::*;
+use ndarray::{linalg::general_mat_mul, prelude::*};
 use ndarray_conv::{ConvExt, ConvMode, PaddingMode};
 use num_traits::AsPrimitive;
 use std::process::Command;
@@ -301,42 +301,43 @@ impl DynArray<Ix2> {
             DynArray::Uint8(o) => {
                 let l = self.saturating_cast::<u8>();
                 let r = rhs.saturating_cast::<u8>();
-                o.assign(&l.dot(&r));
+                general_mat_mul(1, &l, &r, 1, o);
             }
             DynArray::Sint8(o) => {
                 let l = self.saturating_cast::<i8>();
                 let r = rhs.saturating_cast::<i8>();
-                o.assign(&l.dot(&r));
+                general_mat_mul(1, &l, &r, 1, o);
             }
             DynArray::Uint16(o) => {
                 let l = self.saturating_cast::<u16>();
                 let r = rhs.saturating_cast::<u16>();
-                o.assign(&l.dot(&r));
+                general_mat_mul(1, &l, &r, 1, o);
             }
             DynArray::Sint16(o) => {
                 let l = self.saturating_cast::<i16>();
                 let r = rhs.saturating_cast::<i16>();
-                o.assign(&l.dot(&r));
+                general_mat_mul(1, &l, &r, 1, o);
             }
             DynArray::Uint32(o) => {
                 let l = self.saturating_cast::<u32>();
                 let r = rhs.saturating_cast::<u32>();
-                o.assign(&l.dot(&r));
+                general_mat_mul(1, &l, &r, 1, o);
             }
             DynArray::Sint32(o) => {
                 let l = self.saturating_cast::<i32>();
                 let r = rhs.saturating_cast::<i32>();
-                o.assign(&l.dot(&r));
+                general_mat_mul(1, &l, &r, 1, o);
             }
             DynArray::Float32(o) => {
                 let l = self.saturating_cast::<f32>();
                 let r = rhs.saturating_cast::<f32>();
-                o.assign(&l.dot(&r));
+                general_mat_mul(1.0, &l, &r, 1.0, o);
             }
             DynArray::Bfloat16(o) => {
                 let l = self.saturating_cast::<half::bf16>();
                 let r = rhs.saturating_cast::<half::bf16>();
-                o.assign(&l.dot(&r));
+                let intermed = l.dot(&r);
+                *o += &intermed;
             }
         }
     }
@@ -474,7 +475,7 @@ where
         .map(make_array_input_dyn::<Tgt>)
         .collect::<Vec<_>>();
 
-    // Gather output from program. Do this before execute so that the expected output
+    // Gather output from program. Do this before execution so that the expected output
     // isn't given to the generated program.
     let lowered_output = built_artifact
         .run_with_input_data(&concrete_tensors)
@@ -501,7 +502,14 @@ fn make_array_input_dyn<Tgt: Target>(input: &TensorSpec<Tgt>) -> DynArray<IxDyn>
 
 fn make_array_input_static<T>(shape: &[DimSize]) -> ArrayD<T>
 where
-    T: num_traits::Bounded + num_traits::WrappingAdd + num_traits::Num + Copy,
+    T: num_traits::Bounded + num_traits::WrappingAdd + num_traits::Num + Copy + PartialOrd,
+{
+    make_array_input_static_bounds(shape, T::min_value(), T::max_value())
+}
+
+fn make_array_input_static_bounds<T>(shape: &[DimSize], min: T, max: T) -> ArrayD<T>
+where
+    T: num_traits::WrappingAdd + num_traits::Num + Copy + PartialOrd,
 {
     let mut value_cnt = 1;
     let mut shp_usize = Vec::with_capacity(shape.len());
@@ -510,29 +518,32 @@ where
         shp_usize.push(vc);
         value_cnt *= vc;
     }
-    Array::from_iter(cycle_int_values::<T>().take(value_cnt))
+    Array::from_iter(cycle_int_values::<T>(min, max).take(value_cnt))
         .into_shape(IxDyn(&shp_usize))
         .unwrap()
 }
 
 fn make_array_input_static_f32(shape: &[DimSize]) -> ArrayD<f32> {
-    make_array_input_static::<u8>(shape).map(|x| x.as_())
+    make_array_input_static_bounds::<u8>(shape, 0, 3).map(|x| x.as_())
 }
 
 fn make_array_input_static_bf16(shape: &[DimSize]) -> ArrayD<half::bf16> {
-    make_array_input_static::<u8>(shape).map(|x| x.as_())
+    make_array_input_static_bounds::<u8>(shape, 0, 3).map(|x| x.as_())
 }
 
 /// Returns an iterator that yields infinitely all values of a numeric type in ascending order.
-fn cycle_int_values<T>() -> impl Iterator<Item = T>
+fn cycle_int_values<T>(min: T, max: T) -> impl Iterator<Item = T>
 where
-    T: num_traits::Bounded + num_traits::WrappingAdd + num_traits::Num + Copy,
+    T: num_traits::WrappingAdd + num_traits::Num + Copy + PartialOrd,
 {
     // The following can just be `T::min_value()..=T::max_value()` once std::iter::Step is stable.
-    let mut v = T::min_value();
+    let mut v = min;
     std::iter::from_fn(move || {
         let r = v;
         v = v.wrapping_add(&T::one());
+        if v > max {
+            v = min;
+        }
         Some(r)
     })
 }
