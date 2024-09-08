@@ -628,6 +628,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                                 + vector_size,
                         );
 
+                        self.headers.emit_cvtbf16_fp32 = true;
                         writeln!(
                             w,
                             "{}cvtbf16_fp32_256({}, &{}, &{});",
@@ -867,6 +868,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         Ok(())
                     }
                     CpuKernel::DotProductLoop => {
+                        self.headers.emit_sum8 = true;
+
                         let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
                             0 | 1 => self.c_index_ptr(a, b, None),
                             2 => self.c_index(a, b, None),
@@ -1039,6 +1042,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
                         self.headers.vector_type_defs.insert(vf32);
                         self.headers.vector_type_defs.insert(vbf16);
+                        self.headers.emit_sum8 = true;
                         Ok(())
                     }
                     CpuKernel::DotProductLoopF32Bf16F32 => {
@@ -1159,6 +1163,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
                         self.headers.vector_type_defs.insert(vf32);
                         self.headers.vector_type_defs.insert(vbf16);
+                        self.headers.emit_sum8 = true;
+                        self.headers.emit_cvtbf16_fp32 = true;
                         Ok(())
                     }
                     CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
@@ -1292,6 +1298,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
                         self.headers.vector_type_defs.insert(vf32);
                         self.headers.vector_type_defs.insert(vbf16);
+                        self.headers.emit_sum8 = true;
                         Ok(())
                     }
                     CpuKernel::PhysicalTransposeByte128 => {

@@ -3,21 +3,16 @@ use crate::target::TargetId;
 
 use std::{collections::HashSet, fmt};
 
+#[derive(Default)]
 pub struct HeaderEmitter {
     pub emit_benchmarking: bool,
     pub vector_type_defs: HashSet<&'static VecType>,
     pub emit_stdbool_and_assert_headers: bool,
+    pub emit_sum8: bool,
+    pub emit_cvtbf16_fp32: bool,
 }
 
 impl HeaderEmitter {
-    pub fn new() -> Self {
-        Self {
-            emit_benchmarking: false,
-            vector_type_defs: HashSet::new(),
-            emit_stdbool_and_assert_headers: false,
-        }
-    }
-
     pub fn emit<W: fmt::Write>(&self, target: TargetId, out: &mut W) -> Result<(), fmt::Error> {
         out.write_str(include_str!("../codegen/partials/std.c"))?;
         out.write_char('\n')?;
@@ -31,6 +26,12 @@ impl HeaderEmitter {
             TargetId::Arm => {
                 out.write_str(include_str!("../codegen/partials/arm.c"))?;
             }
+        }
+        if self.emit_sum8 {
+            out.write_str(include_str!("../codegen/partials/x86/sum8.c"))?;
+        }
+        if self.emit_cvtbf16_fp32 {
+            out.write_str(include_str!("../codegen/partials/x86/cvtbf16_fp32.c"))?;
         }
         out.write_char('\n')?;
         if self.emit_benchmarking {
@@ -53,11 +54,5 @@ impl HeaderEmitter {
         }
 
         Ok(())
-    }
-}
-
-impl Default for HeaderEmitter {
-    fn default() -> Self {
-        HeaderEmitter::new()
     }
 }
