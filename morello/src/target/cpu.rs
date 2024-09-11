@@ -1253,7 +1253,7 @@ mod tests {
         common::{DimSize, Dtype},
         layout::{col_major, row_major, Layout},
         lspec,
-        scheduling::ApplyError,
+        scheduling::{ApplyError, NotApplicableReason},
         spec::Spec,
         target::X86Target,
     };
@@ -1363,11 +1363,11 @@ mod tests {
         let act = Action::Place(CpuKernel::BroadcastVecMultAdd.into(), false);
         assert!(matches!(
             act.apply(&spec).unwrap_err(),
-            ApplyError::OutOfMemory(_)
+            ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(_))
         ));
         assert!(matches!(
             act.apply_unchecked_canon(&spec).unwrap_err(),
-            ApplyError::OutOfMemory(_)
+            ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(_))
         ));
     }
 

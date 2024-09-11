@@ -1858,7 +1858,7 @@ mod tests {
                             // TODO: Assert here that the min of each level-wise limit is zero.
                             assert_eq!(&applied.peak_memory(), limits_memvec);
                         }
-                        Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory(_)) => {}
+                        Err(ApplyError::NotApplicable(_)) => {}
                         Err(ApplyError::SpecNotCanonical) => panic!(),
                     }
                 }
@@ -1877,9 +1877,7 @@ mod tests {
                 let applied_actions = Tgt::actions(&spec.0, None)
                     .filter_map(|a| match a.apply(&spec) {
                         Ok(applied) => Some((a, applied)),
-                        Err(ApplyError::ActionNotApplicable(_) | ApplyError::OutOfMemory(_)) => {
-                            None
-                        }
+                        Err(ApplyError::NotApplicable(_)) => None,
                         Err(ApplyError::SpecNotCanonical) => unreachable!(),
                     })
                     .collect::<Vec<_>>();

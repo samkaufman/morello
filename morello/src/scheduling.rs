@@ -99,15 +99,14 @@ struct MoveLetPlan<'a, Tgt: Target> {
 pub enum ApplyError {
     #[error("Cannot apply action to non-canonical Spec")]
     SpecNotCanonical,
-    #[error("Insufficient memory in {0} to apply action")]
-    OutOfMemory(String),
     #[error("Action does not apply to this Spec: {0}")]
-    ActionNotApplicable(ActionNotApplicableReason),
+    NotApplicable(NotApplicableReason),
 }
 
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
-pub enum ActionNotApplicableReason {
+pub enum NotApplicableReason {
+    OutOfMemory(String),
     TileShapeMatchesOriginal,
     TileShapeIsLarger,
     TileShapeInvalid,
@@ -147,8 +146,8 @@ impl<Tgt: Target> Action<Tgt> {
 
                             // TODO: Move assertions into solver() as well.
                             if parallel && logical_spec.serial_only() {
-                                return Err(ApplyError::ActionNotApplicable(
-                                    ActionNotApplicableReason::ParallelPrevented,
+                                return Err(ApplyError::NotApplicable(
+                                    NotApplicableReason::ParallelPrevented,
                                 ));
                             }
                             assert_eq!(
@@ -197,8 +196,8 @@ impl<Tgt: Target> Action<Tgt> {
 
                                 let tiling_shape = updated_input_tiling.shape();
                                 if !original_input.is_valid_tile_shape(tiling_shape, parallel) {
-                                    return Err(ApplyError::ActionNotApplicable(
-                                        ActionNotApplicableReason::TileShapeInvalid,
+                                    return Err(ApplyError::NotApplicable(
+                                        NotApplicableReason::TileShapeInvalid,
                                     ));
                                 }
 
@@ -335,10 +334,8 @@ impl<Tgt: Target> Action<Tgt> {
                     serial_only,
                 } = logical_spec
                 else {
-                    // TODO: Use a more specific ActionNotApplicableReason.
-                    return Err(ApplyError::ActionNotApplicable(
-                        ActionNotApplicableReason::Other,
-                    ));
+                    // TODO: Use a more specific NotApplicableReason.
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
                 };
                 debug_assert!(components.len() >= 2);
 
@@ -425,7 +422,9 @@ impl<Tgt: Target> Action<Tgt> {
                             .clone()
                             .checked_sub_snap_down(&intermediate_mem_consumed_nondiscrete)
                             .map_err(|oom_idx| {
-                                ApplyError::OutOfMemory(Tgt::levels()[oom_idx].to_string())
+                                ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
+                                    Tgt::levels()[oom_idx].to_string(),
+                                ))
                             })?,
                     });
                     m.discretize();
@@ -468,16 +467,12 @@ impl<Tgt: Target> Action<Tgt> {
                     serial_only,
                 ) = logical_spec
                 else {
-                    // TODO: Use a more specific ActionNotApplicableReason.
-                    return Err(ApplyError::ActionNotApplicable(
-                        ActionNotApplicableReason::Other,
-                    ));
+                    // TODO: Use a more specific NotApplicableReason.
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
                 };
                 if !*conv_accum {
-                    // TODO: Use a more specific ActionNotApplicableReason.
-                    return Err(ApplyError::ActionNotApplicable(
-                        ActionNotApplicableReason::Other,
-                    ));
+                    // TODO: Use a more specific NotApplicableReason.
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
                 }
                 let rank: u8 = operands[0].shape.len().try_into().unwrap();
 
@@ -631,16 +626,12 @@ impl<Tgt: Target> Action<Tgt> {
                 };
                 let (PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum }) = typ
                 else {
-                    // TODO: Use a more specific ActionNotApplicableReason.
-                    return Err(ApplyError::ActionNotApplicable(
-                        ActionNotApplicableReason::Other,
-                    ));
+                    // TODO: Use a more specific NotApplicableReason.
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
                 };
                 if *accum {
-                    // TODO: Use a more specific ActionNotApplicableReason.
-                    return Err(ApplyError::ActionNotApplicable(
-                        ActionNotApplicableReason::Other,
-                    ));
+                    // TODO: Use a more specific NotApplicableReason.
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
                 }
 
                 let TensorSpec {
@@ -686,9 +677,7 @@ impl<Tgt: Target> Action<Tgt> {
             Action::Place(k, force) => {
                 if !force && !k.applies_to_logical_spec(&spec.0) {
                     // TODO: Use better error message-producing Error type.
-                    return Err(ApplyError::ActionNotApplicable(
-                        ActionNotApplicableReason::Other,
-                    ));
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
                 }
 
                 let arguments = operands
@@ -710,7 +699,9 @@ impl<Tgt: Target> Action<Tgt> {
                     ) => {
                         for (i, (a, b)) in allocated.iter().zip(bounds.iter()).enumerate() {
                             if *a > b {
-                                return Err(ApplyError::OutOfMemory(Tgt::levels()[i].to_string()));
+                                return Err(ApplyError::NotApplicable(
+                                    NotApplicableReason::OutOfMemory(Tgt::levels()[i].to_string()),
+                                ));
                             }
                         }
                     }
@@ -959,8 +950,8 @@ impl<Tgt: Target> ActionSolver<Tgt> {
 
             // TODO: Need is_valid_tile_shape if we're calling update_for_tiling?
             if !outer.is_valid_tile_shape(inner.shape(), parallel) {
-                return Err(ApplyError::ActionNotApplicable(
-                    ActionNotApplicableReason::TileShapeInvalid,
+                return Err(ApplyError::NotApplicable(
+                    NotApplicableReason::TileShapeInvalid,
                 ));
             }
             let Ok((new_layout, new_contig)) = outer.layout().update_for_tiling(
@@ -976,8 +967,8 @@ impl<Tgt: Target> ActionSolver<Tgt> {
         }
 
         if new_spec.canonicalize().is_err() {
-            return Err(ApplyError::ActionNotApplicable(
-                ActionNotApplicableReason::TileShapeInvalid,
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::TileShapeInvalid,
             ));
         }
 
@@ -992,8 +983,8 @@ fn check_tile_out_applies<Tgt: Target>(
     parallel: bool,
 ) -> Result<(), ApplyError> {
     if current_out_shape == output_shape {
-        return Err(ApplyError::ActionNotApplicable(
-            ActionNotApplicableReason::TileShapeMatchesOriginal,
+        return Err(ApplyError::NotApplicable(
+            NotApplicableReason::TileShapeMatchesOriginal,
         ));
     }
     if output_shape
@@ -1001,16 +992,16 @@ fn check_tile_out_applies<Tgt: Target>(
         .enumerate()
         .any(|(dim, dim_size)| *dim_size > current_out_shape[dim])
     {
-        return Err(ApplyError::ActionNotApplicable(
-            ActionNotApplicableReason::TileShapeIsLarger,
+        return Err(ApplyError::NotApplicable(
+            NotApplicableReason::TileShapeIsLarger,
         ));
     }
 
     // Abort if it's invalid to tile the original output tensor
     // to the new shape (e.g., the new shape is larger).
     if !current_output.is_valid_tile_shape(output_shape, parallel) {
-        return Err(ApplyError::ActionNotApplicable(
-            ActionNotApplicableReason::TileShapeInvalid,
+        return Err(ApplyError::NotApplicable(
+            NotApplicableReason::TileShapeInvalid,
         ));
     }
 
@@ -1079,37 +1070,40 @@ impl TileOut {
     }
 }
 
-impl Display for ActionNotApplicableReason {
+impl Display for NotApplicableReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ActionNotApplicableReason::TileShapeMatchesOriginal => {
+            NotApplicableReason::OutOfMemory(lvl) => {
+                write!(f, "Insufficient memory in {lvl} to apply action")
+            }
+            NotApplicableReason::TileShapeMatchesOriginal => {
                 write!(f, "Tile shape matches original")
             }
-            ActionNotApplicableReason::TileShapeIsLarger => {
+            NotApplicableReason::TileShapeIsLarger => {
                 write!(f, "Tile shape is larger than original")
             }
-            ActionNotApplicableReason::TileShapeInvalid => {
+            NotApplicableReason::TileShapeInvalid => {
                 write!(f, "Invalid tile shape")
             }
-            ActionNotApplicableReason::ParallelPrevented => {
+            NotApplicableReason::ParallelPrevented => {
                 write!(f, "Cannot implement serial-only Spec with parallel tile")
             }
-            ActionNotApplicableReason::LayoutIncompatible => {
+            NotApplicableReason::LayoutIncompatible => {
                 write!(f, "Layout does not apply to tile size")
             }
-            ActionNotApplicableReason::SelfMove => {
+            NotApplicableReason::SelfMove => {
                 write!(
                     f,
                     "Source and destination TensorSpecs were equal after canonicalization"
                 )
             }
-            ActionNotApplicableReason::VectorSizeInvalid(dtype, size) => {
+            NotApplicableReason::VectorSizeInvalid(dtype, size) => {
                 write!(
                     f,
                     "Target does not support {dtype} vectors with {size} values"
                 )
             }
-            ActionNotApplicableReason::Other => write!(f, "Unknown reason"),
+            NotApplicableReason::Other => write!(f, "Unknown reason"),
         }
     }
 }
@@ -1126,9 +1120,9 @@ fn plan_movelet<'a, Tgt: Target>(
     let outer_moved_operand_spec = &operands[usize::from(source_idx)];
 
     if !outer_moved_operand_spec.can_move_to(destination_layout, &destination_level) {
-        return Err(ApplyError::ActionNotApplicable(
-            // TODO: Replace Other with a new ActionNotApplicableReason variant.
-            ActionNotApplicableReason::Other,
+        return Err(ApplyError::NotApplicable(
+            // TODO: Replace Other with a new NotApplicableReason variant.
+            NotApplicableReason::Other,
         ));
     }
 
@@ -1136,8 +1130,8 @@ fn plan_movelet<'a, Tgt: Target>(
         if !Tgt::vec_types().iter().any(|vec_type| {
             vec_type.dtype == destination_dtype && u32::from(vec_type.value_cnt) == vs.get()
         }) {
-            return Err(ApplyError::ActionNotApplicable(
-                ActionNotApplicableReason::VectorSizeInvalid(destination_dtype, vs),
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::VectorSizeInvalid(destination_dtype, vs),
             ));
         }
     }
@@ -1189,9 +1183,7 @@ fn plan_movelet<'a, Tgt: Target>(
     // Filter cases where, after canonicalization, the source and destination
     // TensorSpecs match (i.e., within-level copies).
     if outer_moved_operand_spec == &new_spec {
-        return Err(ApplyError::ActionNotApplicable(
-            ActionNotApplicableReason::SelfMove,
-        ));
+        return Err(ApplyError::NotApplicable(NotApplicableReason::SelfMove));
     }
 
     let lower_limits: MemoryLimits = {
@@ -1207,9 +1199,9 @@ fn plan_movelet<'a, Tgt: Target>(
                     .get_unscaled(updated_level_idx)
                     .checked_sub(additional)
                 else {
-                    return Err(ApplyError::OutOfMemory(
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
                         levels[updated_level_idx].to_string(),
-                    ));
+                    )));
                 };
                 new_limits.set_unscaled(updated_level_idx, prev_power_of_two(level_updated));
                 MemoryLimits::Standard(new_limits)
@@ -1303,7 +1295,7 @@ fn move_is_cache_miss<Tgt: Target>(
 fn tile_to_apply_err(err: TileError) -> ApplyError {
     match err {
         TileError::LayoutIncompatible(_) => {
-            ApplyError::ActionNotApplicable(ActionNotApplicableReason::LayoutIncompatible)
+            ApplyError::NotApplicable(NotApplicableReason::LayoutIncompatible)
         }
     }
 }
