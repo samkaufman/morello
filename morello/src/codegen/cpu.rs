@@ -574,7 +574,23 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                     p.0,
                     iter::repeat("_").take(p.1.len()).join(", ")
                 )?;
-                writeln!(w, "{}assert(false);  /* Missing Impl */", indent(depth))
+                let args: String =
+                    p.1.iter()
+                        .map(|arg| {
+                            let backing_tensor = arg.backing_tensor(&self.param_bindings).unwrap();
+                            match self.name_env.get(backing_tensor).unwrap() {
+                                CBuffer::HeapArray { name, .. }
+                                | CBuffer::StackArray { name, .. }
+                                | CBuffer::Ptr { name, .. } => format!("{name}[_]"),
+                                CBuffer::ValueVar { name, .. }
+                                | CBuffer::SingleVecVar { name, .. } => name.clone(),
+                                CBuffer::VecVars { inner_vecs, .. } => {
+                                    inner_vecs[0].name().unwrap_or("_").to_owned()
+                                }
+                            }
+                        })
+                        .join(", ");
+                writeln!(w, "{}assert(false);  // missing imp({args})", indent(depth))
             }
             ImplNode::Kernel(KernelApp {
                 kernel_type,
