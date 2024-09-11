@@ -1074,7 +1074,7 @@ impl Display for NotApplicableReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NotApplicableReason::OutOfMemory(lvl) => {
-                write!(f, "Insufficient memory in {lvl} to apply action")
+                write!(f, "Insufficient memory in {lvl}")
             }
             NotApplicableReason::TileShapeMatchesOriginal => {
                 write!(f, "Tile shape matches original")

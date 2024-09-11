@@ -4,7 +4,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
-use crate::scheduling::{Action, ApplyError, NotApplicableReason, TileOut};
+use crate::scheduling::{Action, ApplyError, TileOut};
 use crate::search::top_down;
 use crate::spec::Spec;
 use crate::target::Target;
@@ -313,11 +313,8 @@ where
 fn apply_unwrap<Tgt: Target>(spec: &Spec<Tgt>, action: Action<Tgt>) -> ImplNode<Tgt> {
     match action.apply(spec) {
         Ok(result) => result,
-        Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(lvl))) => {
-            panic!("Insufficient remaining memory in {lvl} to apply {action:?} to {spec}")
-        }
-        Err(ApplyError::NotApplicable(_)) => {
-            panic!("Action {action:?} is not defined for {spec}")
+        Err(ApplyError::NotApplicable(reason)) => {
+            panic!("Action {action:?} is not defined for {spec}: {reason}")
         }
         Err(e) => panic!("{e}"),
     }
