@@ -114,7 +114,7 @@ pub enum NotApplicableReason {
     LayoutIncompatible,
     SelfMove,
     VectorSizeInvalid(Dtype, DimSize),
-    Other,
+    Other(Option<&'static str>),
 }
 
 impl<Tgt: Target> Action<Tgt> {
@@ -238,46 +238,54 @@ impl<Tgt: Target> Action<Tgt> {
                             new_tiles.push(smaller_output);
                             (new_tiles, parallel)
                         }
-                        Action::Split { k } => match logical_spec {
-                            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
-                                match typ {
-                                    PrimitiveSpecType::Matmul { accum: _ } => {
-                                        let [lhs, rhs] = &operands[..2] else {
-                                            panic!();
-                                        };
-                                        assert!(
-                                            *k < lhs.shape()[1],
-                                            "Cannot split to k={k} when inner dim. is not larger (it is {})",
-                                            lhs.shape()[1]
-                                        );
+                        Action::Split { k } => {
+                            match logical_spec {
+                                LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
+                                    match typ {
+                                        PrimitiveSpecType::Matmul { accum: _ } => {
+                                            let [lhs, rhs] = &operands[..2] else {
+                                                panic!();
+                                            };
+                                            assert!(
+                                                *k < lhs.shape()[1],
+                                                "Cannot split to k={k} when inner dim. is not larger (it is {})",
+                                                lhs.shape()[1]
+                                            );
 
-                                        let tiles = vec![
-                                            LoopTile {
-                                                axes: vec![0, 1],
-                                                tile: Tile::new(
-                                                    vec![lhs.shape()[0], *k],
-                                                    vec![lhs.shape()[0], *k],
-                                                    Param::new(0, lhs.clone()),
-                                                )
-                                                .map_err(tile_to_apply_err)?,
-                                            },
-                                            LoopTile {
-                                                axes: vec![1, 2],
-                                                tile: Tile::new(
-                                                    vec![*k, rhs.shape()[1]],
-                                                    vec![*k, rhs.shape()[1]],
-                                                    Param::new(1, rhs.clone()),
-                                                )
-                                                .map_err(tile_to_apply_err)?,
-                                            },
-                                        ];
-                                        (tiles, false)
+                                            if lhs.shape()[1].get() % k.get() != 0 {
+                                                return Err(ApplyError::NotApplicable(
+                                                    NotApplicableReason::Other(Some("Original size is not a multiple of split size")),
+                                                ));
+                                            }
+
+                                            let tiles = vec![
+                                                LoopTile {
+                                                    axes: vec![0, 1],
+                                                    tile: Tile::new(
+                                                        vec![lhs.shape()[0], *k],
+                                                        vec![lhs.shape()[0], *k],
+                                                        Param::new(0, lhs.clone()),
+                                                    )
+                                                    .map_err(tile_to_apply_err)?,
+                                                },
+                                                LoopTile {
+                                                    axes: vec![1, 2],
+                                                    tile: Tile::new(
+                                                        vec![*k, rhs.shape()[1]],
+                                                        vec![*k, rhs.shape()[1]],
+                                                        Param::new(1, rhs.clone()),
+                                                    )
+                                                    .map_err(tile_to_apply_err)?,
+                                                },
+                                            ];
+                                            (tiles, false)
+                                        }
+                                        _ => unimplemented!("Split not implemented for {:?}", typ),
                                     }
-                                    _ => unimplemented!("Split not implemented for {:?}", typ),
                                 }
+                                LogicalSpec::Compose { .. } => todo!(),
                             }
-                            LogicalSpec::Compose { .. } => todo!(),
-                        },
+                        }
                         _ => unreachable!(),
                     }
                 };
@@ -335,7 +343,9 @@ impl<Tgt: Target> Action<Tgt> {
                 } = logical_spec
                 else {
                     // TODO: Use a more specific NotApplicableReason.
-                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                        "Not a Compose",
+                    ))));
                 };
                 debug_assert!(components.len() >= 2);
 
@@ -468,11 +478,15 @@ impl<Tgt: Target> Action<Tgt> {
                 ) = logical_spec
                 else {
                     // TODO: Use a more specific NotApplicableReason.
-                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                        "Not a Conv",
+                    ))));
                 };
                 if !*conv_accum {
                     // TODO: Use a more specific NotApplicableReason.
-                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                        "Conv is not accumulating",
+                    ))));
                 }
                 let rank: u8 = operands[0].shape.len().try_into().unwrap();
 
@@ -627,11 +641,15 @@ impl<Tgt: Target> Action<Tgt> {
                 let (PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum }) = typ
                 else {
                     // TODO: Use a more specific NotApplicableReason.
-                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                        "Not a Matmul or Conv",
+                    ))));
                 };
                 if *accum {
                     // TODO: Use a more specific NotApplicableReason.
-                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                        "Already accumulating",
+                    ))));
                 }
 
                 let TensorSpec {
@@ -677,7 +695,7 @@ impl<Tgt: Target> Action<Tgt> {
             Action::Place(k, force) => {
                 if !force && !k.applies_to_logical_spec(&spec.0) {
                     // TODO: Use better error message-producing Error type.
-                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other));
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other(None)));
                 }
 
                 let arguments = operands
@@ -976,6 +994,9 @@ impl<Tgt: Target> ActionSolver<Tgt> {
     }
 }
 
+/// Return an error if the tile shape is invalid.
+///
+/// This can return TileShapeMatchesOriginal, TileShapeIsLarger, or TileShapeInvalid.
 fn check_tile_out_applies<Tgt: Target>(
     current_out_shape: &[DimSize],
     output_shape: &[DimSize],
@@ -1003,6 +1024,16 @@ fn check_tile_out_applies<Tgt: Target>(
         return Err(ApplyError::NotApplicable(
             NotApplicableReason::TileShapeInvalid,
         ));
+    }
+
+    if output_shape
+        .iter()
+        .enumerate()
+        .any(|(dim, dim_size)| current_out_shape[dim].get() % dim_size.get() != 0)
+    {
+        return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+            "Original size is not a multiple of tile size",
+        ))));
     }
 
     Ok(())
@@ -1103,7 +1134,8 @@ impl Display for NotApplicableReason {
                     "Target does not support {dtype} vectors with {size} values"
                 )
             }
-            NotApplicableReason::Other => write!(f, "Unknown reason"),
+            NotApplicableReason::Other(Some(reason_string)) => write!(f, "{}", reason_string),
+            NotApplicableReason::Other(None) => write!(f, "Unknown reason"),
         }
     }
 }
@@ -1122,7 +1154,7 @@ fn plan_movelet<'a, Tgt: Target>(
     if !outer_moved_operand_spec.can_move_to(destination_layout, &destination_level) {
         return Err(ApplyError::NotApplicable(
             // TODO: Replace Other with a new NotApplicableReason variant.
-            NotApplicableReason::Other,
+            NotApplicableReason::Other(None),
         ));
     }
 
@@ -1307,6 +1339,7 @@ mod tests {
         layout::{col_major, row_major, PhysDim},
         lspec,
         memorylimits::MemVec,
+        shape,
         spec::arb_canonical_spec,
         target::{CpuMemoryLevel, X86Target},
     };
@@ -1364,6 +1397,55 @@ mod tests {
         assert_eq!(
             plan.new_spec.contiguous_abs(),
             fixed_layout.contiguous_full()
+        );
+    }
+
+    /// Test that a TileOut::SingleLoop with a non-multiple size fails to apply.
+    ///
+    /// These aren't implemented yet in Impl, so the action should fail.
+    #[test]
+    fn test_non_multiple_tile_out_single_returns_error() {
+        shared_test_non_multiple_tiling_returns_error(Action::TileOut(TileOut::SingleLoop {
+            dim: 0,
+            size: nz!(3u32),
+            parallel: false,
+        }))
+    }
+
+    /// Test that a TileOut::MultiLoop with a non-multiple size fails to apply.
+    ///
+    /// These aren't implemented yet in Impl, so the action should fail.
+    #[test]
+    fn test_non_multiple_tile_out_multi_returns_error() {
+        shared_test_non_multiple_tiling_returns_error(Action::TileOut(TileOut::MultiLoop {
+            output_shape: shape![4, 6],
+            parallel: false,
+        }))
+    }
+
+    /// Test that a TileOut::Split with a non-multiple size fails to apply.
+    ///
+    /// These aren't implemented yet in Impl, so the action should fail.
+    #[test]
+    fn test_non_multiple_split_returns_error() {
+        shared_test_non_multiple_tiling_returns_error(Action::Split { k: nz!(6u32) })
+    }
+
+    fn shared_test_non_multiple_tiling_returns_error(action: Action<X86Target>) {
+        let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+            [8, 8, 8],
+            (f32, CpuMemoryLevel::GL, col_major(2)),
+            (f32, CpuMemoryLevel::GL, row_major(2)),
+            (f32, CpuMemoryLevel::GL, row_major(2))
+        ));
+        let spec = Spec(logical_spec, X86Target::max_mem());
+        let application = action.apply(&spec);
+        assert!(
+            matches!(
+                application,
+                Err(ApplyError::NotApplicable(NotApplicableReason::Other(_))),
+            ),
+            "expected NotApplicable(Other) but got {application:?}",
         );
     }
 
