@@ -57,7 +57,7 @@ fn main() {
                 .subschedule(&[1], |z| {
                     z.move_param(1, CpuMemoryLevel::VRF, interleaved.clone(), Some(nz!(8u32)))
                         .subschedule(&[0], |z| z.place(CpuKernel::VectorInterleaveBf16F32))
-                        .subschedule(&[1], |z| z.tile_out(&[1, 8]).place(CpuKernel::VectorAssign))
+                        .subschedule(&[1], |z| z.place(CpuKernel::VectorAssign))
                 })
         })
         .subschedule(&[1], |body| {

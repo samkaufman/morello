@@ -62,7 +62,7 @@ fn main() {
                     m.split(1)
                         .tile_out(&[1, 16])
                         .move_param(1, VRF, layout_b.clone(), Some(nz!(8u32)))
-                        .subschedule(&[0], |m| m.tile_out(&[1, 8]).place(CpuKernel::VectorAssign))
+                        .subschedule(&[0], |m| m.place(CpuKernel::VectorAssign))
                         .subschedule(&[1], |m| m.place(CpuKernel::BroadcastVecMultAdd))
                 })
                 .subschedule(&[2], |m| m.tile_out(&[1, 8]).place(CpuKernel::VectorAssign))

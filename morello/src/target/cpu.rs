@@ -652,7 +652,7 @@ impl CpuKernel {
                         has_vrf = true;
                         match o.vector_size() {
                             Some(vector_size) => {
-                                if vector_size != o.volume() {
+                                if o.volume().get() % vector_size.get() != 0 {
                                     return false;
                                 }
                             }
@@ -877,10 +877,17 @@ impl CpuKernel {
             CpuKernel::VectorCastBf16F32 => 6 * INST_COST, // RThroughput = 3
             CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
             CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
-            CpuKernel::ValueAssign
-            | CpuKernel::VectorAssign
-            | CpuKernel::MemsetZero
-            | CpuKernel::VectorZero => ASSIGN_INST_COST,
+            CpuKernel::VectorAssign => {
+                let vector_value_count = parameters[0]
+                    .1
+                    .vector_size()
+                    .unwrap_or_else(|| parameters[1].1.vector_size().unwrap());
+                let vec_count = parameters[0].1.volume().get() / vector_value_count.get();
+                ASSIGN_INST_COST * vec_count
+            }
+            CpuKernel::ValueAssign | CpuKernel::MemsetZero | CpuKernel::VectorZero => {
+                ASSIGN_INST_COST
+            }
         }
     }
 
@@ -1369,6 +1376,32 @@ mod tests {
             act.apply_unchecked_canon(&spec).unwrap_err(),
             ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(_))
         ));
+    }
+
+    #[test]
+    fn test_vectorassign_main_cost() {
+        let arg0 = TensorSpec::new_canon(
+            shape![2, 32],
+            Dtype::Uint32,
+            row_major(2).contiguous_full(),
+            true,
+            CpuMemoryLevel::VRF,
+            row_major(2),
+            Some(nz!(16u32)),
+        );
+        let arg1 = TensorSpec::new_canon(
+            shape![2, 32],
+            Dtype::Uint32,
+            row_major(2).contiguous_full(),
+            true,
+            CpuMemoryLevel::L1,
+            row_major(2),
+            None,
+        );
+        let parameter0: Param<X86Target> = Param::new(0, arg0);
+        let parameter1: Param<X86Target> = Param::new(1, arg1);
+        let cost = CpuKernel::VectorAssign.main_cost(&[parameter0, parameter1]);
+        assert_eq!(cost, 4 * ASSIGN_INST_COST);
     }
 
     fn assert_unique_layouts(layouts: &[Layout]) {

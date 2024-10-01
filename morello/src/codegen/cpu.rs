@@ -9,7 +9,7 @@ use super::c_utils::{c_type, printf_fmt, CBuffer, CExprVar, InitType, VecType};
 use super::header::HeaderEmitter;
 use super::namegen::NameGenerator;
 use crate::common::{DimSize, Dtype};
-use crate::expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term};
+use crate::expr::{AffineForm, Bounds as _, NonAffine, NonAffineExpr, Substitute, Term};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
 use crate::imp::loops::Loop;
@@ -87,7 +87,6 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
         let mut operand_idx = 0;
         for (operand, tensor) in imp.parameters().zip(top_arg_tensors) {
-            let spec = tensor.spec();
             let parameter_name = self.namer.fresh_name();
             writeln!(
                 main_body_str,
@@ -109,7 +108,6 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 Rc::clone(tensor),
                 CBuffer::Ptr {
                     name: parameter_name,
-                    dtype: spec.dtype(),
                 },
             );
             operand_idx += 1;
@@ -408,6 +406,11 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         mut depth: usize,
         out: &mut W,
     ) -> Result<(), fmt::Error> {
+        let buffer = self.name_env.get(tensor).unwrap();
+        if buffer.needs_unroll() {
+            unimplemented!();
+        }
+
         let rank = tensor.shape().len();
 
         let shape_str = tensor.shape().iter().map(ToString::to_string).join("x");
@@ -425,11 +428,9 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 Either::Left(n.to_string()),
             );
         }
-
         depth += 1;
 
         debug_assert_eq!(tensor, tensor.backing_tensor(&self.param_bindings).unwrap());
-        let buffer = self.name_env.get(tensor).unwrap();
         let buffer_indexing_expr = tensor.make_buffer_indexing_expr(&self.param_bindings);
         writeln!(
             out,
@@ -687,37 +688,65 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         )
                     }
                     CpuKernel::VectorAssign => {
-                        let dtype = arguments[0].spec().dtype();
-                        let volume = arguments[0].spec().volume();
+                        let first_spec = arguments[0].spec();
+                        let second_spec = arguments[1].spec();
 
-                        let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
-                            self.c_index_ptr(a, b, None)
+                        let vector_size = first_spec.vector_size().unwrap_or_else(|| {
+                            second_spec.vector_size().unwrap_or_else(|| {
+                                panic!(
+                                    "neither Spec had a vector size: {} and {}",
+                                    first_spec, second_spec
+                                )
+                            })
                         });
-                        let vtype = get_vector(Tgt::vec_types(), dtype, volume);
+
+                        let dtype = first_spec.dtype();
+                        let vtype = get_vector(Tgt::vec_types(), dtype, vector_size);
                         let itype = vtype.native_type_name;
-                        if arguments.iter().all(|a| a.1.aligned()) {
-                            writeln!(
-                                w,
-                                "{}*({} *)({}) = (*({} *)({}));  /* VectorAssign */",
-                                indent(depth),
-                                itype,
-                                exprs[1],
-                                itype,
-                                exprs[0]
-                            )
-                        } else {
-                            writeln!(
-                                w,
-                                "{0}{1}(({2} *)({3}), {4}(({5} *)({6})));  /* VectorAssign */",
-                                indent(depth),
-                                vtype.store_fn,
-                                vtype.store_fn_arg0,
-                                exprs[1],
-                                vtype.load_fn,
-                                vtype.load_fn_arg0,
-                                exprs[0],
-                            )
+                        let aligned = arguments.iter().all(|a| a.1.aligned());
+                        let vector_count = first_spec.volume().get() / vector_size.get();
+
+                        for vector_idx in 0..vector_count {
+                            let exprs = arguments
+                                .iter()
+                                .map(|arg| {
+                                    let backing_tensor =
+                                        arg.backing_tensor(&self.param_bindings).unwrap();
+                                    let buffer = self.name_env.get(backing_tensor).unwrap();
+                                    let mut buffer_indexing_expr =
+                                        arg.make_buffer_indexing_expr(&self.param_bindings);
+                                    buffer_indexing_expr = zero_points(buffer_indexing_expr);
+                                    buffer_indexing_expr +=
+                                        i32::try_from(vector_size.get() * vector_idx).unwrap();
+                                    self.c_index_ptr(buffer, &buffer_indexing_expr, None)
+                                })
+                                .collect::<Vec<_>>();
+
+                            if aligned {
+                                writeln!(
+                                    w,
+                                    "{}*({} *)({}) = (*({} *)({}));  /* VectorAssign */",
+                                    indent(depth),
+                                    itype,
+                                    exprs[1],
+                                    itype,
+                                    exprs[0]
+                                )?;
+                            } else {
+                                writeln!(
+                                    w,
+                                    "{0}{1}(({2} *)({3}), {4}(({5} *)({6})));  /* VectorAssign */",
+                                    indent(depth),
+                                    vtype.store_fn,
+                                    vtype.store_fn_arg0,
+                                    exprs[1],
+                                    vtype.load_fn,
+                                    vtype.load_fn_arg0,
+                                    exprs[0],
+                                )?;
+                            }
                         }
+                        Ok(())
                     }
                     CpuKernel::BroadcastVecMultAdd => {
                         let vector_size = arguments[2].spec().vector_size().unwrap().get();
@@ -1658,7 +1687,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
             },
             CBuffer::SingleVecVar { name, .. } => {
                 if let Some(reinterpret) = reinterpret {
-                    debug_assert_eq!(expr, 0);
+                    debug_assert_eq!(*expr, 0);
                     format!("*({} *)(&{})", reinterpret, name)
                 } else {
                     format!(
@@ -1671,11 +1700,17 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
             CBuffer::VecVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
-                self.c_index(
-                    inner_vec_buffer,
-                    &AffineForm::constant(vec_offset.try_into().unwrap()),
-                    reinterpret,
-                )
+                debug_assert!(vec_offset.as_constant().is_some());
+
+                let CBuffer::SingleVecVar { name, vec_type: _ } = inner_vec_buffer else {
+                    unreachable!();
+                };
+                if let Some(reinterpret) = reinterpret {
+                    debug_assert_eq!(vec_offset, 0);
+                    format!("*({} *)(&{})", reinterpret, name)
+                } else {
+                    format!("{}[{}]", name, expr_to_c(&vec_offset))
+                }
             }
         }
     }
@@ -1697,7 +1732,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 unimplemented!()
             }
             CBuffer::SingleVecVar { name, .. } => {
-                if expr != 0 {
+                if *expr != 0 {
                     panic!("expr must be 0, but was: {:?}", expr);
                 }
                 if reinterpret.is_some() {
@@ -1708,11 +1743,18 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
             CBuffer::VecVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
-                self.c_index_vec(
-                    inner_vec_buffer,
-                    &AffineForm::constant(vec_offset.try_into().unwrap()),
-                    reinterpret,
-                )
+                debug_assert!(vec_offset.as_constant().is_some());
+
+                let CBuffer::SingleVecVar { name, vec_type: _ } = inner_vec_buffer else {
+                    unreachable!();
+                };
+                if vec_offset != 0 {
+                    panic!("vec_offset must be 0, but was: {:?}", vec_offset);
+                }
+                if reinterpret.is_some() {
+                    unimplemented!();
+                }
+                name.clone()
             }
         }
     }
@@ -1752,7 +1794,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 if reinterpret.is_some() {
                     unimplemented!();
                 };
-                if expr == 0 {
+                if *expr == 0 {
                     format!("&{}", name)
                 } else {
                     format!("&{}", self.c_index(buffer, expr, None))
@@ -1761,11 +1803,19 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
             CBuffer::VecVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
                 let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
-                self.c_index_ptr(
-                    inner_vec_buffer,
-                    &AffineForm::constant(vec_offset.try_into().unwrap()),
-                    reinterpret,
-                )
+                debug_assert!(vec_offset.as_constant().is_some());
+
+                let CBuffer::SingleVecVar { name, vec_type: _ } = inner_vec_buffer else {
+                    unreachable!();
+                };
+                if reinterpret.is_some() {
+                    unimplemented!();
+                };
+                if vec_offset == 0 {
+                    format!("&{name}")
+                } else {
+                    format!("&{name}[{}]", expr_to_c(&vec_offset))
+                }
             }
         }
     }

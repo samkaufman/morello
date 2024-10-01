@@ -76,12 +76,9 @@ impl<T: Bounds> Bounds for AffineForm<T> {
         let mut maximum: Option<u32> = None;
         for term in &self.0 {
             let (term_min, term_max) = term.1.bounds()?;
-            minimum = minimum.min(u32::try_from(term.0).unwrap() * term_min);
-            maximum = Some(
-                maximum
-                    .unwrap_or(0)
-                    .max(u32::try_from(term.0).unwrap() * term_max),
-            );
+            let coeff = u32::try_from(term.0).unwrap();
+            minimum = minimum.min(coeff * term_min);
+            maximum = Some(maximum.unwrap_or(0).max(coeff * term_max));
         }
         // maximum is `None` if there are no terms. In this case, minimum is 0.
         let c = u32::try_from(self.1).unwrap();
@@ -208,7 +205,7 @@ impl<T: Atom> From<Option<T>> for NonAffineExpr<T> {
     }
 }
 
-impl<T> PartialEq<i32> for &AffineForm<T> {
+impl<T> PartialEq<i32> for AffineForm<T> {
     fn eq(&self, rhs: &i32) -> bool {
         self.0.is_empty() && self.1 == *rhs
     }
@@ -315,7 +312,9 @@ impl<T> Rem<u32> for AffineForm<NonAffine<T>> {
     type Output = Self;
 
     fn rem(mut self, rhs: u32) -> Self::Output {
-        if self.0.len() == 1 && self.0[0].0 == 1 && self.1 == 0 {
+        if self.0.is_empty() {
+            AffineForm::constant(self.1 % i32::try_from(rhs).unwrap())
+        } else if self.0.len() == 1 && self.0[0].0 == 1 && self.1 == 0 {
             (self.0.pop().unwrap().1 % rhs).into()
         } else {
             NonAffine::Mod(Box::new(self), rhs).into()
@@ -412,7 +411,7 @@ fn write_affine_term<T: Display>(f: &mut std::fmt::Formatter<'_>, t: &Term<T>) -
 
 #[cfg(test)]
 mod tests {
-    use crate::expr::Substitute;
+    use crate::expr::{NonAffineExpr, Substitute};
 
     use super::{AffineForm, NonAffine, Term};
 
@@ -561,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn test_subs_mod() {
+    fn test_subs_mod_1() {
         let x = NonAffine::Leaf("x");
         let original_expr = AffineForm(vec![Term(1, NonAffine::Mod(Box::new(x.into()), 16))], 0);
 
@@ -570,5 +569,11 @@ mod tests {
 
         let result_2 = original_expr.subs(&"x", &AffineForm::constant(16));
         assert_eq!(result_2, AffineForm::constant(0));
+    }
+
+    #[test]
+    fn test_subs_mod_2() {
+        let root = NonAffineExpr::<()>::constant(0) % 8;
+        assert_eq!(root, 0i32);
     }
 }

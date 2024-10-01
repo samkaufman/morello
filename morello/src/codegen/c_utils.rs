@@ -1,8 +1,8 @@
-use std::fmt;
+use std::{fmt, ops::Rem};
 
 use crate::{
     common::Dtype,
-    expr::{AffineForm, Atom, Bounds, NonAffine},
+    expr::{AffineForm, Atom, Bounds, NonAffineExpr},
     layout::BufferVar,
     utils::indent,
 };
@@ -32,7 +32,6 @@ pub enum CBuffer {
     },
     Ptr {
         name: String,
-        dtype: Dtype,
     },
 }
 
@@ -71,13 +70,6 @@ impl CBuffer {
             | CBuffer::SingleVecVar { name, .. }
             | CBuffer::Ptr { name, .. } => Some(name),
             CBuffer::VecVars { .. } => None,
-        }
-    }
-
-    pub fn size(&self) -> Option<u32> {
-        match self {
-            CBuffer::HeapArray { size, .. } | CBuffer::StackArray { size, .. } => Some(*size),
-            _ => None,
         }
     }
 
@@ -217,27 +209,46 @@ impl CBuffer {
         }
     }
 
-    pub(super) fn inner_vec_from_expr(
+    /// Returns a specific [CBuffer::SingleVecVar] and its internal offset.
+    ///
+    /// This checks the upper and lower bounds of the given expression. If they both fall inside the
+    /// same single vector, this returns that vector. Otherwise, it panics.
+    pub(super) fn inner_vec_from_expr<T>(
         &self,
-        expr: &AffineForm<NonAffine<CExprVar>>,
-    ) -> (&CBuffer, usize) {
+        expr: &NonAffineExpr<T>,
+    ) -> (&CBuffer, NonAffineExpr<T>)
+    where
+        T: Bounds + Clone + fmt::Debug,
+        NonAffineExpr<T>: Rem<u32, Output = NonAffineExpr<T>>,
+    {
         let CBuffer::VecVars { inner_vecs, .. } = self else {
             unreachable!();
         };
         let CBuffer::SingleVecVar { name: _, vec_type } = inner_vecs[0] else {
             unreachable!();
         };
-        let AffineForm(ref linear_terms, expr_constant) = *expr;
-        debug_assert!(
+
+        let AffineForm(linear_terms, _) = expr;
+        assert!(
             linear_terms.is_empty(),
-            "Linear terms was non-empty: {:?}",
-            linear_terms
+            "unexpectedly contained linear terms: {expr:?}",
         );
-        let expr_constant = usize::try_from(expr_constant).unwrap();
-        let vector_size = usize::from(vec_type.value_cnt);
-        let inner_vec_idx = expr_constant / vector_size;
-        let inside_vec_offset = expr_constant % vector_size;
-        (&inner_vecs[inner_vec_idx], inside_vec_offset)
+
+        let Some((bmin, bmax)) = expr.bounds() else {
+            panic!("expr's bounds are undefined: {expr:?}");
+        };
+        let vector_size = u32::from(vec_type.value_cnt);
+        let min_vec_idx = bmin / vector_size;
+        let max_vec_idx = bmax / vector_size;
+        assert_eq!(
+            min_vec_idx, max_vec_idx,
+            "expr spans multiple vectors: {expr:?}"
+        );
+
+        (
+            &inner_vecs[usize::try_from(min_vec_idx).unwrap()],
+            expr.clone() % vector_size,
+        )
     }
 }
 

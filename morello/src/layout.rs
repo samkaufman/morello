@@ -1,11 +1,3 @@
-use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-
-use std::{collections::HashSet, fmt::Display, hash::Hash};
-
-#[cfg(any(debug_assertions, test))]
-use nonzero::nonzero as nz;
-
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
     expr::{AffineForm, Atom, Bounds, NonAffineExpr},
@@ -13,6 +5,10 @@ use crate::{
     opaque_symbol::OpaqueSymbol,
     target::Target,
 };
+use itertools::Itertools;
+use nonzero::nonzero as nz;
+use serde::{Deserialize, Serialize};
+use std::{collections::HashSet, fmt::Display, hash::Hash};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
 pub struct Layout(pub Vec<(u8, PhysDim)>);
