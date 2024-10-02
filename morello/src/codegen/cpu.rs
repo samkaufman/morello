@@ -554,12 +554,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 }
                 Ok(())
             }
-            ImplNode::Block(Block {
-                stages,
-                bindings: _,
-                parameters: _,
-                spec: _,
-            }) => {
+            ImplNode::Block(Block { stages, .. }) => {
                 for stage in stages {
                     self.emit(w, stage, depth)?;
                 }

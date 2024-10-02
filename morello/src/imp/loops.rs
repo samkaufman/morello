@@ -94,8 +94,7 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
         )
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
-        let mut new_children = new_children;
+    fn replace_children(&self, mut new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
         let new_loop = Loop {
             tiles: self.tiles.clone(),
             body: Box::new(new_children.next().unwrap()),

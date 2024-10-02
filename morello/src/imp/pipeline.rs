@@ -53,11 +53,13 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
     }
 
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
-        Pipeline {
+        let new_impl = Pipeline {
             intermediates: self.intermediates.clone(),
             stages: new_children.collect(),
             spec: self.spec.clone(),
-        }
+        };
+        debug_assert_eq!(new_impl.intermediates.len(), self.intermediates.len());
+        new_impl
     }
 
     fn bind<'i, 'j: 'i>(

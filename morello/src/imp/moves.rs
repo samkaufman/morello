@@ -103,6 +103,10 @@ impl<Tgt: Target> Impl<Tgt> for MoveLet<Tgt> {
         &self.children
     }
 
+    fn default_child(&self) -> Option<usize> {
+        Some(if self.has_prologue { 1 } else { 0 })
+    }
+
     fn memory_allocated(&self) -> MemoryAllocation {
         movelet_memory_allocation(self.introduced.spec())
     }

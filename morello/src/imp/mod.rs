@@ -34,6 +34,12 @@ pub trait Impl<Tgt: Target> {
 
     fn children(&self) -> &[ImplNode<Tgt>];
 
+    /// The index of the child which will be scheduled by pass-through scheduling operators when
+    /// multiple children exist.
+    fn default_child(&self) -> Option<usize> {
+        None
+    }
+
     /// Returns the amount of memory allocated by this Impl node alone.
     ///
     /// Spec applications allocate no memory.

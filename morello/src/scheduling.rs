@@ -690,6 +690,7 @@ impl<Tgt: Target> Action<Tgt> {
                     bindings: vec![vec![2], vec![0, 1, 2]],
                     parameters: operands,
                     spec: Some(spec.clone()),
+                    default_child: Some(1),
                 }))
             }
             Action::Place(k, force) => {

@@ -88,33 +88,24 @@ fn main() {
     let implementation = implementation_smaller
         .subschedule(&[0], zero_schedule)
         // Second, we'll schedule the MatmulAccum:
-        .subschedule(&[1], |mm_accum_spec_a| {
-            // Tile the 1x64x1 MatmulAccum to 1x4x1, introducing loop over the k dimension:
-            mm_accum_spec_a
-                .split(4)
-                // Move the 1x4 left-hand input tensor into the register. This results in two
-                // sub-Specs---a Move from L1 into RF and the continuation of the MatrmulAccum.
-                //
-                // Let's schedule the introduced Move sub-Spec with `move_schedule` (defined below).
-                .move_param(0, CpuMemoryLevel::RF, row_major(2), None)
-                .subschedule(&[0], move_schedule)
-                .subschedule(&[1], |mm_accum_spec_b| {
-                    // Move the 4x1 right-hand input tensor into the register file:
-                    mm_accum_spec_b
-                        .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
-                        .subschedule(&[0], move_schedule)
-                        .subschedule(&[1], |mm_accum_spec_c| {
-                            mm_accum_spec_c
-                                // And finally we'll move the 1x1 output tensor into RF, scheduling
-                                // the load and store sub-Specs...
-                                .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
-                                .subschedule(&[0], move_schedule)
-                                .subschedule(&[2], move_schedule)
-                                // ...and compute the 1x1x1 matix multiply with `+= a * b`.
-                                .subschedule(&[1], |s| s.split(1).place(CpuKernel::MultAdd))
-                        })
-                })
-        });
+        // Tile the 1x64x1 MatmulAccum to 1x4x1, introducing loop over the k dimension:
+        .split(4)
+        // Move the 1x4 left-hand input tensor into the register. This results in two
+        // sub-Specs---a Move from L1 into RF and the continuation of the MatrmulAccum.
+        .move_param(0, CpuMemoryLevel::RF, row_major(2), None)
+        // Let's schedule the introduced Move sub-Spec with `move_schedule` (defined below).
+        .subschedule(&[1, 0], move_schedule)
+        // Move the 4x1 right-hand input tensor into registers as well.
+        .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
+        .subschedule(&[1, 1, 0], move_schedule)
+        // And, finally, move the 1x1 output tensor into RF, scheduling
+        // the load and store sub-Specs...
+        .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
+        .subschedule(&[1, 1, 1, 0], move_schedule)
+        .subschedule(&[1, 1, 1, 2], move_schedule)
+        // ...and compute the 1x1x1 matix multiply with `+= a * b`.
+        .split(1)
+        .place(CpuKernel::MultAdd);
 
     // The resulting implementation is:
     //   tile (aa: (16×64, u32) <-[0, 2]- #0, ab: (64×16, u32, c1) <-[3, 1]- #1, ac: (16×16, u32, c1) <-[0, 1]- #2)

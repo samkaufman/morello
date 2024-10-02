@@ -305,7 +305,20 @@ where
         _ => match &node.children() {
             [] => panic!("Not a Spec application and no children."),
             [child] => node.replace_children(iter::once(apply_to_leaf_spec(child, f))),
-            _ => panic!("Ambiguous choice of child. Use `subschedule`."),
+            children => {
+                if let Some(default_child_idx) = node.default_child() {
+                    let replaced_child = apply_to_leaf_spec(&children[default_child_idx], f);
+                    node.replace_children(
+                        children[..default_child_idx]
+                            .iter()
+                            .chain(iter::once(&replaced_child))
+                            .chain(&children[(default_child_idx + 1)..])
+                            .cloned(),
+                    )
+                } else {
+                    panic!("Ambiguous choice of child. Use `subschedule`.")
+                }
+            }
         },
     }
 }

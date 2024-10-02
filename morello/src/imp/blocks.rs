@@ -15,6 +15,7 @@ pub struct Block<Tgt: Target> {
     pub bindings: Vec<Vec<u8>>,
     pub parameters: Vec<TensorSpec<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
+    pub default_child: Option<usize>,
 }
 
 impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
@@ -24,6 +25,10 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
 
     fn children(&self) -> &[ImplNode<Tgt>] {
         &self.stages
+    }
+
+    fn default_child(&self) -> Option<usize> {
+        self.default_child
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
@@ -41,11 +46,14 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
         // TODO: Check that parameters are unchanged after children are replaced.
         // TODO: Flatten nested Blocks as well.
+        let stages = new_children.collect::<Vec<_>>();
+        debug_assert_eq!(stages.len(), self.stages.len());
         Self {
-            stages: new_children.collect(),
+            stages,
             bindings: self.bindings.clone(),
             parameters: self.parameters.clone(),
             spec: self.spec.clone(),
+            default_child: self.default_child,
         }
     }
 

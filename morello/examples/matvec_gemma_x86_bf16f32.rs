@@ -60,19 +60,15 @@ fn main() {
                         .subschedule(&[1], |z| z.place(CpuKernel::VectorAssign))
                 })
         })
-        .subschedule(&[1], |body| {
-            body.tile_out_parallel(&[1, 128])
-                .tile_out(&[1, 1])
-                .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
-                .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
-                .subschedule(&[0], |z| z.to_accum())
-                .subschedule(&[0, 0], |z| z.place(CpuKernel::MemsetZero))
-                .subschedule(&[0, 1], |body| {
-                    body.move_param(1, CpuMemoryLevel::L1, col_major(2), None)
-                        .place(CpuKernel::DotProductLoopF32InterleavedBf16F32)
-                })
-                .subschedule(&[1], |body| body.place(CpuKernel::ValueAssign))
-        });
+        .tile_out_parallel(&[1, 128])
+        .tile_out(&[1, 1])
+        .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
+        .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
+        .to_accum()
+        .subschedule(&[1, 0, 0], |z| z.place(CpuKernel::MemsetZero))
+        .move_param(1, CpuMemoryLevel::L1, col_major(2), None)
+        .place(CpuKernel::DotProductLoopF32InterleavedBf16F32)
+        .subschedule(&[1, 1], |body| body.place(CpuKernel::ValueAssign));
 
     implementation
         .emit(
