@@ -7,7 +7,7 @@ pub type NonAffineExpr<T> = AffineForm<NonAffine<T>>;
 
 pub trait Bounds {
     /// The inclusive bounds of the value, if known.
-    fn bounds(&self) -> Option<(u32, u32)> {
+    fn bounds(&self) -> Option<(i32, i32)> {
         None
     }
 
@@ -15,7 +15,7 @@ pub trait Bounds {
         // TODO: Weird this returns i32, not u32. Unify types as u32 if possible.
         if let Some((lower_bound, upper_bound)) = self.bounds() {
             if lower_bound == upper_bound {
-                return Some(lower_bound.try_into().unwrap());
+                return Some(lower_bound);
             }
         }
         None
@@ -56,8 +56,8 @@ pub enum NonAffine<T> {
     // TODO: `Constant` should be a kind of leaf
     Constant(i32),
     Leaf(T),
-    FloorDiv(Box<NonAffineExpr<T>>, u32),
-    Mod(Box<NonAffineExpr<T>>, u32),
+    FloorDiv(Box<NonAffineExpr<T>>, i32),
+    Mod(Box<NonAffineExpr<T>>, i32),
 }
 
 impl<T> AffineForm<T> {
@@ -71,28 +71,30 @@ impl<T> AffineForm<T> {
 }
 
 impl<T: Bounds> Bounds for AffineForm<T> {
-    fn bounds(&self) -> Option<(u32, u32)> {
-        let mut minimum = 0u32;
-        let mut maximum: Option<u32> = None;
-        for term in &self.0 {
-            let (term_min, term_max) = term.1.bounds()?;
-            let coeff = u32::try_from(term.0).unwrap();
-            minimum = minimum.min(coeff * term_min);
-            maximum = Some(maximum.unwrap_or(0).max(coeff * term_max));
+    fn bounds(&self) -> Option<(i32, i32)> {
+        let mut minimum = self.1;
+        let mut maximum = Some(self.1);
+        for Term(coeff, sym) in &self.0 {
+            let (sym_min, sym_max) = sym.bounds()?;
+            if *coeff < 0 {
+                // TODO: Convert the following to checked_add and checked_mul.
+                minimum += *coeff * sym_max;
+                maximum = maximum.map(|m| m + (*coeff * sym_min));
+            } else {
+                // TODO: Convert the following to checked_add and checked_mul.
+                minimum += *coeff * sym_min;
+                maximum = maximum.map(|m| m + (*coeff * sym_max));
+            }
         }
         // maximum is `None` if there are no terms. In this case, minimum is 0.
-        let c = u32::try_from(self.1).unwrap();
-        Some((minimum + c, maximum.unwrap_or(0) + c))
+        Some((minimum, maximum.unwrap_or(0)))
     }
 }
 
 impl<T: Bounds> Bounds for NonAffine<T> {
-    fn bounds(&self) -> Option<(u32, u32)> {
+    fn bounds(&self) -> Option<(i32, i32)> {
         match self {
-            NonAffine::Constant(v) => {
-                let v = (*v).try_into().unwrap();
-                Some((v, v))
-            }
+            NonAffine::Constant(v) => Some((*v, *v)),
             NonAffine::Leaf(v) => v.bounds(),
             NonAffine::FloorDiv(v, d) => v.bounds().map(|(v_min, v_max)| (v_min / d, v_max / d)),
             NonAffine::Mod(v, m) => {
@@ -149,7 +151,7 @@ where
             NonAffine::FloorDiv(v, d) => {
                 let subbed = v.map_vars(mapper);
                 if let Some(c) = subbed.as_constant() {
-                    NonAffineExpr::constant(c / i32::try_from(d).unwrap())
+                    NonAffineExpr::constant(c / d)
                 } else {
                     AffineForm::from(NonAffine::FloorDiv(Box::new(subbed), d))
                 }
@@ -157,7 +159,7 @@ where
             NonAffine::Mod(v, m) => {
                 let subbed = v.map_vars(mapper);
                 if let Some(c) = subbed.as_constant() {
-                    NonAffineExpr::constant(c % i32::try_from(m).unwrap())
+                    NonAffineExpr::constant(c % m)
                 } else {
                     AffineForm::from(NonAffine::Mod(Box::new(subbed), m))
                 }
@@ -289,10 +291,10 @@ impl<T> MulAssign<i32> for AffineForm<T> {
     }
 }
 
-impl<T> Div<u32> for AffineForm<NonAffine<T>> {
+impl<T> Div<i32> for AffineForm<NonAffine<T>> {
     type Output = Self;
 
-    fn div(self, rhs: u32) -> Self::Output {
+    fn div(self, rhs: i32) -> Self::Output {
         debug_assert_ne!(rhs, 0);
         if rhs == 1 {
             self
@@ -302,18 +304,18 @@ impl<T> Div<u32> for AffineForm<NonAffine<T>> {
     }
 }
 
-impl<T> DivAssign<u32> for AffineForm<NonAffine<T>> {
-    fn div_assign(&mut self, rhs: u32) {
+impl<T> DivAssign<i32> for AffineForm<NonAffine<T>> {
+    fn div_assign(&mut self, rhs: i32) {
         *self = std::mem::take(self) / rhs
     }
 }
 
-impl<T> Rem<u32> for AffineForm<NonAffine<T>> {
+impl<T> Rem<i32> for AffineForm<NonAffine<T>> {
     type Output = Self;
 
-    fn rem(mut self, rhs: u32) -> Self::Output {
+    fn rem(mut self, rhs: i32) -> Self::Output {
         if self.0.is_empty() {
-            AffineForm::constant(self.1 % i32::try_from(rhs).unwrap())
+            AffineForm::constant(self.1 % rhs)
         } else if self.0.len() == 1 && self.0[0].0 == 1 && self.1 == 0 {
             (self.0.pop().unwrap().1 % rhs).into()
         } else {
@@ -322,13 +324,13 @@ impl<T> Rem<u32> for AffineForm<NonAffine<T>> {
     }
 }
 
-impl<T> Rem<u32> for NonAffine<T> {
+impl<T> Rem<i32> for NonAffine<T> {
     type Output = Self;
 
-    fn rem(self, rhs: u32) -> Self::Output {
+    fn rem(self, rhs: i32) -> Self::Output {
         match self {
             // TODO: Below i32 cast shouldn't be necesary. May make more sense to use i32 for Mod.
-            NonAffine::Constant(c) => NonAffine::Constant(c % i32::try_from(rhs).unwrap()),
+            NonAffine::Constant(c) => NonAffine::Constant(c % rhs),
             leaf @ NonAffine::Leaf(_) => NonAffine::Mod(Box::new(leaf.into()), rhs),
             // e.g., (a % 8) % 2 == a % 2
             NonAffine::Mod(a, r) if r % rhs == 0 => NonAffine::Mod(a, rhs),
@@ -339,14 +341,14 @@ impl<T> Rem<u32> for NonAffine<T> {
     }
 }
 
-impl<T> RemAssign<u32> for AffineForm<NonAffine<T>> {
-    fn rem_assign(&mut self, rhs: u32) {
+impl<T> RemAssign<i32> for AffineForm<NonAffine<T>> {
+    fn rem_assign(&mut self, rhs: i32) {
         *self = std::mem::take(self) % rhs
     }
 }
 
-impl<T> RemAssign<u32> for NonAffine<T> {
-    fn rem_assign(&mut self, rhs: u32) {
+impl<T> RemAssign<i32> for NonAffine<T> {
+    fn rem_assign(&mut self, rhs: i32) {
         *self = std::mem::take(self) % rhs
     }
 }
@@ -411,9 +413,8 @@ fn write_affine_term<T: Display>(f: &mut std::fmt::Formatter<'_>, t: &Term<T>) -
 
 #[cfg(test)]
 mod tests {
-    use crate::expr::{NonAffineExpr, Substitute};
-
     use super::{AffineForm, NonAffine, Term};
+    use crate::expr::{Bounds, NonAffineExpr, Substitute};
 
     #[test]
     fn test_intercept_scalar_addition() {
@@ -438,6 +439,43 @@ mod tests {
             AffineForm::<&str>(vec![], 1) * 0,
             AffineForm::<&str>(vec![], 0)
         );
+    }
+
+    #[test]
+    fn test_affineform_bounds_intercept() {
+        assert_eq!(AffineForm::<&str>(vec![], 1).bounds(), Some((1, 1)))
+    }
+
+    #[test]
+    fn test_affineform_bounds_positive_signs() {
+        struct Trt(i32, i32);
+
+        impl Bounds for Trt {
+            fn bounds(&self) -> Option<(i32, i32)> {
+                Some((self.0, self.1))
+            }
+        }
+
+        assert_eq!(
+            AffineForm(vec![Term(1, Trt(0, 10)), Term(2, Trt(0, 10))], 0).bounds(),
+            Some((0, 30))
+        )
+    }
+
+    #[test]
+    fn test_affineform_bounds_mixed_signs() {
+        struct Trt(i32, i32);
+
+        impl Bounds for Trt {
+            fn bounds(&self) -> Option<(i32, i32)> {
+                Some((self.0, self.1))
+            }
+        }
+
+        assert_eq!(
+            AffineForm(vec![Term(1, Trt(0, 10)), Term(-2, Trt(-5, 10))], 1).bounds(),
+            Some((-19, 21))
+        )
     }
 
     #[test]

@@ -219,7 +219,7 @@ impl CBuffer {
     ) -> (&CBuffer, NonAffineExpr<T>)
     where
         T: Bounds + Clone + fmt::Debug,
-        NonAffineExpr<T>: Rem<u32, Output = NonAffineExpr<T>>,
+        NonAffineExpr<T>: Rem<i32, Output = NonAffineExpr<T>>,
     {
         let CBuffer::VecVars { inner_vecs, .. } = self else {
             unreachable!();
@@ -237,7 +237,7 @@ impl CBuffer {
         let Some((bmin, bmax)) = expr.bounds() else {
             panic!("expr's bounds are undefined: {expr:?}");
         };
-        let vector_size = u32::from(vec_type.value_cnt);
+        let vector_size = i32::from(vec_type.value_cnt);
         let min_vec_idx = bmin / vector_size;
         let max_vec_idx = bmax / vector_size;
         assert_eq!(

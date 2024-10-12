@@ -111,30 +111,31 @@ impl Layout {
             debug_assert!(prev_remaining_volume <= concrete_shape[logical_dim_us]);
             let new_remaining_volume =
                 DimSize::new(prev_remaining_volume.get() / physical_size.get()).unwrap();
+            let new_remaining_volume_i32 = i32::try_from(new_remaining_volume.get()).unwrap();
             dim_remaining_volume[logical_dim_us] = new_remaining_volume;
 
             // Construct a "term" for this physical dimension: really, an expression parameterized
             // by a logical dimension.
             let mut term: NonAffineExpr<_> = BufferVar::Pt(logical_dim, expr_id.clone()).into();
             if prev_remaining_volume != concrete_shape[logical_dim_us] {
-                term %= prev_remaining_volume.get();
+                term %= prev_remaining_volume.get().try_into().unwrap();
             }
             match phys_dim {
                 PhysDim::OddEven(deinterleave_strip_size) => {
-                    let deinterleave_strip_size = deinterleave_strip_size.get();
+                    let deinterleave_strip_size =
+                        i32::try_from(deinterleave_strip_size.get()).unwrap();
                     debug_assert_eq!(deinterleave_strip_size % 2, 0);
                     let half_size = deinterleave_strip_size / 2;
-                    let half_size_i32 = i32::try_from(half_size).unwrap();
 
                     let alternating_term =
-                        ((term.clone() % deinterleave_strip_size) % 2) * half_size_i32;
+                        ((term.clone() % deinterleave_strip_size) % 2) * half_size;
                     let linear_term = (term % deinterleave_strip_size) / 2;
                     term = linear_term + alternating_term;
-                    term /= new_remaining_volume.get();
+                    term /= new_remaining_volume_i32;
                 }
                 _ => {
                     if concrete_shape[logical_dim_us] != physical_size {
-                        term /= new_remaining_volume.get();
+                        term /= new_remaining_volume_i32;
                     }
                 }
             };
