@@ -95,9 +95,9 @@ where
         }
     }
 
-    fn pprint_line<'a>(
-        &'a self,
-        names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
+    fn pprint_line(
+        &self,
+        names: &mut NameEnv,
         param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         let args_str = self

@@ -1,37 +1,32 @@
-use by_address::ByThinAddress;
+use crate::{opaque_symbol::OpaqueSymbol, target::Target, utils::ASCII_PAIRS, views::View};
 use std::collections::HashMap;
 
-use crate::{target::Target, utils::ASCII_PAIRS, views::View};
-
-pub struct NameEnv<'t, K: ?Sized> {
-    names: HashMap<ByThinAddress<&'t K>, String>,
+#[derive(Default)]
+pub struct NameEnv {
+    names: HashMap<OpaqueSymbol, String>,
 }
 
-impl<'t, K: ?Sized> NameEnv<'t, K> {
+impl NameEnv {
     pub fn new() -> Self {
-        NameEnv {
-            names: HashMap::new(),
-        }
+        NameEnv::default()
     }
+}
 
-    pub fn name(&mut self, view: &'t K) -> &str {
-        let view_by_address = ByThinAddress(view);
+impl NameEnv {
+    pub fn name<K: View + ?Sized>(&mut self, view: &K) -> &str {
         let cnt = self.names.len();
         let name = self
             .names
-            .entry(view_by_address)
+            .entry(view.identifier())
             .or_insert_with(|| String::from_iter(ASCII_PAIRS[cnt]));
         name
     }
 
-    pub fn get_name(&self, view: &'t K) -> Option<&str> {
-        let view_by_address = ByThinAddress(view);
-        self.names.get(&view_by_address).map(|s| s.as_str())
+    pub fn get_name<K: View + ?Sized>(&self, view: &K) -> Option<&str> {
+        self.names.get(&view.identifier()).map(|s| s.as_str())
     }
-}
 
-impl<'t, Tgt: Target> NameEnv<'t, dyn View<Tgt = Tgt>> {
-    pub fn get_name_or_display(&self, view: &'t dyn View<Tgt = Tgt>) -> String {
+    pub fn get_name_or_display<Tgt: Target>(&self, view: &dyn View<Tgt = Tgt>) -> String {
         if let Some(present_name) = self.get_name(view) {
             present_name.to_owned()
         } else if let Some(param) = view.to_param() {
@@ -39,11 +34,5 @@ impl<'t, Tgt: Target> NameEnv<'t, dyn View<Tgt = Tgt>> {
         } else {
             panic!("No name for non-Param view");
         }
-    }
-}
-
-impl<K> Default for NameEnv<'_, K> {
-    fn default() -> Self {
-        Self::new()
     }
 }

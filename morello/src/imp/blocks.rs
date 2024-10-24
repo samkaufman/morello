@@ -71,9 +71,9 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
         }
     }
 
-    fn pprint_line<'a>(
-        &'a self,
-        _names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
+    fn pprint_line(
+        &self,
+        _names: &mut NameEnv,
         _param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         // TODO: Add an option to pprint Blocks.

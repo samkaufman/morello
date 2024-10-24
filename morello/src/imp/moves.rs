@@ -153,9 +153,9 @@ impl<Tgt: Target> Impl<Tgt> for MoveLet<Tgt> {
         }
     }
 
-    fn pprint_line<'a>(
-        &'a self,
-        names: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
+    fn pprint_line(
+        &self,
+        names: &mut NameEnv,
         param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     ) -> Option<String> {
         let introduced_view = self.introduced.inner_fat_ptr();

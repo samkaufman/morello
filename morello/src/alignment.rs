@@ -90,7 +90,7 @@ mod tests {
             }
         };
 
-        let iexpr = layout.buffer_indexing_expr(&OpaqueSymbol::new(), parent.shape());
+        let iexpr = layout.buffer_indexing_expr(OpaqueSymbol::new(), parent.shape());
         println!("initial indexing expr = {}", iexpr);
 
         let parent_as_param = Param::new(0, parent);
@@ -99,7 +99,7 @@ mod tests {
         let iexpr = tile.compose_buffer_indexing_expr(
             parent
                 .layout()
-                .buffer_indexing_expr(&OpaqueSymbol::new(), parent.shape()),
+                .buffer_indexing_expr(OpaqueSymbol::new(), parent.shape()),
         );
         println!("tiled indexing expr = {}", iexpr);
 

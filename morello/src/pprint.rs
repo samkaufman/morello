@@ -48,7 +48,7 @@ fn pprint_table<Tgt>(root: &ImplNode<Tgt>, style: ImplPrintStyle) -> prettytable
 where
     Tgt: Target,
 {
-    let mut name_env: NameEnv<'_, dyn View<Tgt = Tgt>> = NameEnv::new();
+    let mut name_env = NameEnv::new();
     let mut costs_table = HashMap::new();
 
     // Set up table
@@ -97,7 +97,7 @@ fn pprint_inner<'a, Tgt>(
     table: &mut prettytable::Table,
     imp: &'a ImplNode<Tgt>,
     param_bindings: &'a HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
-    name_env: &mut NameEnv<'a, dyn View<Tgt = Tgt>>,
+    name_env: &mut NameEnv,
     costs_table: &mut HashMap<ByThinAddress<&'a ImplNode<Tgt>>, Cost>,
     depth: usize,
     style: ImplPrintStyle,

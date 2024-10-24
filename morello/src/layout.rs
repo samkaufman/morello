@@ -91,7 +91,7 @@ impl Layout {
 
     pub fn buffer_indexing_expr(
         &self,
-        expr_id: &OpaqueSymbol,
+        expr_id: OpaqueSymbol,
         concrete_shape: &[DimSize],
     ) -> NonAffineExpr<BufferVar> {
         let Layout(dims) = self;
@@ -116,7 +116,7 @@ impl Layout {
 
             // Construct a "term" for this physical dimension: really, an expression parameterized
             // by a logical dimension.
-            let mut term: NonAffineExpr<_> = BufferVar::Pt(logical_dim, expr_id.clone()).into();
+            let mut term: NonAffineExpr<_> = BufferVar::Pt(logical_dim, expr_id).into();
             if prev_remaining_volume != concrete_shape[logical_dim_us] {
                 term %= prev_remaining_volume.get().try_into().unwrap();
             }
@@ -1071,7 +1071,7 @@ mod tests {
 
             // Lay out sequential integers in a Vec according to the layout's indexing expression.
             let e = OpaqueSymbol::new();
-            let iexpr = layout.buffer_indexing_expr(&e, &tensor_shape);
+            let iexpr = layout.buffer_indexing_expr(e, &tensor_shape);
             let tensor_volume = tensor_shape.iter().map(|d| d.get()).product::<u32>();
             let tensor_buffer = (first_int..(first_int + tensor_volume)).collect::<Vec<_>>();
 
@@ -1263,10 +1263,10 @@ mod tests {
     fn test_row_major_indexing_expression() {
         let rm = row_major(2);
         let expr_id = OpaqueSymbol::new();
-        let iexpr = rm.buffer_indexing_expr(&expr_id, &shape![16, 4]);
+        let iexpr = rm.buffer_indexing_expr(expr_id, &shape![16, 4]);
         let expected = NonAffineExpr::constant(0)
-            + Term(4, NonAffine::Leaf(BufferVar::Pt(0, expr_id.clone())))
-            + Term(1, NonAffine::Leaf(BufferVar::Pt(1, expr_id.clone())));
+            + Term(4, NonAffine::Leaf(BufferVar::Pt(0, expr_id)))
+            + Term(1, NonAffine::Leaf(BufferVar::Pt(1, expr_id)));
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
     }
 
@@ -1274,9 +1274,9 @@ mod tests {
     fn test_interleaved_indexing_expression_1() {
         let layout = Layout::new(vec![(0, PhysDim::OddEven(DimSize::new(8).unwrap()))]);
         let expr_id = OpaqueSymbol::new();
-        let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![8]);
+        let iexpr = layout.buffer_indexing_expr(expr_id, &shape![8]);
 
-        let pt = NonAffineExpr::from(BufferVar::Pt(0, expr_id.clone()));
+        let pt = NonAffineExpr::from(BufferVar::Pt(0, expr_id));
         let expected = (pt.clone() % 8) / 2 + (pt % 2) * 4i32;
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
     }
@@ -1288,9 +1288,9 @@ mod tests {
             (0, PhysDim::OddEven(DimSize::new(8).unwrap())),
         ]);
         let expr_id = OpaqueSymbol::new();
-        let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![16]);
+        let iexpr = layout.buffer_indexing_expr(expr_id, &shape![16]);
 
-        let pt = NonAffineExpr::from(BufferVar::Pt(0, expr_id.clone()));
+        let pt = NonAffineExpr::from(BufferVar::Pt(0, expr_id));
         let expected = (pt.clone() / 8) * 8 + (pt.clone() % 8) / 2 + (pt % 2) * 4;
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
     }
@@ -1302,10 +1302,10 @@ mod tests {
             (1, PhysDim::OddEven(DimSize::new(8).unwrap())),
         ]);
         let expr_id = OpaqueSymbol::new();
-        let iexpr = layout.buffer_indexing_expr(&expr_id, &shape![2, 8]);
+        let iexpr = layout.buffer_indexing_expr(expr_id, &shape![2, 8]);
 
-        let pt0 = NonAffineExpr::from(BufferVar::Pt(0, expr_id.clone()));
-        let pt1 = NonAffineExpr::from(BufferVar::Pt(1, expr_id.clone()));
+        let pt0 = NonAffineExpr::from(BufferVar::Pt(0, expr_id));
+        let pt1 = NonAffineExpr::from(BufferVar::Pt(1, expr_id));
         let expected = pt0.clone() * 8 + (pt1.clone() % 8) / 2 + (pt1 % 2) * 4;
         assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
     }

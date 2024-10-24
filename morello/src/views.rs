@@ -19,6 +19,9 @@ use std::{
 pub trait View: Debug {
     type Tgt: Target;
 
+    /// Return an identifier which can be used to test reference equality.
+    fn identifier(&self) -> OpaqueSymbol;
+
     fn backing_tensor<'a>(
         &'a self,
         env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
@@ -69,6 +72,7 @@ pub trait ViewExt: View {
             inner: self,
             dims: dims_vec,
             spec,
+            unique_id: OpaqueSymbol::new(),
         }
     }
 
@@ -99,7 +103,11 @@ pub trait ViewExt: View {
             transposed_layout,
             self.spec().vector_size(),
         );
-        TransposeView { inner: self, spec }
+        TransposeView {
+            inner: self,
+            spec,
+            unique_id: OpaqueSymbol::new(),
+        }
     }
 }
 
@@ -126,11 +134,16 @@ pub struct Tensor<Tgt: Target>(pub TensorSpec<Tgt>, OpaqueSymbol);
 pub struct CacheView<V: View> {
     pub source: V,
     spec: TensorSpec<V::Tgt>,
+    unique_id: OpaqueSymbol,
 }
 
 impl<V: View> CacheView<V> {
     pub fn new(source: V, spec: TensorSpec<V::Tgt>) -> CacheView<V> {
-        CacheView { source, spec }
+        CacheView {
+            source,
+            spec,
+            unique_id: OpaqueSymbol::new(),
+        }
     }
 }
 
@@ -142,6 +155,7 @@ pub struct Tile<V: View> {
     pub view: V,
     expr_term_id: OpaqueSymbol,
     spec: TensorSpec<V::Tgt>,
+    unique_id: OpaqueSymbol,
 }
 
 #[derive(Debug)]
@@ -149,12 +163,14 @@ pub struct SqueezeDimsView<V: View> {
     pub inner: V,
     pub dims: Vec<u8>,
     spec: TensorSpec<V::Tgt>,
+    unique_id: OpaqueSymbol,
 }
 
 #[derive(Debug)]
 pub struct TransposeView<V: View> {
     pub inner: V,
     spec: TensorSpec<V::Tgt>,
+    unique_id: OpaqueSymbol,
 }
 
 impl<Tgt: Target> Param<Tgt> {
@@ -165,6 +181,10 @@ impl<Tgt: Target> Param<Tgt> {
 
 impl<Tgt: Target> View for Param<Tgt> {
     type Tgt = Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        self.2
+    }
 
     fn backing_tensor<'a>(
         &'a self,
@@ -218,15 +238,14 @@ impl<Tgt: Target> Tensor<Tgt> {
     pub fn new(spec: TensorSpec<Tgt>) -> Self {
         Tensor(spec, OpaqueSymbol::new())
     }
-
-    // TODO: We shouldn't need to expose this.
-    pub fn identifier(&self) -> OpaqueSymbol {
-        self.1.clone()
-    }
 }
 
 impl<Tgt: Target> View for Tensor<Tgt> {
     type Tgt = Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        self.1
+    }
 
     fn backing_tensor<'a>(
         &'a self,
@@ -244,7 +263,7 @@ impl<Tgt: Target> View for Tensor<Tgt> {
         _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
         layout: &Layout,
     ) -> NonAffineExpr<BufferVar> {
-        layout.buffer_indexing_expr(&self.1, self.shape())
+        layout.buffer_indexing_expr(self.1, self.shape())
     }
 
     fn bind<'i>(
@@ -257,6 +276,10 @@ impl<Tgt: Target> View for Tensor<Tgt> {
 
 impl<V: View> View for CacheView<V> {
     type Tgt = V::Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        self.unique_id
+    }
 
     fn backing_tensor<'a>(
         &'a self,
@@ -290,6 +313,7 @@ impl<V: View> View for CacheView<V> {
 impl<V: View> Tile<V> {
     pub fn new(shape: Shape, step_sizes: Shape, view: V) -> Result<Self, TileError> {
         let expr_term_id = OpaqueSymbol::new();
+        let unique_id = OpaqueSymbol::new();
         let mut spec = view.spec().clone();
         let aligned = aligned_approx(&shape, &step_sizes, view.spec())?;
         spec.shrink(&shape, aligned)?;
@@ -299,6 +323,7 @@ impl<V: View> Tile<V> {
             view,
             expr_term_id,
             spec,
+            unique_id,
         })
     }
 
@@ -318,7 +343,7 @@ impl<V: View> Tile<V> {
             if steps != 1 {
                 Some(BufferVar::TileIdx(
                     dim.try_into().unwrap(),
-                    self.expr_term_id.clone(),
+                    self.expr_term_id,
                 ))
             } else {
                 None
@@ -355,13 +380,13 @@ impl<V: View> Tile<V> {
         }
         inner_expr.map_vars(&mut |term_var| match term_var {
             BufferVar::Pt(dim, _) => {
-                let e = &self.expr_term_id;
+                let e = self.expr_term_id;
                 let size_in_dim = self.shape()[usize::from(dim)];
-                let mut terms = vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e.clone())))];
+                let mut terms = vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e)))];
                 if size_in_dim != self.view.shape()[usize::from(dim)] {
                     terms.push(Term(
                         size_in_dim.get().try_into().unwrap(),
-                        NonAffine::Leaf(BufferVar::TileIdx(dim, e.clone())),
+                        NonAffine::Leaf(BufferVar::TileIdx(dim, e)),
                     ));
                 }
                 AffineForm(terms, 0)
@@ -373,6 +398,10 @@ impl<V: View> Tile<V> {
 
 impl<T: View> View for Tile<T> {
     type Tgt = T::Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        self.unique_id
+    }
 
     fn backing_tensor<'a>(
         &'a self,
@@ -407,6 +436,10 @@ impl<T: View> View for Tile<T> {
 impl<T: View> View for SqueezeDimsView<T> {
     type Tgt = T::Tgt;
 
+    fn identifier(&self) -> OpaqueSymbol {
+        self.unique_id
+    }
+
     fn backing_tensor<'a>(
         &'a self,
         env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
@@ -437,6 +470,10 @@ impl<T: View> View for SqueezeDimsView<T> {
 
 impl<T: View> View for TransposeView<T> {
     type Tgt = T::Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        self.unique_id
+    }
 
     fn backing_tensor<'a>(
         &'a self,
