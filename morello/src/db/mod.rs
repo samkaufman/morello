@@ -1279,7 +1279,7 @@ pub fn iter_blocks_in_single_dim_range(
 
 fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::PathBuf {
     let ((spec_key, table_key_rest), block_pt) = superblock_key;
-    let spec_key_dir_name = match spec_key {
+    let mut path = match spec_key {
         SpecKey::Matmul { dtypes } => root
             .join("Matmul")
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
@@ -1290,10 +1290,15 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
             .join("Move")
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::Zero { dtype } => root.join("Zero").join(dtype.to_string()),
+        SpecKey::Compose { components } => root
+            .join("Compose")
+            .join(components.iter().map(|(spec_type, _)| spec_type).join("_"))
+            .join(components.iter().flat_map(|(_, dtypes)| dtypes).join("_")),
     };
-    spec_key_dir_name
-        .join(table_key_rest.iter().map(|(l, _, _)| l).join("_"))
-        .join(table_key_rest.iter().map(|(_, d, _)| d).join("_"))
+    for (l, _, _) in table_key_rest {
+        path = path.join(l.to_string());
+    }
+    path.join(table_key_rest.iter().map(|(_, d, _)| d).join("_"))
         .join(table_key_rest.iter().map(|(_, _, v)| v).join("_"))
         .join(block_pt.iter().map(|p| p.to_string()).join("_"))
 }
