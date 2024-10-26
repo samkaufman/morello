@@ -10,7 +10,10 @@ use crate::views::{Param, Tile, View};
 use itertools::Itertools;
 
 use std::collections::HashMap;
-use std::{iter, slice};
+use std::{
+    fmt::{self, Debug},
+    iter, slice,
+};
 
 const PAR_TILE_OVERHEAD: MainCost = 45_000; // rough cycle estimate
 
@@ -34,7 +37,7 @@ const PAR_TILE_OVERHEAD: MainCost = 45_000; // rough cycle estimate
 /// Notice that untiled arguments (`c`) are passed through to the body
 /// [`Impl`] while tiled arguments are replaced by [`Tile`]s
 /// (`a` and `b`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Loop<Tgt: Target> {
     pub tiles: Vec<LoopTile<Tgt>>,
     pub body: Box<ImplNode<Tgt>>,
@@ -146,6 +149,16 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
 
     fn spec(&self) -> Option<&Spec<Tgt>> {
         self.spec.as_ref()
+    }
+}
+
+impl<Tgt: Target> Debug for Loop<Tgt> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Loop")
+            .field("tiles", &self.tiles)
+            .field("parallel", &self.parallel)
+            .field("spec", &self.spec)
+            .finish_non_exhaustive()
     }
 }
 

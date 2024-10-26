@@ -62,11 +62,10 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
         args: &[&'j dyn View<Tgt = Tgt>],
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
+        let mut inner_args = vec![];
         for (stage, stage_bindings) in self.stages.iter().zip(&self.bindings) {
-            let inner_args = stage_bindings
-                .iter()
-                .map(|&b| args[usize::from(b)])
-                .collect::<Vec<_>>();
+            inner_args.clear();
+            inner_args.extend(stage_bindings.iter().map(|&b| args[usize::from(b)]));
             stage.bind(&inner_args, env);
         }
     }

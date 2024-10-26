@@ -12,15 +12,14 @@ use crate::tiling::Tiling;
 use crate::utils::{bit_length_inverse, bit_length_u32, join_into_string, prev_power_of_two_u32};
 
 use itertools::Itertools;
+use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
 use std::iter::once;
 use std::iter::Iterator;
 use std::marker::PhantomData;
-use std::mem;
 use std::num::NonZeroU32;
 use std::panic;
 use std::{assert_eq, debug_assert_eq};
@@ -71,6 +70,7 @@ pub enum PrimitiveSpecType {
 /// dimension of the first input (the m dimension) is bound to the m dimension
 /// of the output, and so on for the n dimension.
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct TilingInference(pub Vec<(Tiling, Vec<Option<u8>>)>);
 
 /// A [BiMap] which extends [LogicalSpecSurMap] with memory limits dimensions.
@@ -100,6 +100,32 @@ pub struct ShapeBimap(pub bool);
 pub enum CanonicalizeError {
     #[error("Failed to canonicalize the TensorSpecAux: {0}")]
     TensorSpecAuxCanonicalizeError(tensorspec::CanonicalizeError),
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct PrimitiveBasicsArbParams {
+    max_size: Option<DimSize>,
+    first_input_shape: Option<Shape>,
+    first_input_dtype: Option<Dtype>,
+    allowed_types: Option<Vec<PrimitiveSpecType>>,
+}
+
+#[cfg(test)]
+impl From<DimSize> for PrimitiveBasicsArbParams {
+    fn from(max_size: DimSize) -> Self {
+        Some(max_size).into()
+    }
+}
+
+#[cfg(test)]
+impl From<Option<DimSize>> for PrimitiveBasicsArbParams {
+    fn from(max_size: Option<DimSize>) -> Self {
+        PrimitiveBasicsArbParams {
+            max_size,
+            ..Default::default()
+        }
+    }
 }
 
 impl<Tgt: Target> Spec<Tgt> {
@@ -159,7 +185,7 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for Spec<Tgt> {
         }
 
         (
-            any_with::<LogicalSpec<Tgt>>(args.0),
+            any_with::<LogicalSpec<Tgt>>(args.0.into()),
             arb_memorylimits::<Tgt>(&max_memory),
         )
             .prop_map(|(logical_spec, mem_limits)| Spec(logical_spec, mem_limits))
@@ -232,6 +258,13 @@ impl PrimitiveBasics {
         I: IntoIterator<Item = &'a TensorSpecAux<Tgt>> + 'a,
     {
         operand_auxes.into_iter().cloned().collect()
+    }
+
+    // TODO: Avoid constructing output shape.
+    pub fn input_shapes(&self) -> Vec<Shape> {
+        let mut operands = self.parameter_shapes();
+        operands.remove(self.typ.output_idx());
+        operands
     }
 
     pub fn parameter_shapes(&self) -> Vec<Shape> {
@@ -329,18 +362,14 @@ impl PrimitiveBasics {
                 let mut new_filters_steps: Shape = new_filters_shape.clone();
                 new_filters_steps[0] = smaller_output.step_sizes()[1];
 
-                // Construct the bindings Vecs.
-                let image_bindings = vec![Some(0), None, None, None];
-                let filter_bindings = vec![None, Some(1), None, None];
-
                 TilingInference(vec![
                     (
                         Tiling::new_sliding(new_image_shape, new_image_steps),
-                        image_bindings,
+                        vec![Some(0), None, None, None],
                     ),
                     (
                         Tiling::new_sliding(new_filters_shape, new_filters_steps),
-                        filter_bindings,
+                        vec![None, Some(1), None, None],
                     ),
                 ])
             }
@@ -349,7 +378,7 @@ impl PrimitiveBasics {
                     typ: PrimitiveSpecType::Move,
                     ..
                 },
-                true,
+                _,
             ) => TilingInference(vec![(
                 smaller_output.clone(),
                 (0..smaller_output.shape().len())
@@ -361,35 +390,13 @@ impl PrimitiveBasics {
                     typ: PrimitiveSpecType::Zero,
                     ..
                 },
-                true,
+                _,
             ) => TilingInference(vec![]),
             _ => unimplemented!(
                 "Output tiling not implemented for {:?} and {:?}",
                 self,
                 smaller_output
             ),
-        }
-    }
-
-    pub fn parameter_dim_axes(&self) -> Vec<Vec<u8>> {
-        match self.typ {
-            PrimitiveSpecType::Matmul { .. } => {
-                vec![vec![0, 2], vec![2, 1], vec![0, 1]]
-            }
-            PrimitiveSpecType::Conv { .. } => {
-                // Only correct for 2 spatial dimensions.
-                // TODO: Extend this to arbitrary number of spatial dimensions.
-                let (b, f, c, h, w, fh, fw) = (0, 1, 2, 3, 4, 5, 6);
-                let img = vec![b, c, h, w];
-                let filt = vec![f, c, fh, fw];
-                let out = vec![b, f, h, w];
-                vec![img, filt, out]
-            }
-            PrimitiveSpecType::Move { .. } | PrimitiveSpecType::Zero { .. } => self
-                .parameter_shapes()
-                .iter()
-                .map(|o| (0..u8::try_from(o.len()).unwrap()).collect())
-                .collect(),
         }
     }
 }
@@ -408,43 +415,83 @@ impl Display for PrimitiveBasics {
 
 #[cfg(test)]
 impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
-    type Parameters = Option<DimSize>;
+    type Parameters = PrimitiveBasicsArbParams;
     type Strategy = proptest::strategy::BoxedStrategy<PrimitiveBasics>;
 
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
         use proptest::prelude::*;
 
-        let max_size = args.unwrap_or(ARBITRARY_SPEC_MAX_SIZE).get();
+        let max_size = args.max_size.unwrap_or(ARBITRARY_SPEC_MAX_SIZE).get();
 
-        any::<PrimitiveSpecType>()
-            .prop_flat_map(|typ| {
+        let type_strategy = match args.allowed_types {
+            Some(allowed_types) => proptest::sample::select(allowed_types).sboxed(),
+            None => any::<PrimitiveSpecType>().sboxed(),
+        };
+        type_strategy
+            .prop_flat_map(move |typ| {
                 let cnt = typ.operand_count();
-                (Just(typ), proptest::collection::vec(any::<Dtype>(), cnt))
+                let dtypes_strategy = match args.first_input_dtype {
+                    Some(d) => proptest::collection::vec(any::<Dtype>(), cnt - 1)
+                        .prop_map(move |mut v| {
+                            v.insert(0, d);
+                            v
+                        })
+                        .sboxed(),
+                    None => proptest::collection::vec(any::<Dtype>(), cnt).sboxed(),
+                };
+                (Just(typ), dtypes_strategy)
             })
             .prop_flat_map(move |(typ, dtypes)| {
                 let shape_strategy = match typ {
                     PrimitiveSpecType::Matmul { accum: _ } => {
-                        proptest::collection::vec(1..=max_size, 3).boxed()
+                        let (m, k) = match args.first_input_shape.as_deref() {
+                            Some([m, k]) => (Just(m.get()).sboxed(), Just(k.get()).sboxed()),
+                            Some(_) => panic!("Matmul requires a rank-2 first input"),
+                            None => ((1..=max_size).sboxed(), (1..=max_size).sboxed()),
+                        };
+                        vec![m, k, (1..=max_size).sboxed()].sboxed()
                     }
-                    PrimitiveSpecType::Conv { accum: _ } => (1..=max_size, 1..=max_size)
-                        .prop_flat_map(move |(h, w)| {
-                            (
-                                1..max_size,
-                                1..max_size,
-                                1..max_size,
-                                Just(h),
-                                Just(w),
-                                1..=h,
-                                1..=w,
-                            )
-                        })
-                        .prop_map(|(b, f, c, h, w, fh, fw)| vec![b, f, c, h, w, fh, fw])
-                        .boxed(),
-                    PrimitiveSpecType::Move | PrimitiveSpecType::Zero => (1..=4usize)
-                        .prop_flat_map(move |tensor_rank| {
-                            proptest::collection::vec(1..=max_size, tensor_rank)
-                        })
-                        .boxed(),
+                    PrimitiveSpecType::Conv { accum: _ } => {
+                        let (b, c, h, w) = match args.first_input_shape.as_deref() {
+                            Some([b, c, h, w]) => (
+                                Just(b.get()).sboxed(),
+                                Just(c.get()).sboxed(),
+                                Just(h.get()).sboxed(),
+                                Just(w.get()).sboxed(),
+                            ),
+                            Some(_) => panic!("Conv requires a rank-4 first input"),
+                            None => (
+                                (1..=max_size).sboxed(),
+                                (1..=max_size).sboxed(),
+                                (1..=max_size).sboxed(),
+                                (1..=max_size).sboxed(),
+                            ),
+                        };
+                        (b, c, h, w)
+                            .prop_flat_map(move |(b, c, h, w)| {
+                                (
+                                    Just(b),
+                                    1..max_size,
+                                    Just(c),
+                                    Just(h),
+                                    Just(w),
+                                    1..=h,
+                                    1..=w,
+                                )
+                            })
+                            .prop_map(|(b, f, c, h, w, fh, fw)| vec![b, f, c, h, w, fh, fw])
+                            .sboxed()
+                    }
+                    PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
+                        match args.first_input_shape.as_deref() {
+                            Some(s) => s.iter().map(|d| Just(d.get())).collect::<Vec<_>>().sboxed(),
+                            None => (1..=4usize)
+                                .prop_flat_map(move |tensor_rank| {
+                                    proptest::collection::vec(1..=max_size, tensor_rank).sboxed()
+                                })
+                                .sboxed(),
+                        }
+                    }
                 };
                 (Just(typ), Just(dtypes), shape_strategy)
             })
@@ -552,16 +599,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
     pub fn operand_count(&self) -> usize {
         match self {
-            LogicalSpec::Compose { components, .. } => {
-                let (innermost_component, outer_components) = components.split_last().unwrap();
-                let mut cnt = innermost_component.typ.operand_count();
-                cnt += outer_components
-                    .iter()
-                    .map(|p| p.typ.operand_count() - 2)
-                    .sum::<usize>();
-                cnt
-            }
             LogicalSpec::Primitive(basics, _, _) => basics.typ.operand_count(),
+            LogicalSpec::Compose { components, .. } => compose_parameter_count(components),
         }
     }
 
@@ -592,38 +631,79 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 operand_auxes,
                 serial_only: _,
             } => {
-                let mut result_basics = Vec::with_capacity(self.operand_count());
-                let mut last_seen_output = None;
-                for (i, c) in components.iter().rev().enumerate() {
-                    let mut operand_basics: Vec<(Shape, Dtype)> = c
-                        .parameter_shapes()
-                        .into_iter()
-                        .zip(c.dtypes.iter().copied())
-                        .collect::<Vec<_>>();
-                    last_seen_output = operand_basics.pop();
-                    debug_assert!(last_seen_output.is_some());
-                    operand_basics.reverse();
-                    if i != 0 {
-                        operand_basics.pop();
-                    }
-                    result_basics.append(&mut operand_basics);
+                debug_assert!(components.len() >= 2);
+
+                let mut result = vec![];
+                result.reserve_exact(compose_parameter_count(components));
+
+                // Compute the parameters for the first component (executed last).
+                let mut outermost_component_parameter_shapes = components[0].parameter_shapes();
+                let mut outermost_component_dtypes = components[0].dtypes.clone();
+                let outermost_component_output_shape =
+                    outermost_component_parameter_shapes.remove(components[0].typ.output_idx());
+                let outermost_component_output_dtype =
+                    outermost_component_dtypes.remove(components[0].typ.output_idx());
+                result.extend(
+                    outermost_component_parameter_shapes[1..]
+                        .iter()
+                        .zip(&outermost_component_dtypes[1..])
+                        .zip(&operand_auxes[..outermost_component_dtypes.len() - 1])
+                        .map(|((s, dt), a)| {
+                            TensorSpec::new_noncanon_with_aux(s.clone(), *dt, a.clone())
+                        }),
+                );
+
+                for c in &components[1..components.len() - 1] {
+                    let mut ps = c.parameter_shapes();
+                    ps.remove(c.typ.output_idx());
+                    ps.remove(0);
+                    let mut dtypes = c.dtypes.clone();
+                    dtypes.remove(c.typ.output_idx());
+                    dtypes.remove(0);
+                    result.extend(
+                        ps.into_iter()
+                            .zip(dtypes)
+                            .zip(&operand_auxes[result.len()..])
+                            .map(|((s, dt), a)| {
+                                TensorSpec::new_noncanon_with_aux(s, dt, a.clone())
+                            }),
+                    );
                 }
-                result_basics.reverse();
-                result_basics.push(last_seen_output.unwrap());
-                debug_assert_eq!(result_basics.len(), operand_auxes.len());
-                result_basics
-                    .into_iter()
-                    .zip(operand_auxes)
-                    .map(|((s, d), a)| TensorSpec::new_noncanon_with_aux(s, d, a.clone()))
-                    .collect()
+
+                // Fill in the innermost component
+                let innermost_component = &components[components.len() - 1];
+                let mut ps = innermost_component.parameter_shapes();
+                ps.remove(innermost_component.typ.output_idx());
+                let mut dtypes = innermost_component.dtypes.clone();
+                dtypes.remove(innermost_component.typ.output_idx());
+                result.extend(
+                    ps.into_iter()
+                        .zip(dtypes)
+                        .zip(&operand_auxes[result.len()..])
+                        .map(|((s, dt), a)| TensorSpec::new_noncanon_with_aux(s, dt, a.clone())),
+                );
+
+                result.push(TensorSpec::new_noncanon_with_aux(
+                    outermost_component_output_shape,
+                    outermost_component_output_dtype,
+                    operand_auxes.last().unwrap().clone(),
+                ));
+                result
             }
+        }
+    }
+
+    pub fn input_shapes(&self) -> Vec<Shape> {
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => basics.input_shapes(),
+            LogicalSpec::Compose { .. } => todo!(),
         }
     }
 
     pub fn parameter_shapes(&self) -> Vec<Shape> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => basics.parameter_shapes(),
-            LogicalSpec::Compose { .. } => todo!(),
+            LogicalSpec::Compose { components, .. } => compose_parameter_shapes(components),
         }
     }
 
@@ -684,7 +764,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
                 }
             },
-            LogicalSpec::Compose { .. } => todo!(),
+            LogicalSpec::Compose { .. } => {
+                let shapes = self.parameter_shapes();
+                let LogicalSpec::Compose { operand_auxes, .. } = self else {
+                    unreachable!();
+                };
+                for (shp, aux) in shapes.into_iter().zip(operand_auxes) {
+                    aux.canonicalize(&shp)
+                        .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
+                }
+            }
         }
         Ok(())
     }
@@ -724,7 +813,17 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
                 }
             },
-            LogicalSpec::Compose { .. } => todo!(),
+            LogicalSpec::Compose { .. } => {
+                let shapes = self.parameter_shapes();
+                let LogicalSpec::Compose { operand_auxes, .. } = self else {
+                    unreachable!();
+                };
+                for (shp, aux) in shapes.into_iter().zip(operand_auxes) {
+                    if !aux.is_canonical(&shp) {
+                        return false;
+                    }
+                }
+            }
         }
         true
     }
@@ -762,100 +861,33 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             LogicalSpec::Primitive(basics, _, _) => {
                 basics.input_tilings_for_tile_out(smaller_output)
             }
-            LogicalSpec::Compose { .. } => {
-                todo!("Resolve axes.");
-                // let mut accumulated_input_tilings = Vec::with_capacity(self.operand_count() - 1);
-                // let mut last_output_tiling = smaller_output.clone();
-                // for (i, subspec) in components.iter().enumerate().rev() {
-                //     let mut subspec_input_tilings =
-                //         subspec.input_tilings_for_tile_out(&last_output_tiling);
-                //     debug_assert!(
-                //         !subspec_input_tilings.is_empty(),
-                //         "Compose contains {:?}, which has no inputs",
-                //         subspec
-                //     );
-                //     if i == 0 {
-                //         accumulated_input_tilings.extend(subspec_input_tilings);
-                //     } else {
-                //         accumulated_input_tilings.extend(subspec_input_tilings.drain(1..));
-                //         last_output_tiling = subspec_input_tilings.remove(0);
-                //     }
-                // }
-                // accumulated_input_tilings
-            }
-        }
-    }
-
-    // TODO: Can we replace this entirely with Spec shapes?
-    pub fn operands_dim_axes(&self) -> Vec<Vec<u8>> {
-        match self {
-            LogicalSpec::Primitive(basics, _, _) => basics.parameter_dim_axes(),
             LogicalSpec::Compose { components, .. } => {
-                let mut max_seen = 0;
-                let mut accum: Vec<Vec<u8>> = Vec::new();
-                let mut last_out_subs: Option<Vec<u8>> = None;
+                let mut accumulated_input_tilings = Vec::with_capacity(self.operand_count() - 1);
 
-                for compose_subspec in components.iter().rev() {
-                    let mut kls_axes = Self::increment_dims_axes(
-                        &compose_subspec.parameter_dim_axes(),
-                        &mut max_seen,
-                    );
-                    if accum.is_empty() {
-                        // Drop the output only
-                        accum.extend_from_slice(&kls_axes[..kls_axes.len() - 1]);
-                        last_out_subs = Some(kls_axes.last().unwrap().clone());
-                    } else {
-                        assert!(last_out_subs.is_some());
-                        assert_eq!(last_out_subs.as_ref().unwrap().len(), kls_axes[0].len());
-                        let substitution_dict = kls_axes
-                            .first()
-                            .unwrap()
-                            .iter()
-                            .copied()
-                            .zip(last_out_subs.unwrap())
-                            .collect::<HashMap<_, _>>();
-                        kls_axes = Self::sub_axis(&kls_axes, &substitution_dict);
-                        last_out_subs = Some(kls_axes.last().unwrap().clone());
-                        let mut new_accum = Vec::with_capacity(accum.len() + kls_axes.len());
-                        new_accum.extend_from_slice(&kls_axes[1..kls_axes.len() - 1]);
-                        new_accum.extend(accum.drain(..accum.len()));
-                        mem::swap(&mut accum, &mut new_accum);
-                    }
-                    max_seen = kls_axes.into_iter().flatten().max().unwrap();
+                // Compute [TilingInference] for the outermost (last-executed) component.
+                // `accumulated_input_tilings` will contain the [Tiling]s and dimensions for all but
+                // the first input of that outermost component (those which don't consume the next
+                // component's output).
+                let mut first_inference = components[0].input_tilings_for_tile_out(smaller_output);
+                accumulated_input_tilings.extend(first_inference.0.drain(1..));
+
+                let mut last_output_tiling = first_inference.0.remove(0).0;
+                for subspec in &components[1..components.len() - 1] {
+                    let mut subspec_input_tilings =
+                        subspec.input_tilings_for_tile_out(&last_output_tiling);
+                    accumulated_input_tilings.extend(subspec_input_tilings.0.drain(1..));
+                    last_output_tiling = subspec_input_tilings.0.remove(0).0;
                 }
 
-                // Add the Compose' output
-                assert!(last_out_subs.is_some());
-                accum.push(last_out_subs.unwrap());
-                accum
-            }
-        }
-    }
+                accumulated_input_tilings.extend(
+                    components[components.len() - 1]
+                        .input_tilings_for_tile_out(&last_output_tiling)
+                        .0,
+                );
 
-    fn increment_dims_axes(subs: &[Vec<u8>], inc: &mut u8) -> Vec<Vec<u8>> {
-        let mut result = Vec::new();
-        for dims in subs {
-            let mut subresult = Vec::with_capacity(dims.len());
-            for &d in dims {
-                *inc = (*inc).max(d);
-                subresult.push(d + *inc);
+                TilingInference(accumulated_input_tilings)
             }
-            result.push(subresult);
         }
-        *inc += 1;
-        result
-    }
-
-    fn sub_axis(source: &[Vec<u8>], substitutions: &HashMap<u8, u8>) -> Vec<Vec<u8>> {
-        let mut result = Vec::new();
-        for dims in source {
-            let mut subresult = Vec::with_capacity(dims.len());
-            for &d in dims {
-                subresult.push(*substitutions.get(&d).unwrap_or(&d));
-            }
-            result.push(subresult);
-        }
-        result
     }
 
     // TODO: Need IO? Would inputs alone be sufficient? Caller can check inferred output.
@@ -916,7 +948,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     new_operands.last().unwrap().shape(),
                     &component_inputs[0].0[..]
                 );
-                debug_assert_eq!(component_inputs[0].1, new_operands.last().unwrap().dtype());
 
                 *operand_auxes = new_operands.iter().map(|t| t.aux.clone()).collect();
             }
@@ -934,15 +965,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 }
             }
         }
-        debug_assert!(
-            self.parameters()
-                .iter()
-                .zip(new_operands)
-                .all(|(a, b)| { a == b }),
-            "Parameter mismatch after replace_io; Spec is {} after replacing with [{}]",
-            self,
-            new_operands.iter().map(|o| o.to_string()).join(", "),
-        );
     }
 
     pub fn output_is_read(&self) -> bool {
@@ -972,7 +994,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             LogicalSpec::Primitive(basics, _, _) => {
                 DimSize::new(basics.spec_shape.iter().map(|d| d.get()).product()).unwrap()
             }
-            LogicalSpec::Compose { .. } => todo!(),
+            LogicalSpec::Compose { .. } => {
+                // Returning a 1 here basically disables intensity-scaling.
+                // TODO: Return an actual volume.
+                nz!(1u32)
+            }
         }
     }
 }
@@ -990,7 +1016,7 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
             debug_assert_eq!(self.output_idx(), external_inputs.len());
             return write!(
                 f,
-                "Compose(({}), [{}, out={}],{})",
+                "Compose(({}), [{}, out={}]{})",
                 join_into_string(components.iter().map(|c| c.typ), ", "),
                 join_into_string(external_inputs, ", "),
                 output,
@@ -1096,7 +1122,37 @@ where
                 pt.push(!*serial_only as _);
                 ((key, aux_keys), pt)
             }
-            LogicalSpec::Compose { .. } => todo!(),
+            LogicalSpec::Compose {
+                components,
+                operand_auxes,
+                serial_only,
+            } => {
+                let key = SpecKey::Compose {
+                    components: components
+                        .iter()
+                        .map(|c| (c.typ, c.dtypes.clone()))
+                        .collect(),
+                };
+                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.binary_scale_shapes);
+                let mut pt = components
+                    .iter()
+                    .flat_map(|c| BiMap::apply(&shape_bimap, &c.spec_shape))
+                    .collect::<Vec<_>>();
+                // TODO: Avoid calling self.parameters(), which is expensive, if possible
+                let aux_keys = operand_auxes
+                    .iter()
+                    .zip(spec.parameters())
+                    .map(|(tensor_aux, parameter)| {
+                        let aux_bimap = (self.aux_surmap_fn)(parameter.shape(), parameter.dtype());
+                        let (aux_key, aux_pt) = aux_bimap.apply(tensor_aux);
+                        pt.extend(aux_pt);
+                        aux_key
+                    })
+                    .collect();
+
+                pt.push(!*serial_only as _);
+                ((key, aux_keys), pt)
+            }
         }
     }
 
@@ -1238,6 +1294,9 @@ impl BiMap for PrimitiveBasicsBimap {
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: vec![*dtype],
             },
+            SpecKey::Compose { .. } => {
+                panic!("PrimitiveBasicsBimap is not defined for Compose keys")
+            }
         };
         basics
     }
@@ -1280,15 +1339,14 @@ impl BiMap for ShapeBimap {
 
 #[cfg(test)]
 impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
-    type Parameters = Option<DimSize>;
+    type Parameters = PrimitiveBasicsArbParams;
     type Strategy = proptest::strategy::BoxedStrategy<LogicalSpec<Tgt>>;
 
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
         use crate::tensorspec::TensorSpecArbMaxShape;
         use proptest::prelude::*;
 
-        // TODO: Generate Compose as well.
-        (any_with::<PrimitiveBasics>(args), any::<bool>())
+        let primitive_arb = (any_with::<PrimitiveBasics>(args), any::<bool>())
             .prop_flat_map(|(basics, serial_only)| {
                 // TODO: These don't all make sense. Are they canonical for shapes?
                 let auxes_strategy = basics
@@ -1303,9 +1361,106 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
             })
             .prop_filter("Layout must be applicable to TensorSpec shape", |s| {
                 s.clone().canonicalize().is_ok()
-            })
-            .boxed()
+            });
+
+        proptest::prop_oneof![primitive_arb, arb_compose_spec()].boxed()
     }
+}
+
+#[cfg(test)]
+pub(crate) fn arb_compose_spec<Tgt>() -> impl proptest::strategy::Strategy<Value = LogicalSpec<Tgt>>
+where
+    Tgt: Target,
+{
+    use crate::tensorspec::TensorSpecArbMaxShape;
+    use proptest::prelude::*;
+
+    arb_compose_components()
+        .prop_flat_map(|components| {
+            let auxes_strategies = compose_parameter_shapes(&components)
+                .into_iter()
+                .map(|shape| any_with::<TensorSpecAux<Tgt>>(TensorSpecArbMaxShape(shape)))
+                .collect::<Vec<_>>();
+            (Just(components), auxes_strategies, any::<bool>())
+        })
+        .prop_map(
+            |(components, operand_auxes, serial_only)| LogicalSpec::Compose {
+                components,
+                operand_auxes,
+                serial_only,
+            },
+        )
+}
+
+#[cfg(test)]
+fn arb_compose_component_innermost() -> impl proptest::strategy::Strategy<Value = PrimitiveBasics> {
+    use proptest::prelude::*;
+
+    any::<PrimitiveBasics>()
+        .prop_filter("Must have at least two parameters to compose", |basics| {
+            basics.typ.operand_count() > 1
+        })
+        .boxed()
+}
+
+#[cfg(test)]
+fn arb_compose_component_successor(
+    predecessor: &PrimitiveBasics,
+) -> impl proptest::strategy::Strategy<Value = PrimitiveBasics> {
+    use proptest::prelude::*;
+
+    // Restrict the basic types to those which have a first input of a possible rank.
+    let shapes = predecessor.parameter_shapes();
+    let out_idx = predecessor.typ.output_idx();
+    let mut allowed_types = vec![];
+    match shapes[out_idx].len() {
+        2 => {
+            allowed_types.push(PrimitiveSpecType::Matmul { accum: true });
+            allowed_types.push(PrimitiveSpecType::Matmul { accum: false });
+        }
+        4 => {
+            allowed_types.push(PrimitiveSpecType::Conv { accum: true });
+            allowed_types.push(PrimitiveSpecType::Conv { accum: false });
+        }
+        _ => {}
+    }
+    allowed_types.push(PrimitiveSpecType::Move);
+
+    any_with::<PrimitiveBasics>(PrimitiveBasicsArbParams {
+        max_size: None,
+        first_input_shape: Some(shapes[out_idx].clone()),
+        first_input_dtype: Some(predecessor.dtypes[out_idx]),
+        allowed_types: Some(allowed_types),
+    })
+    .prop_filter("Must have at least two parameters to compose", |basics| {
+        basics.typ.operand_count() > 1
+    })
+    .boxed()
+}
+
+/// Returns a strategy for generating arbitrary 2- and 3-long Compose Specs.
+#[cfg(test)]
+fn arb_compose_components() -> impl proptest::strategy::Strategy<Value = Vec<PrimitiveBasics>> {
+    use proptest::prelude::*;
+
+    prop_oneof![
+        arb_compose_component_innermost()
+            .prop_flat_map(|c| {
+                let successor = arb_compose_component_successor(&c);
+                (successor, Just(c))
+            })
+            .prop_map(|(s, c)| vec![s, c]),
+        arb_compose_component_innermost()
+            .prop_flat_map(|c| {
+                let successor = arb_compose_component_successor(&c);
+                (successor, Just(c))
+            })
+            .prop_flat_map(|(s, c)| {
+                let successor2 = arb_compose_component_successor(&s);
+                (successor2, Just(s), Just(c))
+            })
+            .prop_map(|(s2, s, c)| vec![s2, s, c]),
+    ]
 }
 
 #[cfg(test)]
@@ -1314,7 +1469,7 @@ pub fn arb_canonical_logical_spec<Tgt: Target>(
 ) -> impl proptest::strategy::Strategy<Value = LogicalSpec<Tgt>> {
     use proptest::prelude::*;
 
-    any_with::<LogicalSpec<Tgt>>(max_size).prop_filter_map(
+    any_with::<LogicalSpec<Tgt>>(max_size.into()).prop_filter_map(
         "Must be possible to canonicalize LogicalSpec",
         |mut s| {
             if s.canonicalize().is_err() {
@@ -1369,6 +1524,68 @@ pub fn conv_infer_output_shape(image_shape: &[DimSize], filters_shape: &[DimSize
             },
         ))
         .collect()
+}
+
+fn compose_parameter_shapes(components: &[PrimitiveBasics]) -> Vec<Shape> {
+    debug_assert!(components.len() >= 2);
+
+    let mut result = vec![];
+    result.reserve_exact(compose_parameter_count(components));
+    compose_parameter_visit(components, |component_idx, parameter_idx| {
+        let component = &components[component_idx];
+        // TODO: Calling parameter_shapes repeatedly is probably slow. Write a per-idx call.
+        result.push(component.parameter_shapes().swap_remove(parameter_idx));
+    });
+    result
+}
+
+fn compose_parameter_visit(components: &[PrimitiveBasics], mut visitor: impl FnMut(usize, usize)) {
+    debug_assert!(components.len() >= 2);
+
+    // TODO: Replace parameter_dtypes with some parameter_count method
+    let c0_output_idx = components[0].typ.output_idx();
+    for parameter in 1..components[0].parameter_dtypes().len() {
+        if parameter != c0_output_idx {
+            visitor(0, parameter);
+        }
+    }
+
+    for (component_idx, c) in components
+        .iter()
+        .enumerate()
+        .take(components.len() - 1)
+        .skip(1)
+    {
+        let output_idx = c.typ.output_idx();
+        for parameter in 1..c.parameter_dtypes().len() {
+            if parameter != output_idx {
+                visitor(component_idx, parameter);
+            }
+        }
+    }
+
+    let cl_output_idx = components[components.len() - 1].typ.output_idx();
+    for parameter in 0..components[components.len() - 1].parameter_dtypes().len() {
+        if parameter != cl_output_idx {
+            visitor(components.len() - 1, parameter);
+        }
+    }
+
+    visitor(0, c0_output_idx)
+}
+
+fn compose_parameter_count(components: &[PrimitiveBasics]) -> usize {
+    components
+        .iter()
+        .map(|c| {
+            // TODO: Don't bother with the panic
+            c.typ
+                .operand_count()
+                .checked_sub(2)
+                .unwrap_or_else(|| panic!("Component {:?} has too few operands", c))
+        })
+        .sum::<usize>()
+        + 2
 }
 
 pub mod macros {
@@ -1534,10 +1751,14 @@ mod tests {
     use crate::imp::{visit_leaves, Impl, ImplExt, ImplNode};
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
     use crate::scheduling::{Action, ApplyError, TileOut};
-    use crate::target::{ArmTarget, Target, X86Target};
+    use crate::scheduling_sugar::SchedulingSugar;
+    use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
     use crate::tensorspec::TensorSpecArbMaxShape;
     use crate::utils::{next_binary_power, sum_seqs};
-    use crate::{layout::row_major, target::CpuMemoryLevel::GL};
+    use crate::{
+        layout::row_major,
+        target::CpuMemoryLevel::{GL, L1, RF},
+    };
     use crate::{lspec, shape};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
@@ -1587,6 +1808,62 @@ mod tests {
         assert_eq!(spec, expected);
     }
 
+    #[test]
+    fn test_compose_parameters() {
+        let spec = compose_logicalspec_test_data();
+        let LogicalSpec::Compose {
+            components,
+            operand_auxes,
+            serial_only: _,
+        } = &spec
+        else {
+            unreachable!();
+        };
+
+        let expected_parameters: Vec<TensorSpec<X86Target>> = vec![
+            TensorSpec::new_noncanon_with_aux(
+                components[0].spec_shape[1..].to_vec(),
+                components[0].dtypes[1],
+                operand_auxes[0].clone(),
+            ),
+            TensorSpec::new_noncanon_with_aux(
+                components[1].spec_shape[1..].to_vec(),
+                components[1].dtypes[1],
+                operand_auxes[1].clone(),
+            ),
+            TensorSpec::new_noncanon_with_aux(
+                components[2].spec_shape[..2].to_vec(),
+                components[2].dtypes[0],
+                operand_auxes[2].clone(),
+            ),
+            TensorSpec::new_noncanon_with_aux(
+                components[2].spec_shape[1..].to_vec(),
+                components[2].dtypes[1],
+                operand_auxes[3].clone(),
+            ),
+            TensorSpec::new_noncanon_with_aux(
+                vec![components[0].spec_shape[0], components[0].spec_shape[2]],
+                components[0].dtypes[2],
+                operand_auxes.last().unwrap().clone(),
+            ),
+        ];
+
+        assert_eq!(spec.parameters(), expected_parameters);
+    }
+
+    #[test]
+    fn test_compose_input_tiling_inference() {
+        let spec = compose_logicalspec_test_data();
+        let output_tiling = Tiling::new_simple(shape![32, 128]);
+        let expected = TilingInference(vec![
+            (Tiling::new_simple(shape![128, 128]), vec![None, Some(1)]),
+            (Tiling::new_simple(shape![128, 128]), vec![None, Some(1)]),
+            (Tiling::new_simple(shape![32, 128]), vec![Some(0), None]),
+            (Tiling::new_simple(shape![128, 128]), vec![None, Some(1)]),
+        ]);
+        assert_eq!(spec.input_tilings_for_tile_out(&output_tiling), expected);
+    }
+
     proptest! {
         #[test]
         fn test_no_action_panics_x86(spec in any::<Spec<X86Target>>()) {
@@ -1610,6 +1887,13 @@ mod tests {
             logical_spec in arb_canonical_logical_spec::<X86Target>(Some(TEST_SMALL_SIZE))
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
+        }
+
+        #[test]
+        fn test_parameters_len_matches_operand_count(
+            logical_spec in any::<LogicalSpec<X86Target>>()
+        ) {
+            prop_assert_eq!(logical_spec.parameters().len(), logical_spec.operand_count());
         }
 
         #[test]
@@ -1779,6 +2063,67 @@ mod tests {
             let reversed = BiMap::apply_inverse(&bimap, &projection);
             assert_eq!(basics, reversed);
         }
+
+        #[test]
+        fn test_parameters_match_parameter_shapes(spec in any::<LogicalSpec<X86Target>>()) {
+            let parameters = spec.parameters();
+            let parameter_shapes = spec.parameter_shapes();
+            prop_assert_eq!(parameters.len(), parameter_shapes.len());
+            for (p, s) in parameters.iter().zip(&parameter_shapes) {
+                assert_eq!(p.shape(), s);
+            }
+        }
+
+        #[test]
+        fn test_replace_io_noop(logical_spec in any::<LogicalSpec<X86Target>>()) {
+            let mut replaced = logical_spec.clone();
+            replaced.replace_io(&logical_spec.parameters());
+            prop_assert_eq!(logical_spec, replaced);
+        }
+
+        #[test]
+        fn test_bufferized_compose_parameters_match_pipeline_parameters(
+            tinp in any::<Spec<X86Target>>()
+                .prop_filter("Spec was not Compose", |s| matches!(s.0, LogicalSpec::Compose { .. }))
+                .prop_flat_map(|mut s| {
+                    s.canonicalize().unwrap();
+                    let LogicalSpec::Compose { components, .. } = &s.0 else {
+                        unreachable!();
+                    };
+                    let components_len = components.len();
+                    (Just(s), 0..(components_len - 1))
+                })
+                .prop_filter("Spec intermediate didn't fit in RF", |(s, index)| {
+                    let LogicalSpec::Compose { components, .. } = &s.0 else {
+                        unreachable!();
+                    };
+                    let buf_volume: u32 =
+                        components[*index].input_shapes()[0].iter().map(|d| d.get()).product();
+                    let value_size = u32::from(components[*index].dtypes[0].size());
+                    let bytes_needed = buf_volume * value_size;
+                    let rf_idx =
+                        X86Target::levels().iter().position(|l| l == &CpuMemoryLevel::RF).unwrap();
+                    let remaining_in_rf = match s.1.clone().into_standard() {
+                        MemoryLimits::Standard(standard) => standard.get_unscaled(rf_idx),
+                    };
+                    u64::from(bytes_needed) <= remaining_in_rf
+                })
+        ) {
+            let (compose_spec, index) = tinp;
+            let LogicalSpec::Compose { components, .. } = &compose_spec.0 else {
+                unreachable!();
+            };
+
+            let pipeline = compose_spec.bufferize(
+                index,
+                CpuMemoryLevel::RF,
+                row_major(components[index].input_shapes()[0].len().try_into().unwrap()),
+                None
+            );
+            let spec_parameters = compose_spec.0.parameters();
+            let pipeline_parameters = pipeline.parameters().cloned().collect::<Vec<_>>();
+            prop_assert_eq!(spec_parameters, pipeline_parameters);
+        }
     }
 
     fn shared_test_no_action_panics<Tgt: Target>(spec: Spec<Tgt>) {
@@ -1890,14 +2235,13 @@ mod tests {
             .prop_flat_map(|(spec, applied_actions)| {
                 (Just(spec), proptest::sample::select(applied_actions))
             })
-            .prop_flat_map(|(spec, action_pair)| {
-                let (action, applied) = action_pair;
+            .prop_flat_map(|(spec, (action, applied))| {
                 let lower_bound = match applied.memory_allocated() {
                     MemoryAllocation::Simple(allocated) => allocated,
-                    MemoryAllocation::Inner(_) => todo!(),
                     MemoryAllocation::Pipeline {
-                        intermediate_consumption: _,
-                    } => todo!(),
+                        intermediate_consumption,
+                    } if intermediate_consumption.len() == 1 => intermediate_consumption[0],
+                    _ => todo!(),
                 };
                 let MemoryLimits::Standard(limits_memvec) = &spec.1;
                 let lower_limit_strategy = arb_memorylimits_ext(
@@ -1911,5 +2255,65 @@ mod tests {
                     lower_limit_strategy,
                 )
             })
+    }
+
+    fn compose_logicalspec_test_data() -> LogicalSpec<X86Target> {
+        let basic0 = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![128, 128, 128],
+            dtypes: vec![Dtype::Uint8, Dtype::Uint16, Dtype::Uint32],
+        };
+        let basic1 = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![128, 128, 128],
+            dtypes: vec![Dtype::Uint32, Dtype::Uint16, Dtype::Uint8],
+        };
+        let basic2 = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![128, 128, 128],
+            dtypes: vec![Dtype::Uint8, Dtype::Uint8, Dtype::Uint32],
+        };
+
+        let aux0_1 = TensorSpecAux {
+            contig: row_major(2).contiguous_full(),
+            aligned: true,
+            level: GL,
+            layout: row_major(2),
+            vector_size: None,
+        };
+        let aux1_1 = TensorSpecAux {
+            contig: row_major(2).contiguous_full(),
+            aligned: true,
+            level: L1,
+            layout: row_major(2),
+            vector_size: None,
+        };
+        let aux2_0 = TensorSpecAux {
+            contig: row_major(2).contiguous_full(),
+            aligned: false,
+            level: GL,
+            layout: row_major(2),
+            vector_size: None,
+        };
+        let aux2_1 = TensorSpecAux {
+            contig: row_major(2).contiguous_full(),
+            aligned: false,
+            level: L1,
+            layout: row_major(2),
+            vector_size: None,
+        };
+        let aux0_out = TensorSpecAux {
+            contig: row_major(2).contiguous_full(),
+            aligned: true,
+            level: RF,
+            layout: row_major(2),
+            vector_size: None,
+        };
+
+        LogicalSpec::<X86Target>::Compose {
+            components: vec![basic0.clone(), basic1.clone(), basic2.clone()],
+            operand_auxes: vec![aux0_1, aux1_1, aux2_0, aux2_1, aux0_out],
+            serial_only: false,
+        }
     }
 }

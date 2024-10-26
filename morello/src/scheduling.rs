@@ -20,7 +20,7 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Kernel, MemoryLevel, Target};
-use crate::tensorspec::TensorSpec;
+use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::{prev_power_of_two, snap_memvec_up};
 use crate::views::{CacheView, Param, Tensor, Tile, TileError, View, ViewExt};
@@ -44,9 +44,10 @@ pub enum Action<Tgt: Target> {
         destination_vector_size: Option<DimSize>,
     },
     ToAccum,
-    Peel {
-        layout: Layout,
+    Bufferize {
+        index: usize,
         level: Tgt::Level,
+        layout: Layout,
         vector_size: Option<DimSize>,
     },
     SpatialSplit,
@@ -331,9 +332,10 @@ impl<Tgt: Target> Action<Tgt> {
                     spec: Some(spec.clone()),
                 }))
             }
-            Action::Peel {
-                layout,
+            Action::Bufferize {
+                index,
                 level,
+                layout,
                 vector_size,
             } => {
                 let LogicalSpec::Compose {
@@ -347,86 +349,35 @@ impl<Tgt: Target> Action<Tgt> {
                         "Not a Compose",
                     ))));
                 };
-                debug_assert!(components.len() >= 2);
 
-                // Determine the output shape of the next-to-outermost component Spec.
-                // This is the shape of the intermediate tensor.
-                let next_to_outer_basics = &components[1];
-                let out_idx = next_to_outer_basics.typ.output_idx();
-                let intermediate_tensorspec = TensorSpec::<Tgt>::new_canon(
-                    next_to_outer_basics.parameter_shapes().swap_remove(out_idx),
-                    next_to_outer_basics.dtypes[out_idx],
+                debug_assert!(*index < components.len() - 1);
+                let consumer = &components[*index];
+                let buffer_tensor = Rc::new(Tensor::new(TensorSpec::<Tgt>::new_canon(
+                    consumer.input_shapes().swap_remove(0),
+                    consumer.dtypes[0],
                     layout.contiguous_full(),
                     true,
                     *level,
                     layout.clone(),
                     *vector_size,
-                );
-                let intermediate_tensor = Rc::new(Tensor::new(intermediate_tensorspec.clone()));
+                )));
 
-                // The head of a Compose is the final function evaluated. Build
-                // a full Spec so that it can be further scheduled independently.
-                let external_head_input_cnt = components[0].typ.input_count() - 1;
-                let head_spec = {
-                    let head_operand_auxes = iter::once(&intermediate_tensorspec.aux)
-                        .chain(&operand_auxes[..external_head_input_cnt])
-                        .chain(iter::once(&operand_auxes[logical_spec.output_idx()]));
-                    let head_basics = &components[0];
-                    LogicalSpec::Primitive(
-                        head_basics.clone(),
-                        head_basics.aux_from_operand_auxes(head_operand_auxes),
-                        *serial_only,
-                    )
-                };
-
-                // The "remainder" (inner/first) portion of the pipeline will be
-                // a primitive Spec or a smaller Compose, depending on the initial
-                // length of the Compose.
-                let next_to_head_input_auxes = &operand_auxes[external_head_input_cnt
-                    ..external_head_input_cnt + next_to_outer_basics.typ.input_count()];
-                let remainder: LogicalSpec<Tgt> = if components.len() == 2 {
-                    LogicalSpec::Primitive(
-                        next_to_outer_basics.clone(),
-                        next_to_outer_basics.aux_from_operand_auxes(
-                            next_to_head_input_auxes
-                                .iter()
-                                .chain(iter::once(&intermediate_tensorspec.aux)),
-                        ),
-                        *serial_only,
-                    )
-                } else {
-                    let remainder_inputs =
-                        &operands[external_head_input_cnt..next_to_head_input_auxes.len() - 1];
-                    let remainder_operand_auxes = remainder_inputs
-                        .iter()
-                        .map(|t| t.aux.clone())
-                        .chain(iter::once(intermediate_tensorspec.aux))
-                        .collect::<Vec<_>>();
-                    LogicalSpec::Compose {
-                        components: components[1..].to_vec(),
-                        operand_auxes: remainder_operand_auxes,
-                        serial_only: *serial_only,
-                    }
-                };
-
-                // Compute the memory limits for the two new children.
+                // Compute the memory limits for the new children.
                 let new_limits = {
                     // Compute the amount of memory consumed by the new, intermediate
                     // tensor.
                     // TODO: This shouldn't need to be both here and in `memory_allocated`.
-                    let next_to_outer_basics = &components[1];
-                    let ntob_out_idx = next_to_outer_basics.typ.output_idx();
-                    let output_shape = &next_to_outer_basics.parameter_shapes()[ntob_out_idx];
                     let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
                         if level == &l {
-                            u64::from(next_to_outer_basics.dtypes[ntob_out_idx].size())
-                                * u64::from(output_shape.iter().map(|d| d.get()).product::<u32>())
+                            u64::from(buffer_tensor.0.dtype().size())
+                                * u64::from(buffer_tensor.0.volume().get())
                         } else {
                             0u64
                         }
                     });
 
                     // TODO: Use MemoryLimits::Pipeline where appropriate instead.
+                    // (Already done by Pipeline::memory_allocated.)
                     let mut m = MemoryLimits::Standard(match &spec.1 {
                         MemoryLimits::Standard(v) => v
                             .clone()
@@ -441,30 +392,83 @@ impl<Tgt: Target> Action<Tgt> {
                     m
                 };
 
-                // Reify the new Specs and TensorSpecs into applications we can
-                // nest in the Pipeline body.
-                let remainder_spec_application = {
-                    let mut params: Vec<Rc<dyn View<Tgt = Tgt>>> = vec![];
-                    params.extend(remainder.inputs().iter().enumerate().map(|(i, inp)| {
-                        Rc::new(Param::new(i.try_into().unwrap(), inp.clone())) as _
-                    }));
-                    params.push(Rc::new(intermediate_tensor.clone()) as _);
-                    ImplNode::SpecApp(SpecApp::new(Spec(remainder, new_limits.clone()), params))
+                // Build the inner Compose (or atomic if a single component). This is the
+                // sub-composition which is executed first.
+                let inner_components = &components[(*index + 1)..];
+                let inner_input_count = 1 + inner_components
+                    .iter()
+                    .map(|c| c.typ.input_count() - 1)
+                    .sum::<usize>();
+                let inner_inputs = &operand_auxes
+                    [(operand_auxes.len() - inner_input_count - 1)..(operand_auxes.len() - 1)];
+                let new_intermediate_aux = TensorSpecAux::<Tgt> {
+                    contig: layout.contiguous_full(),
+                    aligned: true,
+                    level: *level,
+                    layout: layout.clone(),
+                    vector_size: *vector_size,
                 };
-                let head_spec_application = {
-                    let mut params: Vec<Rc<dyn View<Tgt = Tgt>>> = vec![];
-                    // TODO: Fill in.
-                    params.extend(head_spec.parameters().iter().skip(1).map(|_operand| {
-                        todo!();
-                    }));
-                    ImplNode::SpecApp(SpecApp::new(Spec(head_spec, new_limits), params))
-                };
+                let inner_operand_auxes = inner_inputs
+                    .iter()
+                    .chain(iter::once(&new_intermediate_aux))
+                    .cloned()
+                    .collect();
+                let mut inner_compose = Spec(
+                    match inner_components {
+                        [] => unreachable!("should never be empty"),
+                        [single] => LogicalSpec::Primitive(
+                            single.clone(),
+                            inner_operand_auxes,
+                            *serial_only,
+                        ),
+                        _ => LogicalSpec::Compose {
+                            components: inner_components.into(),
+                            operand_auxes: inner_operand_auxes,
+                            serial_only: *serial_only,
+                        },
+                    },
+                    new_limits.clone(),
+                );
 
-                Ok(ImplNode::Pipeline(Pipeline {
-                    intermediates: vec![intermediate_tensor],
-                    stages: vec![remainder_spec_application, head_spec_application],
-                    spec: Some(spec.clone()),
-                }))
+                // Build the outer Compose (or atomic if a single component). This is the
+                // composition which is executed last.
+                let outer_components = &components[..(*index + 1)];
+                let outer_input_count = outer_components
+                    .iter()
+                    .map(|c| c.typ.input_count() - 1)
+                    .sum::<usize>();
+                let mut outer_operand_auxes = vec![];
+                outer_operand_auxes.reserve_exact(outer_input_count + 2);
+                outer_operand_auxes.extend_from_slice(&operand_auxes[..outer_input_count]);
+                let insertion_point = 1 + outer_operand_auxes.len()
+                    - outer_components.last().unwrap().typ.input_count();
+                outer_operand_auxes.insert(insertion_point, new_intermediate_aux);
+                outer_operand_auxes.push(operand_auxes.last().unwrap().clone());
+                let mut outer_compose = Spec(
+                    match outer_components {
+                        [] => unreachable!("should never be empty"),
+                        [single] => LogicalSpec::Primitive(
+                            single.clone(),
+                            outer_operand_auxes,
+                            *serial_only,
+                        ),
+                        _ => LogicalSpec::Compose {
+                            components: outer_components.into(),
+                            operand_auxes: outer_operand_auxes,
+                            serial_only: *serial_only,
+                        },
+                    },
+                    new_limits.clone(),
+                );
+
+                inner_compose.canonicalize().unwrap();
+                outer_compose.canonicalize().unwrap();
+
+                Ok(compose_subspecs_to_pipeline(
+                    spec,
+                    inner_compose,
+                    outer_compose,
+                ))
             }
             Action::SpatialSplit => {
                 let LogicalSpec::Primitive(
@@ -1030,7 +1034,7 @@ fn check_tile_out_applies<Tgt: Target>(
     if output_shape
         .iter()
         .enumerate()
-        .any(|(dim, dim_size)| current_out_shape[dim].get() % dim_size.get() != 0)
+        .any(|(dim, out_size)| current_out_shape[dim].get() % out_size.get() != 0)
     {
         return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
             "Original size is not a multiple of tile size",
@@ -1139,6 +1143,54 @@ impl Display for NotApplicableReason {
             NotApplicableReason::Other(None) => write!(f, "Unknown reason"),
         }
     }
+}
+
+fn compose_subspecs_to_pipeline<Tgt: Target>(
+    parent_spec: &Spec<Tgt>,
+    inner_compose: Spec<Tgt>,
+    outer_compose: Spec<Tgt>,
+) -> ImplNode<Tgt> {
+    let intermediate_tensorspec = inner_compose.0.output();
+    let intermediate_tensor = Rc::new(Tensor::new(intermediate_tensorspec.clone()));
+
+    let inner_application = {
+        let input_specs = inner_compose.0.inputs();
+        let mut params: Vec<Rc<dyn View<Tgt = Tgt>>> = vec![];
+        params.reserve_exact(input_specs.len() + 1);
+        params.extend(
+            input_specs
+                .into_iter()
+                .enumerate()
+                .map(|(i, op)| Rc::new(Param::new(i.try_into().unwrap(), op)) as _),
+        );
+        params.insert(
+            inner_compose.0.output_idx(),
+            Rc::new(intermediate_tensor.clone()) as _,
+        );
+        ImplNode::SpecApp(SpecApp::new(inner_compose, params))
+    };
+    let outer_application = {
+        let outer_output_idx = outer_compose.0.output_idx();
+        let parameter_specs = outer_compose.0.parameters();
+        let mut params: Vec<Rc<dyn View<Tgt = Tgt>>> = vec![];
+        params.reserve_exact(parameter_specs.len());
+        let idx_to_replace = if outer_output_idx == 0 { 1 } else { 0 };
+        for (i, parameter_spec) in parameter_specs.into_iter().enumerate() {
+            if i == idx_to_replace {
+                params.push(Rc::new(intermediate_tensor.clone()) as _);
+            } else {
+                params.push(Rc::new(Param::new(i.try_into().unwrap(), parameter_spec)) as _);
+            }
+        }
+        ImplNode::SpecApp(SpecApp::new(outer_compose, params))
+    };
+
+    ImplNode::Pipeline(Pipeline {
+        intermediates: vec![intermediate_tensor],
+        stages: vec![inner_application, outer_application],
+        parameters: parent_spec.0.parameters(),
+        spec: Some(parent_spec.clone()),
+    })
 }
 
 fn plan_movelet<'a, Tgt: Target>(

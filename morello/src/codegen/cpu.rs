@@ -14,6 +14,7 @@ use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
 use crate::imp::loops::Loop;
 use crate::imp::moves::TensorOrCacheView;
+use crate::imp::pipeline::Pipeline;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferVar;
@@ -510,10 +511,15 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 // simplicity, every Impl loop is emitted as either as a C loop nest or fully
                 // unrolled.
                 if l.tiles.iter().any(|loop_tile| {
-                    self.name_env
-                        .get(loop_tile.tile.backing_tensor(&self.param_bindings).unwrap())
-                        .unwrap()
-                        .needs_unroll()
+                    let backing_tensor = loop_tile
+                        .tile
+                        .backing_tensor(&self.param_bindings)
+                        .expect("tile should have backing tensor");
+                    let backing_tensor_name = self
+                        .name_env
+                        .get(backing_tensor)
+                        .expect("tile's backing tensor should have a name");
+                    backing_tensor_name.needs_unroll()
                 }) {
                     self.emit_unrolled_loop(w, l, depth)
                 } else {
@@ -560,7 +566,34 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 }
                 Ok(())
             }
-            ImplNode::Pipeline(_) => todo!("Emit code for Pipeline"),
+            ImplNode::Pipeline(Pipeline {
+                stages,
+                intermediates,
+                ..
+            }) => {
+                for (stage_idx, stage) in stages.iter().enumerate() {
+                    // Emit variable declaration(s) and store association between the
+                    // CBuffer and Tensor.
+                    if let Some(tensor) = intermediates.get(stage_idx) {
+                        let intermediate_spec = tensor.spec();
+                        let buffer = self.make_buffer(
+                            intermediate_spec.shape(),
+                            intermediate_spec.vector_size(),
+                            intermediate_spec.dtype(),
+                            intermediate_spec.level(),
+                        );
+                        buffer.emit(w, InitType::None, depth)?;
+                        self.name_env.insert(Rc::clone(tensor), buffer);
+                    }
+                    self.emit(w, stage, depth)?;
+                    if stage_idx > 0 {
+                        let consumed_buffer =
+                            self.name_env.get(&intermediates[stage_idx - 1]).unwrap();
+                        consumed_buffer.emit_free(w, depth)?;
+                    }
+                }
+                Ok(())
+            }
             ImplNode::SpecApp(p) => {
                 self.headers.emit_stdbool_and_assert_headers = true;
                 writeln!(
@@ -1859,7 +1892,7 @@ fn vec_func_names(
 }
 
 fn axis_order_and_steps<Tgt: Target>(l: &Loop<Tgt>) -> impl Iterator<Item = (u8, u32)> + '_ {
-    // TODO: Choose according to a skip-minimizing heuristic.
+    // TODO: Choose loop order according to a skip-minimizing heuristic.
     let result = l
         .tiles
         .iter()
@@ -1884,7 +1917,7 @@ fn axis_order_and_steps<Tgt: Target>(l: &Loop<Tgt>) -> impl Iterator<Item = (u8,
         let rv = result.clone().collect::<Vec<_>>();
         for (axis, _) in rv.clone() {
             if !seen.insert(axis) {
-                panic!("Duplicate axis in result: {}", axis);
+                panic!("Duplicate axis {axis} from loop: {l:?}");
             }
         }
     }

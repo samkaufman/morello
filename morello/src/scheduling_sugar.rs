@@ -35,10 +35,11 @@ pub trait SchedulingSugar<Tgt: Target> {
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_accum(&self) -> ImplNode<Tgt>;
-    fn peel(
+    fn bufferize(
         &self,
-        layout: Layout,
+        index: usize,
         level: Tgt::Level,
+        layout: Layout,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn spatial_split(&self) -> ImplNode<Tgt>;
@@ -128,18 +129,22 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         apply_unwrap(self, action)
     }
 
-    fn peel(
+    fn bufferize(
         &self,
-        layout: Layout,
+        index: usize,
         level: Tgt::Level,
+        layout: Layout,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        let action = Action::Peel {
-            layout,
-            level,
-            vector_size,
-        };
-        apply_unwrap(self, action)
+        apply_unwrap(
+            self,
+            Action::Bufferize {
+                index,
+                level,
+                layout,
+                vector_size,
+            },
+        )
     }
 
     fn spatial_split(&self) -> ImplNode<Tgt> {
@@ -224,13 +229,16 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.to_accum())
     }
 
-    fn peel(
+    fn bufferize(
         &self,
-        layout: Layout,
+        index: usize,
         level: Tgt::Level,
+        layout: Layout,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.peel(layout, level, vector_size))
+        apply_to_leaf_spec(self, |spec| {
+            spec.bufferize(index, level, layout, vector_size)
+        })
     }
 
     fn spatial_split(&self) -> ImplNode<Tgt> {

@@ -110,7 +110,7 @@ pub fn split_actions<Tgt: Target>(
         .map(|k| Action::Split { k })
 }
 
-pub fn peel_actions<Tgt: Target>(
+pub fn bufferize_actions<Tgt: Target>(
     spec: &LogicalSpec<Tgt>,
 ) -> impl Iterator<Item = Action<Tgt>> + '_ {
     let LogicalSpec::Compose {
@@ -119,36 +119,40 @@ pub fn peel_actions<Tgt: Target>(
         serial_only: _,
     } = spec
     else {
-        panic!("peel_actions called on non-Compose Spec");
+        panic!("bufferize_actions called on non-Compose Spec");
     };
 
     let mut results = vec![];
 
-    let o = components[1].parameter_shapes();
-    let comp_out_idx = components[1].typ.output_idx();
-    let intermediate_shape = &o[comp_out_idx];
-    let intermediate_dtype = components[1].dtypes[comp_out_idx];
+    for index in 0..(components.len() - 1) {
+        let comp = &components[index + 1];
+        let comp_out_idx = comp.typ.output_idx();
+        let intermediate_shape = comp.parameter_shapes().swap_remove(comp_out_idx);
+        let intermediate_dtype = comp.dtypes[comp_out_idx];
 
-    for level in Tgt::levels() {
-        let vector_bytes = level.vector_bytes();
+        for level in Tgt::levels() {
+            let vector_bytes = level.vector_bytes();
 
-        for layout in Tgt::move_destination_layouts(intermediate_shape, intermediate_dtype) {
-            // TODO: Need to implement `can_move_to`-style logic here.
+            for layout in Tgt::move_destination_layouts(&intermediate_shape, intermediate_dtype) {
+                // TODO: Need to implement `can_move_to`-style logic here.
 
-            if !vector_bytes.is_empty() {
-                for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
-                    results.push(Action::Peel {
-                        layout: layout.clone(),
+                if !vector_bytes.is_empty() {
+                    for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
+                        results.push(Action::Bufferize {
+                            index,
+                            level,
+                            layout: layout.clone(),
+                            vector_size: Some(vector_size),
+                        });
+                    }
+                } else {
+                    results.push(Action::Bufferize {
+                        index,
                         level,
-                        vector_size: Some(vector_size),
+                        layout,
+                        vector_size: None,
                     });
                 }
-            } else {
-                results.push(Action::Peel {
-                    layout: layout.clone(),
-                    level,
-                    vector_size: None,
-                });
             }
         }
     }

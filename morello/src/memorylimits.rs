@@ -238,7 +238,7 @@ impl MemoryAllocation {
             MemoryAllocation::Pipeline {
                 intermediate_consumption,
             } => {
-                debug_assert_eq!(child_peaks.len() + 1, intermediate_consumption.len());
+                debug_assert_eq!(child_peaks.len(), intermediate_consumption.len() + 1);
                 let z = [0; LEVEL_COUNT];
                 let mut preceding_consumption = &z;
                 let mut following_consumption = &intermediate_consumption[0];

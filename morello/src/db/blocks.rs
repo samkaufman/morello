@@ -95,6 +95,12 @@ pub enum RTreeBlock {
     D28(RTreeBlockInner<28>),
     D29(RTreeBlockInner<29>),
     D30(RTreeBlockInner<30>),
+    D31(RTreeBlockInner<31>),
+    D32(RTreeBlockInner<32>),
+    D33(RTreeBlockInner<33>),
+    D34(RTreeBlockInner<34>),
+    D35(RTreeBlockInner<35>),
+    D36(RTreeBlockInner<36>),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -328,6 +334,12 @@ impl RTreeBlock {
             28 => RTreeBlock::D28(RTreeBlockInner::default()),
             29 => RTreeBlock::D29(RTreeBlockInner::default()),
             30 => RTreeBlock::D30(RTreeBlockInner::default()),
+            31 => RTreeBlock::D31(RTreeBlockInner::default()),
+            32 => RTreeBlock::D32(RTreeBlockInner::default()),
+            33 => RTreeBlock::D33(RTreeBlockInner::default()),
+            34 => RTreeBlock::D34(RTreeBlockInner::default()),
+            35 => RTreeBlock::D35(RTreeBlockInner::default()),
+            36 => RTreeBlock::D36(RTreeBlockInner::default()),
             _ => panic!("Unsupported rank: {}", rank),
         }
     }

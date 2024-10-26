@@ -1,4 +1,4 @@
-use super::common_actions::{move_actions, peel_actions, split_actions, tile_out_actions};
+use super::common_actions::{bufferize_actions, move_actions, split_actions, tile_out_actions};
 use crate::codegen::c_utils::VecType;
 use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
@@ -354,7 +354,7 @@ impl<T: CpuTarget> Target for T {
                 serial_only: _,
             } => {
                 // TODO: Add head reduce split actions as well.
-                Box::new(iter.chain(peel_actions(spec)))
+                Box::new(iter.chain(bufferize_actions(spec)))
             }
         }
     }
