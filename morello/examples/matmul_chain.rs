@@ -71,11 +71,6 @@ fn main() {
         result.inner_loop_iterations as f64 / result.best_inner_loop_runtime().as_secs_f64();
     println!("\n// cost: {}", Cost::from_impl(&imp).main);
     println!("// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)",);
-    println!(
-        "// {:.4} gigaFLOPs/sec (Spec is {} FLOPs)",
-        (spec.flops().unwrap() as f64 * throughput) / 1_000_000_000.0,
-        spec.flops().unwrap(),
-    );
 }
 
 fn schedule_matmul(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
