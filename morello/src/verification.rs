@@ -3,7 +3,7 @@
 use crate::{
     codegen::BuiltArtifact,
     common::{DimSize, Dtype},
-    spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},
+    spec::{LogicalSpec, PrimitiveSpecType, Spec},
     target::Target,
     tensorspec::TensorSpec,
 };
@@ -52,12 +52,7 @@ impl BuiltArtifact {
     /// This method can be used for a little extra defense against bugs in Morello or the underlying
     /// C compiler.
     pub fn check_correctness<Tgt: Target>(&self, spec: &Spec<Tgt>) -> bool {
-        let test_result = match &spec.0 {
-            LogicalSpec::Primitive(PrimitiveBasics { .. }, _, _) => {
-                test_artifact_correct_inner(spec, self)
-            }
-            LogicalSpec::Compose { .. } => todo!(),
-        };
+        let test_result = test_artifact_correct_inner(spec, self);
         if test_result {
             log::debug!("Artifact passed correctness check");
         } else {
@@ -172,6 +167,47 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     args
                 }
             },
+            LogicalSpec::Compose { components, .. }
+                if components
+                    .iter()
+                    .all(|c| matches!(c.typ, PrimitiveSpecType::Matmul { accum: false })) =>
+            {
+                let mut result = vec![]; // TODO: reserve
+
+                let mut outermost_out = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
+                outermost_out.zero();
+
+                // Compute the innermost matmul.
+                let innermost_component = components.last().unwrap();
+                let first_rhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
+                let first_lhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
+                let first_dtype = innermost_component.dtypes[innermost_component.typ.output_idx()];
+                let mut first_out =
+                    DynArray::zeros((first_lhs.shape()[0], first_rhs.shape()[1]), first_dtype);
+                first_lhs.dot_inplace(&first_rhs, &mut first_out);
+                result.push(first_rhs.into_dyn());
+                result.push(first_lhs.into_dyn());
+
+                // Compute the inner components
+                let mut next_lhs = first_out;
+                for component in components.iter().take(components.len() - 2).skip(1) {
+                    let dtype = component.dtypes[component.typ.output_idx()];
+                    let rhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
+                    let mut out = DynArray::zeros((next_lhs.shape()[0], rhs.shape()[1]), dtype);
+                    next_lhs.dot_inplace(&rhs, &mut out);
+                    next_lhs = out;
+                    result.push(rhs.into_dyn());
+                }
+
+                // Compute the final matmul.
+                let rhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
+                next_lhs.dot_inplace(&rhs, &mut outermost_out);
+                result.push(rhs.into_dyn());
+
+                result.reverse();
+                result.push(outermost_out.into_dyn());
+                result
+            }
             LogicalSpec::Compose { .. } => todo!(),
         }
     }
@@ -291,6 +327,25 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Sint32(a) => a.mapv(|x| x.as_()),
             DynArray::Float32(a) => a.mapv(|x| x.as_()),
             DynArray::Bfloat16(a) => a.mapv(|x| x.as_()),
+        }
+    }
+}
+
+impl<D: ndarray::Dimension> DynArray<D> {
+    // TODO: Generalize to D other than IxDyn.
+    pub fn zeros<Sh>(shape: Sh, dtype: Dtype) -> Self
+    where
+        Sh: ShapeBuilder<Dim = D>,
+    {
+        match dtype {
+            Dtype::Uint8 => DynArray::Uint8(Array::zeros(shape)),
+            Dtype::Sint8 => DynArray::Sint8(Array::zeros(shape)),
+            Dtype::Uint16 => DynArray::Uint16(Array::zeros(shape)),
+            Dtype::Sint16 => DynArray::Sint16(Array::zeros(shape)),
+            Dtype::Uint32 => DynArray::Uint32(Array::zeros(shape)),
+            Dtype::Sint32 => DynArray::Sint32(Array::zeros(shape)),
+            Dtype::Float32 => DynArray::Float32(Array::zeros(shape)),
+            Dtype::Bfloat16 => DynArray::Bfloat16(Array::zeros(shape)),
         }
     }
 }

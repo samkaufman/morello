@@ -60,8 +60,24 @@ fn main() {
     )
     .unwrap_or_else(|e| panic!("Failed to generate code: {}", e));
 
+    // If the verification flag is set, let's additionally double-check that the lowered
+    // code builds and produces the correct results.
+    #[cfg(feature = "verification")]
+    {
+        match imp.build(false) {
+            Ok(artifact) => {
+                if !artifact.check_correctness(&spec) {
+                    panic!("Generated code returned incorrect output");
+                }
+            }
+            Err(e) => {
+                panic!("Failed to build generated code: {}", e);
+            }
+        }
+    }
+
     // Benchmark.
-    const ITERS: u32 = 10;
+    const ITERS: u32 = 5;
     let result = imp
         .bench(ITERS, None)
         .unwrap_or_else(|e| panic!("Failed to benchmark: {}", e));
