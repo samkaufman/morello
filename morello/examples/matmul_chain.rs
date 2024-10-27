@@ -1,31 +1,35 @@
 use morello::codegen::CodeGen;
 use morello::common::Dtype;
 use morello::cost::Cost;
+use morello::db::FilesDatabase;
 use morello::imp::ImplNode;
-use morello::layout::row_major;
+use morello::layout::{row_major, Layout, PhysDim};
 use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::shape;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::CpuKernel;
 use morello::target::{
-    CpuMemoryLevel::{GL, L1, RF},
+    CpuMemoryLevel::{GL, L1, RF, VRF},
     Target, X86Target,
 };
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
 use std::io;
+use std::path::Path;
+
+use nonzero::nonzero as nz;
 
 fn main() {
     let basics0 = PrimitiveBasics {
         typ: PrimitiveSpecType::Matmul { accum: false },
-        spec_shape: shape![2048, 32, 2048],
+        spec_shape: shape![1024, 1024, 1024],
         dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
     };
     let basics1 = PrimitiveBasics {
         typ: PrimitiveSpecType::Matmul { accum: false },
-        spec_shape: shape![2048, 2048, 2048],
+        spec_shape: shape![1024, 1024, 1024],
         dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
     };
     let aux = TensorSpecAux {
@@ -46,13 +50,19 @@ fn main() {
     );
     spec.canonicalize().unwrap();
 
-    let imp = spec.tile_out(&[128, 128]);
-    let imp = imp
+    let db = FilesDatabase::new(
+        Some(Path::new("./matmul_chain.db")),
+        true,
+        1,
+        2usize.pow(22),
+        2,
+        None,
+    );
+    let imp = spec
+        .tile_out(&[128, 128])
         .bufferize(0, GL, row_major(2), None)
-        .subschedule(&[0], schedule_matmul)
-        .subschedule(&[1], schedule_matmul);
-    // pprint(&imp, ImplPrintStyle::Compact);
-    // println!("\nThe above Impl lowered to C:");
+        .subschedule(&[0], |s| schedule_matmul(&db, s))
+        .subschedule(&[1], |s| schedule_matmul(&db, s));
     imp.emit(
         false,
         Some(ImplPrintStyle::Compact),
@@ -89,62 +99,43 @@ fn main() {
     println!("// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)",);
 }
 
-fn schedule_matmul(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
-    spec.tile_out(&[16, 16])
-        .to_accum()
-        .split(16)
-        .move_param(0, L1, row_major(2), None)
-        .move_param(1, L1, row_major(2), None)
-        .move_param(2, L1, row_major(2), None)
-        .tile_out(&[1, 1])
-        .subschedule(&[0], zero_schedule)
-        .split(4)
-        .move_param(0, RF, row_major(2), None)
-        .subschedule(&[1, 0], move_schedule)
-        .move_param(1, RF, row_major(2), None)
-        .subschedule(&[1, 1, 0], move_schedule)
-        .move_param(2, RF, row_major(2), None)
-        .subschedule(&[1, 1, 1, 0], move_schedule)
-        .subschedule(&[1, 1, 1, 2], move_schedule)
-        .split(1)
-        .place(CpuKernel::MultAdd)
-}
-
-/// Schedules the given 1x1 Zero Spec.
-///
-/// Specifically, this moves the Zero's tensor from L1 into registers, which introduces two
-/// sub-Specs:
-///  Zero((1×1, u32, RF), serial)
-///  Move((1×1, u32, RF), (1×1, u32, L1, ua), serial)
-/// These are then implemented with kernels which lower to `memset` and `=` respectively, like so:
-/// ```
-//  uint32_t v;
-//  memset((void *)(&v), 0, 4);
-//  l1_tile[index] = v;
-/// ```
-fn zero_schedule(zero: &Spec<X86Target>) -> ImplNode<X86Target> {
-    zero.tile_out(&[1, 16])
-        .move_param(0, RF, row_major(2), None)
-        .subschedule(&[0], |z| z.place(CpuKernel::MemsetZero))
-        .subschedule(&[1], |z| {
-            z.move_param(1, L1, row_major(2), None)
-                .tile_out(&[1, 1])
-                .place(CpuKernel::ValueAssign)
+fn schedule_matmul(db: &FilesDatabase, spec: &Spec<X86Target>) -> ImplNode<X86Target> {
+    let mat1_pack_size = nz!(16u32);
+    let layout_b = Layout::new(vec![
+        (1, PhysDim::Dynamic),
+        (0, PhysDim::Dynamic),
+        (1, PhysDim::Packed(mat1_pack_size)),
+    ]);
+    spec.to_accum()
+        .subschedule(&[0], |zero_spec| {
+            zero_spec.tile_out(&[1, 4]).synthesize(db, None)
         })
-}
-
-/// Schedules the given Move Spec.
-///
-/// Specifically, this checks if the Move's tensor is a single value. If it is, it directly assigns
-/// the value using the `ValueAssign` kernel. If not, it tiles the tensor and then assigns the values
-/// using the `ValueAssign` kernel.
-fn move_schedule(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
-    let is_single_value = move_spec.0.parameter_shapes()[0]
-        .iter()
-        .all(|size| size.get() == 1);
-    if is_single_value {
-        move_spec.place(CpuKernel::ValueAssign)
-    } else {
-        move_spec.tile_out(&[1, 1]).place(CpuKernel::ValueAssign)
-    }
+        .split(128)
+        .move_param(1, GL, layout_b.clone(), None)
+        .subschedule(&[1, 0], |pack_b| {
+            // TODO: This stinks. Use vectors at least.
+            pack_b
+                .tile_out(&[1, 1])
+                .move_param(0, L1, row_major(2), None)
+                .move_param(1, L1, row_major(2), None)
+                .move_param(0, RF, row_major(2), None)
+                .subschedule(&[0], |m0| m0.place(CpuKernel::ValueAssign))
+                .subschedule(&[1], |m0| m0.place(CpuKernel::ValueAssign))
+        })
+        .tile_out(&[4, 16])
+        .move_param(0, L1, row_major(2), None)
+        .move_param(1, L1, layout_b.clone(), None)
+        .move_param(2, L1, row_major(2), None)
+        .move_param(2, VRF, row_major(2), Some(nz!(8u32)))
+        .subschedule(&[1, 1, 0], |m| {
+            m.tile_out(&[1, 8]).place(CpuKernel::VectorAssign)
+        })
+        .subschedule(&[1, 1, 2], |m| {
+            m.tile_out(&[1, 8]).place(CpuKernel::VectorAssign)
+        })
+        .split(1)
+        .tile_out(&[1, 16])
+        .move_param(1, VRF, layout_b.clone(), Some(nz!(8u32)))
+        .subschedule(&[1, 1, 1, 0], |m| m.place(CpuKernel::VectorAssign))
+        .subschedule(&[1, 1, 1, 1], |m| m.place(CpuKernel::BroadcastVecMultAdd))
 }
