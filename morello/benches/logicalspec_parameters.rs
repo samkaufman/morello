@@ -3,7 +3,7 @@ use std::hint::black_box;
 
 use morello::layout::row_major;
 use morello::lspec;
-use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+use morello::spec::LogicalSpec;
 use morello::target::{Target, X86Target};
 
 // TODO: Add a benchmark for Compose
