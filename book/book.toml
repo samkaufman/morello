@@ -1,0 +1,15 @@
+[book]
+authors = ["Sam Kaufman"]
+language = "en"
+multilingual = false
+src = "src"
+title = "Implementing Fast Neural Networks with Morello"
+
+[output.html]
+smart-punctuation = true
+
+[output.html.code.hidelines]
+c = "//~"
+
+[output.html.playground]
+runnable = false
