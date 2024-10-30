@@ -3,6 +3,9 @@ name: Deploy mdBook site to Pages
 on:
   push:
     branches: ["main"]
+    paths:
+      - "book/**"
+      - ".github/workflows/**"
   # `workflow_dispatch` allows running this workflow manually from the Actions tab
   workflow_dispatch:
 
