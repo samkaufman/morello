@@ -5,7 +5,7 @@ use std::hint::black_box;
 use morello::db::FilesDatabase;
 use morello::layout::row_major;
 use morello::lspec;
-use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use morello::spec::Spec;
 use morello::target::{Target, X86Target};
 
 #[export_name = "morello_bench_synth::matmul_spec"]
