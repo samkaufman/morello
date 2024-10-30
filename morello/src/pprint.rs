@@ -179,7 +179,7 @@ mod tests {
     use crate::imp::subspecs::SpecApp;
     use crate::layout::row_major;
     use crate::lspec;
-    use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+    use crate::spec::{LogicalSpec, Spec};
     use crate::target::{
         CpuMemoryLevel::{GL, L1},
         X86Target,

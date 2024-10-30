@@ -7,7 +7,7 @@ use morello::layout::row_major;
 use morello::lspec;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
-use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use morello::spec::Spec;
 use morello::target::CpuKernel;
 use morello::target::{
     CpuMemoryLevel::{self, GL},

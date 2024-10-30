@@ -837,7 +837,7 @@ mod tests {
     use crate::layout::row_major;
     use crate::lspec;
     use crate::memorylimits::{MemVec, MemoryLimits};
-    use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+    use crate::spec::{arb_canonical_spec, LogicalSpec};
     use crate::target::{
         CpuMemoryLevel::{GL, L1, RF},
         X86Target,

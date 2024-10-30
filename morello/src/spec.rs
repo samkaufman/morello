@@ -1635,12 +1635,12 @@ pub mod macros {
 
             let auxes = [ $( lspec!(@tensorspecaux_tup $($opterms)*) ),* ];
             let dtypes = auxes.iter().map(|v| v.0.clone()).collect();
-            let basics = PrimitiveBasics {
+            let basics = $crate::spec::PrimitiveBasics {
                 typ: lspec!(@primitive_spec_type $typ),
                 spec_shape: ($shp).into_iter().map(|x| x.into_dim_size()).collect(),
                 dtypes,
             };
-            LogicalSpec::Primitive(
+            $crate::spec::LogicalSpec::Primitive(
                 basics,
                 auxes.into_iter().map(|v| v.1).collect(),
                 $s,
@@ -1697,22 +1697,22 @@ pub mod macros {
         }};
 
         ( @primitive_spec_type Zero ) => {
-            PrimitiveSpecType::Zero
+            $crate::spec::PrimitiveSpecType::Zero
         };
         ( @primitive_spec_type Move ) => {
-            PrimitiveSpecType::Move
+            $crate::spec::PrimitiveSpecType::Move
         };
         ( @primitive_spec_type Matmul ) => {
-            PrimitiveSpecType::Matmul { accum: false }
+            $crate::spec::PrimitiveSpecType::Matmul { accum: false }
         };
         ( @primitive_spec_type MatmulAccum ) => {
-            PrimitiveSpecType::Matmul { accum: true }
+            $crate::spec::PrimitiveSpecType::Matmul { accum: true }
         };
         ( @primitive_spec_type Conv ) => {
-            PrimitiveSpecType::Conv { accum: false }
+            $crate::spec::PrimitiveSpecType::Conv { accum: false }
         };
         ( @primitive_spec_type ConvAccum ) => {
-            PrimitiveSpecType::Conv { accum: true }
+            $crate::spec::PrimitiveSpecType::Conv { accum: true }
         };
 
         ( @dt_convert u8 ) => {
