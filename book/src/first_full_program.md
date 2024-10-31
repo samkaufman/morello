@@ -1,7 +1,5 @@
 # First Schedule
 
-**TODO:** Define *schedule*.
-
 **TODO:** Needing to expose `ToWriteFmt` stinks. Remove that.
 
 **TODO:** Address or hide canonicalization. (This is a footgun.)

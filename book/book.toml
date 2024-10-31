@@ -3,7 +3,7 @@ authors = ["Sam Kaufman"]
 language = "en"
 multilingual = false
 src = "src"
-title = "Implementing Fast Neural Networks with Morello"
+title = "Optimizing Neural Networks with Morello"
 
 [output.html]
 smart-punctuation = true

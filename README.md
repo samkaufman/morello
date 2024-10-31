@@ -1,26 +1,36 @@
 # Morello
 
-Morello is a synthesizer which generates fast neural network pipelines and kernels for
-X86 and ARM CPUs. It consumes a neural network specification ("Spec" for short) and
+Morello is a synthesis-based compiler which generates fast neural network pipelines and kernels for CPUs. It consumes a neural network specification ("Spec" for short) and
 generates a C implementation of that specification.
 
-The easiest way to get started running Morello locally is to `git clone` the project
-and, from the cloned source directory, synthesize one of the predefined specifications.
-For example, to synthesize a 2x2x2 matrix multiplication:
+If you're new, the best place to start is the [book](http://samk.name/morello/book).
+The book introduces the key ideas behind Morello, walking through increasingly
+sophisticated neural networks and features of Morello. It's appropriate for any
+developer interested in making their neural network inference workload run more quickly.
+
+## Installation
+
+You can start running Morello locally by `git clone`ing the project.
+
+An alternative is to launch a GitHub Codespace. This repository has a Dev Container
+configuration, so launching a Codespace will now connect you to an environment set up
+for Morello development (Rust toolchain, Clang, etc.).
+
+## Automatic Synthesis
+
+Try synthesizing a 2x2x2 matrix multiplication by running, from the cloned source directory, the following command:
 
 ```bash
 cargo r --release -- matmul 2
 ```
 
-(Run `cargo r --release -- --help` for a list of predefined specifications.)
+Run `cargo r --release -- --help` for a list of other predefined specifications.
 
-A good alternative is to launch a GitHub Codespace. This repository has a Dev Container
-configuration, so launching a Codespace will now connect you to an environment set up
-for Morello development (Rust toolchain, Clang, etc.).
+### Synthesis Databases
 
 Synthesizing larger sizes (e.g., 16x16x16) can take a long time (hours or even days). To
-speed up subsequent executions, Morello can memoize optimization decisions to disk when
-given `--db` flag. For example:
+speed up subsequent executions, Morello saves optimization decisions to disk when given
+`--db` flag. For example:
 
 ```bash
 cargo r --release -- --db morello.db matmul 2
@@ -33,10 +43,6 @@ Morello to compute a 2x2x2 matrix multiplication, it will be near-instantaneous,
 also, if synthesizing a 4x4x4 matrix multiplication or a pipeline of matrix
 multiplications, you'll have a head-start by reusing that database.
 
-## Logging
-
-Morello logs useful, additional information via the [log](https://docs.rs/log/latest/log/) crate. Consider setting `RUST_LOG=info` in your shell environment to see these logs.
-
 ## Manual Scheduling
 
 While Morello is primarily intended as a synthesizer, its IR can also be a convenient
@@ -47,3 +53,7 @@ matrix multiplication is given in
 ```bash
 cargo r --example simple_matmul_x86
 ```
+
+## Logging
+
+Morello logs additional information via the [log](https://docs.rs/log/latest/log/) crate. Consider setting `RUST_LOG=info` in your shell environment.
