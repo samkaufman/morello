@@ -75,6 +75,11 @@ pub trait CodeGen<Tgt: Target> {
             TargetId::Arm => &ARM_CLI_VEC_FLAGS,
         }
     }
+
+    fn emit_stdout(&self) -> fmt::Result {
+        self.emit(false, None, &mut ToWriteFmt(io::stdout()))
+    }
+
     fn emit<W: fmt::Write>(
         &self,
         benchmark: bool,

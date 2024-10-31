@@ -35,12 +35,6 @@ fn main() {
     // ANCHOR_END: schedule
 
     // ANCHOR: emit
-    implementation
-        .emit(
-            false,
-            None,
-            &mut morello::utils::ToWriteFmt(std::io::stdout()),
-        )
-        .unwrap()
+    implementation.emit_stdout().unwrap();
     // ANCHOR_END: emit
 }
