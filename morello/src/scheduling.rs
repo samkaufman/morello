@@ -32,10 +32,12 @@ use crate::views::{CacheView, Param, Tensor, Tile, TileError, View, ViewExt};
 /// corresponding Impl node can be computed given the Spec.
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub enum Action<Tgt: Target> {
+    /// Tile the output tensor and its inputs to respect the updated inputs.
     TileOut(TileOut),
     Split {
         k: DimSize,
     },
+    /// Move a tensor to a different memory level, layout, and/or dtype.
     Move {
         source_idx: u8,
         destination_dtype: Dtype,
@@ -43,6 +45,7 @@ pub enum Action<Tgt: Target> {
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
     },
+    /// Allocate an output tensor, a Zero sub-Spec, and an accumulating variant of the receiver.
     ToAccum,
     Bufferize {
         index: usize,
@@ -639,16 +642,22 @@ impl<Tgt: Target> Action<Tgt> {
                 )))
             }
             Action::ToAccum => {
-                let LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, ..) = logical_spec else {
-                    panic!();
+                let head = match logical_spec {
+                    LogicalSpec::Primitive(basics, ..) => basics,
+                    LogicalSpec::Compose { components, .. } => &components[0],
                 };
-                let (PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum }) = typ
+
+                let PrimitiveBasics {
+                    typ: PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum },
+                    ..
+                } = head
                 else {
                     // TODO: Use a more specific NotApplicableReason.
                     return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-                        "Not a Matmul or Conv",
+                        "ToAccum is only defined for Matmul and Conv",
                     ))));
                 };
+
                 if *accum {
                     // TODO: Use a more specific NotApplicableReason.
                     return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
@@ -656,29 +665,8 @@ impl<Tgt: Target> Action<Tgt> {
                     ))));
                 }
 
-                let TensorSpec {
-                    shape: output_shape,
-                    dtype: output_dtype,
-                    aux: output_aux,
-                } = logical_spec.output();
-
-                let zero_app = {
-                    let subspec = LogicalSpec::Primitive(
-                        PrimitiveBasics {
-                            typ: PrimitiveSpecType::Zero,
-                            spec_shape: output_shape,
-                            dtypes: vec![output_dtype],
-                        },
-                        vec![output_aux],
-                        logical_spec.serial_only(),
-                    );
-                    let mut spec = Spec(subspec, spec.1.clone());
-                    spec.canonicalize()
-                        .expect("ToAccum's introduced Zero should be canonicalizable");
-                    let app_arguments = [Param::new(0, logical_spec.output())];
-                    SpecApp::new(spec, app_arguments).into()
-                };
-                let accum_app = {
+                let zero_app = make_zero_for_spec(spec);
+                let (accum_app, main_arg_count, output_idx) = {
                     let mut spec = Spec(logical_spec.clone_as_accum(), spec.1.clone());
                     spec.canonicalize()
                         .expect("ToAccum's introduced accumulating Spec should be canonicalizable");
@@ -686,12 +674,15 @@ impl<Tgt: Target> Action<Tgt> {
                         .iter()
                         .enumerate()
                         .map(|(i, t)| Param::new(i.try_into().unwrap(), t.clone()));
-                    SpecApp::new(spec, app_arguments).into()
+                    let output_idx = u8::try_from(spec.0.output_idx()).unwrap();
+                    let app_node = SpecApp::new(spec, app_arguments);
+                    let main_arg_count = u8::try_from(app_node.1.len()).unwrap();
+                    (app_node.into(), main_arg_count, output_idx)
                 };
 
                 Ok(ImplNode::Block(Block {
                     stages: vec![zero_app, accum_app],
-                    bindings: vec![vec![2], vec![0, 1, 2]],
+                    bindings: vec![vec![output_idx], (0..main_arg_count).collect()],
                     parameters: operands,
                     spec: Some(spec.clone()),
                     default_child: Some(1),
@@ -824,6 +815,25 @@ impl<Tgt: Target> Action<Tgt> {
         self.apply_unchecked_canon(spec)
             .map(|applied| ActionSolver::Fallback(applied))
     }
+}
+
+/// Returns a Spec application of a Zero corresponding to the output of the given Spec.
+fn make_zero_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> ImplNode<Tgt> {
+    let output = spec.0.output();
+    let subspec = LogicalSpec::Primitive(
+        PrimitiveBasics {
+            typ: PrimitiveSpecType::Zero,
+            spec_shape: output.shape.clone(),
+            dtypes: vec![output.dtype],
+        },
+        vec![output.aux.clone()],
+        spec.0.serial_only(),
+    );
+    let mut spec = Spec(subspec, spec.1.clone());
+    spec.canonicalize()
+        .expect("ToAccum's introduced Zero should be canonicalizable");
+    let app_arguments = [Param::new(0, output)];
+    SpecApp::new(spec, app_arguments).into()
 }
 
 impl<Tgt: Target> ActionSolver<Tgt> {

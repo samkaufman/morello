@@ -631,7 +631,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 operand_auxes,
                 serial_only: _,
             } => {
-                debug_assert!(components.len() >= 2);
+                debug_assert!(
+                    components.len() >= 2,
+                    "Compose must have at least 2 components, but components are: {:?}",
+                    components
+                );
 
                 let mut result = vec![];
                 result.reserve_exact(compose_parameter_count(components));
@@ -981,9 +985,14 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => {
                     *accum = true;
                 }
-                _ => panic!("Cannot clone_as_accum for {:?}", self),
+                _ => panic!("Cannot clone_as_accum: {:?}", self),
             },
-            LogicalSpec::Compose { .. } => todo!("Compose can accumulate if head can."),
+            LogicalSpec::Compose { components, .. } => match &mut components[0].typ {
+                PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => {
+                    *accum = true;
+                }
+                _ => panic!("Cannot clone_as_accum: {:?}", self),
+            },
         }
         cloned
     }
