@@ -125,7 +125,7 @@ pub enum TileError {
 /// may produce a MoveLet binding and a nested Block. In this case, parameters---and, therefore,
 /// the referents of a Param---differ between the MoveLet and Block.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Param<Tgt: Target>(pub u8, pub TensorSpec<Tgt>, OpaqueSymbol);
+pub struct Param<Tgt: Target>(pub u8, pub TensorSpec<Tgt>, pub(crate) OpaqueSymbol);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Tensor<Tgt: Target>(pub TensorSpec<Tgt>, OpaqueSymbol);

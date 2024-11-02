@@ -18,6 +18,7 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
+use crate::scheduling_sugar::SchedulingSugar;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Kernel, MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
@@ -136,205 +137,289 @@ impl<Tgt: Target> Action<Tgt> {
         let operands = logical_spec.parameters();
 
         match self {
-            Action::TileOut(..) | Action::Split { .. } => {
-                // TODO: Refactor this huge case body into flattened cases for TileOut and Split.
-                let (tiles, parallel) = {
-                    match self {
-                        Action::TileOut(tileout) => {
-                            let current_output = &operands[logical_spec.output_idx()];
-                            let current_out_shape = current_output.shape();
-                            let rank = current_out_shape.len();
+            Action::TileOut(tileout) => {
+                let current_output = &operands[logical_spec.output_idx()];
+                let current_out_shape = current_output.shape();
+                let rank = current_out_shape.len();
 
-                            let output_shape = tileout.tiled_output_shape(current_out_shape);
-                            let parallel = tileout.parallel();
+                let output_shape = tileout.tiled_output_shape(current_out_shape);
+                let parallel = tileout.parallel();
 
-                            // TODO: Move assertions into solver() as well.
-                            if parallel && logical_spec.serial_only() {
-                                return Err(ApplyError::NotApplicable(
-                                    NotApplicableReason::ParallelPrevented,
-                                ));
-                            }
-                            assert_eq!(
-                                output_shape.len(),
-                                current_out_shape.len(),
-                                "Expected {} dimensions; got {}",
-                                current_out_shape.len(),
-                                output_shape.len()
-                            );
-                            check_tile_out_applies(
-                                current_out_shape,
-                                &output_shape,
-                                current_output,
-                                parallel,
-                            )?;
+                // TODO: Move assertions into solver() as well.
+                if parallel && logical_spec.serial_only() {
+                    return Err(ApplyError::NotApplicable(
+                        NotApplicableReason::ParallelPrevented,
+                    ));
+                }
+                assert_eq!(
+                    output_shape.len(),
+                    current_out_shape.len(),
+                    "Expected {} dimensions; got {}",
+                    current_out_shape.len(),
+                    output_shape.len()
+                );
+                check_tile_out_applies(current_out_shape, &output_shape, current_output, parallel)?;
 
-                            // Tiling happens in three steps:
-                            // 1. Construct the simple tile corresponding to the new output shape.
-                            let out_idx: u8 = logical_spec.output_idx().try_into().unwrap();
-                            let smaller_output_tiling =
-                                Tiling::new_simple(output_shape.either_into());
-                            let smaller_output = LoopTile {
-                                axes: (0..u8::try_from(rank).unwrap()).collect(),
-                                tile: smaller_output_tiling
-                                    .apply(Param::new(out_idx, current_output.clone()))
-                                    .map_err(tile_to_apply_err)?,
-                            };
-
-                            // 2. Construct tilings which respect the data deps. of the new output tile.
-                            let updated_input_tilings =
-                                logical_spec.input_tilings_for_tile_out(&smaller_output_tiling);
-
-                            // 3. Reify the tilings into Tiles we'll store with this action. Tiles
-                            //    objects track the index and shape of the Impl parameter being
-                            //    tiled.
-                            let mut next_fresh_loop_dim = u8::try_from(rank).unwrap();
-                            let mut new_tiles: Vec<LoopTile<Tgt>> = vec![];
-                            for (
-                                operand_idx,
-                                (original_input, (updated_input_tiling, updated_input_axes)),
-                            ) in operands.iter().zip(updated_input_tilings.0).enumerate()
-                            {
-                                if operand_idx == logical_spec.output_idx() {
-                                    continue;
-                                }
-
-                                let tiling_shape = updated_input_tiling.shape();
-                                if !original_input.is_valid_tile_shape(tiling_shape, parallel) {
-                                    return Err(ApplyError::NotApplicable(
-                                        NotApplicableReason::TileShapeInvalid,
-                                    ));
-                                }
-
-                                // Compute loop dimension names for the tile. Any axis which is None
-                                // is given a fresh integer identifier, otherwise is is given the
-                                // identifier of the corresponding dimension in the output.
-                                let axes = updated_input_axes
-                                    .iter()
-                                    .map(|b| {
-                                        match *b {
-                                            Some(output_dim) => {
-                                                // It's correct to use the output dim. here because
-                                                // we earlier initialized the output axes to be
-                                                // simply their indices.
-                                                output_dim
-                                            }
-                                            None => {
-                                                let fresh_dim = next_fresh_loop_dim;
-                                                next_fresh_loop_dim += 1;
-                                                fresh_dim
-                                            }
-                                        }
-                                    })
-                                    .collect();
-
-                                if original_input.shape() != &tiling_shape[..] {
-                                    new_tiles.push(LoopTile {
-                                        axes,
-                                        tile: updated_input_tiling
-                                            .apply(Param::new(
-                                                operand_idx.try_into().unwrap(),
-                                                original_input.clone(),
-                                            ))
-                                            .map_err(tile_to_apply_err)?,
-                                    });
-                                }
-                            }
-                            new_tiles.push(smaller_output);
-                            (new_tiles, parallel)
-                        }
-                        Action::Split { k } => {
-                            match logical_spec {
-                                LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
-                                    match typ {
-                                        PrimitiveSpecType::Matmul { accum: _ } => {
-                                            let [lhs, rhs] = &operands[..2] else {
-                                                panic!();
-                                            };
-                                            assert!(
-                                                *k < lhs.shape()[1],
-                                                "Cannot split to k={k} when inner dim. is not larger (it is {})",
-                                                lhs.shape()[1]
-                                            );
-
-                                            if lhs.shape()[1].get() % k.get() != 0 {
-                                                return Err(ApplyError::NotApplicable(
-                                                    NotApplicableReason::Other(Some("Original size is not a multiple of split size")),
-                                                ));
-                                            }
-
-                                            let tiles = vec![
-                                                LoopTile {
-                                                    axes: vec![0, 1],
-                                                    tile: Tile::new(
-                                                        vec![lhs.shape()[0], *k],
-                                                        vec![lhs.shape()[0], *k],
-                                                        Param::new(0, lhs.clone()),
-                                                    )
-                                                    .map_err(tile_to_apply_err)?,
-                                                },
-                                                LoopTile {
-                                                    axes: vec![1, 2],
-                                                    tile: Tile::new(
-                                                        vec![*k, rhs.shape()[1]],
-                                                        vec![*k, rhs.shape()[1]],
-                                                        Param::new(1, rhs.clone()),
-                                                    )
-                                                    .map_err(tile_to_apply_err)?,
-                                                },
-                                            ];
-                                            (tiles, false)
-                                        }
-                                        _ => unimplemented!("Split not implemented for {:?}", typ),
-                                    }
-                                }
-                                LogicalSpec::Compose { .. } => todo!(),
-                            }
-                        }
-                        _ => unreachable!(),
-                    }
+                // Tiling happens in three steps:
+                // 1. Construct the simple tile corresponding to the new output shape.
+                let out_idx: u8 = logical_spec.output_idx().try_into().unwrap();
+                let smaller_output_tiling = Tiling::new_simple(output_shape.either_into());
+                let smaller_output = LoopTile {
+                    axes: (0..u8::try_from(rank).unwrap()).collect(),
+                    tile: smaller_output_tiling
+                        .apply(Param::new(out_idx, current_output.clone()))
+                        .map_err(tile_to_apply_err)?,
                 };
 
-                let mut new_operands = operands;
-                for loop_tile in &tiles {
-                    let ref_op = &mut new_operands[usize::from(loop_tile.tile.view.0)];
-                    let aligned =
-                        aligned_approx(loop_tile.tile.shape(), loop_tile.tile.step_sizes(), ref_op)
-                            .unwrap();
-                    ref_op.shrink(loop_tile.tile.shape(), aligned).unwrap();
-                }
+                // 2. Construct tilings which respect the data deps. of the new output tile.
+                let updated_input_tilings =
+                    logical_spec.input_tilings_for_tile_out(&smaller_output_tiling);
 
-                let mut inner_spec = logical_spec.clone();
-                inner_spec.replace_io(&new_operands);
-                inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
-                inner_spec.canonicalize().unwrap();
-                match self {
-                    Action::TileOut(..) => {}
-                    Action::Split { .. } => {
-                        if !matches!(
-                            &inner_spec,
-                            LogicalSpec::Primitive(
-                                PrimitiveBasics {
-                                    typ: PrimitiveSpecType::Matmul { accum: true },
-                                    ..
-                                },
-                                ..
-                            )
-                        ) {
+                // 3. Reify the tilings into Tiles we'll store with this action. Tiles objects track
+                // the index and shape of the Impl parameter being tiled.
+                let mut next_fresh_loop_dim = u8::try_from(rank).unwrap();
+                let mut new_tiles: Vec<LoopTile<Tgt>> = vec![];
+                for (operand_idx, (original_input, (updated_input_tiling, updated_input_axes))) in
+                    operands.iter().zip(updated_input_tilings.0).enumerate()
+                {
+                    if operand_idx == logical_spec.output_idx() {
+                        continue;
+                    }
+
+                    let tiling_shape = updated_input_tiling.shape();
+                    if !original_input.is_valid_tile_shape(tiling_shape, parallel) {
+                        return Err(ApplyError::NotApplicable(
+                            NotApplicableReason::TileShapeInvalid,
+                        ));
+                    }
+
+                    // Compute loop dimension names for the tile. Any axis which is None
+                    // is given a fresh integer identifier, otherwise is is given the
+                    // identifier of the corresponding dimension in the output.
+                    let axes = updated_input_axes
+                        .iter()
+                        .map(|b| {
+                            match *b {
+                                Some(output_dim) => {
+                                    // It's correct to use the output dim. here because
+                                    // we earlier initialized the output axes to be
+                                    // simply their indices.
+                                    output_dim
+                                }
+                                None => {
+                                    let fresh_dim = next_fresh_loop_dim;
+                                    next_fresh_loop_dim += 1;
+                                    fresh_dim
+                                }
+                            }
+                        })
+                        .collect();
+
+                    if original_input.shape() != &tiling_shape[..] {
+                        new_tiles.push(LoopTile {
+                            axes,
+                            tile: updated_input_tiling
+                                .apply(Param::new(
+                                    operand_idx.try_into().unwrap(),
+                                    original_input.clone(),
+                                ))
+                                .map_err(tile_to_apply_err)?,
+                        });
+                    }
+                }
+                new_tiles.push(smaller_output);
+
+                self.loop_spec_with_shrunken_tiles(
+                    operands,
+                    new_tiles,
+                    logical_spec,
+                    parallel,
+                    spec,
+                )
+            }
+            Action::Split { k } => match logical_spec {
+                LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
+                    match typ {
+                        PrimitiveSpecType::Matmul { accum: false } => {
                             // TODO: Should return an error instead?
                             panic!("Can only split an accumulating Matmul");
-                        };
-                    }
-                    _ => unreachable!(),
-                };
-                let body = Box::new(SpecApp::default_app(Spec(inner_spec, spec.1.clone())).into());
+                        }
+                        PrimitiveSpecType::Matmul { accum: true } => {
+                            let [lhs, rhs] = &operands[..2] else {
+                                panic!();
+                            };
+                            assert!(
+                                *k < lhs.shape()[1],
+                                "Cannot split to k={k} when inner dim. is not larger (it is {})",
+                                lhs.shape()[1]
+                            );
 
-                Ok(ImplNode::Loop(Loop {
-                    tiles,
-                    body,
-                    parallel,
-                    spec: Some(spec.clone()),
-                }))
-            }
+                            if lhs.shape()[1].get() % k.get() != 0 {
+                                return Err(ApplyError::NotApplicable(NotApplicableReason::Other(
+                                    Some("Original size is not a multiple of split size"),
+                                )));
+                            }
+
+                            let tiles = vec![
+                                LoopTile {
+                                    axes: vec![0, 1],
+                                    tile: Tile::new(
+                                        vec![lhs.shape()[0], *k],
+                                        vec![lhs.shape()[0], *k],
+                                        Param::new(0, lhs.clone()),
+                                    )
+                                    .map_err(tile_to_apply_err)?,
+                                },
+                                LoopTile {
+                                    axes: vec![1, 2],
+                                    tile: Tile::new(
+                                        vec![*k, rhs.shape()[1]],
+                                        vec![*k, rhs.shape()[1]],
+                                        Param::new(1, rhs.clone()),
+                                    )
+                                    .map_err(tile_to_apply_err)?,
+                                },
+                            ];
+
+                            self.loop_spec_with_shrunken_tiles(
+                                operands,
+                                tiles,
+                                logical_spec,
+                                false,
+                                spec,
+                            )
+                        }
+                        _ => unimplemented!("Split not implemented for {:?}", typ),
+                    }
+                }
+                LogicalSpec::Compose {
+                    components,
+                    operand_auxes,
+                    serial_only,
+                } if matches!(
+                    components[0],
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Matmul { accum: true },
+                        ..
+                    }
+                ) =>
+                {
+                    let [old_m, old_k, old_n] = &components[0].spec_shape[..] else {
+                        todo!();
+                    };
+
+                    // Build a Loop out of a Compose with the head component removed.
+                    // TODO: Can we use a helper method to avoid dupe'ing with Bufferize?
+                    let compose_tail = Spec(
+                        if components.len() == 2 {
+                            LogicalSpec::Primitive(
+                                components[1].clone(),
+                                operand_auxes[1..].to_vec(),
+                                *serial_only,
+                            )
+                        } else {
+                            debug_assert!(components.len() > 2);
+                            LogicalSpec::Compose {
+                                components: components[1..].to_vec(),
+                                operand_auxes: operand_auxes[1..].to_vec(),
+                                serial_only: *serial_only,
+                            }
+                        },
+                        spec.1.clone(),
+                    );
+                    debug_assert!(compose_tail.is_canonical());
+
+                    // Match the tail Compose's Loop, which we're about to mutate.
+                    let ImplNode::Loop(Loop {
+                        mut tiles,
+                        mut body,
+                        parallel: _,
+                        spec: _,
+                    }) = compose_tail.tile_out(&[old_m.get(), k.get()])
+                    else {
+                        unreachable!();
+                    };
+                    let ImplNode::SpecApp(SpecApp(app_spec, app_args)) = body.as_mut() else {
+                        unreachable!();
+                    };
+
+                    // Remove the LoopTile for the output
+                    let tail_output_tile = tiles.remove(
+                        tiles
+                            .iter()
+                            .position(|tile| {
+                                usize::from(tile.tile.view.0) == app_spec.0.output_idx()
+                            })
+                            .expect("tail Compose should have a loop over output"),
+                    );
+
+                    // Add a LoopTile for the new rhs argument on the head Compose.
+                    let new_head_rhs_looptile = LoopTile {
+                        axes: vec![tail_output_tile.axes[1], 255], // TODO: Replace 255
+                        tile: Tiling::new_simple(vec![*k, *old_n])
+                            .apply(Param::new(
+                                0,
+                                TensorSpec::new_noncanon_with_aux(
+                                    vec![*old_k, *old_n],
+                                    components[0].dtypes[1],
+                                    operand_auxes[0].clone(),
+                                ),
+                            ))
+                            .map_err(tile_to_apply_err)?,
+                    };
+                    tiles.insert(0, new_head_rhs_looptile);
+                    let new_head_rhs_looptile = &tiles[0];
+
+                    // Add an argument for the new head rhs
+                    let mut new_app_args: Vec<Rc<dyn View<Tgt = Tgt>>> =
+                        Vec::with_capacity(app_args.len() + 1);
+                    debug_assert_ne!(spec.0.output_idx(), 0);
+                    new_app_args.push(Rc::new(Param::new(
+                        0,
+                        new_head_rhs_looptile.tile.spec().clone(),
+                    )));
+                    // Add Params with indices incremented to account for the
+                    // additional argument
+                    for (idx, a) in app_args.iter().enumerate() {
+                        if idx == compose_tail.0.output_idx() {
+                            continue;
+                        }
+                        let Some(Param(param_idx, param_spec, ..)) = a.to_param() else {
+                            unreachable!();
+                        };
+                        new_app_args.push(Rc::new(Param::new(param_idx + 1, param_spec.clone())));
+                    }
+                    // Add an output argument with the Spec's target output
+                    new_app_args.insert(
+                        spec.0.output_idx(),
+                        Rc::new(Param::new(
+                            new_app_args.len().try_into().unwrap(),
+                            spec.0.output().clone(),
+                        )),
+                    );
+                    debug_assert_eq!(new_app_args.len(), spec.0.parameters().len());
+                    *app_args = new_app_args;
+
+                    // TODO: Replace the application Spec with a shrunken target
+                    let new_operands = app_args
+                        .iter()
+                        .map(|a| a.spec().clone())
+                        .collect::<Vec<_>>();
+                    *app_spec = spec.clone();
+                    app_spec.0.replace_io(&new_operands);
+                    debug_assert!(app_spec.is_canonical());
+
+                    // TODO: Rather than returning a new struct, return the original Loop.
+                    debug_assert_eq!(body.parameters().cloned().collect::<Vec<_>>(), new_operands);
+                    Ok(ImplNode::Loop(Loop {
+                        tiles,
+                        body,
+                        parallel: false,
+                        spec: Some(spec.clone()),
+                    }))
+                }
+                LogicalSpec::Compose { .. } => todo!(),
+            },
             Action::Bufferize {
                 index,
                 level,
@@ -728,6 +813,39 @@ impl<Tgt: Target> Action<Tgt> {
                 }))
             }
         }
+    }
+
+    fn loop_spec_with_shrunken_tiles(
+        &self,
+        mut operands: Vec<TensorSpec<Tgt>>,
+        tiles: Vec<LoopTile<Tgt>>,
+        logical_spec: &LogicalSpec<Tgt>,
+        parallel: bool,
+        spec: &Spec<Tgt>,
+    ) -> Result<ImplNode<Tgt>, ApplyError> {
+        // Modify `operands` TensorSpecs' shapes to accord with the tilings.
+        for loop_tile in &tiles {
+            let ref_op = &mut operands[usize::from(loop_tile.tile.view.0)];
+            let aligned =
+                aligned_approx(loop_tile.tile.shape(), loop_tile.tile.step_sizes(), ref_op)
+                    .unwrap();
+            ref_op.shrink(loop_tile.tile.shape(), aligned).unwrap();
+        }
+
+        // Update the Spec with these new operands, as well as its serial_only flag.
+        let mut inner_spec = logical_spec.clone();
+        inner_spec.replace_io(&operands);
+        inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
+        inner_spec.canonicalize().unwrap();
+
+        // Return a Loop containing the Spec as its body.
+        let body = Box::new(SpecApp::default_app(Spec(inner_spec, spec.1.clone())).into());
+        Ok(ImplNode::Loop(Loop {
+            tiles,
+            body,
+            parallel,
+            spec: Some(spec.clone()),
+        }))
     }
 
     /// Returns a value which produces sub-Spec requests and compute a [Cost].

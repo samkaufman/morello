@@ -49,17 +49,15 @@ fn main() {
     spec.canonicalize().unwrap();
 
     let imp = spec
+        .to_accum()
+        .split(1024)
         .bufferize(0, GL, row_major(2), None)
-        .subschedule(&[0], |s| {
+        .subschedule(&[1, 0], |s| {
             s.to_accum()
                 .subschedule(&[0], schedule_zero)
                 .subschedule(&[1], schedule_matmulaccum)
         })
-        .subschedule(&[1], |s| {
-            s.to_accum()
-                .subschedule(&[0], schedule_zero)
-                .subschedule(&[1], schedule_matmulaccum)
-        });
+        .subschedule(&[1, 1], schedule_matmulaccum);
     imp.emit(
         false,
         Some(ImplPrintStyle::Compact),
@@ -93,7 +91,7 @@ fn main() {
     let throughput =
         result.inner_loop_iterations as f64 / result.best_inner_loop_runtime().as_secs_f64();
     println!("\n// cost: {}", Cost::from_impl(&imp).main);
-    println!("// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)",);
+    println!("// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)");
 }
 
 fn schedule_matmulaccum(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
