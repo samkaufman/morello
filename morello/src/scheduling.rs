@@ -353,6 +353,11 @@ impl<Tgt: Target> Action<Tgt> {
                             .expect("tail Compose should have a loop over output"),
                     );
 
+                    // Increment the Param indices for the LoopTiles in `tiles`.
+                    for tile in &mut tiles {
+                        tile.tile.view.0 += 1;
+                    }
+
                     // Add a LoopTile for the new rhs argument on the head Compose.
                     let new_head_rhs_looptile = LoopTile {
                         axes: vec![tail_output_tile.axes[1], 255], // TODO: Replace 255
@@ -400,7 +405,7 @@ impl<Tgt: Target> Action<Tgt> {
                     debug_assert_eq!(new_app_args.len(), spec.0.parameters().len());
                     *app_args = new_app_args;
 
-                    // TODO: Replace the application Spec with a shrunken target
+                    // Replace the application Spec with a shrunken target
                     let new_operands = app_args
                         .iter()
                         .map(|a| a.spec().clone())

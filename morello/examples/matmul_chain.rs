@@ -52,6 +52,7 @@ fn main() {
         .to_accum()
         .split(1024)
         .bufferize(0, GL, row_major(2), None)
+        .subschedule(&[0], schedule_zero)
         .subschedule(&[1, 0], |s| {
             s.to_accum()
                 .subschedule(&[0], schedule_zero)

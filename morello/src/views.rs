@@ -218,6 +218,14 @@ impl<Tgt: Target> View for Param<Tgt> {
                 args.len()
             );
         };
+        // TODO: Enable this runtime check that the given parameter Specs are right.
+        // debug_assert_eq!(
+        //     self.spec(),
+        //     a.spec(),
+        //     "Param binding given {} but expected {}",
+        //     a.spec(),
+        //     self.spec(),
+        // );
         if env.insert(self.clone(), *a).is_some() {
             panic!("Identifier was already in environment")
         }
