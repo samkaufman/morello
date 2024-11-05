@@ -1261,8 +1261,8 @@ mod tests {
         layout::{col_major, row_major, Layout},
         lspec,
         scheduling::{ApplyError, NotApplicableReason},
-        spec::Spec,
-        target::X86Target,
+        spec::{arb_canonical_spec, Spec},
+        target::{Target, X86Target},
     };
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
@@ -1330,6 +1330,45 @@ mod tests {
                     .collect(),
             );
         }
+
+        #[test]
+        fn test_actions_include_move_actions_for_all_parameters(
+            spec in arb_canonical_spec::<X86Target>(None, None),
+            tiling_depth in Just(None).prop_union(Just(Some(nz!(1u32)))).or(Just(Some(nz!(2u32)))),
+        ) {
+            let mut seen_source_idxs = HashSet::new();
+            for action in X86Target::actions(&spec.0, tiling_depth) {
+                if let Action::Move { source_idx, .. } = action {
+                    seen_source_idxs.insert(source_idx);
+                }
+            }
+
+            let moveable_parameter_idxs = spec
+                .0
+                .parameters()
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, parameter)| {
+                    let dest_layouts = X86Target::move_destination_layouts(
+                        parameter.shape(), parameter.dtype()
+                    );
+                    if dest_layouts.is_empty() {
+                        None
+                    } else {
+                        Some(u8::try_from(idx).unwrap())
+                    }
+                })
+                .collect::<HashSet<_>>();
+            prop_assert_eq!(
+                &seen_source_idxs,
+                &moveable_parameter_idxs,
+                "Only saw {:?} but expected {:?} for {}",
+                seen_source_idxs,
+                moveable_parameter_idxs,
+                spec
+            );
+        }
+
     }
 
     prop_compose! {

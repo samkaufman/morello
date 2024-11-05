@@ -1489,16 +1489,13 @@ pub fn arb_canonical_logical_spec<Tgt: Target>(
     )
 }
 
-pub fn dim_range(
+pub(crate) fn dim_range(
     dim_size: DimSize,
     include_end: bool,
     depth: Option<NonZeroU32>,
 ) -> impl Iterator<Item = DimSize> {
     let start = depth
-        .map(|d| {
-            assert!(dim_size.is_power_of_two());
-            dim_size.trailing_zeros().saturating_sub(d.get())
-        })
+        .map(|d| dim_size.trailing_zeros().saturating_sub(d.get()))
         .unwrap_or(0);
     let it = (start..)
         .map(|power| 2u32.pow(power))
@@ -2133,6 +2130,27 @@ mod tests {
             let pipeline_parameters = pipeline.parameters().cloned().collect::<Vec<_>>();
             prop_assert_eq!(spec_parameters, pipeline_parameters);
         }
+    }
+
+    #[test]
+    fn test_dim_range_with_odd_max() {
+        assert_eq!(
+            dim_range(nz!(3u32), false, None).collect::<Vec<_>>(),
+            vec![nz!(1u32), nz!(2u32)]
+        );
+        assert_eq!(
+            dim_range(nz!(3u32), true, None).collect::<Vec<_>>(),
+            vec![nz!(1u32), nz!(2u32), nz!(3u32)]
+        );
+
+        assert_eq!(
+            dim_range(nz!(7u32), false, None).collect::<Vec<_>>(),
+            vec![nz!(1u32), nz!(2u32), nz!(4u32)]
+        );
+        assert_eq!(
+            dim_range(nz!(7u32), true, None).collect::<Vec<_>>(),
+            vec![nz!(1u32), nz!(2u32), nz!(4u32), nz!(7u32)]
+        );
     }
 
     fn shared_test_no_action_panics<Tgt: Target>(spec: Spec<Tgt>) {
