@@ -299,6 +299,56 @@ impl PrimitiveBasics {
         }
     }
 
+    pub fn parameter_shape(&self, idx: usize) -> Shape {
+        match self.typ {
+            PrimitiveSpecType::Matmul { .. } => match idx {
+                0 => vec![self.spec_shape[0], self.spec_shape[1]],
+                1 => vec![self.spec_shape[1], self.spec_shape[2]],
+                2 => vec![self.spec_shape[0], self.spec_shape[2]],
+                _ => panic!("Matmul has only 3 parameters"),
+            },
+            PrimitiveSpecType::Conv { .. } => {
+                let [b, f, c, h, w, fh, fw] = self.spec_shape[..] else {
+                    panic!("Conv must have rank 7")
+                };
+                debug_assert!(
+                    h >= fh && w >= fw,
+                    "Conv spatial dims. {}x{} were larger than filter {}x{}",
+                    h,
+                    w,
+                    fh,
+                    fw
+                );
+                match idx {
+                    0 => vec![b, c, h, w],
+                    1 => vec![f, c, fh, fw],
+                    2 => conv_infer_output_shape(&[b, c, h, w], &[f, c, fh, fw]),
+                    _ => panic!("Conv has only 3 parameters"),
+                }
+            }
+            PrimitiveSpecType::Move => match idx {
+                0 | 1 => self.spec_shape.clone(),
+                _ => panic!("Move has only 2 parameters"),
+            },
+            PrimitiveSpecType::Zero => match idx {
+                0 => self.spec_shape.clone(),
+                _ => panic!("Zero has only 1 parameter"),
+            },
+        }
+    }
+
+    pub fn input_shape(&self, idx: usize) -> Shape {
+        if idx < self.typ.output_idx() {
+            self.parameter_shape(idx)
+        } else {
+            self.parameter_shape(idx + 1)
+        }
+    }
+
+    pub fn output_shape(&self) -> Shape {
+        self.parameter_shape(self.typ.output_idx())
+    }
+
     pub fn parameter_dtypes(&self) -> Vec<Dtype> {
         self.dtypes.clone()
     }
@@ -704,10 +754,21 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
+    pub fn output_shape(&self) -> Shape {
+        self.parameter_shape(self.output_idx())
+    }
+
     pub fn parameter_shapes(&self) -> Vec<Shape> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => basics.parameter_shapes(),
             LogicalSpec::Compose { components, .. } => compose_parameter_shapes(components),
+        }
+    }
+
+    pub fn parameter_shape(&self, index: usize) -> Shape {
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => basics.parameter_shape(index),
+            LogicalSpec::Compose { components, .. } => compose_parameter_shape(components, index),
         }
     }
 
@@ -718,7 +779,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     pub fn output(&self) -> TensorSpec<Tgt> {
-        self.parameters()[self.output_idx()].clone()
+        self.parameters().swap_remove(self.output_idx())
     }
 
     pub fn output_idx(&self) -> usize {
@@ -1539,10 +1600,26 @@ fn compose_parameter_shapes(components: &[PrimitiveBasics]) -> Vec<Shape> {
     result.reserve_exact(compose_parameter_count(components));
     compose_parameter_visit(components, |component_idx, parameter_idx| {
         let component = &components[component_idx];
-        // TODO: Calling parameter_shapes repeatedly is probably slow. Write a per-idx call.
-        result.push(component.parameter_shapes().swap_remove(parameter_idx));
+        result.push(component.parameter_shape(parameter_idx));
     });
     result
+}
+
+fn compose_parameter_shape(components: &[PrimitiveBasics], mut index: usize) -> Shape {
+    for component in &components[..components.len() - 1] {
+        let exposed_input_count = component.typ.input_count() - 1;
+        if index < exposed_input_count {
+            return component.input_shape(index + 1);
+        }
+        index -= exposed_input_count;
+    }
+    let last_component = &components[components.len() - 1];
+    let last_input_count = last_component.typ.input_count();
+    if index < last_input_count {
+        return last_component.input_shape(index);
+    }
+    debug_assert_eq!(index, last_input_count);
+    components[0].output_shape()
 }
 
 fn compose_parameter_visit(components: &[PrimitiveBasics], mut visitor: impl FnMut(usize, usize)) {
@@ -1871,6 +1948,17 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn test_parameter_shapes_and_every_parameter_shape_matches(
+            spec in any::<LogicalSpec<X86Target>>()
+        ) {
+            let shapes_left = spec.parameter_shapes();
+            let shapes_right = (0..spec.operand_count())
+                .map(|i| spec.parameter_shape(i))
+                .collect::<Vec<_>>();
+            prop_assert_eq!(shapes_left, shapes_right);
+        }
+
         #[test]
         fn test_no_action_panics_x86(spec in any::<Spec<X86Target>>()) {
             shared_test_no_action_panics(spec);

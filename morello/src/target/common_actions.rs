@@ -27,7 +27,7 @@ pub fn tile_out_actions<Tgt: Target>(
     depth: Option<NonZeroU32>,
 ) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
     let serial_only = spec.serial_only();
-    let output_shape = spec.parameter_shapes().swap_remove(spec.output_idx());
+    let output_shape = spec.output_shape();
     let multi_dim = MULTI_DIM_TILING || !serial_only;
     if multi_dim {
         // TODO: Simplfy following, knowing multi_dim is true.
@@ -127,7 +127,7 @@ pub fn bufferize_actions<Tgt: Target>(
     for index in 0..(components.len() - 1) {
         let comp = &components[index + 1];
         let comp_out_idx = comp.typ.output_idx();
-        let intermediate_shape = comp.parameter_shapes().swap_remove(comp_out_idx);
+        let intermediate_shape = comp.output_shape();
         let intermediate_dtype = comp.dtypes[comp_out_idx];
 
         for level in Tgt::levels() {

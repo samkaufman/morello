@@ -863,7 +863,7 @@ impl<Tgt: Target> Action<Tgt> {
     pub fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         match (self, &spec.0) {
             (Action::TileOut(tileout), LogicalSpec::Primitive(basics, ..)) => {
-                let output_tensor = spec.0.parameters().swap_remove(spec.0.output_idx());
+                let output_tensor = spec.0.output();
                 let untiled_output_shape = output_tensor.shape();
                 let tile_shape = tileout.tiled_output_shape(untiled_output_shape);
                 let parallel = tileout.parallel();
