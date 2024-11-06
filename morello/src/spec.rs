@@ -100,6 +100,8 @@ pub struct ShapeBimap(pub bool);
 pub enum CanonicalizeError {
     #[error("Failed to canonicalize the TensorSpecAux: {0}")]
     TensorSpecAuxCanonicalizeError(tensorspec::CanonicalizeError),
+    #[error("Non-head component of the Compose causes side effects")]
+    SideEffectingComponent,
 }
 
 #[cfg(test)]
@@ -351,6 +353,13 @@ impl PrimitiveBasics {
 
     pub fn parameter_dtypes(&self) -> Vec<Dtype> {
         self.dtypes.clone()
+    }
+
+    pub fn causes_side_effects(&self) -> bool {
+        match self.typ {
+            PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => accum,
+            PrimitiveSpecType::Move | PrimitiveSpecType::Zero => false,
+        }
     }
 
     pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> TilingInference {
@@ -789,6 +798,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
+    pub fn causes_side_effects(&self) -> bool {
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => basics.causes_side_effects(),
+            LogicalSpec::Compose { components, .. } => components[0].causes_side_effects(),
+        }
+    }
+
     pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
         match self {
             LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
@@ -831,9 +847,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             },
             LogicalSpec::Compose { .. } => {
                 let shapes = self.parameter_shapes();
-                let LogicalSpec::Compose { operand_auxes, .. } = self else {
+                let LogicalSpec::Compose {
+                    components,
+                    operand_auxes,
+                    ..
+                } = self
+                else {
                     unreachable!();
                 };
+                for tail_component in &components[1..] {
+                    if tail_component.causes_side_effects() {
+                        return Err(CanonicalizeError::SideEffectingComponent);
+                    }
+                }
                 for (shp, aux) in shapes.into_iter().zip(operand_auxes) {
                     aux.canonicalize(&shp)
                         .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
@@ -1947,6 +1973,26 @@ mod tests {
         assert_eq!(spec.input_tilings_for_tile_out(&output_tiling), expected);
     }
 
+    #[test]
+    fn test_compose_canonicalization_accepts_accmulating_head() {
+        let mut spec = compose_logicalspec_test_data();
+        let LogicalSpec::Compose { components, .. } = &mut spec else {
+            unreachable!();
+        };
+        components[0].typ = PrimitiveSpecType::Matmul { accum: true };
+        assert!(spec.canonicalize().is_ok());
+    }
+
+    #[test]
+    fn test_compose_canonicalization_rejects_accmulating_tail_components() {
+        let mut spec = compose_logicalspec_test_data();
+        let LogicalSpec::Compose { components, .. } = &mut spec else {
+            unreachable!();
+        };
+        components[1].typ = PrimitiveSpecType::Matmul { accum: true };
+        assert!(spec.canonicalize().is_err());
+    }
+
     proptest! {
         #[test]
         fn test_parameter_shapes_and_every_parameter_shape_matches(
@@ -1960,12 +2006,12 @@ mod tests {
         }
 
         #[test]
-        fn test_no_action_panics_x86(spec in any::<Spec<X86Target>>()) {
+        fn test_no_action_panics_x86(spec in arb_canonical_spec::<X86Target>(None, None)) {
             shared_test_no_action_panics(spec);
         }
 
         #[test]
-        fn test_no_action_panics_arm(spec in any::<Spec<ArmTarget>>()) {
+        fn test_no_action_panics_arm(spec in arb_canonical_spec::<ArmTarget>(None, None)) {
             shared_test_no_action_panics(spec);
         }
 
@@ -1995,19 +2041,20 @@ mod tests {
             logical_spec in any::<LogicalSpec<X86Target>>()
         ) {
             let mut canonicalized_logical_spec = logical_spec.clone();
-            canonicalized_logical_spec.canonicalize().unwrap();
-            if logical_spec == canonicalized_logical_spec {
-                prop_assert!(
-                    logical_spec.is_canonical(),
-                    "LogicalSpec::is_canonical was false, but canonicalizing {} was a no-op",
-                    logical_spec
-                );
-            } else {
-                prop_assert!(
-                    !logical_spec.is_canonical(),
-                    "LogicalSpec::is_canonical was true, but {} was canonicalized to {}",
-                    logical_spec, canonicalized_logical_spec
-                );
+            if canonicalized_logical_spec.canonicalize().is_ok() {
+                if logical_spec == canonicalized_logical_spec {
+                    prop_assert!(
+                        logical_spec.is_canonical(),
+                        "LogicalSpec::is_canonical was false, but canonicalizing {} was a no-op",
+                        logical_spec
+                    );
+                } else {
+                    prop_assert!(
+                        !logical_spec.is_canonical(),
+                        "LogicalSpec::is_canonical was true, but {} was canonicalized to {}",
+                        logical_spec, canonicalized_logical_spec
+                    );
+                }
             }
         }
 
@@ -2086,7 +2133,9 @@ mod tests {
         }
 
         #[test]
-        fn test_move_actions_never_returns_within_level_copy(spec in any::<Spec<X86Target>>()) {
+        fn test_move_actions_never_returns_within_level_copy(
+            spec in arb_canonical_spec::<X86Target>(None, None)
+        ) {
             for action in X86Target::actions(&spec.0, None) {
                 if let Ok(ImplNode::MoveLet(move_let)) = action.apply(&spec) {
                     assert_ne!(&move_let.source_spec, move_let.introduced.spec(),
@@ -2107,21 +2156,21 @@ mod tests {
 
         #[test]
         fn test_no_action_produces_same_spec_with_higher_memory_limit_x86(
-            spec in any::<Spec<X86Target>>()
+            spec in arb_canonical_spec::<X86Target>(None, None)
         ) {
             shared_test_no_action_produces_same_spec_with_higher_memory_limit(&spec)
         }
 
         #[test]
         fn test_no_action_produces_same_spec_with_higher_memory_limit_arm(
-            spec in any::<Spec<ArmTarget>>()
+            spec in arb_canonical_spec::<ArmTarget>(None, None)
         ) {
             shared_test_no_action_produces_same_spec_with_higher_memory_limit(&spec)
         }
 
         #[test]
         fn test_actions_produce_canonical_subspecs(
-            spec in any::<Spec<X86Target>>()
+            spec in arb_canonical_spec::<X86Target>(None, None)
         ) {
             X86Target::actions(&spec.0, None).for_each(|action| {
                 let Ok(applied) = action.apply(&spec) else {
@@ -2179,8 +2228,13 @@ mod tests {
         fn test_bufferized_compose_parameters_match_pipeline_parameters(
             tinp in any::<Spec<X86Target>>()
                 .prop_filter("Spec was not Compose", |s| matches!(s.0, LogicalSpec::Compose { .. }))
-                .prop_flat_map(|mut s| {
-                    s.canonicalize().unwrap();
+                .prop_filter_map("Spec was not canonical", |mut s| {
+                    if s.canonicalize().is_err() {
+                        return None;
+                    }
+                    Some(s)
+                })
+                .prop_flat_map(|s| {
                     let LogicalSpec::Compose { components, .. } = &s.0 else {
                         unreachable!();
                     };
