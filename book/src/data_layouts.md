@@ -1,4 +1,4 @@
-# Memory Movement
+# Data Layouts
 
 In Morello, tensors have associated memory layouts which describe how the data of that
 tensor are arranged in the underlying memory buffer. `Layout`s are buffer indexing
