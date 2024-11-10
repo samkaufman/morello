@@ -51,7 +51,7 @@ goal Spec:
 // Matmul(1x32x1)
 ```
 
-<img src="images/step1.svg">
+![](images/step1.svg)
 
 The first step is to rewrite that trivially nested Spec into a partial program
 which initializes an accumulator and contains a new, accumulating Spec.
@@ -60,7 +60,7 @@ output = 0;
 // MatmulAccum(1x32x1)
 ```
 
-<img src="images/step2.svg">
+![](images/step2.svg)
 
 Next, that nested Spec is replaced by a loop followed by a version of the
 original Spec tiled over the *k* dimension:
@@ -71,7 +71,7 @@ for (unsigned i = 0; i < 32; i++) {
 }
 ```
 
-<img src="images/step3.svg">
+![](images/step3.svg)
 
 Finally, that nested Spec is replaced with a C multiply-accumulate statement:
 
