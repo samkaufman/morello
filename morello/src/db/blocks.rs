@@ -1,4 +1,4 @@
-use super::{ActionCostVec, ActionIdx, ActionNormalizedCostVec, GetPreference};
+use super::{ActionCostVec, ActionNormalizedCostVec, ActionNum, GetPreference};
 use crate::{
     common::DimSize,
     cost::{Cost, CostIntensity},
@@ -26,14 +26,14 @@ pub enum DbBlock {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RTreeBlock(RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionIdx)>>);
+pub struct RTreeBlock(RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionNum)>>);
 
 impl DbBlock {
     pub(super) fn get_with_preference<Tgt>(
         &self,
         query: &Spec<Tgt>,
         inner_pt: &[u8],
-    ) -> GetPreference<ActionCostVec, Vec<ActionIdx>>
+    ) -> GetPreference<ActionCostVec, Vec<ActionNum>>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -82,14 +82,14 @@ impl RTreeBlock {
         // TODO: Return (and test!) k > 1. (The above point may be in a space without k dim.)
         let value = self.0.locate_at_point(&arr)?;
         Some(ActionCostVec(match &value {
-            Some((cost_intensity, peaks, depth, action_idx)) => {
+            Some((cost_intensity, peaks, depth, action_num)) => {
                 let cost = Cost {
                     main: cost_intensity.into_main_cost_for_volume(spec_volume),
                     // peaks: MemVec::new_from_binary_scaled(peaks),
                     peaks: peaks.clone(),
                     depth: *depth,
                 };
-                vec![(*action_idx, cost)]
+                vec![(*action_num, cost)]
             }
             None => vec![],
         }))
@@ -115,12 +115,12 @@ impl RTreeBlock {
         let value = normalized_action_costs
             .0
             .first()
-            .map(|(action_idx, normalized_cost)| {
+            .map(|(action_num, normalized_cost)| {
                 (
                     normalized_cost.intensity,
                     normalized_cost.peaks.clone(),
                     normalized_cost.depth,
-                    *action_idx,
+                    *action_num,
                 )
             });
         self.0.merge_insert(&bottom, &top, value);

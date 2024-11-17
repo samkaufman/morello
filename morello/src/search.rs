@@ -10,7 +10,7 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 use crate::cost::Cost;
-use crate::db::{ActionCostVec, ActionIdx, FilesDatabase, GetPreference};
+use crate::db::{ActionCostVec, ActionNum, FilesDatabase, GetPreference};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::scheduling::{ActionSolver, ActionT as _, ApplyError};
@@ -61,7 +61,7 @@ enum WorkingPartialImpl<Tgt: Target> {
         solver: ActionSolver<Tgt>,
         subspecs: Vec<Spec<Tgt>>,
         subspec_costs: Vec<Option<Cost>>, // empty = unsat; all Some = ready-to-complete
-        producing_action_idx: ActionIdx,
+        producing_action_num: ActionNum,
     },
     Unsat,
     Sat,
@@ -73,13 +73,13 @@ enum WorkingPartialImpl<Tgt: Target> {
 pub struct ImplReducer {
     results: ImplReducerResults,
     top_k: usize,
-    preferences: Vec<ActionIdx>,
+    preferences: Vec<ActionNum>,
 }
 
 #[derive(Debug)]
 enum ImplReducerResults {
-    One(Option<(Cost, ActionIdx)>),
-    Many(BTreeSet<(Cost, ActionIdx)>),
+    One(Option<(Cost, ActionNum)>),
+    Many(BTreeSet<(Cost, ActionNum)>),
 }
 
 enum RequestsMapRef<'a, Tgt: Target> {
@@ -93,7 +93,7 @@ pub fn top_down<Tgt>(
     goal: &Spec<Tgt>,
     top_k: usize,
     jobs: Option<NonZeroUsize>,
-) -> (Vec<(ActionIdx, Cost)>, u64, u64)
+) -> (Vec<(ActionNum, Cost)>, u64, u64)
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -536,7 +536,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
     /// Internally, this will expand partial [Impl]s for all actions.
     fn start(
         goal: Spec<Tgt>,
-        preferences: Option<Vec<ActionIdx>>,
+        preferences: Option<Vec<ActionNum>>,
         search: &TopDownSearch<'_>,
     ) -> Self
     where
@@ -552,8 +552,8 @@ impl<Tgt: Target> SpecTask<Tgt> {
         let all_actions = Tgt::actions(&goal.0).collect::<Vec<_>>();
         let initial_skip = search.thread_idx * all_actions.len() / search.thread_count;
 
-        for action_idx in (initial_skip..all_actions.len()).chain(0..initial_skip) {
-            let action = &all_actions[action_idx];
+        for action_num in (initial_skip..all_actions.len()).chain(0..initial_skip) {
+            let action = &all_actions[action_num];
             match action.top_down_solver(&goal) {
                 Ok(solver) => {
                     let partial_impl_subspecs = solver.subspecs().collect::<Vec<_>>();
@@ -566,7 +566,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
                     // caller.
                     if partial_impl_subspecs.is_empty() {
                         reducer.insert(
-                            u16::try_from(action_idx).unwrap(),
+                            u16::try_from(action_num).unwrap(),
                             solver.compute_cost(iter::empty()),
                         );
                     } else {
@@ -574,7 +574,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
                             solver,
                             subspecs: partial_impl_subspecs,
                             subspec_costs: vec![None; subspec_count],
-                            producing_action_idx: action_idx.try_into().unwrap(),
+                            producing_action_num: action_num.try_into().unwrap(),
                         });
                         partial_impls_incomplete += 1;
                     }
@@ -664,7 +664,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
                 solver,
                 subspecs: _,
                 subspec_costs,
-                producing_action_idx,
+                producing_action_num,
             } => {
                 if let Some(cost) = cost {
                     let entry = &mut subspec_costs[child_idx];
@@ -676,7 +676,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
                     if subspec_costs.iter().all(|c| c.is_some()) {
                         finished = true;
                         reducer.insert(
-                            *producing_action_idx,
+                            *producing_action_num,
                             solver.compute_cost(
                                 // TODO: Move rather than clone the child_costs.
                                 &mut subspec_costs.iter().map(|c| c.as_ref().unwrap().clone()),
@@ -716,7 +716,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
 }
 
 impl ImplReducer {
-    pub fn new(top_k: usize, preferences: Vec<ActionIdx>) -> Self {
+    pub fn new(top_k: usize, preferences: Vec<ActionNum>) -> Self {
         debug_assert!(preferences.len() <= top_k);
         debug_assert!(
             preferences.iter().all_unique(),
@@ -734,8 +734,8 @@ impl ImplReducer {
         }
     }
 
-    pub fn insert(&mut self, new_action_idx: ActionIdx, new_cost: Cost) {
-        let new_action = (new_cost, new_action_idx);
+    pub fn insert(&mut self, new_action_num: ActionNum, new_cost: Cost) {
+        let new_action = (new_cost, new_action_num);
         match &mut self.results {
             ImplReducerResults::One(None) => {
                 self.results = ImplReducerResults::One(Some(new_action));
@@ -783,13 +783,13 @@ impl ImplReducer {
         }
     }
 
-    fn finalize(self) -> Vec<(ActionIdx, Cost)> {
+    fn finalize(self) -> Vec<(ActionNum, Cost)> {
         match self.results {
             ImplReducerResults::One(None) => vec![],
-            ImplReducerResults::One(Some((cost, action_idx))) => vec![(action_idx, cost)],
+            ImplReducerResults::One(Some((cost, action_num))) => vec![(action_num, cost)],
             ImplReducerResults::Many(actions) => actions
                 .into_iter()
-                .map(|(cost, action_idx)| (action_idx, cost))
+                .map(|(cost, action_num)| (action_num, cost))
                 .collect(),
         }
     }
@@ -910,22 +910,22 @@ mod tests {
             let preferences = vec![];
             let mut reducer = ImplReducer::new(top_k, preferences);
 
-            for (cost, action_idx) in &action_costs {
-                reducer.insert(*action_idx, cost.clone());
+            for (cost, action_num) in &action_costs {
+                reducer.insert(*action_num, cost.clone());
             }
 
             let finalized = reducer.finalize();
             action_costs.sort();
             assert_eq!(finalized.len(), action_costs.len());
 
-            for (reduced, original) in finalized.into_iter().zip(action_costs.into_iter().map(|(action_idx, cost)| (cost, action_idx))) {
+            for (reduced, original) in finalized.into_iter().zip(action_costs.into_iter().map(|(action_num, cost)| (cost, action_num))) {
                 assert_eq!(reduced, original);
             }
         }
     }
 
-    fn arb_action_indices(top_k: usize) -> impl Strategy<Value = HashSet<ActionIdx>> {
-        prop::collection::hash_set(any::<ActionIdx>(), 1..top_k)
+    fn arb_action_indices(top_k: usize) -> impl Strategy<Value = HashSet<ActionNum>> {
+        prop::collection::hash_set(any::<ActionNum>(), 1..top_k)
     }
 
     fn arb_costs(top_k: usize) -> impl Strategy<Value = Vec<Cost>> {
@@ -938,7 +938,7 @@ mod tests {
             top_k in Just(top_k),
             action_indices in arb_action_indices(top_k),
             costs in arb_costs(top_k)
-        ) -> (usize, Vec<(Cost, ActionIdx)>) {
+        ) -> (usize, Vec<(Cost, ActionNum)>) {
             (top_k, costs.into_iter().zip(action_indices).collect())
         }
     }
@@ -996,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn test_implreducer_sort_by_action_idx() {
+    fn test_implreducer_sort_by_action_num() {
         let top_k = 3;
         let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
@@ -1012,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn test_implreducer_sort_by_cost_then_action_idx() {
+    fn test_implreducer_sort_by_cost_then_action_num() {
         let top_k = 3;
         let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
@@ -1064,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn test_implreducer_preference_replacement_and_sort_by_cost_then_action_idx() {
+    fn test_implreducer_preference_replacement_and_sort_by_cost_then_action_num() {
         let top_k = 3;
         let preferences = vec![3, u16::MAX, 0];
         let mut reducer = ImplReducer::new(top_k, preferences);

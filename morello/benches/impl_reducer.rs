@@ -2,12 +2,12 @@ use iai_callgrind::{library_benchmark, library_benchmark_group, main, LibraryBen
 use std::hint::black_box;
 
 use morello::cost::Cost;
-use morello::db::ActionIdx;
+use morello::db::ActionNum;
 use morello::memorylimits::MemVec;
 use morello::search::ImplReducer;
 
 #[export_name = "morello_bench_impl_reducer::init_reduce_costs"]
-fn init_reduce_costs(k: u16) -> (Vec<(ActionIdx, Cost)>, ImplReducer) {
+fn init_reduce_costs(k: u16) -> (Vec<(ActionNum, Cost)>, ImplReducer) {
     let reducer = ImplReducer::new(usize::from(k), vec![]);
     // Generate some "random" entries to reduce.
     let entries = (0..k + 10000)
@@ -34,8 +34,8 @@ fn init_reduce_costs(k: u16) -> (Vec<(ActionIdx, Cost)>, ImplReducer) {
 #[benches::multiple(1, 2, 8, 100)]
 fn reduce_costs(k: u16) {
     let (entries, mut reducer) = black_box(init_reduce_costs(black_box(k)));
-    for (action_idx, cost) in entries {
-        reducer.insert(black_box(action_idx), black_box(cost));
+    for (action_num, cost) in entries {
+        reducer.insert(black_box(action_num), black_box(cost));
     }
 }
 

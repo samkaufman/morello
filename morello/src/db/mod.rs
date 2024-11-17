@@ -43,7 +43,7 @@ type DbKey = (TableKey, Vec<BimapInt>); // TODO: Rename to BlockKey for consiste
 type TableKey = (SpecKey, Vec<(Layout,)>);
 type SuperBlockKey = DbKey;
 type SuperBlockContents = HashMap<Vec<BimapInt>, DbBlock>;
-pub type ActionIdx = u16;
+pub type ActionNum = u16;
 
 /// The number of shards/locks per thread.
 const THREAD_SHARDS: usize = 2;
@@ -124,10 +124,10 @@ enum DirPathHandle {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActionCostVec(pub Vec<(ActionIdx, Cost)>);
+pub struct ActionCostVec(pub Vec<(ActionNum, Cost)>);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ActionNormalizedCostVec(pub Vec<(ActionIdx, NormalizedCost)>);
+pub(crate) struct ActionNormalizedCostVec(pub Vec<(ActionNum, NormalizedCost)>);
 
 pub enum GetPreference<T, V> {
     Hit(T),
@@ -223,8 +223,8 @@ impl FilesDatabase {
             root_results
                 .as_ref()
                 .iter()
-                .map(|(action_idx, _cost)| {
-                    let root = actions[usize::from(*action_idx)].apply(query).unwrap();
+                .map(|(action_num, _cost)| {
+                    let root = actions[usize::from(*action_num)].apply(query).unwrap();
                     let children = root.children();
                     let new_children = children
                         .iter()
@@ -239,7 +239,7 @@ impl FilesDatabase {
     pub fn get_with_preference<Tgt>(
         &self,
         query: &Spec<Tgt>,
-    ) -> GetPreference<ActionCostVec, Vec<ActionIdx>>
+    ) -> GetPreference<ActionCostVec, Vec<ActionNum>>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -310,7 +310,7 @@ impl FilesDatabase {
         }
     }
 
-    pub fn put<Tgt>(&self, mut spec: Spec<Tgt>, decisions: Vec<(ActionIdx, Cost)>)
+    pub fn put<Tgt>(&self, mut spec: Spec<Tgt>, decisions: Vec<(ActionNum, Cost)>)
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -804,15 +804,15 @@ impl DirPathHandle {
 }
 
 impl Deref for ActionCostVec {
-    type Target = Vec<(ActionIdx, Cost)>;
+    type Target = Vec<(ActionNum, Cost)>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl AsRef<Vec<(ActionIdx, Cost)>> for ActionCostVec {
-    fn as_ref(&self) -> &Vec<(ActionIdx, Cost)> {
+impl AsRef<Vec<(ActionNum, Cost)>> for ActionCostVec {
+    fn as_ref(&self) -> &Vec<(ActionNum, Cost)> {
         self.deref()
     }
 }
@@ -823,7 +823,7 @@ impl ActionNormalizedCostVec {
             action_costs
                 .0
                 .into_iter()
-                .map(|(action_idx, cost)| (action_idx, NormalizedCost::new(cost, volume)))
+                .map(|(action_num, cost)| (action_num, NormalizedCost::new(cost, volume)))
                 .collect(),
         )
     }
@@ -1015,7 +1015,7 @@ fn blockify_point(mut pt: Vec<BimapInt>) -> (Vec<BimapInt>, Vec<u8>) {
 fn put_range_to_fill<Tgt, B>(
     bimap: &B,
     spec: &Spec<Tgt>,
-    impls: &Vec<(ActionIdx, Cost)>,
+    impls: &Vec<(ActionNum, Cost)>,
 ) -> (TableKey, (Vec<BimapInt>, Vec<BimapInt>))
 where
     Tgt: Target,
@@ -1226,11 +1226,11 @@ mod tests {
     #[derive(Clone)]
     struct Decision<Tgt: Target> {
         spec: Spec<Tgt>,
-        actions_costs: Vec<(ActionIdx, Cost)>,
+        actions_costs: Vec<(ActionNum, Cost)>,
         children: Vec<Decision<Tgt>>,
     }
 
-    type DecisionNode<Tgt> = (Spec<Tgt>, Vec<(ActionIdx, Cost)>);
+    type DecisionNode<Tgt> = (Spec<Tgt>, Vec<(ActionNum, Cost)>);
 
     impl<Tgt: Target> Decision<Tgt> {
         /// Yield all nested [Spec] and actions-costs, bottom-up.
@@ -1474,14 +1474,14 @@ mod tests {
                 let valid_actions = Tgt::actions(&spec.0)
                     .enumerate()
                     .filter_map(|(i, a)| match a.apply(&spec) {
-                        Ok(applied) => Some((ActionIdx::from(u16::try_from(i).unwrap()), applied)),
+                        Ok(applied) => Some((ActionNum::from(u16::try_from(i).unwrap()), applied)),
                         Err(ApplyError::NotApplicable(_)) => None,
                         Err(ApplyError::SpecNotCanonical) => {
                             unreachable!("Non-canonical Spec should be filtered: {spec}")
                         }
                     })
                     .collect::<Vec<_>>();
-                let action_idx_strategy = if valid_actions.is_empty() {
+                let action_num_strategy = if valid_actions.is_empty() {
                     Just(None).boxed()
                 } else {
                     prop_oneof![
@@ -1490,11 +1490,11 @@ mod tests {
                     ]
                     .boxed()
                 };
-                (Just(spec), action_idx_strategy)
+                (Just(spec), action_num_strategy)
             })
             .prop_map(|(spec, action_opt)| {
-                if let Some((action_idx, imp)) = action_opt {
-                    recursively_decide_with_action(&spec, action_idx, &imp)
+                if let Some((action_num, imp)) = action_opt {
+                    recursively_decide_with_action(&spec, action_num, &imp)
                 } else {
                     Decision {
                         spec,
@@ -1528,7 +1528,7 @@ mod tests {
     /// Will return a [Decision] by choosing the first action for the Spec (if any) and recursively
     /// choosing the first action for all child Specs in the resulting partial Impl.
     fn recursively_decide_actions<Tgt: Target>(spec: &Spec<Tgt>) -> Decision<Tgt> {
-        if let Some((action_idx, partial_impl)) = Tgt::actions(&spec.0)
+        if let Some((action_num, partial_impl)) = Tgt::actions(&spec.0)
             .enumerate()
             .filter_map(|(i, a)| match a.apply(spec) {
                 Ok(imp) => Some((i, imp)),
@@ -1537,7 +1537,7 @@ mod tests {
             })
             .next()
         {
-            recursively_decide_with_action(spec, action_idx.try_into().unwrap(), &partial_impl)
+            recursively_decide_with_action(spec, action_num.try_into().unwrap(), &partial_impl)
         } else {
             Decision {
                 spec: spec.clone(),
@@ -1549,7 +1549,7 @@ mod tests {
 
     fn recursively_decide_with_action<Tgt: Target>(
         spec: &Spec<Tgt>,
-        action_idx: ActionIdx,
+        action_num: ActionNum,
         partial_impl: &ImplNode<Tgt>,
     ) -> Decision<Tgt> {
         let mut children = Vec::new();
@@ -1585,7 +1585,7 @@ mod tests {
         );
         Decision {
             spec: spec.clone(),
-            actions_costs: vec![(action_idx, cost)],
+            actions_costs: vec![(action_num, cost)],
             children,
         }
     }

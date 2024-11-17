@@ -525,7 +525,7 @@ mod tests {
         (0..BimapSInt::from(4)).prop_flat_map(|b| (Just(b), (b..((b + 4).min(6)))))
     }
 
-    // fn arb_rect_value() -> impl Strategy<Value = Option<(CostIntensity, MemVec, u8, ActionIdx)>> {
+    // fn arb_rect_value() -> impl Strategy<Value = Option<(CostIntensity, MemVec, u8, ActionNum)>> {
     //     (0..4u32, 1..4u32)
     //         .prop_map(|(a, b)| CostIntensity::new(a, DimSize::try_from(b).unwrap()))
     //         .prop_flat_map(|intensity| {
