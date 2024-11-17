@@ -41,8 +41,7 @@ enum ImplReducerResults {
 /// An [VisitUpdater] which logs completed Specs in a Vec.
 struct TrackingUpdater<'a, Tgt: Target, U> {
     inner_updater: U,
-    goals: &'a [Spec<Tgt>],
-    goal_solvers_outstanding: Vec<usize>,
+    goal_solvers_outstanding: HashMap<&'a Spec<Tgt>, usize>,
     current_solver_name: String, // TODO: Remove current_solver_name
 }
 
@@ -131,8 +130,7 @@ fn synthesize_block<Tgt>(
         .collect::<HashMap<_, _>>();
     let mut tracking_updater = TrackingUpdater {
         inner_updater: &mut reducers,
-        goals,
-        goal_solvers_outstanding: vec![solvers.len(); goals.len()],
+        goal_solvers_outstanding: goals.iter().map(|g| (g, solvers.len())).collect(),
         current_solver_name: "".to_string(),
     };
 
@@ -214,7 +212,10 @@ fn synthesize_block<Tgt>(
                         }),
                     "canonicalization moved Spec point outside the dependency range: {spec}"
                 );
-                if !goals.contains(&spec) && db.get(&spec).is_none() {
+                let spec_is_goal = tracking_updater
+                    .goal_solvers_outstanding
+                    .contains_key(&spec);
+                if !spec_is_goal && db.get(&spec).is_none() {
                     missing_subspecs_set.insert(spec);
                 }
             });
@@ -262,7 +263,11 @@ fn synthesize_block<Tgt>(
                         .iter()
                         .map(|(_, c)| c.clone())
                         .collect::<Vec<_>>();
-                    if goals.contains(&completed_spec) {
+
+                    let completed_spec_is_goal = tracking_updater
+                        .goal_solvers_outstanding
+                        .contains_key(&completed_spec);
+                    if completed_spec_is_goal {
                         // This can happen if the recursive call incidentally solves a goal as
                         // because it's a dependency (perhaps transitively) of another goal. This
                         // isn't a correctness issue, but it's wasted work which could probably be
@@ -290,16 +295,17 @@ fn synthesize_block<Tgt>(
     assert!(
         tracking_updater
             .goal_solvers_outstanding
-            .iter()
+            .values()
             .any(|&x| x == 0),
         "No Specs were completed with external dependencies only, stalling algorithm: {:?}, {}",
         tracking_updater.goal_solvers_outstanding,
         solvers.len()
     );
-    for (goal, incomplete_solvers) in goals
-        .iter()
-        .zip(&mut tracking_updater.goal_solvers_outstanding)
-    {
+    for goal in goals {
+        let incomplete_solvers = tracking_updater
+            .goal_solvers_outstanding
+            .get_mut(goal)
+            .unwrap();
         if *incomplete_solvers != 0 {
             continue;
         }
@@ -340,11 +346,12 @@ fn synthesize_block<Tgt>(
         }
 
         // Fill the visit_queue with the completed Specs.
-        for (completed_spec, incomplete_solvers) in goals
-            .iter()
-            .zip(&mut tracking_updater.goal_solvers_outstanding)
-        {
+        for completed_spec in goals {
             // TODO: The body of this loop is almost identical to the above.
+            let incomplete_solvers = tracking_updater
+                .goal_solvers_outstanding
+                .get_mut(completed_spec)
+                .unwrap();
             if *incomplete_solvers != 0 {
                 continue;
             }
@@ -369,11 +376,16 @@ fn synthesize_block<Tgt>(
 
     #[cfg(debug_assertions)]
     {
-        let incomplete_goals = goals
+        let incomplete_goals = tracking_updater
+            .goal_solvers_outstanding
             .iter()
-            .zip(&tracking_updater.goal_solvers_outstanding)
-            .filter(|(_, &x)| x != usize::MAX)
-            .map(|(g, &o)| format!("{g}({o})"))
+            .filter_map(|(&g, &o)| {
+                if o != usize::MAX {
+                    Some(format!("{g}[{o}]"))
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
         if !incomplete_goals.is_empty() {
             panic!(
@@ -481,13 +493,9 @@ where
 
     fn complete_spec(&mut self, spec: &Spec<Tgt>) {
         self.inner_updater.complete_spec(spec);
-        let goal_idx = self
-            .goals
-            .iter()
-            .position(|g| g == spec)
-            .unwrap_or_else(|| panic!("completed spec should be a goal: {}", spec));
-        debug_assert_ne!(self.goal_solvers_outstanding[goal_idx], usize::MAX);
-        self.goal_solvers_outstanding[goal_idx] -= 1;
+        let outstanding = self.goal_solvers_outstanding.get_mut(spec).unwrap();
+        debug_assert_ne!(*outstanding, usize::MAX);
+        *outstanding -= 1;
     }
 }
 
