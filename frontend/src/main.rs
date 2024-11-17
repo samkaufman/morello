@@ -232,7 +232,8 @@ where
         }
     };
 
-    let spec = Spec(logical_spec, Tgt::max_mem());
+    let mut spec = Spec(logical_spec, Tgt::max_mem());
+    spec.canonicalize().unwrap();
     info!("Synthesizing {}", spec);
 
     let start_time = std::time::Instant::now();
