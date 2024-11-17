@@ -224,10 +224,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     }
 
     fn to_max_and_denominator(&self) -> ImplNode<Tgt> {
-        apply_unwrap(
-            self,
-            Action::ToMaxAndDenominator(ToMaxAndDenominator),
-        )
+        apply_unwrap(self, Action::ToMaxAndDenominator(ToMaxAndDenominator))
     }
 
     fn to_max_and_unscaled(

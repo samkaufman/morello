@@ -26,7 +26,7 @@ pub enum PageContents {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RTreePageContents(RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionNum)>>);
+pub struct RTreePageContents(pub RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionNum)>>);
 
 impl PageContents {
     pub fn get_with_preference<Tgt>(

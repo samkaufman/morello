@@ -1,17 +1,26 @@
 use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Dtype};
-use crate::cost::{Cost, MainCost};
+use crate::cost::{Cost, MainCost, NormalizedCost};
+use crate::db::ActionNum;
 use crate::imp::loops::compute_loop_main_cost;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
+use crate::search::ImplReducer;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::utils::snap_memvec_up;
 use crate::views::{Param, Tensor, TileError, View, ViewE};
+use auto_impl::auto_impl;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt::Display;
+use std::hash::Hash;
+use std::iter;
+use std::marker::PhantomData;
+use std::rc::{Rc, Weak};
 
 pub mod broadcast_first;
 pub mod bufferize;
@@ -25,7 +34,8 @@ pub mod to_max_and_unscaled;
 pub mod to_softmax_parts;
 
 pub trait ActionT<Tgt: Target> {
-    type BSolver: BottomUpSolver + Default;
+    type BSolver: BottomUpSolver<Tgt = Tgt>;
+    type BSolverIter: Iterator<Item = Self::BSolver>;
 
     fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         if !spec.is_canonical() {
@@ -49,32 +59,68 @@ pub trait ActionT<Tgt: Target> {
         self.apply_unchecked_canon(spec)
             .map(|applied| ActionTopDownSolver::Fallback(applied))
     }
+
+    fn bottom_up_solvers() -> Self::BSolverIter;
 }
 
+/// Provides (some of) a [Spec]'s action dependencies and computes the cost of one or more of that
+/// [Spec]'s actions from those dependencies.
 pub trait BottomUpSolver {
     type Tgt: Target;
 
     fn dependencies_for_spec(
-        &self,
+        &mut self,
         spec: &Spec<Self::Tgt>,
     ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>;
 
+    // TODO: Document specifically what's in the [low, high] set.
     fn dependencies_for_range(
-        &self,
+        &mut self,
         low: &Spec<Self::Tgt>,
         high: &Spec<Self::Tgt>,
     ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>;
 
-    fn visit_dependency(&self, spec: &Spec<Self::Tgt>, cost: &Cost);
+    fn visit_dependency<U>(
+        &mut self,
+        spec: &Spec<Self::Tgt>,
+        cost: &[NormalizedCost],
+        updater: &mut U,
+    ) where
+        U: VisitUpdater<Self::Tgt>;
 
-    fn visit_dependency_range(
-        &self,
-        _low: &Spec<Self::Tgt>,
-        _high: &Spec<Self::Tgt>,
-        _cost: &Cost,
-    ) {
-        todo!("Default implementation should call visit_dependency, or just remove this");
+    fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
+    where
+        U: VisitUpdater<Self::Tgt>;
+}
+
+/// A trait for putting final Spec-action costs. [BottomUpSolver::visit_dependency] is expected to
+/// call [VisitUpdater::complete] for satisfied solutions. (No call for unsat.)
+#[auto_impl(&mut)]
+pub trait VisitUpdater<Tgt: Target> {
+    /// Store the cost-action for a particular [Spec]-action.
+    fn complete_action(
+        &mut self,
+        spec: &Spec<Tgt>,
+        action: ActionNum,
+        normalized_cost: NormalizedCost,
+    );
+
+    /// Finalize a Spec after [VisitUpdater::complete_action] called for all possible decisions.
+    fn complete_spec(&mut self, spec: &Spec<Tgt>);
+}
+
+pub trait NaiveBottomUpActionProvider<Tgt: Target> {
+    fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>>;
+
+    // TODO: Remove
+    fn debugging() -> Option<String> {
+        None
     }
+}
+
+pub trait ActionEncodeDecode<Tgt: Target> {
+    fn encode(&self, spec: &Spec<Tgt>) -> ActionNum;
+    fn decode(spec: &Spec<Tgt>, encoding: ActionNum) -> Self;
 }
 
 macro_rules! action_dispatch {
@@ -89,14 +135,14 @@ macro_rules! action_dispatch {
             $( $variant($innertype) ),*
         }
 
-        #[derive(Default)]
         #[allow(non_snake_case)]
-        pub struct $solver<Tgt: Target> {
-            $( $variant: <$innertype as ActionT<Tgt>>::BSolver ),*
+        pub enum $solver<Tgt: Target> {
+            $( $variant(<$innertype as ActionT<Tgt>>::BSolver) ),*
         }
 
         impl<Tgt: Target> ActionT<Tgt> for $name<Tgt> {
             type BSolver = $solver<Tgt>;
+            type BSolverIter = Box<dyn Iterator<Item = $solver<Tgt>> + 'static>;
 
             fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
                 match self {
@@ -109,36 +155,62 @@ macro_rules! action_dispatch {
                     $( Self::$variant(a) => a.top_down_solver(spec) ),*
                 }
             }
+
+            fn bottom_up_solvers() -> Self::BSolverIter {
+                let it = std::iter::empty();
+                $(
+                    let sub = <$innertype as ActionT<Tgt>>::bottom_up_solvers();
+                    let it = it.chain(sub.map(|i| $solver::<Tgt>::$variant(i)));
+                )*
+                Box::new(it)
+            }
         }
 
         impl<Tgt: Target> BottomUpSolver for $solver<Tgt> {
             type Tgt = Tgt;
 
             fn dependencies_for_spec(
-                &self,
+                &mut self,
                 spec: &Spec<Tgt>,
             ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-                let it = std::iter::empty();
-                $( let it = it.chain(self.$variant.dependencies_for_spec(spec)); )*
-                it.collect()
+                match self {
+                    $( Self::$variant(a) => a.dependencies_for_spec(spec) ),*
+                }
             }
 
             fn dependencies_for_range(
-                &self,
+                &mut self,
                 low: &Spec<Tgt>,
                 high: &Spec<Tgt>,
             ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-                let it = std::iter::empty();
-                $( let it = it.chain(self.$variant.dependencies_for_range(low, high)); )*
-                it.collect()
+                match self {
+                    $( Self::$variant(a) => a.dependencies_for_range(low, high) ),*
+                }
             }
 
-            fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
-                $( self.$variant.visit_dependency(spec, cost); )*
+            fn visit_dependency<U>(
+                &mut self,
+                spec: &Spec<Tgt>,
+                cost: &[NormalizedCost],
+                updater: &mut U,
+            )
+            where
+                U: VisitUpdater<Self::Tgt>
+            {
+                match self {
+                    $( Self::$variant(a) => {
+                        a.visit_dependency(spec, cost, updater)
+                    } ),*
+                }
             }
 
-            fn visit_dependency_range(&self, low: &Spec<Tgt>, high: &Spec<Tgt>, cost: &Cost) {
-                $( self.$variant.visit_dependency_range(low, high, cost); )*
+            fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
+            where
+                U: VisitUpdater<Self::Tgt>
+            {
+                match self {
+                    $( Self::$variant(a) => a.apply_no_dependency_updates(spec, updater) ),*
+                }
             }
         }
 
@@ -156,8 +228,7 @@ action_dispatch! {
     /// A scheduling decision which can be applied to a Spec to produce an Impl.
     ///
     /// [Action]s contain the minimal amount of information needed to distinguish a one scheduling
-    /// decision from another, which makes it appropriate for storing in a database so that the
-    /// corresponding Impl node can be computed given the Spec.
+    /// decision from another for a given Spec.
     Action,
     ActionBottomUpSolver,
     (TileOut, tiling::TileOut),
@@ -190,6 +261,27 @@ pub enum ActionTopDownSolver<Tgt: Target> {
     Fallback(ImplNode<Tgt>),
 }
 
+#[derive(Debug, Default)]
+pub struct NaiveBottomUpSolver<Tgt: Target, P> {
+    requests_map: HashMap<Spec<Tgt>, Vec<(Rc<RefCell<NaiveWorkingImpl<Tgt>>>, usize)>>,
+    _phantom: PhantomData<P>,
+}
+
+#[derive(Debug)]
+struct NaiveWorkingImpl<Tgt: Target> {
+    working_spec: Rc<RefCell<NaiveWorkingSpec<Tgt>>>,
+    solver: ActionTopDownSolver<Tgt>,
+    action_num: ActionNum, // TODO: Needed?
+    subspec_costs: Vec<Option<Option<Cost>>>,
+}
+
+#[derive(Debug)]
+pub struct NaiveWorkingSpec<Tgt: Target> {
+    spec: Spec<Tgt>, // TODO: Needed? Basically just for debugging.
+    impls: Vec<Weak<RefCell<NaiveWorkingImpl<Tgt>>>>,
+    incomplete_impls: usize,
+}
+
 #[derive(thiserror::Error, Debug)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
 pub enum ApplyError {
@@ -212,6 +304,42 @@ pub enum NotApplicableReason {
     VectorSizeInvalid(Dtype, DimSize),
     MultipleOutputs,
     Other(Option<&'static str>),
+}
+
+impl<Tgt> VisitUpdater<Tgt> for HashMap<&Spec<Tgt>, ImplReducer>
+where
+    Tgt: Target,
+{
+    fn complete_action(
+        &mut self,
+        spec: &Spec<Tgt>,
+        action: ActionNum,
+        normalized_cost: NormalizedCost,
+    ) {
+        let reducer = self.get_mut(spec).unwrap();
+        let cost = normalized_cost.into_main_cost_for_volume(spec.0.volume());
+        reducer.insert(action, cost);
+    }
+
+    fn complete_spec(&mut self, _spec: &Spec<Tgt>) {}
+}
+
+// TODO: Encode without iterating actions.
+impl<Tgt: Target> ActionEncodeDecode<Tgt> for Action<Tgt> {
+    fn encode(&self, spec: &Spec<Tgt>) -> ActionNum {
+        Tgt::actions(&spec.0)
+            .position(|a| a == *self)
+            .unwrap()
+            .try_into()
+            .unwrap()
+    }
+
+    fn decode(spec: &Spec<Tgt>, encoding: ActionNum) -> Self {
+        Tgt::actions(&spec.0)
+            .nth(encoding as usize)
+            .unwrap()
+            .clone()
+    }
 }
 
 impl<Tgt: Target> ActionTopDownSolver<Tgt> {
@@ -498,6 +626,166 @@ fn check_tile_out_applies<Tgt: Target>(
     Ok(())
 }
 
+impl<Tgt, P> BottomUpSolver for NaiveBottomUpSolver<Tgt, P>
+where
+    Tgt: Target,
+    P: NaiveBottomUpActionProvider<Tgt>,
+{
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(
+        &mut self,
+        spec: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)> {
+        // TODO: Test that this never returns and correctly visits duplicate sub-Specs.
+        // TODO: Test that this can be called twice without messing up our internal state.
+
+        let working_spec = Rc::new(RefCell::new(NaiveWorkingSpec {
+            spec: spec.clone(),
+            impls: vec![],
+            incomplete_impls: 0,
+        }));
+
+        let mut out = vec![];
+        for action in P::actions(&spec.0) {
+            match action.top_down_solver(spec) {
+                Ok(solver) => {
+                    let subspecs = solver.subspecs().collect::<Vec<_>>();
+                    if subspecs.is_empty() {
+                        continue;
+                    }
+                    let working_impl = Rc::new(RefCell::new(NaiveWorkingImpl {
+                        working_spec: Rc::clone(&working_spec),
+                        solver,
+                        action_num: action.encode(spec),
+                        subspec_costs: vec![None; subspecs.len()],
+                    }));
+                    let mut working_spec_mut = RefCell::borrow_mut(&working_spec);
+                    working_spec_mut.impls.push(Rc::downgrade(&working_impl));
+                    if !subspecs.is_empty() {
+                        working_spec_mut.incomplete_impls += 1;
+                    }
+
+                    for (subspec_idx, subspec) in subspecs.into_iter().enumerate() {
+                        out.push((subspec.clone(), subspec.clone()));
+                        self.requests_map
+                            .entry(subspec)
+                            .or_default()
+                            .push((Rc::clone(&working_impl), subspec_idx));
+                    }
+                }
+                Err(ApplyError::NotApplicable(_)) => {}
+                Err(ApplyError::SpecNotCanonical) => panic!("given non-canon Spec: {spec}"),
+            }
+        }
+        out
+    }
+
+    fn dependencies_for_range(
+        &mut self,
+        low: &Spec<Self::Tgt>,
+        high: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)> {
+        todo!()
+    }
+
+    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
+    where
+        U: VisitUpdater<Self::Tgt>,
+    {
+        if cost.len() >= 2 {
+            todo!("Support k > 1");
+        }
+
+        debug_assert!(spec.is_canonical());
+        let Some(requests) = self.requests_map.get_mut(spec) else {
+            panic!("spec never requested: {spec}");
+        };
+
+        for (working_impl_rc, request_subspec_idx) in requests {
+            let mut working_impl = RefCell::borrow_mut(working_impl_rc);
+
+            let new_slot_entry = Some(
+                cost.first()
+                    .map(|c| c.clone().into_main_cost_for_volume(spec.0.volume())),
+            );
+            let slot = &mut working_impl.subspec_costs[*request_subspec_idx];
+            if slot.is_some() {
+                if slot != &new_slot_entry {
+                    panic!(
+                        "subspec {spec} already set to a different value for {}",
+                        working_impl.working_spec.borrow().spec
+                    );
+                }
+                log::warn!("subspec {spec} already set");
+                return;
+            }
+            *slot = new_slot_entry;
+
+            if working_impl.subspec_costs.iter().all(|o| o.is_some()) {
+                let solver = &working_impl.solver;
+                let mut working_spec = RefCell::borrow_mut(&working_impl.working_spec);
+
+                // Once all dependencies for a particular action are available and SAT, call
+                // [VisitUpdater::complete_action].
+                if working_impl
+                    .subspec_costs
+                    .iter()
+                    .all(|o| matches!(o, Some(Some(_))))
+                {
+                    let cost = solver.compute_cost(
+                        working_impl
+                            .subspec_costs
+                            .iter()
+                            .map(|cost_option| cost_option.clone().unwrap().unwrap()),
+                    );
+
+                    let normalized_cost = NormalizedCost::new(cost, spec.0.volume());
+                    updater.complete_action(
+                        &working_spec.spec,
+                        working_impl.action_num,
+                        normalized_cost,
+                    );
+                }
+
+                // Once all dependencies are available but not necessarily SAT, do some bookkeeping
+                // around NaiveWorkingImpls.
+                working_spec.incomplete_impls -= 1;
+                if working_spec.incomplete_impls == 0 {
+                    updater.complete_spec(&working_spec.spec);
+                }
+            }
+        }
+    }
+
+    fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
+    where
+        U: VisitUpdater<Self::Tgt>,
+    {
+        // TODO: Avoid the redundant (with dependencies_for_spec) scan of actions.
+        let mut all_actions_complete = true;
+        for action in P::actions(&spec.0) {
+            match action.top_down_solver(spec) {
+                Ok(solver) => {
+                    let subspecs = solver.subspecs().collect::<Vec<_>>();
+                    if subspecs.is_empty() {
+                        let cost = solver.compute_cost(iter::empty());
+                        let normalized_cost = NormalizedCost::new(cost, spec.0.volume());
+                        updater.complete_action(spec, action.encode(spec), normalized_cost);
+                    } else {
+                        all_actions_complete = false;
+                    }
+                }
+                Err(ApplyError::NotApplicable(_)) => {}
+                Err(ApplyError::SpecNotCanonical) => panic!("given non-canon Spec: {spec}"),
+            }
+        }
+        if all_actions_complete {
+            updater.complete_spec(spec);
+        }
+    }
+}
+
 // TODO: Can we replace this function with a more general `utils` crate fn. or something?
 /// Push all nested [Spec]s in an Impl into a given [Vec], left to right.
 fn collect_nested_specs<Tgt: Target>(imp: &ImplNode<Tgt>, out: &mut Vec<Spec<Tgt>>) {
@@ -702,6 +990,16 @@ mod tests {
                         prop_assert!(false, "solver returned {l:?} but apply returned {r:?}");
                     }
                 }
+            }
+        }
+
+        // TODO: Add an ARM variant
+        #[test]
+        fn test_action_encode_consistent_with_decode(spec in arb_canonical_spec::<X86Target>(None, None)) {
+            for action in X86Target::actions(&spec.0) {
+                let encoding = action.encode(&spec);
+                let decoded = Action::decode(&spec, encoding);
+                prop_assert_eq!(action, decoded);
             }
         }
 

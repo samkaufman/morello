@@ -1,17 +1,19 @@
 use crate::common::DimSize;
+use crate::cost::NormalizedCost;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{
-    make_inner_compose, make_outer_compose, ActionT, ApplyError, BottomUpSolver, Cost,
-    NotApplicableReason,
+    make_inner_compose, make_outer_compose, ActionT, ApplyError, BottomUpSolver,
+    NotApplicableReason, VisitUpdater,
 };
 use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::views::Tensor;
 use serde::{Deserialize, Serialize};
+use std::iter;
 use std::rc::Rc;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -27,6 +29,7 @@ pub struct BufferizeSolver<Tgt>(std::marker::PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
     type BSolver = BufferizeSolver<Tgt>;
+    type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
@@ -118,24 +121,46 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
             spec: Some(spec.clone()),
         }))
     }
+
+    fn bottom_up_solvers() -> Self::BSolverIter {
+        iter::once(Self::BSolver::default())
+    }
 }
 
 impl<Tgt: Target> BottomUpSolver for BufferizeSolver<Tgt> {
     type Tgt = Tgt;
 
-    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
+    fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        self.dependencies_for_range(spec, spec)
     }
 
     fn dependencies_for_range(
-        &self,
+        &mut self,
         low: &Spec<Tgt>,
         high: &Spec<Tgt>,
     ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
+        if matches!(&low.0, LogicalSpec::Compose { .. })
+            || matches!(&high.0, LogicalSpec::Compose { .. })
+        {
+            todo!()
+        } else {
+            vec![]
+        }
     }
 
-    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+    fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
+    where
+        U: VisitUpdater<Self::Tgt>,
+    {
+        if !matches!(&spec.0, LogicalSpec::Compose { .. }) {
+            updater.complete_spec(spec);
+        }
+    }
+
+    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
+    where
+        U: VisitUpdater<Tgt>,
+    {
         todo!()
     }
 }

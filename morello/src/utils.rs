@@ -1,8 +1,13 @@
+use crate::grid::general::SurMap;
+use crate::grid::linear::BimapInt;
 use crate::memorylimits::MemVec;
+use crate::spec::Spec;
+use crate::target::Target;
 use num_traits::PrimInt;
 use std::fmt;
 use std::io;
 use std::iter;
+use std::ops::Add;
 
 const INDENT_SIZE: usize = 2;
 
@@ -22,9 +27,16 @@ pub struct LinePrefixWrite<'a, W: fmt::Write>(W, &'a str, bool);
 
 pub struct SumSeqs<T>(Box<dyn Iterator<Item = Vec<T>> + Send>, bool);
 
+pub struct SumSeqsShifted<'a, T>(SumSeqs<T>, &'a [T]);
+
 pub struct Diagonals<T> {
     maxes: Vec<T>,
     stage: T,
+}
+
+pub struct DiagonalsShifted<'o, T> {
+    inner: Diagonals<T>,
+    offset: &'o [T],
 }
 
 impl<T: io::Write> fmt::Write for ToWriteFmt<T> {
@@ -75,6 +87,19 @@ impl<T> Iterator for SumSeqs<T> {
     }
 }
 
+impl<T: Add<Output = T> + Copy> Iterator for SumSeqsShifted<'_, T> {
+    type Item = Vec<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|mut v| {
+            for (v, &o) in v.iter_mut().zip(self.1) {
+                *v = v.add(o);
+            }
+            v
+        })
+    }
+}
+
 impl<T: PrimInt + Send + 'static> Iterator for Diagonals<T> {
     type Item = SumSeqs<T>;
 
@@ -85,6 +110,17 @@ impl<T: PrimInt + Send + 'static> Iterator for Diagonals<T> {
         }
         self.stage = self.stage.add(T::one());
         Some(diagonal)
+    }
+}
+
+impl<'o, T: PrimInt + Send + 'static> Iterator for DiagonalsShifted<'o, T> {
+    type Item = SumSeqsShifted<'o, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let offset: &'o [T] = self.offset;
+        self.inner
+            .next()
+            .map(move |seqs_iter| SumSeqsShifted(seqs_iter, offset))
     }
 }
 
@@ -204,6 +240,18 @@ pub fn diagonals<T: PrimInt>(maxes: &[T]) -> Diagonals<T> {
     }
 }
 
+pub fn diagonals_shifted<'b, T: PrimInt>(bottom: &'b [T], top: &[T]) -> DiagonalsShifted<'b, T> {
+    debug_assert_eq!(bottom.len(), top.len());
+    debug_assert!(bottom.iter().zip(top).all(|(&b, &t)| b <= t));
+    DiagonalsShifted {
+        inner: Diagonals {
+            maxes: top.iter().zip(bottom).map(|(&t, &b)| t - b).collect(),
+            stage: T::zero(),
+        },
+        offset: bottom,
+    }
+}
+
 pub fn sum_seqs<T: PrimInt + Send + 'static>(maxes: &[T], total: T) -> SumSeqs<T> {
     let maxes = maxes.to_vec();
     let len = maxes.len();
@@ -258,6 +306,34 @@ pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &
 
 pub fn indent(depth: usize) -> String {
     " ".repeat(depth * INDENT_SIZE)
+}
+
+// TODO: Search the repo. for more places to use this.
+// TODO: Document this function.
+pub(crate) fn iter_spec_tile<'s, Tgt, S>(
+    surmap: &'s S,
+    low: &Spec<Tgt>,
+    high: &Spec<Tgt>,
+) -> impl Iterator<Item = Spec<Tgt>> + 's
+where
+    Tgt: Target,
+    S: SurMap<Domain = Spec<Tgt>, Codomain = Vec<BimapInt>>,
+{
+    let low_pt = surmap.apply(low);
+    let high_pt = surmap.apply(high);
+    let lowered_high = low_pt
+        .iter()
+        .zip(&high_pt)
+        .map(|(&l, &h)| h - l)
+        .collect::<Vec<_>>();
+    diagonals(&lowered_high).flatten().flat_map(move |v| {
+        let shifted_up = low_pt
+            .iter()
+            .zip(&v)
+            .map(|(&l, &d)| l + d)
+            .collect::<Vec<_>>();
+        surmap.apply_inverse(&shifted_up)
+    })
 }
 
 #[cfg(test)]

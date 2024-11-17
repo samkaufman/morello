@@ -1,22 +1,26 @@
-use crate::cost::Cost;
 use crate::imp::blocks::Block;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
-use crate::scheduling::{ActionT, ApplyError, BottomUpSolver, NotApplicableReason};
+use crate::scheduling::{
+    Action, ActionT, ApplyError, NaiveBottomUpActionProvider, NaiveBottomUpSolver,
+    NotApplicableReason,
+};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::views::{Param, ViewE};
 use serde::{Deserialize, Serialize};
+use std::iter;
 
 /// Rewrites a SoftmaxDenominatorAndMax into a Max followed by SoftmaxDenominator.
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ToMaxAndDenominator;
 
 #[derive(Default)]
-pub struct ToMaxAndDenominatorSolver<Tgt>(std::marker::PhantomData<Tgt>);
+pub struct ToMaxAndDenominatorActionProvider<Tgt>(std::marker::PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
-    type BSolver = ToMaxAndDenominatorSolver<Tgt>;
+    type BSolver = NaiveBottomUpSolver<Tgt, ToMaxAndDenominatorActionProvider<Tgt>>;
+    type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
@@ -74,24 +78,19 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
             default_child: None,
         }))
     }
+
+    fn bottom_up_solvers() -> Self::BSolverIter {
+        iter::once(Self::BSolver::default())
+    }
 }
 
-impl<Tgt: Target> BottomUpSolver for ToMaxAndDenominatorSolver<Tgt> {
-    type Tgt = Tgt;
-
-    fn dependencies_for_spec(&self, spec: &Spec<Self::Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
+impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for ToMaxAndDenominatorActionProvider<Tgt> {
+    fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
+        // TODO: Return the actions!
+        vec![]
     }
 
-    fn dependencies_for_range(
-        &self,
-        low: &Spec<Tgt>,
-        high: &Spec<Tgt>,
-    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
-    }
-
-    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
-        todo!()
+    fn debugging() -> Option<String> {
+        Some("ToMaxAndDenominator".to_string())
     }
 }

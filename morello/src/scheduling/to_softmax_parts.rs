@@ -1,17 +1,21 @@
 use crate::common::{DimSize, Dtype};
-use crate::cost::Cost;
+use crate::cost::NormalizedCost;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::{ActionT, ApplyError, BottomUpSolver, NotApplicableReason};
+use crate::scheduling::{
+    Action, ActionT, ApplyError, BottomUpSolver, NaiveBottomUpActionProvider, NaiveBottomUpSolver,
+    NotApplicableReason, VisitUpdater,
+};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::{Param, Tensor, View, ViewE};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
+use std::iter;
 use std::rc::Rc;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -35,13 +39,14 @@ pub struct ToSoftmaxPartsRecompute<Tgt: Target> {
 }
 
 #[derive(Default)]
-pub struct ToSoftmaxPartsSolver<Tgt>(std::marker::PhantomData<Tgt>);
+pub struct ToSoftmaxPartsActionProvider<Tgt>(std::marker::PhantomData<Tgt>);
 
 #[derive(Default)]
-pub struct ToSoftmaxPartsRecomputeSolver<Tgt>(std::marker::PhantomData<Tgt>);
+pub struct ToSoftmaxPartsRecomputeActionProvider<Tgt>(std::marker::PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
-    type BSolver = ToSoftmaxPartsSolver<Tgt>;
+    type BSolver = NaiveBottomUpSolver<Tgt, ToSoftmaxPartsActionProvider<Tgt>>;
+    type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let LogicalSpec::Primitive(basics, _, _) = &spec.0 else {
@@ -122,10 +127,15 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
             spec: Some(spec.clone()),
         }))
     }
+
+    fn bottom_up_solvers() -> Self::BSolverIter {
+        iter::once(Self::BSolver::default())
+    }
 }
 
 impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
-    type BSolver = ToSoftmaxPartsRecomputeSolver<Tgt>;
+    type BSolver = NaiveBottomUpSolver<Tgt, ToSoftmaxPartsRecomputeActionProvider<Tgt>>;
+    type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let LogicalSpec::Primitive(basics, _, _) = &spec.0 else {
@@ -205,45 +215,31 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
             spec: Some(spec.clone()),
         }))
     }
-}
 
-impl<Tgt: Target> BottomUpSolver for ToSoftmaxPartsSolver<Tgt> {
-    type Tgt = Tgt;
-
-    fn dependencies_for_spec(&self, spec: &Spec<Self::Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
-    }
-
-    fn dependencies_for_range(
-        &self,
-        low: &Spec<Tgt>,
-        high: &Spec<Tgt>,
-    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
-    }
-
-    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
-        todo!()
+    fn bottom_up_solvers() -> Self::BSolverIter {
+        iter::once(Self::BSolver::default())
     }
 }
 
-impl<Tgt: Target> BottomUpSolver for ToSoftmaxPartsRecomputeSolver<Tgt> {
-    type Tgt = Tgt;
-
-    fn dependencies_for_spec(&self, spec: &Spec<Self::Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
+impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for ToSoftmaxPartsActionProvider<Tgt> {
+    fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
+        // TODO: Return the actions!
+        vec![]
     }
 
-    fn dependencies_for_range(
-        &self,
-        low: &Spec<Tgt>,
-        high: &Spec<Tgt>,
-    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
+    fn debugging() -> Option<String> {
+        Some("ToSoftmaxParts".to_string())
+    }
+}
+
+impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for ToSoftmaxPartsRecomputeActionProvider<Tgt> {
+    fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
+        // TODO: Return the actions!
+        vec![]
     }
 
-    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
-        todo!()
+    fn debugging() -> Option<String> {
+        Some("ToSoftmaxPartsRecompute".to_string())
     }
 }
 

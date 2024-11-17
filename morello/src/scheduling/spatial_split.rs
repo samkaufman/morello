@@ -1,10 +1,10 @@
 use crate::common::Shape;
-use crate::cost::Cost;
+use crate::cost::NormalizedCost;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::scheduling::{
-    tile_to_apply_err, ActionT, ApplyError, BottomUpSolver, NotApplicableReason,
+    tile_to_apply_err, ActionT, ApplyError, BottomUpSolver, NotApplicableReason, VisitUpdater,
 };
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
@@ -21,6 +21,7 @@ pub struct SpatialSplitSolver<Tgt>(std::marker::PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
     type BSolver = SpatialSplitSolver<Tgt>;
+    type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
@@ -135,24 +136,58 @@ impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
             spec: Some(spec.clone()),
         }))
     }
+
+    fn bottom_up_solvers() -> Self::BSolverIter {
+        iter::once(Self::BSolver::default())
+    }
 }
 
 impl<Tgt: Target> BottomUpSolver for SpatialSplitSolver<Tgt> {
     type Tgt = Tgt;
 
-    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
+    fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        self.dependencies_for_range(spec, spec)
     }
 
     fn dependencies_for_range(
-        &self,
+        &mut self,
         low: &Spec<Tgt>,
         high: &Spec<Tgt>,
     ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
+        if spec_is_conv(low) || spec_is_conv(high) {
+            todo!()
+        } else {
+            vec![]
+        }
     }
 
-    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+    fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
+    where
+        U: VisitUpdater<Self::Tgt>,
+    {
+        if !spec_is_conv(spec) {
+            updater.complete_spec(spec);
+        }
+    }
+
+    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
+    where
+        U: VisitUpdater<Tgt>,
+    {
         todo!()
     }
+}
+
+fn spec_is_conv<Tgt: Target>(spec: &Spec<Tgt>) -> bool {
+    matches!(
+        &spec.0,
+        LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Conv { .. },
+                ..
+            },
+            _,
+            _
+        )
+    )
 }

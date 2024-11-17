@@ -72,9 +72,9 @@ pub fn tile_out_actions<Tgt: Target>(
     }
 }
 
-pub fn split_actions<Tgt: Target>(
+pub(crate) fn split_actions<Tgt: Target>(
     spec: &LogicalSpec<Tgt>,
-) -> impl Iterator<Item = Action<Tgt>> + '_ {
+) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
     let LogicalSpec::Primitive(
         PrimitiveBasics {
             typ, spec_shape, ..
@@ -82,26 +82,28 @@ pub fn split_actions<Tgt: Target>(
         ..,
     ) = spec
     else {
-        panic!("split_actions called on non-primitive Spec");
+        return Box::new(iter::empty());
     };
     let PrimitiveSpecType::Matmul { accum } = typ else {
-        panic!("split_actions called on non-Matmul");
+        return Box::new(iter::empty());
     };
     if !accum {
-        panic!("split_actions called on non-accumulating Matmul");
+        return Box::new(iter::empty());
     }
     let [b, m, orig_k, n] = spec_shape[..] else {
         unreachable!();
     };
 
     let operands = spec.parameters();
-    dim_range(orig_k, false)
-        .filter(move |&new_k| {
-            // TODO: Shouldn't this be rejected during application instead?
-            operands[0].is_valid_tile_shape(&[b, m, new_k], false)
-                && operands[1].is_valid_tile_shape(&[b, new_k, n], false)
-        })
-        .map(|k| Action::Split(Split { k }))
+    Box::new(
+        dim_range(orig_k, false)
+            .filter(move |&new_k| {
+                // TODO: Shouldn't this be rejected during application instead?
+                operands[0].is_valid_tile_shape(&[b, m, new_k], false)
+                    && operands[1].is_valid_tile_shape(&[b, new_k, n], false)
+            })
+            .map(|k| Action::Split(Split { k })),
+    )
 }
 
 pub fn move_actions<Tgt: Target>(

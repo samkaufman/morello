@@ -1,17 +1,19 @@
 use crate::common::{DimSize, Dtype};
-use crate::cost::Cost;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::{ActionT, ApplyError, BottomUpSolver, NotApplicableReason};
+use crate::scheduling::{
+    ActionT, ApplyError, NaiveBottomUpActionProvider, NaiveBottomUpSolver, NotApplicableReason,
+};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::{Param, Tensor, View};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
+use std::iter;
 use std::rc::Rc;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -22,10 +24,11 @@ pub struct ToMaxAndUnscaled<Tgt: Target> {
 }
 
 #[derive(Default)]
-pub struct ToMaxAndUnscaledSolver<Tgt>(std::marker::PhantomData<Tgt>);
+pub struct ToMaxAndUnscaledActionProvider<Tgt>(std::marker::PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for ToMaxAndUnscaled<Tgt> {
-    type BSolver = ToMaxAndUnscaledSolver<Tgt>;
+    type BSolver = NaiveBottomUpSolver<Tgt, ToMaxAndUnscaledActionProvider<Tgt>>;
+    type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let LogicalSpec::Primitive(head, _, serial_only) = &spec.0 else {
@@ -104,25 +107,20 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndUnscaled<Tgt> {
             spec: Some(spec.clone()),
         }))
     }
+
+    fn bottom_up_solvers() -> Self::BSolverIter {
+        iter::once(Self::BSolver::default())
+    }
 }
 
-impl<Tgt: Target> BottomUpSolver for ToMaxAndUnscaledSolver<Tgt> {
-    type Tgt = Tgt;
-
-    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
+impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for ToMaxAndUnscaledActionProvider<Tgt> {
+    fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<super::Action<Tgt>> {
+        // TODO: Return the actions!
+        vec![]
     }
 
-    fn dependencies_for_range(
-        &self,
-        low: &Spec<Tgt>,
-        high: &Spec<Tgt>,
-    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
-    }
-
-    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
-        todo!()
+    fn debugging() -> Option<String> {
+        Some("ToMaxAndUnscaled".to_string())
     }
 }
 

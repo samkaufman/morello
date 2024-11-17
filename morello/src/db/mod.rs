@@ -6,12 +6,13 @@ use crate::datadeps::SpecKey;
 use crate::db::pagecontents::PageContents;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap};
-use crate::grid::linear::BimapInt;
+use crate::grid::linear::{BimapInt, BimapSInt};
 use crate::imp::functions::FunctionApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
-use crate::scheduling::ActionT as _;
+use crate::rtree::RTreeDyn;
+use crate::scheduling::{Action, ActionEncodeDecode, ActionT as _};
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
@@ -23,6 +24,7 @@ use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Preh
 use serde::{Deserialize, Serialize};
 use wtinylfu::WTinyLfuCache;
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::ops::{Deref, DerefMut, Range};
@@ -35,8 +37,8 @@ use {
     std::time::Instant,
 };
 
-type DbKey = (TableKey, Vec<BimapInt>);
-type TableKey = (SpecKey, Vec<(Layout,)>);
+pub(crate) type DbKey = (TableKey, Vec<BimapInt>);
+pub(crate) type TableKey = (SpecKey, Vec<(Layout,)>);
 type PageKey = DbKey;
 pub type ActionNum = u16;
 
@@ -120,11 +122,20 @@ enum DirPathHandle {
 pub struct ActionCostVec(pub Vec<(ActionNum, Cost)>);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ActionNormalizedCostVec(pub Vec<(ActionNum, NormalizedCost)>);
+pub struct ActionNormalizedCostVec(pub Vec<(ActionNum, NormalizedCost)>);
 
 pub enum GetPreference<T, V> {
     Hit(T),
     Miss(Option<V>),
+}
+
+/// Intersections yielded by [FilesDatabase::intersect].
+#[derive(Debug)]
+pub(crate) struct Intersection<T> {
+    pub(crate) bottom: Vec<BimapInt>,
+    pub(crate) top: Vec<BimapInt>,
+    pub(crate) action_costs: ActionNormalizedCostVec,
+    pub(crate) dep_meta: T,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -211,21 +222,17 @@ impl FilesDatabase {
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let root_results = self.get(query)?;
-        let actions = Tgt::actions(&query.0).collect::<Vec<_>>();
         Some(
             root_results
                 .as_ref()
                 .iter()
                 .map(|(action_num, _cost)| {
-                    let root = actions[usize::from(*action_num)].apply(query).unwrap();
+                    let root = Action::decode(query, *action_num).apply(query).unwrap();
                     let children = root.children();
-                    let new_children = children
-                        .iter()
-                        .map(|c| construct_impl(self, c))
-                        .collect::<Vec<_>>();
-                    root.replace_children(new_children.into_iter())
+                    let new_children = children.iter().map(|c| construct_impl(self, c));
+                    root.replace_children(new_children)
                 })
-                .collect::<Vec<_>>(),
+                .collect(),
         )
     }
 
@@ -301,8 +308,11 @@ impl FilesDatabase {
         }
     }
 
-    pub fn put<Tgt>(&self, mut spec: Spec<Tgt>, decisions: Vec<(ActionNum, Cost)>)
-    where
+    pub fn put_normalized<Tgt>(
+        &self,
+        mut spec: Spec<Tgt>,
+        normalized_decisions: ActionNormalizedCostVec,
+    ) where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
@@ -312,20 +322,20 @@ impl FilesDatabase {
         // Check that all costs in decisions have peak memory less than or equal to spec's
         // memory limits.
         debug_assert!(
-            decisions.iter().all(|(_, c)| {
+            normalized_decisions.0.iter().all(|(_, c)| {
                 let MemoryLimits::Standard(limits) = &spec.1;
                 &c.peaks <= limits
             }),
             "peak memory of an action exceeds memory limits of {}: {:?}",
             spec,
-            decisions
+            normalized_decisions
         );
 
         #[cfg(feature = "db-stats")]
         self.stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
 
         let bimap = self.spec_bimap();
-        let (table_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
+        let (table_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &normalized_decisions.0);
 
         // Construct an iterator over all pages (tiles) to fill.
         let rank = bottom.len();
@@ -333,12 +343,10 @@ impl FilesDatabase {
             .into_iter()
             .zip(&top)
             .enumerate()
-            .map(|(dim, (b, t))| iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank)))
+            .map(|(dim, (b, t))| {
+                iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank).into())
+            })
             .multi_cartesian_product();
-
-        // Since this put is for a single Spec, we can normalize the cost with that Spec's volume.
-        let normalized_decisions =
-            ActionNormalizedCostVec::normalize(ActionCostVec(decisions), spec.0.volume());
 
         // Reuse the follow two values to avoid some allocations.
         let mut key_tuple = (table_key, vec![]);
@@ -366,6 +374,19 @@ impl FilesDatabase {
         }
     }
 
+    pub fn put<Tgt>(&self, spec: Spec<Tgt>, decisions: Vec<(ActionNum, Cost)>)
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        // Since this put is for a single logical Spec, we can normalize the cost with that Spec's
+        // volume.
+        let normalized_decisions =
+            ActionNormalizedCostVec::normalize(ActionCostVec(decisions), spec.0.volume());
+        self.put_normalized(spec, normalized_decisions)
+    }
+
     /// Saves anything cached in memory to disk.
     pub fn save(&self) {
         for shard in &self.shards.0 {
@@ -378,8 +399,69 @@ impl FilesDatabase {
         Some(self.k.into())
     }
 
+    // TODO: Return normalized cost or rescaled?
+    // TODO: We should return ptrs. to T, not require it to be Copy.
+    pub(crate) fn intersect<'a, T: Copy>(
+        &'a self,
+        table_key: &'a TableKey,
+        rtree: &'a RTreeDyn<T>,
+    ) -> impl Iterator<Item = Intersection<T>> + 'a {
+        let rank = rtree.dim_count();
+        let page_shape = (0..rank)
+            .map(|dim| block_size_dim(dim, rank))
+            .collect::<Vec<_>>();
+        rtree_grid_intersections(rtree, page_shape).flat_map(move |page_pt| {
+            let key = self.prehasher.prehash((table_key.clone(), page_pt.clone()));
+            let Page {
+                contents: PageContents::RTree(page_contents),
+                modified: _,
+            } = &*self.load_live_page(&key);
+            let page_tree = &page_contents.as_ref().0;
+            debug_assert_eq!(page_tree.dim_count(), rank);
+
+            page_tree
+                .intersection_candidates_with_other_tree(rtree)
+                .map(
+                    |((db_rect_bottom, db_rect_top, db_value), (b_bottom, b_top, dep_meta))| {
+                        let (intersect_bottom, intersect_top) =
+                            intersect(db_rect_bottom, db_rect_top, b_bottom, b_top);
+                        let intersect_bottom_u32 = intersect_bottom
+                            .iter()
+                            .map(|&x| BimapInt::try_from(x).unwrap())
+                            .collect::<Vec<_>>();
+                        let intersect_top_u32 = intersect_top
+                            .iter()
+                            .map(|&x| BimapInt::try_from(x).unwrap())
+                            .collect::<Vec<_>>();
+                        let v = ActionNormalizedCostVec(match db_value {
+                            Some((cost_intensity, peaks, depth, action_num)) => {
+                                vec![(
+                                    *action_num,
+                                    NormalizedCost {
+                                        intensity: *cost_intensity,
+                                        peaks: peaks.clone(),
+                                        depth: *depth,
+                                    },
+                                )]
+                            }
+                            None => vec![],
+                        });
+                        Intersection {
+                            bottom: intersect_bottom_u32,
+                            top: intersect_top_u32,
+                            action_costs: v,
+                            dep_meta: *dep_meta,
+                        }
+                    },
+                )
+                // TODO: Avoid `collect`. Just return the iterator.
+                .collect::<Vec<_>>()
+                .into_iter()
+        })
+    }
+
     /// Return a bidirectional map from [Spec]s to tuples of table keys and their coordinates.
-    fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
+    pub(crate) fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -921,7 +1003,7 @@ where
     }
 }
 
-fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
+fn block_size_dim(dim: usize, dim_count: usize) -> u8 {
     if dim >= dim_count - LEVEL_COUNT {
         31
     } else {
@@ -971,7 +1053,7 @@ fn blockify_point(pt: &[BimapInt]) -> Vec<BimapInt> {
     let rank = pt.len();
     pt.iter()
         .enumerate()
-        .map(|(i, &d)| d / block_size_dim(i, rank))
+        .map(|(i, &d)| d / BimapInt::from(block_size_dim(i, rank)))
         .collect()
 }
 
@@ -981,7 +1063,7 @@ fn blockify_point(pt: &[BimapInt]) -> Vec<BimapInt> {
 fn put_range_to_fill<Tgt, B>(
     bimap: &B,
     spec: &Spec<Tgt>,
-    impls: &Vec<(ActionNum, Cost)>,
+    impls: &Vec<(ActionNum, NormalizedCost)>,
 ) -> (TableKey, (Vec<BimapInt>, Vec<BimapInt>))
 where
     Tgt: Target,
@@ -1147,6 +1229,58 @@ fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
 fn prehashed_clone<T: Clone>(value: &Prehashed<T>) -> Prehashed<T> {
     let (inner, h) = Prehashed::as_parts(value);
     Prehashed::new(inner.clone(), *h)
+}
+
+/// Calculates the cells of a regular grid that intersect rectangles in an [RTreeDyn].
+fn rtree_grid_intersections<T>(
+    rtree: &RTreeDyn<T>,
+    cell_size: Vec<u8>,
+) -> impl Iterator<Item = Vec<BimapInt>> + '_ {
+    // TODO: This is a slow implementation. Instead, use the structure of the tree to prune.
+    debug_assert!(
+        !cell_size.iter().any(|c| *c == 0),
+        "cell cannot have size-zero dimension"
+    );
+    debug_assert_eq!(rtree.dim_count(), cell_size.len());
+    let blocks_touched = rtree
+        .iter()
+        .flat_map(move |(bottom, top, _)| {
+            if bottom.iter().any(|&v| v < 0) || top.iter().any(|&v| v < 0) {
+                todo!("Negative values not supported");
+            }
+            let transposed = bottom.iter().zip(top.iter()).zip(&cell_size);
+            transposed
+                .map(|((&b, &t), &c)| {
+                    let block_bottom = BimapInt::try_from(b).unwrap() / BimapInt::from(c);
+                    let block_top = BimapInt::try_from(t).unwrap() / BimapInt::from(c);
+                    block_bottom..=block_top
+                })
+                .multi_cartesian_product()
+        })
+        .collect::<HashSet<_>>();
+    blocks_touched.into_iter()
+}
+
+// TODO: Shouldn't need this. Inline it.
+fn intersect(
+    db_rect_bottom: &[BimapSInt],
+    db_rect_top: &[BimapSInt],
+    b_bottom: &[BimapSInt],
+    b_top: &[BimapSInt],
+) -> (Vec<BimapSInt>, Vec<BimapSInt>) {
+    let rank = db_rect_bottom.len();
+    let mut intersection_bottom = Vec::with_capacity(rank);
+    let mut intersection_top = Vec::with_capacity(rank);
+
+    for dim in 0..rank {
+        let bottom = db_rect_bottom[dim].max(b_bottom[dim]);
+        let top = db_rect_top[dim].min(b_top[dim]);
+        debug_assert!(bottom <= top);
+        intersection_bottom.push(bottom);
+        intersection_top.push(top);
+    }
+
+    (intersection_bottom, intersection_top)
 }
 
 #[cfg(test)]
@@ -1382,6 +1516,72 @@ mod tests {
         // }
     }
 
+    #[test]
+    #[should_panic(expected = "zero dimension")]
+    fn test_rtree_grid_intersections_panics_on_empty_cells() {
+        let t = RTreeDyn::empty(2);
+        // should panic without needing to consume the iterator
+        #[allow(unused_must_use)]
+        {
+            rtree_grid_intersections::<u8>(&t, vec![0, 1]);
+        }
+    }
+
+    #[test]
+    fn test_rtree_grid_intersections_empty() {
+        let t = RTreeDyn::<u8>::empty(2);
+        let output = rtree_grid_intersections(&t, vec![2, 2]).collect::<HashSet<_>>();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_rtree_grid_intersections_1() {
+        let mut t = RTreeDyn::<u8>::empty(2);
+        t.insert(&[0, 0], &[0, 0], 9);
+        let output = rtree_grid_intersections(&t, vec![2, 2]).collect::<HashSet<_>>();
+        assert_eq!(output, HashSet::from([vec![0, 0]]));
+    }
+
+    #[test]
+    fn test_rtree_grid_intersections_2() {
+        let mut t = RTreeDyn::<u8>::empty(2);
+        t.insert(&[1, 1], &[1, 1], 9);
+        let output = rtree_grid_intersections(&t, vec![2, 2]).collect::<HashSet<_>>();
+        assert_eq!(output, HashSet::from([vec![0, 0]]));
+    }
+
+    #[test]
+    fn test_rtree_grid_intersections_3() {
+        let mut t = RTreeDyn::<u8>::empty(2);
+        t.insert(&[1, 1], &[2, 1], 9);
+        let output = rtree_grid_intersections(&t, vec![2, 2]).collect::<HashSet<_>>();
+        assert_eq!(output, HashSet::from([vec![0, 0], vec![1, 0]]));
+    }
+
+    // #[test]
+    // #[should_panic(expected = "already exists")]
+    // fn test_db_overwriting_put_panics() {
+    //     let rm2 = row_major(2);
+    //     let spec: Spec<X86Target> = Spec(
+    //         lspec!(Matmul(
+    //             [64, 64, 64],
+    //             (u32, GL, rm2.clone()),
+    //             (u32, GL, rm2.clone()),
+    //             (u32, GL, rm2),
+    //             serial
+    //         )),
+    //         MemoryLimits::Standard(MemVec::zero::<X86Target>()),
+    //     );
+    //     let cost = Cost {
+    //         main: 0,
+    //         peaks: MemVec::zero::<X86Target>(),
+    //         depth: 1,
+    //     };
+    //     let db = FilesDatabase::new(None, false, 1, 128, 1);
+    //     db.put(spec.clone(), vec![]);
+    //     db.put(spec.clone(), vec![(1, cost.clone())]);
+    // }
+
     fn arb_spec_and_decision<Tgt: Target>(
         max_size: Option<DimSize>,
         max_memory: Option<u64>,
@@ -1389,16 +1589,15 @@ mod tests {
         arb_canonical_spec::<Tgt>(max_size, max_memory)
             .prop_flat_map(|spec| {
                 let valid_actions = Tgt::actions(&spec.0)
-                    .enumerate()
-                    .filter_map(|(i, a)| match a.apply(&spec) {
-                        Ok(applied) => Some((ActionNum::from(u16::try_from(i).unwrap()), applied)),
+                    .filter_map(|a| match a.apply(&spec) {
+                        Ok(applied) => Some((a.encode(&spec), applied)),
                         Err(ApplyError::NotApplicable(_)) => None,
                         Err(ApplyError::SpecNotCanonical) => {
                             unreachable!("Non-canonical Spec should be filtered: {spec}")
                         }
                     })
                     .collect::<Vec<_>>();
-                let action_num_strategy = if valid_actions.is_empty() {
+                let action_strategy = if valid_actions.is_empty() {
                     Just(None).boxed()
                 } else {
                     prop_oneof![
@@ -1407,7 +1606,7 @@ mod tests {
                     ]
                     .boxed()
                 };
-                (Just(spec), action_num_strategy)
+                (Just(spec), action_strategy)
             })
             .prop_map(|(spec, action_opt)| {
                 if let Some((action_num, imp)) = action_opt {
@@ -1446,9 +1645,8 @@ mod tests {
     /// choosing the first action for all child Specs in the resulting partial Impl.
     fn recursively_decide_actions<Tgt: Target>(spec: &Spec<Tgt>) -> Decision<Tgt> {
         if let Some((action_num, partial_impl)) = Tgt::actions(&spec.0)
-            .enumerate()
-            .filter_map(|(i, a)| match a.apply(spec) {
-                Ok(imp) => Some((i, imp)),
+            .filter_map(|a| match a.apply(spec) {
+                Ok(imp) => Some((a.encode(spec), imp)),
                 Err(ApplyError::NotApplicable(_)) => None,
                 Err(ApplyError::SpecNotCanonical) => panic!(),
             })

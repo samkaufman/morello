@@ -1,66 +1,19 @@
-use indexmap::IndexMap;
 use itertools::Itertools;
+use nonzero::nonzero as nz;
 
-use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::iter;
-use std::mem::{replace, take};
 use std::num::NonZeroUsize;
-use std::rc::Rc;
 
-use crate::cost::Cost;
-use crate::db::{ActionCostVec, ActionNum, FilesDatabase, GetPreference};
+use crate::cost::{Cost, NormalizedCost};
+use crate::db::{ActionCostVec, ActionNum, FilesDatabase, TableKey};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::scheduling::{ActionT as _, ActionTopDownSolver, ApplyError};
+use crate::grid::linear::{BimapInt, BimapSInt};
+use crate::rtree::RTreeDyn;
+use crate::scheduling::{Action, ActionT, BottomUpSolver, VisitUpdater};
 use crate::spec::Spec;
 use crate::target::Target;
-
-type RequestId = (usize, usize);
-type WorkingPartialImplHandle = (usize, RequestId);
-
-struct TopDownSearch<'d> {
-    db: &'d FilesDatabase,
-    top_k: usize,
-}
-
-struct BlockSearch<'a, 'd, Tgt: Target> {
-    search: &'a TopDownSearch<'d>,
-    working_set: IndexMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
-    working_set_running: usize,
-    // The following two fields map requested Specs (the keys) to the recipients
-    // (Specs + RequestIds). The latter might be out-of-date by the time they are
-    // resolved; for example, when another resolution removes that SpecTask from
-    // `working_set` when a WorkingPartialImpl became Unsat.
-    working_block_requests: HashMap<usize, Vec<WorkingPartialImplHandle>>,
-    subblock_requests: Vec<HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>>>,
-}
-
-/// On-going synthesis of a [Spec]. (Essentially a coroutine.)
-#[derive(Debug)]
-enum SpecTask<Tgt: Target> {
-    Running {
-        reducer: ImplReducer,
-        partial_impls: Vec<WorkingPartialImpl<Tgt>>,
-        partial_impls_incomplete: usize,
-        request_batches_returned: usize,
-        max_children: usize, // TODO: Combine with request_batches_returned
-    },
-    // TODO: Shouldn't need this second bool to track if it's from the database
-    Complete(ActionCostVec, bool),
-}
-
-#[derive(Debug)]
-enum WorkingPartialImpl<Tgt: Target> {
-    Constructing {
-        solver: ActionTopDownSolver<Tgt>,
-        subspecs: Vec<Spec<Tgt>>,
-        subspec_costs: Vec<Option<Cost>>, // empty = unsat; all Some = ready-to-complete
-        producing_action_num: ActionNum,
-    },
-    Unsat,
-    Sat,
-}
+use crate::utils::diagonals_shifted;
 
 // TODO: Make this private once #[bench] gets stable.
 #[doc(hidden)]
@@ -77,9 +30,12 @@ enum ImplReducerResults {
     Many(BTreeSet<(Cost, ActionNum)>),
 }
 
-enum RequestsMapRef<'a, Tgt: Target> {
-    Internal(&'a mut HashMap<usize, Vec<WorkingPartialImplHandle>>),
-    External(&'a mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>>),
+/// An [VisitUpdater] which logs completed Specs in a Vec.
+struct TrackingUpdater<'a, Tgt: Target, U> {
+    inner_updater: U,
+    goals: &'a [Spec<Tgt>],
+    goal_solvers_outstanding: Vec<usize>,
+    current_solver_name: String, // TODO: Remove current_solver_name
 }
 
 // Computes an optimal Impl for `goal` and stores it in `db`.
@@ -102,8 +58,8 @@ where
         .0
 }
 
-pub fn top_down_many<'d, Tgt>(
-    db: &'d FilesDatabase,
+pub fn top_down_many<Tgt>(
+    db: &FilesDatabase,
     goals: &[Spec<Tgt>],
     top_k: usize,
     jobs: Option<NonZeroUsize>,
@@ -134,528 +90,295 @@ where
     }
 
     // Synthesize each group with BlockSearch. Scatter results into combined_results.
-    let mut combined_results = vec![Default::default(); goals.len()];
+    let mut combined_results = vec![ActionCostVec::default(); goals.len()];
     for (page_group, original_indices) in grouped_canonical_goals.values() {
-        let search = TopDownSearch::<'d> { db, top_k };
-        let result = BlockSearch::synthesize(page_group, &search, None);
-        for (r, &i) in result.into_iter().zip(original_indices) {
-            combined_results[i] = r;
+        // TODO: Deduplicate Specs in `page_group`.
+        synthesize_block(db, top_k, page_group);
+        for (query, &original_index) in page_group.iter().zip(original_indices) {
+            let result = db
+                .get(query)
+                .unwrap_or_else(|| panic!("db should contain goal after block synthesis: {query}"));
+            combined_results[original_index] = result;
         }
     }
-
     combined_results
 }
 
-impl<'a, 'd, Tgt> BlockSearch<'a, 'd, Tgt>
-where
+/// Synthesize all blocks between `low` and `high`, inclusive. Membership is determined by
+/// the given `surmap` from [Spec]s to coordinates.
+fn synthesize_block<Tgt>(
+    db: &FilesDatabase,
+    top_k: usize,
+    // TODO: Switch to low-high from goals
+    // surmap: &S,
+    // low: &Spec<Tgt>,
+    // high: &Spec<Tgt>,
+    goals: &[Spec<Tgt>],
+) where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
-    fn synthesize(
-        goals: &[Spec<Tgt>],
-        search: &'a TopDownSearch<'d>,
-        prefetch_after: Option<&Spec<Tgt>>,
-    ) -> Vec<ActionCostVec> {
-        debug_assert!(goals.iter().all_unique());
+    debug_assert!(goals.iter().all(|g| g.0.is_canonical()));
 
-        let mut block = BlockSearch {
-            search,
-            working_set: IndexMap::with_capacity(goals.len()),
-            working_set_running: 0,
-            working_block_requests: HashMap::new(),
-            subblock_requests: Vec::new(),
-        };
-        let mut visited_in_stage = HashSet::new();
-        let mut outbox = Vec::new();
-        for g in goals {
-            let (spec_working_set_index, task) = block.get_task_internal(g);
-            visited_in_stage.insert(g.clone());
-            block.visit_next_request_batch(
-                spec_working_set_index,
-                g,
-                Rc::clone(&task),
-                &mut visited_in_stage,
-                &mut outbox,
-            );
-        }
+    let bimap = db.spec_bimap();
+    let mut solvers = Action::bottom_up_solvers().collect::<Vec<_>>();
+    let mut reducers = goals
+        .iter()
+        .map(|g| (g, ImplReducer::new(top_k, vec![])))
+        .collect::<HashMap<_, _>>();
+    let mut tracking_updater = TrackingUpdater {
+        inner_updater: &mut reducers,
+        goals,
+        goal_solvers_outstanding: vec![solvers.len(); goals.len()],
+        current_solver_name: "".to_string(),
+    };
 
-        loop {
-            for (spec, completed_task_results) in outbox.drain(..) {
-                block.resolve_request_internal(&spec, completed_task_results);
-            }
-
-            let new_vec = Vec::with_capacity(block.subblock_requests.len());
-            let mut subblock_reqs_iter = replace(&mut block.subblock_requests, new_vec)
-                .into_iter()
-                .peekable();
-            while let Some(mut subblock) = subblock_reqs_iter.next() {
-                // TODO: Move prefetch so that it happens after the get inside the recursive call.
-                let mut prefetch_to_push_down: Option<&Spec<Tgt>> = None;
-                match subblock_reqs_iter.peek() {
-                    Some(next_subblock) => prefetch_to_push_down = next_subblock.keys().next(),
-                    None => {
-                        if let Some(prefetch_after) = prefetch_after.as_ref() {
-                            search.db.prefetch(prefetch_after);
-                        }
-                    }
-                }
-
-                let subblock_goals = subblock.keys().cloned().collect::<Vec<_>>();
-                let subblock_results =
-                    Self::synthesize(&subblock_goals, search, prefetch_to_push_down);
-                for (subspec, subspec_result) in subblock_goals.into_iter().zip(subblock_results) {
-                    block.resolve_request_external(&mut subblock, &subspec, subspec_result);
-                }
-            }
-
-            debug_assert_eq!(
-                block.working_set_running,
-                block
-                    .working_set
-                    .values()
-                    .filter(|v| matches!(&*v.borrow(), SpecTask::Running { .. }))
-                    .count()
-            );
-            if block.working_set_running == 0 {
-                break;
-            }
-
-            let ws_vec = block
-                .working_set
-                .iter()
-                .enumerate()
-                .filter(|(_, (_, task))| matches!(*task.borrow(), SpecTask::Running { .. }))
-                .map(|(spec_idx, (spec, task))| (spec_idx, spec.clone(), Rc::clone(task)))
-                .collect::<Vec<_>>();
-            visited_in_stage.clear();
-            for (spec_idx, spec, task_ref) in ws_vec {
-                block.visit_next_request_batch(
-                    spec_idx,
-                    &spec,
-                    task_ref,
-                    &mut visited_in_stage,
-                    &mut outbox,
+    // Build R-Trees of all goals' dependencies.
+    // TODO: Use a Tgt-specific ActionT type.
+    let mut deps_trees = HashMap::<TableKey, RTreeDyn<usize>>::new();
+    for (solver_idx, solver) in solvers.iter_mut().enumerate() {
+        tracking_updater.current_solver_name = format!("solver {}", solver_idx);
+        for goal in goals {
+            // TODO: Use dependencies_for_range instead.
+            solver.apply_no_dependency_updates(goal, &mut tracking_updater);
+            for (dep_low, dep_high) in solver.dependencies_for_spec(goal) {
+                // dep_low and dep_high are not guaranteed to be canonical. This can be useful in
+                // constructing some ranges, such as those from 1x1 to mxn where the 1x1 point might
+                // have different contiguousness.
+                let (dep_key, dep_pt_low) = BiMap::apply(&bimap, &dep_low);
+                let (dep_key_high, dep_pt_high) = BiMap::apply(&bimap, &dep_high);
+                debug_assert_eq!(
+                    dep_key, dep_key_high,
+                    "Dep. keys should be the same between {} and {}",
+                    dep_low, dep_high
                 );
-            }
-        }
-        debug_assert!(
-            block.working_block_requests.is_empty(),
-            "working_block_requests is not empty: {}",
-            block
-                .working_block_requests
-                .keys()
-                .map(|k| format!("{k}"))
-                .join(", ")
-        );
-        debug_assert!(block.subblock_requests.is_empty());
+                let dep_pt_low_i64 = dep_pt_low
+                    .iter()
+                    .map(|&x| BimapSInt::from(x))
+                    .collect::<Vec<_>>();
+                let dep_pt_high_i64 = dep_pt_high
+                    .iter()
+                    .map(|&x| BimapSInt::from(x))
+                    .collect::<Vec<_>>();
 
-        // After this point, we'll be removing entries from working_set, so
-        // WorkingPartialImplHandles will not be valid.
-
-        // Gather all tasks requested by synthesize. This removes from the working set.
-        let final_results = goals
-            .iter()
-            .map(|g| process_complete_task(search, g, block.working_set.swap_remove(g).unwrap()))
-            .collect::<Vec<_>>();
-
-        // Anything left in the working set is not a goal but should still be put
-        for (spec, task) in block.working_set.drain(..) {
-            process_complete_task(search, &spec, task);
-        }
-
-        final_results
-    }
-
-    /// Return a working set task and its index. If none exists for the [Spec], start one.
-    fn get_task_internal(&mut self, spec: &Spec<Tgt>) -> (usize, Rc<RefCell<SpecTask<Tgt>>>) {
-        match self.working_set.entry(spec.clone()) {
-            indexmap::map::Entry::Occupied(e) => (e.index(), Rc::clone(e.get())),
-            indexmap::map::Entry::Vacant(e) => {
-                // Check the database and immediately return if present.
-                let task = match self.search.db.get_with_preference(spec) {
-                    GetPreference::Hit(v) => {
-                        // TODO: Re-enable search hits and misses tracking
-                        // search.hits += 1;
-                        SpecTask::Complete(v, true)
-                    }
-                    GetPreference::Miss(preferences) => {
-                        let started = SpecTask::start(spec.clone(), preferences, self.search);
-                        if matches!(&started, SpecTask::Running { .. }) {
-                            self.working_set_running += 1;
-                        }
-                        started
-                    }
-                };
-                // search.misses += 1;
-                let entry_index = e.index();
-                let task_rc = Rc::new(RefCell::new(task));
-                e.insert(Rc::clone(&task_rc));
-                (entry_index, task_rc)
+                // Update the R-Tree with the new dependency.
+                let e = deps_trees
+                    .entry(dep_key.clone()) // TODO: Don't clone
+                    .or_insert_with(|| RTreeDyn::empty(dep_pt_low.len()));
+                e.merge_insert(&dep_pt_low_i64, &dep_pt_high_i64, solver_idx);
             }
         }
     }
 
-    fn visit_next_request_batch(
-        &mut self,
-        working_set_spec_idx: usize,
-        spec: &Spec<Tgt>,
-        task_ref: Rc<RefCell<SpecTask<Tgt>>>,
-        visited_in_stage: &mut HashSet<Spec<Tgt>>,
-        outbox: &mut Vec<(Spec<Tgt>, ActionCostVec)>, // TODO: Make Option<Cost>
-    ) {
-        let mut task = task_ref.borrow_mut();
-        if !matches!(&*task, SpecTask::Running { .. }) {
-            return;
-        }
-
-        let page_id = self.search.db.page_id(spec);
-
-        // collect to avoid keeping the borrow
-        if let Some(next_batch) = task.next_request_batch().map(|v| v.collect::<Vec<_>>()) {
-            for (subspec, request_id) in next_batch {
-                if page_id.contains(&subspec) {
-                    let (subspec_idx, subtask) = self.get_task_internal(&subspec);
-                    if !visited_in_stage.contains(spec) {
-                        visited_in_stage.insert(subspec.clone());
-                        self.visit_next_request_batch(
-                            subspec_idx,
-                            &subspec,
-                            Rc::clone(&subtask),
-                            visited_in_stage,
-                            outbox,
-                        );
-                    }
-
-                    let subtask_ref = subtask.borrow();
-                    match &*subtask_ref {
-                        SpecTask::Running { .. } => {
-                            drop(subtask_ref);
-                            self.add_request_mapping_internal(
-                                working_set_spec_idx,
-                                subspec_idx,
-                                request_id,
-                            );
-                        }
-                        SpecTask::Complete(subtask_result, _) => {
-                            let cost = subtask_result.iter().next().map(|v| v.1.clone());
-                            task.resolve_request(request_id, cost);
-                            // At this point, the task_ref might have completed (be
-                            // `SpecTask::Complete`). We want to propagate the completion to any
-                            // tasks waiting within the working set, but we don't want to recurse
-                            // into a Spec we're already borrowing lower on the current stack.
-                            // That's overly complicated and will lead to a RefCell borrow panic.
-                            // Instead, push the completion into a queue (the `outbox`) we'll
-                            // resolve later.
-                            if let SpecTask::Complete(completed_task_results, _) = &*task {
-                                self.working_set_running -= 1;
-                                outbox.push((spec.clone(), completed_task_results.clone()));
-                            }
-                        }
-                    };
-                } else {
-                    self.add_request_mapping_external(working_set_spec_idx, &subspec, request_id);
+    // Start satisfying external (non-goal) dependencies. First, iterate over intersecting tiles,
+    // then intersection-join with `deps_trees`, passing each to BottomUpSolver::visit_dependency.
+    // TODO: Avoid recursion for dependencies which are *not* external!
+    for (table_key, deps_tree) in &deps_trees {
+        // Walk over every element of the dependency tree to collect all Specs which weren't in the
+        // database and aren't current goals. Then recurse. Note that these Specs may span multiple
+        // database pages.
+        // TODO: Visiting every entry is probably very slow, since it walks over entries that are
+        //       already in the database's R-Trees. Ideally, we preserve the geometry all the way
+        //       through the solver calls.
+        let mut missing_subspecs_set = HashSet::<Spec<Tgt>>::new();
+        deps_tree.iter().for_each(|(bottom, top, _)| {
+            diagonals_shifted(bottom, top).flatten().for_each(|pt| {
+                let pt_u32 = pt
+                    .iter()
+                    .map(|&x| {
+                        BimapInt::try_from(x).unwrap_or_else(|_| {
+                            panic!("Can't convert elem of {pt:?}. Bottom is {bottom:?}")
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let pt_tuple = (table_key.clone(), pt_u32);
+                let mut spec: Spec<Tgt> = BiMap::apply_inverse(&bimap, &pt_tuple);
+                spec.canonicalize().unwrap();
+                debug_assert_eq!(
+                    BiMap::apply(&bimap, &spec).0,
+                    *table_key,
+                    "canonicalization changed the table key: {spec}"
+                );
+                debug_assert!(
+                    BiMap::apply(&bimap, &spec)
+                        .1
+                        .iter()
+                        .zip(bottom)
+                        .zip(top)
+                        .all(|((&pt, &bottom_pt), &top_pt)| {
+                            let pt = BimapSInt::from(pt);
+                            pt >= bottom_pt && pt <= top_pt
+                        }),
+                    "canonicalization moved Spec point outside the dependency range: {spec}"
+                );
+                if !goals.contains(&spec) && db.get(&spec).is_none() {
+                    missing_subspecs_set.insert(spec);
                 }
-            }
+            });
+        });
+
+        // TODO: Recurse once, not once for each dependency tree.
+        top_down_many(
+            db,
+            // TODO: Use `into_iter` instead of cloning.
+            &missing_subspecs_set.iter().cloned().collect::<Vec<_>>(),
+            top_k,
+            Some(nz!(1usize)),
+        );
+
+        // TODO: Remove the following.
+        for spec in &missing_subspecs_set {
+            assert!(
+                db.get(spec).is_some(),
+                "Spec should be in the database: {spec}"
+            );
         }
-    }
 
-    fn resolve_request_internal(&mut self, subspec: &Spec<Tgt>, results: ActionCostVec) {
-        Self::inner_resolve_request(
-            &self.working_set,
-            &mut self.working_set_running,
-            RequestsMapRef::Internal(&mut self.working_block_requests),
-            None,
-            subspec,
-            results,
-        );
-    }
+        // Spatial join on the database to collect all dependencies. At this point, after
+        // recursion, all external dependencies should be in the database.
+        // TODO: Assert that all dependencies are gathered.
+        db.intersect(table_key, deps_tree).for_each(|intersection| {
+            // TODO: Instead of resolving Specs individually, resolve ranges (possibly broken by
+            //       dimensions/normalization group).
+            diagonals_shifted(&intersection.bottom, &intersection.top)
+                .flatten()
+                .for_each(|pt| {
+                    // For each point (canonical Spec) in the intersection, have each solver
+                    // associated with that intersection visit. If that results in a completion of a
+                    // Spec, push that onto a queue and loop.
 
-    fn resolve_request_external(
-        &mut self,
-        subblock: &mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>>,
-        subspec: &Spec<Tgt>,
-        results: ActionCostVec,
-    ) {
-        Self::inner_resolve_request(
-            &self.working_set,
-            &mut self.working_set_running,
-            RequestsMapRef::External(subblock),
-            Some(&mut self.working_block_requests),
-            subspec,
-            results,
-        );
-    }
+                    let composed_key = (table_key.clone(), pt.to_vec());
+                    let mut spec: Spec<Tgt> = BiMap::apply_inverse(&db.spec_bimap(), &composed_key);
+                    spec.canonicalize().unwrap();
 
-    fn inner_resolve_request(
-        working_set: &IndexMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
-        working_set_running: &mut usize,
-        mut subblock: RequestsMapRef<Tgt>,
-        next_subblock: Option<&mut HashMap<usize, Vec<WorkingPartialImplHandle>>>,
-        subspec: &Spec<Tgt>,
-        results: ActionCostVec,
-    ) {
-        let Some(rs) = subblock.remove(subspec, working_set) else {
-            return;
-        };
+                    let solver_idx = intersection.dep_meta;
+                    let completed_spec = spec.clone(); // TODO: Clone needed?
 
-        let mut resolved_next_subblock = next_subblock
-            .map(RequestsMapRef::Internal)
-            .unwrap_or(subblock);
-
-        let cost = results.0.into_iter().next().map(|v| v.1);
-        for (requester_wb_spec_idx, request_id) in rs {
-            let (wb_spec, requester_task) = working_set.get_index(requester_wb_spec_idx).unwrap();
-            let mut requester = requester_task.borrow_mut();
-            // The SpecTask might already be Complete if it was unsat'ed by a prior resolution.
-            if matches!(&*requester, SpecTask::Running { .. }) {
-                requester.resolve_request(request_id, cost.clone());
-                if let SpecTask::Complete(completed_requester_results, _) = &*requester {
-                    // TODO: Avoid this clone by consuming the sub-block. (Do at the call site.)
-                    *working_set_running -= 1;
-                    let cloned_results = completed_requester_results.clone();
-                    drop(requester);
-                    Self::inner_resolve_request(
-                        working_set,
-                        working_set_running,
-                        // TODO: Can we get rid of the following match? This is just a
-                        match &mut resolved_next_subblock {
-                            RequestsMapRef::Internal(m) => RequestsMapRef::Internal(m),
-                            RequestsMapRef::External(m) => RequestsMapRef::External(m),
-                        },
-                        None,
-                        wb_spec,
-                        cloned_results,
+                    let ncosts = intersection
+                        .action_costs
+                        .0
+                        .iter()
+                        .map(|(_, c)| c.clone())
+                        .collect::<Vec<_>>();
+                    if goals.contains(&completed_spec) {
+                        // This can happen if the recursive call incidentally solves a goal as
+                        // because it's a dependency (perhaps transitively) of another goal. This
+                        // isn't a correctness issue, but it's wasted work which could probably be
+                        // prevented.
+                        log::warn!("Goal Spec showed up in external visit: {spec}");
+                    }
+                    solvers[solver_idx].visit_dependency(
+                        &completed_spec,
+                        &ncosts,
+                        &mut tracking_updater,
                     );
-                }
-            }
+                });
+        });
+    }
+
+    // TODO: Start pushing results bottom-up within the goal block. Remember that
+    //       we need links within coordinates of the space, but not between.
+    // TODO: The following placeholder implementation sucks.
+    // visit_queue maps Specs to decisions and requesting solver IDs. If there are no
+    // solver IDs, then the Specs are just put into the database. If there are, then we
+    // will track which Specs are updated as a consequence of a solver visit and enqueue
+    // those.
+    let mut visit_queue = HashMap::<&Spec<Tgt>, (Vec<(ActionNum, Cost)>, Vec<usize>)>::new();
+    // Fill the visit_queue with the Specs completed with external dependencies only.
+    assert!(
+        tracking_updater
+            .goal_solvers_outstanding
+            .iter()
+            .any(|&x| x == 0),
+        "No Specs were completed with external dependencies only, stalling algorithm: {:?}, {}",
+        tracking_updater.goal_solvers_outstanding,
+        solvers.len()
+    );
+    for (goal, incomplete_solvers) in goals
+        .iter()
+        .zip(&mut tracking_updater.goal_solvers_outstanding)
+    {
+        if *incomplete_solvers != 0 {
+            continue;
         }
+        let (spec_db_key, spec_pt) = BiMap::apply(&bimap, goal);
+        let spec_pt_i64 = spec_pt
+            .iter()
+            .map(|&x| BimapSInt::from(x))
+            .collect::<Vec<_>>();
+        let requesting_solver_idxs = deps_trees
+            .get(&spec_db_key)
+            .map(|t| t.locate_all_at_point(&spec_pt_i64).copied().collect())
+            .unwrap_or_default();
+        let reducer = tracking_updater.inner_updater.remove(&goal).unwrap();
+        let decisions = reducer.finalize();
+        visit_queue.insert(goal, (decisions, requesting_solver_idxs));
+        *incomplete_solvers = usize::MAX;
     }
 
-    /// Update `working_block_requests` with a new request for an internal sub-Spec.
-    ///
-    /// Both Specs must be in the working set.
-    fn add_request_mapping_internal(
-        &mut self,
-        requester_index: usize,
-        requested_index: usize,
-        request_id: RequestId,
-    ) {
-        self.working_block_requests
-            .entry(requested_index)
-            .or_default()
-            .push((requester_index, request_id));
-    }
+    // Repeatedly scan the visit_queue, putting into the database and enqueueing new Specs
+    // affected by visits. (Pushes completion up the internal dep. lattice.)
+    let mut visited = HashSet::<Spec<Tgt>>::new(); // TODO: Remove `visited`
+    while !visit_queue.is_empty() {
+        for (spec, (decisions, solver_ids)) in visit_queue.drain() {
+            if !visited.insert(spec.clone()) {
+                panic!("Spec should not be visited twice: {spec}");
+            }
 
-    /// Update `subblock_requests` with a new request for the external `subspec` by a task in the
-    /// working set.
-    fn add_request_mapping_external(
-        &mut self,
-        working_set_spec_idx: usize,
-        subspec: &Spec<Tgt>,
-        request_id: RequestId,
-    ) {
-        let subspec_page = self.search.db.page_id(subspec);
-        let request_set = match self
-            .subblock_requests
-            .iter_mut()
-            .find(|s| subspec_page.contains(s.keys().next().unwrap()))
+            // TODO: This converts to NormalizedCost, but do solvers just denormalize again?
+            let normalized_costs = decisions
+                .iter()
+                .map(|x| NormalizedCost::new(x.1.clone(), spec.0.volume()))
+                .collect::<Vec<_>>();
+            for solver_id in solver_ids {
+                solvers[solver_id].visit_dependency(spec, &normalized_costs, &mut tracking_updater);
+            }
+
+            db.put(spec.clone(), decisions);
+        }
+
+        // Fill the visit_queue with the completed Specs.
+        for (completed_spec, incomplete_solvers) in goals
+            .iter()
+            .zip(&mut tracking_updater.goal_solvers_outstanding)
         {
-            Some(s) => s,
-            None => {
-                if self.subblock_requests.is_empty() {
-                    let requesting_spec =
-                        self.working_set.get_index(working_set_spec_idx).unwrap().0;
-                    self.search.db.prefetch(requesting_spec);
-                }
-                self.subblock_requests.push(HashMap::new());
-                self.subblock_requests.last_mut().unwrap()
+            // TODO: The body of this loop is almost identical to the above.
+            if *incomplete_solvers != 0 {
+                continue;
             }
-        };
-        request_set
-            .entry(subspec.clone())
-            .or_default()
-            .push((working_set_spec_idx, request_id));
+            let (spec_db_key, spec_pt) = BiMap::apply(&bimap, completed_spec);
+            let spec_pt_i64 = spec_pt
+                .iter()
+                .map(|&x| BimapSInt::from(x))
+                .collect::<Vec<_>>();
+            let requesting_solver_idxs = deps_trees
+                .get(&spec_db_key)
+                .map(|tree| tree.locate_all_at_point(&spec_pt_i64).copied().collect())
+                .unwrap_or_default();
+            let reducer = tracking_updater
+                .inner_updater
+                .remove(&completed_spec)
+                .unwrap();
+            let decisions = reducer.finalize();
+            visit_queue.insert(completed_spec, (decisions, requesting_solver_idxs));
+            *incomplete_solvers = usize::MAX;
+        }
     }
-}
 
-impl<Tgt: Target> SpecTask<Tgt> {
-    /// Begin computing the optimal implementation of a Spec.
-    ///
-    /// Internally, this will expand partial [Impl]s for all actions.
-    fn start(
-        goal: Spec<Tgt>,
-        preferences: Option<Vec<ActionNum>>,
-        search: &TopDownSearch<'_>,
-    ) -> Self
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    #[cfg(debug_assertions)]
     {
-        let mut reducer = ImplReducer::new(search.top_k, preferences.unwrap_or_default());
-        let mut max_children = 0;
-        let mut partial_impls = Vec::new();
-        let mut partial_impls_incomplete = 0;
-
-        for (action_num, action) in Tgt::actions(&goal.0).enumerate() {
-            match action.top_down_solver(&goal) {
-                Ok(solver) => {
-                    let partial_impl_subspecs = solver.subspecs().collect::<Vec<_>>();
-
-                    let subspec_count = partial_impl_subspecs.len();
-                    max_children = max_children.max(subspec_count);
-
-                    // If the resulting Impl is already complete, update the reducer. If there
-                    // are nested sub-Specs, then store the partial Impl for resolution by the
-                    // caller.
-                    if partial_impl_subspecs.is_empty() {
-                        reducer.insert(
-                            u16::try_from(action_num).unwrap(),
-                            solver.compute_cost(iter::empty()),
-                        );
-                    } else {
-                        partial_impls.push(WorkingPartialImpl::Constructing {
-                            solver,
-                            subspecs: partial_impl_subspecs,
-                            subspec_costs: vec![None; subspec_count],
-                            producing_action_num: action_num.try_into().unwrap(),
-                        });
-                        partial_impls_incomplete += 1;
-                    }
-                }
-                Err(ApplyError::NotApplicable(_)) => {}
-                Err(ApplyError::SpecNotCanonical) => panic!(),
-            };
-        }
-
-        if partial_impls_incomplete == 0 {
-            SpecTask::Complete(ActionCostVec(reducer.finalize()), false)
-        } else {
-            SpecTask::Running {
-                reducer,
-                max_children,
-                partial_impls,
-                partial_impls_incomplete,
-                request_batches_returned: 0,
-            }
-        }
-    }
-
-    /// Return an iterator over a set of [Spec]s needed to compute this task's goal.
-    ///
-    /// This will return `None` when all dependencies are resolved and the goal is computed.
-    /// The caller should continue to call [next_request_batch] if an empty iterator is returned.
-    fn next_request_batch(&mut self) -> Option<impl Iterator<Item = (Spec<Tgt>, RequestId)> + '_> {
-        // TODO: Define behavior for and document returning duplicates from this function.
-
-        let SpecTask::Running {
-            partial_impls,
-            request_batches_returned,
-            max_children,
-            ..
-        } = self
-        else {
-            return None;
-        };
-        if request_batches_returned == max_children {
-            return None;
-        }
-
-        let subspec_idx = *request_batches_returned;
-        *request_batches_returned += 1;
-
-        // TODO: Assert/test that we return unique Specs
-        Some(partial_impls.iter().enumerate().filter_map(move |(i, p)| {
-            let WorkingPartialImpl::Constructing { subspecs, .. } = p else {
-                return None;
-            };
-            subspecs
-                .get(subspec_idx)
-                .map(|s| (s.clone(), (i, subspec_idx)))
-        }))
-    }
-
-    fn resolve_request(
-        &mut self,
-        id: RequestId,
-        cost: Option<Cost>, // `None` means that the Spec was unsat
-    ) where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-    {
-        let SpecTask::Running {
-            reducer,
-            partial_impls,
-            partial_impls_incomplete,
-            request_batches_returned: _,
-            max_children: _,
-        } = self
-        else {
-            panic!("Task is not running");
-        };
-
-        if *partial_impls_incomplete == 0 {
-            return;
-        }
-
-        let (working_impl_idx, child_idx) = id;
-        let mut finished = false;
-        let mut became_unsat = false;
-        let entry = partial_impls.get_mut(working_impl_idx).unwrap();
-        match entry {
-            WorkingPartialImpl::Constructing {
-                solver,
-                subspecs: _,
-                subspec_costs,
-                producing_action_num,
-            } => {
-                if let Some(cost) = cost {
-                    let entry = &mut subspec_costs[child_idx];
-                    debug_assert!(entry.is_none(), "Requested Spec was already resolved");
-                    *entry = Some(cost);
-
-                    // If all subspec costs for this partial Impl are completed, then reduce costs
-                    // for the parent and transition this partial to a Sat state.
-                    if subspec_costs.iter().all(|c| c.is_some()) {
-                        finished = true;
-                        reducer.insert(
-                            *producing_action_num,
-                            solver.compute_cost(
-                                // TODO: Move rather than clone the child_costs.
-                                &mut subspec_costs.iter().map(|c| c.as_ref().unwrap().clone()),
-                            ),
-                        );
-                    }
-                } else {
-                    finished = true;
-                    became_unsat = true;
-                }
-            }
-            WorkingPartialImpl::Unsat => {}
-            WorkingPartialImpl::Sat => {
-                panic!("Resolved a request for an already-completed Spec");
-            }
-        };
-
-        if finished {
-            *partial_impls_incomplete -= 1;
-            if became_unsat {
-                *entry = WorkingPartialImpl::Unsat;
-            } else {
-                *entry = WorkingPartialImpl::Sat;
-            }
-
-            // If that was the last working partial Impl for this task, then the task is complete.
-            if *partial_impls_incomplete == 0 {
-                // TODO: Check that the final costs are below `task_goal`'s peaks.
-                // TODO: Make sure completions prop. up the request DAG.
-                let tmp_replacement = ImplReducer::new(0, Vec::new());
-                let removed_reducer: ImplReducer = replace(reducer, tmp_replacement);
-                let final_result = removed_reducer.finalize();
-                *self = SpecTask::Complete(ActionCostVec(final_result), false);
-            }
+        let incomplete_goals = goals
+            .iter()
+            .zip(&tracking_updater.goal_solvers_outstanding)
+            .filter(|(_, &x)| x != usize::MAX)
+            .map(|(g, &o)| format!("{g}({o})"))
+            .collect::<Vec<_>>();
+        if !incomplete_goals.is_empty() {
+            panic!(
+                "Some goals were not completed: {}",
+                incomplete_goals.join(", ")
+            );
         }
     }
 }
@@ -740,37 +463,31 @@ impl ImplReducer {
     }
 }
 
-impl<Tgt: Target> RequestsMapRef<'_, Tgt> {
-    fn remove(
-        &mut self,
-        key: &Spec<Tgt>,
-        working_set: &IndexMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
-    ) -> Option<Vec<WorkingPartialImplHandle>> {
-        match self {
-            RequestsMapRef::Internal(m) => m.remove(&working_set.get_index_of(key).unwrap()),
-            RequestsMapRef::External(m) => m.remove(key),
-        }
-    }
-}
-
-fn process_complete_task<Tgt>(
-    search: &TopDownSearch<'_>,
-    spec: &Spec<Tgt>,
-    task: Rc<RefCell<SpecTask<Tgt>>>,
-) -> ActionCostVec
+impl<'a, Tgt, U> VisitUpdater<Tgt> for TrackingUpdater<'a, Tgt, U>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    U: VisitUpdater<Tgt>,
 {
-    let SpecTask::Complete(task_result, from_db) = &mut *task.borrow_mut() else {
-        unreachable!("Expected goal to be complete.");
-    };
-    let action_costs = take(task_result);
-    if !*from_db {
-        search.db.put(spec.clone(), action_costs.0.clone());
+    fn complete_action(
+        &mut self,
+        spec: &Spec<Tgt>,
+        action: ActionNum,
+        normalized_cost: NormalizedCost,
+    ) {
+        self.inner_updater
+            .complete_action(spec, action, normalized_cost.clone());
     }
-    action_costs
+
+    fn complete_spec(&mut self, spec: &Spec<Tgt>) {
+        self.inner_updater.complete_spec(spec);
+        let goal_idx = self
+            .goals
+            .iter()
+            .position(|g| g == spec)
+            .unwrap_or_else(|| panic!("completed spec should be a goal: {}", spec));
+        debug_assert_ne!(self.goal_solvers_outstanding[goal_idx], usize::MAX);
+        self.goal_solvers_outstanding[goal_idx] -= 1;
+    }
 }
 
 #[cfg(test)]
@@ -790,6 +507,7 @@ mod tests {
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::sample::select;
+    use std::collections::HashSet;
     use std::rc::Rc;
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);
