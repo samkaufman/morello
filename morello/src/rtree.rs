@@ -10,12 +10,18 @@ use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 
+pub type RTreeEntryRef<'a, T> = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
+
 /// A trait abstracting over differently ranked RTree<RTreeRect<_, T>> variants.
 #[enum_dispatch]
 trait RTreeGeneric<T> {
+    type Intersectable<A>;
+
     fn size(&self) -> usize;
 
     fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T>;
+
+    fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_>;
 
     // TODO: It would be nice to take low and high by value to avoid a clone.
     fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T);
@@ -23,6 +29,11 @@ trait RTreeGeneric<T> {
     fn merge_insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T)
     where
         T: PartialEq + Eq + Hash + Clone;
+
+    fn intersection_candidates_with_other_tree<'a, A>(
+        &'a self,
+        other: &'a Self::Intersectable<A>,
+    ) -> Box<dyn Iterator<Item = (RTreeEntryRef<'a, T>, RTreeEntryRef<'a, A>)> + 'a>;
 }
 
 macro_rules! rtreedyn_cases {
@@ -48,9 +59,22 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
+            pub fn dim_count(&self) -> usize {
+                match self {
+                    $( RTreeDyn::$name(_) => $n, )*
+                }
+            }
+
             pub fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T> {
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::locate_at_point(t, pt), )*
+                }
+            }
+
+
+            pub fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_> {
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::locate_all_at_point(t, pt), )*
                 }
             }
 
@@ -66,6 +90,26 @@ macro_rules! rtreedyn_cases {
             {
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::merge_insert(t, low, high, value), )*
+                }
+            }
+
+            pub fn iter(&self) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
+                match self {
+                    $( RTreeDyn::$name(t) => Box::new(
+                        t.iter().map(|r| (&r.bottom.arr[..], &r.top.arr[..], &r.value))
+                    ), )*
+                }
+            }
+
+            pub fn intersection_candidates_with_other_tree<'a, A>(
+                &'a self,
+                other: &'a RTreeDyn<A>,
+            ) -> Box<dyn Iterator<Item = (RTreeEntryRef<'a, T>, RTreeEntryRef<'a, A>)> + 'a> {
+                match (self, other) {
+                    $( (RTreeDyn::$name(t), RTreeDyn::$name(o)) => {
+                        RTreeGeneric::intersection_candidates_with_other_tree(t, o)
+                    }, )*
+                    _ => panic!("Mismatched ranks: {} and {}", self.dim_count(), other.dim_count()),
                 }
             }
         }
@@ -102,9 +146,18 @@ struct BatchRemoveSelFn<O: rstar::RTreeObject> {
     envelope: Option<O::Envelope>,
 }
 
-impl<T> RTreeDyn<T> {}
+impl<'a, T> IntoIterator for &'a RTreeDyn<T> {
+    type Item = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
 
 impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
+    type Intersectable<A> = RTree<RTreeRect<D, A>>;
+
     fn size(&self) -> usize {
         self.size()
     }
@@ -114,6 +167,15 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
             arr: pt.try_into().unwrap(),
         })
         .map(|rect| &rect.value)
+    }
+
+    fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_> {
+        Box::new(
+            self.locate_all_at_point(&RTreePt {
+                arr: pt.try_into().unwrap(),
+            })
+            .map(|rect| &rect.value),
+        )
     }
 
     fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T) {
@@ -154,22 +216,25 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 to_insert.top.arr.map(|t| t.saturating_add(1)).into(),
             );
             for candidate in self.locate_in_envelope_intersecting(&candidate_area) {
+                let value_matches = candidate.value == to_insert.value;
+
                 // When the inserted rect has matching value and would be fully contained (or is identical),
                 // there's nothing to merge. The outer rect. would have already triggered applicable merge
                 // rules.
                 // TODO: Avoid constructing envelope if possible.
                 let candidate_envelope = candidate.envelope();
                 let insert_envelope = to_insert.envelope();
-                if candidate_envelope.contains_envelope(&insert_envelope) {
+                if candidate_envelope.contains_envelope(&insert_envelope) && value_matches {
                     // Assert the MainCost, but not the later tuple elements, are unchanged.
                     should_repeat = false;
                     skip_insert = true;
                     break;
                 }
 
-                // If the candidate is contained by the to-be-inserted rectangle, remove it.
+                // If the candidate is contained by the to-be-inserted rectangle and has a matching
+                // value, remove it.
                 let candidate_envelope = candidate.envelope();
-                if insert_envelope.contains_envelope(&candidate_envelope) {
+                if insert_envelope.contains_envelope(&candidate_envelope) && value_matches {
                     // TODO: Avoid the following clone.
                     to_remove.queue_removal(candidate.clone());
                     // Assert the MainCost, but not the later tuple elements, are unchanged.
@@ -177,11 +242,12 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     continue;
                 }
 
-                // If a candidate extrudes the to-be-inserted rect. in exactly one dimension, just grow
-                // the to-be-inserted to include it and then remove that rect.
+                // If a candidate extrudes the to-be-inserted rect. in exactly one dimension and the
+                // value matches, just grow the to-be-inserted to include it and then remove that
+                // rect.
                 //
                 // TODO: This condition+loop is wasteful.
-                if candidate.value == to_insert.value
+                if value_matches
                     && all_dimensions_adjacent_or_overlap(&to_insert, candidate)
                     && count_matching_dimensions(&to_insert, candidate) == D - 1
                 {
@@ -206,8 +272,57 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         }
 
         if !skip_insert {
+            // Subtract the to_insert from any intersecting rectangles with the same value.
+            // TODO: Reuse the result of the previous intersection call to avoid a second traversal.
+            to_remove.clear();
+            let mut parts_to_insert = vec![];
+            for intersecting_rect in self.locate_in_envelope_intersecting(&to_insert.envelope()) {
+                if intersecting_rect.value != to_insert.value {
+                    continue;
+                }
+                for part in rect_subtract(
+                    &intersecting_rect.bottom.arr,
+                    &intersecting_rect.top.arr,
+                    &to_insert.bottom.arr,
+                    &to_insert.top.arr,
+                ) {
+                    let (bottom, top) = part;
+                    let value = intersecting_rect.value.clone();
+                    let part_rect = RTreeRect {
+                        bottom: RTreePt {
+                            arr: bottom.try_into().unwrap(),
+                        },
+                        top: RTreePt {
+                            arr: top.try_into().unwrap(),
+                        },
+                        value,
+                    };
+                    parts_to_insert.push(part_rect);
+                }
+                to_remove.queue_removal(intersecting_rect.clone());
+            }
+            for _ in self.drain_with_selection_function(&to_remove) {}
+
+            for part in parts_to_insert {
+                self.insert(part);
+            }
             self.insert(to_insert);
         }
+    }
+
+    fn intersection_candidates_with_other_tree<'a, A>(
+        &'a self,
+        other: &'a Self::Intersectable<A>,
+    ) -> Box<dyn Iterator<Item = (RTreeEntryRef<'a, T>, RTreeEntryRef<'a, A>)> + 'a> {
+        Box::new(
+            self.intersection_candidates_with_other_tree(other)
+                .map(|(a, b)| {
+                    (
+                        (&a.bottom.arr[..], &a.top.arr[..], &a.value),
+                        (&b.bottom.arr[..], &b.top.arr[..], &b.value),
+                    )
+                }),
+        )
     }
 }
 
@@ -326,6 +441,47 @@ where
     }
 }
 
+/// Subtract the subtrahend rectangle from the minuend rectangle (both defined by inclusive points),
+/// returning replacement rectangles which cover the same space as the minuend but exclude the
+/// subtrahend.
+fn rect_subtract(
+    rect_bottom: &[i64],
+    rect_top: &[i64],
+    subtrahend_bottom: &[i64],
+    subtrahend_top: &[i64],
+) -> Vec<(Vec<i64>, Vec<i64>)> {
+    assert_eq!(rect_bottom.len(), rect_top.len());
+    assert_eq!(rect_bottom.len(), subtrahend_bottom.len());
+    assert_eq!(rect_bottom.len(), subtrahend_top.len());
+
+    let mut working_bottom = rect_bottom.to_vec();
+    let mut working_top = rect_top.to_vec();
+    for dim in 0..rect_bottom.len() {
+        if working_bottom[dim] > subtrahend_top[dim] || working_top[dim] < subtrahend_bottom[dim] {
+            return vec![(working_bottom, working_top)];
+        }
+    }
+
+    let mut result = vec![];
+    for dim in 0..rect_bottom.len() {
+        if working_bottom[dim] < subtrahend_bottom[dim] {
+            let orig = working_top[dim];
+            working_top[dim] = subtrahend_bottom[dim] - 1;
+            result.push((working_bottom.clone(), working_top.clone()));
+            working_top[dim] = orig;
+        }
+        if working_top[dim] > subtrahend_top[dim] {
+            let orig = working_bottom[dim];
+            working_bottom[dim] = subtrahend_top[dim] + 1;
+            result.push((working_bottom.clone(), working_top.clone()));
+            working_bottom[dim] = orig;
+        }
+        working_bottom[dim] = working_bottom[dim].max(subtrahend_bottom[dim]);
+        working_top[dim] = working_top[dim].min(subtrahend_top[dim]);
+    }
+    result
+}
+
 fn count_matching_dimensions<const D: usize, T>(
     new_rect: &RTreeRect<D, T>,
     candidate: &RTreeRect<D, T>,
@@ -363,6 +519,7 @@ fn all_dimensions_adjacent_or_overlap<const D: usize, T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::diagonals;
     use itertools::Itertools;
     use proptest::strategy::{Just, Strategy};
     use proptest::{prop_assert, prop_assert_eq, proptest};
@@ -428,6 +585,84 @@ mod tests {
         assert_merged(&[([0, 0], [1, 1]), ([2, 0], [2, 2]), ([0, 2], [1, 2])]);
     }
 
+    #[test]
+    fn test_merge_insert_merges_values_strict_intersect() {
+        let mut tree = RTree::<RTreeRect<2, _>>::new();
+        tree.merge_insert(&[0, 1], &[0, 2], "a");
+        tree.merge_insert(&[0, 1], &[0, 2], "b");
+        assert_eq!(
+            tree.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from_iter([
+                RTreeRect {
+                    top: RTreePt { arr: [0, 2] },
+                    bottom: RTreePt { arr: [0, 1] },
+                    value: "a",
+                },
+                RTreeRect {
+                    top: RTreePt { arr: [0, 2] },
+                    bottom: RTreePt { arr: [0, 1] },
+                    value: "b",
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn test_merge_insert_merges_values_corners_intersect() {
+        let mut tree = RTree::<RTreeRect<2, _>>::new();
+        tree.merge_insert(&[0, 1], &[0, 2], "a");
+        tree.merge_insert(&[0, 2], &[0, 3], "b");
+        assert_eq!(
+            tree.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from_iter([
+                RTreeRect {
+                    top: RTreePt { arr: [0, 2] },
+                    bottom: RTreePt { arr: [0, 1] },
+                    value: "a",
+                },
+                RTreeRect {
+                    top: RTreePt { arr: [0, 3] },
+                    bottom: RTreePt { arr: [0, 2] },
+                    value: "b",
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn test_rect_subtract_1() {
+        assert_eq!(rect_subtract(&[0, 0], &[1, 1], &[0, 0], &[1, 1]), []);
+    }
+
+    #[test]
+    fn test_rect_subtract_2() {
+        assert_eq!(
+            rect_subtract(&[0, 0], &[2, 2], &[0, 0], &[1, 1]),
+            [(vec![2, 0], vec![2, 2]), (vec![0, 2], vec![1, 2])]
+        );
+    }
+
+    #[test]
+    fn test_rect_subtract_3() {
+        assert_eq!(
+            rect_subtract(&[0, 0], &[2, 2], &[1, 1], &[1, 1]),
+            [
+                (vec![0, 0], vec![0, 2]),
+                (vec![2, 0], vec![2, 2]),
+                (vec![1, 0], vec![1, 0]),
+                (vec![1, 2], vec![1, 2]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_rect_subtract_4() {
+        assert_eq!(
+            rect_subtract(&[0, 0], &[1, 1], &[0, 1], &[2, 1]),
+            [(vec![0, 0], vec![1, 0])]
+        );
+    }
+
     proptest! {
         #[test]
         fn test_disjoint_inserts_dont_change_point_results(rects in arb_disjoint_rects::<3>(3)) {
@@ -482,6 +717,74 @@ mod tests {
                     }
                 }
                 prop_assert_eq!(tree_value, expected_value, "values differed at {:?}", pt);
+            }
+        }
+
+        #[test]
+        fn test_rect_subtract_results_are_disjoint((rect, subtrahend) in arb_rect_subtract()) {
+            let (rect_low, rect_high) = rect;
+            let (sub_low, sub_high) = subtrahend;
+            let rects = rect_subtract(&rect_low, &rect_high, &sub_low, &sub_high);
+            for a in 0..rects.len() {
+                for b in a + 1..rects.len() {
+                    let (a_low, a_high) = (&rects[a].0, &rects[a].1);
+                    let (b_low, b_high) = (&rects[b].0, &rects[b].1);
+                    prop_assert!(
+                        (0..a_low.len()).any(|dim| {
+                            a_low[dim] > b_high[dim] || a_high[dim] < b_low[dim]
+                        }),
+                        "rects {:?} and {:?} intersected",
+                        rects[a],
+                        rects[b]
+                    );
+                }
+            }
+        }
+
+        /// Test that every point on the union of `rect_subtract` results intersects correctly.
+        #[test]
+        fn test_rect_subtract((rect, subtrahend) in arb_rect_subtract()) {
+            let (rect_low, rect_high) = rect;
+            let (sub_low, sub_high) = subtrahend;
+
+            let bound_low = rect_low.iter().zip(&sub_low).map(|(r, s)| r.min(s)).copied().collect::<Vec<_>>();
+            let bound_high = rect_high.iter().zip(&sub_high).map(|(r, s)| r.max(s)).copied().collect::<Vec<_>>();
+
+            let bound_pts = diagonals(&bound_high).flatten().map(|mut unshifted_pt| {
+                for dim in 0..unshifted_pt.len() {
+                    unshifted_pt[dim] += bound_low[dim];
+                }
+                unshifted_pt
+            });
+            for bound_pt in bound_pts {
+                let result_match =
+                    rect_subtract(&rect_low, &rect_high, &sub_low, &sub_high).iter().any(|rect| {
+                        (0..bound_pt.len()).all(|dim| {
+                            bound_pt[dim] >= rect.0[dim] && bound_pt[dim] <= rect.1[dim]
+                        })
+                    });
+                let expected = {
+                    let mut pt_in_rect = true;
+                    let mut pt_in_sub = true;
+                    for dim in 0..bound_pt.len() {
+                        if bound_pt[dim] < rect_low[dim] || bound_pt[dim] > rect_high[dim] {
+                            pt_in_rect = false;
+                            break;
+                        }
+                    }
+                    for dim in 0..bound_pt.len() {
+                        if bound_pt[dim] < sub_low[dim] || bound_pt[dim] > sub_high[dim] {
+                            pt_in_sub = false;
+                            break;
+                        }
+                    }
+                    pt_in_rect && !pt_in_sub
+                };
+                prop_assert_eq!(result_match, expected,
+                    "point {:?} was {:?} but expected {:?} (rects were: {:?})",
+                    bound_pt, result_match, expected,
+                    rect_subtract(&rect_low, &rect_high, &sub_low, &sub_high)
+                );
             }
         }
 
@@ -569,7 +872,23 @@ mod tests {
     //         })
     // }
 
-    /// Construct an RTree, insert rects with the given points, and assert that they are merged.
+    fn arb_rect_subtract() -> impl Strategy<Value = ((Vec<i64>, Vec<i64>), (Vec<i64>, Vec<i64>))> {
+        proptest::collection::vec((0..6i64, 0..6i64, 0..6i64, 0..6i64), 0..4).prop_map(
+            |dim_tuples| {
+                let mut result = ((vec![], vec![]), (vec![], vec![]));
+                for (num0, num1, num2, num3) in dim_tuples {
+                    result.0 .0.push(num0.min(num1));
+                    result.0 .1.push(num1.max(num0));
+                    result.1 .0.push(num2.min(num3));
+                    result.1 .1.push(num3.max(num2));
+                }
+                result
+            },
+        )
+    }
+
+    /// Construct an RTree, insert rects with the given points and the same value, and assert that
+    /// they are all merged into a single rectangle
     fn assert_merged<const D: usize>(rects: &[([BimapSInt; D], [BimapSInt; D])]) {
         let mut tree = RTree::new();
         for (bottom, top) in rects {
