@@ -152,10 +152,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
                     vec![lhs.into_dyn(), rhs.into_dyn(), out.into_dyn()]
                 }
-                PrimitiveSpecType::Softmax {
-                    reduction_dim,
-                    accum,
-                } => todo!(),
+                PrimitiveSpecType::Softmax { .. } => todo!(),
                 PrimitiveSpecType::Move => {
                     let [inp, mut out] = args
                         .try_into()
