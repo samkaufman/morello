@@ -11,6 +11,10 @@ pub enum SpecKey {
     Conv {
         dtypes: [Dtype; 3],
     },
+    Softmax {
+        reduction_dim: u8,
+        dtype: Dtype,
+    },
     Move {
         dtypes: [Dtype; 2],
     },
@@ -27,7 +31,7 @@ impl SpecKey {
         match self {
             SpecKey::Matmul { dtypes } | SpecKey::Conv { dtypes } => dtypes,
             SpecKey::Move { dtypes } => dtypes,
-            SpecKey::Zero { dtype } => slice::from_ref(dtype),
+            SpecKey::Softmax { dtype, .. } | SpecKey::Zero { dtype } => slice::from_ref(dtype),
             SpecKey::Compose { components: _ } => todo!(),
         }
     }

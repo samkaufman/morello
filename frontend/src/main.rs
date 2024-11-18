@@ -123,6 +123,12 @@ enum QuerySpec {
         filters_size: DimSize,
         size: DimSize,
     },
+    #[command(about = "Synthesize a softmax")]
+    Softmax {
+        #[arg(long, default_value = "2")]
+        rank: u8,
+        size: DimSize,
+    },
 }
 
 #[derive(Parser)]
@@ -223,6 +229,30 @@ where
                     };
                     3
                 ],
+                true,
+            )
+        }
+        QuerySpec::Softmax { rank, size } => {
+            let layouts = [row_major(*rank), row_major(*rank - 1)];
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Softmax {
+                        reduction_dim: 0,
+                        accum: false,
+                    },
+                    spec_shape: vec![*size; usize::from(*rank)],
+                    dtypes: vec![Dtype::Uint32; usize::from(*rank)],
+                },
+                layouts
+                    .into_iter()
+                    .map(|layout| TensorSpecAux::<Tgt> {
+                        contig: layout.contiguous_full(),
+                        aligned: true,
+                        level: CpuMemoryLevel::GL,
+                        layout,
+                        vector_size: None,
+                    })
+                    .collect(),
                 true,
             )
         }

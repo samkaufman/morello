@@ -152,6 +152,8 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn all_layouts_for_shape(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
+        assert!(!shape.is_empty());
+
         let all_target_vector_bytes = Self::levels()
             .into_iter()
             .flat_map(|lvl| lvl.vector_bytes().iter().copied())
@@ -290,6 +292,7 @@ impl<T: CpuTarget> Target for T {
                     }
                 }
                 PrimitiveSpecType::Conv { .. } => &[],
+                PrimitiveSpecType::Softmax { .. } => &[],
                 PrimitiveSpecType::Move { .. } => {
                     const MOVE_KERNELS: [CpuKernel; 8] = [
                         CpuKernel::ValueAssign,
