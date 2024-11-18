@@ -56,8 +56,17 @@ pub struct PrimitiveBasics {
 pub enum PrimitiveSpecType {
     Zero,
     Move,
-    Matmul { accum: bool },
-    Conv { accum: bool },
+    Matmul {
+        accum: bool,
+    },
+    Conv {
+        accum: bool,
+    },
+    Softmax {
+        #[cfg_attr(test, proptest(strategy = "0..4u8"))]
+        reduction_dim: u8,
+        accum: bool,
+    },
 }
 
 /// Tilings and dimension bindings for a particular output tiling.
@@ -158,6 +167,7 @@ impl<Tgt: Target> Spec<Tgt> {
                     // TODO: Implement for floating-pt. Convs.
                     None
                 }
+                PrimitiveSpecType::Softmax { .. } => None,
                 PrimitiveSpecType::Move | PrimitiveSpecType::Zero => None,
             },
             Spec(LogicalSpec::Compose { .. }, _) => None,
@@ -240,6 +250,17 @@ impl PrimitiveBasics {
                 self.spec_shape = vec![b, f, c, h, w, fh, fw];
                 // TODO: Assert output shape is expected.
             }
+            PrimitiveSpecType::Softmax {
+                reduction_dim,
+                accum: _,
+            } => {
+                debug_assert_eq!(new_operands.len(), 2);
+                debug_assert_eq!(
+                    new_operands[1].0,
+                    softmax_output_shape(new_operands[0].0, reduction_dim)
+                );
+                self.spec_shape = new_operands[0].0.into();
+            }
             PrimitiveSpecType::Move => {
                 let [src, dest] = new_operands else {
                     panic!("Move must have 2 operands");
@@ -294,10 +315,21 @@ impl PrimitiveBasics {
                 let out = conv_infer_output_shape(&img, &filt);
                 vec![img, filt, out]
             }
+            PrimitiveSpecType::Softmax {
+                reduction_dim,
+                accum: _,
+            } => {
+                vec![
+                    self.spec_shape.clone(),
+                    softmax_output_shape(&self.spec_shape, reduction_dim),
+                ]
+            }
             PrimitiveSpecType::Move => {
                 vec![self.spec_shape.clone(), self.spec_shape.clone()]
             }
-            PrimitiveSpecType::Zero => vec![self.spec_shape.clone()],
+            PrimitiveSpecType::Zero => {
+                vec![self.spec_shape.clone()]
+            }
         }
     }
 
@@ -328,6 +360,14 @@ impl PrimitiveBasics {
                     _ => panic!("Conv has only 3 parameters"),
                 }
             }
+            PrimitiveSpecType::Softmax {
+                reduction_dim,
+                accum: _,
+            } => match idx {
+                0 => self.spec_shape.clone(),
+                1 => softmax_output_shape(&self.spec_shape, reduction_dim),
+                _ => panic!("Softmax has only 2 parameters"),
+            },
             PrimitiveSpecType::Move => match idx {
                 0 | 1 => self.spec_shape.clone(),
                 _ => panic!("Move has only 2 parameters"),
@@ -357,7 +397,9 @@ impl PrimitiveBasics {
 
     pub fn causes_side_effects(&self) -> bool {
         match self.typ {
-            PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => accum,
+            PrimitiveSpecType::Matmul { accum }
+            | PrimitiveSpecType::Conv { accum }
+            | PrimitiveSpecType::Softmax { accum, .. } => accum,
             PrimitiveSpecType::Move | PrimitiveSpecType::Zero => false,
         }
     }
@@ -434,6 +476,29 @@ impl PrimitiveBasics {
             }
             (
                 PrimitiveBasics {
+                    typ: PrimitiveSpecType::Softmax { reduction_dim, .. },
+                    spec_shape,
+                    ..
+                },
+                _,
+            ) => {
+                let r = usize::from(*reduction_dim);
+                let mut tiled_input = smaller_output.shape().clone();
+                tiled_input.insert(r, spec_shape[r]);
+                let mut tiled_step_sizes = smaller_output.step_sizes().to_vec();
+                tiled_step_sizes.insert(r, spec_shape[r]);
+                let mut bindings = (0..smaller_output.shape().len())
+                    .map(|d| Some(d.try_into().unwrap()))
+                    .collect::<Vec<_>>();
+                bindings.insert(r, None);
+                TilingInference(vec![(
+                    Tiling::new_sliding(tiled_input, tiled_step_sizes),
+                    bindings,
+                )])
+            }
+
+            (
+                PrimitiveBasics {
                     typ: PrimitiveSpecType::Move,
                     ..
                 },
@@ -483,20 +548,27 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
         let max_size = args.max_size.unwrap_or(ARBITRARY_SPEC_MAX_SIZE).get();
 
         let type_strategy = match args.allowed_types {
-            Some(allowed_types) => proptest::sample::select(allowed_types).sboxed(),
-            None => any::<PrimitiveSpecType>().sboxed(),
+            Some(allowed_types) => proptest::sample::select(allowed_types).boxed(),
+            None => any::<PrimitiveSpecType>().boxed(),
         };
         type_strategy
             .prop_flat_map(move |typ| {
                 let cnt = typ.operand_count();
-                let dtypes_strategy = match args.first_input_dtype {
-                    Some(d) => proptest::collection::vec(any::<Dtype>(), cnt - 1)
-                        .prop_map(move |mut v| {
-                            v.insert(0, d);
-                            v
-                        })
-                        .sboxed(),
-                    None => proptest::collection::vec(any::<Dtype>(), cnt).sboxed(),
+                let dtypes_strategy = match &typ {
+                    // Softmax has two Dtypes in PrimitiveSpecType, but they must match.
+                    PrimitiveSpecType::Softmax { .. } => match args.first_input_dtype {
+                        Some(d) => Just(vec![d, d]).sboxed(),
+                        None => any::<Dtype>().prop_map(|d| vec![d, d]).sboxed(),
+                    },
+                    _ => match args.first_input_dtype {
+                        Some(d) => proptest::collection::vec(any::<Dtype>(), cnt - 1)
+                            .prop_map(move |mut v| {
+                                v.insert(0, d);
+                                v
+                            })
+                            .sboxed(),
+                        None => proptest::collection::vec(any::<Dtype>(), cnt).sboxed(),
+                    },
                 };
                 (Just(typ), dtypes_strategy)
             })
@@ -541,6 +613,24 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
                             .prop_map(|(b, f, c, h, w, fh, fw)| vec![b, f, c, h, w, fh, fw])
                             .sboxed()
                     }
+                    PrimitiveSpecType::Softmax { reduction_dim, .. } => {
+                        match args.first_input_shape.as_deref() {
+                            Some(s) => {
+                                assert!(usize::from(reduction_dim) < s.len());
+                                s.iter().map(|d| Just(d.get())).collect::<Vec<_>>().sboxed()
+                            }
+                            None => {
+                                // TODO: assert reduction and max size relationship
+                                let r = usize::from(reduction_dim);
+                                ((r + 2)..(r + 3))
+                                    .prop_flat_map(move |tensor_rank| {
+                                        proptest::collection::vec(1..=max_size, tensor_rank)
+                                            .sboxed()
+                                    })
+                                    .sboxed()
+                            }
+                        }
+                    }
                     PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
                         match args.first_input_shape.as_deref() {
                             Some(s) => s.iter().map(|d| Just(d.get())).collect::<Vec<_>>().sboxed(),
@@ -575,7 +665,7 @@ impl PrimitiveSpecType {
         match self {
             PrimitiveSpecType::Matmul { .. } => 2,
             PrimitiveSpecType::Conv { .. } => 2,
-            PrimitiveSpecType::Move => 1,
+            PrimitiveSpecType::Softmax { .. } | PrimitiveSpecType::Move => 1,
             PrimitiveSpecType::Zero => 0,
         }
     }
@@ -583,7 +673,7 @@ impl PrimitiveSpecType {
     pub fn output_idx(&self) -> usize {
         match self {
             PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => 2,
-            PrimitiveSpecType::Move { .. } => 1,
+            &PrimitiveSpecType::Softmax { .. } | PrimitiveSpecType::Move { .. } => 1,
             PrimitiveSpecType::Zero { .. } => 0,
         }
     }
@@ -617,6 +707,9 @@ impl PrimitiveSpecType {
                     DimSize::new(1 + w.get() - fw.get()).unwrap(),
                 ]
             }
+            PrimitiveSpecType::Softmax { reduction_dim, .. } => {
+                softmax_output_shape(inputs[0], *reduction_dim)
+            }
             PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
                 // The shape and dtype match for moves and zero.
                 inputs[0].to_vec()
@@ -632,6 +725,8 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::Matmul { .. } => write!(f, "Matmul"),
             PrimitiveSpecType::Conv { accum, .. } if *accum => write!(f, "ConvAccum"),
             PrimitiveSpecType::Conv { .. } => write!(f, "Conv"),
+            PrimitiveSpecType::Softmax { accum, .. } if *accum => write!(f, "SoftmaxAccum"),
+            PrimitiveSpecType::Softmax { .. } => write!(f, "Softmax"),
             PrimitiveSpecType::Move { .. } => write!(f, "Move"),
             PrimitiveSpecType::Zero { .. } => write!(f, "Zero"),
         }
@@ -666,7 +761,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     pub fn parameters(&self) -> Vec<TensorSpec<Tgt>> {
         match self {
             LogicalSpec::Primitive(basics, auxes, _) => match basics.typ {
-                PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => basics
+                PrimitiveSpecType::Matmul { .. }
+                | PrimitiveSpecType::Conv { .. }
+                | PrimitiveSpecType::Softmax { .. } => basics
                     .parameter_shapes()
                     .into_iter()
                     .zip(&basics.dtypes)
@@ -808,7 +905,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
         match self {
             LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
-                PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
+                PrimitiveSpecType::Matmul { .. }
+                | PrimitiveSpecType::Conv { .. }
+                | PrimitiveSpecType::Softmax { .. } => {
                     for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
                         aux.canonicalize(shp)
                             .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
@@ -872,7 +971,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     pub fn is_canonical(&self) -> bool {
         match self {
             LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
-                PrimitiveSpecType::Matmul { accum: _ } | PrimitiveSpecType::Conv { accum: _ } => {
+                PrimitiveSpecType::Matmul { .. }
+                | PrimitiveSpecType::Conv { .. }
+                | PrimitiveSpecType::Softmax { .. } => {
                     for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
                         if !aux.is_canonical(shp) {
                             return false;
@@ -1333,6 +1434,20 @@ impl BiMap for PrimitiveBasicsBimap {
                     v,
                 )
             }
+            PrimitiveSpecType::Softmax {
+                reduction_dim,
+                accum,
+            } => {
+                assert_eq!(dtypes.len(), 2);
+                assert_eq!(dtypes[0], dtypes[1]);
+                (
+                    SpecKey::Softmax {
+                        reduction_dim,
+                        dtype: dtypes[0],
+                    },
+                    once(!accum as _).chain(shifted_shape).collect(),
+                )
+            }
             PrimitiveSpecType::Move => (
                 SpecKey::Move {
                     dtypes: dtypes.as_slice().try_into().unwrap(),
@@ -1348,11 +1463,30 @@ impl BiMap for PrimitiveBasicsBimap {
     fn apply_inverse(&self, c: &Self::Codomain) -> Self::Domain {
         let (key, v) = c;
         let basics = match key {
-            SpecKey::Matmul { dtypes } | SpecKey::Conv { dtypes } => {
+            SpecKey::Matmul { dtypes: _ }
+            | SpecKey::Conv { dtypes: _ }
+            | SpecKey::Softmax {
+                reduction_dim: _,
+                dtype: _,
+            } => {
                 let accum = v[0] == 0;
-                let typ = match key {
-                    SpecKey::Matmul { .. } => PrimitiveSpecType::Matmul { accum },
-                    SpecKey::Conv { .. } => PrimitiveSpecType::Conv { accum },
+                let (typ, dtypes) = match key {
+                    SpecKey::Matmul { dtypes } => {
+                        (PrimitiveSpecType::Matmul { accum }, dtypes.to_vec())
+                    }
+                    SpecKey::Conv { dtypes } => {
+                        (PrimitiveSpecType::Conv { accum }, dtypes.to_vec())
+                    }
+                    SpecKey::Softmax {
+                        reduction_dim,
+                        dtype,
+                    } => (
+                        PrimitiveSpecType::Softmax {
+                            reduction_dim: *reduction_dim,
+                            accum,
+                        },
+                        vec![*dtype, *dtype],
+                    ),
                     _ => unreachable!(),
                 };
 
@@ -1377,7 +1511,7 @@ impl BiMap for PrimitiveBasicsBimap {
                         .iter()
                         .map(|&d| DimSize::new(d).unwrap())
                         .collect(),
-                    dtypes: dtypes.as_slice().into(),
+                    dtypes,
                 }
             }
             SpecKey::Move { dtypes } => PrimitiveBasics {
@@ -1697,6 +1831,12 @@ fn compose_parameter_count(components: &[PrimitiveBasics]) -> usize {
         + 2
 }
 
+fn softmax_output_shape(input_shape: &[DimSize], reduction_dim: u8) -> Shape {
+    let mut result = input_shape.to_vec();
+    result.remove(reduction_dim.into());
+    result
+}
+
 pub mod macros {
     pub mod internal {
         use crate::common::DimSize;
@@ -1823,6 +1963,7 @@ pub mod macros {
         ( @primitive_spec_type ConvAccum ) => {
             $crate::spec::PrimitiveSpecType::Conv { accum: true }
         };
+        // TODO: Add Softmax to lspec!. Need some notation for reduction dim.
 
         ( @dt_convert u8 ) => {
             $crate::common::Dtype::Uint8
