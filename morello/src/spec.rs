@@ -853,6 +853,20 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
+    pub fn parameter(&self, index: usize) -> TensorSpec<Tgt> {
+        match self {
+            LogicalSpec::Primitive(basics, auxes, _) => TensorSpec::new_noncanon_with_aux(
+                self.parameter_shape(index),
+                basics.dtypes[index],
+                auxes[index].clone(),
+            ),
+            LogicalSpec::Compose { .. } => {
+                // TODO: Extremely inefficient. Specialize this.
+                self.parameters().swap_remove(index)
+            }
+        }
+    }
+
     pub fn input_shapes(&self) -> Vec<Shape> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => basics.input_shapes(),
@@ -2346,6 +2360,25 @@ mod tests {
             let projection = BiMap::apply(&bimap, &basics);
             let reversed = BiMap::apply_inverse(&bimap, &projection);
             assert_eq!(basics, reversed);
+        }
+
+        #[test]
+        fn test_parameter_fn_matches_parameters_fn(spec in any::<LogicalSpec<X86Target>>()) {
+            let parameters = spec.parameters();
+            let individual_parameters = (0..parameters.len()).map(|i| spec.parameter(i)).collect::<Vec<_>>();
+            prop_assert_eq!(parameters, individual_parameters);
+        }
+
+        #[test]
+        #[should_panic]
+        fn test_parameter_fn_panics_above_parameter_len(spec in any::<LogicalSpec<X86Target>>()) {
+            spec.parameter(spec.parameters().len());
+        }
+
+        #[test]
+        #[should_panic]
+        fn test_parameter_fn_panics_above_parameter_count(spec in any::<LogicalSpec<X86Target>>()) {
+            spec.parameter(spec.operand_count());
         }
 
         #[test]
