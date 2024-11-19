@@ -119,6 +119,7 @@ pub enum NotApplicableReason {
     LayoutIncompatible,
     SelfMove,
     VectorSizeInvalid(Dtype, DimSize),
+    MultipleOutputs,
     Other(Option<&'static str>),
 }
 
@@ -138,7 +139,13 @@ impl<Tgt: Target> Action<Tgt> {
 
         match self {
             Action::TileOut(tileout) => {
-                let current_output = &operands[logical_spec.output_idx()];
+                let Some(output_idx) = logical_spec.unique_output_index() else {
+                    return Err(ApplyError::NotApplicable(
+                        NotApplicableReason::MultipleOutputs,
+                    ));
+                };
+
+                let current_output = &operands[output_idx];
                 let current_out_shape = current_output.shape();
                 let rank = current_out_shape.len();
 
@@ -162,13 +169,13 @@ impl<Tgt: Target> Action<Tgt> {
 
                 // Tiling happens in three steps:
                 // 1. Construct the simple tile corresponding to the new output shape.
-                let out_idx: u8 = logical_spec.output_idx().try_into().unwrap();
+                let output_idx_u8 = u8::try_from(output_idx).unwrap();
                 let smaller_output_tiling = Tiling::new_simple(output_shape.either_into());
                 let smaller_output = LoopTile {
-                    parameter_index: out_idx,
+                    parameter_index: output_idx_u8,
                     axes: (0..u8::try_from(rank).unwrap()).collect(),
                     tile: smaller_output_tiling
-                        .apply(Param::new(out_idx, current_output.clone()))
+                        .apply(Param::new(output_idx_u8, current_output.clone()))
                         .map(|v| v.boxed_viewe())
                         .map_err(tile_to_apply_err)?,
                 };
@@ -184,7 +191,7 @@ impl<Tgt: Target> Action<Tgt> {
                 for (operand_idx, (original_input, (updated_input_tiling, updated_input_axes))) in
                     operands.iter().zip(updated_input_tilings.0).enumerate()
                 {
-                    if operand_idx == logical_spec.output_idx() {
+                    if operand_idx == output_idx {
                         continue;
                     }
 
@@ -310,6 +317,9 @@ impl<Tgt: Target> Action<Tgt> {
                     }
                 ) =>
                 {
+                    let Some(output_idx) = logical_spec.unique_output_index() else {
+                        panic!("Compose should have a unique output");
+                    };
                     let [old_m, old_k, old_n] = &components[0].spec_shape[..] else {
                         todo!();
                     };
@@ -350,12 +360,11 @@ impl<Tgt: Target> Action<Tgt> {
                     };
 
                     // Remove the LoopTile for the output
+                    debug_assert_eq!(output_idx, app_spec.0.unique_output_index().unwrap());
                     let tail_output_tile = tiles.remove(
                         tiles
                             .iter()
-                            .position(|tile| {
-                                usize::from(tile.parameter_index) == app_spec.0.output_idx()
-                            })
+                            .position(|tile| usize::from(tile.parameter_index) == output_idx)
                             .expect("tail Compose should have a loop over output"),
                     );
 
@@ -388,13 +397,13 @@ impl<Tgt: Target> Action<Tgt> {
 
                     // Add an argument for the new head rhs
                     let mut new_app_args = Vec::<ViewE<Tgt>>::with_capacity(app_args.len() + 1);
-                    debug_assert_ne!(spec.0.output_idx(), 0);
+                    debug_assert!(!spec.0.parameter_is_output(0));
                     new_app_args
                         .push(Param::new(0, new_head_rhs_looptile.tile.spec().clone()).into());
                     // Add Params with indices incremented to account for the
                     // additional argument
                     for (idx, a) in app_args.iter().enumerate() {
-                        if idx == compose_tail.0.output_idx() {
+                        if compose_tail.0.parameter_is_output(idx) {
                             continue;
                         }
                         let Some(Param(param_idx, param_spec, ..)) = a.to_param() else {
@@ -404,10 +413,10 @@ impl<Tgt: Target> Action<Tgt> {
                     }
                     // Add an output argument with the Spec's target output
                     new_app_args.insert(
-                        spec.0.output_idx(),
+                        output_idx,
                         Param::new(
                             new_app_args.len().try_into().unwrap(),
-                            spec.0.output().clone(),
+                            logical_spec.parameter(output_idx).clone(),
                         )
                         .into(),
                     );
@@ -746,6 +755,11 @@ impl<Tgt: Target> Action<Tgt> {
                 )))
             }
             Action::ToAccum => {
+                if logical_spec.unique_output_index().is_none() {
+                    return Err(ApplyError::NotApplicable(
+                        NotApplicableReason::MultipleOutputs,
+                    ));
+                };
                 let head = match logical_spec {
                     LogicalSpec::Primitive(basics, ..) => basics,
                     LogicalSpec::Compose { components, .. } => &components[0],
@@ -886,7 +900,11 @@ impl<Tgt: Target> Action<Tgt> {
     pub fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         match (self, &spec.0) {
             (Action::TileOut(tileout), LogicalSpec::Primitive(basics, ..)) => {
-                let output_tensor = spec.0.output();
+                let Some(output_tensor) = spec.0.unique_output() else {
+                    return Err(ApplyError::NotApplicable(
+                        NotApplicableReason::MultipleOutputs,
+                    ));
+                };
                 let untiled_output_shape = output_tensor.shape();
                 let tile_shape = tileout.tiled_output_shape(untiled_output_shape);
                 let parallel = tileout.parallel();
@@ -965,8 +983,10 @@ impl<Tgt: Target> Action<Tgt> {
 
 /// Returns a Spec application of a Zero corresponding to the output of the given Spec.
 fn make_zero_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> ImplNode<Tgt> {
-    let output_idx = u8::try_from(spec.0.output_idx()).unwrap();
-    let output = spec.0.output();
+    let Some(output_idx) = spec.0.unique_output_index() else {
+        panic!("Cannot make a Zero for a Spec with multiple outputs");
+    };
+    let output = spec.0.parameter(output_idx);
     let subspec = LogicalSpec::Primitive(
         PrimitiveBasics {
             typ: PrimitiveSpecType::Zero,
@@ -979,7 +999,10 @@ fn make_zero_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> ImplNode<Tgt> {
     let mut spec = Spec(subspec, spec.1.clone());
     spec.canonicalize()
         .expect("ToAccum's introduced Zero should be canonicalizable");
-    let app_arguments = [ViewE::from(Param::new(output_idx, output))];
+    let app_arguments = [ViewE::from(Param::new(
+        output_idx.try_into().unwrap(),
+        output,
+    ))];
     SpecApp::new(spec, app_arguments).into()
 }
 
@@ -1296,6 +1319,9 @@ impl Display for NotApplicableReason {
                     "Target does not support {dtype} vectors with {size} values"
                 )
             }
+            NotApplicableReason::MultipleOutputs => {
+                write!(f, "Spec has multiple outputs")
+            }
             NotApplicableReason::Other(Some(reason_string)) => write!(f, "{}", reason_string),
             NotApplicableReason::Other(None) => write!(f, "Unknown reason"),
         }
@@ -1307,7 +1333,7 @@ fn compose_subspecs_to_pipeline<Tgt: Target>(
     inner_compose: Spec<Tgt>,
     outer_compose: Spec<Tgt>,
 ) -> ImplNode<Tgt> {
-    let intermediate_tensorspec = inner_compose.0.output();
+    let intermediate_tensorspec = inner_compose.0.unique_output().unwrap();
     let intermediate_tensor = Rc::new(Tensor::new(intermediate_tensorspec.clone()));
 
     let inner_application = {
@@ -1321,13 +1347,16 @@ fn compose_subspecs_to_pipeline<Tgt: Target>(
                 .map(|(i, op)| Param::new(i.try_into().unwrap(), op).into()),
         );
         params.insert(
-            inner_compose.0.output_idx(),
+            inner_compose.0.unique_output_index().unwrap(),
             (*intermediate_tensor).clone().into(),
         );
         ImplNode::from(SpecApp::new(inner_compose, params))
     };
     let outer_application = {
-        let outer_output_idx = outer_compose.0.output_idx();
+        let outer_output_idx = outer_compose
+            .0
+            .unique_output_index()
+            .expect("Component Specs to have a unique output");
         let parameter_specs = outer_compose.0.parameters();
         let mut params: Vec<ViewE<Tgt>> = vec![];
         params.reserve_exact(parameter_specs.len());

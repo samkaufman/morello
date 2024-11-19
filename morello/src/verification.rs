@@ -524,6 +524,10 @@ fn test_artifact_correct_inner<Tgt>(spec: &Spec<Tgt>, built_artifact: &BuiltArti
 where
     Tgt: Target,
 {
+    let Some(output_idx) = spec.0.unique_output_index() else {
+        todo!("Support Specs with multiple outputs");
+    };
+
     // Generate some test inputs (and output).
     let parameters = spec.0.parameters();
     let mut concrete_tensors = parameters
@@ -540,7 +544,7 @@ where
     // Compute expected output
     concrete_tensors = spec.0.execute(concrete_tensors);
 
-    lowered_output == concrete_tensors[spec.0.output_idx()]
+    lowered_output == concrete_tensors[output_idx]
 }
 
 fn make_array_input_dyn<Tgt: Target>(input: &TensorSpec<Tgt>) -> DynArray<IxDyn> {
