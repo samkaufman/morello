@@ -27,9 +27,9 @@ pub fn tile_out_actions<Tgt: Target>(
     depth: Option<NonZeroU32>,
 ) -> Box<dyn Iterator<Item = Action<Tgt>> + '_> {
     let serial_only = spec.serial_only();
-    let output_idx = spec
-        .unique_output_index()
-        .expect("Spec has a unique output");
+    let Some(output_idx) = spec.unique_output_index() else {
+        return Box::new(iter::empty());
+    };
     let output_shape = spec.parameter_shape(output_idx);
     let multi_dim = MULTI_DIM_TILING || !serial_only;
     if multi_dim {
