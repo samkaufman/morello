@@ -180,9 +180,10 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
                 // Compute the innermost matmul.
                 let innermost_component = components.last().unwrap();
+                let innermost_output_idx = innermost_component.typ.unique_output_index().unwrap();
                 let first_rhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
                 let first_lhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
-                let first_dtype = innermost_component.dtypes[innermost_component.typ.output_idx()];
+                let first_dtype = innermost_component.dtypes[innermost_output_idx];
                 let mut first_out =
                     DynArray::zeros((first_lhs.shape()[0], first_rhs.shape()[1]), first_dtype);
                 first_lhs.dot_inplace(&first_rhs, &mut first_out);
@@ -192,7 +193,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 // Compute the inner components
                 let mut next_lhs = first_out;
                 for component in components.iter().take(components.len() - 2).skip(1) {
-                    let dtype = component.dtypes[component.typ.output_idx()];
+                    let dtype = component.dtypes[component.typ.unique_output_index().unwrap()];
                     let rhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
                     let mut out = DynArray::zeros((next_lhs.shape()[0], rhs.shape()[1]), dtype);
                     next_lhs.dot_inplace(&rhs, &mut out);

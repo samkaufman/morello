@@ -283,11 +283,27 @@ impl PrimitiveBasics {
         operand_auxes.into_iter().cloned().collect()
     }
 
-    // TODO: Avoid constructing output shape.
+    pub fn input_shape(&self, index: usize) -> Shape {
+        if let Some(output_idx) = self.typ.unique_output_index() {
+            if index < output_idx {
+                self.parameter_shape(index)
+            } else {
+                self.parameter_shape(index + 1)
+            }
+        } else {
+            todo!()
+        }
+    }
+
     pub fn input_shapes(&self) -> Vec<Shape> {
-        let mut operands = self.parameter_shapes();
-        operands.remove(self.typ.output_idx());
-        operands
+        let param_count = self.typ.operand_count();
+        let mut shapes = Vec::with_capacity(param_count);
+        for i in 0..param_count {
+            if !self.typ.parameter_is_output(i) {
+                shapes.push(self.parameter_shape(i));
+            }
+        }
+        shapes
     }
 
     pub fn parameter_shapes(&self) -> Vec<Shape> {
@@ -379,16 +395,10 @@ impl PrimitiveBasics {
         }
     }
 
-    pub fn input_shape(&self, idx: usize) -> Shape {
-        if idx < self.typ.output_idx() {
-            self.parameter_shape(idx)
-        } else {
-            self.parameter_shape(idx + 1)
-        }
-    }
-
-    pub fn output_shape(&self) -> Shape {
-        self.parameter_shape(self.typ.output_idx())
+    pub fn unique_output_shape(&self) -> Option<Shape> {
+        self.typ
+            .unique_output_index()
+            .map(|idx| self.parameter_shape(idx))
     }
 
     pub fn parameter_dtypes(&self) -> Vec<Dtype> {
@@ -670,11 +680,19 @@ impl PrimitiveSpecType {
         }
     }
 
-    pub fn output_idx(&self) -> usize {
+    fn parameter_is_output(&self, index: usize) -> bool {
         match self {
-            PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => 2,
-            &PrimitiveSpecType::Softmax { .. } | PrimitiveSpecType::Move { .. } => 1,
-            PrimitiveSpecType::Zero { .. } => 0,
+            PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => index == 2,
+            PrimitiveSpecType::Softmax { .. } | PrimitiveSpecType::Move => index == 1,
+            PrimitiveSpecType::Zero => index == 0,
+        }
+    }
+
+    pub fn unique_output_index(&self) -> Option<usize> {
+        match self {
+            PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => Some(2),
+            PrimitiveSpecType::Softmax { .. } | PrimitiveSpecType::Move { .. } => Some(1),
+            PrimitiveSpecType::Zero { .. } => Some(0),
         }
     }
 
@@ -797,12 +815,14 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 result.reserve_exact(compose_parameter_count(components));
 
                 // Compute the parameters for the first component (executed last).
+                let outermost_component_output_idx =
+                    components[0].typ.unique_output_index().unwrap();
                 let mut outermost_component_parameter_shapes = components[0].parameter_shapes();
                 let mut outermost_component_dtypes = components[0].dtypes.clone();
                 let outermost_component_output_shape =
-                    outermost_component_parameter_shapes.remove(components[0].typ.output_idx());
+                    outermost_component_parameter_shapes.remove(outermost_component_output_idx);
                 let outermost_component_output_dtype =
-                    outermost_component_dtypes.remove(components[0].typ.output_idx());
+                    outermost_component_dtypes.remove(outermost_component_output_idx);
                 result.extend(
                     outermost_component_parameter_shapes[1..]
                         .iter()
@@ -814,11 +834,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 );
 
                 for c in &components[1..components.len() - 1] {
+                    let c_out_idx = c.typ.unique_output_index().unwrap();
                     let mut ps = c.parameter_shapes();
-                    ps.remove(c.typ.output_idx());
+                    ps.remove(c_out_idx);
                     ps.remove(0);
                     let mut dtypes = c.dtypes.clone();
-                    dtypes.remove(c.typ.output_idx());
+                    dtypes.remove(c_out_idx);
                     dtypes.remove(0);
                     result.extend(
                         ps.into_iter()
@@ -832,10 +853,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
                 // Fill in the innermost component
                 let innermost_component = &components[components.len() - 1];
+                let innermost_component_output_idx =
+                    innermost_component.typ.unique_output_index().unwrap();
                 let mut ps = innermost_component.parameter_shapes();
-                ps.remove(innermost_component.typ.output_idx());
+                ps.remove(innermost_component_output_idx);
                 let mut dtypes = innermost_component.dtypes.clone();
-                dtypes.remove(innermost_component.typ.output_idx());
+                dtypes.remove(innermost_component_output_idx);
                 result.extend(
                     ps.into_iter()
                         .zip(dtypes)
@@ -921,11 +944,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     pub fn parameter_is_output(&self, index: usize) -> bool {
-        let output_idx = match &self {
-            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_idx(),
-            LogicalSpec::Compose { .. } => self.operand_count() - 1,
-        };
-        index == output_idx
+        match &self {
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
+                typ.parameter_is_output(index)
+            }
+            LogicalSpec::Compose { .. } => index == (self.operand_count() - 1),
+        }
     }
 
     pub fn causes_side_effects(&self) -> bool {
@@ -1150,7 +1174,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let mut new_operands = component_inputs.clone();
                     new_operands.push((
                         new_output_shape,
-                        component.dtypes[component.typ.output_idx()],
+                        component.dtypes[component.typ.unique_output_index().unwrap()],
                     ));
                     component.replace_io(
                         new_operands
@@ -1677,7 +1701,7 @@ fn arb_compose_component_successor(
 
     // Restrict the basic types to those which have a first input of a possible rank.
     let shapes = predecessor.parameter_shapes();
-    let out_idx = predecessor.typ.output_idx();
+    let out_idx = predecessor.typ.unique_output_index().unwrap();
     let mut allowed_types = vec![];
     match shapes[out_idx].len() {
         2 => {
@@ -1810,19 +1834,17 @@ fn compose_parameter_shape(components: &[PrimitiveBasics], mut index: usize) -> 
         index -= exposed_input_count;
     }
     let last_component = &components[components.len() - 1];
-    let last_input_count = last_component.typ.input_count();
-    if index < last_input_count {
+    if index < last_component.typ.input_count() {
         return last_component.input_shape(index);
     }
-    debug_assert_eq!(index, last_input_count);
-    components[0].output_shape()
+    components[0].unique_output_shape().unwrap()
 }
 
 fn compose_parameter_visit(components: &[PrimitiveBasics], mut visitor: impl FnMut(usize, usize)) {
     debug_assert!(components.len() >= 2);
 
     // TODO: Replace parameter_dtypes with some parameter_count method
-    let c0_output_idx = components[0].typ.output_idx();
+    let c0_output_idx = components[0].typ.unique_output_index().unwrap();
     for parameter in 1..components[0].parameter_dtypes().len() {
         if parameter != c0_output_idx {
             visitor(0, parameter);
@@ -1835,7 +1857,7 @@ fn compose_parameter_visit(components: &[PrimitiveBasics], mut visitor: impl FnM
         .take(components.len() - 1)
         .skip(1)
     {
-        let output_idx = c.typ.output_idx();
+        let output_idx = c.typ.unique_output_index().unwrap();
         for parameter in 1..c.parameter_dtypes().len() {
             if parameter != output_idx {
                 visitor(component_idx, parameter);
@@ -1843,7 +1865,10 @@ fn compose_parameter_visit(components: &[PrimitiveBasics], mut visitor: impl FnM
         }
     }
 
-    let cl_output_idx = components[components.len() - 1].typ.output_idx();
+    let cl_output_idx = components[components.len() - 1]
+        .typ
+        .unique_output_index()
+        .unwrap();
     for parameter in 0..components[components.len() - 1].parameter_dtypes().len() {
         if parameter != cl_output_idx {
             visitor(components.len() - 1, parameter);
@@ -2171,6 +2196,27 @@ mod tests {
         assert!(spec.canonicalize().is_err());
     }
 
+    #[test]
+    fn test_dim_range_with_odd_max() {
+        assert_eq!(
+            dim_range(nz!(3u32), false, None).collect::<Vec<_>>(),
+            vec![nz!(1u32), nz!(2u32)]
+        );
+        assert_eq!(
+            dim_range(nz!(3u32), true, None).collect::<Vec<_>>(),
+            vec![nz!(1u32), nz!(2u32), nz!(3u32)]
+        );
+
+        assert_eq!(
+            dim_range(nz!(7u32), false, None).collect::<Vec<_>>(),
+            vec![nz!(1u32), nz!(2u32), nz!(4u32)]
+        );
+        assert_eq!(
+            dim_range(nz!(7u32), true, None).collect::<Vec<_>>(),
+            vec![nz!(1u32), nz!(2u32), nz!(4u32), nz!(7u32)]
+        );
+    }
+
     proptest! {
         #[test]
         fn test_parameter_shapes_and_every_parameter_shape_matches(
@@ -2205,6 +2251,20 @@ mod tests {
             logical_spec in arb_canonical_logical_spec::<X86Target>(Some(TEST_SMALL_SIZE))
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
+        }
+
+        #[test]
+        fn test_unique_output_index_matches_parameter_is_output(
+            spec_type in any::<PrimitiveSpecType>(),
+        ) {
+            let output_idxs = (0..spec_type.operand_count())
+                .filter(|&i| spec_type.parameter_is_output(i))
+                .collect::<Vec<_>>();
+            if let Some(unique_output_idx) = spec_type.unique_output_index() {
+                assert_eq!(output_idxs, [unique_output_idx]);
+            } else {
+                assert_ne!(output_idxs.len(), 1);
+            }
         }
 
         #[test]
@@ -2469,27 +2529,6 @@ mod tests {
             let pipeline_parameters = pipeline.parameters().cloned().collect::<Vec<_>>();
             prop_assert_eq!(spec_parameters, pipeline_parameters);
         }
-    }
-
-    #[test]
-    fn test_dim_range_with_odd_max() {
-        assert_eq!(
-            dim_range(nz!(3u32), false, None).collect::<Vec<_>>(),
-            vec![nz!(1u32), nz!(2u32)]
-        );
-        assert_eq!(
-            dim_range(nz!(3u32), true, None).collect::<Vec<_>>(),
-            vec![nz!(1u32), nz!(2u32), nz!(3u32)]
-        );
-
-        assert_eq!(
-            dim_range(nz!(7u32), false, None).collect::<Vec<_>>(),
-            vec![nz!(1u32), nz!(2u32), nz!(4u32)]
-        );
-        assert_eq!(
-            dim_range(nz!(7u32), true, None).collect::<Vec<_>>(),
-            vec![nz!(1u32), nz!(2u32), nz!(4u32), nz!(7u32)]
-        );
     }
 
     fn shared_test_no_action_panics<Tgt: Target>(spec: Spec<Tgt>) {
