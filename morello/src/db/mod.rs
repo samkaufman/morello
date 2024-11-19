@@ -1301,6 +1301,13 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
             .join("Softmax")
             .join(reduction_dim.to_string())
             .join(dtype.to_string()),
+        SpecKey::SoftmaxDenominatorAndMax {
+            reduction_dim,
+            dtype,
+        } => root
+            .join("SoftmaxDenominatorAndMax")
+            .join(reduction_dim.to_string())
+            .join(dtype.to_string()),
         SpecKey::Move { dtypes } => root
             .join("Move")
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
