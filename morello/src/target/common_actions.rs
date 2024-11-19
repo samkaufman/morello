@@ -129,8 +129,8 @@ pub fn bufferize_actions<Tgt: Target>(
 
     for index in 0..(components.len() - 1) {
         let comp = &components[index + 1];
-        let comp_out_idx = comp.typ.output_idx();
-        let intermediate_shape = comp.output_shape();
+        let comp_out_idx = comp.typ.unique_output_index().unwrap();
+        let intermediate_shape = comp.parameter_shape(comp_out_idx);
         let intermediate_dtype = comp.dtypes[comp_out_idx];
 
         for level in Tgt::levels() {
