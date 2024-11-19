@@ -874,10 +874,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    pub fn output_shape(&self) -> Shape {
-        self.parameter_shape(self.output_idx())
-    }
-
     pub fn parameter_shapes(&self) -> Vec<Shape> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => basics.parameter_shapes(),
@@ -893,20 +889,43 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     pub fn inputs(&self) -> Vec<TensorSpec<Tgt>> {
-        let mut operands = self.parameters();
-        operands.remove(self.output_idx());
-        operands
+        (0..self.operand_count())
+            .filter(|i| !self.parameter_is_output(*i))
+            .map(|i| self.parameter(i))
+            .collect()
     }
 
-    pub fn output(&self) -> TensorSpec<Tgt> {
-        self.parameters().swap_remove(self.output_idx())
+    /// Returns the output parameter if there is just one.
+    pub fn unique_output(&self) -> Option<TensorSpec<Tgt>> {
+        self.unique_output_index().map(|idx| self.parameter(idx))
     }
 
-    pub fn output_idx(&self) -> usize {
-        match &self {
+    /// Returns the index of the output parameter if there is just one.
+    pub fn unique_output_index(&self) -> Option<usize> {
+        let mut found_output = None;
+        let mut param_idx = self.operand_count();
+        while param_idx > 0 {
+            param_idx -= 1;
+            if self.parameter_is_output(param_idx) {
+                found_output = Some(param_idx);
+                break;
+            }
+        }
+        while param_idx > 0 {
+            param_idx -= 1;
+            if self.parameter_is_output(param_idx) {
+                return None;
+            }
+        }
+        found_output
+    }
+
+    pub fn parameter_is_output(&self, index: usize) -> bool {
+        let output_idx = match &self {
             LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_idx(),
             LogicalSpec::Compose { .. } => self.operand_count() - 1,
-        }
+        };
+        index == output_idx
     }
 
     pub fn causes_side_effects(&self) -> bool {
@@ -1223,8 +1242,11 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
         } = self
         {
             let operands = self.parameters();
+            let output_idx = self
+                .unique_output_index()
+                .expect("Compose has a unique output");
             let (output, external_inputs) = operands.split_last().unwrap();
-            debug_assert_eq!(self.output_idx(), external_inputs.len());
+            debug_assert_eq!(output_idx, external_inputs.len());
             return write!(
                 f,
                 "Compose(({}), [{}, out={}]{})",
