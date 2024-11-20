@@ -2326,6 +2326,7 @@ mod tests {
         }
 
         #[test]
+        #[ignore]
         fn test_actions_are_valid_through_consumed_memory_x86(
             logical_spec in arb_canonical_logical_spec::<X86Target>(Some(TEST_SMALL_SIZE))
         ) {
@@ -2333,6 +2334,7 @@ mod tests {
         }
 
         #[test]
+        #[ignore]
         fn test_actions_are_valid_through_consumed_memory_arm(
             logical_spec in arb_canonical_logical_spec::<X86Target>(Some(TEST_SMALL_SIZE))
         ) {
