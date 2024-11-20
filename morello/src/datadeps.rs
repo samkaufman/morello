@@ -12,11 +12,15 @@ pub enum SpecKey {
         dtypes: [Dtype; 3],
     },
     Softmax {
-        reduction_dim: u8,
+        scan_dim: u8,
+        dtype: Dtype,
+    },
+    SoftmaxComplete {
+        scan_dim: u8,
         dtype: Dtype,
     },
     SoftmaxDenominatorAndMax {
-        reduction_dim: u8,
+        scan_dim: u8,
         dtype: Dtype,
     },
     Move {
@@ -36,6 +40,7 @@ impl SpecKey {
             SpecKey::Matmul { dtypes } | SpecKey::Conv { dtypes } => dtypes,
             SpecKey::Move { dtypes } => dtypes,
             SpecKey::Softmax { dtype, .. }
+            | SpecKey::SoftmaxComplete { dtype, .. }
             | SpecKey::SoftmaxDenominatorAndMax { dtype, .. }
             | SpecKey::Zero { dtype } => slice::from_ref(dtype),
             SpecKey::Compose { components: _ } => todo!(),

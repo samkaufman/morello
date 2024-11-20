@@ -1294,19 +1294,17 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
         SpecKey::Conv { dtypes } => root
             .join("Conv")
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::Softmax {
-            reduction_dim,
-            dtype,
-        } => root
+        SpecKey::Softmax { scan_dim, dtype } => root
             .join("Softmax")
-            .join(reduction_dim.to_string())
+            .join(scan_dim.to_string())
             .join(dtype.to_string()),
-        SpecKey::SoftmaxDenominatorAndMax {
-            reduction_dim,
-            dtype,
-        } => root
+        SpecKey::SoftmaxComplete { scan_dim, dtype } => root
+            .join("SoftmaxComplete")
+            .join(scan_dim.to_string())
+            .join(dtype.to_string()),
+        SpecKey::SoftmaxDenominatorAndMax { scan_dim, dtype } => root
             .join("SoftmaxDenominatorAndMax")
-            .join(reduction_dim.to_string())
+            .join(scan_dim.to_string())
             .join(dtype.to_string()),
         SpecKey::Move { dtypes } => root
             .join("Move")
