@@ -179,8 +179,13 @@ impl<Tgt: Target> Action<Tgt> {
                 };
 
                 // 2. Construct tilings which respect the data deps. of the new output tile.
-                let updated_input_tilings =
-                    logical_spec.input_tilings_for_tile_out(&smaller_output_tiling);
+                let Ok(updated_input_tilings) =
+                    logical_spec.input_tilings_for_tile_out(&smaller_output_tiling)
+                else {
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                        "Tiling doesn't apply to logical Spec",
+                    ))));
+                };
 
                 // 3. Reify the tilings into Tiles we'll store with this action. Tiles objects track
                 // the index and shape of the Impl parameter being tiled.
@@ -1154,9 +1159,10 @@ impl<Tgt: Target> ActionSolver<Tgt> {
     }
 }
 
-/// Return an error if the tile shape is invalid.
+/// Return an error if the tile shape is invalid for a given tensor.
 ///
-/// This can return TileShapeMatchesOriginal, TileShapeIsLarger, or TileShapeInvalid.
+/// This can return TileShapeMatchesOriginal, TileShapeIsLarger, TileShapeInvalid, or
+/// Other.
 fn check_tile_out_applies<Tgt: Target>(
     current_out_shape: &[DimSize],
     output_shape: &[DimSize],
@@ -1179,7 +1185,7 @@ fn check_tile_out_applies<Tgt: Target>(
     }
 
     // Abort if it's invalid to tile the original output tensor
-    // to the new shape (e.g., the new shape is larger).
+    // to the new shape (e.g., due to layout constraints).
     if !current_output.is_valid_tile_shape(output_shape, parallel) {
         return Err(ApplyError::NotApplicable(
             NotApplicableReason::TileShapeInvalid,

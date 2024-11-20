@@ -293,6 +293,7 @@ impl<T: CpuTarget> Target for T {
                 }
                 PrimitiveSpecType::Conv { .. } => &[],
                 PrimitiveSpecType::Softmax { .. } => &[],
+                PrimitiveSpecType::SoftmaxComplete { .. } => &[],
                 PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => &[],
                 PrimitiveSpecType::Move { .. } => {
                     const MOVE_KERNELS: [CpuKernel; 8] = [

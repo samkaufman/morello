@@ -233,13 +233,10 @@ where
             )
         }
         QuerySpec::Softmax { rank, size } => {
-            let layouts = [row_major(*rank), row_major(*rank - 1)];
+            let layouts = [row_major(*rank), row_major(*rank)];
             LogicalSpec::Primitive(
                 PrimitiveBasics {
-                    typ: PrimitiveSpecType::Softmax {
-                        reduction_dim: 0,
-                        accum: false,
-                    },
+                    typ: PrimitiveSpecType::Softmax { scan_dim: 0 },
                     spec_shape: vec![*size; usize::from(*rank)],
                     dtypes: vec![Dtype::Uint32; usize::from(*rank)],
                 },
