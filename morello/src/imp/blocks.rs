@@ -12,7 +12,6 @@ use crate::views::{Param, View};
 #[derive(Debug, Clone)]
 pub struct Block<Tgt: Target> {
     pub stages: Vec<ImplNode<Tgt>>,
-    pub bindings: Vec<Vec<u8>>,
     pub parameters: Vec<TensorSpec<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
     pub default_child: Option<usize>,
@@ -50,7 +49,6 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
         debug_assert_eq!(stages.len(), self.stages.len());
         Self {
             stages,
-            bindings: self.bindings.clone(),
             parameters: self.parameters.clone(),
             spec: self.spec.clone(),
             default_child: self.default_child,
@@ -62,11 +60,8 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
         args: &[&'j dyn View<Tgt = Tgt>],
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
-        let mut inner_args = vec![];
-        for (stage, stage_bindings) in self.stages.iter().zip(&self.bindings) {
-            inner_args.clear();
-            inner_args.extend(stage_bindings.iter().map(|&b| args[usize::from(b)]));
-            stage.bind(&inner_args, env);
+        for stage in &self.stages {
+            stage.bind(args, env);
         }
     }
 

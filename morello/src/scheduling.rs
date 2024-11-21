@@ -774,8 +774,8 @@ impl<Tgt: Target> Action<Tgt> {
                     ))));
                 }
 
-                let zero_app = make_zero_for_spec(spec);
-                let (accum_app, main_arg_count) = {
+                let zero_app = make_zero_for_spec(spec, output_idx.try_into().unwrap());
+                let accum_app = {
                     let mut spec = Spec(logical_spec.clone_as_accum(), spec.1.clone());
                     spec.canonicalize()
                         .expect("ToAccum's introduced accumulating Spec should be canonicalizable");
@@ -783,17 +783,11 @@ impl<Tgt: Target> Action<Tgt> {
                         .iter()
                         .enumerate()
                         .map(|(i, t)| Param::new(i.try_into().unwrap(), t.clone()));
-                    let app_node = SpecApp::new(spec, app_arguments);
-                    let main_arg_count = u8::try_from(app_node.1.len()).unwrap();
-                    (app_node.into(), main_arg_count)
+                    SpecApp::new(spec, app_arguments).into()
                 };
 
                 Ok(ImplNode::Block(Block {
                     stages: vec![zero_app, accum_app],
-                    bindings: vec![
-                        vec![output_idx.try_into().unwrap()],
-                        (0..main_arg_count).collect(),
-                    ],
                     parameters: operands,
                     spec: Some(spec.clone()),
                     default_child: Some(1),
@@ -966,7 +960,7 @@ impl<Tgt: Target> Action<Tgt> {
 }
 
 /// Returns a Spec application of a Zero corresponding to the output of the given Spec.
-fn make_zero_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> ImplNode<Tgt> {
+fn make_zero_for_spec<Tgt: Target>(spec: &Spec<Tgt>, param_index: u8) -> ImplNode<Tgt> {
     let Some(output) = spec.0.unique_output() else {
         panic!("Cannot make a Zero for a Spec with multiple outputs");
     };
@@ -982,7 +976,7 @@ fn make_zero_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> ImplNode<Tgt> {
     let mut spec = Spec(subspec, spec.1.clone());
     spec.canonicalize()
         .expect("ToAccum's introduced Zero should be canonicalizable");
-    let app_arguments = [Param::new(0, output)];
+    let app_arguments = [Param::new(param_index, output)];
     SpecApp::new(spec, app_arguments).into()
 }
 
