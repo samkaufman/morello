@@ -470,25 +470,20 @@ impl<Tgt: Target> Action<Tgt> {
 
                 debug_assert!(*index < components.len() - 1);
                 let consumer = &components[*index];
-                let buffer_tensor = Rc::new(Tensor::new(TensorSpec::<Tgt>::new_canon(
-                    consumer.input_shapes().swap_remove(0),
-                    consumer.dtypes[0],
-                    layout.contiguous_full(),
-                    true,
-                    *level,
-                    layout.clone(),
-                    *vector_size,
-                )));
 
                 // Compute the memory limits for the new children.
                 let new_limits = {
                     // Compute the amount of memory consumed by the new, intermediate
                     // tensor.
                     // TODO: This shouldn't need to be both here and in `memory_allocated`.
+                    let first_input_volume: u64 = consumer
+                        .input_shape(0)
+                        .into_iter()
+                        .map(|v| u64::from(v.get()))
+                        .product();
                     let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
                         if level == &l {
-                            u64::from(buffer_tensor.0.dtype().size())
-                                * u64::from(buffer_tensor.0.volume().get())
+                            u64::from(consumer.dtypes[0].size()) * first_input_volume
                         } else {
                             0u64
                         }
