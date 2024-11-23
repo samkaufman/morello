@@ -236,7 +236,7 @@ where
             let layouts = [row_major(*rank), row_major(*rank)];
             LogicalSpec::Primitive(
                 PrimitiveBasics {
-                    typ: PrimitiveSpecType::Softmax { scan_dim: 0 },
+                    typ: PrimitiveSpecType::Softmax { scan_dim: rank - 1 },
                     spec_shape: vec![*size; usize::from(*rank)],
                     dtypes: vec![Dtype::Uint32; usize::from(*rank)],
                 },
