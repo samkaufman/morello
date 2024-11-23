@@ -1303,13 +1303,17 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         let mut cloned = self.clone();
         match &mut cloned {
             LogicalSpec::Primitive(basics, _, _) => match &mut basics.typ {
-                PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => {
+                PrimitiveSpecType::Matmul { accum }
+                | PrimitiveSpecType::Conv { accum }
+                | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. } => {
                     *accum = true;
                 }
                 _ => panic!("Cannot clone_as_accum: {:?}", self),
             },
             LogicalSpec::Compose { components, .. } => match &mut components[0].typ {
-                PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => {
+                PrimitiveSpecType::Matmul { accum }
+                | PrimitiveSpecType::Conv { accum }
+                | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. } => {
                     *accum = true;
                 }
                 _ => panic!("Cannot clone_as_accum: {:?}", self),
