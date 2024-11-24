@@ -1336,41 +1336,51 @@ fn compose_subspecs_to_pipeline<Tgt: Target>(
     inner_compose: Spec<Tgt>,
     outer_compose: Spec<Tgt>,
 ) -> ImplNode<Tgt> {
+    // The following logic assumes the Pipeline has a single output, and it's the last parameter.
+    let parent_output_idx = parent_spec.0.unique_output_index().unwrap();
+    debug_assert_eq!(parent_output_idx, parent_spec.0.operand_count() - 1);
+
     let intermediate_tensorspec = inner_compose.0.unique_output().unwrap();
     let intermediate_tensor = Rc::new(Tensor::new(intermediate_tensorspec.clone()));
 
     let inner_application = {
         let input_specs = inner_compose.0.inputs();
-        let mut params: Vec<ViewE<Tgt>> = vec![];
-        params.reserve_exact(input_specs.len() + 1);
-        params.extend(
-            input_specs
-                .into_iter()
-                .enumerate()
-                .map(|(i, op)| Param::new(i.try_into().unwrap(), op).into()),
-        );
-        params.insert(
-            inner_compose.0.unique_output_index().unwrap(),
-            (*intermediate_tensor).clone().into(),
-        );
-        ImplNode::from(SpecApp::new(inner_compose, params))
+        let param_offset = parent_spec.0.operand_count() - input_specs.len() - 1;
+        let params: Vec<ViewE<Tgt>> = input_specs
+            .into_iter()
+            .enumerate()
+            .map(|(i, op)| Param::new((param_offset + i).try_into().unwrap(), op).into())
+            .chain(std::iter::once((*intermediate_tensor).clone().into()))
+            .collect();
+        ImplNode::SpecApp(SpecApp::new(inner_compose, params))
     };
     let outer_application = {
-        let outer_output_idx = outer_compose
+        let mut first_input_idx = 0;
+        while outer_compose.0.parameter_is_output(first_input_idx) {
+            first_input_idx += 1;
+        }
+        let only_output_idx = outer_compose
             .0
             .unique_output_index()
-            .expect("Component Specs to have a unique output");
+            .expect("outer_compose should have a single output");
+
         let parameter_specs = outer_compose.0.parameters();
-        let mut params: Vec<ViewE<Tgt>> = vec![];
-        params.reserve_exact(parameter_specs.len());
-        let idx_to_replace = if outer_output_idx == 0 { 1 } else { 0 };
-        for (i, parameter_spec) in parameter_specs.into_iter().enumerate() {
-            if i == idx_to_replace {
-                params.push((*intermediate_tensor).clone().into());
-            } else {
-                params.push(Param::new(i.try_into().unwrap(), parameter_spec).into());
-            }
-        }
+        let mut param_idx = 0u8;
+        let params: Vec<ViewE<Tgt>> = parameter_specs
+            .into_iter()
+            .enumerate()
+            .map(|(i, parameter_spec)| {
+                if i == first_input_idx {
+                    (*intermediate_tensor).clone().into()
+                } else if i == only_output_idx {
+                    Param::new(parent_output_idx.try_into().unwrap(), parameter_spec).into()
+                } else {
+                    let p = Param::new(param_idx, parameter_spec).into();
+                    param_idx += 1;
+                    p
+                }
+            })
+            .collect();
         ImplNode::SpecApp(SpecApp::new(outer_compose, params))
     };
 
