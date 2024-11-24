@@ -74,52 +74,12 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
         debug_assert_eq!(self.stages.len(), self.intermediates.len() + 1);
-
         for intermediate in &self.intermediates {
             intermediate.bind(args, env);
         }
-
-        // TODO: The following assumes that children (and self) put the output in the last position.
-
-        // Bind the first stage
-        let first_stage = self.stages.first().unwrap();
-        let first_stage_parameter_count = usize::from(first_stage.parameter_count());
-        debug_assert!(first_stage_parameter_count > 1);
-        let mut subargs = vec![];
-        subargs.reserve_exact(first_stage.parameter_count().into());
-        let mut eaten = args.len() - first_stage_parameter_count;
-        subargs.extend_from_slice(&args[eaten..args.len() - 1]);
-        subargs.push(&self.intermediates[0]);
-        debug_assert_eq!(subargs.len(), first_stage_parameter_count);
-        first_stage.bind(&subargs, env);
-
-        // Bind the middles stages
-        for stage_idx in 1..self.stages.len() - 1 {
-            let stage = &self.stages[stage_idx];
-            let parameter_count = usize::from(stage.parameter_count());
-            debug_assert!(parameter_count > 1);
-            let nonhead_input_count = parameter_count - 2;
-            subargs.clear();
-            subargs.reserve_exact(parameter_count);
-            subargs.push(self.intermediates[stage_idx - 1].as_ref());
-            subargs.extend_from_slice(&args[(eaten - nonhead_input_count)..eaten]);
-            subargs.push(self.intermediates[stage_idx].as_ref());
-            eaten -= nonhead_input_count;
-            debug_assert_eq!(subargs.len(), parameter_count);
-            stage.bind(&subargs, env);
+        for stage in &self.stages {
+            stage.bind(args, env);
         }
-
-        // Bind the last
-        let last_stage = self.stages.last().unwrap();
-        let last_stage_parameter_count = usize::from(last_stage.parameter_count());
-        debug_assert!(last_stage_parameter_count > 1);
-        subargs.clear();
-        subargs.reserve_exact(last_stage_parameter_count);
-        subargs.push(self.intermediates.last().unwrap().as_ref());
-        subargs.extend_from_slice(&args[..eaten]);
-        subargs.push(args[args.len() - 1]);
-        debug_assert_eq!(subargs.len(), last_stage_parameter_count);
-        last_stage.bind(&subargs, env);
     }
 
     fn pprint_line(
