@@ -424,12 +424,8 @@ impl PrimitiveBasics {
         }
     }
 
-    // TODO: Don't returning Err. Put tiling constraints somewhere we can avoid Action generation.
-    pub fn input_tilings_for_tile_out(
-        &self,
-        smaller_output: &Tiling,
-    ) -> Result<TilingInference, ()> {
-        Ok(match (self, smaller_output.is_simple()) {
+    pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> Option<TilingInference> {
+        Some(match (self, smaller_output.is_simple()) {
             (
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Matmul { .. },
@@ -511,7 +507,7 @@ impl PrimitiveBasics {
                 let tiled_input = smaller_output.shape().clone();
                 if tiled_input[scan_dim_us] != spec_shape[scan_dim_us] {
                     // Softmax's scan dimension cannot be tiled
-                    return Err(());
+                    return None;
                 }
                 let mut tiled_step_sizes = smaller_output.step_sizes().to_vec();
                 tiled_step_sizes[scan_dim_us] = spec_shape[scan_dim_us];
@@ -1167,11 +1163,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         true
     }
 
-    // TODO: Don't return Err. Put tiling constraints somewhere we can avoid Action generation.
-    pub fn input_tilings_for_tile_out(
-        &self,
-        smaller_output: &Tiling,
-    ) -> Result<TilingInference, ()> {
+    pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> Option<TilingInference> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => {
                 basics.input_tilings_for_tile_out(smaller_output)
@@ -1201,7 +1193,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .0,
                 );
 
-                Ok(TilingInference(accumulated_input_tilings))
+                Some(TilingInference(accumulated_input_tilings))
             }
         }
     }
@@ -2341,7 +2333,7 @@ mod tests {
         ]);
         assert_eq!(
             spec.input_tilings_for_tile_out(&output_tiling),
-            Ok(expected)
+            Some(expected)
         );
     }
 

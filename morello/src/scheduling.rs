@@ -13,7 +13,7 @@ use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{compute_loop_main_cost, Loop, LoopTile};
 use crate::imp::moves::{move_cost, movelet_memory_allocation, MoveLet, TensorOrCacheView};
-use crate::imp::pipeline::Pipeline;
+use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
@@ -48,6 +48,14 @@ pub enum Action<Tgt: Target> {
     },
     /// Allocate an output tensor, a Zero sub-Spec, and an accumulating variant of the receiver.
     ToAccum,
+    ToSoftmaxParts {
+        max_level: Tgt::Level,
+        max_layout: Layout,
+        max_vector_size: Option<DimSize>,
+        denominator_level: Tgt::Level,
+        denominator_layout: Layout,
+        denominator_vector_size: Option<DimSize>,
+    },
     Bufferize {
         index: usize,
         level: Tgt::Level,
@@ -179,7 +187,7 @@ impl<Tgt: Target> Action<Tgt> {
                 };
 
                 // 2. Construct tilings which respect the data deps. of the new output tile.
-                let Ok(updated_input_tilings) =
+                let Some(updated_input_tilings) =
                     logical_spec.input_tilings_for_tile_out(&smaller_output_tiling)
                 else {
                     return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
@@ -741,24 +749,22 @@ impl<Tgt: Target> Action<Tgt> {
                 )))
             }
             Action::ToAccum => {
-                let Some(output_idx) = logical_spec.unique_output_index() else {
-                    return Err(ApplyError::NotApplicable(
-                        NotApplicableReason::MultipleOutputs,
-                    ));
-                };
                 let head = match logical_spec {
                     LogicalSpec::Primitive(basics, ..) => basics,
                     LogicalSpec::Compose { components, .. } => &components[0],
                 };
 
                 let PrimitiveBasics {
-                    typ: PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum },
+                    typ:
+                        PrimitiveSpecType::Matmul { accum }
+                        | PrimitiveSpecType::Conv { accum }
+                        | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. },
                     ..
                 } = head
                 else {
                     // TODO: Use a more specific NotApplicableReason.
                     return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-                        "ToAccum is only defined for Matmul and Conv",
+                        "ToAccum is only defined for Matmul, Conv, and SoftmaxDenominatorAndMax",
                     ))));
                 };
 
@@ -769,7 +775,7 @@ impl<Tgt: Target> Action<Tgt> {
                     ))));
                 }
 
-                let zero_app = make_zero_for_spec(spec, output_idx.try_into().unwrap());
+                let zero_apps = make_zeroes_for_spec(spec);
                 let accum_app = {
                     let mut spec = Spec(logical_spec.clone_as_accum(), spec.1.clone());
                     spec.canonicalize()
@@ -781,11 +787,165 @@ impl<Tgt: Target> Action<Tgt> {
                     SpecApp::new(spec, app_arguments).into()
                 };
 
+                let mut stages = zero_apps;
+                stages.push(accum_app);
+                let default_child = Some(stages.len() - 1);
                 Ok(ImplNode::Block(Block {
-                    stages: vec![zero_app, accum_app],
+                    stages,
                     parameters: operands,
                     spec: Some(spec.clone()),
-                    default_child: Some(1),
+                    default_child,
+                }))
+            }
+            Action::ToSoftmaxParts {
+                max_level,
+                max_layout,
+                max_vector_size,
+                denominator_level,
+                denominator_layout,
+                denominator_vector_size,
+            } => {
+                let LogicalSpec::Primitive(basics, _, _) = &spec.0 else {
+                    // TODO: Specialize NotApplicableReason.
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                        "Not a Primitive",
+                    ))));
+                };
+                let PrimitiveBasics {
+                    typ: PrimitiveSpecType::Softmax { scan_dim },
+                    spec_shape,
+                    dtypes,
+                } = basics
+                else {
+                    // TODO: Specialize NotApplicableReason.
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                        "Not a Softmax",
+                    ))));
+                };
+
+                // Make tensor for storing the maximum value.
+                let mut max_spec = TensorSpec {
+                    shape: spec_shape.clone(),
+                    dtype: dtypes[0],
+                    aux: TensorSpecAux {
+                        contig: max_layout.contiguous_full(),
+                        aligned: true,
+                        level: *max_level,
+                        layout: max_layout.clone(),
+                        vector_size: *max_vector_size,
+                    },
+                };
+                max_spec.shape[usize::from(*scan_dim)] = nz!(1u32);
+                let max_tensor = Rc::new(Tensor::new(max_spec));
+
+                // Make tensor for storing the denominator
+                let mut denominator_spec = TensorSpec {
+                    shape: spec_shape.clone(),
+                    dtype: dtypes[0],
+                    aux: TensorSpecAux {
+                        contig: denominator_layout.contiguous_full(),
+                        aligned: true,
+                        level: *denominator_level,
+                        layout: denominator_layout.clone(),
+                        vector_size: *denominator_vector_size,
+                    },
+                };
+                denominator_spec.shape[usize::from(*scan_dim)] = nz!(1u32);
+                let denominator_tensor = Rc::new(Tensor::new(denominator_spec));
+
+                let new_buffer_consumption = Tgt::levels().map(|l| {
+                    let mut r = 0;
+                    if max_level == &l {
+                        let max_spec = max_tensor.spec();
+                        r += u64::from(max_spec.dtype.size()) * u64::from(max_spec.volume().get());
+                    }
+                    if denominator_level == &l {
+                        let denominator_spec = denominator_tensor.spec();
+                        r += u64::from(denominator_spec.dtype.size())
+                            * u64::from(denominator_spec.volume().get());
+                    }
+                    r
+                });
+                let mut lowered_limits = MemoryLimits::Standard(match &spec.1 {
+                    MemoryLimits::Standard(v) => v
+                        .clone()
+                        .checked_sub_snap_down(&new_buffer_consumption)
+                        .map_err(|oom_idx| {
+                            ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
+                                Tgt::levels()[oom_idx].to_string(),
+                            ))
+                        })?,
+                });
+                lowered_limits.discretize();
+
+                // Make the SoftmaxDenominatorAndMax sub-Spec
+                let denom_app: ImplNode<Tgt> = {
+                    let mut denom_spec = Spec(
+                        LogicalSpec::Primitive(
+                            PrimitiveBasics {
+                                typ: PrimitiveSpecType::SoftmaxDenominatorAndMax {
+                                    scan_dim: *scan_dim,
+                                    accum: false,
+                                },
+                                spec_shape: basics.spec_shape.clone(),
+                                dtypes: vec![dtypes[0]; 3],
+                            },
+                            vec![
+                                operands[0].aux.clone(),
+                                max_tensor.spec().aux.clone(),
+                                denominator_tensor.spec().aux.clone(),
+                            ],
+                            spec.0.serial_only(),
+                        ),
+                        lowered_limits.clone(),
+                    );
+                    denom_spec.canonicalize().unwrap();
+                    let app_args: Vec<Rc<dyn View<Tgt = Tgt>>> = vec![
+                        Rc::new(Param::new(0, operands[0].clone())),
+                        max_tensor.clone(),
+                        denominator_tensor.clone(),
+                    ];
+                    SpecApp::new(denom_spec, app_args).into()
+                };
+
+                // Make the SoftmaxComplete sub-Spec
+                let complete_app: ImplNode<Tgt> = {
+                    let mut complete_spec = Spec(
+                        LogicalSpec::Primitive(
+                            PrimitiveBasics {
+                                typ: PrimitiveSpecType::SoftmaxComplete {
+                                    scan_dim: *scan_dim,
+                                },
+                                spec_shape: basics.spec_shape.clone(),
+                                dtypes: vec![dtypes[0], dtypes[0], dtypes[0], dtypes[1]],
+                            },
+                            vec![
+                                operands[0].aux.clone(),
+                                max_tensor.spec().aux.clone(),
+                                denominator_tensor.spec().aux.clone(),
+                                operands[1].aux.clone(),
+                            ],
+                            spec.0.serial_only(),
+                        ),
+                        lowered_limits,
+                    );
+                    complete_spec.canonicalize().unwrap();
+                    let app_args: Vec<Rc<dyn View<Tgt = Tgt>>> = vec![
+                        Rc::new(Param::new(0, operands[0].clone())),
+                        Rc::clone(&max_tensor) as _,
+                        Rc::clone(&denominator_tensor) as _,
+                        Rc::new(Param::new(1, operands[1].clone())),
+                    ];
+                    SpecApp::new(complete_spec, app_args).into()
+                };
+
+                Ok(ImplNode::Pipeline(Pipeline {
+                    stages: vec![denom_app, complete_app],
+                    wirings: vec![StageWiring {
+                        intermediate_tensors: vec![max_tensor, denominator_tensor],
+                    }],
+                    parameters: operands,
+                    spec: Some(spec.clone()),
                 }))
             }
             Action::Place(k, force) => {
@@ -954,25 +1114,30 @@ impl<Tgt: Target> Action<Tgt> {
     }
 }
 
-/// Returns a Spec application of a Zero corresponding to the output of the given Spec.
-fn make_zero_for_spec<Tgt: Target>(spec: &Spec<Tgt>, param_index: u8) -> ImplNode<Tgt> {
-    let Some(output) = spec.0.unique_output() else {
-        panic!("Cannot make a Zero for a Spec with multiple outputs");
-    };
-    let subspec = LogicalSpec::Primitive(
-        PrimitiveBasics {
-            typ: PrimitiveSpecType::Zero,
-            spec_shape: output.shape.clone(),
-            dtypes: vec![output.dtype],
-        },
-        vec![output.aux.clone()],
-        spec.0.serial_only(),
-    );
-    let mut spec = Spec(subspec, spec.1.clone());
-    spec.canonicalize()
-        .expect("ToAccum's introduced Zero should be canonicalizable");
-    let app_arguments = [Param::new(param_index, output)];
-    SpecApp::new(spec, app_arguments).into()
+/// Returns applications of Zeroes corresponding to the outputs of the given Spec.
+fn make_zeroes_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> Vec<ImplNode<Tgt>> {
+    (0..u8::try_from(spec.0.operand_count()).unwrap())
+        .flat_map(|parameter_idx| {
+            if !spec.0.parameter_is_output(parameter_idx.into()) {
+                return None;
+            }
+            let output = spec.0.parameter(parameter_idx.into());
+            let subspec = LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Zero,
+                    spec_shape: output.shape.clone(),
+                    dtypes: vec![output.dtype],
+                },
+                vec![output.aux.clone()],
+                spec.0.serial_only(),
+            );
+            let mut spec = Spec(subspec, spec.1.clone());
+            spec.canonicalize()
+                .expect("ToAccum's introduced Zeroes should be canonicalizable");
+            let app_arguments = [Param::new(parameter_idx, output)];
+            Some(SpecApp::new(spec, app_arguments).into())
+        })
+        .collect()
 }
 
 impl<Tgt: Target> ActionSolver<Tgt> {
@@ -1298,6 +1463,10 @@ impl Display for NotApplicableReason {
     }
 }
 
+/// Creates a [ImplNode::Pipeline] by combining two subspecifications into stages.
+///
+/// The stages are [ImplNode::SpecApp]s which apply sequential [Param]s in all positions except
+/// the intermediate.
 fn compose_subspecs_to_pipeline<Tgt: Target>(
     parent_spec: &Spec<Tgt>,
     inner_compose: Spec<Tgt>,
@@ -1355,9 +1524,11 @@ fn compose_subspecs_to_pipeline<Tgt: Target>(
     };
 
     ImplNode::Pipeline(Pipeline {
-        intermediates: vec![intermediate_tensor],
         stages: vec![inner_application, outer_application],
         parameters: parent_spec.0.parameters(),
+        wirings: vec![StageWiring {
+            intermediate_tensors: vec![intermediate_tensor],
+        }],
         spec: Some(parent_spec.clone()),
     })
 }
