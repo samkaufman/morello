@@ -558,29 +558,30 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 Ok(())
             }
             ImplNode::Pipeline(Pipeline {
-                stages,
-                intermediates,
-                ..
+                stages, wirings, ..
             }) => {
                 for (stage_idx, stage) in stages.iter().enumerate() {
                     // Emit variable declaration(s) and store association between the
                     // CBuffer and Tensor.
-                    if let Some(tensor) = intermediates.get(stage_idx) {
-                        let intermediate_spec = tensor.spec();
-                        let buffer = self.make_buffer(
-                            intermediate_spec.shape(),
-                            intermediate_spec.vector_size(),
-                            intermediate_spec.dtype(),
-                            intermediate_spec.level(),
-                        );
-                        buffer.emit(w, InitType::None, depth)?;
-                        self.name_env.insert(Rc::clone(tensor), buffer);
+                    if let Some(wiring) = wirings.get(stage_idx) {
+                        for tensor in &wiring.intermediate_tensors {
+                            let intermediate_spec = tensor.spec();
+                            let buffer = self.make_buffer(
+                                intermediate_spec.shape(),
+                                intermediate_spec.vector_size(),
+                                intermediate_spec.dtype(),
+                                intermediate_spec.level(),
+                            );
+                            buffer.emit(w, InitType::None, depth)?;
+                            self.name_env.insert(Rc::new(tensor.clone()), buffer);
+                        }
                     }
                     self.emit(w, stage, depth)?;
                     if stage_idx > 0 {
-                        let consumed_buffer =
-                            self.name_env.get(&intermediates[stage_idx - 1]).unwrap();
-                        consumed_buffer.emit_free(w, depth)?;
+                        for tensor in &wirings[stage_idx - 1].intermediate_tensors {
+                            let consumed_buffer = self.name_env.get(tensor).unwrap();
+                            consumed_buffer.emit_free(w, depth)?;
+                        }
                     }
                 }
                 Ok(())

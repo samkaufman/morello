@@ -1,4 +1,4 @@
-use itertools::Itertools;
+use itertools::Itertools as _;
 
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
@@ -9,15 +9,19 @@ use crate::target::Target;
 use crate::views::{Tensor, View, ViewE};
 
 use crate::tensorspec::TensorSpec;
-use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct Pipeline<Tgt: Target> {
-    pub intermediates: Vec<Rc<Tensor<Tgt>>>,
-    pub stages: Vec<ImplNode<Tgt>>,
+    pub stages: Vec<ImplNode<Tgt>>, // all stages are [ImplNode::SpecApp]s
+    pub wirings: Vec<StageWiring<Tgt>>,
     // TODO: Should we compute the parameters from the children instead of storing?
     pub parameters: Vec<TensorSpec<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StageWiring<Tgt: Target> {
+    pub intermediate_tensors: Vec<Tensor<Tgt>>,
 }
 
 impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
@@ -32,18 +36,19 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
-        debug_assert_eq!(self.intermediates.len(), self.stages.len() - 1);
         MemoryAllocation::Pipeline {
             intermediate_consumption: self
-                .intermediates
+                .wirings
                 .iter()
-                .map(|t| {
+                .map(|wiring| {
                     Tgt::levels().map(|l| {
-                        if t.spec().level() == l {
-                            t.spec().bytes_used()
-                        } else {
-                            0
+                        let mut level_consumption = 0;
+                        for intermediate_tensor in &wiring.intermediate_tensors {
+                            if intermediate_tensor.spec().level() == l {
+                                level_consumption += intermediate_tensor.spec().bytes_used();
+                            }
                         }
+                        level_consumption
                     })
                 })
                 .collect(),
@@ -61,31 +66,43 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
         // TODO: This method could use some more precondition checks, esp. re: parameters.
         let new_impl = Pipeline {
-            intermediates: self.intermediates.clone(),
             stages: new_children.collect(),
+            wirings: self.wirings.clone(),
             parameters: self.parameters.clone(),
             spec: self.spec.clone(),
         };
         assert_eq!(new_impl.stages.len(), self.stages.len());
-        assert_eq!(new_impl.intermediates.len(), self.intermediates.len());
         new_impl
     }
 
     fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
-        debug_assert_eq!(self.stages.len(), self.intermediates.len() + 1);
-        let new_intermediates = self
-            .intermediates
+        debug_assert_eq!(self.stages.len(), self.wirings.len() + 1);
+        let new_wirings = self
+            .wirings
             .iter()
-            .map(|intermediate| {
-                let ViewE::Tensor(tensor) = intermediate.bind(args) else {
-                    unreachable!();
-                };
-                Rc::new(tensor)
+            .map(|wiring| {
+                let new_intermediate_tensors = wiring
+                    .intermediate_tensors
+                    .iter()
+                    .map(|intermediate_tensor| {
+                        let ViewE::Tensor(tensor) = intermediate_tensor.bind(args) else {
+                            unreachable!();
+                        };
+                        tensor
+                    })
+                    .collect();
+                StageWiring {
+                    intermediate_tensors: new_intermediate_tensors,
+                }
             })
             .collect();
         Pipeline {
-            intermediates: new_intermediates,
-            stages: self.stages.iter().map(|stage| stage.clone().bind(args)).collect(),
+            stages: self
+                .stages
+                .iter()
+                .map(|stage| stage.clone().bind(args))
+                .collect(),
+            wirings: new_wirings,
             parameters: self.parameters,
             spec: self.spec,
         }
@@ -94,8 +111,9 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
     fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
         Some(format!(
             "pipeline ({})",
-            self.intermediates
+            self.wirings
                 .iter()
+                .flat_map(|wiring| wiring.intermediate_tensors.iter())
                 .map(|i| format!("{}: {}", names.name(i), i.spec()))
                 .join(", ")
         ))

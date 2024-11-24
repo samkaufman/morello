@@ -38,6 +38,15 @@ pub trait SchedulingSugar<Tgt: Target> {
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_accum(&self) -> ImplNode<Tgt>;
+    fn to_softmax_parts(
+        &self,
+        max_level: Tgt::Level,
+        max_layout: Layout,
+        max_vector_size: Option<DimSize>,
+        denominator_level: Tgt::Level,
+        denominator_layout: Layout,
+        denominator_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt>;
     fn bufferize(
         &self,
         index: usize,
@@ -130,6 +139,28 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn to_accum(&self) -> ImplNode<Tgt> {
         let action = Action::ToAccum;
         apply_unwrap(self, action)
+    }
+
+    fn to_softmax_parts(
+        &self,
+        max_level: Tgt::Level,
+        max_layout: Layout,
+        max_vector_size: Option<DimSize>,
+        denominator_level: Tgt::Level,
+        denominator_layout: Layout,
+        denominator_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt> {
+        apply_unwrap(
+            self,
+            Action::ToSoftmaxParts {
+                max_level,
+                max_layout,
+                max_vector_size,
+                denominator_level,
+                denominator_layout,
+                denominator_vector_size,
+            },
+        )
     }
 
     fn bufferize(
@@ -230,6 +261,27 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
 
     fn to_accum(&self) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.to_accum())
+    }
+
+    fn to_softmax_parts(
+        &self,
+        max_level: Tgt::Level,
+        max_layout: Layout,
+        max_vector_size: Option<DimSize>,
+        denominator_level: Tgt::Level,
+        denominator_layout: Layout,
+        denominator_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| {
+            spec.to_softmax_parts(
+                max_level,
+                max_layout,
+                max_vector_size,
+                denominator_level,
+                denominator_layout,
+                denominator_vector_size,
+            )
+        })
     }
 
     fn bufferize(
