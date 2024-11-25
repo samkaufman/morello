@@ -23,6 +23,14 @@ pub enum SpecKey {
         scan_dim: u8,
         dtype: Dtype,
     },
+    SoftmaxDenominator {
+        scan_dim: u8,
+        dtypes: [Dtype; 3],
+    },
+    Max {
+        dim: u8,
+        dtypes: [Dtype; 2],
+    },
     Move {
         dtypes: [Dtype; 2],
     },
@@ -37,8 +45,10 @@ pub enum SpecKey {
 impl SpecKey {
     pub fn dtypes(&self) -> &[Dtype] {
         match self {
-            SpecKey::Matmul { dtypes } | SpecKey::Conv { dtypes } => dtypes,
-            SpecKey::Move { dtypes } => dtypes,
+            SpecKey::Matmul { dtypes }
+            | SpecKey::Conv { dtypes }
+            | SpecKey::SoftmaxDenominator { dtypes, .. } => dtypes,
+            SpecKey::Move { dtypes } | SpecKey::Max { dtypes, .. } => dtypes,
             SpecKey::Softmax { dtype, .. }
             | SpecKey::SoftmaxComplete { dtype, .. }
             | SpecKey::SoftmaxDenominatorAndMax { dtype, .. }

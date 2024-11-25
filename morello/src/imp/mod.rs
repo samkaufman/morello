@@ -50,9 +50,9 @@ pub trait Impl<Tgt: Target> {
     #[must_use]
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self;
 
-    fn bind<'i, 'j: 'i>(
+    fn bind<'i, 'a: 'i, 'j: 'i>(
         &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
+        args: &'a [&'j dyn View<Tgt = Tgt>],
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     );
 

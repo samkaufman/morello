@@ -155,6 +155,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Softmax { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxComplete { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => todo!(),
+                PrimitiveSpecType::SoftmaxDenominator { .. } => todo!(),
+                PrimitiveSpecType::Max { .. } => todo!(),
                 PrimitiveSpecType::Move => {
                     let [inp, mut out] = args
                         .try_into()

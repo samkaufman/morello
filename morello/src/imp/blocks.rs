@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use itertools::Itertools as _;
-
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
@@ -57,18 +55,11 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
         }
     }
 
-    fn bind<'i, 'j: 'i>(
+    fn bind<'i, 'a: 'i, 'j: 'i>(
         &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
+        args: &'a [&'j dyn View<Tgt = Tgt>],
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
-        println!(
-            "{}Block bind args:\n- {}",
-            self.spec
-                .as_ref()
-                .map_or("".to_string(), |s| format!("{s} ")),
-            args.iter().map(|a| format!("{a:?}")).join("\n- ")
-        );
         for stage in &self.stages {
             stage.bind(args, env);
         }

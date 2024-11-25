@@ -130,9 +130,9 @@ impl<Tgt: Target> Impl<Tgt> for MoveLet<Tgt> {
         }
     }
 
-    fn bind<'i, 'j: 'i>(
+    fn bind<'i, 'a: 'i, 'j: 'i>(
         &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
+        args: &'a [&'j dyn View<Tgt = Tgt>],
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
         self.introduced.inner_fat_ptr().bind(args, env);

@@ -573,8 +573,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                     // Emit variable declaration(s) and store association between the
                     // CBuffer and Tensor.
                     if let Some(wiring) = wirings.get(stage_idx) {
-                        for tensor in &wiring.intermediate_tensors {
-                            let intermediate_spec = tensor.spec();
+                        for tensor_wiring in &wiring.tensor_wirings {
+                            let intermediate_spec = tensor_wiring.tensor.spec();
                             let buffer = self.make_buffer(
                                 intermediate_spec.shape(),
                                 intermediate_spec.vector_size(),
@@ -582,12 +582,14 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                                 intermediate_spec.level(),
                             );
                             buffer.emit(w, InitType::None, depth)?;
-                            self.name_env.insert(Rc::clone(tensor), buffer);
+                            self.name_env
+                                .insert(Rc::clone(&tensor_wiring.tensor), buffer);
                         }
                     }
                     self.emit(w, stage, depth)?;
                     if stage_idx > 0 {
-                        for tensor in &wirings[stage_idx - 1].intermediate_tensors {
+                        for tensor_wiring in &wirings[stage_idx - 1].tensor_wirings {
+                            let tensor = &tensor_wiring.tensor;
                             let consumed_buffer = self.name_env.get(tensor).unwrap();
                             consumed_buffer.emit_free(w, depth)?;
                         }
@@ -596,7 +598,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 Ok(())
             }
             ImplNode::SpecApp(p) => {
-                self.headers.emit_stdbool_and_assert_headers = true;
+                self.headers.emit_stdbool_and_assert_includes = true;
                 writeln!(
                     w,
                     "{}/* {}({}) */",
@@ -628,6 +630,49 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 spec: _,
             }) => {
                 match kernel_type.into_cpu_kernel().unwrap() {
+                    CpuKernel::ValueSoftmaxComplete => {
+                        self.headers.emit_math_include = true;
+                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
+                            self.c_index(a, b, None)
+                        });
+                        writeln!(
+                            w,
+                            "{}{} = expf({} - {}) / {};",
+                            indent(depth),
+                            exprs[3],
+                            exprs[0],
+                            exprs[1],
+                            exprs[2],
+                        )
+                    }
+                    CpuKernel::ValueSoftmaxDenominator => {
+                        self.headers.emit_math_include = true;
+                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
+                            self.c_index(a, b, None)
+                        });
+                        writeln!(
+                            w,
+                            "{}{} += expf({} - {});",
+                            indent(depth),
+                            exprs[2],
+                            exprs[0],
+                            exprs[1],
+                        )
+                    }
+                    CpuKernel::ValueMax => {
+                        self.headers.emit_math_include = true;
+                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
+                            self.c_index(a, b, None)
+                        });
+                        writeln!(
+                            w,
+                            "{}{} = fmaxf({}, {});",
+                            indent(depth),
+                            exprs[1],
+                            exprs[1],
+                            exprs[0],
+                        )
+                    }
                     CpuKernel::MultAdd => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)

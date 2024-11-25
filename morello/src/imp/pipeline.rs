@@ -1,29 +1,35 @@
-use itertools::Itertools as _;
-
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
 use crate::spec::Spec;
 use crate::target::Target;
-use crate::views::{Param, Tensor, View};
-use std::collections::HashMap;
-
 use crate::tensorspec::TensorSpec;
+use crate::views::{Param, Tensor, View};
+use itertools::Itertools as _;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct Pipeline<Tgt: Target> {
     pub stages: Vec<ImplNode<Tgt>>, // all stages are [ImplNode::SpecApp]s
     pub wirings: Vec<StageWiring<Tgt>>,
-    // TODO: Should we compute the parameters from the children instead of storing?
+    pub passthrough_leading_input: bool,
+    pub final_stage_output: u8,
     pub parameters: Vec<TensorSpec<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StageWiring<Tgt: Target> {
-    pub intermediate_tensors: Vec<Rc<Tensor<Tgt>>>,
+    pub tensor_wirings: Vec<TensorWiring<Tgt>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TensorWiring<Tgt: Target> {
+    pub tensor: Rc<Tensor<Tgt>>,
+    pub producing_idx: u8,
+    pub consuming_idx: u8,
 }
 
 impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
@@ -43,9 +49,9 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
                 .map(|wiring| {
                     Tgt::levels().map(|l| {
                         let mut level_consumption = 0;
-                        for intermediate_tensor in &wiring.intermediate_tensors {
-                            if intermediate_tensor.spec().level() == l {
-                                level_consumption += intermediate_tensor.spec().bytes_used();
+                        for w in &wiring.tensor_wirings {
+                            if w.tensor.spec().level() == l {
+                                level_consumption += w.tensor.spec().bytes_used();
                             }
                         }
                         level_consumption
@@ -69,24 +75,106 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
             stages: new_children.collect(),
             wirings: self.wirings.clone(),
             parameters: self.parameters.clone(),
+            final_stage_output: self.final_stage_output,
+            passthrough_leading_input: self.passthrough_leading_input,
             spec: self.spec.clone(),
         }
     }
 
-    fn bind<'i, 'j: 'i>(
+    fn bind<'i, 'a: 'i, 'j: 'i>(
         &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
+        args: &'a [&'j dyn View<Tgt = Tgt>],
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
         debug_assert_eq!(self.stages.len(), self.wirings.len() + 1);
-        for wiring in &self.wirings {
-            for intermediate in &wiring.intermediate_tensors {
-                intermediate.bind(args, env);
+
+        // Bind the first stage
+        let mut subargs: Vec<&dyn View<Tgt = Tgt>> = vec![];
+        subargs.reserve_exact(
+            self.stages
+                .iter()
+                .map(|s| s.parameter_count())
+                .max()
+                .unwrap()
+                .into(),
+        );
+
+        let mut remaining_pipeline_inputs = args[..args.len() - 1].to_vec();
+
+        let first_stage = self.stages.first().unwrap();
+        let first_stage_parameter_count = first_stage.parameter_count();
+        debug_assert!(first_stage_parameter_count > 1);
+        for i in (0..first_stage_parameter_count).rev() {
+            if let Some(w) = self.wirings[0]
+                .tensor_wirings
+                .iter()
+                .find(|w| w.producing_idx == i)
+            {
+                subargs.push(&w.tensor);
+                continue;
+            }
+            if i == 0 && self.passthrough_leading_input {
+                subargs.push(args[0]);
+                continue;
+            }
+            subargs.push(remaining_pipeline_inputs.pop().unwrap());
+        }
+        subargs.reverse();
+        first_stage.bind(&subargs, env);
+
+        // Bind the middles stages
+        // for stage_idx in 1..self.stages.len() - 1 {
+        //     let stage = &self.stages[stage_idx];
+        //     let parameter_count = usize::from(stage.parameter_count());
+        //     debug_assert!(parameter_count > 1);
+        //     let nonhead_input_count = parameter_count - 2;
+        //     subargs.clear();
+        //     //subargs.push(self.intermediates[stage_idx - 1].as_ref());
+        //     subargs.extend_from_slice(&args[(eaten - nonhead_input_count)..eaten]);
+        //     //subargs.push(self.intermediates[stage_idx].as_ref());
+        //     // TODO: Slot in the wirings for the previous stage in specified positions
+        //     // TODO: Slot in the wirings for the next stage in output positions
+        //     eaten -= nonhead_input_count;
+        //     debug_assert_eq!(subargs.len(), parameter_count);
+        //     stage.bind(&subargs, env);
+        // }
+        if self.stages.len() > 2 {
+            todo!("Implement binding the middle stages");
+        }
+
+        // Bind the last
+        let last_stage = self.stages.last().unwrap();
+        let last_stage_parameter_count = last_stage.parameter_count();
+        subargs.clear();
+        for i in (0..last_stage_parameter_count).rev() {
+            if let Some(w) = self.wirings[self.wirings.len() - 1]
+                .tensor_wirings
+                .iter()
+                .find(|w| w.consuming_idx == i)
+            {
+                subargs.push(&w.tensor);
+                continue;
+            }
+            if i == self.final_stage_output {
+                subargs.push(args[args.len() - 1]);
+                continue;
+            }
+
+            if i == 0 && self.passthrough_leading_input {
+                subargs.push(args[0]);
+                continue;
+            }
+
+            // TODO: Just pop().unwrap() below
+            // subargs.push(remaining_pipeline_inputs.pop().unwrap());
+            if let Some(x) = remaining_pipeline_inputs.pop() {
+                subargs.push(x);
+            } else {
+                subargs.push(subargs.last().cloned().unwrap());
             }
         }
-        for stage in &self.stages {
-            stage.bind(args, env);
-        }
+        subargs.reverse();
+        last_stage.bind(&subargs, env);
     }
 
     fn pprint_line(
@@ -98,8 +186,8 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
             "pipeline ({})",
             self.wirings
                 .iter()
-                .flat_map(|wiring| wiring.intermediate_tensors.iter())
-                .map(|i| format!("{}: {}", names.name(i), i.spec()))
+                .flat_map(|wiring| &wiring.tensor_wirings)
+                .map(|w| format!("{}: {}", names.name(&w.tensor), w.tensor.spec()))
                 .join(", ")
         ))
     }

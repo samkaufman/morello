@@ -85,9 +85,9 @@ where
         self.clone()
     }
 
-    fn bind<'i, 'j: 'i>(
+    fn bind<'i, 'a: 'i, 'j: 'i>(
         &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
+        args: &'a [&'j dyn View<Tgt = Tgt>],
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
         for a in &self.1 {

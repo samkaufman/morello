@@ -44,6 +44,7 @@ pub trait SchedulingSugar<Tgt: Target> {
         denominator_layout: Layout,
         denominator_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
+    fn to_max_and_denominator(&self) -> ImplNode<Tgt>;
     fn bufferize(
         &self,
         index: usize,
@@ -158,6 +159,10 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
                 denominator_vector_size,
             },
         )
+    }
+
+    fn to_max_and_denominator(&self) -> ImplNode<Tgt> {
+        apply_unwrap(self, Action::ToMaxAndDenominator)
     }
 
     fn bufferize(
@@ -279,6 +284,10 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
                 denominator_vector_size,
             )
         })
+    }
+
+    fn to_max_and_denominator(&self) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| spec.to_max_and_denominator())
     }
 
     fn bufferize(

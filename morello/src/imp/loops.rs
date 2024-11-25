@@ -108,9 +108,9 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
         new_loop
     }
 
-    fn bind<'i, 'j: 'i>(
+    fn bind<'i, 'a: 'i, 'j: 'i>(
         &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
+        args: &'a [&'j dyn View<Tgt = Tgt>],
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     ) {
         let mut inner_args = args.to_vec();
