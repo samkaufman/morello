@@ -346,6 +346,7 @@ impl<Tgt: Target> Action<Tgt> {
                     debug_assert!(compose_tail.is_canonical());
 
                     // Match the tail Compose's Loop, which we're about to mutate.
+                    let tail_compose_output_idx = compose_tail.0.unique_output_index().unwrap();
                     let ImplNode::Loop(Loop {
                         mut tiles,
                         mut body,
@@ -360,11 +361,12 @@ impl<Tgt: Target> Action<Tgt> {
                     };
 
                     // Remove the LoopTile for the output
-                    debug_assert_eq!(output_idx, app_spec.0.unique_output_index().unwrap());
                     let tail_output_tile = tiles.remove(
                         tiles
                             .iter()
-                            .position(|tile| usize::from(tile.parameter_index) == output_idx)
+                            .position(|tile| {
+                                usize::from(tile.parameter_index) == tail_compose_output_idx
+                            })
                             .expect("tail Compose should have a loop over output"),
                     );
 
