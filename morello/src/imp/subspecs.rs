@@ -15,7 +15,9 @@ pub struct SpecApp<A: View>(pub Spec<A::Tgt>, pub Vec<A>);
 
 impl<A: View> SpecApp<A> {
     pub fn new(spec: Spec<A::Tgt>, args: impl IntoIterator<Item = A>) -> Self {
-        Self(spec, args.into_iter().collect::<Vec<_>>())
+        let a = args.into_iter().collect::<Vec<_>>();
+        debug_assert_eq!(spec.0.operand_count(), a.len());
+        Self(spec, a)
     }
 }
 
@@ -45,6 +47,7 @@ impl<A: View> Impl<A::Tgt> for SpecApp<A> {
     }
 
     fn bind(self, args: &[ViewE<A::Tgt>]) -> Self::BindOut {
+        debug_assert_eq!(self.0 .0.operand_count(), self.1.len());
         SpecApp(self.0, self.1.into_iter().map(|a| a.bind(args)).collect())
     }
 

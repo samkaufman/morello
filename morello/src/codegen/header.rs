@@ -7,7 +7,8 @@ use std::{collections::HashSet, fmt};
 pub struct HeaderEmitter {
     pub emit_benchmarking: bool,
     pub vector_type_defs: HashSet<&'static VecType>,
-    pub emit_stdbool_and_assert_headers: bool,
+    pub emit_stdbool_and_assert_includes: bool,
+    pub emit_math_include: bool, // math.h
     pub emit_sum8: bool,
     pub emit_cvtbf16_fp32: bool,
 }
@@ -16,8 +17,11 @@ impl HeaderEmitter {
     pub fn emit<W: fmt::Write>(&self, target: TargetId, out: &mut W) -> Result<(), fmt::Error> {
         out.write_str(include_str!("../codegen/partials/std.c"))?;
         out.write_char('\n')?;
-        if self.emit_stdbool_and_assert_headers {
+        if self.emit_stdbool_and_assert_includes {
             out.write_str("#include <assert.h>\n#include <stdbool.h>\n")?;
+        }
+        if self.emit_math_include {
+            out.write_str("#include <math.h>\n")?;
         }
         match target {
             TargetId::X86 => {

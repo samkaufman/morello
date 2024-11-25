@@ -96,6 +96,9 @@ pub enum CpuKernel {
     PhysicalTransposeByte256,
     VectorInterleaveBf16F32,
     VectorDeinterleaveF32Bf16,
+    ValueSoftmaxComplete,
+    ValueSoftmaxDenominator,
+    ValueMax,
     ValueAssign,
     VectorAssign,
     MemsetZero,
@@ -293,8 +296,29 @@ impl<T: CpuTarget> Target for T {
                 }
                 PrimitiveSpecType::Conv { .. } => &[],
                 PrimitiveSpecType::Softmax { .. } => &[],
-                PrimitiveSpecType::SoftmaxComplete { .. } => &[],
+                PrimitiveSpecType::SoftmaxComplete { .. } => {
+                    const SOFTMAX_COMPLETE_KERNELS: [CpuKernel; 1] =
+                        [CpuKernel::ValueSoftmaxComplete];
+                    &SOFTMAX_COMPLETE_KERNELS
+                }
                 PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => &[],
+                PrimitiveSpecType::SoftmaxDenominator { accum, .. } => {
+                    if *accum {
+                        const SOFTMAX_DENOMINATOR_KERNELS: [CpuKernel; 1] =
+                            [CpuKernel::ValueSoftmaxDenominator];
+                        &SOFTMAX_DENOMINATOR_KERNELS
+                    } else {
+                        &[]
+                    }
+                }
+                PrimitiveSpecType::Max { accum, .. } => {
+                    if *accum {
+                        const MAX_KERNELS: [CpuKernel; 1] = [CpuKernel::ValueMax];
+                        &MAX_KERNELS
+                    } else {
+                        &[]
+                    }
+                }
                 PrimitiveSpecType::Move { .. } => {
                     const MOVE_KERNELS: [CpuKernel; 8] = [
                         CpuKernel::ValueAssign,
@@ -376,7 +400,9 @@ impl<T: CpuTarget> Target for T {
 impl CpuKernel {
     pub fn argument_count(&self) -> u8 {
         match self {
+            CpuKernel::ValueSoftmaxComplete => 4,
             CpuKernel::MultAdd
+            | CpuKernel::ValueSoftmaxDenominator
             | CpuKernel::BroadcastVecMultAdd
             | CpuKernel::BroadcastVecMultAddBf16F32
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
@@ -388,6 +414,7 @@ impl CpuKernel {
             | CpuKernel::PhysicalTransposeByte256
             | CpuKernel::VectorInterleaveBf16F32
             | CpuKernel::VectorDeinterleaveF32Bf16
+            | CpuKernel::ValueMax
             | CpuKernel::ValueAssign
             | CpuKernel::VectorAssign
             | CpuKernel::CastBf16F32
@@ -607,6 +634,75 @@ impl CpuKernel {
 
                 // TODO: Fill in
                 false
+            }
+            CpuKernel::ValueSoftmaxComplete => {
+                debug_assert_eq!(operands.len(), 4);
+                if !matches!(typ, PrimitiveSpecType::SoftmaxComplete { .. }) {
+                    return false;
+                }
+                if operands
+                    .iter()
+                    .flat_map(|o| o.shape())
+                    .any(|d| d.get() != 1)
+                {
+                    return false;
+                }
+                for o in &operands {
+                    if o.dtype() != Dtype::Float32 {
+                        return false;
+                    }
+                    if o.level() != CpuMemoryLevel::RF {
+                        return false;
+                    }
+                }
+                true
+            }
+            CpuKernel::ValueSoftmaxDenominator => {
+                debug_assert_eq!(operands.len(), 3);
+                if !matches!(
+                    typ,
+                    PrimitiveSpecType::SoftmaxDenominator { accum: true, .. }
+                ) {
+                    return false;
+                }
+                if operands
+                    .iter()
+                    .flat_map(|o| o.shape())
+                    .any(|d| d.get() != 1)
+                {
+                    return false;
+                }
+                for o in &operands {
+                    if o.dtype() != Dtype::Float32 {
+                        return false;
+                    }
+                    if o.level() != CpuMemoryLevel::RF {
+                        return false;
+                    }
+                }
+                true
+            }
+            CpuKernel::ValueMax => {
+                debug_assert_eq!(operands.len(), 2);
+                if !matches!(typ, PrimitiveSpecType::Max { accum: true, .. }) {
+                    return false;
+                }
+                if operands
+                    .iter()
+                    .flat_map(|o| o.shape())
+                    .any(|d| d.get() != 1)
+                {
+                    return false;
+                }
+                for o in &operands {
+                    if o.dtype() != Dtype::Float32 {
+                        return false;
+                    }
+                    if o.level() != CpuMemoryLevel::RF {
+                        return false;
+                    }
+                }
+                true
             }
             CpuKernel::ValueAssign => {
                 debug_assert_eq!(operands.len(), 2);
@@ -862,9 +958,19 @@ impl CpuKernel {
                 }
                 cost / d
             }
-            CpuKernel::VectorInterleaveBf16F32 | CpuKernel::VectorDeinterleaveF32Bf16 => {
+            CpuKernel::VectorInterleaveBf16F32
+            | CpuKernel::VectorDeinterleaveF32Bf16
+            | CpuKernel::ValueMax => {
                 // TODO: Measure throughput!
                 INST_COST
+            }
+            CpuKernel::ValueSoftmaxDenominator => {
+                // TODO: Measure throughput!
+                INST_COST * 3
+            }
+            CpuKernel::ValueSoftmaxComplete => {
+                // TODO: Measure throughput!
+                INST_COST * 4
             }
             CpuKernel::MultAdd => {
                 match parameters[0].spec().dtype() {

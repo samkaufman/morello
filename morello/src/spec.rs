@@ -78,6 +78,16 @@ pub enum PrimitiveSpecType {
         scan_dim: u8,
         accum: bool,
     },
+    Max {
+        #[cfg_attr(test, proptest(strategy = "0..4u8"))]
+        dim: u8,
+        accum: bool,
+    },
+    SoftmaxDenominator {
+        #[cfg_attr(test, proptest(strategy = "0..4u8"))]
+        scan_dim: u8,
+        accum: bool,
+    },
 }
 
 /// Tilings and dimension bindings for a particular output tiling.
@@ -174,15 +184,7 @@ impl<Tgt: Target> Spec<Tgt> {
                     };
                     Some(2 * u64::from(m.get()) * u64::from(k.get()) * u64::from(n.get()))
                 }
-                PrimitiveSpecType::Conv { .. } => {
-                    // TODO: Implement for floating-pt. Convs.
-                    None
-                }
-                PrimitiveSpecType::Softmax { .. }
-                | PrimitiveSpecType::SoftmaxComplete { .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
-                | PrimitiveSpecType::Move
-                | PrimitiveSpecType::Zero => None,
+                _ => None,
             },
             Spec(LogicalSpec::Compose { .. }, _) => None,
         }
@@ -266,7 +268,9 @@ impl PrimitiveBasics {
             }
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => {
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
+            | PrimitiveSpecType::SoftmaxDenominator { .. }
+            | PrimitiveSpecType::Max { .. } => {
                 self.spec_shape = new_operands[0].0.into();
             }
             PrimitiveSpecType::Move => {
@@ -339,22 +343,15 @@ impl PrimitiveBasics {
                 let out = conv_infer_output_shape(&img, &filt);
                 vec![img, filt, out]
             }
-            PrimitiveSpecType::Softmax { .. }
-            | PrimitiveSpecType::SoftmaxComplete { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => {
-                let mut shapes = Vec::with_capacity(self.typ.operand_count());
-                shapes.push(self.spec_shape.clone());
-                for _ in 1..self.typ.operand_count() {
-                    shapes.push(self.spec_shape.to_vec());
-                }
-                shapes
-            }
             PrimitiveSpecType::Move => {
                 vec![self.spec_shape.clone(), self.spec_shape.clone()]
             }
             PrimitiveSpecType::Zero => {
                 vec![self.spec_shape.clone()]
             }
+            _ => (0..self.typ.operand_count())
+                .map(|i| self.parameter_shape(i))
+                .collect(),
         }
     }
 
@@ -385,11 +382,29 @@ impl PrimitiveBasics {
                     _ => panic!("Conv has only 3 parameters"),
                 }
             }
-            PrimitiveSpecType::Softmax { .. }
-            | PrimitiveSpecType::SoftmaxComplete { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => match idx {
-                x if x < self.typ.operand_count() => self.spec_shape.to_vec(),
+            PrimitiveSpecType::Softmax { .. } => match idx {
+                0 | 1 => self.spec_shape.to_vec(),
                 _ => panic!("Softmax has only 2 parameters"),
+            },
+            PrimitiveSpecType::SoftmaxComplete { scan_dim } => match idx {
+                0 | 3 => self.spec_shape.clone(),
+                1 | 2 => {
+                    let mut reduced = self.spec_shape.clone();
+                    reduced[usize::from(scan_dim)] = nz!(1u32);
+                    reduced
+                }
+                _ => panic!("SoftmaxComplete has only 4 parameters"),
+            },
+            PrimitiveSpecType::SoftmaxDenominator { scan_dim: dim, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim: dim, .. }
+            | PrimitiveSpecType::Max { dim, .. } => match idx {
+                0 => self.spec_shape.clone(),
+                x if x < self.typ.operand_count() => {
+                    let mut reduced = self.spec_shape.clone();
+                    reduced[usize::from(dim)] = nz!(1u32);
+                    reduced
+                }
+                _ => panic!(),
             },
             PrimitiveSpecType::Move => match idx {
                 0 | 1 => self.spec_shape.clone(),
@@ -416,7 +431,9 @@ impl PrimitiveBasics {
         match self.typ {
             PrimitiveSpecType::Matmul { accum }
             | PrimitiveSpecType::Conv { accum }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. } => accum,
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. }
+            | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+            | PrimitiveSpecType::Max { accum, .. } => accum,
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
             | PrimitiveSpecType::Move
@@ -538,6 +555,47 @@ impl PrimitiveBasics {
             }
             (
                 PrimitiveBasics {
+                    typ: PrimitiveSpecType::SoftmaxDenominator { scan_dim, .. },
+                    spec_shape,
+                    ..
+                },
+                _,
+            ) => {
+                let bindings = (0..smaller_output.shape().len())
+                    .map(|d| Some(d.try_into().unwrap()))
+                    .collect::<Vec<_>>();
+                let mut x_shape = smaller_output.shape().clone();
+                x_shape[usize::from(*scan_dim)] = spec_shape[usize::from(*scan_dim)];
+                let mut x_steps = smaller_output.step_sizes().to_vec();
+                x_steps[usize::from(*scan_dim)] = spec_shape[usize::from(*scan_dim)];
+                let maxes_shape = smaller_output.shape().clone();
+                let maxes_steps = smaller_output.step_sizes().to_vec();
+                TilingInference(vec![
+                    (Tiling::new_sliding(x_shape, x_steps), bindings.clone()),
+                    (Tiling::new_sliding(maxes_shape, maxes_steps), bindings),
+                ])
+            }
+            (
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Max { dim, accum: _ },
+                    spec_shape,
+                    dtypes: _,
+                },
+                _,
+            ) => {
+                let mut input_shape = smaller_output.shape().clone();
+                input_shape[usize::from(*dim)] = spec_shape[usize::from(*dim)];
+                let mut input_steps = smaller_output.step_sizes().to_vec();
+                input_steps[usize::from(*dim)] = spec_shape[usize::from(*dim)];
+                TilingInference(vec![(
+                    Tiling::new_sliding(input_shape, input_steps),
+                    (0..smaller_output.shape().len())
+                        .map(|d| Some(d.try_into().unwrap()))
+                        .collect(),
+                )])
+            }
+            (
+                PrimitiveBasics {
                     typ: PrimitiveSpecType::Move,
                     ..
                 },
@@ -656,7 +714,9 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
                     }
                     PrimitiveSpecType::Softmax { scan_dim, .. }
                     | PrimitiveSpecType::SoftmaxComplete { scan_dim, .. }
-                    | PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, .. } => {
+                    | PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, .. }
+                    | PrimitiveSpecType::SoftmaxDenominator { scan_dim, .. }
+                    | PrimitiveSpecType::Max { dim: scan_dim, .. } => {
                         match args.first_input_shape.as_deref() {
                             Some(s) => {
                                 assert!(usize::from(scan_dim) < s.len());
@@ -710,10 +770,12 @@ impl PrimitiveSpecType {
     pub fn input_count(&self) -> usize {
         match self {
             PrimitiveSpecType::SoftmaxComplete { .. } => 3,
-            PrimitiveSpecType::Matmul { .. } => 2,
-            PrimitiveSpecType::Conv { .. } => 2,
+            PrimitiveSpecType::Matmul { .. }
+            | PrimitiveSpecType::Conv { .. }
+            | PrimitiveSpecType::SoftmaxDenominator { .. } => 2,
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
+            | PrimitiveSpecType::Max { .. }
             | PrimitiveSpecType::Move => 1,
             PrimitiveSpecType::Zero => 0,
         }
@@ -721,8 +783,12 @@ impl PrimitiveSpecType {
 
     fn parameter_is_output(&self, index: usize) -> bool {
         match self {
-            PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => index == 2,
-            PrimitiveSpecType::Softmax { .. } | PrimitiveSpecType::Move => index == 1,
+            PrimitiveSpecType::Matmul { .. }
+            | PrimitiveSpecType::Conv { .. }
+            | PrimitiveSpecType::SoftmaxDenominator { .. } => index == 2,
+            PrimitiveSpecType::Softmax { .. }
+            | PrimitiveSpecType::Max { .. }
+            | PrimitiveSpecType::Move => index == 1,
             PrimitiveSpecType::Zero => index == 0,
             PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => index == 1 || index == 2,
             PrimitiveSpecType::SoftmaxComplete { .. } => index == 3,
@@ -732,8 +798,12 @@ impl PrimitiveSpecType {
     pub fn unique_output_index(&self) -> Option<usize> {
         match self {
             PrimitiveSpecType::SoftmaxComplete { .. } => Some(3),
-            PrimitiveSpecType::Matmul { .. } | PrimitiveSpecType::Conv { .. } => Some(2),
-            PrimitiveSpecType::Softmax { .. } | PrimitiveSpecType::Move { .. } => Some(1),
+            PrimitiveSpecType::Matmul { .. }
+            | PrimitiveSpecType::Conv { .. }
+            | PrimitiveSpecType::SoftmaxDenominator { .. } => Some(2),
+            PrimitiveSpecType::Softmax { .. }
+            | PrimitiveSpecType::Max { .. }
+            | PrimitiveSpecType::Move { .. } => Some(1),
             PrimitiveSpecType::Zero { .. } => Some(0),
             PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => None,
         }
@@ -768,6 +838,20 @@ impl PrimitiveSpecType {
                     DimSize::new(1 + w.get() - fw.get()).unwrap(),
                 ])
             }
+            PrimitiveSpecType::Max { dim, .. } => Some(
+                inputs[0]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| {
+                        if i == usize::from(*dim) {
+                            nz!(1u32)
+                        } else {
+                            *d
+                        }
+                    })
+                    .collect(),
+            ),
+            PrimitiveSpecType::SoftmaxDenominator { .. } => Some(inputs[1].into()),
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
             | PrimitiveSpecType::Move
@@ -797,6 +881,12 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, .. } => {
                 write!(f, "SoftmaxDenominatorAndMax{scan_dim}")
             }
+            PrimitiveSpecType::SoftmaxDenominator { accum, .. } if *accum => {
+                write!(f, "SoftmaxDenominatorAccum")
+            }
+            PrimitiveSpecType::SoftmaxDenominator { .. } => write!(f, "SoftmaxDenominator"),
+            PrimitiveSpecType::Max { dim, accum } if *accum => write!(f, "MaxAccum{dim}"),
+            PrimitiveSpecType::Max { dim, .. } => write!(f, "Max{dim}"),
             PrimitiveSpecType::Move { .. } => write!(f, "Move"),
             PrimitiveSpecType::Zero { .. } => write!(f, "Zero"),
         }
@@ -835,7 +925,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 | PrimitiveSpecType::Conv { .. }
                 | PrimitiveSpecType::Softmax { .. }
                 | PrimitiveSpecType::SoftmaxComplete { .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => basics
+                | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
+                | PrimitiveSpecType::SoftmaxDenominator { .. }
+                | PrimitiveSpecType::Max { .. } => basics
                     .parameter_shapes()
                     .into_iter()
                     .zip(&basics.dtypes)
@@ -1020,7 +1112,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 | PrimitiveSpecType::Conv { .. }
                 | PrimitiveSpecType::Softmax { .. }
                 | PrimitiveSpecType::SoftmaxComplete { .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => {
+                | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
+                | PrimitiveSpecType::SoftmaxDenominator { .. }
+                | PrimitiveSpecType::Max { .. } => {
                     for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
                         aux.canonicalize(shp)
                             .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
@@ -1088,7 +1182,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 | PrimitiveSpecType::Conv { .. }
                 | PrimitiveSpecType::Softmax { .. }
                 | PrimitiveSpecType::SoftmaxComplete { .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => {
+                | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
+                | PrimitiveSpecType::SoftmaxDenominator { .. }
+                | PrimitiveSpecType::Max { .. } => {
                     for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
                         if !aux.is_canonical(shp) {
                             return false;
@@ -1297,6 +1393,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             LogicalSpec::Primitive(basics, _, _) => match &mut basics.typ {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
+                | PrimitiveSpecType::Max { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. } => {
                     *accum = true;
                 }
@@ -1305,6 +1403,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             LogicalSpec::Compose { components, .. } => match &mut components[0].typ {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
+                | PrimitiveSpecType::Max { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. } => {
                     *accum = true;
                 }
@@ -1602,6 +1702,20 @@ impl BiMap for PrimitiveBasicsBimap {
                     once(!accum as _).chain(shifted_shape).collect(),
                 )
             }
+            PrimitiveSpecType::SoftmaxDenominator { scan_dim, accum } => (
+                SpecKey::SoftmaxDenominator {
+                    scan_dim,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                },
+                once(!accum as _).chain(shifted_shape).collect(),
+            ),
+            PrimitiveSpecType::Max { dim, accum } => (
+                SpecKey::Max {
+                    dim,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                },
+                once(!accum as _).chain(shifted_shape).collect(),
+            ),
             PrimitiveSpecType::Move => (
                 SpecKey::Move {
                     dtypes: dtypes.as_slice().try_into().unwrap(),
@@ -1622,7 +1736,12 @@ impl BiMap for PrimitiveBasicsBimap {
             | SpecKey::SoftmaxDenominatorAndMax {
                 scan_dim: _,
                 dtype: _,
-            } => {
+            }
+            | SpecKey::SoftmaxDenominator {
+                scan_dim: _,
+                dtypes: _,
+            }
+            | SpecKey::Max { dim: _, dtypes: _ } => {
                 let accum = v[0] == 0;
                 let (typ, dtypes) = match key {
                     SpecKey::Matmul { dtypes } => {
@@ -1638,6 +1757,16 @@ impl BiMap for PrimitiveBasicsBimap {
                         },
                         vec![*dtype, *dtype, *dtype],
                     ),
+                    SpecKey::SoftmaxDenominator { scan_dim, dtypes } => (
+                        PrimitiveSpecType::SoftmaxDenominator {
+                            scan_dim: *scan_dim,
+                            accum,
+                        },
+                        dtypes.into(),
+                    ),
+                    SpecKey::Max { dim, dtypes } => {
+                        (PrimitiveSpecType::Max { dim: *dim, accum }, dtypes.to_vec())
+                    }
                     _ => unreachable!(),
                 };
 

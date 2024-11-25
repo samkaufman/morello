@@ -1,4 +1,4 @@
-use itertools::Itertools as _;
+use std::rc::Rc;
 
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
@@ -6,22 +6,30 @@ use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
 use crate::spec::Spec;
 use crate::target::Target;
-use crate::views::{Tensor, View, ViewE};
-
 use crate::tensorspec::TensorSpec;
+use crate::views::{Tensor, View, ViewE};
+use itertools::Itertools as _;
 
 #[derive(Debug, Clone)]
 pub struct Pipeline<Tgt: Target> {
     pub stages: Vec<ImplNode<Tgt>>, // all stages are [ImplNode::SpecApp]s
     pub wirings: Vec<StageWiring<Tgt>>,
-    // TODO: Should we compute the parameters from the children instead of storing?
+    pub passthrough_leading_input: bool,
+    pub final_stage_output: u8,
     pub parameters: Vec<TensorSpec<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StageWiring<Tgt: Target> {
-    pub intermediate_tensors: Vec<Tensor<Tgt>>,
+    pub tensor_wirings: Vec<TensorWiring<Tgt>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TensorWiring<Tgt: Target> {
+    pub tensor: Rc<Tensor<Tgt>>,
+    pub producing_idx: u8,
+    pub consuming_idx: u8,
 }
 
 impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
@@ -43,9 +51,9 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
                 .map(|wiring| {
                     Tgt::levels().map(|l| {
                         let mut level_consumption = 0;
-                        for intermediate_tensor in &wiring.intermediate_tensors {
-                            if intermediate_tensor.spec().level() == l {
-                                level_consumption += intermediate_tensor.spec().bytes_used();
+                        for w in &wiring.tensor_wirings {
+                            if w.tensor.spec().level() == l {
+                                level_consumption += w.tensor.spec().bytes_used();
                             }
                         }
                         level_consumption
@@ -69,6 +77,8 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
             stages: new_children.collect(),
             wirings: self.wirings.clone(),
             parameters: self.parameters.clone(),
+            final_stage_output: self.final_stage_output,
+            passthrough_leading_input: self.passthrough_leading_input,
             spec: self.spec.clone(),
         };
         assert_eq!(new_impl.stages.len(), self.stages.len());
@@ -79,21 +89,27 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
         debug_assert_eq!(self.stages.len(), self.wirings.len() + 1);
         let new_wirings = self
             .wirings
-            .iter()
-            .map(|wiring| {
-                let new_intermediate_tensors = wiring
-                    .intermediate_tensors
-                    .iter()
-                    .map(|intermediate_tensor| {
-                        let ViewE::Tensor(tensor) = intermediate_tensor.bind(args) else {
+            .into_iter()
+            .map(|stage_wiring| StageWiring {
+                tensor_wirings: stage_wiring
+                    .tensor_wirings
+                    .into_iter()
+                    .map(|tensor_wiring| {
+                        let TensorWiring {
+                            tensor,
+                            producing_idx,
+                            consuming_idx,
+                        } = tensor_wiring;
+                        let ViewE::Tensor(tensor) = Rc::unwrap_or_clone(tensor).bind(args) else {
                             unreachable!();
                         };
-                        tensor
+                        TensorWiring {
+                            tensor: Rc::new(tensor),
+                            producing_idx,
+                            consuming_idx,
+                        }
                     })
-                    .collect();
-                StageWiring {
-                    intermediate_tensors: new_intermediate_tensors,
-                }
+                    .collect(),
             })
             .collect();
         Pipeline {
@@ -104,6 +120,8 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
                 .collect(),
             wirings: new_wirings,
             parameters: self.parameters,
+            final_stage_output: self.final_stage_output,
+            passthrough_leading_input: self.passthrough_leading_input,
             spec: self.spec,
         }
     }
@@ -113,8 +131,8 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
             "pipeline ({})",
             self.wirings
                 .iter()
-                .flat_map(|wiring| wiring.intermediate_tensors.iter())
-                .map(|i| format!("{}: {}", names.name(i), i.spec()))
+                .flat_map(|wiring| &wiring.tensor_wirings)
+                .map(|w| format!("{}: {}", names.name(&w.tensor), w.tensor.spec()))
                 .join(", ")
         ))
     }
