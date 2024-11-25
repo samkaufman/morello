@@ -31,8 +31,8 @@ pub use self::cpu::CpuCodeGenThreadStyle;
 const CLI_FLAGS: [&str; 4] = ["-std=gnu99", "-O3", "-rtlib=compiler-rt", "-o"];
 
 // TODO: Avoid -fopenmp if we're not using an OpenMP pool.
-const X86_CLI_VEC_FLAGS: [&str; 3] = ["-fopenmp", "-mavx2", "-mfma"];
-const ARM_CLI_VEC_FLAGS: [&str; 1] = ["-fopenmp"];
+const X86_CLI_VEC_FLAGS: [&str; 4] = ["-arch", "x86_64", "-mavx2", "-mfma"];
+const ARM_CLI_VEC_FLAGS: [&str; 3] = ["-arch", "arm64", "-fopenmp"];
 
 const MIN_SAMPLES: u32 = 3;
 const MIN_TRIAL_TIME_SECS: f32 = 2.5;
