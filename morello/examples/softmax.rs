@@ -54,13 +54,17 @@ fn main() {
         .tile_out(&[1, SIZE.get()])
         // Split into sub-Specs for computing denominator-and-max and then one to complete softmax.
         .to_softmax_parts(GL, row_major(RANK), None, GL, row_major(RANK), None)
+        // This [0] corresponds to SoftmaxDenominatorAndMax
         .subschedule(&[0], |subspec| subspec.to_max_and_denominator())
+        // This [0, 0] corresponds to Max
         .subschedule(&[0, 0], |subspec| {
             subspec.to_accum().split(1).synthesize(&db, None)
         })
+        // This [0, 1] corresponds to the SoftmaxDenominator
         .subschedule(&[0, 1], |subspec| {
             subspec.to_accum().split(1).synthesize(&db, None)
         })
+        // This [1] corresponds to SoftmaxComplete
         .subschedule(&[1], |softmax_complete| {
             softmax_complete.tile_out(&[1, 1]).synthesize(&db, None)
         });
