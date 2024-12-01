@@ -16,17 +16,13 @@ use std::rc::Rc;
 
 // TODO: Do we still want to be generic over the specific Spec?
 #[derive(Debug, Clone)]
-pub struct SpecApp<Tgt, P>(pub P, pub Vec<Rc<dyn View<Tgt = Tgt>>>)
-where
-    Tgt: Target,
-    P: Borrow<Spec<Tgt>> + Clone;
+pub struct SpecApp<Tgt: Target>(pub Spec<Tgt>, pub Vec<Rc<dyn View<Tgt = Tgt>>>);
 
-impl<Tgt, P> SpecApp<Tgt, P>
+impl<Tgt> SpecApp<Tgt>
 where
     Tgt: Target,
-    P: Borrow<Spec<Tgt>> + Clone,
 {
-    pub fn new<ParamT, I>(spec: P, args: I) -> Self
+    pub fn new<ParamT, I>(spec: Spec<Tgt>, args: I) -> Self
     where
         ParamT: View<Tgt = Tgt> + 'static,
         I: IntoIterator<Item = ParamT>,
@@ -39,10 +35,9 @@ where
     }
 }
 
-impl<Tgt, P> Impl<Tgt> for SpecApp<Tgt, P>
+impl<Tgt> Impl<Tgt> for SpecApp<Tgt>
 where
     Tgt: Target,
-    P: Borrow<Spec<Tgt>> + Clone + Debug,
 {
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
         Box::new(self.1.iter().map(|p| p.spec()))
@@ -97,7 +92,7 @@ where
 }
 
 #[cfg(test)]
-impl<Tgt> proptest::arbitrary::Arbitrary for SpecApp<Tgt, Spec<Tgt>>
+impl<Tgt> proptest::arbitrary::Arbitrary for SpecApp<Tgt>
 where
     Tgt: Target,
 {

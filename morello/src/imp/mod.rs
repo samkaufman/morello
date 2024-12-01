@@ -93,7 +93,7 @@ pub enum ImplNode<Tgt: Target> {
     Pipeline(Pipeline<Tgt>),
     Kernel(KernelApp<Tgt>),
     FunctionApp(FunctionApp<Tgt>),
-    SpecApp(SpecApp<Tgt, Spec<Tgt>>),
+    SpecApp(SpecApp<Tgt>),
 }
 
 impl<Tgt: Target, T: Impl<Tgt>> ImplExt<Tgt> for T {
@@ -123,7 +123,7 @@ where
         // TODO: Generate non-leaf Impls.
         let impl_leaf_strategy = prop_oneof![
             any::<KernelApp<Tgt>>().prop_map(ImplNode::Kernel),
-            any::<SpecApp<Tgt, Spec<Tgt>>>().prop_map(ImplNode::SpecApp)
+            any::<SpecApp<Tgt>>().prop_map(ImplNode::SpecApp)
         ];
         impl_leaf_strategy.boxed()
     }
