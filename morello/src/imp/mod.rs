@@ -57,11 +57,6 @@ pub trait Impl<Tgt: Target> {
         env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
     );
 
-    /// If the Impl node is a [Spec] application, returns that Spec.
-    fn as_spec_app(&self) -> Option<&Spec<Tgt>> {
-        None
-    }
-
     fn pprint_line(
         &self,
         names: &mut NameEnv,
@@ -81,11 +76,6 @@ pub trait ImplExt<Tgt: Target>: Impl<Tgt> {
     /// This traverses the Impl tree. Spec applications are treated as allocating no
     /// memory.
     fn peak_memory(&self) -> MemVec;
-
-    /// Call the given function on all nested [Spec]s.
-    ///
-    /// Traversal is short-circuited if the function returns `false`.
-    fn visit_subspecs(&self, f: impl FnMut(&Spec<Tgt>) -> bool) -> bool;
 }
 
 /// A non-Spec node in an Impl program tree.
@@ -115,29 +105,6 @@ impl<Tgt: Target, T: Impl<Tgt>> ImplExt<Tgt> for T {
         }
         self.memory_allocated()
             .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
-    }
-
-    fn visit_subspecs(&self, mut f: impl FnMut(&Spec<Tgt>) -> bool) -> bool {
-        visit_subspecs_erased(self, &mut f)
-    }
-}
-
-fn visit_subspecs_erased<Tgt, T, F>(imp: &T, f: &mut F) -> bool
-where
-    Tgt: Target,
-    T: Impl<Tgt>,
-    F: FnMut(&Spec<Tgt>) -> bool,
-{
-    match imp.as_spec_app() {
-        Some(applied_spec) => f(applied_spec),
-        None => {
-            for child in imp.children() {
-                if !visit_subspecs_erased(child, f) {
-                    return false;
-                }
-            }
-            true
-        }
     }
 }
 

@@ -94,10 +94,6 @@ where
     fn spec(&self) -> Option<&Spec<Tgt>> {
         Some(self.0.borrow())
     }
-
-    fn as_spec_app(&self) -> Option<&Spec<Tgt>> {
-        Some(self.0.borrow())
-    }
 }
 
 #[cfg(test)]
