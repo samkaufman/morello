@@ -8,8 +8,8 @@ use crate::views::{Param, View};
 use crate::{
     cost::MainCost,
     imp::{
-        blocks::Block, kernels::KernelApp, loops::Loop, moves::MoveLet, pipeline::Pipeline,
-        subspecs::SpecApp,
+        blocks::Block, functions::FunctionApp, kernels::KernelApp, loops::Loop, moves::MoveLet,
+        pipeline::Pipeline, subspecs::SpecApp,
     },
     memorylimits::{MemVec, MemoryAllocation},
     nameenv::NameEnv,
@@ -18,6 +18,7 @@ use crate::{
 };
 
 pub mod blocks;
+pub mod functions;
 pub mod kernels;
 pub mod loops;
 pub mod moves;
@@ -101,6 +102,7 @@ pub enum ImplNode<Tgt: Target> {
     Block(Block<Tgt>),
     Pipeline(Pipeline<Tgt>),
     Kernel(KernelApp<Tgt>),
+    FunctionApp(FunctionApp<Tgt>),
     SpecApp(SpecApp<Tgt, Spec<Tgt>>),
 }
 

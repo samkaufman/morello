@@ -844,7 +844,20 @@ impl<Tgt: Target> Action<Tgt> {
         inner_spec.canonicalize().unwrap();
 
         // Return a Loop containing the Spec as its body.
-        let body = Box::new(SpecApp::default_app(Spec(inner_spec, spec.1.clone())).into());
+        let body = Box::new(
+            {
+                let spec = Spec(inner_spec, spec.1.clone());
+                let operands = spec
+                    .0
+                    .parameters()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, o)| Rc::new(Param::new(i.try_into().unwrap(), o)) as Rc<_>)
+                    .collect();
+                SpecApp(spec, operands)
+            }
+            .into(),
+        );
         Ok(ImplNode::Loop(Loop {
             tiles,
             body,

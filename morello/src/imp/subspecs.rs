@@ -39,25 +39,6 @@ where
     }
 }
 
-impl<Tgt, P> SpecApp<Tgt, P>
-where
-    Tgt: Target,
-    P: Borrow<Spec<Tgt>> + Clone,
-{
-    /// Returns a [Spec] application with [Param] operands.
-    pub fn default_app(spec: P) -> Self {
-        let operands = spec
-            .borrow()
-            .0
-            .parameters()
-            .into_iter()
-            .enumerate()
-            .map(|(i, o)| Rc::new(Param::new(i.try_into().unwrap(), o)) as Rc<_>)
-            .collect();
-        SpecApp(spec, operands)
-    }
-}
-
 impl<Tgt, P> Impl<Tgt> for SpecApp<Tgt, P>
 where
     Tgt: Target,

@@ -1533,6 +1533,9 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                     CpuKernel::VectorDeinterleaveF32Bf16 => todo!(),
                 }
             }
+            ImplNode::FunctionApp(_) => {
+                panic!("FunctionApp should have been inlined");
+            }
         }
     }
 
