@@ -190,7 +190,7 @@ pub(crate) fn compute_loop_main_cost<Tgt: Target>(
     } else {
         (steps, 0)
     };
-    body_cost.saturating_mul(factor) + overhead
+    body_cost.saturating_mul(factor).saturating_add(overhead)
 }
 
 /// Yields the first tile and tile dimension seen for each unique axis.
