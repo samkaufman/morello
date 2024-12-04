@@ -13,7 +13,6 @@ use crate::expr::{AffineForm, Bounds as _, NonAffine, NonAffineExpr, Substitute,
 use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
 use crate::imp::loops::Loop;
-use crate::imp::moves::TensorOrCacheView;
 use crate::imp::pipeline::Pipeline;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
@@ -28,15 +27,14 @@ use crate::target::{
     CpuKernel, CpuMemoryLevel, CpuTarget, Kernel, Target,
 };
 use crate::utils::{indent, LinePrefixWrite, ASCII_CHARS};
-use crate::views::{Param, Tensor, View};
+use crate::views::{Tensor, View, ViewE};
 
 const STACK_CUTOFF: u32 = 256;
 
-pub struct CpuCodeGenerator<'a, Tgt: Target> {
+pub struct CpuCodeGenerator<Tgt: Target> {
     pub namer: NameGenerator,
     pub name_env: HashMap<Rc<Tensor<Tgt>>, CBuffer>,
     pub loop_iter_bindings: HashMap<BufferVar, Either<String, i32>>,
-    pub param_bindings: HashMap<Param<Tgt>, &'a dyn View<Tgt = Tgt>>,
     pub headers: HeaderEmitter,
     pub kernel_name: String,
     pub thread_style: CpuCodeGenThreadStyle,
@@ -49,7 +47,7 @@ pub enum CpuCodeGenThreadStyle {
     Highway, // TODO: Generalize to plug-in codelets
 }
 
-impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
+impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -57,7 +55,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
     /// Write a pretty-printed Impl as a C comment.
     pub fn emit_impl_comment<W: Write>(
         &mut self,
-        imp: &'a ImplNode<Tgt>,
+        imp: &ImplNode<Tgt>,
         impl_style: ImplPrintStyle,
         out: &mut W,
     ) -> fmt::Result {
@@ -68,8 +66,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
     pub fn emit_kernel<W: Write>(
         &mut self,
-        imp: &'a ImplNode<Tgt>,
-        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+        imp: &ImplNode<Tgt>,
+        top_arg_tensors: &[Rc<Tensor<Tgt>>],
         bench: bool,
         out: &mut W,
     ) -> fmt::Result {
@@ -127,16 +125,14 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
             operand_idx += 1;
         }
 
-        // Put the tensor->c_buffer binding into `self.name_env`. (And fill
-        // tensors_as_trait_obj_ptrs.)
-        let tensors_as_trait_obj_ptrs = top_arg_tensors
+        // Put the tensor->c_buffer binding into `self.name_env`. (And fill tensors_as_ptrs.)
+        let tensors_as_viewe = top_arg_tensors
             .iter()
-            .map(|tensor| tensor.as_ref() as &dyn View<Tgt = Tgt>)
+            .map(|tensor| ViewE::from(Rc::as_ref(tensor).clone()))
             .collect::<Vec<_>>();
 
-        imp.bind(&tensors_as_trait_obj_ptrs, &mut self.param_bindings);
-        let depth = 1_usize;
-        self.emit(&mut main_body_str, imp, depth)?;
+        let beta_reduced_imp = imp.clone().bind(&tensors_as_viewe);
+        self.emit(&mut main_body_str, &beta_reduced_imp, 1)?;
 
         writeln!(main_body_str, "}}")?;
 
@@ -151,7 +147,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
     pub fn emit_load_inputs<W: Write>(
         &mut self,
-        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+        top_arg_tensors: &[Rc<Tensor<Tgt>>],
         out: &mut W,
     ) -> fmt::Result {
         if top_arg_tensors
@@ -206,7 +202,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
     pub fn emit_standard_main<W: Write>(
         &mut self,
-        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+        top_arg_tensors: &[Rc<Tensor<Tgt>>],
         out: &mut W,
     ) -> fmt::Result {
         let mut main_body_str = String::new();
@@ -287,7 +283,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
 
     pub fn emit_benchmarking_main<W: Write>(
         &mut self,
-        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
+        top_arg_tensors: &[Rc<Tensor<Tgt>>],
         out: &mut W,
     ) -> fmt::Result {
         let mut main_body_str = String::new();
@@ -325,10 +321,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         out.write_str(&main_body_str)
     }
 
-    fn make_kernel_call(
-        &self,
-        top_arg_tensors: &'a [Rc<Tensor<Tgt>>],
-    ) -> Result<String, fmt::Error> {
+    fn make_kernel_call(&self, top_arg_tensors: &[Rc<Tensor<Tgt>>]) -> Result<String, fmt::Error> {
         let mut kernel_call_str = String::new();
         write!(kernel_call_str, "{}(", self.kernel_name)?;
         for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
@@ -431,8 +424,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         }
         depth += 1;
 
-        debug_assert_eq!(tensor, tensor.backing_tensor(&self.param_bindings).unwrap());
-        let buffer_indexing_expr = tensor.make_buffer_indexing_expr(&self.param_bindings);
+        debug_assert_eq!(tensor, tensor.backing_tensor().unwrap());
+        let buffer_indexing_expr = tensor.make_buffer_indexing_expr();
         writeln!(
             out,
             "{}printf(\"{} \", {});",
@@ -513,7 +506,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 if l.tiles.iter().any(|loop_tile| {
                     let backing_tensor = loop_tile
                         .tile
-                        .backing_tensor(&self.param_bindings)
+                        .backing_tensor()
                         .expect("tile should have backing tensor");
                     let backing_tensor_name = self
                         .name_env
@@ -528,7 +521,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
             }
             ImplNode::MoveLet(move_let) => {
                 match &move_let.introduced {
-                    TensorOrCacheView::Tensor(tensor) => {
+                    ViewE::Tensor(tensor) => {
                         // Emit variable declaration(s) and store association between the
                         // CBuffer and Tensor.
                         let spec = move_let.introduced.spec();
@@ -539,9 +532,10 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             spec.level(),
                         );
                         dest_buffer.emit(w, InitType::None, depth)?;
-                        self.name_env.insert(Rc::clone(tensor), dest_buffer);
+                        self.name_env.insert(Rc::new(tensor.clone()), dest_buffer);
                     }
-                    TensorOrCacheView::CacheView(_) => (),
+                    ViewE::CacheView(_) => (),
+                    _ => unreachable!(),
                 };
 
                 if let Some(prologue) = move_let.prologue() {
@@ -552,11 +546,8 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                     self.emit(w, epilogue, depth)?;
                 }
 
-                if let TensorOrCacheView::Tensor(tensor) = &move_let.introduced {
-                    self.name_env
-                        .remove(&**tensor)
-                        .unwrap()
-                        .emit_free(w, depth)?;
+                if let ViewE::Tensor(tensor) = &move_let.introduced {
+                    self.name_env.remove(tensor).unwrap().emit_free(w, depth)?;
                 }
                 Ok(())
             }
@@ -606,7 +597,7 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                 let args: String =
                     p.1.iter()
                         .map(|arg| {
-                            let backing_tensor = arg.backing_tensor(&self.param_bindings).unwrap();
+                            let backing_tensor = arg.backing_tensor().unwrap();
                             match self.name_env.get(backing_tensor).unwrap() {
                                 CBuffer::HeapArray { name, .. }
                                 | CBuffer::StackArray { name, .. }
@@ -657,21 +648,15 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                             i32::try_from(arguments[1].spec().vector_size().unwrap().get())
                                 .unwrap();
 
-                        let lhs_tensor = arguments[0].backing_tensor(&self.param_bindings).unwrap();
+                        let lhs_tensor = arguments[0].backing_tensor().unwrap();
                         let lhs_buffer = self.name_env.get(lhs_tensor).unwrap();
-                        let rhs_tensor = arguments[1].backing_tensor(&self.param_bindings).unwrap();
+                        let rhs_tensor = arguments[1].backing_tensor().unwrap();
                         let rhs_buffer = self.name_env.get(rhs_tensor).unwrap();
 
-                        let lhs_iexpr = zero_points(
-                            arguments[0].make_buffer_indexing_expr(&self.param_bindings),
-                        );
-                        let rhs0_iexpr = zero_points(
-                            arguments[1].make_buffer_indexing_expr(&self.param_bindings),
-                        );
-                        let rhs1_iexpr = zero_points(
-                            arguments[1].make_buffer_indexing_expr(&self.param_bindings)
-                                + vector_size,
-                        );
+                        let lhs_iexpr = zero_points(arguments[0].make_buffer_indexing_expr());
+                        let rhs0_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
+                        let rhs1_iexpr =
+                            zero_points(arguments[1].make_buffer_indexing_expr() + vector_size);
 
                         self.headers.emit_cvtbf16_fp32 = true;
                         writeln!(
@@ -686,18 +671,16 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                     CpuKernel::MemsetZero => {
                         // TODO: Merge this duplicate `exprs` block. It's used also in the ValueAssign.
                         debug_assert_eq!(arguments.len(), 1);
-                        let backing_tensor =
-                            arguments[0].backing_tensor(&self.param_bindings).unwrap();
+                        let backing_tensor = arguments[0].backing_tensor().unwrap();
                         let buffer = self.name_env.get(backing_tensor).unwrap();
-                        let mut buffer_indexing_expr =
-                            arguments[0].make_buffer_indexing_expr(&self.param_bindings);
+                        let mut buffer_indexing_expr = arguments[0].make_buffer_indexing_expr();
                         buffer_indexing_expr = zero_points(buffer_indexing_expr);
                         let arg_expr = self.c_index_ptr(buffer, &buffer_indexing_expr, None);
                         writeln!(
                             w,
                             "{}memset((void *)({arg_expr}), 0, {});",
                             indent(depth),
-                            arguments[0].1.bytes_used()
+                            arguments[0].spec().bytes_used()
                         )
                     }
                     CpuKernel::VectorZero => {
@@ -731,18 +714,16 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         let dtype = first_spec.dtype();
                         let vtype = get_vector(Tgt::vec_types(), dtype, vector_size);
                         let itype = vtype.native_type_name;
-                        let aligned = arguments.iter().all(|a| a.1.aligned());
+                        let aligned = arguments.iter().all(|a| a.spec().aligned());
                         let vector_count = first_spec.volume().get() / vector_size.get();
 
                         for vector_idx in 0..vector_count {
                             let exprs = arguments
                                 .iter()
                                 .map(|arg| {
-                                    let backing_tensor =
-                                        arg.backing_tensor(&self.param_bindings).unwrap();
+                                    let backing_tensor = arg.backing_tensor().unwrap();
                                     let buffer = self.name_env.get(backing_tensor).unwrap();
-                                    let mut buffer_indexing_expr =
-                                        arg.make_buffer_indexing_expr(&self.param_bindings);
+                                    let mut buffer_indexing_expr = arg.make_buffer_indexing_expr();
                                     buffer_indexing_expr = zero_points(buffer_indexing_expr);
                                     buffer_indexing_expr +=
                                         i32::try_from(vector_size.get() * vector_idx).unwrap();
@@ -1383,13 +1364,9 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         ]
                         .into_iter()
                         .map(|(arg, idx)| {
-                            let buffer = self
-                                .name_env
-                                .get(arg.backing_tensor(&self.param_bindings).unwrap())
-                                .unwrap();
+                            let buffer = self.name_env.get(arg.backing_tensor().unwrap()).unwrap();
                             let buffer_indexing_expr =
-                                zero_points(arg.make_buffer_indexing_expr(&self.param_bindings))
-                                    + idx;
+                                zero_points(arg.make_buffer_indexing_expr()) + idx;
                             println!("About to index with expr: {:?}", buffer_indexing_expr);
                             self.c_index_vec(buffer, &buffer_indexing_expr, None)
                         })
@@ -1425,13 +1402,9 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         ]
                         .into_iter()
                         .map(|(arg, idx)| {
-                            let buffer = self
-                                .name_env
-                                .get(arg.backing_tensor(&self.param_bindings).unwrap())
-                                .unwrap();
+                            let buffer = self.name_env.get(arg.backing_tensor().unwrap()).unwrap();
                             let buffer_indexing_expr =
-                                zero_points(arg.make_buffer_indexing_expr(&self.param_bindings))
-                                    + idx;
+                                zero_points(arg.make_buffer_indexing_expr()) + idx;
                             self.c_index_vec(buffer, &buffer_indexing_expr, None)
                         })
                         .collect::<Vec<_>>()
@@ -1488,20 +1461,14 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
                         )
                     }
                     CpuKernel::VectorInterleaveBf16F32 => {
-                        let lhs_tensor = arguments[0].backing_tensor(&self.param_bindings).unwrap();
+                        let lhs_tensor = arguments[0].backing_tensor().unwrap();
                         let lhs_buffer = self.name_env.get(lhs_tensor).unwrap();
-                        let rhs_tensor = arguments[1].backing_tensor(&self.param_bindings).unwrap();
+                        let rhs_tensor = arguments[1].backing_tensor().unwrap();
                         let rhs_buffer = self.name_env.get(rhs_tensor).unwrap();
 
-                        let lhs_iexpr = zero_points(
-                            arguments[0].make_buffer_indexing_expr(&self.param_bindings),
-                        );
-                        let rhs0_iexpr = zero_points(
-                            arguments[1].make_buffer_indexing_expr(&self.param_bindings),
-                        );
-                        let rhs1_iexpr = zero_points(
-                            arguments[1].make_buffer_indexing_expr(&self.param_bindings) + 8,
-                        );
+                        let lhs_iexpr = zero_points(arguments[0].make_buffer_indexing_expr());
+                        let rhs0_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
+                        let rhs1_iexpr = zero_points(arguments[1].make_buffer_indexing_expr() + 8);
 
                         let src_name = self.c_index_vec(lhs_buffer, &lhs_iexpr, None);
                         let even_name = self.c_index_vec(rhs_buffer, &rhs0_iexpr, None);
@@ -1664,17 +1631,18 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
         Ok(())
     }
 
-    fn param_args_to_c_indices<F>(&self, arguments: &[Param<Tgt>], f: F) -> Vec<String>
+    fn param_args_to_c_indices<A, F>(&self, arguments: &[A], f: F) -> Vec<String>
     where
+        A: View<Tgt = Tgt>,
         F: Fn(usize, &CBuffer, &NonAffineExpr<BufferVar>) -> String,
     {
         arguments
             .iter()
             .enumerate()
             .map(|(idx, arg)| {
-                let backing_tensor = arg.backing_tensor(&self.param_bindings).unwrap();
+                let backing_tensor = arg.backing_tensor().unwrap();
                 let buffer = self.name_env.get(backing_tensor).unwrap();
-                let mut buffer_indexing_expr = arg.make_buffer_indexing_expr(&self.param_bindings);
+                let mut buffer_indexing_expr = arg.make_buffer_indexing_expr();
                 buffer_indexing_expr = zero_points(buffer_indexing_expr);
                 f(idx, buffer, &buffer_indexing_expr)
             })
@@ -1859,13 +1827,12 @@ impl<'a, Tgt: CpuTarget> CpuCodeGenerator<'a, Tgt> {
     }
 }
 
-impl<'a, Tgt: Target> Default for CpuCodeGenerator<'a, Tgt> {
+impl<Tgt: Target> Default for CpuCodeGenerator<Tgt> {
     fn default() -> Self {
         CpuCodeGenerator {
             namer: Default::default(),
             name_env: Default::default(),
             loop_iter_bindings: Default::default(),
-            param_bindings: Default::default(),
             headers: Default::default(),
             kernel_name: String::from("kernel"),
             thread_style: Default::default(),

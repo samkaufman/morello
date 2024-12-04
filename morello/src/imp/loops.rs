@@ -5,14 +5,12 @@ use crate::nameenv::NameEnv;
 use crate::spec::Spec;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
-use crate::views::{Param, Tile, View};
-
+use crate::views::{Tile, View, ViewE};
 use itertools::Itertools;
-
-use std::collections::HashMap;
+use std::iter;
 use std::{
     fmt::{self, Debug},
-    iter, slice,
+    slice,
 };
 
 const PAR_TILE_OVERHEAD: MainCost = 45_000; // rough cycle estimate
@@ -47,17 +45,20 @@ pub struct Loop<Tgt: Target> {
 
 #[derive(Debug, Clone)]
 pub struct LoopTile<Tgt: Target> {
+    pub parameter_index: u8,
     pub axes: Vec<u8>,
-    pub tile: Tile<Param<Tgt>>,
+    pub tile: Tile<Box<ViewE<Tgt>>>,
 }
 
 impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
+    type BindOut = Self;
+
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
         debug_assert!(
             self.tiles
                 .iter()
                 .tuple_windows::<(_, _)>()
-                .all(|(a, b)| a.tile.view.0 < b.tile.view.0),
+                .all(|(a, b)| a.parameter_index < b.parameter_index),
             "tile weren't sorted"
         );
 
@@ -71,7 +72,7 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
                 None
             }
             Some((i, body_param)) => match self.tiles.get(next_tile_idx) {
-                Some(next_tile) if i == usize::from(next_tile.tile.view.0) => {
+                Some(next_tile) if i == usize::from(next_tile.parameter_index) => {
                     next_tile_idx += 1;
                     Some(next_tile.tile.view.spec())
                 }
@@ -108,33 +109,40 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
         new_loop
     }
 
-    fn bind<'i, 'j: 'i>(
-        &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
-        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
-    ) {
+    fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
+        debug_assert_eq!(args.len(), self.parameters().count());
+
+        let mut new_tiles = vec![];
+        new_tiles.reserve_exact(self.tiles.len());
         let mut inner_args = args.to_vec();
         for tile in &self.tiles {
-            tile.tile.bind(args, env);
-            inner_args[usize::from(tile.tile.view.0)] = &tile.tile;
+            let ViewE::Tile(bound) = tile.tile.clone().bind(args) else {
+                unreachable!()
+            };
+            new_tiles.push(LoopTile {
+                parameter_index: tile.parameter_index,
+                axes: tile.axes.clone(),
+                tile: bound.clone(),
+            });
+            inner_args[usize::from(tile.parameter_index)] = ViewE::Tile(bound);
         }
-        self.body.bind(&inner_args, env);
+        Loop {
+            tiles: new_tiles,
+            body: Box::new(self.body.bind(&inner_args)),
+            parallel: self.parallel,
+            spec: self.spec,
+        }
     }
 
-    fn pprint_line(
-        &self,
-        names: &mut NameEnv,
-        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
-    ) -> Option<String> {
+    fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
         Some(format!(
             "tile{} ({})",
             if self.parallel { "[p]" } else { "" },
             self.tiles
                 .iter()
                 .map(|t| {
-                    let source = param_bindings[&t.tile.view];
                     let left = names.name(&t.tile).to_owned();
-                    let right = names.get_name_or_display(source);
+                    let right = names.get_name_or_display(&t.tile.view);
                     format!(
                         "{}: {} <-[{}]- {}",
                         left,

@@ -1,10 +1,9 @@
 use super::{cpu::CpuTarget, CpuKernel, Kernel, TargetId};
-use crate::codegen::c_utils::VecType;
 use crate::common::Dtype;
 use crate::cost::MainCost;
 use crate::memorylimits::MemoryAllocation;
 use crate::spec::LogicalSpec;
-use crate::views::Param;
+use crate::{codegen::c_utils::VecType, views::View};
 
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -202,11 +201,11 @@ impl Kernel for X86Kernel {
         self.0.applies_to_logical_spec(logical_spec)
     }
 
-    fn memory_allocated(&self, parameters: &[Param<Self::Tgt>]) -> MemoryAllocation {
+    fn memory_allocated<P: View<Tgt = Self::Tgt>>(&self, parameters: &[P]) -> MemoryAllocation {
         self.0.memory_allocated(parameters)
     }
 
-    fn main_cost(&self, parameters: &[Param<Self::Tgt>]) -> MainCost {
+    fn main_cost<P: View<Tgt = Self::Tgt>>(&self, parameters: &[P]) -> MainCost {
         self.0.main_cost(parameters)
     }
 

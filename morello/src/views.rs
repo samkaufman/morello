@@ -7,25 +7,19 @@ use crate::{
     target::Target,
     tensorspec::TensorSpec,
 };
-
-use auto_impl::auto_impl;
-
 use std::{
-    collections::HashMap,
+    borrow::Borrow,
     fmt::{Debug, Display, Formatter},
+    rc::Rc,
 };
 
-#[auto_impl(&, Box, Rc)]
-pub trait View: Debug {
+pub trait View: Clone {
     type Tgt: Target;
 
     /// Return an identifier which can be used to test reference equality.
     fn identifier(&self) -> OpaqueSymbol;
 
-    fn backing_tensor<'a>(
-        &'a self,
-        env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
-    ) -> Option<&'a Tensor<Self::Tgt>>;
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>>;
 
     fn spec(&self) -> &TensorSpec<Self::Tgt>;
 
@@ -33,34 +27,153 @@ pub trait View: Debug {
         self.spec().shape()
     }
 
-    fn make_buffer_indexing_expr(
-        &self,
-        env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-    ) -> NonAffineExpr<BufferVar> {
-        let backing_layout = self.backing_tensor(env).unwrap().spec().layout();
-        self.make_buffer_indexing_expr_with_layout(env, backing_layout)
+    fn make_buffer_indexing_expr(&self) -> NonAffineExpr<BufferVar> {
+        let backing_tensor = self.backing_tensor().unwrap();
+        let backing_layout = backing_tensor.spec().layout();
+        self.make_buffer_indexing_expr_with_layout(backing_layout)
     }
 
     // TODO: Rename
-    fn make_buffer_indexing_expr_with_layout(
-        &self,
-        env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-        layout: &Layout,
-    ) -> NonAffineExpr<BufferVar>;
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar>;
 
-    /// Update environment to map all nested [Param]s to Views, given `args`.
-    fn bind<'i>(
-        &self,
-        args: &[&'i dyn View<Tgt = Self::Tgt>],
-        env: &mut HashMap<Param<Self::Tgt>, &'i dyn View<Tgt = Self::Tgt>>,
-    );
+    /// Replace any nested [Param]s with the corresponding [View]s from `args`.
+    #[must_use]
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>;
 
     fn to_param(&self) -> Option<&Param<Self::Tgt>> {
         None
     }
 }
 
-// TODO: Rename to ViewTransforms
+// TODO: Replace with an impl on all smart pointers? Maybe a macro?
+impl<V> View for &V
+where
+    V: View,
+{
+    type Tgt = V::Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        (**self).identifier()
+    }
+
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        (**self).backing_tensor()
+    }
+
+    fn spec(&self) -> &TensorSpec<Self::Tgt> {
+        (**self).spec()
+    }
+
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        (**self).make_buffer_indexing_expr_with_layout(layout)
+    }
+
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        (*self).clone().bind(args)
+    }
+
+    fn to_param(&self) -> Option<&Param<Self::Tgt>> {
+        (**self).to_param()
+    }
+
+    fn shape(&self) -> &[DimSize] {
+        (**self).shape()
+    }
+
+    fn make_buffer_indexing_expr(&self) -> NonAffineExpr<BufferVar> {
+        (**self).make_buffer_indexing_expr()
+    }
+}
+
+impl<V> View for Box<V>
+where
+    V: View,
+{
+    type Tgt = V::Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        (**self).identifier()
+    }
+
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        (**self).backing_tensor()
+    }
+
+    fn spec(&self) -> &TensorSpec<Self::Tgt> {
+        (**self).spec()
+    }
+
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        (**self).make_buffer_indexing_expr_with_layout(layout)
+    }
+
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        (*self).clone().bind(args)
+    }
+
+    fn to_param(&self) -> Option<&Param<Self::Tgt>> {
+        (**self).to_param()
+    }
+
+    fn shape(&self) -> &[DimSize] {
+        (**self).shape()
+    }
+
+    fn make_buffer_indexing_expr(&self) -> NonAffineExpr<BufferVar> {
+        (**self).make_buffer_indexing_expr()
+    }
+}
+
+impl<V> View for Rc<V>
+where
+    V: View,
+{
+    type Tgt = V::Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        (**self).identifier()
+    }
+
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        (**self).backing_tensor()
+    }
+
+    fn spec(&self) -> &TensorSpec<Self::Tgt> {
+        (**self).spec()
+    }
+
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        (**self).make_buffer_indexing_expr_with_layout(layout)
+    }
+
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        (*self).clone().bind(args)
+    }
+
+    fn to_param(&self) -> Option<&Param<Self::Tgt>> {
+        (**self).to_param()
+    }
+
+    fn shape(&self) -> &[DimSize] {
+        (**self).shape()
+    }
+
+    fn make_buffer_indexing_expr(&self) -> NonAffineExpr<BufferVar> {
+        (**self).make_buffer_indexing_expr()
+    }
+}
+
 pub trait ViewExt: View {
     fn squeeze_dims<I: IntoIterator<Item = u8>>(self, dims: I) -> SqueezeDimsView<Self>
     where
@@ -113,10 +226,251 @@ pub trait ViewExt: View {
 
 impl<V: View> ViewExt for V {}
 
+// TODO: Rename. `ViewE` is a confusing name.
+#[derive(Debug, Clone)]
+pub enum ViewE<Tgt: Target> {
+    Tensor(Tensor<Tgt>),
+    Param(Param<Tgt>),
+    CacheView(CacheView<Box<ViewE<Tgt>>>),
+    Tile(Tile<Box<ViewE<Tgt>>>),
+    SqueezeDimsView(SqueezeDimsView<Box<ViewE<Tgt>>>),
+    TransposeView(TransposeView<Box<ViewE<Tgt>>>),
+}
+
+impl<Tgt: Target> View for ViewE<Tgt> {
+    type Tgt = Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        match self {
+            ViewE::Tensor(tensor) => tensor.identifier(),
+            ViewE::Param(param) => param.identifier(),
+            ViewE::CacheView(cache_view) => cache_view.identifier(),
+            ViewE::Tile(tile) => tile.identifier(),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.identifier(),
+            ViewE::TransposeView(transpose_view) => transpose_view.identifier(),
+        }
+    }
+
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        match self {
+            ViewE::Tensor(tensor) => tensor.backing_tensor(),
+            ViewE::Param(param) => param.backing_tensor(),
+            ViewE::CacheView(cache_view) => cache_view.backing_tensor(),
+            ViewE::Tile(tile) => tile.backing_tensor(),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.backing_tensor(),
+            ViewE::TransposeView(transpose_view) => transpose_view.backing_tensor(),
+        }
+    }
+
+    fn spec(&self) -> &TensorSpec<Self::Tgt> {
+        match self {
+            ViewE::Tensor(tensor) => tensor.spec(),
+            ViewE::Param(param) => param.spec(),
+            ViewE::CacheView(cache_view) => cache_view.spec(),
+            ViewE::Tile(tile) => tile.spec(),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.spec(),
+            ViewE::TransposeView(transpose_view) => transpose_view.spec(),
+        }
+    }
+
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        match self {
+            ViewE::Tensor(tensor) => tensor.make_buffer_indexing_expr_with_layout(layout),
+            ViewE::Param(param) => param.make_buffer_indexing_expr_with_layout(layout),
+            ViewE::CacheView(cache_view) => {
+                cache_view.make_buffer_indexing_expr_with_layout(layout)
+            }
+            ViewE::Tile(tile) => tile.make_buffer_indexing_expr_with_layout(layout),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => {
+                squeeze_dims_view.make_buffer_indexing_expr_with_layout(layout)
+            }
+            ViewE::TransposeView(transpose_view) => {
+                transpose_view.make_buffer_indexing_expr_with_layout(layout)
+            }
+        }
+    }
+
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        match self {
+            ViewE::Tensor(tensor) => tensor.bind(args),
+            ViewE::Param(param) => param.bind(args),
+            ViewE::CacheView(cache_view) => cache_view.bind(args),
+            ViewE::Tile(tile) => tile.bind(args),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.bind(args),
+            ViewE::TransposeView(transpose_view) => transpose_view.bind(args),
+        }
+    }
+
+    fn shape(&self) -> &[DimSize] {
+        match self {
+            ViewE::Tensor(tensor) => tensor.shape(),
+            ViewE::Param(param) => param.shape(),
+            ViewE::CacheView(cache_view) => cache_view.shape(),
+            ViewE::Tile(tile) => tile.shape(),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.shape(),
+            ViewE::TransposeView(transpose_view) => transpose_view.shape(),
+        }
+    }
+
+    fn make_buffer_indexing_expr(&self) -> NonAffineExpr<BufferVar> {
+        match self {
+            ViewE::Tensor(tensor) => tensor.make_buffer_indexing_expr(),
+            ViewE::Param(param) => param.make_buffer_indexing_expr(),
+            ViewE::CacheView(cache_view) => cache_view.make_buffer_indexing_expr(),
+            ViewE::Tile(tile) => tile.make_buffer_indexing_expr(),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => {
+                squeeze_dims_view.make_buffer_indexing_expr()
+            }
+            ViewE::TransposeView(transpose_view) => transpose_view.make_buffer_indexing_expr(),
+        }
+    }
+
+    fn to_param(&self) -> Option<&Param<Self::Tgt>> {
+        match self {
+            ViewE::Tensor(tensor) => tensor.to_param(),
+            ViewE::Param(param) => param.to_param(),
+            ViewE::CacheView(cache_view) => cache_view.to_param(),
+            ViewE::Tile(tile) => tile.to_param(),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.to_param(),
+            ViewE::TransposeView(transpose_view) => transpose_view.to_param(),
+        }
+    }
+}
+
+impl<Tgt: Target> From<Tensor<Tgt>> for ViewE<Tgt> {
+    fn from(tensor: Tensor<Tgt>) -> Self {
+        ViewE::Tensor(tensor)
+    }
+}
+
+impl<Tgt: Target> From<Param<Tgt>> for ViewE<Tgt> {
+    fn from(param: Param<Tgt>) -> Self {
+        ViewE::Param(param)
+    }
+}
+
+impl<V> From<CacheView<V>> for ViewE<V::Tgt>
+where
+    V: View + Into<ViewE<V::Tgt>>,
+{
+    fn from(cache_view: CacheView<V>) -> Self {
+        ViewE::CacheView(CacheView {
+            source: Box::new(cache_view.source.into()),
+            spec: cache_view.spec,
+            unique_id: cache_view.unique_id,
+        })
+    }
+}
+
+impl<V> From<Tile<V>> for ViewE<V::Tgt>
+where
+    V: View + Into<ViewE<V::Tgt>>,
+{
+    fn from(tile: Tile<V>) -> Self {
+        ViewE::Tile(Tile {
+            shape: tile.shape,
+            step_sizes: tile.step_sizes,
+            view: Box::new(tile.view.into()),
+            expr_term_id: tile.expr_term_id,
+            spec: tile.spec,
+            unique_id: tile.unique_id,
+        })
+    }
+}
+
+impl<V> From<SqueezeDimsView<V>> for ViewE<V::Tgt>
+where
+    V: View + Into<ViewE<V::Tgt>>,
+{
+    fn from(view: SqueezeDimsView<V>) -> Self {
+        ViewE::SqueezeDimsView(SqueezeDimsView {
+            inner: Box::new(view.inner.into()),
+            dims: view.dims,
+            spec: view.spec,
+            unique_id: view.unique_id,
+        })
+    }
+}
+
+impl<V> From<TransposeView<V>> for ViewE<V::Tgt>
+where
+    V: View + Into<ViewE<V::Tgt>>,
+{
+    fn from(view: TransposeView<V>) -> Self {
+        ViewE::TransposeView(TransposeView {
+            inner: Box::new(view.inner.into()),
+            spec: view.spec,
+            unique_id: view.unique_id,
+        })
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum TileError {
     #[error("Layout does not apply to tile size")]
     LayoutIncompatible(#[from] LayoutError),
+}
+
+#[derive(Debug, Clone)]
+pub enum ParamOr<V, P> {
+    Param(P),
+    Other(V),
+}
+
+impl<V, P> View for ParamOr<V, P>
+where
+    V: View,
+    P: Borrow<Param<V::Tgt>> + Clone + Debug, // TODO: Remove Debug bound one removed from View
+{
+    type Tgt = V::Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        match self {
+            ParamOr::Param(p) => p.borrow().identifier(),
+            ParamOr::Other(v) => v.identifier(),
+        }
+    }
+
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        match self {
+            ParamOr::Param(p) => p.borrow().backing_tensor(),
+            ParamOr::Other(v) => v.backing_tensor(),
+        }
+    }
+
+    fn spec(&self) -> &TensorSpec<Self::Tgt> {
+        match self {
+            ParamOr::Param(p) => p.borrow().spec(),
+            ParamOr::Other(v) => v.spec(),
+        }
+    }
+
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        match self {
+            ParamOr::Param(p) => p.borrow().make_buffer_indexing_expr_with_layout(layout),
+            ParamOr::Other(v) => v.make_buffer_indexing_expr_with_layout(layout),
+        }
+    }
+
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        match self {
+            ParamOr::Param(p) => p.borrow().clone().bind(args),
+            ParamOr::Other(v) => v.bind(args),
+        }
+    }
+
+    fn to_param(&self) -> Option<&Param<Self::Tgt>> {
+        match self {
+            ParamOr::Param(p) => Some(p.borrow()),
+            ParamOr::Other(v) => v.to_param(),
+        }
+    }
 }
 
 /// A reference to an Impl node parameter.
@@ -138,7 +492,7 @@ pub struct CacheView<V: View> {
 }
 
 impl<V: View> CacheView<V> {
-    pub fn new(source: V, spec: TensorSpec<V::Tgt>) -> CacheView<V> {
+    pub fn new(source: V, spec: TensorSpec<V::Tgt>) -> Self {
         CacheView {
             source,
             spec,
@@ -158,7 +512,7 @@ pub struct Tile<V: View> {
     unique_id: OpaqueSymbol,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqueezeDimsView<V: View> {
     pub inner: V,
     pub dims: Vec<u8>,
@@ -166,7 +520,7 @@ pub struct SqueezeDimsView<V: View> {
     unique_id: OpaqueSymbol,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransposeView<V: View> {
     pub inner: V,
     spec: TensorSpec<V::Tgt>,
@@ -186,52 +540,26 @@ impl<Tgt: Target> View for Param<Tgt> {
         self.2
     }
 
-    fn backing_tensor<'a>(
-        &'a self,
-        env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
-    ) -> Option<&'a Tensor<Self::Tgt>> {
-        env.get(self).and_then(|v| v.backing_tensor(env))
+    fn backing_tensor(&self) -> Option<&Tensor<Tgt>> {
+        None
     }
 
-    fn spec(&self) -> &TensorSpec<Self::Tgt> {
+    fn spec(&self) -> &TensorSpec<Tgt> {
         &self.1
     }
 
-    fn make_buffer_indexing_expr_with_layout(
-        &self,
-        env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-        layout: &Layout,
-    ) -> NonAffineExpr<BufferVar> {
-        let resolved = env.get(self).expect("Param should be in environment");
-        resolved.make_buffer_indexing_expr_with_layout(env, layout)
+    fn make_buffer_indexing_expr_with_layout(&self, _layout: &Layout) -> NonAffineExpr<BufferVar> {
+        todo!()
     }
 
-    fn bind<'i>(
-        &self,
-        args: &[&'i dyn View<Tgt = Self::Tgt>],
-        env: &mut HashMap<Param<Self::Tgt>, &'i dyn View<Tgt = Self::Tgt>>,
-    ) {
-        let Some(a) = args.get(usize::from(self.0)) else {
-            panic!(
-                "Param has index {} but only {} args given",
-                self.0,
-                args.len()
-            );
-        };
-        // TODO: Enable this runtime check that the given parameter Specs are right.
-        // debug_assert_eq!(
-        //     self.spec(),
-        //     a.spec(),
-        //     "Param binding given {} but expected {}",
-        //     a.spec(),
-        //     self.spec(),
-        // );
-        if env.insert(self.clone(), *a).is_some() {
-            panic!("Identifier was already in environment")
-        }
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        args[usize::from(self.0)].clone().into()
     }
 
-    fn to_param(&self) -> Option<&Param<Self::Tgt>> {
+    fn to_param(&self) -> Option<&Param<Tgt>> {
         Some(self)
     }
 }
@@ -255,10 +583,7 @@ impl<Tgt: Target> View for Tensor<Tgt> {
         self.1
     }
 
-    fn backing_tensor<'a>(
-        &'a self,
-        _env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
-    ) -> Option<&'a Tensor<Self::Tgt>> {
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
         Some(self)
     }
 
@@ -266,19 +591,15 @@ impl<Tgt: Target> View for Tensor<Tgt> {
         &self.0
     }
 
-    fn make_buffer_indexing_expr_with_layout(
-        &self,
-        _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-        layout: &Layout,
-    ) -> NonAffineExpr<BufferVar> {
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
         layout.buffer_indexing_expr(self.1, self.shape())
     }
 
-    fn bind<'i>(
-        &self,
-        _args: &[&'i dyn View<Tgt = Self::Tgt>],
-        _env: &mut HashMap<Param<Self::Tgt>, &'i dyn View<Tgt = Self::Tgt>>,
-    ) {
+    fn bind<A>(self, _args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        self.into()
     }
 }
 
@@ -289,32 +610,27 @@ impl<V: View> View for CacheView<V> {
         self.unique_id
     }
 
-    fn backing_tensor<'a>(
-        &'a self,
-        env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
-    ) -> Option<&'a Tensor<Self::Tgt>> {
-        self.source.backing_tensor(env)
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        self.source.backing_tensor()
     }
 
     fn spec(&self) -> &TensorSpec<Self::Tgt> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr_with_layout(
-        &self,
-        env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-        layout: &Layout,
-    ) -> NonAffineExpr<BufferVar> {
-        self.source
-            .make_buffer_indexing_expr_with_layout(env, layout)
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        self.source.make_buffer_indexing_expr_with_layout(layout)
     }
 
-    fn bind<'i>(
-        &self,
-        args: &[&'i dyn View<Tgt = Self::Tgt>],
-        env: &mut HashMap<Param<Self::Tgt>, &'i dyn View<Tgt = Self::Tgt>>,
-    ) {
-        self.source.bind(args, env)
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        ViewE::from(CacheView {
+            source: self.source.bind(args),
+            spec: self.spec.clone(),
+            unique_id: self.unique_id,
+        })
     }
 }
 
@@ -402,6 +718,20 @@ impl<V: View> Tile<V> {
             BufferVar::TileIdx(_, _) => NonAffine::Leaf(term_var).into(),
         })
     }
+
+    pub(crate) fn boxed_viewe(self) -> Tile<Box<ViewE<V::Tgt>>>
+    where
+        V: Into<ViewE<V::Tgt>>,
+    {
+        Tile {
+            view: Box::new(self.view.into()),
+            shape: self.shape,
+            step_sizes: self.step_sizes,
+            expr_term_id: self.expr_term_id,
+            spec: self.spec,
+            unique_id: self.unique_id,
+        }
+    }
 }
 
 impl<T: View> View for Tile<T> {
@@ -411,33 +741,30 @@ impl<T: View> View for Tile<T> {
         self.unique_id
     }
 
-    fn backing_tensor<'a>(
-        &'a self,
-        env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
-    ) -> Option<&'a Tensor<Self::Tgt>> {
-        self.view.backing_tensor(env)
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        self.view.backing_tensor()
     }
 
     fn spec(&self) -> &TensorSpec<Self::Tgt> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr_with_layout(
-        &self,
-        env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-        layout: &Layout,
-    ) -> NonAffineExpr<BufferVar> {
-        self.compose_buffer_indexing_expr(
-            self.view.make_buffer_indexing_expr_with_layout(env, layout),
-        )
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        self.compose_buffer_indexing_expr(self.view.make_buffer_indexing_expr_with_layout(layout))
     }
 
-    fn bind<'i>(
-        &self,
-        args: &[&'i dyn View<Tgt = Self::Tgt>],
-        env: &mut HashMap<Param<Self::Tgt>, &'i dyn View<Tgt = Self::Tgt>>,
-    ) {
-        self.view.bind(args, env)
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        ViewE::from(Tile {
+            view: self.view.bind(args),
+            unique_id: self.unique_id,
+            shape: self.shape,
+            step_sizes: self.step_sizes,
+            expr_term_id: self.expr_term_id,
+            spec: self.spec,
+        })
     }
 }
 
@@ -448,31 +775,28 @@ impl<T: View> View for SqueezeDimsView<T> {
         self.unique_id
     }
 
-    fn backing_tensor<'a>(
-        &'a self,
-        env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
-    ) -> Option<&'a Tensor<Self::Tgt>> {
-        self.inner.backing_tensor(env)
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        self.inner.backing_tensor()
     }
 
     fn spec(&self) -> &TensorSpec<Self::Tgt> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr_with_layout(
-        &self,
-        _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-        _layout: &Layout,
-    ) -> NonAffineExpr<BufferVar> {
+    fn make_buffer_indexing_expr_with_layout(&self, _layout: &Layout) -> NonAffineExpr<BufferVar> {
         todo!()
     }
 
-    fn bind<'i>(
-        &self,
-        args: &[&'i dyn View<Tgt = Self::Tgt>],
-        env: &mut HashMap<Param<Self::Tgt>, &'i dyn View<Tgt = Self::Tgt>>,
-    ) {
-        self.inner.bind(args, env)
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        ViewE::from(SqueezeDimsView {
+            inner: self.inner.bind(args),
+            dims: self.dims,
+            spec: self.spec,
+            unique_id: self.unique_id,
+        })
     }
 }
 
@@ -483,30 +807,26 @@ impl<T: View> View for TransposeView<T> {
         self.unique_id
     }
 
-    fn backing_tensor<'a>(
-        &'a self,
-        env: &'a HashMap<Param<Self::Tgt>, &'a dyn View<Tgt = Self::Tgt>>,
-    ) -> Option<&'a Tensor<Self::Tgt>> {
-        self.inner.backing_tensor(env)
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        self.inner.backing_tensor()
     }
 
     fn spec(&self) -> &TensorSpec<Self::Tgt> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr_with_layout(
-        &self,
-        _env: &HashMap<Param<Self::Tgt>, &dyn View<Tgt = Self::Tgt>>,
-        _layout: &Layout,
-    ) -> NonAffineExpr<BufferVar> {
+    fn make_buffer_indexing_expr_with_layout(&self, _layout: &Layout) -> NonAffineExpr<BufferVar> {
         todo!()
     }
 
-    fn bind<'i>(
-        &self,
-        args: &[&'i dyn View<Tgt = Self::Tgt>],
-        env: &mut HashMap<Param<Self::Tgt>, &'i dyn View<Tgt = Self::Tgt>>,
-    ) {
-        self.inner.bind(args, env)
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        ViewE::from(TransposeView {
+            inner: self.inner.bind(args),
+            spec: self.spec,
+            unique_id: self.unique_id,
+        })
     }
 }

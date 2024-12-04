@@ -1,10 +1,3 @@
-use enum_dispatch::enum_dispatch;
-
-use std::collections::HashMap;
-use std::fmt::Debug;
-
-use crate::tensorspec::TensorSpec;
-use crate::views::{Param, View};
 use crate::{
     cost::MainCost,
     imp::{
@@ -15,7 +8,10 @@ use crate::{
     nameenv::NameEnv,
     spec::Spec,
     target::Target,
+    tensorspec::TensorSpec,
+    views::ViewE,
 };
+use enum_dispatch::enum_dispatch;
 
 pub mod blocks;
 pub mod functions;
@@ -27,6 +23,8 @@ pub mod subspecs;
 
 #[enum_dispatch]
 pub trait Impl<Tgt: Target> {
+    type BindOut: Impl<Tgt>;
+
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_>;
 
     fn parameter_count(&self) -> u8 {
@@ -51,17 +49,10 @@ pub trait Impl<Tgt: Target> {
     #[must_use]
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self;
 
-    fn bind<'i, 'j: 'i>(
-        &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
-        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
-    );
+    #[must_use]
+    fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut;
 
-    fn pprint_line(
-        &self,
-        names: &mut NameEnv,
-        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
-    ) -> Option<String>;
+    fn pprint_line(&self, names: &mut NameEnv) -> Option<String>;
 
     /// The [Spec] this Impl satisfies, if any and known.
     ///
@@ -78,22 +69,103 @@ pub trait ImplExt<Tgt: Target>: Impl<Tgt> {
     fn peak_memory(&self) -> MemVec;
 }
 
-/// A non-Spec node in an Impl program tree.
-///
-/// These usually result from applying an [Action](crate::scheduling::Action).
-///
-/// Unlike [Action](crate::scheduling::Action)s, parameters may be bound to "concrete" [Tensor]s and
-/// other [View]s and stored in [Rc]s (rather than an explicit environment structure).
-#[derive(Debug, Clone)]
-#[enum_dispatch(Impl<Tgt>)]
-pub enum ImplNode<Tgt: Target> {
-    Loop(Loop<Tgt>),
-    MoveLet(MoveLet<Tgt>),
-    Block(Block<Tgt>),
-    Pipeline(Pipeline<Tgt>),
-    Kernel(KernelApp<Tgt>),
-    FunctionApp(FunctionApp<Tgt>),
-    SpecApp(SpecApp<Tgt>),
+crate::impl_impl_for_enum!(
+    ImplNode,
+    Loop => Loop<Tgt>,
+    MoveLet => MoveLet<Tgt>,
+    Block => Block<Tgt>,
+    Pipeline => Pipeline<Tgt>,
+    Kernel => KernelApp<ViewE<Tgt>>,
+    FunctionApp => FunctionApp<Tgt>,
+    SpecApp => SpecApp<ViewE<Tgt>>,
+);
+
+// TODO: Move this mod down
+pub mod macros {
+    #[macro_export]
+    macro_rules! impl_impl_for_enum {
+        ($(#[$meta:meta])* $enum_name:ident $(, $variant:ident => $type:ty) *$(,)*) => {
+            $(#[$meta])*
+            #[derive(Debug, Clone)]
+            pub enum $enum_name<Tgt: Target> {
+                $(
+                    $variant($type),
+                )*
+            }
+
+            impl<Tgt: Target> Impl<Tgt> for $enum_name<Tgt> {
+                type BindOut = Self;
+
+                fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
+                    match self {
+                        $(Self::$variant(inner) => inner.parameters(),)*
+                    }
+                }
+
+                fn parameter_count(&self) -> u8 {
+                    match self {
+                        $(Self::$variant(inner) => inner.parameter_count(),)*
+                    }
+                }
+
+                fn children(&self) -> &[ImplNode<Tgt>] {
+                    match self {
+                        $(Self::$variant(inner) => inner.children(),)*
+                    }
+                }
+
+                fn default_child(&self) -> Option<usize> {
+                    match self {
+                        $(Self::$variant(inner) => inner.default_child(),)*
+                    }
+                }
+
+                fn memory_allocated(&self) -> MemoryAllocation {
+                    match self {
+                        $(Self::$variant(inner) => inner.memory_allocated(),)*
+                    }
+                }
+
+                fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
+                    match self {
+                        $(Self::$variant(inner) => inner.compute_main_cost(child_costs),)*
+                    }
+                }
+
+                fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
+                    match self {
+                        $(Self::$variant(inner) => Self::$variant(inner.replace_children(new_children)),)*
+                    }
+                }
+
+                fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
+                    match self {
+                        $(Self::$variant(inner) => inner.bind(args).into(),)*
+                    }
+                }
+
+                fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
+                    match self {
+                        $(Self::$variant(inner) => inner.pprint_line(names),)*
+                    }
+                }
+
+                fn spec(&self) -> Option<&Spec<Tgt>> {
+                    match self {
+                        $(Self::$variant(inner) => inner.spec(),)*
+                    }
+                }
+            }
+
+            $(
+                impl<Tgt: Target> From<$type> for $enum_name<Tgt> {
+                    fn from(inner: $type) -> Self {
+                        Self::$variant(inner)
+                    }
+                }
+            )*
+        }
+    }
 }
 
 impl<Tgt: Target, T: Impl<Tgt>> ImplExt<Tgt> for T {
@@ -118,12 +190,21 @@ where
     type Strategy = proptest::strategy::BoxedStrategy<ImplNode<Tgt>>;
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+        use crate::views::Param;
         use proptest::prelude::*;
 
         // TODO: Generate non-leaf Impls.
         let impl_leaf_strategy = prop_oneof![
-            any::<KernelApp<Tgt>>().prop_map(ImplNode::Kernel),
-            any::<SpecApp<Tgt>>().prop_map(ImplNode::SpecApp)
+            any::<KernelApp<Param<Tgt>>>().prop_map(|s| {
+                ImplNode::Kernel(KernelApp {
+                    kernel_type: s.kernel_type,
+                    arguments: s.arguments.into_iter().map(ViewE::Param).collect(),
+                    spec: s.spec,
+                })
+            }),
+            any::<SpecApp<Param<Tgt>>>().prop_map(|s| {
+                ImplNode::SpecApp(SpecApp::new(s.0, s.1.into_iter().map(ViewE::Param)))
+            })
         ];
         impl_leaf_strategy.boxed()
     }

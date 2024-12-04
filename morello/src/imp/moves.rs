@@ -5,36 +5,26 @@ use crate::nameenv::NameEnv;
 use crate::spec::Spec;
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
-use crate::views::{CacheView, Param, Tensor, View};
-
-use std::collections::HashMap;
+use crate::views::{View, ViewE};
 use std::iter;
-use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct MoveLet<Tgt: Target> {
     pub parameter_idx: u8,
     // TODO: Needed if the body already has the new tensor?
     pub source_spec: TensorSpec<Tgt>,
-    pub introduced: TensorOrCacheView<Param<Tgt>>,
+    pub introduced: ViewE<Tgt>,
     pub has_prologue: bool,
     pub has_epilogue: bool,
     pub children: Vec<ImplNode<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
 }
 
-// TODO: Make private.
-#[derive(Debug, Clone)]
-pub enum TensorOrCacheView<V: View + 'static> {
-    Tensor(Rc<Tensor<V::Tgt>>),
-    CacheView(Rc<CacheView<V>>),
-}
-
 impl<Tgt: Target> MoveLet<Tgt> {
     pub fn new(
         parameter_idx: u8,
         source_spec: TensorSpec<Tgt>,
-        introduced: TensorOrCacheView<Param<Tgt>>,
+        introduced: ViewE<Tgt>,
         prologue: Option<ImplNode<Tgt>>,
         main_stage: ImplNode<Tgt>,
         epilogue: Option<ImplNode<Tgt>>,
@@ -84,6 +74,8 @@ impl<Tgt: Target> MoveLet<Tgt> {
 }
 
 impl<Tgt: Target> Impl<Tgt> for MoveLet<Tgt> {
+    type BindOut = Self;
+
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
         Box::new(
             self.main_stage()
@@ -130,47 +122,31 @@ impl<Tgt: Target> Impl<Tgt> for MoveLet<Tgt> {
         }
     }
 
-    fn bind<'i, 'j: 'i>(
-        &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
-        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
-    ) {
-        self.introduced.inner_fat_ptr().bind(args, env);
-
-        let param_idx = usize::from(self.parameter_idx);
-        let mut moves_args = [args[param_idx], self.introduced.inner_fat_ptr()];
-        if let Some(p) = self.prologue() {
-            p.bind(&moves_args, env);
-        }
-
-        let mut inner_args = args.to_vec();
-        inner_args[param_idx] = self.introduced.inner_fat_ptr();
-        self.main_stage().bind(&inner_args, env);
-
-        if let Some(e) = self.epilogue() {
-            moves_args.swap(0, 1);
-            e.bind(&moves_args, env);
+    fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
+        let introduced = self.introduced.clone().bind(args);
+        let new_children = self
+            .children
+            .into_iter()
+            .map(|child| child.bind(args))
+            .collect();
+        Self {
+            introduced,
+            children: new_children,
+            ..self
         }
     }
 
-    fn pprint_line(
-        &self,
-        names: &mut NameEnv,
-        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
-    ) -> Option<String> {
-        let introduced_view = self.introduced.inner_fat_ptr();
+    fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
         let cache_view_suffix = match &self.introduced {
-            TensorOrCacheView::Tensor(_) => String::from(""),
-            TensorOrCacheView::CacheView(cache_view) => {
-                format!(
-                    " <- {}",
-                    names.get_name_or_display(param_bindings[&cache_view.source])
-                )
+            ViewE::Tensor(_) => String::from(""),
+            ViewE::CacheView(cache_view) => {
+                format!(" <- {}", names.get_name_or_display(&cache_view.source))
             }
+            _ => unreachable!(),
         };
         let top = format!(
             "alloc {}: {}{}",
-            names.name(introduced_view),
+            names.name(&self.introduced),
             self.introduced.spec(),
             cache_view_suffix
         );
@@ -179,29 +155,6 @@ impl<Tgt: Target> Impl<Tgt> for MoveLet<Tgt> {
 
     fn spec(&self) -> Option<&Spec<Tgt>> {
         self.spec.as_ref()
-    }
-}
-
-impl<V: View + 'static> TensorOrCacheView<V> {
-    pub fn spec(&self) -> &TensorSpec<V::Tgt> {
-        match self {
-            TensorOrCacheView::Tensor(i) => i.spec(),
-            TensorOrCacheView::CacheView(i) => i.spec(),
-        }
-    }
-
-    pub fn inner_fat_ptr(&self) -> &(dyn View<Tgt = V::Tgt> + 'static) {
-        match self {
-            TensorOrCacheView::Tensor(i) => i,
-            TensorOrCacheView::CacheView(i) => i,
-        }
-    }
-
-    pub fn inner_rc(&self) -> Rc<dyn View<Tgt = V::Tgt>> {
-        match self {
-            TensorOrCacheView::Tensor(i) => Rc::clone(i) as Rc<_>,
-            TensorOrCacheView::CacheView(i) => Rc::clone(i) as Rc<_>,
-        }
     }
 }
 

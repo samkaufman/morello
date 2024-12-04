@@ -6,37 +6,22 @@ use crate::{
     spec::Spec,
     target::Target,
     tensorspec::TensorSpec,
-    views::{Param, View},
+    views::{View, ViewE},
 };
-use std::{collections::HashMap, rc::Rc};
 
 /// A fused function and application. In short, `((..) => body)(parameters[0], .., parameters[n])`.
 #[derive(Debug, Clone)]
 pub struct FunctionApp<Tgt: Target> {
     pub body: Box<ImplNode<Tgt>>,
-    pub parameters: Vec<Rc<dyn View<Tgt = Tgt>>>,
+    pub parameters: Vec<ViewE<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
-}
-impl<Tgt: Target> FunctionApp<Tgt> {
-    /// Create a [FunctionApp] with a [Param] for each index.
-    pub fn default_app(body: ImplNode<Tgt>, spec: Spec<Tgt>) -> Self {
-        Self {
-            body: Box::new(body),
-            parameters: spec
-                .0
-                .parameters()
-                .into_iter()
-                .enumerate()
-                .map(|(i, tensorspec)| Rc::new(Param::new(i.try_into().unwrap(), tensorspec)) as _)
-                .collect(),
-            spec: Some(spec),
-        }
-    }
 }
 
 impl<Tgt: Target> Impl<Tgt> for FunctionApp<Tgt> {
+    type BindOut = ImplNode<Tgt>;
+
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
-        todo!()
+        Box::new(self.parameters.iter().map(|p| p.spec()))
     }
 
     fn children(&self) -> &[ImplNode<Tgt>] {
@@ -61,31 +46,17 @@ impl<Tgt: Target> Impl<Tgt> for FunctionApp<Tgt> {
         new_function
     }
 
-    fn bind<'i, 'j: 'i>(
-        &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
-        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
-    ) {
-        for a in &self.parameters {
-            a.bind(args, env)
-        }
-        let new_args = self
+    fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
+        let body_args = self
             .parameters
             .iter()
-            .map(|p| p.as_ref())
+            .map(|p| p.bind(args))
             .collect::<Vec<_>>();
-        self.body.bind(&new_args, env)
+        self.body.bind(&body_args)
     }
 
-    fn pprint_line(
-        &self,
-        names: &mut NameEnv,
-        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
-    ) -> Option<String> {
-        Some(format!(
-            "(..) => {}",
-            self.body.pprint_line(names, param_bindings)?
-        ))
+    fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
+        Some(format!("(..) => {}", self.body.pprint_line(names)?))
     }
 
     fn spec(&self) -> Option<&Spec<Tgt>> {

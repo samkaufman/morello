@@ -12,7 +12,7 @@ use crate::cost::{Cost, MainCost};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{compute_loop_main_cost, Loop, LoopTile};
-use crate::imp::moves::{move_cost, movelet_memory_allocation, MoveLet, TensorOrCacheView};
+use crate::imp::moves::{move_cost, movelet_memory_allocation, MoveLet};
 use crate::imp::pipeline::Pipeline;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
@@ -24,7 +24,7 @@ use crate::target::{Kernel, MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::{prev_power_of_two, snap_memvec_up};
-use crate::views::{CacheView, Param, Tensor, Tile, TileError, View, ViewExt};
+use crate::views::{CacheView, Param, Tensor, Tile, TileError, View, ViewE, ViewExt};
 
 /// A scheduling decision which can be applied to a Spec to produce an Impl.
 ///
@@ -165,9 +165,11 @@ impl<Tgt: Target> Action<Tgt> {
                 let out_idx: u8 = logical_spec.output_idx().try_into().unwrap();
                 let smaller_output_tiling = Tiling::new_simple(output_shape.either_into());
                 let smaller_output = LoopTile {
+                    parameter_index: out_idx,
                     axes: (0..u8::try_from(rank).unwrap()).collect(),
                     tile: smaller_output_tiling
                         .apply(Param::new(out_idx, current_output.clone()))
+                        .map(|v| v.boxed_viewe())
                         .map_err(tile_to_apply_err)?,
                 };
 
@@ -216,13 +218,13 @@ impl<Tgt: Target> Action<Tgt> {
                         .collect();
 
                     if original_input.shape() != &tiling_shape[..] {
+                        let operand_idx_u8 = u8::try_from(operand_idx).unwrap();
                         new_tiles.push(LoopTile {
+                            parameter_index: operand_idx_u8,
                             axes,
                             tile: updated_input_tiling
-                                .apply(Param::new(
-                                    operand_idx.try_into().unwrap(),
-                                    original_input.clone(),
-                                ))
+                                .apply(Param::new(operand_idx_u8, original_input.clone()))
+                                .map(|v| v.boxed_viewe())
                                 .map_err(tile_to_apply_err)?,
                         });
                     }
@@ -262,21 +264,25 @@ impl<Tgt: Target> Action<Tgt> {
 
                             let tiles = vec![
                                 LoopTile {
+                                    parameter_index: 0,
                                     axes: vec![0, 1],
                                     tile: Tile::new(
                                         vec![lhs.shape()[0], *k],
                                         vec![lhs.shape()[0], *k],
                                         Param::new(0, lhs.clone()),
                                     )
+                                    .map(|v| v.boxed_viewe())
                                     .map_err(tile_to_apply_err)?,
                                 },
                                 LoopTile {
+                                    parameter_index: 1,
                                     axes: vec![1, 2],
                                     tile: Tile::new(
                                         vec![*k, rhs.shape()[1]],
                                         vec![*k, rhs.shape()[1]],
                                         Param::new(1, rhs.clone()),
                                     )
+                                    .map(|v| v.boxed_viewe())
                                     .map_err(tile_to_apply_err)?,
                                 },
                             ];
@@ -348,18 +354,22 @@ impl<Tgt: Target> Action<Tgt> {
                         tiles
                             .iter()
                             .position(|tile| {
-                                usize::from(tile.tile.view.0) == app_spec.0.output_idx()
+                                usize::from(tile.parameter_index) == app_spec.0.output_idx()
                             })
                             .expect("tail Compose should have a loop over output"),
                     );
 
                     // Increment the Param indices for the LoopTiles in `tiles`.
                     for tile in &mut tiles {
-                        tile.tile.view.0 += 1;
+                        tile.parameter_index += 1;
+                        if let ViewE::Param(p) = &mut *tile.tile.view {
+                            p.0 += 1;
+                        }
                     }
 
                     // Add a LoopTile for the new rhs argument on the head Compose.
                     let new_head_rhs_looptile = LoopTile {
+                        parameter_index: 0,
                         axes: vec![tail_output_tile.axes[1], 255], // TODO: Replace 255
                         tile: Tiling::new_simple(vec![*k, *old_n])
                             .apply(Param::new(
@@ -370,19 +380,17 @@ impl<Tgt: Target> Action<Tgt> {
                                     operand_auxes[0].clone(),
                                 ),
                             ))
+                            .map(|v| v.boxed_viewe())
                             .map_err(tile_to_apply_err)?,
                     };
                     tiles.insert(0, new_head_rhs_looptile);
                     let new_head_rhs_looptile = &tiles[0];
 
                     // Add an argument for the new head rhs
-                    let mut new_app_args: Vec<Rc<dyn View<Tgt = Tgt>>> =
-                        Vec::with_capacity(app_args.len() + 1);
+                    let mut new_app_args = Vec::<ViewE<Tgt>>::with_capacity(app_args.len() + 1);
                     debug_assert_ne!(spec.0.output_idx(), 0);
-                    new_app_args.push(Rc::new(Param::new(
-                        0,
-                        new_head_rhs_looptile.tile.spec().clone(),
-                    )));
+                    new_app_args
+                        .push(Param::new(0, new_head_rhs_looptile.tile.spec().clone()).into());
                     // Add Params with indices incremented to account for the
                     // additional argument
                     for (idx, a) in app_args.iter().enumerate() {
@@ -392,15 +400,16 @@ impl<Tgt: Target> Action<Tgt> {
                         let Some(Param(param_idx, param_spec, ..)) = a.to_param() else {
                             unreachable!();
                         };
-                        new_app_args.push(Rc::new(Param::new(param_idx + 1, param_spec.clone())));
+                        new_app_args.push(Param::new(param_idx + 1, param_spec.clone()).into());
                     }
                     // Add an output argument with the Spec's target output
                     new_app_args.insert(
                         spec.0.output_idx(),
-                        Rc::new(Param::new(
+                        Param::new(
                             new_app_args.len().try_into().unwrap(),
                             spec.0.output().clone(),
-                        )),
+                        )
+                        .into(),
                     );
                     debug_assert_eq!(new_app_args.len(), spec.0.parameters().len());
                     *app_args = new_app_args;
@@ -643,21 +652,23 @@ impl<Tgt: Target> Action<Tgt> {
                 Ok(ImplNode::Loop(Loop {
                     tiles: vec![
                         LoopTile {
+                            parameter_index: outer_image_tile.view.0,
                             axes: vec![7, 8, 0, 1],
-                            tile: outer_image_tile,
+                            tile: outer_image_tile.boxed_viewe(),
                         },
                         LoopTile {
+                            parameter_index: outer_filters_tile.view.0,
                             axes: vec![9, 8, 0, 1],
-                            tile: outer_filters_tile,
+                            tile: outer_filters_tile.boxed_viewe(),
                         },
                     ],
                     body: Box::new(
                         SpecApp::new(
                             Spec(body_spec, spec.1.clone()),
                             [
-                                Rc::new(inner_image_tile) as Rc<dyn View<Tgt = Tgt>>,
-                                Rc::new(inner_filters_tile) as Rc<dyn View<Tgt = Tgt>>,
-                                Rc::new(inner_output_view) as Rc<dyn View<Tgt = Tgt>>,
+                                ViewE::from(inner_image_tile),
+                                ViewE::from(inner_filters_tile),
+                                ViewE::from(inner_output_view),
                             ],
                         )
                         .into(),
@@ -693,41 +704,44 @@ impl<Tgt: Target> Action<Tgt> {
 
                 let inner_moved_operand = if is_cache_miss {
                     let source = Param::new(*source_idx, outer_moved_operand_spec.clone());
-                    TensorOrCacheView::CacheView(Rc::new(CacheView::new(source, new_spec)))
+                    ViewE::from(CacheView::new(source, new_spec))
                 } else {
-                    TensorOrCacheView::Tensor(Rc::new(Tensor::new(new_spec)))
+                    ViewE::from(Tensor::new(new_spec))
                 };
 
+                let source_param =
+                    ViewE::from(Param::new(*source_idx, outer_moved_operand_spec.clone()));
                 let prologue = prologue_spec.map(|s| {
-                    let mut parameters = s.0.parameters();
-                    let right = Rc::new(Param::new(1, parameters.pop().unwrap()));
-                    let left = Rc::new(Param::new(0, parameters.pop().unwrap()));
-                    let args: [Rc<dyn View<Tgt = Tgt>>; 2] = [left as _, right as _];
-                    SpecApp::new(s.clone(), args)
+                    ImplNode::from(SpecApp::new(
+                        s.clone(),
+                        [source_param.clone(), inner_moved_operand.clone()],
+                    ))
                 });
                 let epilogue = epilogue_spec.map(|s| {
-                    let mut parameters = s.0.parameters();
-                    let right = Rc::new(Param::new(0, parameters.pop().unwrap()));
-                    let left = Rc::new(Param::new(1, parameters.pop().unwrap()));
-                    let args: [Rc<dyn View<Tgt = Tgt>>; 2] = [left as _, right as _];
-                    SpecApp::new(s.clone(), args)
+                    ImplNode::from(SpecApp::new(
+                        s.clone(),
+                        [inner_moved_operand.clone(), source_param],
+                    ))
                 });
 
-                let new_body_app = {
+                let main_stage = {
                     let inner_operands = new_operands.iter().enumerate().map(|(i, o)| {
-                        Rc::new(Param::new(u8::try_from(i).unwrap(), o.clone()))
-                            as Rc<dyn View<Tgt = Tgt>>
+                        if i == *source_idx as usize {
+                            inner_moved_operand.clone()
+                        } else {
+                            ViewE::from(Param::new(u8::try_from(i).unwrap(), o.clone()))
+                        }
                     });
-                    SpecApp::new(new_body_spec, inner_operands)
+                    ImplNode::from(SpecApp::new(new_body_spec, inner_operands))
                 };
 
                 Ok(ImplNode::MoveLet(MoveLet::new(
                     *source_idx,
                     outer_moved_operand_spec.clone(),
                     inner_moved_operand,
-                    prologue.map(|i| i.into()),
-                    new_body_app.into(),
-                    epilogue.map(|i| i.into()),
+                    prologue,
+                    main_stage,
+                    epilogue,
                     Some(spec.clone()),
                 )))
             }
@@ -756,23 +770,19 @@ impl<Tgt: Target> Action<Tgt> {
                 }
 
                 let zero_app = make_zero_for_spec(spec);
-                let (accum_app, main_arg_count, output_idx) = {
+                let accum_app = {
                     let mut spec = Spec(logical_spec.clone_as_accum(), spec.1.clone());
                     spec.canonicalize()
                         .expect("ToAccum's introduced accumulating Spec should be canonicalizable");
                     let app_arguments = operands
                         .iter()
                         .enumerate()
-                        .map(|(i, t)| Param::new(i.try_into().unwrap(), t.clone()));
-                    let output_idx = u8::try_from(spec.0.output_idx()).unwrap();
-                    let app_node = SpecApp::new(spec, app_arguments);
-                    let main_arg_count = u8::try_from(app_node.1.len()).unwrap();
-                    (app_node.into(), main_arg_count, output_idx)
+                        .map(|(i, t)| ViewE::from(Param::new(i.try_into().unwrap(), t.clone())));
+                    SpecApp::new(spec, app_arguments).into()
                 };
 
                 Ok(ImplNode::Block(Block {
                     stages: vec![zero_app, accum_app],
-                    bindings: vec![vec![output_idx], (0..main_arg_count).collect()],
                     parameters: operands,
                     spec: Some(spec.clone()),
                     default_child: Some(1),
@@ -787,7 +797,7 @@ impl<Tgt: Target> Action<Tgt> {
                 let arguments = operands
                     .iter()
                     .enumerate()
-                    .map(|(i, p)| Param::new(i.try_into().unwrap(), p.clone()))
+                    .map(|(i, p)| ViewE::from(Param::new(i.try_into().unwrap(), p.clone())))
                     .collect::<Vec<_>>();
 
                 // Check that the kernel doesn't violate memory limits.
@@ -830,7 +840,7 @@ impl<Tgt: Target> Action<Tgt> {
     ) -> Result<ImplNode<Tgt>, ApplyError> {
         // Modify `operands` TensorSpecs' shapes to accord with the tilings.
         for loop_tile in &tiles {
-            let ref_op = &mut operands[usize::from(loop_tile.tile.view.0)];
+            let ref_op = &mut operands[usize::from(loop_tile.parameter_index)];
             let aligned =
                 aligned_approx(loop_tile.tile.shape(), loop_tile.tile.step_sizes(), ref_op)
                     .unwrap();
@@ -847,14 +857,14 @@ impl<Tgt: Target> Action<Tgt> {
         let body = Box::new(
             {
                 let spec = Spec(inner_spec, spec.1.clone());
-                let operands = spec
+                let arguments = spec
                     .0
                     .parameters()
                     .into_iter()
                     .enumerate()
-                    .map(|(i, o)| Rc::new(Param::new(i.try_into().unwrap(), o)) as Rc<_>)
+                    .map(|(i, o)| ViewE::from(Param::new(i.try_into().unwrap(), o)))
                     .collect();
-                SpecApp(spec, operands)
+                SpecApp(spec, arguments)
             }
             .into(),
         );
@@ -955,6 +965,7 @@ impl<Tgt: Target> Action<Tgt> {
 
 /// Returns a Spec application of a Zero corresponding to the output of the given Spec.
 fn make_zero_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> ImplNode<Tgt> {
+    let output_idx = u8::try_from(spec.0.output_idx()).unwrap();
     let output = spec.0.output();
     let subspec = LogicalSpec::Primitive(
         PrimitiveBasics {
@@ -968,7 +979,7 @@ fn make_zero_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> ImplNode<Tgt> {
     let mut spec = Spec(subspec, spec.1.clone());
     spec.canonicalize()
         .expect("ToAccum's introduced Zero should be canonicalizable");
-    let app_arguments = [Param::new(0, output)];
+    let app_arguments = [ViewE::from(Param::new(output_idx, output))];
     SpecApp::new(spec, app_arguments).into()
 }
 
@@ -1301,31 +1312,31 @@ fn compose_subspecs_to_pipeline<Tgt: Target>(
 
     let inner_application = {
         let input_specs = inner_compose.0.inputs();
-        let mut params: Vec<Rc<dyn View<Tgt = Tgt>>> = vec![];
+        let mut params: Vec<ViewE<Tgt>> = vec![];
         params.reserve_exact(input_specs.len() + 1);
         params.extend(
             input_specs
                 .into_iter()
                 .enumerate()
-                .map(|(i, op)| Rc::new(Param::new(i.try_into().unwrap(), op)) as _),
+                .map(|(i, op)| Param::new(i.try_into().unwrap(), op).into()),
         );
         params.insert(
             inner_compose.0.output_idx(),
-            Rc::new(intermediate_tensor.clone()) as _,
+            (*intermediate_tensor).clone().into(),
         );
-        ImplNode::SpecApp(SpecApp::new(inner_compose, params))
+        ImplNode::from(SpecApp::new(inner_compose, params))
     };
     let outer_application = {
         let outer_output_idx = outer_compose.0.output_idx();
         let parameter_specs = outer_compose.0.parameters();
-        let mut params: Vec<Rc<dyn View<Tgt = Tgt>>> = vec![];
+        let mut params: Vec<ViewE<Tgt>> = vec![];
         params.reserve_exact(parameter_specs.len());
         let idx_to_replace = if outer_output_idx == 0 { 1 } else { 0 };
         for (i, parameter_spec) in parameter_specs.into_iter().enumerate() {
             if i == idx_to_replace {
-                params.push(Rc::new(intermediate_tensor.clone()) as _);
+                params.push((*intermediate_tensor).clone().into());
             } else {
-                params.push(Rc::new(Param::new(i.try_into().unwrap(), parameter_spec)) as _);
+                params.push(Param::new(i.try_into().unwrap(), parameter_spec).into());
             }
         }
         ImplNode::SpecApp(SpecApp::new(outer_compose, params))

@@ -3,7 +3,7 @@ use crate::imp::ImplNode;
 use crate::nameenv::NameEnv;
 use crate::target::Target;
 use crate::utils::indent;
-use crate::views::View;
+use crate::views::ViewE;
 use crate::{imp::Impl, views::Param};
 
 use by_address::ByThinAddress;
@@ -62,19 +62,13 @@ where
     let args = root
         .parameters()
         .enumerate()
-        .map(|(i, s)| Param::new(i.try_into().unwrap(), s.clone()))
-        .collect::<Vec<_>>();
-    let args_ptrs = args
-        .iter()
-        .map(|p| p as &dyn View<Tgt = Tgt>)
+        .map(|(i, s)| ViewE::from(Param::new(i.try_into().unwrap(), s.clone())))
         .collect::<Vec<_>>();
 
-    let mut param_bindings = HashMap::new();
-    root.bind(&args_ptrs, &mut param_bindings);
+    let beta_subbed = root.clone().bind(&args);
     pprint_inner(
         &mut table,
-        root,
-        &param_bindings,
+        &beta_subbed,
         &mut name_env,
         &mut costs_table,
         0,
@@ -96,7 +90,6 @@ where
 fn pprint_inner<'a, Tgt>(
     table: &mut prettytable::Table,
     imp: &'a ImplNode<Tgt>,
-    param_bindings: &'a HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
     name_env: &mut NameEnv,
     costs_table: &mut HashMap<ByThinAddress<&'a ImplNode<Tgt>>, Cost>,
     depth: usize,
@@ -104,7 +97,7 @@ fn pprint_inner<'a, Tgt>(
 ) where
     Tgt: Target,
 {
-    if let Some(line_top) = imp.pprint_line(name_env, param_bindings) {
+    if let Some(line_top) = imp.pprint_line(name_env) {
         let indent_str = indent(depth);
         let main_str = format!("{indent_str}{line_top}");
         let mut r;
@@ -141,15 +134,7 @@ fn pprint_inner<'a, Tgt>(
     }
 
     for child in imp.children() {
-        pprint_inner(
-            table,
-            child,
-            param_bindings,
-            name_env,
-            costs_table,
-            depth + 1,
-            style,
-        );
+        pprint_inner(table, child, name_env, costs_table, depth + 1, style);
     }
 }
 
@@ -194,7 +179,7 @@ mod tests {
             .parameters()
             .into_iter()
             .enumerate()
-            .map(|(i, ts)| Param::new(i.try_into().unwrap(), ts));
+            .map(|(i, ts)| ViewE::from(Param::new(i.try_into().unwrap(), ts)));
         let spec_app: ImplNode<X86Target> =
             SpecApp::new(Spec(logical_spec, X86Target::max_mem()), args).into();
         pprint(&spec_app, ImplPrintStyle::Full);

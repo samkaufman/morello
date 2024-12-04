@@ -500,7 +500,7 @@ impl<D> From<Array<half::bf16, D>> for DynArray<D> {
     }
 }
 
-impl<'a, D> DynArrayViewMut<'a, D>
+impl<D> DynArrayViewMut<'_, D>
 where
     D: ndarray::Dimension,
 {

@@ -11,7 +11,7 @@ use crate::shape;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{Kernel, MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
-use crate::views::Param;
+use crate::views::View;
 
 use divrem::DivRem;
 use itertools::Itertools;
@@ -748,13 +748,13 @@ impl CpuKernel {
         }
     }
 
-    pub fn memory_allocated<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MemoryAllocation {
+    pub fn memory_allocated<P: View>(&self, parameters: &[P]) -> MemoryAllocation {
         match self {
             // TODO: Model memory correctly for BroadcastVecMultAddBf16F32
             CpuKernel::BroadcastVecMultAdd
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::BroadcastVecMultAddBf16F32 => {
-                let vec_tensor_spec = &parameters[1].1;
+                let vec_tensor_spec = &parameters[1].spec();
                 let vb = u64::from(vec_tensor_spec.vector_size().unwrap().get())
                     * u64::from(vec_tensor_spec.dtype().size());
                 MemoryAllocation::Simple(CPU_LEVELS.map(
@@ -806,7 +806,7 @@ impl CpuKernel {
         }
     }
 
-    pub fn main_cost<Tgt: Target>(&self, parameters: &[Param<Tgt>]) -> MainCost {
+    pub fn main_cost<P: View>(&self, parameters: &[P]) -> MainCost {
         match self {
             CpuKernel::BroadcastVecMultAdd
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
@@ -815,7 +815,7 @@ impl CpuKernel {
                 // TODO: Adjust the TwoVecBroadcastVecMultAddU8S8S16 cost.
                 // TODO: Model cost for BroadcastVecMultAddBf16F32 correctly.
 
-                let vec_tensor_spec = &parameters[1].1;
+                let vec_tensor_spec = &parameters[1].spec();
                 let vector_size = vec_tensor_spec.vector_size().unwrap().get();
                 let volume = vec_tensor_spec.volume().get();
                 debug_assert_eq!(volume % vector_size, 0);
@@ -826,7 +826,7 @@ impl CpuKernel {
                 if matches!(self, CpuKernel::TwoVecBroadcastVecMultAddU8S8S16) {
                     // TODO: Instead, call `move_cost`. Requires specializing kernel to X86/ARM.
                     let mut l1_hit_cost = CpuMemoryLevel::L1.cache_hit_cost();
-                    if !parameters[0].1.is_contiguous() {
+                    if !parameters[0].spec().is_contiguous() {
                         l1_hit_cost *= 2;
                     }
                     cost += l1_hit_cost;
@@ -836,20 +836,20 @@ impl CpuKernel {
             }
             CpuKernel::DotProductLoop => {
                 // TODO: Measure throughput! This is a rough estimate.
-                let value_cnt = parameters[0].1.shape()[1].get();
+                let value_cnt = parameters[0].spec().shape()[1].get();
                 let d = DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT;
                 8 * INST_COST * value_cnt / d
             }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
                 // TODO: Measure throughput! This is a rough estimate.
-                let value_cnt = parameters[0].1.shape()[1].get();
+                let value_cnt = parameters[0].spec().shape()[1].get();
                 let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT;
                 (12 * INST_COST * value_cnt) / d
             }
             CpuKernel::DotProductLoopF32Bf16F32
             | CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
                 // RThroughput = 8 or 16
-                let value_cnt = parameters[0].1.shape()[1].get();
+                let value_cnt = parameters[0].spec().shape()[1].get();
                 let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT;
                 let mut cost = 16 * INST_COST * value_cnt;
                 if self == &CpuKernel::DotProductLoopF32Bf16F32 {
@@ -862,7 +862,7 @@ impl CpuKernel {
                 INST_COST
             }
             CpuKernel::MultAdd => {
-                match parameters[0].1.dtype() {
+                match parameters[0].spec().dtype() {
                     Dtype::Bfloat16 => 6 * INST_COST,
                     Dtype::Float32 => INST_COST, // RThroughput = .5
                     Dtype::Uint8
@@ -879,10 +879,10 @@ impl CpuKernel {
             CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
             CpuKernel::VectorAssign => {
                 let vector_value_count = parameters[0]
-                    .1
+                    .spec()
                     .vector_size()
-                    .unwrap_or_else(|| parameters[1].1.vector_size().unwrap());
-                let vec_count = parameters[0].1.volume().get() / vector_value_count.get();
+                    .unwrap_or_else(|| parameters[1].spec().vector_size().unwrap());
+                let vec_count = parameters[0].spec().volume().get() / vector_value_count.get();
                 ASSIGN_INST_COST * vec_count
             }
             CpuKernel::ValueAssign | CpuKernel::MemsetZero | CpuKernel::VectorZero => {
@@ -1263,6 +1263,7 @@ mod tests {
         scheduling::{ApplyError, NotApplicableReason},
         spec::{arb_canonical_spec, Spec},
         target::{Target, X86Target},
+        views::Param,
     };
     use nonzero::nonzero as nz;
     use proptest::prelude::*;

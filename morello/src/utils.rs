@@ -40,7 +40,7 @@ impl<'a, W: fmt::Write> LinePrefixWrite<'a, W> {
     }
 }
 
-impl<'a, W: fmt::Write> fmt::Write for LinePrefixWrite<'a, W> {
+impl<W: fmt::Write> fmt::Write for LinePrefixWrite<'_, W> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         if self.2 && !s.is_empty() {
             self.0.write_str(self.1)?;

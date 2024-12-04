@@ -2,12 +2,15 @@ use crate::common::{DimSize, Dtype};
 use crate::db::FilesDatabase;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
+use crate::imp::functions::FunctionApp;
+use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::scheduling::{Action, ApplyError, TileOut};
 use crate::search::top_down;
 use crate::spec::Spec;
 use crate::target::Target;
+use crate::views::ViewE;
 use std::iter;
 use std::num::NonZeroUsize;
 
@@ -277,7 +280,7 @@ impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt> {
             let children = this.children();
             if children.is_empty() {
                 match this {
-                    ImplNode::SpecApp(spec_app) => f(&spec_app.0),
+                    ImplNode::SpecApp(spec_app) => specapp_apply(spec_app, f).into(),
                     _ => panic!("subschedule path chose non-Spec leaf: {:?}", this),
                 }
             } else if children.len() == 1 {
@@ -309,7 +312,7 @@ where
     F: FnOnce(&Spec<Tgt>) -> ImplNode<Tgt>,
 {
     match node {
-        ImplNode::SpecApp(app) => f(&app.0),
+        ImplNode::SpecApp(app) => specapp_apply(app, f).into(),
         _ => match &node.children() {
             [] => panic!("Not a Spec application and no children."),
             [child] => node.replace_children(iter::once(apply_to_leaf_spec(child, f))),
@@ -338,5 +341,17 @@ fn apply_unwrap<Tgt: Target>(spec: &Spec<Tgt>, action: Action<Tgt>) -> ImplNode<
             panic!("Action {action:?} is not defined for {spec}: {reason}")
         }
         Err(e) => panic!("{e}"),
+    }
+}
+
+fn specapp_apply<Tgt, F>(app: &SpecApp<ViewE<Tgt>>, f: F) -> FunctionApp<Tgt>
+where
+    Tgt: Target,
+    F: FnOnce(&Spec<Tgt>) -> ImplNode<Tgt>,
+{
+    FunctionApp {
+        body: Box::new(f(&app.0)),
+        parameters: app.1.clone(),
+        spec: Some(app.0.clone()),
     }
 }

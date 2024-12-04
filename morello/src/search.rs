@@ -796,7 +796,7 @@ impl ImplReducer {
     }
 }
 
-impl<'a, Tgt: Target> RequestsMapRef<'a, Tgt> {
+impl<Tgt: Target> RequestsMapRef<'_, Tgt> {
     fn remove(
         &mut self,
         key: &Spec<Tgt>,

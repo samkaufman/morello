@@ -5,22 +5,21 @@ use crate::nameenv::NameEnv;
 use crate::spec::Spec;
 use crate::target::{Kernel, Target};
 use crate::tensorspec::TensorSpec;
-use crate::views::{Param, View};
-
+use crate::views::{View, ViewE};
 use itertools::Itertools;
-
-use std::collections::HashMap;
 use std::fmt::Debug;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KernelApp<Tgt: Target> {
-    pub kernel_type: Tgt::Kernel,
-    pub arguments: Vec<Param<Tgt>>,
-    pub spec: Option<Spec<Tgt>>,
+pub struct KernelApp<A: View> {
+    pub kernel_type: <A::Tgt as Target>::Kernel,
+    pub arguments: Vec<A>,
+    pub spec: Option<Spec<A::Tgt>>,
 }
 
-impl<Tgt: Target> Impl<Tgt> for KernelApp<Tgt> {
-    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
+impl<A: View> Impl<A::Tgt> for KernelApp<A> {
+    type BindOut = KernelApp<ViewE<A::Tgt>>;
+
+    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<A::Tgt>> + '_> {
         debug_assert_eq!(
             usize::from(self.kernel_type.argument_count()),
             self.arguments.len()
@@ -28,7 +27,7 @@ impl<Tgt: Target> Impl<Tgt> for KernelApp<Tgt> {
         Box::new(self.arguments.iter().map(|param| param.spec()))
     }
 
-    fn children(&self) -> &[ImplNode<Tgt>] {
+    fn children(&self) -> &[ImplNode<A::Tgt>] {
         &[]
     }
 
@@ -41,54 +40,49 @@ impl<Tgt: Target> Impl<Tgt> for KernelApp<Tgt> {
         self.kernel_type.main_cost(&self.arguments)
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<A::Tgt>>) -> Self {
         debug_assert_eq!(new_children.count(), 0);
         self.clone()
     }
 
-    fn bind<'i, 'j: 'i>(
-        &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
-        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
-    ) {
+    fn bind(self, args: &[ViewE<A::Tgt>]) -> Self::BindOut {
         debug_assert_eq!(
             usize::from(self.kernel_type.argument_count()),
             self.arguments.len()
         );
-        for a in &self.arguments {
-            a.bind(args, env)
+        KernelApp {
+            arguments: self.arguments.into_iter().map(|a| a.bind(args)).collect(),
+            kernel_type: self.kernel_type,
+            spec: self.spec,
         }
     }
 
-    fn pprint_line(
-        &self,
-        names: &mut NameEnv,
-        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
-    ) -> Option<String> {
+    fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
         let name = self.kernel_type.name();
         let args_str = self
             .arguments
             .iter()
-            .map(|a| names.get_name_or_display(param_bindings[a]))
+            .map(|a| names.get_name_or_display(a))
             .join(", ");
         Some(format!("{}({})", name, args_str))
     }
 
-    fn spec(&self) -> Option<&Spec<Tgt>> {
+    fn spec(&self) -> Option<&Spec<A::Tgt>> {
         self.spec.as_ref()
     }
 }
 
 #[cfg(test)]
-impl<Tgt> proptest::arbitrary::Arbitrary for KernelApp<Tgt>
+impl<Tgt> proptest::arbitrary::Arbitrary for KernelApp<crate::views::Param<Tgt>>
 where
-    Tgt: Target,
+    Tgt: crate::target::Target,
     Tgt::Kernel: Debug + Clone + proptest::arbitrary::Arbitrary,
 {
     type Parameters = ();
     type Strategy = proptest::strategy::BoxedStrategy<Self>;
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+        use crate::views::Param;
         use proptest::prelude::*;
 
         any::<Tgt::Kernel>()

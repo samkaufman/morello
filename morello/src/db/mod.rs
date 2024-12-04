@@ -621,7 +621,7 @@ impl Drop for FilesDatabase {
     }
 }
 
-impl<'a> PageId<'a> {
+impl PageId<'_> {
     /// Returns `true` if the page contains the given canonical [Spec].
     ///
     /// Passing a non-canonical [Spec] is a logic error.
@@ -1244,7 +1244,7 @@ pub fn iter_blocks_in_single_dim_range(
 
     // Compute half-open range of blocks.
     let block_bottom = global_bottom / block_dim_size;
-    let block_top = (global_top + block_dim_size - 1) / block_dim_size;
+    let block_top = global_top.div_ceil(block_dim_size);
     debug_assert!(block_top > block_bottom);
 
     let last_block_is_complete = global_top % block_dim_size == 0;

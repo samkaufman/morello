@@ -1,4 +1,4 @@
-use crate::{opaque_symbol::OpaqueSymbol, target::Target, utils::ASCII_PAIRS, views::View};
+use crate::{opaque_symbol::OpaqueSymbol, utils::ASCII_PAIRS, views::View};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -13,7 +13,7 @@ impl NameEnv {
 }
 
 impl NameEnv {
-    pub fn name<K: View + ?Sized>(&mut self, view: &K) -> &str {
+    pub fn name<K: View>(&mut self, view: &K) -> &str {
         let cnt = self.names.len();
         let name = self
             .names
@@ -22,11 +22,11 @@ impl NameEnv {
         name
     }
 
-    pub fn get_name<K: View + ?Sized>(&self, view: &K) -> Option<&str> {
+    pub fn get_name<K: View>(&self, view: &K) -> Option<&str> {
         self.names.get(&view.identifier()).map(|s| s.as_str())
     }
 
-    pub fn get_name_or_display<Tgt: Target>(&self, view: &dyn View<Tgt = Tgt>) -> String {
+    pub fn get_name_or_display<V: View>(&self, view: &V) -> String {
         if let Some(present_name) = self.get_name(view) {
             present_name.to_owned()
         } else if let Some(param) = view.to_param() {

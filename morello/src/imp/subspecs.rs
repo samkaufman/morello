@@ -3,47 +3,30 @@ use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
 use crate::spec::Spec;
-use crate::target::{Target, LEVEL_COUNT};
+use crate::target::LEVEL_COUNT;
 use crate::tensorspec::TensorSpec;
-use crate::views::{Param, View};
-
+use crate::views::{View, ViewE};
 use itertools::Itertools;
-
 use std::borrow::Borrow;
-use std::collections::HashMap;
 use std::fmt::Debug;
-use std::rc::Rc;
 
-// TODO: Do we still want to be generic over the specific Spec?
 #[derive(Debug, Clone)]
-pub struct SpecApp<Tgt: Target>(pub Spec<Tgt>, pub Vec<Rc<dyn View<Tgt = Tgt>>>);
+pub struct SpecApp<A: View>(pub Spec<A::Tgt>, pub Vec<A>);
 
-impl<Tgt> SpecApp<Tgt>
-where
-    Tgt: Target,
-{
-    pub fn new<ParamT, I>(spec: Spec<Tgt>, args: I) -> Self
-    where
-        ParamT: View<Tgt = Tgt> + 'static,
-        I: IntoIterator<Item = ParamT>,
-    {
-        let cast_args = args
-            .into_iter()
-            .map(|v| Rc::new(v) as _)
-            .collect::<Vec<_>>();
-        Self(spec, cast_args)
+impl<A: View> SpecApp<A> {
+    pub fn new(spec: Spec<A::Tgt>, args: impl IntoIterator<Item = A>) -> Self {
+        Self(spec, args.into_iter().collect::<Vec<_>>())
     }
 }
 
-impl<Tgt> Impl<Tgt> for SpecApp<Tgt>
-where
-    Tgt: Target,
-{
-    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
+impl<A: View> Impl<A::Tgt> for SpecApp<A> {
+    type BindOut = SpecApp<ViewE<A::Tgt>>;
+
+    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<A::Tgt>> + '_> {
         Box::new(self.1.iter().map(|p| p.spec()))
     }
 
-    fn children(&self) -> &[ImplNode<Tgt>] {
+    fn children(&self) -> &[ImplNode<A::Tgt>] {
         &[]
     }
 
@@ -56,45 +39,37 @@ where
         0
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<A::Tgt>>) -> Self {
         debug_assert_eq!(new_children.count(), 0);
         self.clone()
     }
 
-    fn bind<'i, 'j: 'i>(
-        &'j self,
-        args: &[&'j dyn View<Tgt = Tgt>],
-        env: &'i mut HashMap<Param<Tgt>, &'j dyn View<Tgt = Tgt>>,
-    ) {
-        for a in &self.1 {
-            a.bind(args, env)
-        }
+    fn bind(self, args: &[ViewE<A::Tgt>]) -> Self::BindOut {
+        SpecApp(self.0, self.1.into_iter().map(|a| a.bind(args)).collect())
     }
 
-    fn pprint_line(
-        &self,
-        names: &mut NameEnv,
-        param_bindings: &HashMap<Param<Tgt>, &dyn View<Tgt = Tgt>>,
-    ) -> Option<String> {
+    fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
         let args_str = self
             .1
             .iter()
             .map(|a| {
-                names.get_name_or_display(a.to_param().map(|p| param_bindings[p]).unwrap_or(a))
+                a.to_param()
+                    .map(|a| names.get_name_or_display(a))
+                    .unwrap_or_else(|| names.get_name_or_display(a))
             })
             .join(", ");
         Some(format!("{}({})", self.0.borrow(), args_str))
     }
 
-    fn spec(&self) -> Option<&Spec<Tgt>> {
+    fn spec(&self) -> Option<&Spec<A::Tgt>> {
         Some(self.0.borrow())
     }
 }
 
 #[cfg(test)]
-impl<Tgt> proptest::arbitrary::Arbitrary for SpecApp<Tgt>
+impl<Tgt> proptest::arbitrary::Arbitrary for SpecApp<crate::views::Param<Tgt>>
 where
-    Tgt: Target,
+    Tgt: crate::target::Target,
 {
     type Parameters = ();
     type Strategy = proptest::strategy::BoxedStrategy<Self>;
@@ -111,7 +86,7 @@ where
                         .into_iter()
                         .enumerate()
                         .map(|(idx, parameter_spec)| {
-                            Rc::new(Param::new(idx.try_into().unwrap(), parameter_spec)) as Rc<_>
+                            crate::views::Param::new(idx.try_into().unwrap(), parameter_spec)
                         })
                         .collect(),
                 )

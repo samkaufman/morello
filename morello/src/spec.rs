@@ -1864,6 +1864,7 @@ mod tests {
     use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
     use crate::tensorspec::TensorSpecArbMaxShape;
     use crate::utils::{next_binary_power, sum_seqs};
+    use crate::views::View;
     use crate::{
         layout::row_major,
         target::CpuMemoryLevel::{GL, L1, RF},

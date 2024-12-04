@@ -13,7 +13,7 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
 use crate::spec::LogicalSpec;
-use crate::views::Param;
+use crate::views::View;
 use crate::{codegen::c_utils::VecType, common::Dtype};
 
 use serde::de::DeserializeOwned;
@@ -79,9 +79,9 @@ pub trait Kernel: PartialEq + Eq + Copy + Clone + Hash + Debug {
 
     fn applies_to_logical_spec(&self, logical_spec: &LogicalSpec<Self::Tgt>) -> bool;
 
-    // TODO: Take something more generic than Param.
-    fn memory_allocated(&self, parameters: &[Param<Self::Tgt>]) -> MemoryAllocation;
-    fn main_cost(&self, parameters: &[Param<Self::Tgt>]) -> MainCost;
+    fn memory_allocated<P: View<Tgt = Self::Tgt>>(&self, parameters: &[P]) -> MemoryAllocation;
+
+    fn main_cost<P: View<Tgt = Self::Tgt>>(&self, parameters: &[P]) -> MainCost;
 
     fn name(&self) -> &'static str;
 
