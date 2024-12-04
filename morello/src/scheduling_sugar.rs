@@ -95,6 +95,11 @@ pub trait SchedulingSugar<Tgt: Target> {
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
+    fn synthesize_all(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
 }
 
 pub trait Subschedule<Tgt: Target> {
@@ -308,6 +313,15 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
             None => panic!("No Impl exists for {self}"),
         }
     }
+
+    fn synthesize_all(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        self.synthesize(db, jobs)
+    }
 }
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
@@ -463,6 +477,15 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     {
         apply_to_leaf_spec(self, |spec| spec.synthesize(db, jobs))
     }
+
+    fn synthesize_all(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        apply_to_leaves(self, &|spec| spec.synthesize(db, jobs))
+    }
 }
 
 impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt> {
@@ -504,6 +527,21 @@ impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt> {
         }
 
         inner(self, path, &f)
+    }
+}
+
+fn apply_to_leaves<Tgt, F>(node: &ImplNode<Tgt>, f: &F) -> ImplNode<Tgt>
+where
+    Tgt: Target,
+    F: Fn(&Spec<Tgt>) -> ImplNode<Tgt>,
+{
+    match node {
+        ImplNode::SpecApp(app) => specapp_apply(app, f).into(),
+        _ => node.replace_children(
+            node.children()
+                .iter()
+                .map(|child| apply_to_leaves(child, f)),
+        ),
     }
 }
 
