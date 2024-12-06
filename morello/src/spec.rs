@@ -2347,18 +2347,17 @@ pub mod macros {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::general::AsBimap;
     use crate::imp::{visit_leaves, Impl, ImplExt, ImplNode};
+    use crate::layout::row_major;
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
     use crate::scheduling::{Action, ApplyError, TileOut};
     use crate::scheduling_sugar::SchedulingSugar;
+    use crate::target::CpuMemoryLevel::{GL, L1, RF};
     use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
-    use crate::tensorspec::TensorSpecArbMaxShape;
+    use crate::tensorspec::{TensorSpecArbMaxShape, TensorSpecAuxNonDepBimap};
     use crate::utils::{next_binary_power, sum_seqs};
     use crate::views::View;
-    use crate::{
-        layout::row_major,
-        target::CpuMemoryLevel::{GL, L1, RF},
-    };
     use crate::{lspec, shape};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
@@ -2739,6 +2738,26 @@ mod tests {
         }
 
         #[test]
+        fn test_specbimap_is_invertible_x86(spec in any::<Spec<X86Target>>()) {
+            shared_test_specbimap_is_invertible(spec, false);
+        }
+
+        #[test]
+        fn test_specbimap_is_invertible_binary_scaled_x86(spec in any::<Spec<X86Target>>()) {
+            shared_test_specbimap_is_invertible(spec, true);
+        }
+
+        #[test]
+        fn test_specbimap_is_invertible_arm(spec in any::<Spec<ArmTarget>>()) {
+            shared_test_specbimap_is_invertible(spec, false);
+        }
+
+        #[test]
+        fn test_specbimap_is_invertible_binary_scaled_arm(spec in any::<Spec<ArmTarget>>()) {
+            shared_test_specbimap_is_invertible(spec, true);
+        }
+
+        #[test]
         fn test_parameter_fn_matches_parameters_fn(spec in any::<LogicalSpec<X86Target>>()) {
             let parameters = spec.parameters();
             let individual_parameters = (0..parameters.len()).map(|i| spec.parameter(i)).collect::<Vec<_>>();
@@ -2822,6 +2841,27 @@ mod tests {
             let pipeline_parameters = pipeline.parameters().cloned().collect::<Vec<_>>();
             prop_assert_eq!(spec_parameters, pipeline_parameters);
         }
+    }
+
+    fn shared_test_specbimap_is_invertible<Tgt>(spec: Spec<Tgt>, binary_scale_shapes: bool)
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    {
+        let surmap = SpecSurMap::<Tgt, _, _, _> {
+            logical_spec_surmap: LogicalSpecSurMap::new(
+                PrimitiveBasicsBimap {
+                    binary_scale_shapes,
+                },
+                |_: &[DimSize], _| TensorSpecAuxNonDepBimap::default(),
+            ),
+            memory_limits_bimap: MemoryLimitsBimap::default(),
+        };
+        let bimap = surmap.into_bimap();
+        let projection = BiMap::apply(&bimap, &spec);
+        let reversed = BiMap::apply_inverse(&bimap, &projection);
+        assert_eq!(spec, reversed);
     }
 
     fn shared_test_no_action_panics<Tgt: Target>(spec: Spec<Tgt>) {
