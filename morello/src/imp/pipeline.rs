@@ -32,6 +32,7 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
+        debug_assert_eq!(self.intermediates.len(), self.stages.len() - 1);
         MemoryAllocation::Pipeline {
             intermediate_consumption: self
                 .intermediates
@@ -65,7 +66,8 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
             parameters: self.parameters.clone(),
             spec: self.spec.clone(),
         };
-        debug_assert_eq!(new_impl.intermediates.len(), self.intermediates.len());
+        assert_eq!(new_impl.stages.len(), self.stages.len());
+        assert_eq!(new_impl.intermediates.len(), self.intermediates.len());
         new_impl
     }
 

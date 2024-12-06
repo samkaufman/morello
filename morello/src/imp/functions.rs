@@ -29,11 +29,12 @@ impl<Tgt: Target> Impl<Tgt> for FunctionApp<Tgt> {
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
-        self.body.memory_allocated()
+        MemoryAllocation::none()
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        self.body.compute_main_cost(child_costs)
+        assert_eq!(child_costs.len(), 1);
+        child_costs[0]
     }
 
     fn replace_children(&self, mut new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
