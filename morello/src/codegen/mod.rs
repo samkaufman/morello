@@ -18,6 +18,7 @@ use crate::views::Tensor;
 
 use log::{debug, info};
 use std::cmp::max;
+use std::env;
 use std::fmt;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -31,8 +32,12 @@ pub use self::cpu::CpuCodeGenThreadStyle;
 const CLI_FLAGS: [&str; 4] = ["-std=gnu99", "-O3", "-rtlib=compiler-rt", "-o"];
 
 // TODO: Add -fopenmp if we're using an OpenMP pool.
-const X86_CLI_VEC_FLAGS: [&str; 4] = ["-arch", "x86_64", "-mavx2", "-mfma"];
-const ARM_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "arm64"];
+const X86_CLI_VEC_FLAGS: [&str; 2] = ["-mavx2", "-mfma"];
+const ARM_CLI_VEC_FLAGS: [&str; 0] = [];
+const X86_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "x86_64"];
+const ARM_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "arm64"];
+const X86_OTHER_HOST_CLI_VEC_FLAGS: [&str; 1] = ["-march=x86-64"];
+const ARM_OTHER_HOST_CLI_VEC_FLAGS: [&str; 1] = ["-march=arm64"];
 
 const MIN_SAMPLES: u32 = 3;
 const MIN_TRIAL_TIME_SECS: f32 = 2.5;
@@ -69,11 +74,26 @@ pub trait CodeGen<Tgt: Target> {
         clang_path()
     }
 
-    fn cli_vec_flags() -> &'static [&'static str] {
-        match Tgt::target_id() {
-            TargetId::X86 => &X86_CLI_VEC_FLAGS,
-            TargetId::Arm => &ARM_CLI_VEC_FLAGS,
-        }
+    fn cli_vec_flags() -> Box<dyn Iterator<Item = &'static str>> {
+        let (target_flags, host_flags) = match Tgt::target_id() {
+            TargetId::X86 => {
+                let host_flags = if env::consts::OS == "macos" {
+                    &X86_MAC_HOST_CLI_VEC_FLAGS
+                } else {
+                    X86_OTHER_HOST_CLI_VEC_FLAGS.as_slice()
+                };
+                (X86_CLI_VEC_FLAGS.as_slice(), host_flags)
+            }
+            TargetId::Arm => {
+                let host_flags = if env::consts::OS == "macos" {
+                    &ARM_MAC_HOST_CLI_VEC_FLAGS
+                } else {
+                    ARM_OTHER_HOST_CLI_VEC_FLAGS.as_slice()
+                };
+                (ARM_CLI_VEC_FLAGS.as_slice(), host_flags)
+            }
+        };
+        Box::new(target_flags.iter().chain(host_flags.iter()).cloned())
     }
 
     fn emit_stdout(&self) -> fmt::Result {
