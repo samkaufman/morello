@@ -7,6 +7,7 @@ use crate::db::blocks::{DbBlock, WholeBlock};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap};
 use crate::grid::linear::BimapInt;
+use crate::imp::functions::FunctionApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
@@ -1096,12 +1097,19 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     match imp {
-        ImplNode::SpecApp(p) => db
-            .get_impl(&p.0)
-            .unwrap_or_else(|| panic!("Database should have the sub-Spec: {}", p.0))
-            .first()
-            .unwrap_or_else(|| panic!("Database sub-Spec should be satisfiable: {}", p.0))
-            .clone(),
+        ImplNode::SpecApp(p) => {
+            let body = db
+                .get_impl(&p.0)
+                .unwrap_or_else(|| panic!("Database should have the sub-Spec: {}", p.0))
+                .first()
+                .unwrap_or_else(|| panic!("Database sub-Spec should be satisfiable: {}", p.0))
+                .clone();
+            ImplNode::FunctionApp(FunctionApp {
+                body: Box::new(body),
+                parameters: p.1.clone(),
+                spec: Some(p.0.clone()),
+            })
+        }
         _ => imp.replace_children(imp.children().iter().map(|c| construct_impl(db, c))),
     }
 }
