@@ -11,7 +11,7 @@ use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::{bit_length_inverse, bit_length_u32, join_into_string, prev_power_of_two_u32};
 
-use itertools::Itertools;
+use itertools::{izip, Itertools};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 
@@ -425,6 +425,10 @@ impl PrimitiveBasics {
 
     pub fn parameter_dtypes(&self) -> Vec<Dtype> {
         self.dtypes.clone()
+    }
+
+    pub fn parameter_dtype(&self, idx: usize) -> Dtype {
+        self.dtypes[idx]
     }
 
     pub fn causes_side_effects(&self) -> bool {
@@ -1556,16 +1560,28 @@ where
                 operand_auxes,
                 serial_only,
             } => {
+                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.binary_scale_shapes);
+
                 let key = SpecKey::Compose {
                     components: components
                         .iter()
-                        .map(|c| (c.typ, c.dtypes.clone()))
+                        .map(|c| {
+                            (
+                                c.typ,
+                                c.dtypes.clone(),
+                                c.spec_shape.len().try_into().unwrap(),
+                            )
+                        })
                         .collect(),
                 };
-                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.binary_scale_shapes);
                 let mut pt = components
                     .iter()
-                    .flat_map(|c| BiMap::apply(&shape_bimap, &c.spec_shape))
+                    .flat_map(|c| {
+                        let mapped_shape = BiMap::apply(&shape_bimap, &c.spec_shape);
+                        // lengths must match for apply_inverse correctness
+                        debug_assert_eq!(c.spec_shape.len(), mapped_shape.len());
+                        mapped_shape
+                    })
                     .collect::<Vec<_>>();
                 // TODO: Avoid calling self.parameters(), which is expensive, if possible
                 let aux_keys = operand_auxes
@@ -1574,6 +1590,7 @@ where
                     .map(|(tensor_aux, parameter)| {
                         let aux_bimap = (self.aux_surmap_fn)(parameter.shape(), parameter.dtype());
                         let (aux_key, aux_pt) = aux_bimap.apply(tensor_aux);
+                        debug_assert_eq!(aux_pt.len(), N);
                         pt.extend(aux_pt);
                         aux_key
                     })
@@ -1587,37 +1604,91 @@ where
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let ((key, aux_keys), pt) = i;
-        let dtypes = key.dtypes();
-        let operand_count = aux_keys.len();
 
-        let pt_without_serial = &pt[..pt.len() - 1];
-        let (basics_pt, tensor_aux_pts) =
-            pt_without_serial.split_at(pt.len() - (operand_count * N) - 1);
-        let serial = pt[pt.len() - 1] == 0;
+        match key {
+            SpecKey::Compose {
+                components: components_proj,
+            } => {
+                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.binary_scale_shapes);
 
-        let primitive_basics = BiMap::apply_inverse(
-            &self.primitive_basics_bimap,
-            &(key.clone(), basics_pt.into()),
-        );
-        let parameter_shapes = primitive_basics.parameter_shapes();
+                let mut remaining_pt = &pt[..pt.len() - 1];
+                let serial_only = pt[pt.len() - 1] == 0;
 
-        Box::new(
-            (0..operand_count)
-                .map(move |i| {
-                    let Ok(tap) = (&tensor_aux_pts[i * N..(i + 1) * N]).try_into() else {
-                        panic!("Couldn't reverse the TensorSpecAux pt.");
-                    };
-                    let aux_surmap = (self.aux_surmap_fn)(&parameter_shapes[i], dtypes[i]);
-                    // TODO: Avoid collect, which is here to avoid needing the iter to be Clone
-                    aux_surmap
-                        .apply_inverse(&(aux_keys[i].clone(), tap))
-                        .collect::<Vec<_>>()
-                })
-                .multi_cartesian_product()
-                .map(move |tensor_auxes| {
-                    LogicalSpec::Primitive(primitive_basics.clone(), tensor_auxes, serial)
-                }),
-        )
+                let mut components = vec![];
+                components.reserve_exact(components_proj.len());
+                for (typ, dtypes, rank) in components_proj {
+                    debug_assert_eq!(dtypes.len(), typ.operand_count());
+                    let spec_shape =
+                        BiMap::apply_inverse(&shape_bimap, &eat(&mut remaining_pt, *rank).to_vec());
+                    components.push(PrimitiveBasics {
+                        typ: *typ,
+                        spec_shape,
+                        dtypes: dtypes.clone(),
+                    });
+                }
+
+                let parameter_shapes = compose_parameter_shapes(&components);
+                let parameter_dtypes = compose_parameter_dtypes(&components);
+                debug_assert_eq!(aux_keys.len(), parameter_shapes.len());
+                debug_assert_eq!(aux_keys.len(), parameter_dtypes.len());
+
+                Box::new(
+                    izip!(aux_keys, parameter_shapes, parameter_dtypes)
+                        .map(|(aux_key, parameter_shape, parameter_dtype)| {
+                            let aux_surmap =
+                                (self.aux_surmap_fn)(&parameter_shape, parameter_dtype);
+                            let aux_pt = eat(&mut remaining_pt, N);
+                            SurMap::apply_inverse(
+                                &aux_surmap,
+                                &(aux_key.clone(), aux_pt.try_into().unwrap()),
+                            )
+                            // TODO: Avoid collect, used to avoid needing the Iter to be Clone
+                            .collect::<Vec<_>>()
+                        })
+                        .multi_cartesian_product()
+                        .map(move |auxes| LogicalSpec::Compose {
+                            components: components.clone(),
+                            operand_auxes: auxes,
+                            serial_only,
+                        }),
+                )
+            }
+            _ => {
+                let dtypes = key.dtypes();
+                let operand_count = aux_keys.len();
+                debug_assert_eq!(dtypes.len(), operand_count);
+
+                let pt_without_serial = &pt[..pt.len() - 1];
+                let (basics_pt, tensor_aux_pts) =
+                    pt_without_serial.split_at(pt.len() - (operand_count * N) - 1);
+                let serial = pt[pt.len() - 1] == 0;
+
+                let primitive_basics = BiMap::apply_inverse(
+                    &self.primitive_basics_bimap,
+                    &(key.clone(), basics_pt.into()),
+                );
+                let parameter_shapes = primitive_basics.parameter_shapes();
+                debug_assert_eq!(parameter_shapes.len(), operand_count);
+
+                Box::new(
+                    (0..operand_count)
+                        .map(move |i| {
+                            let Ok(tap) = (&tensor_aux_pts[i * N..(i + 1) * N]).try_into() else {
+                                panic!("Couldn't reverse the TensorSpecAux pt.");
+                            };
+                            let aux_surmap = (self.aux_surmap_fn)(&parameter_shapes[i], dtypes[i]);
+                            // TODO: Avoid collect, used to avoid needing the Iter to be Clone
+                            aux_surmap
+                                .apply_inverse(&(aux_keys[i].clone(), tap))
+                                .collect::<Vec<_>>()
+                        })
+                        .multi_cartesian_product()
+                        .map(move |tensor_auxes| {
+                            LogicalSpec::Primitive(primitive_basics.clone(), tensor_auxes, serial)
+                        }),
+                )
+            }
+        }
     }
 }
 
@@ -1672,36 +1743,25 @@ impl BiMap for PrimitiveBasicsBimap {
                 (
                     SpecKey::Softmax {
                         scan_dim,
-                        dtype: dtypes[0],
+                        dtypes: dtypes.as_slice().try_into().unwrap(),
                     },
                     shifted_shape.collect(),
                 )
             }
-            PrimitiveSpecType::SoftmaxComplete { scan_dim } => {
-                assert_eq!(dtypes.len(), 4);
-                assert_eq!(dtypes[0], dtypes[1]);
-                assert_eq!(dtypes[0], dtypes[2]);
-                assert_eq!(dtypes[0], dtypes[3]);
-                (
-                    SpecKey::SoftmaxComplete {
-                        scan_dim,
-                        dtype: dtypes[0],
-                    },
-                    shifted_shape.collect(),
-                )
-            }
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, accum } => {
-                assert_eq!(dtypes.len(), 3);
-                assert_eq!(dtypes[0], dtypes[1]);
-                assert_eq!(dtypes[0], dtypes[2]);
-                (
-                    SpecKey::SoftmaxDenominatorAndMax {
-                        scan_dim,
-                        dtype: dtypes[0],
-                    },
-                    once(!accum as _).chain(shifted_shape).collect(),
-                )
-            }
+            PrimitiveSpecType::SoftmaxComplete { scan_dim } => (
+                SpecKey::SoftmaxComplete {
+                    scan_dim,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                },
+                shifted_shape.collect(),
+            ),
+            PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, accum } => (
+                SpecKey::SoftmaxDenominatorAndMax {
+                    scan_dim,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                },
+                once(!accum as _).chain(shifted_shape).collect(),
+            ),
             PrimitiveSpecType::SoftmaxDenominator { scan_dim, accum } => (
                 SpecKey::SoftmaxDenominator {
                     scan_dim,
@@ -1735,7 +1795,7 @@ impl BiMap for PrimitiveBasicsBimap {
             | SpecKey::Conv { dtypes: _ }
             | SpecKey::SoftmaxDenominatorAndMax {
                 scan_dim: _,
-                dtype: _,
+                dtypes: _,
             }
             | SpecKey::SoftmaxDenominator {
                 scan_dim: _,
@@ -1750,12 +1810,12 @@ impl BiMap for PrimitiveBasicsBimap {
                     SpecKey::Conv { dtypes } => {
                         (PrimitiveSpecType::Conv { accum }, dtypes.to_vec())
                     }
-                    SpecKey::SoftmaxDenominatorAndMax { scan_dim, dtype } => (
+                    SpecKey::SoftmaxDenominatorAndMax { scan_dim, dtypes } => (
                         PrimitiveSpecType::SoftmaxDenominatorAndMax {
                             scan_dim: *scan_dim,
                             accum,
                         },
-                        vec![*dtype, *dtype, *dtype],
+                        dtypes.into(),
                     ),
                     SpecKey::SoftmaxDenominator { scan_dim, dtypes } => (
                         PrimitiveSpecType::SoftmaxDenominator {
@@ -1796,24 +1856,24 @@ impl BiMap for PrimitiveBasicsBimap {
             }
             SpecKey::Softmax {
                 scan_dim: _,
-                dtype: _,
+                dtypes: _,
             }
             | SpecKey::SoftmaxComplete {
                 scan_dim: _,
-                dtype: _,
+                dtypes: _,
             } => {
                 let (typ, dtypes) = match key {
-                    SpecKey::Softmax { scan_dim, dtype } => (
+                    SpecKey::Softmax { scan_dim, dtypes } => (
                         PrimitiveSpecType::Softmax {
                             scan_dim: *scan_dim,
                         },
-                        vec![*dtype, *dtype],
+                        dtypes.into(),
                     ),
-                    SpecKey::SoftmaxComplete { scan_dim, dtype } => (
+                    SpecKey::SoftmaxComplete { scan_dim, dtypes } => (
                         PrimitiveSpecType::SoftmaxComplete {
                             scan_dim: *scan_dim,
                         },
-                        vec![*dtype, *dtype, *dtype, *dtype],
+                        dtypes.into(),
                     ),
                     _ => unreachable!(),
                 };
@@ -2106,6 +2166,16 @@ fn compose_parameter_shape(components: &[PrimitiveBasics], mut index: usize) -> 
     components[0].unique_output_shape().unwrap()
 }
 
+fn compose_parameter_dtypes(components: &[PrimitiveBasics]) -> Vec<Dtype> {
+    let mut result = vec![];
+    result.reserve_exact(compose_parameter_count(components));
+    compose_parameter_visit(components, |component_idx, parameter_idx| {
+        let component = &components[component_idx];
+        result.push(component.parameter_dtype(parameter_idx));
+    });
+    result
+}
+
 fn compose_parameter_visit(components: &[PrimitiveBasics], mut visitor: impl FnMut(usize, usize)) {
     debug_assert!(components.len() >= 2);
 
@@ -2184,6 +2254,13 @@ fn one_reduced_dimension_tiling_tuple(
         })
         .collect();
     (Tiling::new_sliding(shape, steps), bindings)
+}
+
+/// Return the prefix of a slice, and update that slice to be the tail.
+fn eat<'a, T, U: Into<usize>>(slice: &mut &'a [T], idx: U) -> &'a [T] {
+    let (head, tail) = slice.split_at(idx.into());
+    *slice = tail;
+    head
 }
 
 pub mod macros {
@@ -2739,22 +2816,15 @@ mod tests {
 
         #[test]
         fn test_specbimap_is_invertible_x86(spec in any::<Spec<X86Target>>()) {
+            // binary-scaled SurMap is not tested
             shared_test_specbimap_is_invertible(spec, false);
         }
 
-        #[test]
-        fn test_specbimap_is_invertible_binary_scaled_x86(spec in any::<Spec<X86Target>>()) {
-            shared_test_specbimap_is_invertible(spec, true);
-        }
 
         #[test]
         fn test_specbimap_is_invertible_arm(spec in any::<Spec<ArmTarget>>()) {
+            // binary-scaled SurMap is not tested
             shared_test_specbimap_is_invertible(spec, false);
-        }
-
-        #[test]
-        fn test_specbimap_is_invertible_binary_scaled_arm(spec in any::<Spec<ArmTarget>>()) {
-            shared_test_specbimap_is_invertible(spec, true);
         }
 
         #[test]
@@ -2795,9 +2865,9 @@ mod tests {
 
         #[test]
         fn test_bufferized_compose_parameters_match_pipeline_parameters(
-            tinp in any::<Spec<X86Target>>()
-                .prop_filter("Spec was not Compose", |s| matches!(s.0, LogicalSpec::Compose { .. }))
-                .prop_filter_map("Spec was not canonical", |mut s| {
+            tinp in arb_compose_spec::<X86Target>()
+                .prop_filter_map("Spec was not canonical", |logical_spec| {
+                    let mut s = Spec(logical_spec, X86Target::max_mem());
                     if s.canonicalize().is_err() {
                         return None;
                     }

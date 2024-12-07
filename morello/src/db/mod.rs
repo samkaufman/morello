@@ -1294,18 +1294,18 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
         SpecKey::Conv { dtypes } => root
             .join("Conv")
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::Softmax { scan_dim, dtype } => root
+        SpecKey::Softmax { scan_dim, dtypes } => root
             .join("Softmax")
             .join(scan_dim.to_string())
-            .join(dtype.to_string()),
-        SpecKey::SoftmaxComplete { scan_dim, dtype } => root
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
+        SpecKey::SoftmaxComplete { scan_dim, dtypes } => root
             .join("SoftmaxComplete")
             .join(scan_dim.to_string())
-            .join(dtype.to_string()),
-        SpecKey::SoftmaxDenominatorAndMax { scan_dim, dtype } => root
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
+        SpecKey::SoftmaxDenominatorAndMax { scan_dim, dtypes } => root
             .join("SoftmaxDenominatorAndMax")
             .join(scan_dim.to_string())
-            .join(dtype.to_string()),
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::SoftmaxDenominator { scan_dim, dtypes } => root
             .join("SoftmaxDenominator")
             .join(scan_dim.to_string())
@@ -1318,8 +1318,18 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
         SpecKey::Zero { dtype } => root.join("Zero").join(dtype.to_string()),
         SpecKey::Compose { components } => root
             .join("Compose")
-            .join(components.iter().map(|(spec_type, _)| spec_type).join("_"))
-            .join(components.iter().flat_map(|(_, dtypes)| dtypes).join("_")),
+            .join(
+                components
+                    .iter()
+                    .map(|(spec_type, _, _)| spec_type)
+                    .join("_"),
+            )
+            .join(
+                components
+                    .iter()
+                    .flat_map(|(_, dtypes, _)| dtypes)
+                    .join("_"),
+            ),
     };
     for (l, _, _) in table_key_rest {
         path = path.join(l.to_string());

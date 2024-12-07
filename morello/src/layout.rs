@@ -746,7 +746,10 @@ impl proptest::arbitrary::Arbitrary for Layout {
         let packed_st = (2..=8u32).prop_map(|s| PhysDim::Packed(s.try_into().unwrap()));
         let interleaved_st = (1..=4u32).prop_map(|s| PhysDim::OddEven((s * 2).try_into().unwrap()));
         let non_dynamic_st = prop_oneof![packed_st, interleaved_st];
-        let any_phys_dim_st = prop_oneof![Just(PhysDim::Dynamic), non_dynamic_st.clone()];
+        let any_phys_dim_st = prop_oneof![
+            3 => Just(PhysDim::Dynamic),
+            1 => non_dynamic_st.clone()
+        ];
 
         let required_dims = proptest::collection::vec(any_phys_dim_st, min_rank..=min_rank)
             .prop_map(|v| {
