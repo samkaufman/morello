@@ -1,4 +1,3 @@
-
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
@@ -64,8 +63,7 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
     }
 
     fn pprint_line(&self, _names: &mut NameEnv) -> Option<String> {
-        // TODO: Add an option to pprint Blocks.
-        None
+        Some("block:".to_string())
     }
 
     fn spec(&self) -> Option<&Spec<Tgt>> {
