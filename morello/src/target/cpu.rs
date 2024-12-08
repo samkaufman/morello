@@ -99,6 +99,7 @@ pub enum CpuKernel {
     ValueSoftmaxComplete,
     ValueSoftmaxDenominator,
     ValueMax,
+    VectorMax, // TODO: Add F32 to name
     ValueAssign,
     VectorAssign,
     MemsetZero,
@@ -313,7 +314,8 @@ impl<T: CpuTarget> Target for T {
                 }
                 PrimitiveSpecType::Max { accum, .. } => {
                     if *accum {
-                        const MAX_KERNELS: [CpuKernel; 1] = [CpuKernel::ValueMax];
+                        const MAX_KERNELS: [CpuKernel; 2] =
+                            [CpuKernel::ValueMax, CpuKernel::VectorMax];
                         &MAX_KERNELS
                     } else {
                         &[]
@@ -415,6 +417,7 @@ impl CpuKernel {
             | CpuKernel::VectorInterleaveBf16F32
             | CpuKernel::VectorDeinterleaveF32Bf16
             | CpuKernel::ValueMax
+            | CpuKernel::VectorMax
             | CpuKernel::ValueAssign
             | CpuKernel::VectorAssign
             | CpuKernel::CastBf16F32
@@ -704,6 +707,38 @@ impl CpuKernel {
                 }
                 true
             }
+            CpuKernel::VectorMax => {
+                debug_assert_eq!(operands.len(), 2);
+                if !matches!(typ, PrimitiveSpecType::Max { accum: true, .. }) {
+                    return false;
+                }
+                if operands[0].level() != CpuMemoryLevel::VRF {
+                    return false;
+                }
+                if operands[1].level() != CpuMemoryLevel::RF {
+                    return false;
+                }
+                if operands[0].dtype() != Dtype::Float32 {
+                    return false;
+                }
+                if operands[1].dtype() != Dtype::Float32 {
+                    return false;
+                }
+                if operands[0].volume().get() % operands[0].vector_size().unwrap().get() != 0 {
+                    return false;
+                }
+                // 256-bit VRF
+                if operands[0].vector_size().unwrap().get() != 8 {
+                    return false;
+                }
+                if operands[1].shape().iter().any(|d| d.get() != 1) {
+                    return false;
+                }
+                if operands.iter().any(|o| !o.is_contiguous()) {
+                    return false;
+                }
+                true
+            }
             CpuKernel::ValueAssign => {
                 debug_assert_eq!(operands.len(), 2);
 
@@ -903,6 +938,17 @@ impl CpuKernel {
                     0
                 }))
             }
+            CpuKernel::VectorMax => {
+                MemoryAllocation::Simple(CPU_LEVELS.map(
+                    |level| {
+                        if level.vector_rf() {
+                            128
+                        } else {
+                            0
+                        }
+                    },
+                ))
+            }
             _ => MemoryAllocation::none(),
         }
     }
@@ -963,6 +1009,12 @@ impl CpuKernel {
             | CpuKernel::ValueMax => {
                 // TODO: Measure throughput!
                 INST_COST
+            }
+            CpuKernel::VectorMax => {
+                // TODO: Measure throughput!
+                let value_cnt = parameters[0].spec().volume().get();
+                let vector_cnt = value_cnt / parameters[0].spec().vector_size().unwrap().get();
+                INST_COST * (vector_cnt + 1)
             }
             CpuKernel::ValueSoftmaxDenominator => {
                 // TODO: Measure throughput!

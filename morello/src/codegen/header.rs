@@ -11,6 +11,7 @@ pub struct HeaderEmitter {
     pub emit_math_include: bool, // math.h
     pub emit_sum8: bool,
     pub emit_cvtbf16_fp32: bool,
+    pub emit_max: bool,
 }
 
 impl HeaderEmitter {
@@ -36,6 +37,9 @@ impl HeaderEmitter {
         }
         if self.emit_cvtbf16_fp32 {
             out.write_str(include_str!("../codegen/partials/x86/cvtbf16_fp32.c"))?;
+        }
+        if self.emit_max {
+            out.write_str(include_str!("../codegen/partials/x86/max.c"))?;
         }
         out.write_char('\n')?;
         if self.emit_benchmarking {

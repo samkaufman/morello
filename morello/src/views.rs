@@ -659,20 +659,10 @@ impl<V: View> Tile<V> {
         &self.step_sizes
     }
 
-    /// Yields [`BufferVar::TileIdx`] terms for each non-degenerate tiling dimension.
+    /// Yields [`BufferVar::TileIdx`] terms for all tiling dimensions, including size=1.
     pub fn tile_dim_terms(&self) -> impl Iterator<Item = BufferVar> + '_ {
-        (0..self.shape.len()).filter_map(|dim| {
-            let steps = self.steps_dim(dim.try_into().unwrap());
-            debug_assert_ne!(steps, 0);
-            if steps != 1 {
-                Some(BufferVar::TileIdx(
-                    dim.try_into().unwrap(),
-                    self.expr_term_id,
-                ))
-            } else {
-                None
-            }
-        })
+        (0..self.shape.len())
+            .map(|dim| BufferVar::TileIdx(dim.try_into().unwrap(), self.expr_term_id))
     }
 
     pub fn steps_dim(&self, dim: u8) -> u32 {

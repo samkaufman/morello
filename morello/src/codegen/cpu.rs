@@ -417,10 +417,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 "{}for (int {n} = 0; {n} < {d}; {n}++) {{",
                 indent(depth)
             )?;
-            self.loop_iter_bindings.insert(
+            let insertion_result = self.loop_iter_bindings.insert(
                 BufferVar::Pt(dim.try_into().unwrap(), tensor.identifier()),
                 Either::Left(n.to_string()),
             );
+            debug_assert!(insertion_result.is_none());
         }
         depth += 1;
 
@@ -663,6 +664,58 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             exprs[1],
                             exprs[0],
                         )
+                    }
+                    CpuKernel::VectorMax => {
+                        self.headers.emit_max = true;
+
+                        let vector_volume = arguments[0].spec().volume().get();
+                        let vector_size = arguments[0].spec().vector_size().unwrap();
+                        let vector_count = vector_volume / vector_size.get();
+                        writeln!(w, "{}/* VectorMax */", indent(depth))?;
+
+                        let out_expr = {
+                            let backing_tensor = arguments[1].backing_tensor().unwrap();
+                            let buffer = self.name_env.get(backing_tensor).unwrap();
+                            let mut buffer_indexing_expr = arguments[1].make_buffer_indexing_expr();
+                            buffer_indexing_expr = zero_points(buffer_indexing_expr);
+                            self.c_index(buffer, &buffer_indexing_expr, None)
+                        };
+
+                        let input_vector_exprs = (0..vector_count)
+                            .map(|vector_idx| {
+                                let backing_tensor = arguments[0].backing_tensor().unwrap();
+                                let buffer = self.name_env.get(backing_tensor).unwrap();
+                                let mut buffer_indexing_expr =
+                                    arguments[0].make_buffer_indexing_expr();
+                                buffer_indexing_expr = zero_points(buffer_indexing_expr);
+                                buffer_indexing_expr +=
+                                    i32::try_from(vector_size.get() * vector_idx).unwrap();
+                                self.c_index_vec(buffer, &buffer_indexing_expr, None)
+                            })
+                            .collect::<Vec<_>>();
+
+                        // Emit the vertical reductions
+                        // TODO: Repeatedly halve pairs instead of reducing into the first vector.
+                        for vector_idx in 1..usize::try_from(vector_count).unwrap() {
+                            writeln!(
+                                w,
+                                "{0}{1} = _mm256_max_ps({1}, {2});",
+                                indent(depth),
+                                input_vector_exprs[0],
+                                input_vector_exprs[vector_idx],
+                            )?;
+                        }
+
+                        // Emit the single-vector reduction
+                        writeln!(
+                            w,
+                            "{0}{1} = horizontal_max_f32({2});",
+                            indent(depth),
+                            out_expr,
+                            input_vector_exprs[0],
+                        )?;
+
+                        Ok(())
                     }
                     CpuKernel::MultAdd => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
@@ -1575,8 +1628,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 };
                 let axis = loop_tile.axes[usize::from(dim)];
                 if let Some(axis_loop_iter_name) = iter_var_names.get(&axis) {
-                    self.loop_iter_bindings
+                    let insertion_result = self
+                        .loop_iter_bindings
                         .insert(tt.clone(), Either::Left(axis_loop_iter_name.clone()));
+                    debug_assert!(insertion_result.is_none());
                 }
             }
         }
@@ -1695,6 +1750,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             .collect()
     }
 
+    /// Lowers BufferVars from index expressions to corresponding C loop iterator names.
+    ///
+    /// BufferVars which haven't been bound in `loop_iter_bindings` are preserved as
+    /// [CExprVar::Buffer] leaves.
     fn sub_expr_bindings(&self, unbound_expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<CExprVar> {
         unbound_expr.map_vars(&mut |v| match self.loop_iter_bindings.get(&v) {
             Some(Either::Left(var_name)) => {
@@ -1933,7 +1992,14 @@ fn axis_order_and_steps<Tgt: Target>(l: &Loop<Tgt>) -> impl Iterator<Item = (u8,
         let rv = result.clone().collect::<Vec<_>>();
         for (axis, _) in rv.clone() {
             if !seen.insert(axis) {
-                panic!("Duplicate axis {axis} from loop: {l:?}");
+                panic!(
+                    "Duplicate axis {axis} (steps: {}) from loop for {}",
+                    rv.iter()
+                        .filter(|(a, _)| a == &axis)
+                        .map(|(_, s)| s)
+                        .join(", "),
+                    l.spec().map(|s| s.to_string()).unwrap_or("_".to_string())
+                );
             }
         }
     }
