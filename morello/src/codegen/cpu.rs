@@ -565,8 +565,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     // Emit variable declaration(s) and store association between the
                     // CBuffer and Tensor.
                     if let Some(wiring) = wirings.get(stage_idx) {
-                        for tensor_wiring in &wiring.tensor_wirings {
-                            let intermediate_spec = tensor_wiring.tensor.spec();
+                        for tensor_wiring in &wiring.intermediate_tensors {
+                            let intermediate_spec = tensor_wiring.spec();
                             let buffer = self.make_buffer(
                                 intermediate_spec.shape(),
                                 intermediate_spec.vector_size(),
@@ -574,14 +574,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 intermediate_spec.level(),
                             );
                             buffer.emit(w, InitType::None, depth)?;
-                            self.name_env
-                                .insert(Rc::clone(&tensor_wiring.tensor), buffer);
+                            self.name_env.insert(Rc::clone(tensor_wiring), buffer);
                         }
                     }
                     self.emit(w, stage, depth)?;
                     if stage_idx > 0 {
-                        for tensor_wiring in &wirings[stage_idx - 1].tensor_wirings {
-                            let tensor = &tensor_wiring.tensor;
+                        for tensor in &wirings[stage_idx - 1].intermediate_tensors {
                             let consumed_buffer = self.name_env.get(tensor).unwrap();
                             consumed_buffer.emit_free(w, depth)?;
                         }

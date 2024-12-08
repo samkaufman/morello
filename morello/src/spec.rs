@@ -295,19 +295,15 @@ impl PrimitiveBasics {
         operand_auxes.into_iter().cloned().collect()
     }
 
-    pub fn input_shape(&self, index: usize) -> Shape {
-        if let Some(output_idx) = self.typ.unique_output_index() {
-            if index < output_idx {
-                self.parameter_shape(index)
-            } else {
-                self.parameter_shape(index + 1)
-            }
-        } else {
-            todo!()
-        }
+    pub(crate) fn input_shape(&self, index: usize) -> Shape {
+        self.parameter_shape(self.input_idx(index))
     }
 
-    pub fn input_shapes(&self) -> Vec<Shape> {
+    pub(crate) fn input_dtype(&self, index: usize) -> Dtype {
+        self.parameter_dtype(self.input_idx(index))
+    }
+
+    pub(crate) fn input_shapes(&self) -> Vec<Shape> {
         let param_count = self.typ.operand_count();
         let mut shapes = Vec::with_capacity(param_count);
         for i in 0..param_count {
@@ -316,6 +312,18 @@ impl PrimitiveBasics {
             }
         }
         shapes
+    }
+
+    pub(crate) fn input_idx(&self, index: usize) -> usize {
+        if let Some(output_idx) = self.typ.unique_output_index() {
+            if index < output_idx {
+                index
+            } else {
+                index + 1
+            }
+        } else {
+            todo!()
+        }
     }
 
     pub fn parameter_shapes(&self) -> Vec<Shape> {

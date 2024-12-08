@@ -13,7 +13,7 @@ use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{compute_loop_main_cost, Loop, LoopTile};
 use crate::imp::moves::{move_cost, movelet_memory_allocation, MoveLet};
-use crate::imp::pipeline::{Pipeline, StageWiring, TensorWiring};
+use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
@@ -520,6 +520,15 @@ impl<Tgt: Target> Action<Tgt> {
 
                 debug_assert!(*index < components.len() - 1);
                 let consumer = &components[*index];
+                let intermediate_tensor = Tensor::new(TensorSpec::new_canon(
+                    consumer.input_shape(0),
+                    consumer.input_dtype(0),
+                    layout.contiguous_full(),
+                    true,
+                    *level,
+                    layout.clone(),
+                    *vector_size,
+                ));
 
                 // Compute the memory limits for the new children.
                 let new_limits = {
@@ -555,83 +564,31 @@ impl<Tgt: Target> Action<Tgt> {
                     m
                 };
 
-                // Build the inner Compose (or atomic if a single component). This is the
-                // sub-composition which is executed first.
-                let inner_components = &components[(*index + 1)..];
-                let inner_input_count = 1 + inner_components
-                    .iter()
-                    .map(|c| c.typ.input_count() - 1)
-                    .sum::<usize>();
-                let inner_inputs = &operand_auxes
-                    [(operand_auxes.len() - inner_input_count - 1)..(operand_auxes.len() - 1)];
-                let new_intermediate_aux = TensorSpecAux::<Tgt> {
-                    contig: layout.contiguous_full(),
-                    aligned: true,
-                    level: *level,
-                    layout: layout.clone(),
-                    vector_size: *vector_size,
-                };
-                let inner_operand_auxes = inner_inputs
-                    .iter()
-                    .chain(iter::once(&new_intermediate_aux))
-                    .cloned()
-                    .collect();
-                let mut inner_compose = Spec(
-                    match inner_components {
-                        [] => unreachable!("should never be empty"),
-                        [single] => LogicalSpec::Primitive(
-                            single.clone(),
-                            inner_operand_auxes,
-                            *serial_only,
-                        ),
-                        _ => LogicalSpec::Compose {
-                            components: inner_components.into(),
-                            operand_auxes: inner_operand_auxes,
-                            serial_only: *serial_only,
-                        },
-                    },
+                let inner_compose = ImplNode::from(make_inner_compose(
+                    *index,
+                    components,
+                    operand_auxes,
+                    *serial_only,
+                    intermediate_tensor.clone(),
                     new_limits.clone(),
-                );
+                ));
+                let outer_compose = ImplNode::from(make_outer_compose(
+                    *index,
+                    components,
+                    operand_auxes,
+                    *serial_only,
+                    intermediate_tensor.clone(),
+                    new_limits,
+                ));
 
-                // Build the outer Compose (or atomic if a single component). This is the
-                // composition which is executed last.
-                let outer_components = &components[..(*index + 1)];
-                let outer_input_count = outer_components
-                    .iter()
-                    .map(|c| c.typ.input_count() - 1)
-                    .sum::<usize>();
-                let mut outer_operand_auxes = vec![];
-                outer_operand_auxes.reserve_exact(outer_input_count + 2);
-                outer_operand_auxes.extend_from_slice(&operand_auxes[..outer_input_count]);
-                let insertion_point = 1 + outer_operand_auxes.len()
-                    - outer_components.last().unwrap().typ.input_count();
-                outer_operand_auxes.insert(insertion_point, new_intermediate_aux);
-                outer_operand_auxes.push(operand_auxes.last().unwrap().clone());
-                let mut outer_compose = Spec(
-                    match outer_components {
-                        [] => unreachable!("should never be empty"),
-                        [single] => LogicalSpec::Primitive(
-                            single.clone(),
-                            outer_operand_auxes,
-                            *serial_only,
-                        ),
-                        _ => LogicalSpec::Compose {
-                            components: outer_components.into(),
-                            operand_auxes: outer_operand_auxes,
-                            serial_only: *serial_only,
-                        },
-                    },
-                    new_limits.clone(),
-                );
-
-                inner_compose.canonicalize().unwrap();
-                outer_compose.canonicalize().unwrap();
-
-                Ok(compose_subspecs_to_pipeline(
-                    spec,
-                    inner_compose,
-                    outer_compose,
-                ))
+                Ok(ImplNode::Pipeline(Pipeline {
+                    stages: vec![inner_compose, outer_compose],
+                    parameters: spec.0.parameters(),
+                    wirings: vec![StageWiring {
+                        intermediate_tensors: vec![Rc::new(intermediate_tensor)],
+                    }],
+                    spec: Some(spec.clone()),
+                }))
             }
             Action::SpatialSplit => {
                 let LogicalSpec::Primitive(
@@ -1001,21 +958,11 @@ impl<Tgt: Target> Action<Tgt> {
                 Ok(ImplNode::Pipeline(Pipeline {
                     stages: vec![denom_app, complete_app],
                     wirings: vec![StageWiring {
-                        tensor_wirings: vec![
-                            TensorWiring {
-                                tensor: Rc::new(max_tensor),
-                                producing_idx: 1,
-                                consuming_idx: 1,
-                            },
-                            TensorWiring {
-                                tensor: Rc::new(denominator_tensor),
-                                producing_idx: 2,
-                                consuming_idx: 2,
-                            },
+                        intermediate_tensors: vec![
+                            Rc::new(max_tensor),
+                            Rc::new(denominator_tensor),
                         ],
                     }],
-                    final_stage_output: 3,
-                    passthrough_leading_input: true,
                     parameters: operands,
                     spec: Some(spec.clone()),
                 }))
@@ -1632,85 +1579,119 @@ impl Display for NotApplicableReason {
     }
 }
 
-/// Creates a [ImplNode::Pipeline] by combining two subspecifications into stages.
+/// Build the inner Compose (or Primitive) sub-Spec appliction of a Pipeline.
 ///
-/// The stages are [ImplNode::SpecApp]s which apply sequential [Param]s in all positions except
-/// the intermediate.
-fn compose_subspecs_to_pipeline<Tgt: Target>(
-    parent_spec: &Spec<Tgt>,
-    inner_compose: Spec<Tgt>,
-    outer_compose: Spec<Tgt>,
-) -> ImplNode<Tgt> {
-    // The following logic assumes the Pipeline has a single output, and it's the last parameter.
-    let parent_output_idx = parent_spec.0.unique_output_index().unwrap();
-    debug_assert_eq!(parent_output_idx, parent_spec.0.operand_count() - 1);
+/// The inner sub-Spec is the sub-Spec which is executed first.
+fn make_inner_compose<Tgt: Target>(
+    index: usize,
+    components: &[PrimitiveBasics],
+    parent_operand_auxes: &[TensorSpecAux<Tgt>],
+    serial_only: bool,
+    intermediate_tensor: Tensor<Tgt>,
+    new_limits: MemoryLimits,
+) -> SpecApp<ViewE<Tgt>> {
+    let inner_components = &components[(index + 1)..];
+    let inner_input_count = 1 + inner_components
+        .iter()
+        .map(|c| c.typ.input_count() - 1)
+        .sum::<usize>();
 
-    let intermediate_tensorspec = inner_compose.0.unique_output().unwrap();
-    let intermediate_tensor = Tensor::new(intermediate_tensorspec.clone());
+    // Collect parameter auxes from the parent Spec and add an aux for the intermediate/output.
+    let offset = parent_operand_auxes.len() - inner_input_count - 1;
+    let offset_u8 = u8::try_from(offset).unwrap();
+    let passthrough_auxes = &parent_operand_auxes[offset..(parent_operand_auxes.len() - 1)];
+    let mut auxes = vec![];
+    auxes.reserve_exact(passthrough_auxes.len() + 1);
+    auxes.extend_from_slice(passthrough_auxes);
+    auxes.push(intermediate_tensor.spec().aux.clone());
 
-    let inner_compose_output_idx = inner_compose.0.unique_output_index().unwrap();
-    let inner_application = {
-        let params: Vec<ViewE<Tgt>> = inner_compose
-            .0
-            .parameters()
-            .into_iter()
-            .enumerate()
-            .map(|(i, op)| {
-                if i == inner_compose_output_idx {
-                    ViewE::from(intermediate_tensor.clone())
-                } else {
-                    ViewE::from(Param::new(i.try_into().unwrap(), op))
-                }
-            })
-            .collect();
-        ImplNode::SpecApp(SpecApp::new(inner_compose, params))
-    };
+    // Construct the Spec. (Next, we'll wrap this in a SpecApp.)
+    let mut inner_compose = Spec(
+        match inner_components {
+            [] => unreachable!("should never be empty"),
+            [single] => LogicalSpec::Primitive(single.clone(), auxes, serial_only),
+            _ => LogicalSpec::Compose {
+                components: inner_components.into(),
+                operand_auxes: auxes,
+                serial_only,
+            },
+        },
+        new_limits,
+    );
+    inner_compose.canonicalize().unwrap();
 
-    let mut outer_first_input_idx = 0;
-    while outer_compose.0.parameter_is_output(outer_first_input_idx) {
-        outer_first_input_idx += 1;
-    }
-    let outer_compose_output_idx = outer_compose.0.unique_output_index().unwrap();
-    let outer_application = {
-        let only_output_idx = outer_compose
-            .0
-            .unique_output_index()
-            .expect("outer_compose should have a single output");
+    // Above, we inserted the output at the end. Check that's the real output position.
+    debug_assert_eq!(
+        inner_compose.0.unique_output_index(),
+        Some(inner_compose.0.operand_count() - 1),
+        "Inner Compose must have a single output for the intermediate to be in the correct position"
+    );
 
-        let parameter_specs = outer_compose.0.parameters();
-        let mut param_idx = 0u8;
-        let params: Vec<ViewE<Tgt>> = parameter_specs
-            .into_iter()
-            .enumerate()
-            .map(|(i, parameter_spec)| {
-                if i == outer_first_input_idx {
-                    intermediate_tensor.clone().into()
-                } else if i == only_output_idx {
-                    Param::new(i.try_into().unwrap(), parameter_spec).into()
-                } else {
-                    let p = Param::new(param_idx, parameter_spec).into();
-                    param_idx += 1;
-                    p
-                }
-            })
-            .collect();
-        ImplNode::SpecApp(SpecApp::new(outer_compose, params))
-    };
+    // Parameters
+    let params = (0..u8::try_from(inner_compose.0.operand_count() - 1).unwrap())
+        .map(|i| {
+            ViewE::from(Param::new(
+                i + offset_u8,
+                inner_compose.0.parameter(i.into()),
+            ))
+        })
+        .chain(std::iter::once(ViewE::from(intermediate_tensor)))
+        .collect::<Vec<_>>();
 
-    ImplNode::Pipeline(Pipeline {
-        stages: vec![inner_application, outer_application],
-        parameters: parent_spec.0.parameters(),
-        wirings: vec![StageWiring {
-            tensor_wirings: vec![TensorWiring {
-                tensor: Rc::new(intermediate_tensor),
-                producing_idx: inner_compose_output_idx.try_into().unwrap(),
-                consuming_idx: outer_first_input_idx.try_into().unwrap(),
-            }],
-        }],
-        final_stage_output: outer_compose_output_idx.try_into().unwrap(),
-        passthrough_leading_input: false,
-        spec: Some(parent_spec.clone()),
-    })
+    SpecApp::new(inner_compose, params)
+}
+
+/// Build the outer Compose (or Primitive) sub-Spec appliction of a Pipeline.
+///
+/// The outer sub-Spec is the sub-Spec which is executed second.
+fn make_outer_compose<Tgt: Target>(
+    index: usize,
+    components: &[PrimitiveBasics],
+    parent_operand_auxes: &[TensorSpecAux<Tgt>],
+    serial_only: bool,
+    intermediate_tensor: Tensor<Tgt>,
+    new_limits: MemoryLimits,
+) -> SpecApp<ViewE<Tgt>> {
+    let outer_components = &components[..(index + 1)];
+    let outer_input_count = outer_components
+        .iter()
+        .map(|c| c.typ.input_count() - 1)
+        .sum::<usize>();
+    let mut outer_operand_auxes = vec![];
+    outer_operand_auxes.reserve_exact(outer_input_count + 2);
+    outer_operand_auxes.extend_from_slice(&parent_operand_auxes[..outer_input_count]);
+    let insertion_point =
+        1 + outer_operand_auxes.len() - outer_components.last().unwrap().typ.input_count();
+    outer_operand_auxes.insert(insertion_point, intermediate_tensor.0.aux.clone());
+    outer_operand_auxes.push(parent_operand_auxes.last().unwrap().clone());
+    let mut outer_compose = Spec(
+        match outer_components {
+            [] => unreachable!("should never be empty"),
+            [single] => LogicalSpec::Primitive(single.clone(), outer_operand_auxes, serial_only),
+            _ => LogicalSpec::Compose {
+                components: outer_components.into(),
+                operand_auxes: outer_operand_auxes,
+                serial_only,
+            },
+        },
+        new_limits.clone(),
+    );
+    outer_compose.canonicalize().unwrap();
+
+    // TODO: Wrap in SpecApp
+    let mut params = vec![];
+    params.reserve_exact(outer_input_count + 2);
+    params.extend((0..outer_input_count).map(|i| {
+        ViewE::from(Param::new(i.try_into().unwrap(), {
+            outer_compose.0.parameter(i)
+        }))
+    }));
+    params.insert(insertion_point, ViewE::from(intermediate_tensor));
+    params.push(ViewE::from(Param::new(
+        (parent_operand_auxes.len() - 1).try_into().unwrap(),
+        outer_compose.0.unique_output().unwrap(),
+    )));
+    SpecApp::new(outer_compose, params)
 }
 
 fn plan_movelet<'a, Tgt: Target>(
@@ -2002,6 +1983,105 @@ mod tests {
     #[test]
     fn test_non_multiple_split_returns_error() {
         shared_test_non_multiple_tiling_returns_error(Action::Split { k: nz!(6u32) })
+    }
+
+    /// Test that bufferizing a chain of 3 Matmuls produces the correct sub-Spec applications.
+    #[test]
+    fn test_bufferize_matmul_chain() {
+        let basics0 = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![1, 2, 4],
+            dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
+        };
+        let basics1 = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![1, 4, 8],
+            dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
+        };
+        let basics2 = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![1, 8, 16],
+            dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
+        };
+        let aux = TensorSpecAux {
+            contig: row_major(2).contiguous_full(),
+            aligned: true,
+            level: CpuMemoryLevel::GL,
+            layout: row_major(2),
+            vector_size: None,
+        };
+        let mut spec = Spec::<X86Target>(
+            LogicalSpec::Compose {
+                components: vec![basics2.clone(), basics1.clone(), basics0.clone()],
+                operand_auxes: vec![aux.clone(), aux.clone(), aux.clone(), aux.clone(), aux],
+                serial_only: true,
+            },
+            X86Target::max_mem(),
+        );
+        spec.canonicalize().unwrap();
+        let imp = spec.bufferize(1, CpuMemoryLevel::GL, row_major(2), None);
+
+        assert_eq!(imp.children().len(), 2);
+        assert!(matches!(imp, ImplNode::Pipeline(_)));
+
+        let ImplNode::SpecApp(SpecApp(Spec(first_child_lspec, _), first_child_params)) =
+            &imp.children()[0]
+        else {
+            panic!("expected a SpecApp child, got {:?}", imp.children()[0])
+        };
+        let LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Matmul { accum: false },
+                spec_shape: first_child_shape,
+                dtypes: first_child_dtypes,
+            },
+            _,
+            true,
+        ) = first_child_lspec
+        else {
+            panic!("expected a serial, non-accum Matmul Primitive, got {first_child_lspec:?}");
+        };
+        assert_eq!(first_child_shape, &basics0.spec_shape);
+        assert_eq!(first_child_dtypes, &basics0.dtypes);
+        assert_eq!(first_child_params.len(), 3);
+        assert!(matches!(
+            first_child_params[0],
+            ViewE::Param(Param(2, _, _))
+        ));
+        assert!(matches!(
+            first_child_params[1],
+            ViewE::Param(Param(3, _, _))
+        ));
+        assert!(matches!(first_child_params[2], ViewE::Tensor(_)));
+
+        let ImplNode::SpecApp(SpecApp(Spec(second_child_lspec, _), second_child_params)) =
+            &imp.children()[1]
+        else {
+            panic!("expected a SpecApp child, got {:?}", imp.children()[1])
+        };
+        let LogicalSpec::Compose {
+            components,
+            operand_auxes: _,
+            serial_only: true,
+        } = second_child_lspec
+        else {
+            panic!("expected a serial Compose LogicalSpec, got {second_child_lspec:?}");
+        };
+        assert_eq!(components, &[basics2.clone(), basics1.clone()]);
+        assert_eq!(second_child_params.len(), 4);
+        assert!(matches!(
+            second_child_params[0],
+            ViewE::Param(Param(0, _, _))
+        ));
+        assert!(matches!(second_child_params[1], ViewE::Tensor(_)));
+        assert!(matches!(
+            second_child_params[2],
+            ViewE::Param(Param(1, _, _))
+        ));
+        assert!(matches!(
+            second_child_params[3],
+            ViewE::Param(Param(4, _, _))
+        ));
     }
 
     fn shared_test_non_multiple_tiling_returns_error(action: Action<X86Target>) {
