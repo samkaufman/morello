@@ -1163,7 +1163,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 basics.initial_accumulating_value_for_output(index)
             }
             LogicalSpec::Compose { components, .. } => {
-                components[0].initial_accumulating_value_for_output(index)
+                let component_output = components[0]
+                    .typ
+                    .unique_output_index()
+                    .expect("Compose component should have a unique output");
+                components[0].initial_accumulating_value_for_output(component_output)
             }
         }
     }
