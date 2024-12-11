@@ -804,6 +804,17 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             vtype.name
                         )
                     }
+                    CpuKernel::ValueNegInf => {
+                        let exprs = self
+                            .param_args_to_c_indices(arguments, |_, a, b| self.c_index(a, b, None));
+                        self.headers.emit_math_include = true;
+                        writeln!(
+                            w,
+                            "{}{} = -INFINITY;  /* ValueNegInf */",
+                            indent(depth),
+                            exprs[0],
+                        )
+                    }
                     CpuKernel::VectorAssign => {
                         let first_spec = arguments[0].spec();
                         let second_spec = arguments[1].spec();

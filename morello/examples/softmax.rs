@@ -60,10 +60,12 @@ fn main() {
         .subschedule(&[0, 0], |subspec| {
             subspec.to_accum().split(1).synthesize(&db, None)
         })
+        .subschedule(&[0, 0, 0], |subspec| subspec.synthesize(&db, None))
         // This [0, 1] corresponds to the SoftmaxDenominator
         .subschedule(&[0, 1], |subspec| {
             subspec.to_accum().split(1).synthesize(&db, None)
         })
+        .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db, None))
         // This [1] corresponds to SoftmaxComplete
         .subschedule(&[1], |softmax_complete| {
             softmax_complete.tile_out(&[1, 1]).synthesize(&db, None)

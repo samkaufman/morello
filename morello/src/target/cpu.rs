@@ -105,6 +105,7 @@ pub enum CpuKernel {
     MemsetZero,
     /// Lowers to Clang vector extensions' zero-assignment, which, on x86, should emit `vxorps`.
     VectorZero,
+    ValueNegInf,
     VectorNegInf,
     CastBf16F32,
     VectorCastBf16F32,
@@ -345,7 +346,8 @@ impl<T: CpuTarget> Target for T {
                 PrimitiveSpecType::Fill {
                     value: FillValue::NegInf,
                 } => {
-                    const NEGINF_KERNELS: [CpuKernel; 1] = [CpuKernel::VectorNegInf];
+                    const NEGINF_KERNELS: [CpuKernel; 2] =
+                        [CpuKernel::VectorNegInf, CpuKernel::ValueNegInf];
                     &NEGINF_KERNELS
                 }
             },
@@ -431,7 +433,10 @@ impl CpuKernel {
             | CpuKernel::VectorAssign
             | CpuKernel::CastBf16F32
             | CpuKernel::VectorCastBf16F32 => 2,
-            CpuKernel::MemsetZero | CpuKernel::VectorZero | CpuKernel::VectorNegInf => 1,
+            CpuKernel::MemsetZero
+            | CpuKernel::VectorZero
+            | CpuKernel::ValueNegInf
+            | CpuKernel::VectorNegInf => 1,
         }
     }
 
@@ -900,6 +905,18 @@ impl CpuKernel {
                     _ => true,
                 }
             }
+            CpuKernel::ValueNegInf => {
+                debug_assert_eq!(operands.len(), 1);
+                matches!(
+                    typ,
+                    PrimitiveSpecType::Fill {
+                        value: FillValue::NegInf
+                    }
+                ) && operands[0].volume().get() == 1
+                    && operands[0].level() == CpuMemoryLevel::RF
+                    && operands[0].is_contiguous()
+                    && operands[0].dtype() == Dtype::Float32
+            }
         }
     }
 
@@ -1025,7 +1042,8 @@ impl CpuKernel {
             }
             CpuKernel::VectorInterleaveBf16F32
             | CpuKernel::VectorDeinterleaveF32Bf16
-            | CpuKernel::ValueMax => {
+            | CpuKernel::ValueMax
+            | CpuKernel::ValueNegInf => {
                 // TODO: Measure throughput!
                 INST_COST
             }
