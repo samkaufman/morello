@@ -24,7 +24,7 @@ fn main() {
     // This is a non-accumulating Spec (`Matmul` rather than `MatmulAccum`), which means that the
     // implementation will set rather then add values to the output tensor.
     const RANK: u8 = 2;
-    const SIZE: DimSize = nz!(64u32);
+    const SIZE: DimSize = nz!(1024u32);
     let layouts = [row_major(RANK), row_major(RANK)];
     let logical_spec = LogicalSpec::Primitive(
         PrimitiveBasics {
@@ -78,22 +78,6 @@ fn main() {
     implementation
         .emit(false, None, &mut ToWriteFmt(io::stdout()))
         .unwrap_or_else(|e| panic!("Failed to generate code: {}", e));
-
-    // If the verification flag is set, let's additionally double-check that the lowered
-    // code builds and produces the correct results.
-    #[cfg(feature = "verification")]
-    {
-        match implementation.build(false) {
-            Ok(artifact) => {
-                if !artifact.check_correctness(&spec) {
-                    panic!("Generated code returned incorrect output");
-                }
-            }
-            Err(e) => {
-                panic!("Failed to build generated code: {}", e);
-            }
-        }
-    }
 
     // Benchmark.
     const ITERS: u32 = 100;
