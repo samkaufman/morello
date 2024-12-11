@@ -36,8 +36,8 @@ const X86_CLI_VEC_FLAGS: [&str; 2] = ["-mavx2", "-mfma"];
 const ARM_CLI_VEC_FLAGS: [&str; 0] = [];
 const X86_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "x86_64"];
 const ARM_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "arm64"];
-const X86_OTHER_HOST_CLI_VEC_FLAGS: [&str; 1] = ["-march=x86-64"];
-const ARM_OTHER_HOST_CLI_VEC_FLAGS: [&str; 1] = ["-march=arm64"];
+const X86_OTHER_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-march=x86-64", "-lm"];
+const ARM_OTHER_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-march=arm64", "-lm"];
 
 const MIN_SAMPLES: u32 = 3;
 const MIN_TRIAL_TIME_SECS: f32 = 2.5;
