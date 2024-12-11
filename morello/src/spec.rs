@@ -1747,7 +1747,6 @@ impl BiMap for PrimitiveBasicsBimap {
             }
             PrimitiveSpecType::Softmax { scan_dim } => {
                 assert_eq!(dtypes.len(), 2);
-                assert_eq!(dtypes[0], dtypes[1]);
                 (
                     SpecKey::Softmax {
                         scan_dim,
