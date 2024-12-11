@@ -3,7 +3,7 @@
 use crate::{
     codegen::BuiltArtifact,
     common::{DimSize, Dtype},
-    spec::{LogicalSpec, PrimitiveSpecType, Spec},
+    spec::{FillValue, LogicalSpec, PrimitiveSpecType, Spec},
     target::Target,
     tensorspec::TensorSpec,
 };
@@ -165,7 +165,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     out.assign(&inp);
                     vec![inp, out]
                 }
-                PrimitiveSpecType::Zero => {
+                PrimitiveSpecType::Fill {
+                    value: FillValue::Zero,
+                } => {
                     assert_eq!(args.len(), 1);
                     // TODO: Check shape and dtype are correct for this Spec.
                     args[0].zero();

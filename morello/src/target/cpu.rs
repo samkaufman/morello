@@ -8,7 +8,7 @@ use crate::layout::{col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
 use crate::shape;
-use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{Kernel, MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::View;
@@ -334,7 +334,9 @@ impl<T: CpuTarget> Target for T {
                     ];
                     &MOVE_KERNELS
                 }
-                PrimitiveSpecType::Zero { .. } => {
+                PrimitiveSpecType::Fill {
+                    value: FillValue::Zero,
+                } => {
                     const ZERO_KERNELS: [CpuKernel; 2] =
                         [CpuKernel::MemsetZero, CpuKernel::VectorZero];
                     &ZERO_KERNELS
@@ -861,12 +863,21 @@ impl CpuKernel {
                     )
             }
             CpuKernel::MemsetZero => {
-                matches!(typ, PrimitiveSpecType::Zero)
-                    && operands[0].level() == CpuMemoryLevel::RF
+                matches!(
+                    typ,
+                    PrimitiveSpecType::Fill {
+                        value: FillValue::Zero
+                    }
+                ) && operands[0].level() == CpuMemoryLevel::RF
                     && operands[0].is_contiguous()
             }
             CpuKernel::VectorZero => {
-                if !matches!(typ, PrimitiveSpecType::Zero) {
+                if !matches!(
+                    typ,
+                    PrimitiveSpecType::Fill {
+                        value: FillValue::Zero
+                    }
+                ) {
                     return false;
                 }
                 if !operands[0].is_contiguous() {

@@ -19,7 +19,7 @@ use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling_sugar::SchedulingSugar;
-use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Kernel, MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
@@ -1178,7 +1178,10 @@ impl<Tgt: Target> Action<Tgt> {
                             )?,
                         });
                     }
-                    PrimitiveSpecType::Zero | PrimitiveSpecType::Move => {
+                    PrimitiveSpecType::Move
+                    | PrimitiveSpecType::Fill {
+                        value: FillValue::Zero,
+                    } => {
                         let rank = basics.spec_shape.len();
                         return Ok(ActionSolver::PrimitiveTileOut {
                             outer_spec: spec.clone(),
@@ -1241,7 +1244,9 @@ fn make_zeroes_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> Vec<ImplNode<Tgt>> {
             let output = spec.0.parameter(parameter_idx.into());
             let subspec = LogicalSpec::Primitive(
                 PrimitiveBasics {
-                    typ: PrimitiveSpecType::Zero,
+                    typ: PrimitiveSpecType::Fill {
+                        value: FillValue::Zero,
+                    },
                     spec_shape: output.shape.clone(),
                     dtypes: vec![output.dtype],
                 },
@@ -1304,7 +1309,7 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                             typ:
                                 PrimitiveSpecType::Matmul { .. }
                                 | PrimitiveSpecType::Move
-                                | PrimitiveSpecType::Zero,
+                                | PrimitiveSpecType::Fill { .. },
                             spec_shape,
                             ..
                         },

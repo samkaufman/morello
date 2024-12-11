@@ -1155,7 +1155,7 @@ mod tests {
     #[test]
     fn test_synthesis_at_peak_memory_yields_same_decision_1() {
         let spec = Spec::<X86Target>(
-            lspec!(Zero([2, 2, 2, 2], (u8, GL, row_major(4), c0, ua))),
+            lspec!(FillZero([2, 2, 2, 2], (u8, GL, row_major(4), c0, ua))),
             MemoryLimits::Standard(MemVec::new_from_binary_scaled([0, 5, 7, 6])),
         );
 

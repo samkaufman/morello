@@ -11,7 +11,7 @@ use crate::imp::functions::FunctionApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
-use crate::spec::{LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
+use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 use blocks::{RTreeBlock, RTreeBlockGeneric};
@@ -1315,7 +1315,10 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
             .join(dim.to_string())
             .join(dtypes.iter().join("_")),
         SpecKey::Move { dtypes } => root.join("Move").join(dtypes.iter().join("_")),
-        SpecKey::Zero { dtype } => root.join("Zero").join(dtype.to_string()),
+        SpecKey::Fill {
+            dtype,
+            value: FillValue::Zero,
+        } => root.join("FillZero").join(dtype.to_string()),
         SpecKey::Compose { components } => root
             .join("Compose")
             .join(
@@ -1383,7 +1386,8 @@ fn superblock_key_from_subpath(components: &[path::Component]) -> Result<TableKe
         "Move" => SpecKey::Move {
             dtypes: dtypes.try_into().unwrap(),
         },
-        "Zero" => SpecKey::Zero {
+        "FillZero" => SpecKey::Fill {
+            value: FillValue::Zero,
             dtype: dtypes.into_iter().exactly_one().unwrap(),
         },
         _ => return Err(()),

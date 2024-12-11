@@ -393,7 +393,7 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
     }
 
     bounds.extend((1..=move_needed_rank).map(|rank| {
-        lspec!(Zero(
+        lspec!(FillZero(
             iter::repeat(args.size).take(rank.into()),
             (u32, CpuMemoryLevel::GL, row_major(rank)),
             serial

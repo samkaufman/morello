@@ -1,4 +1,7 @@
-use crate::{common::Dtype, spec::PrimitiveSpecType};
+use crate::{
+    common::Dtype,
+    spec::{FillValue, PrimitiveSpecType},
+};
 use serde::{Deserialize, Serialize};
 use std::{hash::Hash, slice};
 
@@ -34,7 +37,8 @@ pub enum SpecKey {
     Move {
         dtypes: [Dtype; 2],
     },
-    Zero {
+    Fill {
+        value: FillValue,
         dtype: Dtype,
     },
     Compose {
@@ -53,7 +57,7 @@ impl SpecKey {
             SpecKey::SoftmaxComplete { dtypes, .. } => dtypes,
             SpecKey::SoftmaxDenominatorAndMax { dtypes, .. } => dtypes,
             SpecKey::SoftmaxDenominator { dtypes, .. } => dtypes,
-            SpecKey::Zero { dtype } => slice::from_ref(dtype),
+            SpecKey::Fill { dtype, value: _ } => slice::from_ref(dtype),
             SpecKey::Compose { .. } => unimplemented!(),
         }
     }

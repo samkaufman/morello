@@ -54,7 +54,9 @@ pub struct PrimitiveBasics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum PrimitiveSpecType {
-    Zero,
+    Fill {
+        value: FillValue,
+    },
     Move,
     Matmul {
         accum: bool,
@@ -88,6 +90,12 @@ pub enum PrimitiveSpecType {
         scan_dim: u8,
         accum: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
+pub enum FillValue {
+    Zero,
 }
 
 /// Tilings and dimension bindings for a particular output tiling.
@@ -280,7 +288,7 @@ impl PrimitiveBasics {
                 assert_eq!(src.0, dest.0);
                 self.spec_shape = src.0.into();
             }
-            PrimitiveSpecType::Zero => {
+            PrimitiveSpecType::Fill { .. } => {
                 assert_eq!(new_operands.len(), 1);
                 self.spec_shape = new_operands[0].0.into();
             }
@@ -354,7 +362,7 @@ impl PrimitiveBasics {
             PrimitiveSpecType::Move => {
                 vec![self.spec_shape.clone(), self.spec_shape.clone()]
             }
-            PrimitiveSpecType::Zero => {
+            PrimitiveSpecType::Fill { value: _ } => {
                 vec![self.spec_shape.clone()]
             }
             _ => (0..self.typ.operand_count())
@@ -418,7 +426,7 @@ impl PrimitiveBasics {
                 0 | 1 => self.spec_shape.clone(),
                 _ => panic!("Move has only 2 parameters"),
             },
-            PrimitiveSpecType::Zero => match idx {
+            PrimitiveSpecType::Fill { value: _ } => match idx {
                 0 => self.spec_shape.clone(),
                 _ => panic!("Zero has only 1 parameter"),
             },
@@ -446,10 +454,10 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
             | PrimitiveSpecType::Max { accum, .. } => accum,
+            PrimitiveSpecType::Fill { .. } => true,
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
-            | PrimitiveSpecType::Move
-            | PrimitiveSpecType::Zero => false,
+            | PrimitiveSpecType::Move => false,
         }
     }
 
@@ -620,7 +628,7 @@ impl PrimitiveBasics {
             )]),
             (
                 PrimitiveBasics {
-                    typ: PrimitiveSpecType::Zero,
+                    typ: PrimitiveSpecType::Fill { value: _ },
                     ..
                 },
                 _,
@@ -746,7 +754,7 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
                             }
                         }
                     }
-                    PrimitiveSpecType::Move | PrimitiveSpecType::Zero => {
+                    PrimitiveSpecType::Move | PrimitiveSpecType::Fill { value: _ } => {
                         match args.first_input_shape.as_deref() {
                             Some(s) => s.iter().map(|d| Just(d.get())).collect::<Vec<_>>().sboxed(),
                             None => (1..=4usize)
@@ -789,7 +797,7 @@ impl PrimitiveSpecType {
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::Max { .. }
             | PrimitiveSpecType::Move => 1,
-            PrimitiveSpecType::Zero => 0,
+            PrimitiveSpecType::Fill { .. } => 0,
         }
     }
 
@@ -801,7 +809,7 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::Max { .. }
             | PrimitiveSpecType::Move => index == 1,
-            PrimitiveSpecType::Zero => index == 0,
+            PrimitiveSpecType::Fill { .. } => index == 0,
             PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => index == 1 || index == 2,
             PrimitiveSpecType::SoftmaxComplete { .. } => index == 3,
         }
@@ -816,7 +824,7 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::Max { .. }
             | PrimitiveSpecType::Move { .. } => Some(1),
-            PrimitiveSpecType::Zero { .. } => Some(0),
+            PrimitiveSpecType::Fill { .. } => Some(0),
             PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => None,
         }
     }
@@ -867,7 +875,7 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
             | PrimitiveSpecType::Move
-            | PrimitiveSpecType::Zero => {
+            | PrimitiveSpecType::Fill { .. } => {
                 // The shape and dtype match for moves and zero.
                 Some(inputs[0].to_vec())
             }
@@ -900,7 +908,9 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::Max { dim, accum } if *accum => write!(f, "MaxAccum{dim}"),
             PrimitiveSpecType::Max { dim, .. } => write!(f, "Max{dim}"),
             PrimitiveSpecType::Move { .. } => write!(f, "Move"),
-            PrimitiveSpecType::Zero { .. } => write!(f, "Zero"),
+            PrimitiveSpecType::Fill {
+                value: FillValue::Zero,
+            } => write!(f, "FillZero"),
         }
     }
 }
@@ -946,7 +956,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     .zip(auxes)
                     .map(|((s, dt), a)| TensorSpec::new_noncanon_with_aux(s, *dt, a.clone()))
                     .collect(),
-                PrimitiveSpecType::Move | PrimitiveSpecType::Zero => auxes
+                PrimitiveSpecType::Move | PrimitiveSpecType::Fill { .. } => auxes
                     .iter()
                     .zip(&basics.dtypes)
                     .map(|(a, dtype)| {
@@ -1157,7 +1167,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         }
                     }
                 }
-                PrimitiveSpecType::Zero => {
+                PrimitiveSpecType::Fill { .. } => {
                     primitive_aux[0]
                         .canonicalize(&basics.spec_shape)
                         .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
@@ -1222,7 +1232,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         return false;
                     }
                 }
-                PrimitiveSpecType::Zero => {
+                PrimitiveSpecType::Fill { .. } => {
                     if !primitive_aux[0].is_canonical(&basics.spec_shape) {
                         return false;
                     }
@@ -1789,9 +1799,13 @@ impl BiMap for PrimitiveBasicsBimap {
                 },
                 shifted_shape.collect(),
             ),
-            PrimitiveSpecType::Zero => {
-                (SpecKey::Zero { dtype: dtypes[0] }, shifted_shape.collect())
-            }
+            PrimitiveSpecType::Fill { value } => (
+                SpecKey::Fill {
+                    value,
+                    dtype: dtypes[0],
+                },
+                shifted_shape.collect(),
+            ),
         }
     }
 
@@ -1909,8 +1923,8 @@ impl BiMap for PrimitiveBasicsBimap {
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: dtypes.as_slice().into(),
             },
-            SpecKey::Zero { dtype } => PrimitiveBasics {
-                typ: PrimitiveSpecType::Zero,
+            SpecKey::Fill { value, dtype } => PrimitiveBasics {
+                typ: PrimitiveSpecType::Fill { value: *value },
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: vec![*dtype],
             },
@@ -2378,8 +2392,10 @@ pub mod macros {
             )
         }};
 
-        ( @primitive_spec_type Zero ) => {
-            $crate::spec::PrimitiveSpecType::Zero
+        ( @primitive_spec_type FillZero ) => {
+            $crate::spec::PrimitiveSpecType::Fill {
+                value: $crate::spec::FillValue::Zero,
+            }
         };
         ( @primitive_spec_type Move ) => {
             $crate::spec::PrimitiveSpecType::Move
