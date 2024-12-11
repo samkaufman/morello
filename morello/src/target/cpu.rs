@@ -105,6 +105,7 @@ pub enum CpuKernel {
     MemsetZero,
     /// Lowers to Clang vector extensions' zero-assignment, which, on x86, should emit `vxorps`.
     VectorZero,
+    VectorNegInf,
     CastBf16F32,
     VectorCastBf16F32,
 }
@@ -341,6 +342,12 @@ impl<T: CpuTarget> Target for T {
                         [CpuKernel::MemsetZero, CpuKernel::VectorZero];
                     &ZERO_KERNELS
                 }
+                PrimitiveSpecType::Fill {
+                    value: FillValue::NegInf,
+                } => {
+                    const NEGINF_KERNELS: [CpuKernel; 1] = [CpuKernel::VectorNegInf];
+                    &NEGINF_KERNELS
+                }
             },
             LogicalSpec::Compose { .. } => &[],
         };
@@ -424,7 +431,7 @@ impl CpuKernel {
             | CpuKernel::VectorAssign
             | CpuKernel::CastBf16F32
             | CpuKernel::VectorCastBf16F32 => 2,
-            CpuKernel::MemsetZero | CpuKernel::VectorZero => 1,
+            CpuKernel::MemsetZero | CpuKernel::VectorZero | CpuKernel::VectorNegInf => 1,
         }
     }
 
@@ -871,15 +878,16 @@ impl CpuKernel {
                 ) && operands[0].level() == CpuMemoryLevel::RF
                     && operands[0].is_contiguous()
             }
-            CpuKernel::VectorZero => {
-                if !matches!(
-                    typ,
-                    PrimitiveSpecType::Fill {
-                        value: FillValue::Zero
-                    }
-                ) {
-                    return false;
-                }
+            CpuKernel::VectorZero | CpuKernel::VectorNegInf => {
+                let expected_fill_value = match self {
+                    CpuKernel::VectorZero => FillValue::Zero,
+                    CpuKernel::VectorNegInf => FillValue::NegInf,
+                    _ => unreachable!(),
+                };
+                match typ {
+                    PrimitiveSpecType::Fill { value } if value == &expected_fill_value => {}
+                    _ => return false,
+                };
                 if !operands[0].is_contiguous() {
                     return false;
                 }
@@ -1059,8 +1067,13 @@ impl CpuKernel {
                 let vec_count = parameters[0].spec().volume().get() / vector_value_count.get();
                 ASSIGN_INST_COST * vec_count
             }
-            CpuKernel::ValueAssign | CpuKernel::MemsetZero | CpuKernel::VectorZero => {
-                ASSIGN_INST_COST
+            CpuKernel::ValueAssign | CpuKernel::MemsetZero => ASSIGN_INST_COST,
+            CpuKernel::VectorZero | CpuKernel::VectorNegInf => {
+                debug_assert_eq!(
+                    parameters[0].spec().volume().get(),
+                    parameters[0].spec().vector_size().unwrap().get(),
+                );
+                INST_COST
             }
         }
     }

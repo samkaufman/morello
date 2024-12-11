@@ -165,12 +165,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     out.assign(&inp);
                     vec![inp, out]
                 }
-                PrimitiveSpecType::Fill {
-                    value: FillValue::Zero,
-                } => {
+                PrimitiveSpecType::Fill { value } => {
                     assert_eq!(args.len(), 1);
                     // TODO: Check shape and dtype are correct for this Spec.
-                    args[0].zero();
+                    match value {
+                        FillValue::Zero => args[0].zero(),
+                        FillValue::NegInf => args[0].fill_neg_inf(),
+                    }
                     args
                 }
             },
@@ -297,6 +298,19 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Sint32(a) => a.fill(0),
             DynArray::Float32(a) => a.fill(0.0),
             DynArray::Bfloat16(a) => a.fill(half::bf16::ZERO),
+        }
+    }
+
+    pub fn fill_neg_inf(&mut self) {
+        match self {
+            DynArray::Uint8(_) => unimplemented!("fill_neg_inf for Uint8"),
+            DynArray::Sint8(_) => unimplemented!("fill_neg_inf for Sint8"),
+            DynArray::Uint16(_) => unimplemented!("fill_neg_inf for Uint16"),
+            DynArray::Sint16(_) => unimplemented!("fill_neg_inf for Sint16"),
+            DynArray::Uint32(_) => unimplemented!("fill_neg_inf for Uint32"),
+            DynArray::Sint32(_) => unimplemented!("fill_neg_inf for Sint32"),
+            DynArray::Float32(a) => a.fill(f32::NEG_INFINITY),
+            DynArray::Bfloat16(a) => a.fill(half::bf16::NEG_INFINITY),
         }
     }
 

@@ -791,17 +791,17 @@ impl<Tgt: Target> Action<Tgt> {
                     ))));
                 }
 
-                let zero_apps = make_zeroes_for_spec(spec);
-                let accum_app = {
-                    let mut spec = Spec(logical_spec.clone_as_accum(), spec.1.clone());
-                    spec.canonicalize()
-                        .expect("ToAccum's introduced accumulating Spec should be canonicalizable");
-                    let app_arguments = operands
-                        .iter()
-                        .enumerate()
-                        .map(|(i, t)| ViewE::from(Param::new(i.try_into().unwrap(), t.clone())));
-                    SpecApp::new(spec, app_arguments).into()
-                };
+                let accum_logical_spec = logical_spec.clone_as_accum();
+                let mut accum_spec = Spec(accum_logical_spec, spec.1.clone());
+                accum_spec
+                    .canonicalize()
+                    .expect("ToAccum's introduced accumulating Spec should be canonicalizable");
+                let app_arguments = operands
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| ViewE::from(Param::new(i.try_into().unwrap(), t.clone())));
+                let zero_apps = make_accum_inits_for_spec(&accum_spec);
+                let accum_app = SpecApp::new(accum_spec, app_arguments).into();
 
                 let mut stages = zero_apps;
                 stages.push(accum_app);
@@ -1235,17 +1235,21 @@ impl<Tgt: Target> Action<Tgt> {
 }
 
 /// Returns applications of Zeroes corresponding to the outputs of the given Spec.
-fn make_zeroes_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> Vec<ImplNode<Tgt>> {
+fn make_accum_inits_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> Vec<ImplNode<Tgt>> {
     (0..u8::try_from(spec.0.operand_count()).unwrap())
         .flat_map(|parameter_idx| {
             if !spec.0.parameter_is_output(parameter_idx.into()) {
                 return None;
             }
+            let accum_initial_value = spec
+                .0
+                .initial_accumulating_value_for_output(parameter_idx.into())
+                .expect("output parameter should be compatible with ToAccum");
             let output = spec.0.parameter(parameter_idx.into());
             let subspec = LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Fill {
-                        value: FillValue::Zero,
+                        value: accum_initial_value,
                     },
                     spec_shape: output.shape.clone(),
                     dtypes: vec![output.dtype],

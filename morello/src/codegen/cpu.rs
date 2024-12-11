@@ -619,7 +619,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 arguments,
                 spec: _,
             }) => {
-                match kernel_type.into_cpu_kernel().unwrap() {
+                let cpu_kernel = kernel_type.into_cpu_kernel().unwrap();
+                match cpu_kernel {
                     CpuKernel::ValueSoftmaxComplete => {
                         self.headers.emit_math_include = true;
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
@@ -780,16 +781,24 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             arguments[0].spec().bytes_used()
                         )
                     }
-                    CpuKernel::VectorZero => {
+                    CpuKernel::VectorZero | CpuKernel::VectorNegInf => {
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_vec(a, b, None)
                         });
                         let dtype = arguments[0].spec().dtype();
                         let volume = arguments[0].spec().volume();
                         let vtype = get_vector(Tgt::vec_types(), dtype, volume);
+                        let (v, c) = match cpu_kernel {
+                            CpuKernel::VectorZero => ("0", "VectorZero"),
+                            CpuKernel::VectorNegInf => {
+                                self.headers.emit_math_include = true;
+                                ("-INFINITY", "VectorNegInf")
+                            }
+                            _ => unreachable!(),
+                        };
                         writeln!(
                             w,
-                            "{}{} = ({}){{0}};  /* VectorZero */",
+                            "{}{} = ({}){{{v}}};  /* {c} */",
                             indent(depth),
                             exprs[0],
                             vtype.name

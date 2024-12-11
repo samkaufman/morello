@@ -96,6 +96,7 @@ pub enum PrimitiveSpecType {
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum FillValue {
     Zero,
+    NegInf,
 }
 
 /// Tilings and dimension bindings for a particular output tiling.
@@ -458,6 +459,39 @@ impl PrimitiveBasics {
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
             | PrimitiveSpecType::Move => false,
+        }
+    }
+
+    pub(crate) fn initial_accumulating_value_for_output(&self, index: usize) -> Option<FillValue> {
+        let PrimitiveBasics {
+            typ,
+            spec_shape: _,
+            dtypes,
+        } = self;
+        debug_assert!(typ.parameter_is_output(index));
+        match typ {
+            PrimitiveSpecType::Matmul { accum: true }
+            | PrimitiveSpecType::Conv { accum: true }
+            | PrimitiveSpecType::SoftmaxDenominator { accum: true, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: true, .. } => {
+                Some(FillValue::Zero)
+            }
+            PrimitiveSpecType::Max { accum: true, .. } => match dtypes[index] {
+                Dtype::Sint8 | Dtype::Sint16 | Dtype::Sint32 => {
+                    todo!("support min-value filling for signed integers")
+                }
+                Dtype::Uint8 | Dtype::Uint16 | Dtype::Uint32 => Some(FillValue::Zero),
+                Dtype::Float32 | Dtype::Bfloat16 => Some(FillValue::NegInf),
+            },
+            PrimitiveSpecType::Fill { .. }
+            | PrimitiveSpecType::Move
+            | PrimitiveSpecType::Matmul { accum: false }
+            | PrimitiveSpecType::Conv { accum: false }
+            | PrimitiveSpecType::Softmax { .. }
+            | PrimitiveSpecType::SoftmaxComplete { .. }
+            | PrimitiveSpecType::Max { accum: false, .. }
+            | PrimitiveSpecType::SoftmaxDenominator { accum: false, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: false, .. } => None,
         }
     }
 
@@ -911,6 +945,9 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::Fill {
                 value: FillValue::Zero,
             } => write!(f, "FillZero"),
+            PrimitiveSpecType::Fill {
+                value: FillValue::NegInf,
+            } => write!(f, "FillNegInf"),
         }
     }
 }
@@ -1112,11 +1149,22 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     pub fn parameter_is_output(&self, index: usize) -> bool {
-        match &self {
+        match self {
             LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => {
                 typ.parameter_is_output(index)
             }
             LogicalSpec::Compose { .. } => index == (self.operand_count() - 1),
+        }
+    }
+
+    pub(crate) fn initial_accumulating_value_for_output(&self, index: usize) -> Option<FillValue> {
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => {
+                basics.initial_accumulating_value_for_output(index)
+            }
+            LogicalSpec::Compose { components, .. } => {
+                components[0].initial_accumulating_value_for_output(index)
+            }
         }
     }
 
