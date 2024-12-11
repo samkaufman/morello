@@ -950,7 +950,7 @@ impl<Tgt: Target> Action<Tgt> {
                         ViewE::from(Param::new(0, operands[0].clone())),
                         ViewE::from(max_tensor.clone()),
                         ViewE::from(denominator_tensor.clone()),
-                        ViewE::from(Param::new(3, operands[1].clone())),
+                        ViewE::from(Param::new(1, operands[1].clone())),
                     ];
                     SpecApp::new(complete_spec, app_args).into()
                 };
