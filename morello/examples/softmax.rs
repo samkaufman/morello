@@ -66,7 +66,7 @@ fn main() {
         .subschedule(&[0, 1], |subspec| {
             subspec
                 .to_accum()
-                .split(32)
+                .split(64)
                 .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
                 .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
                 .move_param(2, CpuMemoryLevel::L1, row_major(2), None)

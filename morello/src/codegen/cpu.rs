@@ -653,7 +653,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     CpuKernel::VectorSoftmaxDenominator => {
                         // TODO: Test that we don't mutate the input.
 
-                        self.headers.emit_sleef_include = true;
+                        self.headers.emit_expf_avx2 = true;
                         self.headers.emit_sum8 = true;
 
                         let vector_volume = arguments[0].spec().volume().get();
@@ -686,7 +686,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let intermediate_buffer_name = self.namer.fresh_name();
                         writeln!(
                             w,
-                            "{}{} {intermediate_buffer_name} = Sleef_expf8_u10({} - {});",
+                            "{}{} {intermediate_buffer_name} = exp256_ps({} - {});",
                             indent(depth),
                             get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size)
                                 .name,
@@ -697,7 +697,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         for input_vector_name in input_vector_exprs.iter().skip(1) {
                             writeln!(
                                 w,
-                                "{}{intermediate_buffer_name} += Sleef_expf8_u10({} - {});",
+                                "{}{intermediate_buffer_name} += exp256_ps({} - {});",
                                 indent(depth),
                                 input_vector_name,
                                 self.c_index(max_buffer, &max_iexpr, None),
@@ -708,11 +708,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{}{} += sum8({});",
                             indent(depth),
                             self.c_index(out_buffer, &out_iexpr, None),
-                            input_vector_exprs[0]
+                            intermediate_buffer_name,
                         )
                     }
                     CpuKernel::VectorSoftmaxComplete => {
-                        self.headers.emit_sleef_include = true;
+                        self.headers.emit_expf_avx2 = true;
 
                         let vector_count = arguments[0].spec().volume().get() / 8;
                         writeln!(w, "{}/* VectorSoftmaxComplete */", indent(depth))?;
@@ -748,7 +748,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )?;
                         writeln!(
                             w,
-                            "{0}*(({vtype} *)({1} + {5})) = Sleef_expf8_u10(*(({vtype} *)({2} + {5})) - {3}) / {4};",
+                            "{0}*(({vtype} *)({1} + {5})) = exp256_ps(*(({vtype} *)({2} + {5})) - {3}) / {4};",
                             indent(depth + 1),
                             self.c_index_ptr(output_buffer, &out_base_expr, None),
                             self.c_index_ptr(input_buffer, &inp_base_expr, None),
