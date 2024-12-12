@@ -64,14 +64,16 @@ fn main() {
         .subschedule(&[0, 0, 0], |subspec| subspec.synthesize(&db, None))
         // This [0, 1] corresponds to the SoftmaxDenominator
         .subschedule(&[0, 1], |subspec| {
-            subspec.to_accum().split(32)
-            .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
-            .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
-            .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
-            .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
-            .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
-            .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
-            .place(CpuKernel::VectorSoftmaxDenominator)
+            subspec
+                .to_accum()
+                .split(32)
+                .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
+                .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
+                .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
+                .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
+                .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
+                .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
+                .place(CpuKernel::VectorSoftmaxDenominator)
         })
         .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db, None))
         .subschedule(&[0, 1, 1, 0], |subspec| subspec.synthesize(&db, None))
@@ -79,7 +81,13 @@ fn main() {
         .subschedule(&[0, 1, 1, 1, 1, 1], |subspec| subspec.synthesize(&db, None))
         // This [1] corresponds to SoftmaxComplete
         .subschedule(&[1], |softmax_complete| {
-            softmax_complete.tile_out(&[1, 1]).synthesize(&db, None)
+            softmax_complete
+                .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
+                .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
+                .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
+                .move_param(3, CpuMemoryLevel::L1, row_major(2), None)
+                .tile_out(&[1, 32])
+                .synthesize(&db, None)
         });
 
     println!("\nImpl resulting from manual scheduling:");

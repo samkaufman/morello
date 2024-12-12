@@ -711,6 +711,53 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             input_vector_exprs[0]
                         )
                     }
+                    CpuKernel::VectorSoftmaxComplete => {
+                        self.headers.emit_sleef_include = true;
+
+                        let vector_count = arguments[0].spec().volume().get() / 8;
+                        writeln!(w, "{}/* VectorSoftmaxComplete */", indent(depth))?;
+
+                        let vtype = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32))
+                            .native_type_name;
+
+                        let input_tensor = arguments[0].backing_tensor().unwrap();
+                        let input_buffer = self.name_env.get(input_tensor).unwrap();
+                        let max_tensor = arguments[1].backing_tensor().unwrap();
+                        let max_buffer = self.name_env.get(max_tensor).unwrap();
+                        let denominator_tensor = arguments[2].backing_tensor().unwrap();
+                        let denominator_buffer = self.name_env.get(denominator_tensor).unwrap();
+                        let output_tensor = arguments[3].backing_tensor().unwrap();
+                        let output_buffer = self.name_env.get(output_tensor).unwrap();
+
+                        let inp_base_expr = zero_points(arguments[0].make_buffer_indexing_expr());
+                        let max_expr = zero_points(arguments[1].make_buffer_indexing_expr());
+                        let denominator_expr =
+                            zero_points(arguments[2].make_buffer_indexing_expr());
+                        let out_base_expr = zero_points(arguments[3].make_buffer_indexing_expr());
+
+                        let max_expr = self.c_index(max_buffer, &max_expr, None);
+                        let denom_expr = self.c_index(denominator_buffer, &denominator_expr, None);
+
+                        let loop_iter_name = self.namer.fresh_name();
+                        writeln!(
+                            w,
+                            "{0}for (int {1} = 0; {1} < {2}; {1} += 8) {{",
+                            indent(depth),
+                            loop_iter_name,
+                            vector_count,
+                        )?;
+                        writeln!(
+                            w,
+                            "{0}*(({vtype} *)({1} + {5})) = Sleef_expf8_u10(*(({vtype} *)({2} + {5})) - {3}) / {4};",
+                            indent(depth + 1),
+                            self.c_index_ptr(output_buffer, &out_base_expr, None),
+                            self.c_index_ptr(input_buffer, &inp_base_expr, None),
+                            max_expr,
+                            denom_expr,
+                            loop_iter_name,
+                        )?;
+                        writeln!(w, "{}}}", indent(depth),)
+                    }
                     CpuKernel::ValueMax => {
                         self.headers.emit_math_include = true;
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {

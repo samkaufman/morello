@@ -102,6 +102,7 @@ pub enum CpuKernel {
     ValueSoftmaxComplete,
     ValueSoftmaxDenominator,
     VectorSoftmaxDenominator,
+    VectorSoftmaxComplete,
     ValueMax,
     VectorMax, // TODO: Add F32 to name
     ValueAssign,
@@ -308,8 +309,10 @@ impl<T: CpuTarget> Target for T {
                 PrimitiveSpecType::Conv { .. } => &[],
                 PrimitiveSpecType::Softmax { .. } => &[],
                 PrimitiveSpecType::SoftmaxComplete { .. } => {
-                    const SOFTMAX_COMPLETE_KERNELS: [CpuKernel; 1] =
-                        [CpuKernel::ValueSoftmaxComplete];
+                    const SOFTMAX_COMPLETE_KERNELS: [CpuKernel; 2] = [
+                        CpuKernel::ValueSoftmaxComplete,
+                        CpuKernel::VectorSoftmaxComplete,
+                    ];
                     &SOFTMAX_COMPLETE_KERNELS
                 }
                 PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => &[],
@@ -423,7 +426,7 @@ impl<T: CpuTarget> Target for T {
 impl CpuKernel {
     pub fn argument_count(&self) -> u8 {
         match self {
-            CpuKernel::ValueSoftmaxComplete => 4,
+            CpuKernel::ValueSoftmaxComplete | CpuKernel::VectorSoftmaxComplete => 4,
             CpuKernel::MultAdd
             | CpuKernel::ValueSoftmaxDenominator
             | CpuKernel::VectorSoftmaxDenominator
@@ -680,6 +683,41 @@ impl CpuKernel {
                         return false;
                     }
                     if o.level() != CpuMemoryLevel::RF {
+                        return false;
+                    }
+                }
+                true
+            }
+            CpuKernel::VectorSoftmaxComplete => {
+                debug_assert_eq!(operands.len(), 4);
+                if !matches!(typ, PrimitiveSpecType::SoftmaxComplete { .. }) {
+                    return false;
+                }
+
+                if operands[0].level() != CpuMemoryLevel::L1 {
+                    return false;
+                }
+                if operands[1].level() != CpuMemoryLevel::RF {
+                    return false;
+                }
+                if operands[2].level() != CpuMemoryLevel::RF {
+                    return false;
+                }
+                if operands[3].level() != CpuMemoryLevel::L1 {
+                    return false;
+                }
+
+                if operands[0].shape() != operands[3].shape() {
+                    return false;
+                }
+                for operand in &operands[1..=2] {
+                    if operand.shape().iter().any(|d| d.get() != 1) {
+                        return false;
+                    }
+                }
+
+                for o in &operands {
+                    if o.dtype() != Dtype::Float32 {
                         return false;
                     }
                 }
@@ -1108,7 +1146,7 @@ impl CpuKernel {
                 // TODO: Measure throughput!
                 INST_COST * 3
             }
-            CpuKernel::ValueSoftmaxComplete => {
+            CpuKernel::ValueSoftmaxComplete | CpuKernel::VectorSoftmaxComplete => {
                 // TODO: Measure throughput!
                 INST_COST * 4
             }
