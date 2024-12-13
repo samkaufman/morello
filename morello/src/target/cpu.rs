@@ -748,6 +748,9 @@ impl CpuKernel {
                 if operands[0].vector_size().unwrap().get() != 8 {
                     return false;
                 }
+                if operands[0].shape().iter().filter(|d| d.get() > 1).count() >= 2 {
+                    return false;
+                }
                 if operands[1].shape().iter().any(|d| d.get() != 1) {
                     return false;
                 }
