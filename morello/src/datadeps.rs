@@ -47,7 +47,7 @@ pub enum SpecKey {
 }
 
 impl SpecKey {
-    pub fn dtypes(&self) -> &[Dtype] {
+    pub(crate) fn dtypes(&self) -> &[Dtype] {
         match self {
             SpecKey::Matmul { dtypes } => dtypes,
             SpecKey::Conv { dtypes } => dtypes,
