@@ -2113,6 +2113,17 @@ fn arb_compose_component_successor(
         _ => {}
     }
     allowed_types.push(PrimitiveSpecType::Move);
+    for dim in 0..u8::try_from(shapes[out_idx].len()).unwrap() {
+        allowed_types.push(PrimitiveSpecType::Softmax { scan_dim: dim });
+        allowed_types.push(PrimitiveSpecType::SoftmaxComplete { scan_dim: dim });
+        for accum in [true, false] {
+            allowed_types.push(PrimitiveSpecType::Max { dim, accum });
+            allowed_types.push(PrimitiveSpecType::SoftmaxDenominator {
+                scan_dim: dim,
+                accum,
+            });
+        }
+    }
 
     any_with::<PrimitiveBasics>(PrimitiveBasicsArbParams {
         max_size: None,
