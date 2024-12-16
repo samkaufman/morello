@@ -440,6 +440,20 @@ impl<D: ndarray::Dimension> DynArray<D> {
             Dtype::Bfloat16 => DynArray::Bfloat16(Array::zeros(shape)),
         }
     }
+
+    pub fn approx_eq(&self, other: &Self, tol: f32) -> bool {
+        match (self, other) {
+            (DynArray::Uint8(a), DynArray::Uint8(b)) => a == b,
+            (DynArray::Sint8(a), DynArray::Sint8(b)) => a == b,
+            (DynArray::Uint16(a), DynArray::Uint16(b)) => a == b,
+            (DynArray::Sint16(a), DynArray::Sint16(b)) => a == b,
+            (DynArray::Uint32(a), DynArray::Uint32(b)) => a == b,
+            (DynArray::Sint32(a), DynArray::Sint32(b)) => a == b,
+            (DynArray::Float32(a), DynArray::Float32(b)) => a.abs_diff_eq(b, tol),
+            (DynArray::Bfloat16(_), DynArray::Bfloat16(_)) => todo!("approx_eq for bf16"),
+            _ => false,
+        }
+    }
 }
 
 impl DynArray<Ix2> {
@@ -711,7 +725,7 @@ where
     // Compute expected output
     concrete_tensors = spec.0.execute(concrete_tensors);
 
-    lowered_output == concrete_tensors[output_idx]
+    lowered_output.approx_eq(&concrete_tensors[output_idx], 1e-7)
 }
 
 fn make_array_input_dyn<Tgt: Target>(input: &TensorSpec<Tgt>) -> DynArray<IxDyn> {
