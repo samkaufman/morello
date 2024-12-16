@@ -7,12 +7,13 @@ use crate::{
     target::Target,
     tensorspec::TensorSpec,
 };
-use ndarray::{linalg::general_mat_mul, prelude::*};
+use ndarray::{linalg::general_mat_mul, prelude::*, RemoveAxis};
 use ndarray_conv::{ConvExt, ConvMode, PaddingMode};
-use num_traits::AsPrimitive;
-use std::process::Command;
+use num_traits::{real::Real, AsPrimitive};
 use std::{
     io::{self, BufWriter, Write},
+    ops::{DivAssign, Sub},
+    process::Command,
     str::FromStr,
 };
 use tempfile::NamedTempFile;
@@ -152,11 +153,15 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
                     vec![lhs.into_dyn(), rhs.into_dyn(), out.into_dyn()]
                 }
-                PrimitiveSpecType::Softmax { .. } => {
-                    let [_inp, _out] = args
+                PrimitiveSpecType::Softmax { scan_dim } => {
+                    let [inp, mut out] = args
                         .try_into()
-                        .unwrap_or_else(|_| panic!("expected 3 args"));
-                    todo!()
+                        .unwrap_or_else(|_| panic!("expected 2 args"));
+                    let maxes = inp.max_axis(Axis(scan_dim.into()));
+                    out.assign(&(inp.clone() - maxes.broadcast(inp.shape()).unwrap()));
+                    out.exp();
+                    out /= &out.sum_axis(Axis(scan_dim.into()));
+                    vec![inp, out]
                 }
                 PrimitiveSpecType::SoftmaxComplete { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => todo!(),
@@ -306,6 +311,68 @@ impl<D: ndarray::Dimension> DynArray<D> {
         }
     }
 
+    pub fn exp(&mut self) {
+        match self {
+            DynArray::Uint8(_)
+            | DynArray::Sint8(_)
+            | DynArray::Uint16(_)
+            | DynArray::Sint16(_)
+            | DynArray::Uint32(_)
+            | DynArray::Sint32(_) => unimplemented!("exp for integer types"),
+            DynArray::Float32(a) => a.mapv_inplace(f32::exp),
+            DynArray::Bfloat16(a) => a.mapv_inplace(half::bf16::exp),
+        }
+    }
+
+    pub fn broadcast(&self, shape: &[usize]) -> Option<DynArray<IxDyn>> {
+        match self {
+            DynArray::Uint8(a) => a.broadcast(shape).map(|b| DynArray::Uint8(b.into_owned())),
+            DynArray::Sint8(a) => a.broadcast(shape).map(|b| DynArray::Sint8(b.into_owned())),
+            DynArray::Uint16(a) => a.broadcast(shape).map(|b| DynArray::Uint16(b.into_owned())),
+            DynArray::Sint16(a) => a.broadcast(shape).map(|b| DynArray::Sint16(b.into_owned())),
+            DynArray::Uint32(a) => a.broadcast(shape).map(|b| DynArray::Uint32(b.into_owned())),
+            DynArray::Sint32(a) => a.broadcast(shape).map(|b| DynArray::Sint32(b.into_owned())),
+            DynArray::Float32(a) => a
+                .broadcast(shape)
+                .map(|b| DynArray::Float32(b.into_owned())),
+            DynArray::Bfloat16(a) => a
+                .broadcast(shape)
+                .map(|b| DynArray::Bfloat16(b.into_owned())),
+        }
+    }
+
+    pub fn sum_axis(&self, axis: Axis) -> DynArray<D::Smaller>
+    where
+        D: RemoveAxis,
+    {
+        match self {
+            DynArray::Uint8(a) => DynArray::Uint8(a.sum_axis(axis)),
+            DynArray::Sint8(a) => DynArray::Sint8(a.sum_axis(axis)),
+            DynArray::Uint16(a) => DynArray::Uint16(a.sum_axis(axis)),
+            DynArray::Sint16(a) => DynArray::Sint16(a.sum_axis(axis)),
+            DynArray::Uint32(a) => DynArray::Uint32(a.sum_axis(axis)),
+            DynArray::Sint32(a) => DynArray::Sint32(a.sum_axis(axis)),
+            DynArray::Float32(a) => DynArray::Float32(a.sum_axis(axis)),
+            DynArray::Bfloat16(a) => DynArray::Bfloat16(a.sum_axis(axis)),
+        }
+    }
+
+    pub fn max_axis(&self, axis: Axis) -> DynArray<D::Smaller>
+    where
+        D: RemoveAxis,
+    {
+        match self {
+            DynArray::Uint8(a) => DynArray::Uint8(ndarray_max_axis(a, axis)),
+            DynArray::Sint8(a) => DynArray::Sint8(ndarray_max_axis(a, axis)),
+            DynArray::Uint16(a) => DynArray::Uint16(ndarray_max_axis(a, axis)),
+            DynArray::Sint16(a) => DynArray::Sint16(ndarray_max_axis(a, axis)),
+            DynArray::Uint32(a) => DynArray::Uint32(ndarray_max_axis(a, axis)),
+            DynArray::Sint32(a) => DynArray::Sint32(ndarray_max_axis(a, axis)),
+            DynArray::Float32(a) => DynArray::Float32(ndarray_f32_max_axis(a, axis)),
+            DynArray::Bfloat16(_) => todo!("extend ndarray_max_axis to handle bf16"),
+        }
+    }
+
     pub fn fill_neg_inf(&mut self) {
         match self {
             DynArray::Uint8(_) => unimplemented!("fill_neg_inf for Uint8"),
@@ -356,9 +423,7 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Bfloat16(a) => a.mapv(|x| x.as_()),
         }
     }
-}
 
-impl<D: ndarray::Dimension> DynArray<D> {
     // TODO: Generalize to D other than IxDyn.
     pub fn zeros<Sh>(shape: Sh, dtype: Dtype) -> Self
     where
@@ -463,6 +528,46 @@ impl DynArray<Ix2> {
     }
 }
 
+impl<D> Sub for DynArray<D>
+where
+    D: ndarray::Dimension,
+{
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (DynArray::Uint8(a), DynArray::Uint8(b)) => DynArray::Uint8(a - b),
+            (DynArray::Sint8(a), DynArray::Sint8(b)) => DynArray::Sint8(a - b),
+            (DynArray::Uint16(a), DynArray::Uint16(b)) => DynArray::Uint16(a - b),
+            (DynArray::Sint16(a), DynArray::Sint16(b)) => DynArray::Sint16(a - b),
+            (DynArray::Uint32(a), DynArray::Uint32(b)) => DynArray::Uint32(a - b),
+            (DynArray::Sint32(a), DynArray::Sint32(b)) => DynArray::Sint32(a - b),
+            (DynArray::Float32(a), DynArray::Float32(b)) => DynArray::Float32(a - b),
+            (DynArray::Bfloat16(a), DynArray::Bfloat16(b)) => DynArray::Bfloat16(a - b),
+            _ => panic!("Mismatched types"),
+        }
+    }
+}
+
+impl<D> DivAssign<&DynArray<D>> for DynArray<D>
+where
+    D: ndarray::Dimension,
+{
+    fn div_assign(&mut self, rhs: &Self) {
+        match (self, rhs) {
+            (DynArray::Uint8(a), DynArray::Uint8(b)) => a.div_assign(b),
+            (DynArray::Sint8(a), DynArray::Sint8(b)) => a.div_assign(b),
+            (DynArray::Uint16(a), DynArray::Uint16(b)) => a.div_assign(b),
+            (DynArray::Sint16(a), DynArray::Sint16(b)) => a.div_assign(b),
+            (DynArray::Uint32(a), DynArray::Uint32(b)) => a.div_assign(b),
+            (DynArray::Sint32(a), DynArray::Sint32(b)) => a.div_assign(b),
+            (DynArray::Float32(a), DynArray::Float32(b)) => a.div_assign(b),
+            (DynArray::Bfloat16(a), DynArray::Bfloat16(b)) => a.div_assign(b),
+            _ => panic!("Mismatched types"),
+        }
+    }
+}
+
 impl<D: ndarray::Dimension> PartialEq for DynArray<D> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -544,6 +649,42 @@ where
             _ => panic!("Mismatched types"),
         }
     }
+}
+
+fn ndarray_max_axis<A, S, D>(array: &ndarray::ArrayBase<S, D>, axis: Axis) -> Array<A, D::Smaller>
+where
+    A: Copy + Clone + Ord + num_traits::bounds::LowerBounded,
+    S: ndarray::Data<Elem = A>,
+    D: Dimension + ndarray::RemoveAxis,
+{
+    let mut res = Array::from_elem(array.raw_dim().remove_axis(axis), A::min_value());
+    for subview in array.axis_iter(axis) {
+        res.zip_mut_with(&subview, |a, &b| {
+            *a = (*a).max(b);
+        });
+    }
+    res
+}
+
+fn ndarray_f32_max_axis<S, D>(
+    array: &ndarray::ArrayBase<S, D>,
+    axis: Axis,
+) -> Array<f32, D::Smaller>
+where
+    S: ndarray::Data<Elem = f32>,
+    D: Dimension + ndarray::RemoveAxis,
+{
+    let mut res = Array::from_elem(array.raw_dim().remove_axis(axis), f32::MIN);
+    for subview in array.axis_iter(axis) {
+        res.zip_mut_with(&subview, |a, &b| {
+            *a = if a.is_nan() || b.is_nan() {
+                f32::NAN
+            } else {
+                (*a).max(b)
+            };
+        });
+    }
+    res
 }
 
 fn test_artifact_correct_inner<Tgt>(spec: &Spec<Tgt>, built_artifact: &BuiltArtifact) -> bool
@@ -731,4 +872,86 @@ where
     ArrayD::from_shape_vec(ndarray::IxDyn(shape), data)
         .unwrap()
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ndarray_max_axis_single_element() {
+        let array = array![1];
+        let max_axis_0 = ndarray_max_axis(&array, Axis(0));
+        assert_eq!(max_axis_0, arr0(1));
+    }
+
+    #[test]
+    fn test_ndarray_max_axis_row_vector_axis_0() {
+        let array = array![[1, 2, 3, 4]];
+        let max_axis_0 = ndarray_max_axis(&array, Axis(0));
+        assert_eq!(max_axis_0, array![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_ndarray_max_axis_row_vector_axis_1() {
+        let array = array![[1, 2, 3, 4]];
+        let max_axis_1 = ndarray_max_axis(&array, Axis(1));
+        assert_eq!(max_axis_1, array![4]);
+    }
+
+    #[test]
+    fn test_ndarray_max_axis_column_vector_axis_0() {
+        let array = array![[1], [2], [3], [4]];
+        let max_axis_0 = ndarray_max_axis(&array, Axis(0));
+        assert_eq!(max_axis_0, array![4]);
+    }
+
+    #[test]
+    fn test_ndarray_max_axis_column_vector_axis_1() {
+        let array = array![[1], [2], [3], [4]];
+        let max_axis_1 = ndarray_max_axis(&array, Axis(1));
+        assert_eq!(max_axis_1, array![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_ndarray_max_axis_square_matrix_axis_0() {
+        let array = array![[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+        let max_axis_0 = ndarray_max_axis(&array, Axis(0));
+        assert_eq!(max_axis_0, array![7, 8, 9]);
+    }
+
+    #[test]
+    fn test_ndarray_max_axis_square_matrix_axis_1() {
+        let array = array![[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+        let max_axis_1 = ndarray_max_axis(&array, Axis(1));
+        assert_eq!(max_axis_1, array![3, 6, 9]);
+    }
+
+    #[test]
+    fn test_ndarray_max_axis_rectangular_matrix_axis_0() {
+        let array = array![[1, 2], [3, 4], [5, 6]];
+        let max_axis_0 = ndarray_max_axis(&array, Axis(0));
+        assert_eq!(max_axis_0, array![5, 6]);
+    }
+
+    #[test]
+    fn test_ndarray_max_axis_rectangular_matrix_axis_1() {
+        let array = array![[1, 2], [3, 4], [5, 6]];
+        let max_axis_1 = ndarray_max_axis(&array, Axis(1));
+        assert_eq!(max_axis_1, array![2, 4, 6]);
+    }
+
+    #[test]
+    fn test_ndarray_max_axis_large_matrix_axis_0() {
+        let array = array![[1, 2, 3, 4], [5, 6, 7, 8]];
+        let max_axis_0 = ndarray_max_axis(&array, Axis(0));
+        assert_eq!(max_axis_0, array![5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_ndarray_max_axis_large_matrix_axis_1() {
+        let array = array![[1, 2, 3, 4], [5, 6, 7, 8]];
+        let max_axis_1 = ndarray_max_axis(&array, Axis(1));
+        assert_eq!(max_axis_1, array![4, 8]);
+    }
 }
