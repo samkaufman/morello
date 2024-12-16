@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
-pub struct ToSoftmaxParts<Tgt: Target> {
+pub struct ToSoftmaxPartsRecompute<Tgt: Target> {
     pub max_level: Tgt::Level,
     pub max_layout: Layout,
     pub max_vector_size: Option<DimSize>,
@@ -23,7 +23,7 @@ pub struct ToSoftmaxParts<Tgt: Target> {
     pub denominator_vector_size: Option<DimSize>,
 }
 
-impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
+impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();

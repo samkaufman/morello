@@ -13,7 +13,7 @@ use crate::scheduling::spatial_split::SpatialSplit;
 use crate::scheduling::tiling::{Split, TileOut};
 use crate::scheduling::to_accum::ToAccum;
 use crate::scheduling::to_max_and_denom::ToMaxAndDenominator;
-use crate::scheduling::to_softmax_parts::ToSoftmaxParts;
+use crate::scheduling::to_softmax_parts::ToSoftmaxPartsRecompute;
 use crate::scheduling::ActionT as _;
 use crate::scheduling::{Action, ApplyError};
 use crate::search::top_down;
@@ -47,7 +47,7 @@ pub trait SchedulingSugar<Tgt: Target> {
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_accum(&self) -> ImplNode<Tgt>;
-    fn to_softmax_parts(
+    fn to_softmax_parts_recompute(
         &self,
         max_level: Tgt::Level,
         max_layout: impl LayoutBuilder,
@@ -153,7 +153,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         apply_unwrap(self, action)
     }
 
-    fn to_softmax_parts(
+    fn to_softmax_parts_recompute(
         &self,
         max_level: Tgt::Level,
         max_layout: impl LayoutBuilder,
@@ -167,7 +167,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         let denominator_layout = denominator_layout.build(&first_parameter_shape);
         apply_unwrap(
             self,
-            Action::ToSoftmaxParts(ToSoftmaxParts {
+            Action::ToSoftmaxPartsRecompute(ToSoftmaxPartsRecompute {
                 max_level,
                 max_layout,
                 max_vector_size,
@@ -284,7 +284,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.to_accum())
     }
 
-    fn to_softmax_parts(
+    fn to_softmax_parts_recompute(
         &self,
         max_level: Tgt::Level,
         max_layout: impl LayoutBuilder,
@@ -294,7 +294,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         denominator_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
-            spec.to_softmax_parts(
+            spec.to_softmax_parts_recompute(
                 max_level,
                 max_layout,
                 max_vector_size,
