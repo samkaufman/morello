@@ -276,6 +276,6 @@ pub fn printf_fmt(dtype: Dtype) -> &'static str {
         Dtype::Sint16 => "%\" PRIi16 \"",
         Dtype::Uint32 => "%\" PRIu32 \"",
         Dtype::Sint32 => "%\" PRIi32 \"",
-        Dtype::Float32 | Dtype::Bfloat16 => "%f",
+        Dtype::Float32 | Dtype::Bfloat16 => "%.10f",
     }
 }
