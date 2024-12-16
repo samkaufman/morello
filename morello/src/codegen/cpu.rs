@@ -744,7 +744,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{0}for (int {1} = 0; {1} < {2}; {1} += 8) {{",
                             indent(depth),
                             loop_iter_name,
-                            vector_count,
+                            vector_count * 8,
                         )?;
                         writeln!(
                             w,
