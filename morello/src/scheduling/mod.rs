@@ -21,7 +21,7 @@ use spatial_split::SpatialSplit;
 use tiling::{Split, TileOut};
 use to_accum::ToAccum;
 use to_max_and_denom::ToMaxAndDenominator;
-use to_softmax_parts::ToSoftmaxPartsRecompute;
+use to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecompute};
 
 pub mod bufferize;
 pub mod moves;
@@ -78,6 +78,7 @@ pub enum Action<Tgt: Target> {
     Move(Move<Tgt>),
     /// Allocate an output tensor, a Zero sub-Spec, and an accumulating variant of the receiver.
     ToAccum(ToAccum),
+    ToSoftmaxParts(ToSoftmaxParts<Tgt>),
     ToSoftmaxPartsRecompute(ToSoftmaxPartsRecompute<Tgt>),
     /// Rewrites a SoftmaxDenominatorAndMax into a Max followed by SoftmaxDenominator.
     ToMaxAndDenominator(ToMaxAndDenominator),

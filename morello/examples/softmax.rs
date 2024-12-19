@@ -73,7 +73,7 @@ fn main() {
                 .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
                 .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
                 .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
-                .place(CpuKernel::VectorSoftmaxDenominator)
+                .select(CpuKernel::VectorSoftmaxDenominator)
         })
         .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db, None))
         .subschedule(&[0, 1, 1, 0], |subspec| subspec.synthesize(&db, None))

@@ -148,7 +148,7 @@ fn main() -> Result<()> {
     };
 
     #[cfg(feature = "db-stats")]
-    log::info!("DB statistic collection enabled");
+    info!("DB statistic collection enabled");
 
     let threads = rayon::current_num_threads();
     let db = FilesDatabase::new(

@@ -316,6 +316,7 @@ impl<T: CpuTarget> Target for T {
                     &SOFTMAX_COMPLETE_KERNELS
                 }
                 PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => &[],
+                PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => &[],
                 PrimitiveSpecType::SoftmaxDenominator { accum, .. } => {
                     if *accum {
                         const SOFTMAX_DENOMINATOR_KERNELS: [CpuKernel; 2] = [
@@ -327,6 +328,7 @@ impl<T: CpuTarget> Target for T {
                         &[]
                     }
                 }
+                PrimitiveSpecType::DivideVecScalarInPlace { .. } => &[],
                 PrimitiveSpecType::Max { accum, .. } => {
                     if *accum {
                         const MAX_KERNELS: [CpuKernel; 2] =

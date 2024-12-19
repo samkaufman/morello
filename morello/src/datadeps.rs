@@ -14,6 +14,10 @@ pub enum SpecKey {
     Conv {
         dtypes: [Dtype; 3],
     },
+    DivideVecScalarInPlace {
+        scan_dim: u8,
+        dtypes: [Dtype; 2],
+    },
     Softmax {
         scan_dim: u8,
         dtypes: [Dtype; 2],
@@ -23,6 +27,10 @@ pub enum SpecKey {
         dtypes: [Dtype; 4],
     },
     SoftmaxDenominatorAndMax {
+        scan_dim: u8,
+        dtypes: [Dtype; 3],
+    },
+    SoftmaxDenominatorAndUnscaled {
         scan_dim: u8,
         dtypes: [Dtype; 3],
     },
@@ -53,9 +61,11 @@ impl SpecKey {
             SpecKey::Conv { dtypes } => dtypes,
             SpecKey::Move { dtypes } => dtypes,
             SpecKey::Max { dtypes, .. } => dtypes,
+            SpecKey::DivideVecScalarInPlace { dtypes, .. } => dtypes,
             SpecKey::Softmax { dtypes, .. } => dtypes,
             SpecKey::SoftmaxComplete { dtypes, .. } => dtypes,
             SpecKey::SoftmaxDenominatorAndMax { dtypes, .. } => dtypes,
+            SpecKey::SoftmaxDenominatorAndUnscaled { dtypes, .. } => dtypes,
             SpecKey::SoftmaxDenominator { dtypes, .. } => dtypes,
             SpecKey::Fill { dtype, value: _ } => slice::from_ref(dtype),
             SpecKey::Compose { .. } => unimplemented!(),

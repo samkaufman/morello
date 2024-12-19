@@ -5,7 +5,7 @@ use crate::grid::general::BiMap;
 use crate::imp::functions::FunctionApp;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
-use crate::layout::LayoutBuilder;
+use crate::layout::{Layout, LayoutBuilder};
 use crate::scheduling::bufferize::Bufferize;
 use crate::scheduling::moves::Move;
 use crate::scheduling::select::Select;
@@ -13,7 +13,7 @@ use crate::scheduling::spatial_split::SpatialSplit;
 use crate::scheduling::tiling::{Split, TileOut};
 use crate::scheduling::to_accum::ToAccum;
 use crate::scheduling::to_max_and_denom::ToMaxAndDenominator;
-use crate::scheduling::to_softmax_parts::ToSoftmaxPartsRecompute;
+use crate::scheduling::to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecompute};
 use crate::scheduling::ActionT as _;
 use crate::scheduling::{Action, ApplyError};
 use crate::search::top_down;
@@ -47,6 +47,15 @@ pub trait SchedulingSugar<Tgt: Target> {
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_accum(&self) -> ImplNode<Tgt>;
+    fn to_softmax_parts(
+        &self,
+        max_level: Tgt::Level,
+        max_layout: Layout,
+        max_vector_size: Option<DimSize>,
+        exps_level: Tgt::Level,
+        exps_layout: Layout,
+        exps_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt>;
     fn to_softmax_parts_recompute(
         &self,
         max_level: Tgt::Level,
@@ -151,6 +160,28 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn to_accum(&self) -> ImplNode<Tgt> {
         let action = Action::ToAccum(ToAccum::default());
         apply_unwrap(self, action)
+    }
+
+    fn to_softmax_parts(
+        &self,
+        denominator_level: <Tgt as Target>::Level,
+        denominator_layout: Layout,
+        denominator_vector_size: Option<DimSize>,
+        exps_level: <Tgt as Target>::Level,
+        exps_layout: Layout,
+        exps_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt> {
+        apply_unwrap(
+            self,
+            Action::ToSoftmaxParts(ToSoftmaxParts {
+                denominator_level,
+                denominator_layout,
+                denominator_vector_size,
+                exps_level,
+                exps_layout,
+                exps_vector_size,
+            }),
+        )
     }
 
     fn to_softmax_parts_recompute(
@@ -282,6 +313,27 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
 
     fn to_accum(&self) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.to_accum())
+    }
+
+    fn to_softmax_parts(
+        &self,
+        max_level: <Tgt as Target>::Level,
+        max_layout: Layout,
+        max_vector_size: Option<DimSize>,
+        exps_level: <Tgt as Target>::Level,
+        exps_layout: Layout,
+        exps_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| {
+            spec.to_softmax_parts(
+                max_level,
+                max_layout,
+                max_vector_size,
+                exps_level,
+                exps_layout,
+                exps_vector_size,
+            )
+        })
     }
 
     fn to_softmax_parts_recompute(

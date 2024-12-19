@@ -1307,10 +1307,18 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
             .join("SoftmaxDenominatorAndMax")
             .join(scan_dim.to_string())
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
+        SpecKey::SoftmaxDenominatorAndUnscaled { scan_dim, dtypes } => root
+            .join("SoftmaxDenominatorAndUnscaled")
+            .join(scan_dim.to_string())
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::SoftmaxDenominator { scan_dim, dtypes } => root
             .join("SoftmaxDenominator")
             .join(scan_dim.to_string())
             .join(dtypes.iter().join("_")),
+        SpecKey::DivideVecScalarInPlace { scan_dim, dtypes } => root
+            .join("DivideVecScalarInPlace")
+            .join(scan_dim.to_string())
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::Max { dtypes, dim } => root
             .join("Max")
             .join(dim.to_string())
@@ -1626,7 +1634,7 @@ mod tests {
                 iter_blocks_in_single_dim_range(start, end, block_dim_size).map(|(block_idx, _)| block_idx);
             if let Some(mut last_block_idx) = block_idxs.next() {
                 for block_idx in block_idxs {
-                    assert!(block_idx == last_block_idx + 1);
+                    prop_assert_eq!(block_idx, last_block_idx + 1);
                     last_block_idx = block_idx;
                 }
             }

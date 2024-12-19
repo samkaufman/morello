@@ -14,11 +14,7 @@ use morello::common::{DimSize, Dtype};
 use morello::db::FilesDatabase;
 use morello::layout::{col_major, row_major};
 use morello::pprint::{pprint, ImplPrintStyle};
-use morello::target::{
-    ArmTarget,
-    CpuMemoryLevel::{self, GL},
-    CpuTarget, Target, TargetId, X86Target,
-};
+use morello::target::{ArmTarget, CpuMemoryLevel::GL, CpuTarget, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 use morello::{
@@ -235,7 +231,7 @@ where
                     .map(|layout| TensorSpecAux::<Tgt> {
                         contig: layout.contiguous_full(),
                         aligned: true,
-                        level: CpuMemoryLevel::GL,
+                        level: GL,
                         layout,
                         vector_size: None,
                     })
