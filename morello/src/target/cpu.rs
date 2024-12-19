@@ -328,7 +328,7 @@ impl<T: CpuTarget> Target for T {
                         &[]
                     }
                 }
-                PrimitiveSpecType::DivideVecScalarInPlace { .. } => &[],
+                PrimitiveSpecType::DivideVecScalar { .. } => &[],
                 PrimitiveSpecType::Max { accum, .. } => {
                     if *accum {
                         const MAX_KERNELS: [CpuKernel; 2] =

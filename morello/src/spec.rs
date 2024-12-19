@@ -63,12 +63,12 @@ pub enum PrimitiveSpecType {
     Conv {
         accum: bool,
     },
-    /// Broadcasts a tensor (second argument) across `scan_dim`, dividing the first argument.  This
-    /// works "in place," modifying the first argument.
+    /// Broadcasts a tensor (second argument) across `scan_dim`, dividing the first argument. Output
+    /// is in the third argument.
     ///
     /// Implementations of this Spec do not multiply by the reciprocal of the divisor. They divide
     /// directly for improved precision.
-    DivideVecScalarInPlace {
+    DivideVecScalar {
         #[cfg_attr(test, proptest(strategy = "0..4u8"))]
         scan_dim: u8,
     },
@@ -273,10 +273,10 @@ impl PrimitiveBasics {
 
         match self.typ {
             PrimitiveSpecType::Matmul { accum: _ } => {
-                debug_assert_eq!(new_operands.len(), 3);
-                debug_assert_eq!(new_operands[0].0[0], new_operands[2].0[0]);
-                debug_assert_eq!(new_operands[1].0[1], new_operands[2].0[1]);
-                debug_assert_eq!(new_operands[0].0[1], new_operands[1].0[0]);
+                assert_eq!(new_operands.len(), 3);
+                assert_eq!(new_operands[0].0[0], new_operands[2].0[0]);
+                assert_eq!(new_operands[1].0[1], new_operands[2].0[1]);
+                assert_eq!(new_operands[0].0[1], new_operands[1].0[0]);
                 self.spec_shape = vec![
                     new_operands[0].0[0],
                     new_operands[0].0[1],
@@ -294,8 +294,9 @@ impl PrimitiveBasics {
                 self.spec_shape = vec![b, f, c, h, w, fh, fw];
                 // TODO: Assert output shape is expected.
             }
-            PrimitiveSpecType::DivideVecScalarInPlace { scan_dim } => {
-                assert_eq!(new_operands.len(), 2);
+            PrimitiveSpecType::DivideVecScalar { scan_dim } => {
+                assert_eq!(new_operands.len(), 3);
+                assert_eq!(new_operands[0].0, new_operands[2].0);
                 assert!(
                     new_operands[1].0.iter().enumerate().all(|(i, &dim)| {
                         if i == usize::from(scan_dim) {
@@ -434,14 +435,14 @@ impl PrimitiveBasics {
                     _ => panic!("Conv has only 3 parameters"),
                 }
             }
-            PrimitiveSpecType::DivideVecScalarInPlace { scan_dim } => match idx {
-                0 => self.spec_shape.clone(),
+            PrimitiveSpecType::DivideVecScalar { scan_dim } => match idx {
+                0 | 2 => self.spec_shape.clone(),
                 1 => {
                     let mut shape = self.spec_shape.clone();
                     shape[usize::from(scan_dim)] = nz!(1u32);
                     shape
                 }
-                _ => panic!("DivideVecScalarInPlace has only 2 parameters"),
+                _ => panic!("DivideVecScalar has only 2 parameters"),
             },
             PrimitiveSpecType::Softmax { .. } => match idx {
                 0 | 1 => self.spec_shape.to_vec(),
@@ -501,11 +502,10 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
             | PrimitiveSpecType::Max { accum, .. } => accum,
-            PrimitiveSpecType::Fill { .. } | PrimitiveSpecType::DivideVecScalarInPlace { .. } => {
-                true
-            }
+            PrimitiveSpecType::Fill { .. } => true,
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
+            | PrimitiveSpecType::DivideVecScalar { .. }
             | PrimitiveSpecType::Move => false,
         }
     }
@@ -542,7 +542,7 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::Max { accum: false, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum: false, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: false, .. } => None,
-            PrimitiveSpecType::DivideVecScalarInPlace { .. } => todo!(),
+            PrimitiveSpecType::DivideVecScalar { .. } => todo!(),
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => todo!(),
         }
     }
@@ -702,11 +702,11 @@ impl PrimitiveBasics {
             }
             (
                 PrimitiveBasics {
-                    typ: PrimitiveSpecType::DivideVecScalarInPlace { scan_dim },
+                    typ: PrimitiveSpecType::DivideVecScalar { scan_dim },
                     spec_shape: _,
                     dtypes: _,
                 },
-                true,
+                _,
             ) => {
                 let input_tiling = passthrough_tiling_tuple(smaller_output);
                 let scalars_tiling = one_reduced_dimension_tiling_tuple(smaller_output, *scan_dim);
@@ -835,7 +835,7 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
                     | PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, .. }
                     | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim, .. }
                     | PrimitiveSpecType::SoftmaxDenominator { scan_dim, .. }
-                    | PrimitiveSpecType::DivideVecScalarInPlace { scan_dim }
+                    | PrimitiveSpecType::DivideVecScalar { scan_dim }
                     | PrimitiveSpecType::Max { dim: scan_dim, .. } => {
                         match args.first_input_shape.as_deref() {
                             Some(s) => {
@@ -884,7 +884,6 @@ impl PrimitiveSpecType {
         match self {
             PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => 3,
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => 3,
-            PrimitiveSpecType::DivideVecScalarInPlace { .. } => 2,
             _ => self.input_count() + 1,
         }
     }
@@ -901,7 +900,7 @@ impl PrimitiveSpecType {
             | PrimitiveSpecType::Max { .. }
             | PrimitiveSpecType::Move => 1,
             PrimitiveSpecType::Fill { .. } => 0,
-            PrimitiveSpecType::DivideVecScalarInPlace { .. } => 1,
+            PrimitiveSpecType::DivideVecScalar { .. } => 2,
         }
     }
 
@@ -909,13 +908,12 @@ impl PrimitiveSpecType {
         match self {
             PrimitiveSpecType::Matmul { .. }
             | PrimitiveSpecType::Conv { .. }
-            | PrimitiveSpecType::SoftmaxDenominator { .. } => index == 2,
+            | PrimitiveSpecType::SoftmaxDenominator { .. }
+            | PrimitiveSpecType::DivideVecScalar { .. } => index == 2,
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::Max { .. }
             | PrimitiveSpecType::Move => index == 1,
-            PrimitiveSpecType::Fill { .. } | PrimitiveSpecType::DivideVecScalarInPlace { .. } => {
-                index == 0
-            }
+            PrimitiveSpecType::Fill { .. } => index == 0,
             PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => index == 1 || index == 2,
             PrimitiveSpecType::SoftmaxComplete { .. } => index == 3,
@@ -927,14 +925,12 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::SoftmaxComplete { .. } => Some(3),
             PrimitiveSpecType::Matmul { .. }
             | PrimitiveSpecType::Conv { .. }
-            | PrimitiveSpecType::SoftmaxDenominator { .. } => Some(2),
-
+            | PrimitiveSpecType::SoftmaxDenominator { .. }
+            | PrimitiveSpecType::DivideVecScalar { .. } => Some(2),
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::Max { .. }
             | PrimitiveSpecType::Move { .. } => Some(1),
-            PrimitiveSpecType::Fill { .. } | PrimitiveSpecType::DivideVecScalarInPlace { .. } => {
-                Some(0)
-            }
+            PrimitiveSpecType::Fill { .. } => Some(0),
             PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => None,
         }
@@ -949,11 +945,11 @@ impl PrimitiveSpecType {
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
             | PrimitiveSpecType::Max { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum, .. } => *accum,
-            PrimitiveSpecType::DivideVecScalarInPlace { .. } => true,
             PrimitiveSpecType::Fill { .. }
             | PrimitiveSpecType::Move
             | PrimitiveSpecType::Softmax { .. }
-            | PrimitiveSpecType::SoftmaxComplete { .. } => false,
+            | PrimitiveSpecType::SoftmaxComplete { .. }
+            | PrimitiveSpecType::DivideVecScalar { .. } => false,
         }
     }
 
@@ -997,7 +993,7 @@ impl PrimitiveSpecType {
             | PrimitiveSpecType::SoftmaxComplete { .. }
             | PrimitiveSpecType::Move
             | PrimitiveSpecType::Fill { .. }
-            | PrimitiveSpecType::DivideVecScalarInPlace { .. } => {
+            | PrimitiveSpecType::DivideVecScalar { .. } => {
                 // The shape and dtype match for moves and zero.
                 Some(inputs[0].to_vec())
             }
@@ -1043,8 +1039,8 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::Fill {
                 value: FillValue::NegInf,
             } => write!(f, "FillNegInf"),
-            PrimitiveSpecType::DivideVecScalarInPlace { scan_dim } => {
-                write!(f, "DivideVecScalarInPlace{scan_dim}")
+            PrimitiveSpecType::DivideVecScalar { scan_dim } => {
+                write!(f, "DivideVecScalar{scan_dim}")
             }
         }
     }
@@ -1085,7 +1081,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
                 | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. }
                 | PrimitiveSpecType::SoftmaxDenominator { .. }
-                | PrimitiveSpecType::DivideVecScalarInPlace { .. }
+                | PrimitiveSpecType::DivideVecScalar { .. }
                 | PrimitiveSpecType::Max { .. } => basics
                     .parameter_shapes()
                     .into_iter()
@@ -1945,8 +1941,8 @@ impl BiMap for PrimitiveBasicsBimap {
                 },
                 shifted_shape.collect(),
             ),
-            PrimitiveSpecType::DivideVecScalarInPlace { scan_dim } => (
-                SpecKey::DivideVecScalarInPlace {
+            PrimitiveSpecType::DivideVecScalar { scan_dim } => (
+                SpecKey::DivideVecScalar {
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
@@ -2085,8 +2081,8 @@ impl BiMap for PrimitiveBasicsBimap {
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: vec![*dtype],
             },
-            SpecKey::DivideVecScalarInPlace { scan_dim, dtypes } => PrimitiveBasics {
-                typ: PrimitiveSpecType::DivideVecScalarInPlace {
+            SpecKey::DivideVecScalar { scan_dim, dtypes } => PrimitiveBasics {
+                typ: PrimitiveSpecType::DivideVecScalar {
                     scan_dim: *scan_dim,
                 },
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),

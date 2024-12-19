@@ -110,11 +110,11 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
             let mut scale_spec = Spec(
                 LogicalSpec::Primitive(
                     PrimitiveBasics {
-                        typ: PrimitiveSpecType::DivideVecScalarInPlace {
+                        typ: PrimitiveSpecType::DivideVecScalar {
                             scan_dim: *scan_dim,
                         },
                         spec_shape: basics.spec_shape.clone(),
-                        dtypes: vec![dtypes[0]; 2],
+                        dtypes: vec![dtypes[0]; 3],
                     },
                     vec![
                         exps_tensor.spec().aux.clone(),
@@ -128,6 +128,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
             let app_args = vec![
                 denominator_tensor.clone().into(),
                 exps_tensor.clone().into(),
+                Param::new(1, operands[1].clone()).into(),
             ];
             SpecApp::new(scale_spec, app_args).into()
         };
@@ -135,7 +136,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
         Ok(ImplNode::Pipeline(Pipeline {
             stages: vec![denom_app, scale_app],
             wirings: vec![StageWiring {
-                intermediate_tensors: vec![Rc::new(exps_tensor)],
+                intermediate_tensors: vec![Rc::new(denominator_tensor), Rc::new(exps_tensor)],
             }],
             parameters: operands,
             spec: Some(spec.clone()),

@@ -1315,8 +1315,8 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
             .join("SoftmaxDenominator")
             .join(scan_dim.to_string())
             .join(dtypes.iter().join("_")),
-        SpecKey::DivideVecScalarInPlace { scan_dim, dtypes } => root
-            .join("DivideVecScalarInPlace")
+        SpecKey::DivideVecScalar { scan_dim, dtypes } => root
+            .join("DivideVecScalar")
             .join(scan_dim.to_string())
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::Max { dtypes, dim } => root
