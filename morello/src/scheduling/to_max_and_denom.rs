@@ -22,7 +22,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
             ))));
         };
         let PrimitiveBasics {
-            typ: PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, accum },
+            typ: PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim },
             spec_shape,
             dtypes,
         } = head
@@ -32,12 +32,6 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
                 "ToMaxAndDenominator is only defined for SoftmaxDenominatorAndMax",
             ))));
         };
-        if *accum {
-            // TODO: Use a more specific NotApplicableReason.
-            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-                "Accumlating SoftmaxDenominatorAndMax not supported",
-            ))));
-        }
 
         let max_app = {
             let mut max_spec = Spec(

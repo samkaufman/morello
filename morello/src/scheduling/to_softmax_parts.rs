@@ -190,7 +190,6 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
         let denom_app = softmax_denominatorandmax_subapp(
             *scan_dim,
             &basics.spec_shape,
-            dtypes[0],
             spec.0.serial_only(),
             lowered_limits.clone(),
             operands[0].clone(),
@@ -264,20 +263,18 @@ fn softmax_scalar_tensor<Tgt: Target>(
 fn softmax_denominatorandmax_subapp<Tgt: Target>(
     scan_dim: u8,
     spec_shape: &[DimSize],
-    dtype: Dtype,
     serial_only: bool,
     lowered_limits: MemoryLimits,
     input_tensorspec: TensorSpec<Tgt>,
     max_tensor: &Tensor<Tgt>,
     denominator_tensor: &Tensor<Tgt>,
 ) -> ImplNode<Tgt> {
+    debug_assert_eq!(max_tensor.spec().dtype(), denominator_tensor.spec().dtype());
+    let dtype = max_tensor.spec().dtype();
     let mut denom_spec = Spec(
         LogicalSpec::Primitive(
             PrimitiveBasics {
-                typ: PrimitiveSpecType::SoftmaxDenominatorAndMax {
-                    scan_dim,
-                    accum: false,
-                },
+                typ: PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim },
                 spec_shape: spec_shape.to_vec(),
                 dtypes: vec![dtype; 3],
             },

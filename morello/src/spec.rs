@@ -90,9 +90,10 @@ pub enum PrimitiveSpecType {
         // TODO: Swap variant name order to match args
         #[cfg_attr(test, proptest(strategy = "0..4u8"))]
         scan_dim: u8,
-        accum: bool, // TODO: Does this have a point?
     },
     /// Computes `Σ_j e^(x_j - max_k x_k)` and each `e^(x_i - max_k x_k)` as outputs.
+    ///
+    /// First arg is input, second is denominator, then unscaled scores.
     SoftmaxDenominatorAndUnscaled {
         // TODO: Swap variant name order to match args
         #[cfg_attr(test, proptest(strategy = "0..4u8"))]
@@ -101,6 +102,8 @@ pub enum PrimitiveSpecType {
         accum: bool, // TODO: Does this have a point?
     },
     /// Computes unnormalized softmax scores and the scaling denominator from the input and max.
+    ///
+    /// First arg is input, second is maxes, third is denominators, then unscaled scores.
     SoftmaxDenominatorAndUnscaledFromMax {
         #[cfg_attr(test, proptest(strategy = "0..4u8"))]
         scan_dim: u8,
@@ -381,40 +384,9 @@ impl PrimitiveBasics {
     }
 
     pub fn parameter_shapes(&self) -> Vec<Shape> {
-        match self.typ {
-            PrimitiveSpecType::Matmul { .. } => {
-                let [m, k, n] = self.spec_shape[..] else {
-                    panic!("Matmul spec_shape must have length 3")
-                };
-                vec![vec![m, k], vec![k, n], vec![m, n]]
-            }
-            PrimitiveSpecType::Conv { .. } => {
-                let [b, f, c, h, w, fh, fw] = self.spec_shape[..] else {
-                    panic!("Conv must have rank 7")
-                };
-                debug_assert!(
-                    h >= fh && w >= fw,
-                    "Conv spatial dims. {}x{} were larger than filter {}x{}",
-                    h,
-                    w,
-                    fh,
-                    fw
-                );
-                let img = vec![b, c, h, w];
-                let filt = vec![f, c, fh, fw];
-                let out = conv_infer_output_shape(&img, &filt);
-                vec![img, filt, out]
-            }
-            PrimitiveSpecType::Move => {
-                vec![self.spec_shape.clone(), self.spec_shape.clone()]
-            }
-            PrimitiveSpecType::Fill { value: _ } => {
-                vec![self.spec_shape.clone()]
-            }
-            _ => (0..self.typ.operand_count())
-                .map(|i| self.parameter_shape(i))
-                .collect(),
-        }
+        (0..self.typ.operand_count())
+            .map(|i| self.parameter_shape(i))
+            .collect()
     }
 
     pub fn parameter_shape(&self, idx: usize) -> Shape {
@@ -516,7 +488,6 @@ impl PrimitiveBasics {
         match self.typ {
             PrimitiveSpecType::Matmul { accum }
             | PrimitiveSpecType::Conv { accum }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
@@ -524,6 +495,7 @@ impl PrimitiveBasics {
             PrimitiveSpecType::Fill { .. } => true,
             PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::DivideVecScalar { .. }
             | PrimitiveSpecType::Move => false,
         }
@@ -543,11 +515,6 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: true, .. } => {
                 Some(FillValue::Zero)
             }
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: true, .. } => match index {
-                1 => Some(FillValue::Zero),
-                2 => Some(FillValue::NegInf),
-                _ => unreachable!("called on non-input"),
-            },
             PrimitiveSpecType::Max { accum: true, .. } => match dtypes[index] {
                 Dtype::Sint8 | Dtype::Sint16 | Dtype::Sint32 => {
                     todo!("support min-value filling for signed integers")
@@ -563,7 +530,7 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxComplete { .. }
             | PrimitiveSpecType::Max { accum: false, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum: false, .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: false, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: false, .. } => None,
             PrimitiveSpecType::DivideVecScalar { .. } => todo!(),
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => todo!(),
@@ -905,75 +872,86 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
     }
 }
 
+// TODO: Move
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OperandDirection {
+    In,
+    Out,
+    InOut,
+}
+
 impl PrimitiveSpecType {
-    pub fn operand_count(&self) -> usize {
-        match self {
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => 3,
-            PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => 4,
-            _ => self.input_count() + 1,
-        }
-    }
+    pub fn operand_directions(&self) -> &'static [OperandDirection] {
+        use OperandDirection::*;
 
-    pub fn input_count(&self) -> usize {
         match self {
-            PrimitiveSpecType::SoftmaxComplete { .. } => 3,
-            PrimitiveSpecType::Matmul { .. }
-            | PrimitiveSpecType::Conv { .. }
-            | PrimitiveSpecType::SoftmaxDenominator { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => 2,
-            PrimitiveSpecType::Softmax { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. }
-            | PrimitiveSpecType::Max { .. }
-            | PrimitiveSpecType::Move => 1,
-            PrimitiveSpecType::Fill { .. } => 0,
-            PrimitiveSpecType::DivideVecScalar { .. } => 2,
-        }
-    }
-
-    fn parameter_is_output(&self, index: usize) -> bool {
-        match self {
-            PrimitiveSpecType::Matmul { .. }
-            | PrimitiveSpecType::Conv { .. }
-            | PrimitiveSpecType::SoftmaxDenominator { .. }
-            | PrimitiveSpecType::DivideVecScalar { .. } => index == 2,
-            PrimitiveSpecType::Softmax { .. }
-            | PrimitiveSpecType::Max { .. }
-            | PrimitiveSpecType::Move => index == 1,
-            PrimitiveSpecType::Fill { .. } => index == 0,
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => index == 1 || index == 2,
-            PrimitiveSpecType::SoftmaxComplete { .. } => index == 3,
-            PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => {
-                index == 2 || index == 3
+            PrimitiveSpecType::Matmul { accum: true } => &[In, In, InOut],
+            PrimitiveSpecType::Matmul { accum: false } => &[In, In, Out],
+            PrimitiveSpecType::Conv { accum: true } => &[In, In, InOut],
+            PrimitiveSpecType::Conv { accum: false } => &[In, In, Out],
+            PrimitiveSpecType::Softmax { .. } => &[In, Out],
+            PrimitiveSpecType::SoftmaxComplete { .. } => &[In, In, In, Out],
+            PrimitiveSpecType::SoftmaxDenominator { accum: true, .. } => &[In, In, InOut],
+            PrimitiveSpecType::SoftmaxDenominator { accum: false, .. } => &[In, In, Out],
+            PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => &[In, Out, Out],
+            PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum: true, .. } => {
+                &[In, InOut, Out]
             }
+            PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum: false, .. } => {
+                &[In, Out, Out]
+            }
+            PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: true, .. } => {
+                &[In, In, InOut, Out]
+            }
+            PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: false, .. } => {
+                &[In, In, Out, Out]
+            }
+            PrimitiveSpecType::Max { accum: true, .. } => &[In, InOut],
+            PrimitiveSpecType::Max { accum: false, .. } => &[In, Out],
+            PrimitiveSpecType::Move => &[In, Out],
+            PrimitiveSpecType::Fill { .. } => &[Out],
+            PrimitiveSpecType::DivideVecScalar { .. } => &[In, In, Out],
         }
     }
 
-    pub fn unique_output_index(&self) -> Option<usize> {
-        match self {
-            PrimitiveSpecType::SoftmaxComplete { .. } => Some(3),
-            PrimitiveSpecType::Matmul { .. }
-            | PrimitiveSpecType::Conv { .. }
-            | PrimitiveSpecType::SoftmaxDenominator { .. }
-            | PrimitiveSpecType::DivideVecScalar { .. } => Some(2),
-            PrimitiveSpecType::Softmax { .. }
-            | PrimitiveSpecType::Max { .. }
-            | PrimitiveSpecType::Move { .. } => Some(1),
-            PrimitiveSpecType::Fill { .. } => Some(0),
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => None,
-        }
+    pub fn operand_count(&self) -> usize {
+        self.operand_directions().len()
+    }
+
+    // TODO: Check that this handles InOuts as expected by callers.
+    // TODO: Rename this to `strict_input_count`
+    pub fn input_count(&self) -> usize {
+        self.operand_directions()
+            .iter()
+            .filter(|&&d| d == OperandDirection::In)
+            .count()
+    }
+
+    // TODO: Rename to parameter_is_written
+    fn parameter_is_output(&self, index: usize) -> bool {
+        matches!(
+            self.operand_directions()[index],
+            OperandDirection::Out | OperandDirection::InOut
+        )
     }
 
     // TODO: Rename
+    pub fn unique_output_index(&self) -> Option<usize> {
+        let mut directions = self.operand_directions().iter();
+        let first_out = directions
+            .position(|&d| matches!(d, OperandDirection::Out | OperandDirection::InOut))?;
+        if directions.any(|&d| matches!(d, OperandDirection::Out | OperandDirection::InOut)) {
+            return None;
+        }
+        Some(first_out)
+    }
+
+    // TODO: Rename
+    // TODO: Needed?
     pub fn output_is_read(&self) -> bool {
         match self {
             PrimitiveSpecType::Matmul { accum }
             | PrimitiveSpecType::Conv { accum }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
             | PrimitiveSpecType::Max { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
@@ -982,6 +960,7 @@ impl PrimitiveSpecType {
             | PrimitiveSpecType::Move
             | PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::DivideVecScalar { .. } => false,
         }
     }
@@ -1048,9 +1027,6 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::SoftmaxComplete { scan_dim } => {
                 write!(f, "SoftmaxComplete{scan_dim}")
             }
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, accum } if *accum => {
-                write!(f, "SoftmaxDenominatorAndMaxAccum{scan_dim}")
-            }
             PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, .. } => {
                 write!(f, "SoftmaxDenominatorAndMax{scan_dim}")
             }
@@ -1089,6 +1065,13 @@ impl Display for PrimitiveSpecType {
 }
 
 impl<Tgt: Target> LogicalSpec<Tgt> {
+    pub fn operand_directions(&self) -> Vec<OperandDirection> {
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => basics.typ.operand_directions().into(),
+            LogicalSpec::Compose { components, .. } => compose_parameter_directions(components),
+        }
+    }
+
     pub fn serial_only(&self) -> bool {
         match self {
             LogicalSpec::Primitive(_, _, serial_only) => *serial_only,
@@ -1132,16 +1115,12 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     .zip(auxes)
                     .map(|((s, dt), a)| TensorSpec::new_noncanon_with_aux(s, *dt, a.clone()))
                     .collect(),
-                PrimitiveSpecType::Move | PrimitiveSpecType::Fill { .. } => auxes
-                    .iter()
+                PrimitiveSpecType::Move | PrimitiveSpecType::Fill { .. } => basics
+                    .parameter_shapes()
+                    .into_iter()
                     .zip(&basics.dtypes)
-                    .map(|(a, dtype)| {
-                        TensorSpec::new_noncanon_with_aux(
-                            basics.spec_shape.clone(),
-                            *dtype,
-                            a.clone(),
-                        )
-                    })
+                    .zip(auxes)
+                    .map(|((s, dt), a)| TensorSpec::new_noncanon_with_aux(s, *dt, a.clone()))
                     .collect(),
             },
             LogicalSpec::Compose {
@@ -1587,8 +1566,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
                 | PrimitiveSpecType::Max { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. } => {
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. } => {
                     *accum = true;
                 }
                 _ => panic!("Cannot clone_as_accum: {:?}", self),
@@ -1597,8 +1575,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
                 | PrimitiveSpecType::Max { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. } => {
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. } => {
                     *accum = true;
                 }
                 _ => panic!("Cannot clone_as_accum: {:?}", self),
@@ -1943,12 +1920,12 @@ impl BiMap for PrimitiveBasicsBimap {
                 },
                 shifted_shape.collect(),
             ),
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, accum } => (
+            PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim } => (
                 SpecKey::SoftmaxDenominatorAndMax {
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
-                once(!accum as _).chain(shifted_shape).collect(),
+                shifted_shape.collect(),
             ),
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim, accum } => (
                 SpecKey::SoftmaxDenominatorAndUnscaled {
@@ -2006,10 +1983,6 @@ impl BiMap for PrimitiveBasicsBimap {
         let basics = match key {
             SpecKey::Matmul { dtypes: _ }
             | SpecKey::Conv { dtypes: _ }
-            | SpecKey::SoftmaxDenominatorAndMax {
-                scan_dim: _,
-                dtypes: _,
-            }
             | SpecKey::SoftmaxDenominatorAndUnscaled {
                 scan_dim: _,
                 dtypes: _,
@@ -2031,13 +2004,6 @@ impl BiMap for PrimitiveBasicsBimap {
                     SpecKey::Conv { dtypes } => {
                         (PrimitiveSpecType::Conv { accum }, dtypes.to_vec())
                     }
-                    SpecKey::SoftmaxDenominatorAndMax { scan_dim, dtypes } => (
-                        PrimitiveSpecType::SoftmaxDenominatorAndMax {
-                            scan_dim: *scan_dim,
-                            accum,
-                        },
-                        dtypes.into(),
-                    ),
                     SpecKey::SoftmaxDenominatorAndUnscaled { scan_dim, dtypes } => (
                         PrimitiveSpecType::SoftmaxDenominatorAndUnscaled {
                             scan_dim: *scan_dim,
@@ -2096,6 +2062,10 @@ impl BiMap for PrimitiveBasicsBimap {
             | SpecKey::SoftmaxComplete {
                 scan_dim: _,
                 dtypes: _,
+            }
+            | SpecKey::SoftmaxDenominatorAndMax {
+                scan_dim: _,
+                dtypes: _,
             } => {
                 let (typ, dtypes) = match key {
                     SpecKey::Softmax { scan_dim, dtypes } => (
@@ -2106,6 +2076,12 @@ impl BiMap for PrimitiveBasicsBimap {
                     ),
                     SpecKey::SoftmaxComplete { scan_dim, dtypes } => (
                         PrimitiveSpecType::SoftmaxComplete {
+                            scan_dim: *scan_dim,
+                        },
+                        dtypes.into(),
+                    ),
+                    SpecKey::SoftmaxDenominatorAndMax { scan_dim, dtypes } => (
+                        PrimitiveSpecType::SoftmaxDenominatorAndMax {
                             scan_dim: *scan_dim,
                         },
                         dtypes.into(),
@@ -2425,6 +2401,19 @@ fn compose_parameter_dtypes(components: &[PrimitiveBasics]) -> Vec<Dtype> {
     compose_parameter_visit(components, |component_idx, parameter_idx| {
         let component = &components[component_idx];
         result.push(component.parameter_dtype(parameter_idx));
+    });
+    result
+}
+
+fn compose_parameter_directions(components: &[PrimitiveBasics]) -> Vec<OperandDirection> {
+    let mut result = vec![];
+    result.reserve_exact(compose_parameter_count(components));
+    compose_parameter_visit(components, |component_idx, parameter_idx| {
+        let component = &components[component_idx];
+        // While we repeatedly call `operand_directions` on the same component, this should be
+        // pretty cheap since [PrimitiveSpecType::operand_directions] returns a static slice instead
+        // of allocating a Vec like LogicalSpec's operand_directions.
+        result.push(component.typ.operand_directions()[parameter_idx]);
     });
     result
 }

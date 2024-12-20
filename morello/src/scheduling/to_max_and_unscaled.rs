@@ -99,8 +99,8 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndUnscaled<Tgt> {
                     vec![
                         operands[0].aux.clone(),
                         max_tensor.spec().aux.clone(),
-                        operands[1].aux.clone(),
-                        operands[2].aux.clone(),
+                        operands[1].aux.clone(), // denominator
+                        operands[2].aux.clone(), // unscaled scores
                     ],
                     *serial_only,
                 ),
