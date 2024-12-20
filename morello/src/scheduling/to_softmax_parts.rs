@@ -55,7 +55,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
 
         let operands = spec.0.parameters();
 
-        let denominator_tensor = softmax_scalar_tensorspec::<Tgt>(
+        let denominator_tensor = softmax_scalar_tensor::<Tgt>(
             *scan_dim,
             spec_shape,
             dtypes[0],
@@ -167,7 +167,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
         let operands = spec.0.parameters();
 
         // Make tensors for storing the maximum and denominator values.
-        let max_tensor = softmax_scalar_tensorspec(
+        let max_tensor = softmax_scalar_tensor(
             *scan_dim,
             spec_shape,
             dtypes[0],
@@ -175,7 +175,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
             self.max_layout.clone(),
             self.max_vector_size,
         );
-        let denominator_tensor = softmax_scalar_tensorspec(
+        let denominator_tensor = softmax_scalar_tensor(
             *scan_dim,
             spec_shape,
             dtypes[0],
@@ -238,7 +238,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
     }
 }
 
-fn softmax_scalar_tensorspec<Tgt: Target>(
+fn softmax_scalar_tensor<Tgt: Target>(
     scan_dim: u8,
     spec_shape: &[DimSize],
     dtype: Dtype,

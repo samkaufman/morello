@@ -21,6 +21,7 @@ use spatial_split::SpatialSplit;
 use tiling::{Split, TileOut};
 use to_accum::ToAccum;
 use to_max_and_denom::ToMaxAndDenominator;
+use to_max_and_unscaled::ToMaxAndUnscaled;
 use to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecompute};
 
 pub mod bufferize;
@@ -30,6 +31,7 @@ pub mod spatial_split;
 pub mod tiling;
 pub mod to_accum;
 pub mod to_max_and_denom;
+pub mod to_max_and_unscaled;
 pub mod to_softmax_parts;
 
 // TODO: Rename this. (`Action` should probably be X86-specific.)
@@ -78,10 +80,14 @@ pub enum Action<Tgt: Target> {
     Move(Move<Tgt>),
     /// Allocate an output tensor, a Zero sub-Spec, and an accumulating variant of the receiver.
     ToAccum(ToAccum),
+    /// Rewrites a Softmax into a SoftmaxDenominatorAndUnscaled and a DivideVecScalar.
     ToSoftmaxParts(ToSoftmaxParts<Tgt>),
     ToSoftmaxPartsRecompute(ToSoftmaxPartsRecompute<Tgt>),
     /// Rewrites a SoftmaxDenominatorAndMax into a Max followed by SoftmaxDenominator.
     ToMaxAndDenominator(ToMaxAndDenominator),
+    /// Rewrites a SoftmaxDenominatorAndUnscaled into a Max followed by
+    /// SoftmaxDenominatorAndUnscaledFromMax.
+    ToMaxAndUnscaled(ToMaxAndUnscaled<Tgt>),
     Bufferize(Bufferize<Tgt>),
     SpatialSplit(SpatialSplit),
     // TODO: Remove 'force' bool from Select

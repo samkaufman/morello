@@ -13,6 +13,7 @@ use crate::scheduling::spatial_split::SpatialSplit;
 use crate::scheduling::tiling::{Split, TileOut};
 use crate::scheduling::to_accum::ToAccum;
 use crate::scheduling::to_max_and_denom::ToMaxAndDenominator;
+use crate::scheduling::to_max_and_unscaled::ToMaxAndUnscaled;
 use crate::scheduling::to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecompute};
 use crate::scheduling::ActionT as _;
 use crate::scheduling::{Action, ApplyError};
@@ -66,6 +67,12 @@ pub trait SchedulingSugar<Tgt: Target> {
         denominator_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_max_and_denominator(&self) -> ImplNode<Tgt>;
+    fn to_max_and_unscaled(
+        &self,
+        max_level: Tgt::Level,
+        max_layout: Layout,
+        max_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt>;
     fn bufferize(
         &self,
         index: usize,
@@ -216,6 +223,22 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         )
     }
 
+    fn to_max_and_unscaled(
+        &self,
+        max_level: Tgt::Level,
+        max_layout: Layout,
+        max_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt> {
+        apply_unwrap(
+            self,
+            Action::ToMaxAndUnscaled(ToMaxAndUnscaled {
+                max_level,
+                max_layout,
+                max_vector_size,
+            }),
+        )
+    }
+
     fn bufferize(
         &self,
         index: usize,
@@ -359,6 +382,17 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
 
     fn to_max_and_denominator(&self) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.to_max_and_denominator())
+    }
+
+    fn to_max_and_unscaled(
+        &self,
+        max_level: <Tgt as Target>::Level,
+        max_layout: Layout,
+        max_vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| {
+            spec.to_max_and_unscaled(max_level, max_layout, max_vector_size)
+        })
     }
 
     fn bufferize(

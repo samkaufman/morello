@@ -34,6 +34,10 @@ pub enum SpecKey {
         scan_dim: u8,
         dtypes: [Dtype; 3],
     },
+    SoftmaxDenominatorAndUnscaledFromMax {
+        scan_dim: u8,
+        dtypes: [Dtype; 4],
+    },
     SoftmaxDenominator {
         scan_dim: u8,
         dtypes: [Dtype; 3],
@@ -66,6 +70,7 @@ impl SpecKey {
             SpecKey::SoftmaxComplete { dtypes, .. } => dtypes,
             SpecKey::SoftmaxDenominatorAndMax { dtypes, .. } => dtypes,
             SpecKey::SoftmaxDenominatorAndUnscaled { dtypes, .. } => dtypes,
+            SpecKey::SoftmaxDenominatorAndUnscaledFromMax { dtypes, .. } => dtypes,
             SpecKey::SoftmaxDenominator { dtypes, .. } => dtypes,
             SpecKey::Fill { dtype, value: _ } => slice::from_ref(dtype),
             SpecKey::Compose { .. } => unimplemented!(),
