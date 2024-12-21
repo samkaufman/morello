@@ -5,7 +5,7 @@ use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{ActionSolver, ActionT, ApplyError, NotApplicableReason};
-use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{LogicalSpec, OperandDirection, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::utils::prev_power_of_two;
@@ -277,9 +277,11 @@ fn move_gens_prologue<Tgt: Target>(
     logical_spec: &LogicalSpec<Tgt>,
     is_cache_miss: bool,
 ) -> bool {
-    let parameters = logical_spec.parameters();
-    let is_output = usize::from(source_idx) == parameters.len() - 1;
-    let is_read = !is_output || logical_spec.output_is_read();
+    // TODO: Don't allocate whole operand_directions
+    let is_read = match logical_spec.operand_directions()[usize::from(source_idx)] {
+        OperandDirection::In | OperandDirection::InOut => true,
+        OperandDirection::Out => false,
+    };
     is_read && !is_cache_miss
 }
 
@@ -289,7 +291,7 @@ fn move_gens_epilogue<Tgt: Target>(
     is_cache_miss: bool,
 ) -> bool {
     let source_idx_usize = usize::from(source_idx);
-    let is_output = source_idx_usize == logical_spec.operand_count() - 1;
+    let is_output = logical_spec.parameter_is_output(source_idx_usize);
     is_output && !is_cache_miss
 }
 
