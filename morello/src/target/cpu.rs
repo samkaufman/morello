@@ -329,6 +329,7 @@ impl<T: CpuTarget> Target for T {
                         &[]
                     }
                 }
+                PrimitiveSpecType::DivideVec => &[],
                 PrimitiveSpecType::DivideVecScalar { .. } => &[],
                 PrimitiveSpecType::Max { accum, .. } => {
                     if *accum {

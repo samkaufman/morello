@@ -14,6 +14,9 @@ pub enum SpecKey {
     Conv {
         dtypes: [Dtype; 3],
     },
+    DivideVec {
+        dtypes: [Dtype; 3],
+    },
     DivideVecScalar {
         scan_dim: u8,
         dtypes: [Dtype; 3],
@@ -65,6 +68,7 @@ impl SpecKey {
             SpecKey::Conv { dtypes } => dtypes,
             SpecKey::Move { dtypes } => dtypes,
             SpecKey::Max { dtypes, .. } => dtypes,
+            SpecKey::DivideVec { dtypes } => dtypes,
             SpecKey::DivideVecScalar { dtypes, .. } => dtypes,
             SpecKey::Softmax { dtypes, .. } => dtypes,
             SpecKey::SoftmaxComplete { dtypes, .. } => dtypes,

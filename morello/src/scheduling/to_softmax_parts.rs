@@ -119,6 +119,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
                     vec![
                         exps_tensor.spec().aux.clone(),
                         denominator_tensor.spec().aux.clone(),
+                        operands[1].aux.clone(),
                     ],
                     spec.0.serial_only(),
                 ),

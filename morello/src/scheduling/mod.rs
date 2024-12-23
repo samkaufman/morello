@@ -14,6 +14,7 @@ use enum_dispatch::enum_dispatch;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
+use broadcast_first::BroadcastFirst;
 use bufferize::Bufferize;
 use moves::Move;
 use select::Select;
@@ -24,6 +25,7 @@ use to_max_and_denom::ToMaxAndDenominator;
 use to_max_and_unscaled::ToMaxAndUnscaled;
 use to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecompute};
 
+pub mod broadcast_first;
 pub mod bufferize;
 pub mod moves;
 pub mod select;
@@ -80,6 +82,7 @@ pub enum Action<Tgt: Target> {
     Move(Move<Tgt>),
     /// Allocate an output tensor, a Zero sub-Spec, and an accumulating variant of the receiver.
     ToAccum(ToAccum),
+    BroadcastFirst(BroadcastFirst<Tgt>),
     /// Rewrites a Softmax into a SoftmaxDenominatorAndUnscaled and a DivideVecScalar.
     ToSoftmaxParts(ToSoftmaxParts<Tgt>),
     ToSoftmaxPartsRecompute(ToSoftmaxPartsRecompute<Tgt>),

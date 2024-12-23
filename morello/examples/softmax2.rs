@@ -7,7 +7,7 @@ use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule as _};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{
-    CpuMemoryLevel::{self, GL},
+    CpuMemoryLevel::{self, GL, VRF},
     Target, X86Target,
 };
 use morello::tensorspec::TensorSpecAux;
@@ -65,7 +65,11 @@ fn main() {
         // and [0, 1] corresponds to SoftmaxDenominatorAndUnscaledFromMax1
         // .subschedule(&[0, 1], |subspec| todo!())
         // [1] corresponds to DivideVecScalar
-        .subschedule(&[1], |subspec| subspec.to_accum().split(4));
+        .subschedule(&[1], |subspec| {
+            subspec
+                .tile_out(&[1, 4])
+                .broadcast_first(VRF, row_major(RANK), Some(nz!(8u32)))
+        });
 
     println!("\nImpl resulting from manual scheduling:");
     pprint(&implementation, ImplPrintStyle::Compact);

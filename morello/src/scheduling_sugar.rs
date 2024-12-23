@@ -6,6 +6,7 @@ use crate::imp::functions::FunctionApp;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::{Layout, LayoutBuilder};
+use crate::scheduling::broadcast_first::BroadcastFirst;
 use crate::scheduling::bufferize::Bufferize;
 use crate::scheduling::moves::Move;
 use crate::scheduling::select::Select;
@@ -81,6 +82,12 @@ pub trait SchedulingSugar<Tgt: Target> {
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn spatial_split(&self) -> ImplNode<Tgt>;
+    fn broadcast_first(
+        &self,
+        level: Tgt::Level,
+        layout: Layout,
+        vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt>;
     fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
     fn force_select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
     fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
@@ -261,6 +268,20 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         apply_unwrap(self, Action::SpatialSplit(SpatialSplit::default()))
     }
 
+    fn broadcast_first(
+        &self,
+        level: Tgt::Level,
+        layout: Layout,
+        vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt> {
+        let action = Action::BroadcastFirst(BroadcastFirst {
+            broadcast_level: level,
+            broadcast_layout: layout,
+            broadcast_vector_size: vector_size,
+        });
+        apply_unwrap(self, action)
+    }
+
     fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
         let action = Action::Select(Select(kernel.into(), false));
         apply_unwrap(self, action)
@@ -409,6 +430,17 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
 
     fn spatial_split(&self) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.spatial_split())
+    }
+
+    fn broadcast_first(
+        &self,
+        level: Tgt::Level,
+        layout: Layout,
+        vector_size: Option<DimSize>,
+    ) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| {
+            spec.broadcast_first(level, layout, vector_size)
+        })
     }
 
     fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
