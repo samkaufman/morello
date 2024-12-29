@@ -65,8 +65,8 @@ pub enum Action<Tgt: Target> {
         vector_size: Option<DimSize>,
     },
     SpatialSplit,
-    // TODO: Remove 'force' bool from Place
-    Place(Tgt::Kernel, bool),
+    // TODO: Remove 'force' bool from Select
+    Select(Tgt::Kernel, bool),
 }
 
 #[derive(Debug)]
@@ -1052,7 +1052,7 @@ impl<Tgt: Target> Action<Tgt> {
                     default_child: None,
                 }))
             }
-            Action::Place(k, force) => {
+            Action::Select(k, force) => {
                 if !force && !k.applies_to_logical_spec(&spec.0) {
                     // TODO: Use better error message-producing Error type.
                     return Err(ApplyError::NotApplicable(NotApplicableReason::Other(None)));

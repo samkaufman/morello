@@ -31,7 +31,7 @@ fn main() {
     // ANCHOR_END: specdef
 
     // ANCHOR: schedule
-    let implementation = spec.to_accum().split(1).place(CpuKernel::MultAdd);
+    let implementation = spec.to_accum().split(1).select(CpuKernel::MultAdd);
     // ANCHOR_END: schedule
 
     // ANCHOR: emit

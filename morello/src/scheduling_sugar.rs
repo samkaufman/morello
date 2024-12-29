@@ -56,8 +56,8 @@ pub trait SchedulingSugar<Tgt: Target> {
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn spatial_split(&self) -> ImplNode<Tgt>;
-    fn place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
-    fn force_place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
+    fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
+    fn force_select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
     fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
     where
         Tgt: Target,
@@ -191,13 +191,13 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         apply_unwrap(self, action)
     }
 
-    fn place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
-        let action = Action::Place(kernel.into(), false);
+    fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
+        let action = Action::Select(kernel.into(), false);
         apply_unwrap(self, action)
     }
 
-    fn force_place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
-        let action = Action::Place(kernel.into(), true);
+    fn force_select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
+        let action = Action::Select(kernel.into(), true);
         apply_unwrap(self, action)
     }
 
@@ -309,12 +309,12 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.spatial_split())
     }
 
-    fn place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.place(kernel))
+    fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| spec.select(kernel))
     }
 
-    fn force_place<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.force_place(kernel))
+    fn force_select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| spec.force_select(kernel))
     }
 
     fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>

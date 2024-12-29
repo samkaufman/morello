@@ -355,7 +355,7 @@ impl<T: CpuTarget> Target for T {
         };
         let iter = iter.chain(possible_kernels.iter().filter_map(move |mk| {
             if mk.applies_to_logical_spec(spec) {
-                Some(Action::Place((*mk).into(), false))
+                Some(Action::Select((*mk).into(), false))
             } else {
                 None
             }
@@ -1612,7 +1612,7 @@ mod tests {
             logical_spec,
             MemoryLimits::Standard(MemVec::zero::<X86Target>()),
         );
-        let act = Action::Place(CpuKernel::BroadcastVecMultAdd.into(), false);
+        let act = Action::Select(CpuKernel::BroadcastVecMultAdd.into(), false);
         assert!(matches!(
             act.apply(&spec).unwrap_err(),
             ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(_))

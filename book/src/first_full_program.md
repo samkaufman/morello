@@ -46,7 +46,7 @@ to the three rewrites described in the previous section:
 
 1. `to_accum` to introduce an accumulator followed by a `MatmulAccum`,
 2. `split(&[1, 1])` to introduce a loop over the *k* dimension, and
-3. `place(CpuKernel::MultAdd)` to replacement the body with the C multiply-accumulate.
+3. `select(CpuKernel::MultAdd)` to replacement the body with the C multiply-accumulate.
 
 Pull in the `SchedulingSugar` trait, which extends Specs with these operators,
 as well as `CpuKernel`.

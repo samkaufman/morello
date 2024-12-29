@@ -105,7 +105,7 @@ fn main() {
         .subschedule(&[1, 1, 1, 2], move_schedule)
         // ...and compute the 1x1x1 matix multiply with `+= a * b`.
         .split(1)
-        .place(CpuKernel::MultAdd);
+        .select(CpuKernel::MultAdd);
 
     // The resulting implementation is:
     //   tile (aa: (16×64, u32) <-[0, 2]- #0, ab: (64×16, u32, c1) <-[3, 1]- #1, ac: (16×16, u32, c1) <-[0, 1]- #2)
@@ -220,8 +220,8 @@ fn main() {
 /// ```
 fn zero_schedule(zero: &Spec<X86Target>) -> ImplNode<X86Target> {
     zero.move_param(0, CpuMemoryLevel::RF, row_major(2), None)
-        .subschedule(&[0], |z| z.place(CpuKernel::MemsetZero))
-        .subschedule(&[1], |move_back| move_back.place(CpuKernel::ValueAssign))
+        .subschedule(&[0], |z| z.select(CpuKernel::MemsetZero))
+        .subschedule(&[1], |move_back| move_back.select(CpuKernel::ValueAssign))
 }
 
 /// Schedules the given Move Spec.
@@ -234,8 +234,8 @@ fn move_schedule(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
         .iter()
         .all(|size| size.get() == 1);
     if is_single_value {
-        move_spec.place(CpuKernel::ValueAssign)
+        move_spec.select(CpuKernel::ValueAssign)
     } else {
-        move_spec.tile_out(&[1, 1]).place(CpuKernel::ValueAssign)
+        move_spec.tile_out(&[1, 1]).select(CpuKernel::ValueAssign)
     }
 }
