@@ -6,7 +6,15 @@ use crate::imp::functions::FunctionApp;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
-use crate::scheduling::{Action, ApplyError, TileOut};
+use crate::scheduling::bufferize::Bufferize;
+use crate::scheduling::moves::Move;
+use crate::scheduling::select::Select;
+use crate::scheduling::spatial_split::SpatialSplit;
+use crate::scheduling::tiling::{Split, TileOut};
+use crate::scheduling::to_accum::ToAccum;
+use crate::scheduling::to_max_and_denom::ToMaxAndDenominator;
+use crate::scheduling::to_softmax_parts::ToSoftmaxParts;
+use crate::scheduling::{Action, ApplyError};
 use crate::search::top_down;
 use crate::spec::Spec;
 use crate::target::Target;
@@ -95,9 +103,9 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     }
 
     fn split(&self, k: u32) -> ImplNode<Tgt> {
-        let action = Action::Split {
+        let action = Action::Split(Split {
             k: DimSize::new(k).unwrap(),
-        };
+        });
         apply_unwrap(self, action)
     }
 
@@ -109,13 +117,13 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         let destination_dtype = self.0.parameters()[usize::from(source_idx)].dtype();
-        let action = Action::Move {
+        let action = Action::Move(Move {
             source_idx,
             destination_dtype,
             destination_level,
             destination_layout,
             destination_vector_size,
-        };
+        });
         apply_unwrap(self, action)
     }
 
@@ -127,18 +135,18 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         destination_layout: Layout,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        let action = Action::Move {
+        let action = Action::Move(Move {
             source_idx,
             destination_dtype,
             destination_level,
             destination_layout,
             destination_vector_size,
-        };
+        });
         apply_unwrap(self, action)
     }
 
     fn to_accum(&self) -> ImplNode<Tgt> {
-        let action = Action::ToAccum;
+        let action = Action::ToAccum(ToAccum::default());
         apply_unwrap(self, action)
     }
 
@@ -153,19 +161,22 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     ) -> ImplNode<Tgt> {
         apply_unwrap(
             self,
-            Action::ToSoftmaxParts {
+            Action::ToSoftmaxParts(ToSoftmaxParts {
                 max_level,
                 max_layout,
                 max_vector_size,
                 denominator_level,
                 denominator_layout,
                 denominator_vector_size,
-            },
+            }),
         )
     }
 
     fn to_max_and_denominator(&self) -> ImplNode<Tgt> {
-        apply_unwrap(self, Action::ToMaxAndDenominator)
+        apply_unwrap(
+            self,
+            Action::ToMaxAndDenominator(ToMaxAndDenominator::default()),
+        )
     }
 
     fn bufferize(
@@ -177,27 +188,26 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     ) -> ImplNode<Tgt> {
         apply_unwrap(
             self,
-            Action::Bufferize {
+            Action::Bufferize(Bufferize {
                 index,
                 level,
                 layout,
                 vector_size,
-            },
+            }),
         )
     }
 
     fn spatial_split(&self) -> ImplNode<Tgt> {
-        let action = Action::SpatialSplit;
-        apply_unwrap(self, action)
+        apply_unwrap(self, Action::SpatialSplit(SpatialSplit::default()))
     }
 
     fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
-        let action = Action::Select(kernel.into(), false);
+        let action = Action::Select(Select(kernel.into(), false));
         apply_unwrap(self, action)
     }
 
     fn force_select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
-        let action = Action::Select(kernel.into(), true);
+        let action = Action::Select(Select(kernel.into(), true));
         apply_unwrap(self, action)
     }
 

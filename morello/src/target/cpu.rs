@@ -6,6 +6,9 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::layout::{col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
+use crate::scheduling::select::Select;
+use crate::scheduling::spatial_split::SpatialSplit;
+use crate::scheduling::to_accum::ToAccum;
 use crate::scheduling::Action;
 use crate::shape;
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
@@ -355,7 +358,7 @@ impl<T: CpuTarget> Target for T {
         };
         let iter = iter.chain(possible_kernels.iter().filter_map(move |mk| {
             if mk.applies_to_logical_spec(spec) {
-                Some(Action::Select((*mk).into(), false))
+                Some(Action::Select(Select((*mk).into(), false)))
             } else {
                 None
             }
@@ -372,7 +375,7 @@ impl<T: CpuTarget> Target for T {
                 _serial_only,
             ) => match typ {
                 PrimitiveSpecType::Matmul { accum } if !*accum => {
-                    Box::new(iter.chain(once(Action::ToAccum)))
+                    Box::new(iter.chain(once(ToAccum::default().into())))
                 }
                 PrimitiveSpecType::Matmul { accum } if *accum => {
                     Box::new(iter.chain(split_actions(spec, tiling_depth)))
@@ -380,12 +383,12 @@ impl<T: CpuTarget> Target for T {
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
                         if spec.can_spatial_split() {
-                            Box::new(iter.chain(once(Action::SpatialSplit)))
+                            Box::new(iter.chain(once(SpatialSplit::default().into())))
                         } else {
                             Box::new(iter)
                         }
                     } else {
-                        Box::new(iter.chain(once(Action::ToAccum)))
+                        Box::new(iter.chain(once(ToAccum::default().into())))
                     }
                 }
                 _ => Box::new(iter),
@@ -1465,7 +1468,7 @@ mod tests {
         common::{DimSize, Dtype},
         layout::{col_major, row_major, Layout},
         lspec,
-        scheduling::{ApplyError, NotApplicableReason},
+        scheduling::{moves::Move, ApplyError, NotApplicableReason},
         spec::{arb_canonical_spec, Spec},
         target::{Target, X86Target},
         views::Param,
@@ -1544,7 +1547,7 @@ mod tests {
         ) {
             let mut seen_source_idxs = HashSet::new();
             for action in X86Target::actions(&spec.0, tiling_depth) {
-                if let Action::Move { source_idx, .. } = action {
+                if let Action::Move(Move { source_idx, .. }) = action {
                     seen_source_idxs.insert(source_idx);
                 }
             }
@@ -1612,7 +1615,7 @@ mod tests {
             logical_spec,
             MemoryLimits::Standard(MemVec::zero::<X86Target>()),
         );
-        let act = Action::Select(CpuKernel::BroadcastVecMultAdd.into(), false);
+        let act = Action::Select(Select(CpuKernel::BroadcastVecMultAdd.into(), false));
         assert!(matches!(
             act.apply(&spec).unwrap_err(),
             ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(_))

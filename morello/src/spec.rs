@@ -2503,7 +2503,8 @@ mod tests {
     use crate::imp::{visit_leaves, Impl, ImplExt, ImplNode};
     use crate::layout::row_major;
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
-    use crate::scheduling::{Action, ApplyError, TileOut};
+    use crate::scheduling::tiling::TileOut;
+    use crate::scheduling::{Action, ApplyError};
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::target::CpuMemoryLevel::{GL, L1, RF};
     use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};

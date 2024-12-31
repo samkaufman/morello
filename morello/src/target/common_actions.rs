@@ -10,7 +10,12 @@ use itertools::Either;
 use super::{MemoryLevel, Target};
 use crate::{
     common::{DimSize, Shape},
-    scheduling::{Action, TileOut},
+    scheduling::{
+        bufferize::Bufferize,
+        moves::Move,
+        tiling::{Split, TileOut},
+        Action,
+    },
     spec::{dim_range, LogicalSpec, PrimitiveBasics, PrimitiveSpecType},
     tensorspec::{gen_vector_sizes, gen_vector_sizes_opt},
     utils::is_power_of_two_u32,
@@ -110,7 +115,7 @@ pub fn split_actions<Tgt: Target>(
             operands[0].is_valid_tile_shape(&[m, new_k], false)
                 && operands[1].is_valid_tile_shape(&[new_k, n], false)
         })
-        .map(|k| Action::Split { k })
+        .map(|k| Action::Split(Split { k }))
 }
 
 pub fn bufferize_actions<Tgt: Target>(
@@ -141,20 +146,20 @@ pub fn bufferize_actions<Tgt: Target>(
 
                 if !vector_bytes.is_empty() {
                     for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
-                        results.push(Action::Bufferize {
+                        results.push(Action::Bufferize(Bufferize {
                             index,
                             level,
                             layout: layout.clone(),
                             vector_size: Some(vector_size),
-                        });
+                        }));
                     }
                 } else {
-                    results.push(Action::Bufferize {
+                    results.push(Action::Bufferize(Bufferize {
                         index,
                         level,
                         layout,
                         vector_size: None,
-                    });
+                    }));
                 }
             }
         }
@@ -186,13 +191,13 @@ pub fn move_actions<Tgt: Target>(
                                 // This may return Moves with identical source and destination
                                 // TensorSpecs (i.e., within-level copies). These will be filtered in
                                 // [apply_with_aux].
-                                Action::Move {
+                                Action::Move(Move {
                                     source_idx: i,
                                     destination_dtype,
                                     destination_level: level,
                                     destination_layout: layout.clone(),
                                     destination_vector_size: vector_size,
-                                }
+                                })
                             },
                         ),
                     )
