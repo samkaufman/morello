@@ -476,7 +476,7 @@ impl ImplReducer {
     }
 }
 
-impl<'a, Tgt, U> VisitUpdater<Tgt> for TrackingUpdater<'a, Tgt, U>
+impl<Tgt, U> VisitUpdater<Tgt> for TrackingUpdater<'_, Tgt, U>
 where
     Tgt: Target,
     U: VisitUpdater<Tgt>,
