@@ -109,6 +109,7 @@ pub trait VisitUpdater<Tgt: Target> {
     fn complete_spec(&mut self, spec: &Spec<Tgt>);
 }
 
+/// An actions provider for [NaiveBottomUpSolver].
 pub trait NaiveBottomUpActionProvider<Tgt: Target> {
     fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>>;
 
