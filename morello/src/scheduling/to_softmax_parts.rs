@@ -78,61 +78,31 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
         let lowered_limits =
             softmax_child_limits(&spec.1, [denominator_tensor.spec(), exps_tensor.spec()])?;
 
-        let denom_app: ImplNode<Tgt> = {
-            let mut denom_spec = Spec(
-                LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaled {
-                            scan_dim: *scan_dim,
-                            accum: false,
-                        },
-                        spec_shape: basics.spec_shape.clone(),
-                        dtypes: vec![dtypes[0]; 3],
-                    },
-                    vec![
-                        operands[0].aux.clone(),
-                        denominator_tensor.spec().aux.clone(),
-                        exps_tensor.spec().aux.clone(),
-                    ],
-                    spec.0.serial_only(),
-                ),
-                lowered_limits.clone(),
-            );
-            denom_spec.canonicalize().unwrap();
-            let app_args = vec![
+        let denom_app = ImplNode::from(SpecApp::new_primitive_app(
+            PrimitiveSpecType::SoftmaxDenominatorAndUnscaled {
+                scan_dim: *scan_dim,
+                accum: false,
+            },
+            [
                 Param::new(0, operands[0].clone()).into(),
                 denominator_tensor.clone().into(),
                 exps_tensor.clone().into(),
-            ];
-            SpecApp::new(denom_spec, app_args).into()
-        };
-        let scale_app: ImplNode<Tgt> = {
-            let mut scale_spec = Spec(
-                LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::DivideVecScalar {
-                            scan_dim: *scan_dim,
-                        },
-                        spec_shape: basics.spec_shape.clone(),
-                        dtypes: vec![dtypes[0]; 3],
-                    },
-                    vec![
-                        exps_tensor.spec().aux.clone(),
-                        denominator_tensor.spec().aux.clone(),
-                        operands[1].aux.clone(),
-                    ],
-                    spec.0.serial_only(),
-                ),
-                lowered_limits.clone(),
-            );
-            scale_spec.canonicalize().unwrap();
-            let app_args = vec![
+            ],
+            spec.0.serial_only(),
+            lowered_limits.clone(),
+        ));
+        let scale_app = ImplNode::from(SpecApp::new_primitive_app(
+            PrimitiveSpecType::DivideVecScalar {
+                scan_dim: *scan_dim,
+            },
+            [
                 denominator_tensor.clone().into(),
                 exps_tensor.clone().into(),
                 Param::new(1, operands[1].clone()).into(),
-            ];
-            SpecApp::new(scale_spec, app_args).into()
-        };
+            ],
+            spec.0.serial_only(),
+            lowered_limits.clone(),
+        ));
 
         Ok(ImplNode::Pipeline(Pipeline {
             stages: vec![denom_app, scale_app],
@@ -188,44 +158,32 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
         let lowered_limits =
             softmax_child_limits(&spec.1, [max_tensor.spec(), denominator_tensor.spec()])?;
 
-        let denom_app = softmax_denominatorandmax_subapp(
-            *scan_dim,
-            &basics.spec_shape,
+        debug_assert_eq!(max_tensor.spec().dtype(), denominator_tensor.spec().dtype());
+        let denom_app = ImplNode::from(SpecApp::new_primitive_app(
+            PrimitiveSpecType::SoftmaxDenominatorAndMax {
+                scan_dim: *scan_dim,
+            },
+            [
+                ViewE::from(Param::new(0, operands[0].clone())),
+                ViewE::from(max_tensor.clone()),
+                ViewE::from(denominator_tensor.clone()),
+            ],
             spec.0.serial_only(),
             lowered_limits.clone(),
-            operands[0].clone(),
-            &max_tensor,
-            &denominator_tensor,
-        );
-        let complete_app: ImplNode<Tgt> = {
-            let mut complete_spec = Spec(
-                LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::SoftmaxComplete {
-                            scan_dim: *scan_dim,
-                        },
-                        spec_shape: basics.spec_shape.clone(),
-                        dtypes: vec![dtypes[0], dtypes[0], dtypes[0], dtypes[1]],
-                    },
-                    vec![
-                        operands[0].aux.clone(),
-                        max_tensor.spec().aux.clone(),
-                        denominator_tensor.spec().aux.clone(),
-                        operands[1].aux.clone(),
-                    ],
-                    spec.0.serial_only(),
-                ),
-                lowered_limits,
-            );
-            complete_spec.canonicalize().unwrap();
-            let app_args = vec![
+        ));
+        let complete_app = ImplNode::from(SpecApp::new_primitive_app(
+            PrimitiveSpecType::SoftmaxComplete {
+                scan_dim: *scan_dim,
+            },
+            [
                 ViewE::from(Param::new(0, operands[0].clone())),
                 ViewE::from(max_tensor.clone()),
                 ViewE::from(denominator_tensor.clone()),
                 ViewE::from(Param::new(1, operands[1].clone())),
-            ];
-            SpecApp::new(complete_spec, app_args).into()
-        };
+            ],
+            spec.0.serial_only(),
+            lowered_limits,
+        ));
 
         Ok(ImplNode::Pipeline(Pipeline {
             stages: vec![denom_app, complete_app],
@@ -259,42 +217,6 @@ fn softmax_scalar_tensor<Tgt: Target>(
     };
     max_spec.shape[usize::from(scan_dim)] = nz!(1u32);
     Tensor::new(max_spec)
-}
-
-fn softmax_denominatorandmax_subapp<Tgt: Target>(
-    scan_dim: u8,
-    spec_shape: &[DimSize],
-    serial_only: bool,
-    lowered_limits: MemoryLimits,
-    input_tensorspec: TensorSpec<Tgt>,
-    max_tensor: &Tensor<Tgt>,
-    denominator_tensor: &Tensor<Tgt>,
-) -> ImplNode<Tgt> {
-    debug_assert_eq!(max_tensor.spec().dtype(), denominator_tensor.spec().dtype());
-    let dtype = max_tensor.spec().dtype();
-    let mut denom_spec = Spec(
-        LogicalSpec::Primitive(
-            PrimitiveBasics {
-                typ: PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim },
-                spec_shape: spec_shape.to_vec(),
-                dtypes: vec![dtype; 3],
-            },
-            vec![
-                input_tensorspec.aux.clone(),
-                max_tensor.spec().aux.clone(),
-                denominator_tensor.spec().aux.clone(),
-            ],
-            serial_only,
-        ),
-        lowered_limits,
-    );
-    denom_spec.canonicalize().unwrap();
-    let app_args = vec![
-        ViewE::from(Param::new(0, input_tensorspec)),
-        ViewE::from(max_tensor.clone()),
-        ViewE::from(denominator_tensor.clone()),
-    ];
-    SpecApp::new(denom_spec, app_args).into()
 }
 
 // TODO: Rename and use this elsewhere, such as in the Move planning.

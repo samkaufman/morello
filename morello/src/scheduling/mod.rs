@@ -368,21 +368,14 @@ fn make_accum_inits_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> Vec<ImplNode<Tgt>
                 .initial_accumulating_value_for_output(parameter_idx.into())
                 .expect("output parameter should be compatible with ToAccum");
             let output = spec.0.parameter(parameter_idx.into());
-            let subspec = LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Fill {
-                        value: accum_initial_value,
-                    },
-                    spec_shape: output.shape.clone(),
-                    dtypes: vec![output.dtype],
+            Some(ImplNode::from(SpecApp::new_primitive_app(
+                PrimitiveSpecType::Fill {
+                    value: accum_initial_value,
                 },
-                vec![output.aux.clone()],
+                [ViewE::from(Param::new(parameter_idx, output))],
                 spec.0.serial_only(),
-            );
-            let mut spec = Spec(subspec, spec.1.clone());
-            spec.canonicalize()
-                .expect("ToAccum's introduced Zeroes should be canonicalizable");
-            Some(SpecApp::new(spec, [ViewE::from(Param::new(parameter_idx, output))]).into())
+                spec.1.clone(),
+            )))
         })
         .collect()
 }

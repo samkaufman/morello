@@ -33,54 +33,32 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
             ))));
         };
 
-        let max_app = {
-            let mut max_spec = Spec(
-                LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::Max {
-                            dim: *scan_dim,
-                            accum: false,
-                        },
-                        spec_shape: spec_shape.clone(),
-                        dtypes: vec![dtypes[0], dtypes[1]],
-                    },
-                    vec![operands[0].aux.clone(), operands[1].aux.clone()],
-                    *serial_only,
-                ),
-                spec.1.clone(),
-            );
-            max_spec.canonicalize().unwrap();
-            let app_args = vec![
+        let max_app = ImplNode::from(SpecApp::new_primitive_app(
+            PrimitiveSpecType::Max {
+                dim: *scan_dim,
+                accum: false,
+            },
+            [
                 ViewE::from(Param::new(0, operands[0].clone())),
                 ViewE::from(Param::new(1, operands[1].clone())),
-            ];
-            SpecApp::new(max_spec, app_args).into()
-        };
+            ],
+            *serial_only,
+            spec.1.clone(),
+        ));
 
-        let denom_app = {
-            let mut denom_spec = Spec(
-                LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::SoftmaxDenominator {
-                            scan_dim: *scan_dim,
-                            accum: false,
-                        },
-                        spec_shape: spec_shape.clone(),
-                        dtypes: dtypes.clone(),
-                    },
-                    auxes.clone(),
-                    *serial_only,
-                ),
-                spec.1.clone(),
-            );
-            denom_spec.canonicalize().unwrap();
-            let app_args = vec![
+        let denom_app = ImplNode::from(SpecApp::new_primitive_app(
+            PrimitiveSpecType::SoftmaxDenominator {
+                scan_dim: *scan_dim,
+                accum: false,
+            },
+            [
                 ViewE::from(Param::new(0, operands[0].clone())),
                 ViewE::from(Param::new(1, operands[1].clone())),
                 ViewE::from(Param::new(2, operands[2].clone())),
-            ];
-            SpecApp::new(denom_spec, app_args).into()
-        };
+            ],
+            *serial_only,
+            spec.1.clone(),
+        ));
 
         Ok(ImplNode::Block(Block {
             stages: vec![max_app, denom_app],

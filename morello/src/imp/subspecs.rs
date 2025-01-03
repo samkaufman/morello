@@ -1,8 +1,8 @@
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
-use crate::memorylimits::MemoryAllocation;
+use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::nameenv::NameEnv;
-use crate::spec::Spec;
+use crate::spec::{LogicalSpec, PrimitiveSpecType, Spec};
 use crate::target::LEVEL_COUNT;
 use crate::tensorspec::TensorSpec;
 use crate::views::{View, ViewE};
@@ -18,6 +18,25 @@ impl<A: View> SpecApp<A> {
         let a = args.into_iter().collect::<Vec<_>>();
         debug_assert_eq!(spec.0.operand_count(), a.len());
         Self(spec, a)
+    }
+
+    /// Create an application of a primitive [LogicalSpec].
+    pub fn new_primitive_app(
+        primitive_type: PrimitiveSpecType,
+        args: impl IntoIterator<Item = A>,
+        serial_only: bool,
+        memory_limits: MemoryLimits,
+    ) -> Self {
+        let args_vec = args.into_iter().collect::<Vec<_>>();
+        let primitive = LogicalSpec::primitive_from_parameters(
+            primitive_type,
+            args_vec.iter().map(|a| a.spec().clone()),
+            serial_only,
+        );
+        debug_assert_eq!(primitive.operand_count(), args_vec.len());
+        let mut spec = Spec(primitive, memory_limits);
+        spec.canonicalize().unwrap();
+        SpecApp::new(spec, args_vec)
     }
 }
 

@@ -283,73 +283,9 @@ pub fn arb_canonical_spec<Tgt: Target>(
 impl PrimitiveBasics {
     pub fn replace_io(&mut self, new_operands: &[(&[DimSize], Dtype)]) {
         self.dtypes = new_operands.iter().map(|o| o.1).collect();
-
-        match self.typ {
-            PrimitiveSpecType::Matmul { accum: _ } => {
-                assert_eq!(new_operands.len(), 3);
-                assert_eq!(new_operands[0].0[0], new_operands[2].0[0]);
-                assert_eq!(new_operands[1].0[1], new_operands[2].0[1]);
-                assert_eq!(new_operands[0].0[1], new_operands[1].0[0]);
-                self.spec_shape = vec![
-                    new_operands[0].0[0],
-                    new_operands[0].0[1],
-                    new_operands[1].0[1],
-                ];
-            }
-            PrimitiveSpecType::Conv { accum: _ } => {
-                let [b, c, h, w] = new_operands[0].0[..] else {
-                    panic!();
-                };
-                let [f, alt_c, fh, fw] = new_operands[1].0[..] else {
-                    panic!()
-                };
-                assert_eq!(c, alt_c);
-                self.spec_shape = vec![b, f, c, h, w, fh, fw];
-                // TODO: Assert output shape is expected.
-            }
-            PrimitiveSpecType::DivideVec => {
-                assert_eq!(new_operands.len(), 3);
-                assert_eq!(new_operands[0].0, new_operands[1].0);
-                assert_eq!(new_operands[0].0, new_operands[2].0);
-                self.spec_shape = new_operands[0].0.into();
-            }
-            PrimitiveSpecType::DivideVecScalar { scan_dim } => {
-                assert_eq!(new_operands.len(), 3);
-                assert_eq!(new_operands[0].0, new_operands[2].0);
-                assert!(
-                    new_operands[1].0.iter().enumerate().all(|(i, &dim)| {
-                        if i == usize::from(scan_dim) {
-                            dim == nz!(1u32)
-                        } else {
-                            dim == new_operands[0].0[i]
-                        }
-                    }),
-                    "surprise second parameter shape: {:?}",
-                    new_operands[1].0
-                );
-                self.spec_shape = new_operands[0].0.into();
-            }
-            PrimitiveSpecType::Softmax { .. }
-            | PrimitiveSpecType::SoftmaxComplete { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. }
-            | PrimitiveSpecType::SoftmaxDenominator { .. }
-            | PrimitiveSpecType::Max { .. } => {
-                self.spec_shape = new_operands[0].0.into();
-            }
-            PrimitiveSpecType::Move => {
-                let [src, dest] = new_operands else {
-                    panic!("Move must have 2 operands");
-                };
-                assert_eq!(src.0, dest.0);
-                self.spec_shape = src.0.into();
-            }
-            PrimitiveSpecType::Fill { .. } => {
-                assert_eq!(new_operands.len(), 1);
-                self.spec_shape = new_operands[0].0.into();
-            }
-        }
+        self.spec_shape = self
+            .typ
+            .shape_from_parameters(new_operands.iter().map(|t| t.0));
     }
 
     pub fn aux_from_operand_auxes<'a, Tgt, I>(&self, operand_auxes: I) -> Vec<TensorSpecAux<Tgt>>
@@ -908,6 +844,77 @@ pub enum OperandDirection {
 }
 
 impl PrimitiveSpecType {
+    /// Computes a spec_shape from an [Iterator] of parameter shapes.
+    fn shape_from_parameters<'a, I: Iterator<Item = &'a [DimSize]>>(
+        &self,
+        mut parameter_shapes: I,
+    ) -> Shape {
+        match self {
+            PrimitiveSpecType::Matmul { accum: _ } => {
+                let lhs = parameter_shapes.next().unwrap();
+                let rhs = parameter_shapes.next().unwrap();
+                let out = parameter_shapes.next().unwrap();
+                assert_eq!(lhs[0], out[0]);
+                assert_eq!(rhs[1], out[1]);
+                assert_eq!(lhs[1], rhs[0]);
+                vec![lhs[0], lhs[1], rhs[1]]
+            }
+            PrimitiveSpecType::Conv { accum: _ } => {
+                let lhs = parameter_shapes.next().unwrap();
+                let rhs = parameter_shapes.next().unwrap();
+                let _out = parameter_shapes.next().unwrap();
+
+                let [b, c, h, w] = *lhs else {
+                    panic!();
+                };
+                let [f, alt_c, fh, fw] = *rhs else { panic!() };
+                assert_eq!(c, alt_c);
+                // TODO: Assert consistency with the output as well
+                vec![b, f, c, h, w, fh, fw]
+            }
+            PrimitiveSpecType::DivideVec => {
+                let numer = parameter_shapes.next().unwrap();
+                let denom = parameter_shapes.next().unwrap();
+                let out = parameter_shapes.next().unwrap();
+
+                assert_eq!(numer, denom);
+                assert_eq!(numer, out);
+                numer.into()
+            }
+            PrimitiveSpecType::DivideVecScalar { scan_dim } => {
+                let numer = parameter_shapes.next().unwrap();
+                let denom = parameter_shapes.next().unwrap();
+                let out = parameter_shapes.next().unwrap();
+                assert_eq!(numer, out);
+                assert!(
+                    denom.iter().enumerate().all(|(i, &dim)| {
+                        if i == usize::from(*scan_dim) {
+                            dim == nz!(1u32)
+                        } else {
+                            dim == numer[i]
+                        }
+                    }),
+                    "surprise second parameter shape: {denom:?}",
+                );
+                numer.into()
+            }
+            PrimitiveSpecType::Move => {
+                let src = parameter_shapes.next().unwrap();
+                let dest = parameter_shapes.next().unwrap();
+                assert_eq!(src, dest);
+                src.into()
+            }
+            PrimitiveSpecType::Softmax { .. }
+            | PrimitiveSpecType::SoftmaxComplete { .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. }
+            | PrimitiveSpecType::SoftmaxDenominator { .. }
+            | PrimitiveSpecType::Max { .. }
+            | PrimitiveSpecType::Fill { .. } => parameter_shapes.next().unwrap().into(),
+        }
+    }
+
     pub fn operand_directions(&self) -> &'static [OperandDirection] {
         use OperandDirection::*;
 
@@ -1096,6 +1103,36 @@ impl Display for PrimitiveSpecType {
 }
 
 impl<Tgt: Target> LogicalSpec<Tgt> {
+    pub fn primitive_from_parameters<P: IntoIterator<Item = TensorSpec<Tgt>>>(
+        typ: PrimitiveSpecType,
+        parameters: P,
+        serial_only: bool,
+    ) -> Self {
+        let parameters_vec = parameters.into_iter().collect::<Vec<_>>();
+        // Call a less generic version to rein in monomorphization.
+        Self::primitive_from_parameters_vec(typ, parameters_vec, serial_only)
+    }
+
+    fn primitive_from_parameters_vec(
+        typ: PrimitiveSpecType,
+        parameters: Vec<TensorSpec<Tgt>>,
+        serial_only: bool,
+    ) -> Self {
+        let spec_shape = typ.shape_from_parameters(parameters.iter().map(|t| t.shape()));
+        // TODO: Avoid cloning and instead just move out of the Vec elements
+        let dtypes = parameters.iter().map(|p| p.dtype).collect();
+        let auxes = parameters.iter().map(|p| p.aux.clone()).collect();
+        LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ,
+                spec_shape,
+                dtypes,
+            },
+            auxes,
+            serial_only,
+        )
+    }
+
     pub fn operand_directions(&self) -> Vec<OperandDirection> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => basics.typ.operand_directions().into(),
