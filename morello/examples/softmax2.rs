@@ -4,7 +4,7 @@ use morello::cost::Cost;
 use morello::db::FilesDatabase;
 use morello::layout::row_major;
 use morello::pprint::{pprint, ImplPrintStyle};
-use morello::scheduling_sugar::{SchedulingSugar, Subschedule as _};
+use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{
     CpuMemoryLevel::{self, GL, VRF},
@@ -69,6 +69,13 @@ fn main() {
             subspec
                 .tile_out(&[1, 4])
                 .broadcast_first(VRF, row_major(RANK), Some(nz!(4u32)))
+                .subschedule(&[0], |broadcast| {
+                    broadcast
+                        .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
+                        .move_param(0, CpuMemoryLevel::RF, row_major(2), None)
+                        .synthesize(&db, None)
+                })
+                .subschedule(&[1], |d| d.synthesize(&db, None))
         });
 
     println!("\nImpl resulting from manual scheduling:");

@@ -1723,6 +1723,68 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     CpuKernel::VectorDeinterleaveF32Bf16 => todo!(),
+                    CpuKernel::VecScalarAssign => {
+                        let vector_size = arguments[1].spec().vector_size().unwrap();
+                        let out_vector_type =
+                            get_vector(Tgt::vec_types(), arguments[1].spec().dtype(), vector_size);
+
+                        let volume = arguments[1].spec().volume().get();
+                        debug_assert_eq!(volume % vector_size.get(), 0);
+                        let vector_count = volume / vector_size.get();
+                        for vector_idx in 0..vector_count {
+                            let exprs =
+                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                                    0 => self.c_index(a, b, None),
+                                    1 => self.c_index_vec(
+                                        a,
+                                        &(b.clone()
+                                            + i32::try_from(vector_idx * vector_size.get())
+                                                .unwrap()),
+                                        None,
+                                    ),
+                                    _ => unreachable!(),
+                                });
+                            writeln!(
+                                w,
+                                "{}{} = ({}){{{}}}; /* VecScalarAssign */",
+                                indent(depth),
+                                exprs[1],
+                                out_vector_type.name,
+                                exprs[0],
+                            )?;
+                        }
+                        Ok(())
+                    }
+                    CpuKernel::DivideVec => {
+                        let vector_size = arguments[0].spec().vector_size().unwrap();
+                        debug_assert_eq!(arguments[1].spec().vector_size(), Some(vector_size));
+                        debug_assert_eq!(arguments[2].spec().vector_size(), Some(vector_size));
+                        let volume = arguments[1].spec().volume().get();
+                        debug_assert_eq!(volume % vector_size.get(), 0);
+                        let vector_count = volume / vector_size.get();
+                        for vector_idx in 0..vector_count {
+                            let exprs =
+                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                                    0..=2 => self.c_index_vec(
+                                        a,
+                                        &(b.clone()
+                                            + i32::try_from(vector_idx * vector_size.get())
+                                                .unwrap()),
+                                        None,
+                                    ),
+                                    _ => unreachable!(),
+                                });
+                            writeln!(
+                                w,
+                                "{}{} = {} / {}; /* DivideVec */",
+                                indent(depth),
+                                exprs[2],
+                                exprs[0],
+                                exprs[1]
+                            )?;
+                        }
+                        Ok(())
+                    }
                 }
             }
             ImplNode::FunctionApp(_) => {

@@ -105,6 +105,8 @@ pub enum CpuKernel {
     VectorSoftmaxComplete,
     ValueMax,
     VectorMax, // TODO: Add F32 to name
+    VecScalarAssign,
+    DivideVec,
     ValueAssign,
     VectorAssign,
     MemsetZero,
@@ -307,7 +309,7 @@ impl<T: CpuTarget> Target for T {
                     }
                 }
                 PrimitiveSpecType::Conv { .. } => &[],
-                PrimitiveSpecType::Broadcast { .. } => &[],
+                PrimitiveSpecType::Broadcast { .. } => &[CpuKernel::VecScalarAssign],
                 PrimitiveSpecType::Softmax { .. } => &[],
                 PrimitiveSpecType::SoftmaxComplete { .. } => {
                     const SOFTMAX_COMPLETE_KERNELS: [CpuKernel; 2] = [
@@ -330,7 +332,7 @@ impl<T: CpuTarget> Target for T {
                         &[]
                     }
                 }
-                PrimitiveSpecType::DivideVec => &[],
+                PrimitiveSpecType::DivideVec => &[CpuKernel::DivideVec],
                 PrimitiveSpecType::DivideVecScalar { .. } => &[],
                 PrimitiveSpecType::Max { accum, .. } => {
                     if *accum {
@@ -441,7 +443,8 @@ impl CpuKernel {
             | CpuKernel::DotProductLoop
             | CpuKernel::DotProductLoopF32Bf16F32
             | CpuKernel::DotProductLoopF32InterleavedBf16F32
-            | CpuKernel::DotProductLoopBf16Bf16F32 => 3,
+            | CpuKernel::DotProductLoopBf16Bf16F32
+            | CpuKernel::DivideVec => 3,
             CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
             | CpuKernel::VectorInterleaveBf16F32
@@ -451,7 +454,8 @@ impl CpuKernel {
             | CpuKernel::ValueAssign
             | CpuKernel::VectorAssign
             | CpuKernel::CastBf16F32
-            | CpuKernel::VectorCastBf16F32 => 2,
+            | CpuKernel::VectorCastBf16F32
+            | CpuKernel::VecScalarAssign => 2,
             CpuKernel::MemsetZero
             | CpuKernel::VectorZero
             | CpuKernel::ValueNegInf
@@ -843,6 +847,95 @@ impl CpuKernel {
                 }
                 true
             }
+            CpuKernel::VecScalarAssign => {
+                let PrimitiveSpecType::Broadcast { dim } = *typ else {
+                    return false;
+                };
+
+                if operands[0].dtype() != operands[1].dtype() {
+                    return false;
+                }
+
+                if operands[0].level() != CpuMemoryLevel::RF {
+                    return false;
+                }
+                if operands[1].level() != CpuMemoryLevel::VRF {
+                    return false;
+                }
+
+                if !operands[0].is_contiguous() || !operands[1].is_contiguous() {
+                    return false;
+                }
+
+                if !operands[0].shape().iter().all(|d| d.get() == 1) {
+                    return false;
+                }
+
+                let dest_shape = operands[1].shape();
+                if dest_shape[..usize::from(dim)].iter().any(|d| d.get() != 1) {
+                    return false;
+                }
+                if dest_shape[(usize::from(dim) + 1)..]
+                    .iter()
+                    .any(|d| d.get() != 1)
+                {
+                    return false;
+                }
+
+                let Some(vs) = operands[1].vector_size() else {
+                    return false;
+                };
+                if dest_shape[usize::from(dim)].get() % vs.get() != 0 {
+                    return false;
+                }
+
+                true
+            }
+            CpuKernel::DivideVec => {
+                let PrimitiveSpecType::DivideVec = *typ else {
+                    return false;
+                };
+                debug_assert_eq!(operands.len(), 3);
+
+                if operands[0].dtype() != operands[1].dtype()
+                    || operands[0].dtype() != operands[1].dtype()
+                {
+                    return false;
+                }
+
+                if operands[0].level() != CpuMemoryLevel::VRF {
+                    return false;
+                }
+                if operands[1].level() != CpuMemoryLevel::VRF {
+                    return false;
+                }
+                if operands[2].level() != CpuMemoryLevel::VRF {
+                    return false;
+                }
+
+                if operands[0].vector_size() != operands[1].vector_size() {
+                    return false;
+                }
+                if operands[0].vector_size() != operands[2].vector_size() {
+                    return false;
+                }
+
+                if !operands[0].is_contiguous()
+                    || !operands[1].is_contiguous()
+                    || !operands[2].is_contiguous()
+                {
+                    return false;
+                }
+
+                if operands[0].shape() != operands[1].shape() {
+                    return false;
+                }
+                if operands[0].shape() != operands[2].shape() {
+                    return false;
+                }
+
+                true
+            }
             CpuKernel::ValueAssign => {
                 debug_assert_eq!(operands.len(), 2);
 
@@ -1141,10 +1234,15 @@ impl CpuKernel {
                 // TODO: Measure throughput!
                 INST_COST
             }
-            CpuKernel::VectorMax => {
+            CpuKernel::VectorMax | CpuKernel::VecScalarAssign | CpuKernel::DivideVec => {
                 // TODO: Measure throughput!
-                let value_cnt = parameters[0].spec().volume().get();
-                let vector_cnt = value_cnt / parameters[0].spec().vector_size().unwrap().get();
+                let vidx = match self {
+                    CpuKernel::VectorMax | CpuKernel::DivideVec => 0,
+                    CpuKernel::VecScalarAssign => 1,
+                    _ => unreachable!(),
+                };
+                let value_cnt = parameters[vidx].spec().volume().get();
+                let vector_cnt = value_cnt / parameters[vidx].spec().vector_size().unwrap().get();
                 INST_COST * (vector_cnt + 1)
             }
             CpuKernel::ValueSoftmaxDenominator | CpuKernel::VectorSoftmaxDenominator => {
