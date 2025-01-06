@@ -96,8 +96,8 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
                 scan_dim: *scan_dim,
             },
             [
-                denominator_tensor.clone().into(),
                 exps_tensor.clone().into(),
+                denominator_tensor.clone().into(),
                 Param::new(1, operands[1].clone()).into(),
             ],
             spec.0.serial_only(),

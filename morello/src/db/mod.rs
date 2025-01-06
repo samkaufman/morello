@@ -1295,6 +1295,10 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
         SpecKey::Conv { dtypes } => root
             .join("Conv")
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
+        SpecKey::Broadcast { dim, dtypes } => root
+            .join("Broadcast")
+            .join(dim.to_string())
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::Softmax { scan_dim, dtypes } => root
             .join("Softmax")
             .join(scan_dim.to_string())

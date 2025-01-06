@@ -64,6 +64,10 @@ pub enum PrimitiveSpecType {
     Conv {
         accum: bool,
     },
+    Broadcast {
+        #[cfg_attr(test, proptest(strategy = "0..4u8"))]
+        dim: u8,
+    },
     /// Divides the first argument by the second, elementwise, into the third argument.
     DivideVec,
     /// Broadcasts a tensor (second argument) across `scan_dim`, dividing the first argument. Output
@@ -361,6 +365,15 @@ impl PrimitiveBasics {
                     _ => panic!("Conv has only 3 parameters"),
                 }
             }
+            PrimitiveSpecType::Broadcast { dim } => match idx {
+                0 => {
+                    let mut shape = self.spec_shape.clone();
+                    shape[usize::from(dim)] = nz!(1u32);
+                    shape
+                }
+                1 => self.spec_shape.clone(),
+                _ => panic!("Broadcast has only 2 parameters"),
+            },
             PrimitiveSpecType::DivideVec => {
                 if idx > 3 {
                     panic!("DivideVec has only 3 parameters")
@@ -449,6 +462,7 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::DivideVec { .. }
             | PrimitiveSpecType::DivideVecScalar { .. }
+            | PrimitiveSpecType::Broadcast { .. }
             | PrimitiveSpecType::Move => false,
         }
     }
@@ -483,7 +497,8 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::Max { accum: false, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum: false, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: false, .. } => None,
+            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: false, .. }
+            | PrimitiveSpecType::Broadcast { dim: _ } => None,
             PrimitiveSpecType::DivideVec { .. } => todo!(),
             PrimitiveSpecType::DivideVecScalar { .. } => todo!(),
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => todo!(),
@@ -668,6 +683,16 @@ impl PrimitiveBasics {
             }
             (
                 PrimitiveBasics {
+                    typ: PrimitiveSpecType::Broadcast { dim },
+                    ..
+                },
+                _,
+            ) => {
+                let input_tiling = one_reduced_dimension_tiling_tuple(smaller_output, *dim);
+                TilingInference(vec![input_tiling])
+            }
+            (
+                PrimitiveBasics {
                     typ: PrimitiveSpecType::Move,
                     ..
                 },
@@ -821,6 +846,33 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
                             })
                             .sboxed(),
                     },
+                    PrimitiveSpecType::Broadcast { dim } => {
+                        match args.first_input_shape.as_deref() {
+                            Some(s) => {
+                                assert!(usize::from(dim) < s.len());
+                                s.iter()
+                                    .enumerate()
+                                    .map(|(i, d)| {
+                                        if i == usize::from(dim) {
+                                            (1..=8u32).sboxed()
+                                        } else {
+                                            Just(d.get()).sboxed()
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .sboxed()
+                            }
+                            None => {
+                                let r = usize::from(dim);
+                                ((r + 1)..(r + 2))
+                                    .prop_flat_map(move |tensor_rank| {
+                                        proptest::collection::vec(1..=max_size, tensor_rank)
+                                            .sboxed()
+                                    })
+                                    .sboxed()
+                            }
+                        }
+                    }
                 };
                 (Just(typ), Just(dtypes), shape_strategy)
             })
@@ -873,6 +925,14 @@ impl PrimitiveSpecType {
                 // TODO: Assert consistency with the output as well
                 vec![b, f, c, h, w, fh, fw]
             }
+            PrimitiveSpecType::Broadcast { dim } => {
+                let inp = parameter_shapes.next().unwrap();
+                let out = parameter_shapes.next().unwrap();
+                assert_eq!(inp[..usize::from(*dim)], out[..usize::from(*dim)]);
+                assert_eq!(inp[usize::from(*dim)], nz!(1u32));
+                assert_eq!(inp[usize::from(*dim) + 1..], out[usize::from(*dim) + 1..]);
+                out.into()
+            }
             PrimitiveSpecType::DivideVec => {
                 let numer = parameter_shapes.next().unwrap();
                 let denom = parameter_shapes.next().unwrap();
@@ -924,6 +984,7 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::Matmul { accum: false } => &[In, In, Out],
             PrimitiveSpecType::Conv { accum: true } => &[In, In, InOut],
             PrimitiveSpecType::Conv { accum: false } => &[In, In, Out],
+            PrimitiveSpecType::Broadcast { .. } => &[In, Out],
             PrimitiveSpecType::Softmax { .. } => &[In, Out],
             PrimitiveSpecType::SoftmaxComplete { .. } => &[In, In, In, Out],
             PrimitiveSpecType::SoftmaxDenominator { accum: true, .. } => &[In, In, InOut],
@@ -994,6 +1055,7 @@ impl PrimitiveSpecType {
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => *accum,
             PrimitiveSpecType::Fill { .. }
             | PrimitiveSpecType::Move
+            | PrimitiveSpecType::Broadcast { .. }
             | PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
@@ -1002,6 +1064,10 @@ impl PrimitiveSpecType {
         }
     }
 
+    /// Return the output shape of the primitive given the input shapes.
+    ///
+    /// This returns `None` if either there are multiple outputs or the output shape cannot be
+    /// inferred from the inputs.
     pub fn infer_unique_output_shape(&self, inputs: &[&[DimSize]]) -> Option<Shape> {
         // TODO: Can this be rewritten as output inference + `from_io` call?
         debug_assert_eq!(inputs.len(), self.input_count());
@@ -1047,7 +1113,8 @@ impl PrimitiveSpecType {
                 // The shape and dtype match for moves and zero.
                 Some(inputs[0].to_vec())
             }
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
+            PrimitiveSpecType::Broadcast { .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => None,
         }
@@ -1061,6 +1128,7 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::Matmul { .. } => write!(f, "Matmul"),
             PrimitiveSpecType::Conv { accum, .. } if *accum => write!(f, "ConvAccum"),
             PrimitiveSpecType::Conv { .. } => write!(f, "Conv"),
+            PrimitiveSpecType::Broadcast { dim } => write!(f, "Broadcast{dim}"),
             PrimitiveSpecType::Softmax { scan_dim } => write!(f, "Softmax{scan_dim}"),
             PrimitiveSpecType::SoftmaxComplete { scan_dim } => {
                 write!(f, "SoftmaxComplete{scan_dim}")
@@ -2047,6 +2115,13 @@ impl BiMap for PrimitiveBasicsBimap {
                     v,
                 )
             }
+            PrimitiveSpecType::Broadcast { dim } => (
+                SpecKey::Broadcast {
+                    dim,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                },
+                shifted_shape.collect(),
+            ),
             PrimitiveSpecType::Softmax { scan_dim } => {
                 assert_eq!(dtypes.len(), 2);
                 (
@@ -2280,6 +2355,11 @@ impl BiMap for PrimitiveBasicsBimap {
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: dtypes.into(),
             },
+            SpecKey::Broadcast { dim, dtypes } => PrimitiveBasics {
+                typ: PrimitiveSpecType::Broadcast { dim: *dim },
+                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
+                dtypes: dtypes.to_vec(),
+            },
             SpecKey::Compose { .. } => {
                 panic!("PrimitiveBasicsBimap is not defined for Compose keys")
             }
@@ -2379,10 +2459,15 @@ where
 }
 
 #[cfg(test)]
-fn arb_compose_component_innermost() -> impl proptest::strategy::Strategy<Value = PrimitiveBasics> {
+fn arb_compose_component_innermost(
+    allow_broadcast: bool,
+) -> impl proptest::strategy::Strategy<Value = PrimitiveBasics> {
     use proptest::prelude::*;
 
     any::<PrimitiveBasics>()
+        .prop_filter("Must not be a Broadcast", move |basics| {
+            allow_broadcast || !matches!(basics.typ, PrimitiveSpecType::Broadcast { .. })
+        })
         .prop_filter("Must have at least two parameters to compose", |basics| {
             basics.typ.operand_count() > 1
         })
@@ -2395,13 +2480,14 @@ fn arb_compose_component_innermost() -> impl proptest::strategy::Strategy<Value 
 #[cfg(test)]
 fn arb_compose_component_successor(
     predecessor: &PrimitiveBasics,
+    allow_broadcast: bool,
 ) -> impl proptest::strategy::Strategy<Value = PrimitiveBasics> {
     use proptest::prelude::*;
 
     // Restrict the basic types to those which have a first input of a possible rank.
     let shapes = predecessor.parameter_shapes();
     let out_idx = predecessor.typ.unique_output_index().unwrap();
-    let mut allowed_types = vec![];
+    let mut allowed_types = vec![]; // TODO: Somehow gather these from type def.
     match shapes[out_idx].len() {
         2 => {
             allowed_types.push(PrimitiveSpecType::Matmul { accum: true });
@@ -2415,6 +2501,9 @@ fn arb_compose_component_successor(
     }
     allowed_types.push(PrimitiveSpecType::Move);
     for dim in 0..u8::try_from(shapes[out_idx].len()).unwrap() {
+        if allow_broadcast && shapes[out_idx][usize::from(dim)].get() == 1 {
+            allowed_types.push(PrimitiveSpecType::Broadcast { dim });
+        }
         allowed_types.push(PrimitiveSpecType::Softmax { scan_dim: dim });
         allowed_types.push(PrimitiveSpecType::SoftmaxComplete { scan_dim: dim });
         for accum in [true, false] {
@@ -2444,19 +2533,19 @@ fn arb_compose_components() -> impl proptest::strategy::Strategy<Value = Vec<Pri
     use proptest::prelude::*;
 
     prop_oneof![
-        arb_compose_component_innermost()
+        arb_compose_component_innermost(false)
             .prop_flat_map(|c| {
-                let successor = arb_compose_component_successor(&c);
+                let successor = arb_compose_component_successor(&c, true);
                 (successor, Just(c))
             })
             .prop_map(|(s, c)| vec![s, c]),
-        arb_compose_component_innermost()
+        arb_compose_component_innermost(false)
             .prop_flat_map(|c| {
-                let successor = arb_compose_component_successor(&c);
+                let successor = arb_compose_component_successor(&c, false);
                 (successor, Just(c))
             })
             .prop_flat_map(|(s, c)| {
-                let successor2 = arb_compose_component_successor(&s);
+                let successor2 = arb_compose_component_successor(&s, true);
                 (successor2, Just(s), Just(c))
             })
             .prop_map(|(s2, s, c)| vec![s2, s, c]),

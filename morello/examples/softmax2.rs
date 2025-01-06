@@ -68,7 +68,7 @@ fn main() {
         .subschedule(&[1], |subspec| {
             subspec
                 .tile_out(&[1, 4])
-                .broadcast_first(VRF, row_major(RANK), Some(nz!(8u32)))
+                .broadcast_first(VRF, row_major(RANK), Some(nz!(4u32)))
         });
 
     println!("\nImpl resulting from manual scheduling:");

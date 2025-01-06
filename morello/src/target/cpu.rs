@@ -307,6 +307,7 @@ impl<T: CpuTarget> Target for T {
                     }
                 }
                 PrimitiveSpecType::Conv { .. } => &[],
+                PrimitiveSpecType::Broadcast { .. } => &[],
                 PrimitiveSpecType::Softmax { .. } => &[],
                 PrimitiveSpecType::SoftmaxComplete { .. } => {
                     const SOFTMAX_COMPLETE_KERNELS: [CpuKernel; 2] = [

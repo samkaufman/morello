@@ -14,6 +14,10 @@ pub enum SpecKey {
     Conv {
         dtypes: [Dtype; 3],
     },
+    Broadcast {
+        dim: u8,
+        dtypes: [Dtype; 2],
+    },
     DivideVec {
         dtypes: [Dtype; 3],
     },
@@ -66,6 +70,7 @@ impl SpecKey {
         match self {
             SpecKey::Matmul { dtypes } => dtypes,
             SpecKey::Conv { dtypes } => dtypes,
+            SpecKey::Broadcast { dim: _, dtypes } => dtypes,
             SpecKey::Move { dtypes } => dtypes,
             SpecKey::Max { dtypes, .. } => dtypes,
             SpecKey::DivideVec { dtypes } => dtypes,
