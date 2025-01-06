@@ -103,6 +103,7 @@ pub enum CpuKernel {
     ValueSoftmaxDenominator,
     VectorSoftmaxDenominator,
     VectorSoftmaxComplete,
+    VectorSoftmaxDenominatorAndUnscaledF32,
     ValueMax,
     VectorMax, // TODO: Add F32 to name
     VecScalarAssign,
@@ -320,7 +321,9 @@ impl<T: CpuTarget> Target for T {
                 }
                 PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => &[],
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => &[],
-                PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => &[],
+                PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => {
+                    &[CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32]
+                }
                 PrimitiveSpecType::SoftmaxDenominator { accum, .. } => {
                     if *accum {
                         const SOFTMAX_DENOMINATOR_KERNELS: [CpuKernel; 2] = [
@@ -433,7 +436,9 @@ impl<T: CpuTarget> Target for T {
 impl CpuKernel {
     pub fn argument_count(&self) -> u8 {
         match self {
-            CpuKernel::ValueSoftmaxComplete | CpuKernel::VectorSoftmaxComplete => 4,
+            CpuKernel::ValueSoftmaxComplete
+            | CpuKernel::VectorSoftmaxComplete
+            | CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => 4,
             CpuKernel::MultAdd
             | CpuKernel::ValueSoftmaxDenominator
             | CpuKernel::VectorSoftmaxDenominator
@@ -755,6 +760,57 @@ impl CpuKernel {
                         return false;
                     }
                 }
+                true
+            }
+            CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => {
+                debug_assert_eq!(operands.len(), 4);
+                let PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+                    accum: true,
+                    scan_dim,
+                } = typ
+                else {
+                    return false;
+                };
+
+                for o in &operands {
+                    if o.dtype() != Dtype::Float32 {
+                        return false;
+                    }
+                }
+
+                for i in [0, 3] {
+                    let operand = &operands[i];
+                    let shape = operand.shape();
+                    let dim_us = usize::from(*scan_dim);
+                    if shape[..dim_us].iter().any(|d| d.get() != 1) {
+                        return false;
+                    }
+                    if shape[dim_us].get() % 8 != 0 {
+                        return false;
+                    }
+                    if shape[(dim_us + 1)..].iter().any(|d| d.get() != 1) {
+                        return false;
+                    }
+
+                    if operand.level() != CpuMemoryLevel::VRF {
+                        return false;
+                    }
+                    if operand.vector_size().unwrap().get() != 8 {
+                        return false;
+                    }
+                    if !operand.is_contiguous() {
+                        return false;
+                    }
+                }
+                for i in [1, 2] {
+                    if operands[i].shape().iter().any(|d| d.get() != 1) {
+                        return false;
+                    }
+                    if operands[i].level() != CpuMemoryLevel::RF {
+                        return false;
+                    }
+                }
+
                 true
             }
             CpuKernel::VectorSoftmaxDenominator => {
@@ -1245,7 +1301,9 @@ impl CpuKernel {
                 let vector_cnt = value_cnt / parameters[vidx].spec().vector_size().unwrap().get();
                 INST_COST * (vector_cnt + 1)
             }
-            CpuKernel::ValueSoftmaxDenominator | CpuKernel::VectorSoftmaxDenominator => {
+            CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32
+            | CpuKernel::ValueSoftmaxDenominator
+            | CpuKernel::VectorSoftmaxDenominator => {
                 // TODO: Measure throughput!
                 INST_COST * 3
             }

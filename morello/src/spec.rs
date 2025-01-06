@@ -477,9 +477,12 @@ impl PrimitiveBasics {
         match typ {
             PrimitiveSpecType::Matmul { accum: true }
             | PrimitiveSpecType::Conv { accum: true }
-            | PrimitiveSpecType::SoftmaxDenominator { accum: true, .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: true, .. } => {
-                Some(FillValue::Zero)
+            | PrimitiveSpecType::SoftmaxDenominator { accum: true, .. } => Some(FillValue::Zero),
+            PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: true, .. } => {
+                match index {
+                    2 => Some(FillValue::Zero),
+                    _ => None,
+                }
             }
             PrimitiveSpecType::Max { accum: true, .. } => match dtypes[index] {
                 Dtype::Sint8 | Dtype::Sint16 | Dtype::Sint32 => {
@@ -498,7 +501,7 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxDenominator { accum: false, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: false, .. }
-            | PrimitiveSpecType::Broadcast { dim: _ } => None,
+            | PrimitiveSpecType::Broadcast { dim: _ } => panic!("Not an accumulating Spec"),
             PrimitiveSpecType::DivideVec { .. } => todo!(),
             PrimitiveSpecType::DivideVecScalar { .. } => todo!(),
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => todo!(),
@@ -1778,7 +1781,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
                 | PrimitiveSpecType::Max { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominator { accum, .. } => {
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
                     *accum = true;
                 }
                 _ => panic!("Cannot clone_as_accum: {:?}", self),
@@ -1787,7 +1791,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
                 | PrimitiveSpecType::Max { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominator { accum, .. } => {
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
                     *accum = true;
                 }
                 _ => panic!("Cannot clone_as_accum: {:?}", self),

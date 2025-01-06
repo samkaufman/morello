@@ -711,6 +711,45 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             intermediate_buffer_name,
                         )
                     }
+                    CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => {
+                        self.headers.emit_expf_avx2 = true;
+                        self.headers.emit_sum8 = true;
+
+                        writeln!(
+                            w,
+                            "{}/* VectorSoftmaxDenominatorAndUnscaledF32 */",
+                            indent(depth)
+                        )?;
+
+                        let input_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
+                        let unscaled_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[3]);
+                        debug_assert_eq!(input_vector_exprs.len(), unscaled_vector_exprs.len());
+
+                        let max_tensor = arguments[1].backing_tensor().unwrap();
+                        let max_buffer = self.name_env.get(max_tensor).unwrap();
+                        let max_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
+                        let denom_tensor = arguments[2].backing_tensor().unwrap();
+                        let denom_buffer = self.name_env.get(denom_tensor).unwrap();
+                        let denom_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
+
+                        for (input_vector_name, unscaled_vector_name) in
+                            input_vector_exprs.iter().zip(&unscaled_vector_exprs)
+                        {
+                            writeln!(
+                                w,
+                                "{}{unscaled_vector_name} = exp256_ps({input_vector_name} - {});",
+                                indent(depth),
+                                self.c_index(max_buffer, &max_iexpr, None),
+                            )?;
+                            writeln!(
+                                w,
+                                "{}{} += sum8({unscaled_vector_name});",
+                                indent(depth),
+                                self.c_index(denom_buffer, &denom_iexpr, None),
+                            )?;
+                        }
+                        Ok(())
+                    }
                     CpuKernel::VectorSoftmaxComplete => {
                         self.headers.emit_expf_avx2 = true;
 
@@ -788,18 +827,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             self.c_index(buffer, &buffer_indexing_expr, None)
                         };
 
-                        let input_vector_exprs = (0..vector_count)
-                            .map(|vector_idx| {
-                                let backing_tensor = arguments[0].backing_tensor().unwrap();
-                                let buffer = self.name_env.get(backing_tensor).unwrap();
-                                let mut buffer_indexing_expr =
-                                    arguments[0].make_buffer_indexing_expr();
-                                buffer_indexing_expr = zero_points(buffer_indexing_expr);
-                                buffer_indexing_expr +=
-                                    i32::try_from(vector_size.get() * vector_idx).unwrap();
-                                self.c_index_vec(buffer, &buffer_indexing_expr, None)
-                            })
-                            .collect::<Vec<_>>();
+                        let input_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
 
                         // Emit the vertical reductions
                         // TODO: Repeatedly halve pairs instead of reducing into the first vector.
@@ -2110,6 +2138,23 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 }
             }
         }
+    }
+
+    /// Return expressions naming each vector in a distributed tensor view.
+    fn c_vec_exprs_for_tensor(&self, tensor: &ViewE<Tgt>) -> Vec<String> {
+        let vector_volume = tensor.spec().volume().get();
+        let vector_size = tensor.spec().vector_size().unwrap();
+        let vector_count = vector_volume / vector_size.get();
+        (0..vector_count)
+            .map(|vector_idx| {
+                let backing_tensor = tensor.backing_tensor().unwrap();
+                let buffer = self.name_env.get(backing_tensor).unwrap();
+                let mut buffer_indexing_expr = tensor.make_buffer_indexing_expr();
+                buffer_indexing_expr = zero_points(buffer_indexing_expr);
+                buffer_indexing_expr += i32::try_from(vector_size.get() * vector_idx).unwrap();
+                self.c_index_vec(buffer, &buffer_indexing_expr, None)
+            })
+            .collect()
     }
 
     fn thread_style_extra_args(&self) -> &[&'static str] {

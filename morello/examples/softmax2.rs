@@ -24,7 +24,7 @@ fn main() {
     // This is a non-accumulating Spec (`Matmul` rather than `MatmulAccum`), which means that the
     // implementation will set rather then add values to the output tensor.
     const RANK: u8 = 2;
-    const SIZE: DimSize = nz!(1024u32);
+    const SIZE: DimSize = nz!(128u32);
     let layouts = [row_major(RANK), row_major(RANK)];
     let logical_spec = LogicalSpec::Primitive(
         PrimitiveBasics {
@@ -62,8 +62,29 @@ fn main() {
         .subschedule(&[0, 0], |subspec| {
             subspec.to_accum().split(1).synthesize(&db, None)
         })
+        .subschedule(&[0, 0, 0], |s| s.synthesize(&db, None))
         // and [0, 1] corresponds to SoftmaxDenominatorAndUnscaledFromMax1
-        // .subschedule(&[0, 1], |subspec| todo!())
+        .subschedule(&[0, 1], |subspec| {
+            subspec
+                .to_accum()
+                .subschedule(&[0], |s| s.synthesize(&db, None))
+                .subschedule(&[1], |s| {
+                    s.move_param(0, CpuMemoryLevel::L1, row_major(2), None)
+                        .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
+                        .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
+                        .move_param(3, CpuMemoryLevel::L1, row_major(2), None)
+                        .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
+                        .subschedule(&[0], |m| m.tile_out(&[1, 8]).synthesize(&db, None))
+                        .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
+                        .subschedule(&[1, 0], |m| m.synthesize(&db, None))
+                        .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
+                        .subschedule(&[1, 1, 0], |m| m.synthesize(&db, None))
+                        .subschedule(&[1, 1, 2], |m| m.synthesize(&db, None))
+                        .move_param(3, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
+                        .subschedule(&[1, 1, 1, 0], |m| m.synthesize(&db, None))
+                        .subschedule(&[1, 1, 1, 1], |m| m.synthesize(&db, None))
+                })
+        })
         // [1] corresponds to DivideVecScalar
         .subschedule(&[1], |subspec| {
             subspec
@@ -74,6 +95,7 @@ fn main() {
                         .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
                         .move_param(0, CpuMemoryLevel::RF, row_major(2), None)
                         .synthesize(&db, None)
+                        .subschedule(&[0], |s| s.synthesize(&db, None))
                 })
                 .subschedule(&[1], |d| d.synthesize(&db, None))
         });

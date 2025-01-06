@@ -25,14 +25,15 @@ impl<Tgt: Target> ActionT<Tgt> for ToAccum {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
                 | PrimitiveSpecType::Max { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominator { accum, .. },
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. },
             ..
         } = head
         else {
             // TODO: Use a more specific NotApplicableReason.
             return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-                    "ToAccum is only defined for Matmul, Conv, Max, SoftmaxDenominator, and SoftmaxDenominatorAndMax",
-                ))));
+                "ToAccum is only defined for this Spec",
+            ))));
         };
         if *accum {
             // TODO: Use a more specific NotApplicableReason.

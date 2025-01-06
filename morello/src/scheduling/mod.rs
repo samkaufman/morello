@@ -365,8 +365,7 @@ fn make_accum_inits_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> Vec<ImplNode<Tgt>
             }
             let accum_initial_value = spec
                 .0
-                .initial_accumulating_value_for_output(parameter_idx.into())
-                .expect("output parameter should be compatible with ToAccum");
+                .initial_accumulating_value_for_output(parameter_idx.into())?;
             let output = spec.0.parameter(parameter_idx.into());
             Some(ImplNode::from(SpecApp::new_primitive_app(
                 PrimitiveSpecType::Fill {
