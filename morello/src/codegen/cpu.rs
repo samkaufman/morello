@@ -1746,11 +1746,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 });
                             writeln!(
                                 w,
-                                "{}{} = ({}){{{}}}; /* VecScalarAssign */",
+                                "{}{} = ({} - ({}){{}}); /* VecScalarAssign */",
                                 indent(depth),
                                 exprs[1],
-                                out_vector_type.name,
                                 exprs[0],
+                                out_vector_type.name,
                             )?;
                         }
                         Ok(())
