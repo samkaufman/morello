@@ -670,8 +670,6 @@ fn arb_tensorspecaux<Tgt: Target>(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZero;
-
     use super::*;
     use crate::common::Dtype;
     use crate::layout::{row_major, Layout, PhysDim};
@@ -739,7 +737,7 @@ mod tests {
         #[test]
         fn test_tensorspecaux_canonicalize_is_noop_if_already_canonical_x86(
             shape in [1..=16u32, 1..=16u32]
-                .prop_map(|v| v.map(|x| NonZero::new(x).unwrap())),
+                .prop_map(|v| v.map(|x| x.try_into().unwrap())),
             aux in any::<TensorSpecAux<X86Target>>()
         ) {
             let mut canonicalized_aux = aux.clone();

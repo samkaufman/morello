@@ -5,7 +5,7 @@ use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
 use crate::layout::row_major;
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
-use crate::target::{MemoryLevel, Target};
+use crate::target::Target;
 use crate::tensorspec::{self, check_tensor_vector_size, TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::{bit_length_inverse, bit_length_u32, join_into_string, prev_power_of_two_u32};
@@ -20,7 +20,6 @@ use std::iter::once;
 use std::iter::Iterator;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
-use std::os::macos::raw::stat;
 use std::panic;
 use std::{assert_eq, debug_assert_eq};
 
@@ -2929,7 +2928,7 @@ mod tests {
     use crate::scheduling::{Action, ActionT as _, ApplyError};
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::target::CpuMemoryLevel::{GL, L1, RF};
-    use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
+    use crate::target::{ArmTarget, CpuMemoryLevel, MemoryLevel, Target, X86Target};
     use crate::tensorspec::{TensorSpecArbMaxShape, TensorSpecAuxNonDepBimap};
     use crate::utils::{next_binary_power, sum_seqs};
     use crate::views::View;
