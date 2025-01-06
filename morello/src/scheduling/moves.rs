@@ -7,7 +7,7 @@ use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{ActionSolver, ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, OperandDirection, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target};
-use crate::tensorspec::TensorSpec;
+use crate::tensorspec::{self, TensorSpec};
 use crate::utils::prev_power_of_two;
 use crate::views::{CacheView, Param, Tensor, ViewE};
 use serde::{Deserialize, Serialize};
@@ -136,23 +136,6 @@ fn plan_movelet<'a, Tgt: Target>(
 ) -> Result<MoveLetPlan<'a, Tgt>, ApplyError> {
     let outer_moved_operand_spec = &operands[usize::from(source_idx)];
 
-    if !outer_moved_operand_spec.can_move_to(destination_layout, &destination_level) {
-        return Err(ApplyError::NotApplicable(
-            // TODO: Replace Other with a new NotApplicableReason variant.
-            NotApplicableReason::Other(None),
-        ));
-    }
-
-    if let Some(vs) = destination_vector_size {
-        if !Tgt::vec_types().iter().any(|vec_type| {
-            vec_type.dtype == destination_dtype && u32::from(vec_type.value_cnt) == vs.get()
-        }) {
-            return Err(ApplyError::NotApplicable(
-                NotApplicableReason::VectorSizeInvalid(destination_dtype, vs),
-            ));
-        }
-    }
-
     let destination_layout_canonicalized = destination_layout
         .canonicalize(outer_moved_operand_spec.shape())
         .unwrap();
@@ -177,7 +160,21 @@ fn plan_movelet<'a, Tgt: Target>(
     if !is_cache_miss {
         new_spec.set_aligned(true);
         new_spec.set_contiguous_abs(new_spec.layout().contiguous_full());
-        new_spec.canonicalize().unwrap();
+        new_spec
+            .canonicalize()
+            .map_err(|canon_error| match canon_error {
+                tensorspec::CanonicalizeError::LayoutError(_) => {
+                    ApplyError::NotApplicable(NotApplicableReason::LayoutIncompatible)
+                }
+                tensorspec::CanonicalizeError::VectorSizeInvalid => {
+                    let vs = destination_vector_size
+                        .expect("destination vector size is set if VectorSizeInvalid returned");
+                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid(
+                        destination_dtype,
+                        vs,
+                    ))
+                }
+            })?;
     }
     debug_assert_eq!(
         is_cache_miss,

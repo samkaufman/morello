@@ -8,7 +8,7 @@ use crate::scheduling::{
     NotApplicableReason,
 };
 use crate::scheduling_sugar::SchedulingSugar;
-use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{self, FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
@@ -490,7 +490,16 @@ fn loop_spec_with_shrunken_tiles<Tgt: Target>(
     let mut inner_spec = logical_spec.clone();
     inner_spec.replace_io(&operands);
     inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
-    inner_spec.canonicalize().unwrap();
+    inner_spec
+        .canonicalize()
+        .map_err(|canon_error| match canon_error {
+            spec::CanonicalizeError::TensorSpecAuxCanonicalizeError(_) => {
+                ApplyError::NotApplicable(NotApplicableReason::TileShapeInvalid)
+            }
+            spec::CanonicalizeError::SideEffectingComponent => {
+                unreachable!("Compose-to-tile should not have side-effecting components")
+            }
+        })?;
 
     // Return a Loop containing the Spec as its body.
     let body = Box::new(

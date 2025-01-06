@@ -53,6 +53,8 @@ pub struct TensorSpecArbMaxShape(pub Shape);
 pub enum CanonicalizeError {
     #[error("Layout does not apply: {0}")]
     LayoutError(#[from] LayoutError),
+    #[error("Volume is not a multiple of vector size")]
+    VectorSizeInvalid,
 }
 
 impl<Tgt: Target> TensorSpec<Tgt> {
@@ -65,6 +67,27 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         layout: Layout,
         vector_size: Option<DimSize>,
     ) -> Self {
+        Self::new_canon_checked(
+            shape,
+            dtype,
+            contiguous_abs,
+            aligned,
+            level,
+            layout,
+            vector_size,
+        )
+        .unwrap()
+    }
+
+    pub fn new_canon_checked(
+        shape: Shape,
+        dtype: Dtype,
+        contiguous_abs: Contig,
+        aligned: bool,
+        level: Tgt::Level,
+        layout: Layout,
+        vector_size: Option<DimSize>,
+    ) -> Result<Self, CanonicalizeError> {
         let mut r = Self::new_noncanon(
             shape,
             dtype,
@@ -74,9 +97,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             layout,
             vector_size,
         );
-        // TODO: This should prop. the error, not unwrap, and be called try_new_canon.
-        r.canonicalize().unwrap();
-        r
+        r.canonicalize()?;
+        Ok(r)
     }
 
     pub fn new_noncanon(
@@ -211,6 +233,10 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
+        let vector_size = self.aux.vector_size;
+        if !check_tensor_vector_size::<Tgt>(self.shape(), self.dtype, &self.level(), vector_size) {
+            return Err(CanonicalizeError::VectorSizeInvalid);
+        }
         self.aux.canonicalize(&self.shape)
     }
 
@@ -307,22 +333,8 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
         use proptest::prelude::*;
 
-        args.0
-            .into_iter()
-            .map(|m| 1..=m.get())
-            .collect::<Vec<_>>()
-            .prop_flat_map(|shp| {
-                let shp = TensorSpecArbMaxShape(Shape::from(
-                    shp.iter()
-                        .map(|&x| DimSize::new(x).unwrap())
-                        .collect::<Vec<_>>(),
-                ));
-                let aux_strategy = TensorSpecAux::arbitrary_with(shp.clone());
-                let dtype_strategy = any::<Dtype>();
-                (Just(shp), dtype_strategy, aux_strategy)
-            })
-            .prop_filter_map("TensorSpec was not canonical", |(shp, dtype, aux)| {
-                let mut tensor_spec = TensorSpec::new_noncanon_with_aux(shp.0, dtype, aux);
+        arb_noncanon_tensorspec(&args.0)
+            .prop_filter_map("TensorSpec was not canonical", |mut tensor_spec| {
                 let canon_result = tensor_spec.canonicalize();
                 canon_result.ok().map(|_| tensor_spec)
             })
@@ -330,15 +342,38 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for TensorSpec<Tgt> {
     }
 }
 
+#[cfg(test)]
+fn arb_noncanon_tensorspec<Tgt: Target>(
+    max_shape: &[DimSize],
+) -> impl proptest::strategy::Strategy<Value = TensorSpec<Tgt>> {
+    use proptest::prelude::*;
+
+    max_shape
+        .into_iter()
+        .map(|m| 1..=m.get())
+        .collect::<Vec<_>>()
+        .prop_flat_map(|shp| {
+            let shp = TensorSpecArbMaxShape(Shape::from(
+                shp.iter()
+                    .map(|&x| DimSize::new(x).unwrap())
+                    .collect::<Vec<_>>(),
+            ));
+            let aux_strategy = TensorSpecAux::arbitrary_with(shp.clone());
+            let dtype_strategy = any::<Dtype>();
+            (Just(shp), dtype_strategy, aux_strategy)
+        })
+        .prop_map(|(shp, dtype, aux)| TensorSpec::new_noncanon_with_aux(shp.0, dtype, aux))
+}
+
 impl<Tgt: Target> TensorSpecAux<Tgt> {
-    pub(crate) fn canonicalize(&mut self, shape: &Shape) -> Result<(), CanonicalizeError> {
+    pub(crate) fn canonicalize(&mut self, shape: &[DimSize]) -> Result<(), CanonicalizeError> {
         let (new_layout, new_contig) = self.layout.update_for_tiling(shape, shape, self.contig)?;
         self.layout = new_layout;
         self.contig = new_contig;
         Ok(())
     }
 
-    pub fn is_canonical(&self, shape: &Shape) -> bool {
+    pub fn is_canonical(&self, shape: &[DimSize]) -> bool {
         if !self.layout.is_row_major() && shape.iter().all(|d| d.get() == 1) {
             false
         } else {
@@ -552,6 +587,29 @@ pub(crate) fn gen_vector_sizes_opt(
         .chain(iter_b.into_iter().flatten())
 }
 
+/// Checks if an in-VRF tensor's shape, dtype, and chosen vector size are valid for a given level.
+///
+/// This checks both that the vector exists for that target and that the vector size is a multiple
+/// of the shape and dtype.
+///
+/// Returns `true` if the level is not a VRF.
+pub(crate) fn check_tensor_vector_size<Tgt: Target>(
+    shape: &[DimSize],
+    dtype: Dtype,
+    level: &Tgt::Level,
+    vector_size: Option<DimSize>,
+) -> bool {
+    let vector_bytes = level.vector_bytes();
+    if vector_bytes.is_empty() {
+        debug_assert!(vector_size.is_none());
+        return true;
+    }
+    let vector_size = vector_size.unwrap();
+    let volume = DimSize::new(shape.iter().map(|d| d.get()).product()).unwrap();
+    let bytes = volume.get() * u32::from(dtype.size());
+    volume.get() % vector_size.get() == 0 && vector_bytes.iter().any(|&vb| bytes % vb == 0)
+}
+
 fn tensorspec_aux_str<Tgt: Target>(aux: &TensorSpecAux<Tgt>) -> String {
     let mut parts = Vec::with_capacity(5);
     parts.push(aux.level.to_string());
@@ -612,16 +670,45 @@ fn arb_tensorspecaux<Tgt: Target>(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZero;
+
+    use super::*;
     use crate::common::Dtype;
     use crate::layout::{row_major, Layout, PhysDim};
-    use crate::target::{ArmTarget, CpuMemoryLevel, Target, X86Target};
-    use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape};
+    use crate::target::{ArmTarget, CpuMemoryLevel, MemoryLevel, Target, X86Target};
+    use crate::tensorspec::{arb_noncanon_tensorspec, TensorSpec, TensorSpecArbMaxShape};
     use crate::{layout, shape};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::proptest;
 
     proptest! {
+        // TODO: Make an ARM variant
+        #[test]
+        fn test_canonicalize_errors_if_vector_not_a_multiple_x86(
+            tspec in arb_noncanon_tensorspec::<X86Target>(&[nz!(16u32), nz!(16u32)])
+                .prop_filter("TensorSpec is not in VRF", |t| t.level().vector_rf())
+        ) {
+            let volume = tspec.volume().get();
+            let dtype = tspec.dtype();
+
+            let mut can_move = true;
+            // If the destination is in VRF, then the operand volume must be a multiple of at least one
+            // of the vector sizes.
+            let vector_bytes = tspec.level().vector_bytes();
+            if !vector_bytes.is_empty() {
+                let bytes = volume * u32::from(dtype.size());
+                if vector_bytes.iter().all(|&vb| bytes % vb != 0) {
+                    can_move = false;
+                }
+            }
+
+            if !can_move {
+                let mut tspec = tspec;
+                prop_assert!(tspec.canonicalize().is_err());
+            }
+        }
+
         // TODO: Modify `any::<TensorSpec<_>>` to generate multiple ranks and dtypes.
         #[test]
         fn tensorspec_canonicalize_should_be_idempodent_x86(tspec in any::<TensorSpec<X86Target>>()) {
@@ -646,6 +733,23 @@ mod tests {
             tspec in any_with::<TensorSpec<ArmTarget>>(TensorSpecArbMaxShape(shape![4, 4, 4, 4]))
         ) {
             shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
+        }
+
+        // TODO: Add ARM variant
+        #[test]
+        fn test_tensorspecaux_canonicalize_is_noop_if_already_canonical_x86(
+            shape in [1..=16u32, 1..=16u32]
+                .prop_map(|v| v.map(|x| NonZero::new(x).unwrap())),
+            aux in any::<TensorSpecAux<X86Target>>()
+        ) {
+            let mut canonicalized_aux = aux.clone();
+            if canonicalized_aux.canonicalize(&shape).is_ok() {
+                if aux == canonicalized_aux {
+                    prop_assert!(aux.is_canonical(&shape));
+                } else {
+                    prop_assert!(!aux.is_canonical(&shape));
+                }
+            }
         }
     }
 

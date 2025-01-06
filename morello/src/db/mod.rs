@@ -1806,7 +1806,7 @@ mod tests {
                         Ok(applied) => Some((ActionIdx::from(u16::try_from(i).unwrap()), applied)),
                         Err(ApplyError::NotApplicable(_)) => None,
                         Err(ApplyError::SpecNotCanonical) => {
-                            unreachable!("Non-canonical Specs should be filtered")
+                            unreachable!("Non-canonical Spec should be filtered: {spec}")
                         }
                     })
                     .collect::<Vec<_>>();

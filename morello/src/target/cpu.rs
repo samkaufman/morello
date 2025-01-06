@@ -1705,15 +1705,29 @@ mod tests {
             logical_spec,
             MemoryLimits::Standard(MemVec::zero::<X86Target>()),
         );
+        assert!(spec.is_canonical());
+
         let act = Action::Select(Select(CpuKernel::BroadcastVecMultAdd.into(), false));
-        assert!(matches!(
-            act.apply(&spec).unwrap_err(),
-            ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(_))
-        ));
-        assert!(matches!(
-            act.apply_unchecked_canon(&spec).unwrap_err(),
-            ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(_))
-        ));
+        let act_application = act.apply(&spec);
+        let act_unchecked_application = act.apply_unchecked_canon(&spec);
+        assert!(
+            matches!(
+                act_application,
+                Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
+                    _
+                )))
+            ),
+            "Expected OutOfMemory error, got {act_application:?}",
+        );
+        assert!(
+            matches!(
+                act_unchecked_application,
+                Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
+                    _
+                )))
+            ),
+            "Expected OutOfMemory error, got {act_unchecked_application:?}",
+        );
     }
 
     #[test]

@@ -5,8 +5,8 @@ use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
 use crate::layout::row_major;
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
-use crate::target::Target;
-use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
+use crate::target::{MemoryLevel, Target};
+use crate::tensorspec::{self, check_tensor_vector_size, TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::{bit_length_inverse, bit_length_u32, join_into_string, prev_power_of_two_u32};
 
@@ -20,6 +20,7 @@ use std::iter::once;
 use std::iter::Iterator;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
+use std::os::macos::raw::stat;
 use std::panic;
 use std::{assert_eq, debug_assert_eq};
 
@@ -35,8 +36,8 @@ pub struct Spec<Tgt: Target>(pub LogicalSpec<Tgt>, pub MemoryLimits);
 pub enum LogicalSpec<Tgt: Target> {
     Primitive(PrimitiveBasics, Vec<TensorSpecAux<Tgt>>, bool),
     Compose {
-        // Components contain Spec shapes, which can be partially inferred, so
-        // the following stores a little bit of redundant information.
+        // Components contain Spec shapes and dtypes, which can be partially inferred, so the
+        // following stores a little bit of redundant information.
         components: Vec<PrimitiveBasics>,
         operand_auxes: Vec<TensorSpecAux<Tgt>>,
         serial_only: bool,
@@ -1362,8 +1363,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         match self {
             LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
                 PrimitiveSpecType::Move => {
-                    for aux in primitive_aux.iter_mut() {
-                        aux.canonicalize(&basics.spec_shape)
+                    let shape = &basics.spec_shape;
+                    for (aux, dtype) in primitive_aux.iter_mut().zip(&basics.dtypes) {
+                        let vs = aux.vector_size;
+                        if !check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.level, vs) {
+                            return Err(CanonicalizeError::TensorSpecAuxCanonicalizeError(
+                                tensorspec::CanonicalizeError::VectorSizeInvalid,
+                            ));
+                        }
+
+                        aux.canonicalize(shape)
                             .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
                     }
 
@@ -1378,7 +1387,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                             .iter()
                             .all(|aux| aux.contig == aux.layout.contiguous_full())
                     {
-                        let rm = row_major(basics.spec_shape.len().try_into().unwrap());
+                        let rm = row_major(shape.len().try_into().unwrap());
                         let new_contig = rm.contiguous_full();
                         for aux in primitive_aux.iter_mut() {
                             aux.layout = rm.clone();
@@ -1387,31 +1396,63 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
                 }
                 _ => {
-                    for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
-                        aux.canonicalize(shp)
+                    for (shp, dtype, aux) in
+                        izip!(basics.parameter_shapes(), &basics.dtypes, primitive_aux)
+                    {
+                        let vs = aux.vector_size;
+                        if !check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.level, vs) {
+                            return Err(CanonicalizeError::TensorSpecAuxCanonicalizeError(
+                                tensorspec::CanonicalizeError::VectorSizeInvalid,
+                            ));
+                        }
+
+                        aux.canonicalize(&shp)
                             .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
                     }
                 }
             },
-            LogicalSpec::Compose { .. } => {
-                let shapes = self.parameter_shapes();
-                let LogicalSpec::Compose {
-                    components,
-                    operand_auxes,
-                    ..
-                } = self
-                else {
-                    unreachable!();
-                };
+            LogicalSpec::Compose {
+                components,
+                operand_auxes,
+                serial_only: _,
+            } => {
                 for tail_component in &components[1..] {
                     if tail_component.causes_side_effects() {
                         return Err(CanonicalizeError::SideEffectingComponent);
                     }
                 }
-                for (shp, aux) in shapes.into_iter().zip(operand_auxes) {
-                    aux.canonicalize(&shp)
-                        .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
-                }
+
+                let mut visited = 0;
+                let mut status_to_return = Ok(());
+                compose_parameter_visit(components, |component_idx, parameter_idx| {
+                    visited += 1;
+
+                    // TODO: Short-circuit this closure/loop instead of checking `is_err`.
+                    if status_to_return.is_err() {
+                        return;
+                    }
+
+                    let component = &components[component_idx];
+                    let shape = component.parameter_shape(parameter_idx);
+                    let aux = &mut operand_auxes[visited - 1];
+                    status_to_return = aux
+                        .canonicalize(&shape)
+                        .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError);
+                    if status_to_return.is_err() {
+                        return;
+                    }
+
+                    let dtype = component.parameter_dtype(parameter_idx);
+                    let level = &aux.level;
+                    let vs = aux.vector_size;
+                    if !check_tensor_vector_size::<Tgt>(&shape, dtype, level, vs) {
+                        status_to_return = Err(CanonicalizeError::TensorSpecAuxCanonicalizeError(
+                            tensorspec::CanonicalizeError::VectorSizeInvalid,
+                        ));
+                    }
+                });
+                assert_eq!(visited, operand_auxes.len());
+                status_to_return?;
             }
         }
         Ok(())
@@ -1421,8 +1462,14 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         match self {
             LogicalSpec::Primitive(basics, primitive_aux, _) => match &basics.typ {
                 PrimitiveSpecType::Move => {
-                    for aux in primitive_aux {
-                        if !aux.is_canonical(&basics.spec_shape) {
+                    let shape = &basics.spec_shape;
+                    for (aux, dtype) in primitive_aux.iter().zip(&basics.dtypes) {
+                        let vs = aux.vector_size;
+                        if !check_tensor_vector_size::<Tgt>(&shape, *dtype, &aux.level, vs) {
+                            return false;
+                        }
+
+                        if !aux.is_canonical(shape) {
                             return false;
                         }
                     }
@@ -1438,28 +1485,66 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     {
                         return false;
                     }
+                    true
                 }
                 _ => {
-                    for (shp, aux) in basics.parameter_shapes().iter().zip(primitive_aux) {
-                        if !aux.is_canonical(shp) {
+                    for (shp, dtype, aux) in
+                        izip!(basics.parameter_shapes(), &basics.dtypes, primitive_aux)
+                    {
+                        let vs = aux.vector_size;
+                        if !check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.level, vs) {
+                            return false;
+                        }
+
+                        if !aux.is_canonical(&shp) {
                             return false;
                         }
                     }
+                    true
                 }
             },
-            LogicalSpec::Compose { .. } => {
-                let shapes = self.parameter_shapes();
-                let LogicalSpec::Compose { operand_auxes, .. } = self else {
-                    unreachable!();
-                };
-                for (shp, aux) in shapes.into_iter().zip(operand_auxes) {
-                    if !aux.is_canonical(&shp) {
+            LogicalSpec::Compose {
+                components,
+                operand_auxes,
+                ..
+            } => {
+                for tail_component in &components[1..] {
+                    if tail_component.causes_side_effects() {
                         return false;
                     }
                 }
+
+                let mut visited = 0;
+                let mut status_to_return = true;
+                compose_parameter_visit(components, |component_idx, parameter_idx| {
+                    visited += 1;
+
+                    // TODO: Short-circuit this closure/loop instead of checking `is_err`.
+                    if !status_to_return {
+                        return;
+                    }
+
+                    let component = &components[component_idx];
+                    let shape = component.parameter_shape(parameter_idx);
+                    let aux = &operand_auxes[visited - 1];
+                    if !aux.is_canonical(&shape) {
+                        status_to_return = false;
+                    }
+                    if !status_to_return {
+                        return;
+                    }
+
+                    let dtype = component.parameter_dtype(parameter_idx);
+                    let level = &aux.level;
+                    let vs = aux.vector_size;
+                    if !check_tensor_vector_size::<Tgt>(&shape, dtype, level, vs) {
+                        status_to_return = false;
+                    }
+                });
+                assert_eq!(visited, operand_auxes.len());
+                status_to_return
             }
         }
-        true
     }
 
     pub(crate) fn can_spatial_split(&self) -> bool {
@@ -2993,7 +3078,9 @@ mod tests {
                 Ok(()) => {
                     for p in logical_spec.parameters() {
                         let mut recanonicalized = p.clone();
-                        recanonicalized.canonicalize().unwrap();
+                        recanonicalized.canonicalize().unwrap_or_else(|e| {
+                            panic!("Couldn't canonicalize parameter {} even though {} was canon: {}", p, logical_spec, e);
+                        });
                         assert_eq!(p, recanonicalized);
                     }
                 }
@@ -3029,6 +3116,9 @@ mod tests {
                             .collect::<Vec<_>>();
                         (Just(basics), auxes_strategy, any::<bool>())
                     })
+                    .prop_filter("No operand should be in a vector register file", |(_, auxes, _)| {
+                        auxes.iter().all(|aux| !aux.level.vector_rf())
+                    })
                     .prop_filter_map("Spec should be canonical", |(basics, auxes, serial_only)| {
                         let s = Spec(LogicalSpec::Primitive(basics, auxes, serial_only), X86Target::max_mem());
                         if s.is_canonical() {
@@ -3042,7 +3132,7 @@ mod tests {
                 unreachable!();
             };
             let tile_out_result = Action::TileOut(TileOut::MultiLoop { output_shape: shape![1; spec_shape.len()], parallel: false })
-                .apply(&spec).unwrap_or_else(|_| panic!("Couldn't tile Spec {} to single value", spec));
+                .apply(&spec).unwrap_or_else(|e| panic!("Couldn't tile Spec {} to single value: {e:?}", spec));
             let ImplNode::SpecApp(child_spec_app) = &tile_out_result.children()[0] else {
                 panic!("First child was not a SpecApp; was: {:?}", tile_out_result.children()[0]);
             };
@@ -3437,7 +3527,7 @@ mod tests {
             vector_size: None,
         };
 
-        LogicalSpec::<X86Target>::Compose {
+        LogicalSpec::Compose {
             components: vec![basic0.clone(), basic1.clone(), basic2.clone()],
             operand_auxes: vec![aux0_1, aux1_1, aux2_0, aux2_1, aux0_out],
             serial_only: false,

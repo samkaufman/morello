@@ -39,15 +39,18 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
 
         debug_assert!(self.index < components.len() - 1);
         let consumer = &components[self.index];
-        let intermediate_tensor = Tensor::new(TensorSpec::new_canon(
-            consumer.input_shape(0),
-            consumer.input_dtype(0),
-            self.layout.contiguous_full(),
-            true,
-            self.level,
-            self.layout.clone(),
-            self.vector_size,
-        ));
+        let intermediate_tensor = Tensor::new(
+            TensorSpec::new_canon_checked(
+                consumer.input_shape(0),
+                consumer.input_dtype(0),
+                self.layout.contiguous_full(),
+                true,
+                self.level,
+                self.layout.clone(),
+                self.vector_size,
+            )
+            .map_err(|_| ApplyError::NotApplicable(NotApplicableReason::LayoutIncompatible))?,
+        );
 
         // Compute the memory limits for the new children.
         let new_limits = {
