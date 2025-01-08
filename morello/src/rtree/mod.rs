@@ -38,6 +38,14 @@ trait RTreeGeneric<T> {
     ) where
         T: PartialEq + Eq + Hash + Clone;
 
+    /// Update by subtracting the space filled by another [RTreeGeneric].
+    /// That tree's values are ignored.
+    ///
+    /// Note: The current implementation is very slow.
+    fn subtract(&mut self, subtrahend_tree: &Self)
+    where
+        T: Clone;
+
     fn intersection_candidates_with_other_tree<'a, A>(
         &'a self,
         other: &'a Self::Intersectable<A>,
@@ -99,6 +107,16 @@ macro_rules! rtreedyn_cases {
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::merge_insert(t, low, high, value, disallow_overlap), )*
                 }
+            }
+
+            pub fn subtract(&mut self, subtrahend_tree: &Self)
+            where
+                T: Clone
+            {
+                match (self, subtrahend_tree) {
+                    $( (RTreeDyn::$name(t), RTreeDyn::$name(s)) => RTreeGeneric::subtract(t, s), )*
+                    _ => panic!("Mismatched ranks"),
+                };
             }
 
             pub fn iter(&self) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
@@ -171,28 +189,20 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
     }
 
     fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T> {
-        self.locate_at_point(&RTreePt {
-            arr: pt.try_into().unwrap(),
-        })
-        .map(|rect| &rect.value)
+        self.locate_at_point(&pt.try_into().unwrap())
+            .map(|rect| &rect.value)
     }
 
     fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_> {
         Box::new(
-            self.locate_all_at_point(&RTreePt {
-                arr: pt.try_into().unwrap(),
-            })
-            .map(|rect| &rect.value),
+            self.locate_all_at_point(&pt.try_into().unwrap())
+                .map(|rect| &rect.value),
         )
     }
 
     fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T) {
-        let bottom = RTreePt {
-            arr: low.try_into().unwrap(),
-        };
-        let top = RTreePt {
-            arr: high.try_into().unwrap(),
-        };
+        let bottom = low.try_into().unwrap();
+        let top = high.try_into().unwrap();
         self.insert(RTreeRect { top, bottom, value });
     }
 
@@ -206,12 +216,8 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         T: PartialEq + Eq + Hash + Clone,
     {
         let new_rect = RTreeRect {
-            top: RTreePt {
-                arr: high.try_into().unwrap(),
-            },
-            bottom: RTreePt {
-                arr: low.try_into().unwrap(),
-            },
+            top: high.try_into().unwrap(),
+            bottom: low.try_into().unwrap(),
             value,
         };
 
@@ -328,12 +334,8 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     let (bottom, top) = part;
                     let value = intersecting_rect.value.clone();
                     let part_rect = RTreeRect {
-                        bottom: RTreePt {
-                            arr: bottom.try_into().unwrap(),
-                        },
-                        top: RTreePt {
-                            arr: top.try_into().unwrap(),
-                        },
+                        bottom: bottom.try_into().unwrap(),
+                        top: top.try_into().unwrap(),
                         value,
                     };
                     parts_to_insert.push(part_rect);
@@ -346,6 +348,38 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 self.insert(part);
             }
             self.insert(to_insert);
+        }
+    }
+
+    fn subtract(&mut self, subtrahend_tree: &Self)
+    where
+        T: Clone,
+    {
+        let mut new_fragments = vec![];
+        for rhs in subtrahend_tree.iter() {
+            debug_assert!(new_fragments.is_empty());
+            let rhs_envelope = rhs.envelope();
+            for intersecting_rect in self.drain_in_envelope_intersecting(rhs_envelope) {
+                let fragments = rect_subtract(
+                    &intersecting_rect.bottom.arr,
+                    &intersecting_rect.top.arr,
+                    &rhs.bottom.arr,
+                    &rhs.top.arr,
+                );
+                new_fragments.extend(
+                    fragments
+                        .into_iter()
+                        .map(|(bottom, top)| (bottom, top, intersecting_rect.value.clone())),
+                );
+            }
+            // TODO: Is there really no bulk insert?
+            for (bottom, top, value) in new_fragments.drain(..) {
+                self.insert(RTreeRect {
+                    top: top.try_into().unwrap(),
+                    bottom: bottom.try_into().unwrap(),
+                    value,
+                });
+            }
         }
     }
 
@@ -406,6 +440,26 @@ impl<const D: usize, T> PointDistance for RTreeRect<D, T> {
 impl<const D: usize> From<[BimapSInt; D]> for RTreePt<D> {
     fn from(value: [BimapSInt; D]) -> Self {
         RTreePt { arr: value }
+    }
+}
+
+impl<const D: usize> TryFrom<Vec<BimapSInt>> for RTreePt<D> {
+    type Error = <[BimapSInt; D] as TryFrom<Vec<BimapSInt>>>::Error;
+
+    fn try_from(value: Vec<BimapSInt>) -> Result<Self, Self::Error> {
+        Ok(RTreePt {
+            arr: value.try_into()?,
+        })
+    }
+}
+
+impl<'a, const D: usize> TryFrom<&'a [BimapSInt]> for RTreePt<D> {
+    type Error = <[BimapSInt; D] as TryFrom<&'a [BimapSInt]>>::Error;
+
+    fn try_from(value: &'a [BimapSInt]) -> Result<Self, Self::Error> {
+        Ok(RTreePt {
+            arr: value.try_into()?,
+        })
     }
 }
 
@@ -753,6 +807,82 @@ mod tests {
             rect_subtract(&[0, 0], &[1, 1], &[0, 1], &[2, 1]),
             [(vec![0, 0], vec![1, 0])]
         );
+    }
+
+    #[test]
+    fn test_rtree_subtract_1() {
+        let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
+        minuhend.merge_insert(&[1, 1], &[3, 3], (), true);
+
+        let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
+        subtrahend.merge_insert(&[1, 1], &[2, 2], (), true);
+
+        minuhend.subtract(&subtrahend);
+        assert_eq!(
+            minuhend.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([
+                RTreeRect {
+                    bottom: [1, 3].into(),
+                    top: [2, 3].into(),
+                    value: ()
+                },
+                RTreeRect {
+                    bottom: [3, 1].into(),
+                    top: [3, 3].into(),
+                    value: ()
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn test_rtree_subtract_2() {
+        let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
+        minuhend.merge_insert(&[1, 1], &[3, 3], (), true);
+        minuhend.merge_insert(&[5, 1], &[5, 7], (), true);
+
+        let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
+        subtrahend.merge_insert(&[1, 1], &[9, 9], (), true);
+
+        minuhend.subtract(&subtrahend);
+        assert_eq!(minuhend.into_iter().count(), 0);
+    }
+
+    #[test]
+    fn test_rtree_subtract_3() {
+        let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
+        minuhend.merge_insert(&[1, 1], &[3, 7], (), true);
+        minuhend.merge_insert(&[5, 1], &[7, 7], (), true);
+
+        let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
+        subtrahend.merge_insert(&[1, 2], &[7, 3], (), true);
+
+        minuhend.subtract(&subtrahend);
+        assert_eq!(
+            minuhend.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([
+                RTreeRect {
+                    bottom: [1, 1].into(),
+                    top: [3, 1].into(),
+                    value: ()
+                },
+                RTreeRect {
+                    bottom: [5, 1].into(),
+                    top: [7, 1].into(),
+                    value: ()
+                },
+                RTreeRect {
+                    bottom: [1, 4].into(),
+                    top: [3, 7].into(),
+                    value: ()
+                },
+                RTreeRect {
+                    bottom: [5, 4].into(),
+                    top: [7, 7].into(),
+                    value: ()
+                },
+            ])
+        )
     }
 
     proptest! {
