@@ -13,6 +13,7 @@ use std::hash::Hash;
 pub type RTreeEntryRef<'a, T> = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
 
 /// A trait abstracting over differently ranked RTree<RTreeRect<_, T>> variants.
+/// It's used internally to implement RTreeDyn (each variant dispatches).
 #[enum_dispatch]
 trait RTreeGeneric<T> {
     type Intersectable<A>;
@@ -30,11 +31,7 @@ trait RTreeGeneric<T> {
     where
         T: PartialEq + Eq + Hash + Clone;
 
-    /// Update by subtracting the space filled by another [RTreeGeneric].
-    /// That tree's values are ignored.
-    ///
-    /// Note: The current implementation is very slow.
-    fn subtract(&mut self, subtrahend_tree: &Self)
+    fn subtract<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
     where
         T: Clone;
 
@@ -101,13 +98,16 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn subtract(&mut self, subtrahend_tree: &Self)
+            /// Update by subtracting the space filled by another [RTreeGeneric].
+            /// That tree's values are ignored.
+            ///
+            /// Note: The current implementation is very slow.
+            pub fn subtract<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
             where
                 T: Clone
             {
-                match (self, subtrahend_tree) {
-                    $( (RTreeDyn::$name(t), RTreeDyn::$name(s)) => RTreeGeneric::subtract(t, s), )*
-                    _ => panic!("Mismatched ranks"),
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::subtract(t, subtrahend_tree), )*
                 };
             }
 
@@ -312,20 +312,21 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         }
     }
 
-    fn subtract(&mut self, subtrahend_tree: &Self)
+    fn subtract<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
     where
         T: Clone,
     {
         let mut new_fragments = vec![];
-        for rhs in subtrahend_tree.iter() {
+        for (rhs_bottom, rhs_top, _) in subtrahend_tree.iter() {
             debug_assert!(new_fragments.is_empty());
-            let rhs_envelope = rhs.envelope();
+            let rhs_envelope =
+                AABB::from_corners(rhs_bottom.try_into().unwrap(), rhs_top.try_into().unwrap());
             for intersecting_rect in self.drain_in_envelope_intersecting(rhs_envelope) {
                 let fragments = rect_subtract(
                     &intersecting_rect.bottom.arr,
                     &intersecting_rect.top.arr,
-                    &rhs.bottom.arr,
-                    &rhs.top.arr,
+                    rhs_bottom,
+                    rhs_top,
                 );
                 new_fragments.extend(
                     fragments
@@ -725,7 +726,7 @@ mod tests {
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
         subtrahend.merge_insert(&[1, 1], &[2, 2], ());
 
-        minuhend.subtract(&subtrahend);
+        minuhend.subtract(&RTreeDyn::D2(subtrahend));
         assert_eq!(
             minuhend.into_iter().collect::<HashSet<_>>(),
             HashSet::from([
@@ -752,7 +753,7 @@ mod tests {
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
         subtrahend.merge_insert(&[1, 1], &[9, 9], ());
 
-        minuhend.subtract(&subtrahend);
+        minuhend.subtract(&RTreeDyn::D2(subtrahend));
         assert_eq!(minuhend.into_iter().count(), 0);
     }
 
@@ -765,7 +766,7 @@ mod tests {
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
         subtrahend.merge_insert(&[1, 2], &[7, 3], ());
 
-        minuhend.subtract(&subtrahend);
+        minuhend.subtract(&RTreeDyn::D2(subtrahend));
         assert_eq!(
             minuhend.into_iter().collect::<HashSet<_>>(),
             HashSet::from([

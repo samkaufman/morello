@@ -179,8 +179,10 @@ fn synthesize_block<Tgt>(
         // TODO: Visiting every entry is probably very slow, since it walks over entries that are
         //       already in the database's R-Trees. Ideally, we preserve the geometry all the way
         //       through the solver calls.
+        let mut missing_subspecs_rtree = deps_tree.clone();
+        db.subtract_from(table_key, &mut missing_subspecs_rtree);
         let mut missing_subspecs_set = HashSet::<Spec<Tgt>>::new();
-        deps_tree.iter().for_each(|(bottom, top, _)| {
+        missing_subspecs_rtree.iter().for_each(|(bottom, top, _)| {
             diagonals_shifted(bottom, top).flatten().for_each(|pt| {
                 let pt_u32 = pt
                     .iter()
@@ -210,10 +212,10 @@ fn synthesize_block<Tgt>(
                         }),
                     "canonicalization moved Spec point outside the dependency range: {spec}"
                 );
-                let spec_is_goal = tracking_updater
+                let spec_is_internal_goal = tracking_updater
                     .goal_solvers_outstanding
                     .contains_key(&spec);
-                if !spec_is_goal && db.get(&spec).is_none() {
+                if !spec_is_internal_goal {
                     missing_subspecs_set.insert(spec);
                 }
             });
