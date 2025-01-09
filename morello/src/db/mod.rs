@@ -459,6 +459,24 @@ impl FilesDatabase {
         })
     }
 
+    pub(crate) fn subtract_from<U: Clone>(&self, table_key: &TableKey, minuhend: &mut RTreeDyn<U>) {
+        let rank = minuhend.dim_count();
+        let page_shape = (0..rank)
+            .map(|dim| block_size_dim(dim, rank))
+            .collect::<Vec<_>>();
+        let intersecting_pages = rtree_grid_intersections(minuhend, page_shape).collect::<Vec<_>>();
+        for page_pt in intersecting_pages {
+            let key = self.prehasher.prehash((table_key.clone(), page_pt.clone()));
+            let Page {
+                contents: PageContents::RTree(page_contents),
+                modified: _,
+            } = &*self.load_live_page(&key);
+            let page_tree = &page_contents.as_ref().0;
+            debug_assert_eq!(page_tree.dim_count(), rank);
+            minuhend.subtract(page_tree);
+        }
+    }
+
     /// Return a bidirectional map from [Spec]s to tuples of table keys and their coordinates.
     pub(crate) fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
     where
