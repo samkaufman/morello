@@ -23,8 +23,8 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
         };
         let PrimitiveBasics {
             typ: PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim },
-            spec_shape,
-            dtypes,
+            spec_shape: _,
+            dtypes: _,
         } = head
         else {
             // TODO: Use a more specific NotApplicableReason.

@@ -1566,7 +1566,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let shape = &basics.spec_shape;
                     for (aux, dtype) in primitive_aux.iter().zip(&basics.dtypes) {
                         let vs = aux.vector_size;
-                        if !check_tensor_vector_size::<Tgt>(&shape, *dtype, &aux.level, vs) {
+                        if !check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.level, vs) {
                             return false;
                         }
 

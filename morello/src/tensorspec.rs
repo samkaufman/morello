@@ -379,7 +379,7 @@ fn arb_noncanon_tensorspec<Tgt: Target>(
     use proptest::prelude::*;
 
     max_shape
-        .into_iter()
+        .iter()
         .map(|m| 1..=m.get())
         .collect::<Vec<_>>()
         .prop_flat_map(|shp| {
