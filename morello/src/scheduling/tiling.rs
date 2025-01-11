@@ -179,7 +179,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
                         return Ok(ActionSolver::PrimitiveTileOut {
                             outer_spec: spec.clone(),
                             body_spec: ActionSolver::tiled_subspec_fast(
-                                [(0, 0), (2, 1)].into_iter(),
+                                [(0, 0), (1, 1), (3, 2)].into_iter(),
                                 spec,
                                 &tile_shape,
                                 parallel,
@@ -252,13 +252,13 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                             panic!();
                         };
                         assert!(
-                            self.k < lhs.shape()[1],
+                            self.k < lhs.shape()[2],
                             "Cannot split to k={} when inner dim. is not larger (it is {})",
                             self.k,
-                            lhs.shape()[1]
+                            lhs.shape()[2]
                         );
 
-                        if lhs.shape()[1].get() % self.k.get() != 0 {
+                        if lhs.shape()[2].get() % self.k.get() != 0 {
                             return Err(ApplyError::NotApplicable(NotApplicableReason::Other(
                                 Some("Original size is not a multiple of split size"),
                             )));
@@ -267,10 +267,10 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                         let tiles = vec![
                             LoopTile {
                                 parameter_index: 0,
-                                axes: vec![0, 1],
+                                axes: vec![0, 1, 2],
                                 tile: Tile::new(
-                                    vec![lhs.shape()[0], self.k],
-                                    vec![lhs.shape()[0], self.k],
+                                    vec![lhs.shape()[0], lhs.shape()[1], self.k],
+                                    vec![lhs.shape()[0], lhs.shape()[1], self.k],
                                     Param::new(0, lhs.clone()),
                                 )
                                 .map(|v| v.boxed_viewe())
@@ -278,10 +278,10 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                             },
                             LoopTile {
                                 parameter_index: 1,
-                                axes: vec![1, 2],
+                                axes: vec![0, 2, 3],
                                 tile: Tile::new(
-                                    vec![self.k, rhs.shape()[1]],
-                                    vec![self.k, rhs.shape()[1]],
+                                    vec![rhs.shape()[0], self.k, rhs.shape()[2]],
+                                    vec![rhs.shape()[0], self.k, rhs.shape()[2]],
                                     Param::new(1, rhs.clone()),
                                 )
                                 .map(|v| v.boxed_viewe())
@@ -344,7 +344,8 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                 let Some(output_idx) = logical_spec.unique_output_index() else {
                     panic!("Compose should have a unique output");
                 };
-                let [old_m, old_k, old_n] = &components[0].spec_shape[..] else {
+
+                let [old_b, old_m, old_k, old_n] = &components[0].spec_shape[..] else {
                     todo!();
                 };
 
@@ -376,7 +377,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                     mut body,
                     parallel: _,
                     spec: _,
-                }) = compose_tail.tile_out(&[old_m.get(), self.k.get()])
+                }) = compose_tail.tile_out(&[old_b.get(), old_m.get(), self.k.get()])
                 else {
                     unreachable!();
                 };
@@ -403,14 +404,16 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                 }
 
                 // Add a LoopTile for the new rhs argument on the head Compose.
+                debug_assert_ne!(tail_output_tile.axes[0], 255);
+                debug_assert_ne!(tail_output_tile.axes[2], 255);
                 let new_head_rhs_looptile = LoopTile {
                     parameter_index: 0,
-                    axes: vec![tail_output_tile.axes[1], 255], // TODO: Replace 255
-                    tile: Tiling::new_simple(vec![self.k, *old_n])
+                    axes: vec![tail_output_tile.axes[0], tail_output_tile.axes[2], 255], // TODO: Replace 255
+                    tile: Tiling::new_simple(vec![*old_b, self.k, *old_n])
                         .apply(Param::new(
                             0,
                             TensorSpec::new_noncanon_with_aux(
-                                vec![*old_k, *old_n],
+                                vec![*old_b, *old_k, *old_n],
                                 components[0].dtypes[1],
                                 operand_auxes[0].clone(),
                             ),
@@ -527,7 +530,7 @@ fn loop_spec_with_shrunken_tiles<Tgt: Target>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{col_major, row_major};
+    use crate::layout::{row_major, Layout, PhysDim};
     use crate::scheduling::Action;
     use crate::target::{CpuMemoryLevel, X86Target};
     use crate::{lspec, shape};
@@ -551,7 +554,7 @@ mod tests {
     #[test]
     fn test_non_multiple_tile_out_multi_returns_error() {
         shared_test_non_multiple_tiling_returns_error(Action::TileOut(TileOut::MultiLoop {
-            output_shape: shape![4, 6],
+            output_shape: shape![1, 4, 6],
             parallel: false,
         }))
     }
@@ -565,9 +568,14 @@ mod tests {
     }
 
     fn shared_test_non_multiple_tiling_returns_error(action: Action<X86Target>) {
+        let bcm_layout = Layout::new(vec![
+            (0, PhysDim::Dynamic),
+            (2, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+        ]);
         let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
-            [8, 8, 8],
-            (f32, CpuMemoryLevel::GL, col_major),
+            [4, 8, 8, 8],
+            (f32, CpuMemoryLevel::GL, bcm_layout),
             (f32, CpuMemoryLevel::GL, row_major),
             (f32, CpuMemoryLevel::GL, row_major)
         ));

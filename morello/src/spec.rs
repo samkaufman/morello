@@ -224,10 +224,15 @@ impl<Tgt: Target> Spec<Tgt> {
         match self {
             Spec(LogicalSpec::Primitive(basics, _, _), _) => match basics.typ {
                 PrimitiveSpecType::Matmul { .. } => {
-                    let [m, k, n] = basics.spec_shape[..] else {
+                    let [b, m, k, n] = basics.spec_shape[..] else {
                         unreachable!();
                     };
-                    Some(2 * u64::from(m.get()) * u64::from(k.get()) * u64::from(n.get()))
+                    Some(
+                        2 * u64::from(b.get())
+                            * u64::from(m.get())
+                            * u64::from(k.get())
+                            * u64::from(n.get()),
+                    )
                 }
                 _ => None,
             },
@@ -340,9 +345,9 @@ impl PrimitiveBasics {
     pub fn parameter_shape(&self, idx: usize) -> Shape {
         match self.typ {
             PrimitiveSpecType::Matmul { .. } => match idx {
-                0 => vec![self.spec_shape[0], self.spec_shape[1]],
-                1 => vec![self.spec_shape[1], self.spec_shape[2]],
-                2 => vec![self.spec_shape[0], self.spec_shape[2]],
+                0 => vec![self.spec_shape[0], self.spec_shape[1], self.spec_shape[2]],
+                1 => vec![self.spec_shape[0], self.spec_shape[2], self.spec_shape[3]],
+                2 => vec![self.spec_shape[0], self.spec_shape[1], self.spec_shape[3]],
                 _ => panic!("Matmul has only 3 parameters"),
             },
             PrimitiveSpecType::Conv { .. } => {
@@ -519,17 +524,33 @@ impl PrimitiveBasics {
             ) => TilingInference(vec![
                 (
                     Tiling::new_sliding(
-                        vec![smaller_output.shape()[0], spec_shape[1]],
-                        vec![smaller_output.step_sizes()[0], spec_shape[1]],
+                        vec![
+                            smaller_output.shape()[0],
+                            smaller_output.shape()[1],
+                            spec_shape[2],
+                        ],
+                        vec![
+                            smaller_output.step_sizes()[0],
+                            smaller_output.step_sizes()[1],
+                            spec_shape[2],
+                        ],
                     ),
-                    vec![Some(0), None],
+                    vec![Some(0), Some(1), None],
                 ),
                 (
                     Tiling::new_sliding(
-                        vec![spec_shape[1], smaller_output.shape()[1]],
-                        vec![spec_shape[1], smaller_output.step_sizes()[1]],
+                        vec![
+                            smaller_output.shape()[0],
+                            spec_shape[2],
+                            smaller_output.shape()[2],
+                        ],
+                        vec![
+                            smaller_output.shape()[0],
+                            spec_shape[2],
+                            smaller_output.step_sizes()[2],
+                        ],
                     ),
-                    vec![None, Some(1)],
+                    vec![Some(0), None, Some(2)],
                 ),
             ]),
             (
@@ -773,12 +794,20 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
             .prop_flat_map(move |(typ, dtypes)| {
                 let shape_strategy = match typ {
                     PrimitiveSpecType::Matmul { accum: _ } => {
-                        let (m, k) = match args.first_input_shape.as_deref() {
-                            Some([m, k]) => (Just(m.get()).sboxed(), Just(k.get()).sboxed()),
-                            Some(_) => panic!("Matmul requires a rank-2 first input"),
-                            None => ((1..=max_size).sboxed(), (1..=max_size).sboxed()),
+                        let (b, m, k) = match args.first_input_shape.as_deref() {
+                            Some([b, m, k]) => (
+                                Just(b.get()).sboxed(),
+                                Just(m.get()).sboxed(),
+                                Just(k.get()).sboxed(),
+                            ),
+                            Some(_) => panic!("Matmul requires a rank-3 first input"),
+                            None => (
+                                (1..=max_size).sboxed(),
+                                (1..=max_size).sboxed(),
+                                (1..=max_size).sboxed(),
+                            ),
                         };
-                        vec![m, k, (1..=max_size).sboxed()].sboxed()
+                        vec![b, m, k, (1..=max_size).sboxed()].sboxed()
                     }
                     PrimitiveSpecType::Conv { accum: _ } => {
                         let (b, c, h, w) = match args.first_input_shape.as_deref() {
@@ -909,10 +938,12 @@ impl PrimitiveSpecType {
                 let lhs = parameter_shapes.next().unwrap();
                 let rhs = parameter_shapes.next().unwrap();
                 let out = parameter_shapes.next().unwrap();
+                assert_eq!(lhs[0], rhs[0]);
                 assert_eq!(lhs[0], out[0]);
-                assert_eq!(rhs[1], out[1]);
-                assert_eq!(lhs[1], rhs[0]);
-                vec![lhs[0], lhs[1], rhs[1]]
+                assert_eq!(lhs[1], out[1]);
+                assert_eq!(rhs[2], out[2]);
+                assert_eq!(lhs[2], rhs[1]);
+                vec![lhs[0], lhs[1], lhs[2], rhs[2]]
             }
             PrimitiveSpecType::Conv { accum: _ } => {
                 let lhs = parameter_shapes.next().unwrap();
@@ -1075,10 +1106,10 @@ impl PrimitiveSpecType {
         debug_assert_eq!(inputs.len(), self.input_count());
         match self {
             PrimitiveSpecType::Matmul { .. } => {
-                let ([m, _k], [_, n]) = (inputs[0], inputs[1]) else {
-                    panic!("Matmul inputs must have 2 dimensions each");
+                let ([b, m, _k], [_, _, n]) = (inputs[0], inputs[1]) else {
+                    panic!("Matmul inputs must have 3 dimensions each");
                 };
-                Some(vec![*m, *n])
+                Some(vec![*b, *m, *n])
             }
             PrimitiveSpecType::Conv { .. } => {
                 let ([b, _, h, w], [f, _, fh, fw]) = (inputs[0], inputs[1]) else {
@@ -2493,7 +2524,7 @@ fn arb_compose_component_successor(
     let out_idx = predecessor.typ.unique_output_index().unwrap();
     let mut allowed_types = vec![]; // TODO: Somehow gather these from type def.
     match shapes[out_idx].len() {
-        2 => {
+        3 => {
             allowed_types.push(PrimitiveSpecType::Matmul { accum: true });
             allowed_types.push(PrimitiveSpecType::Matmul { accum: false });
         }
@@ -2942,37 +2973,37 @@ mod tests {
     #[test]
     fn test_lspec_1() {
         let spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
-            [2, 3, 3],
+            [32, 2, 3, 3],
             (u8, GL, row_major),
             (i8, GL, row_major, c0),
             (u16, GL, row_major, ua),
             serial
         ));
         let lhs = TensorSpecAux {
-            contig: row_major(2).contiguous_full(),
+            contig: row_major(3).contiguous_full(),
             aligned: true,
             level: GL,
-            layout: row_major(2),
+            layout: row_major(3),
             vector_size: None,
         };
         let rhs = TensorSpecAux {
-            contig: row_major(2).contiguous_none(),
+            contig: row_major(3).contiguous_none(),
             aligned: true,
             level: GL,
-            layout: row_major(2),
+            layout: row_major(3),
             vector_size: None,
         };
         let out = TensorSpecAux {
-            contig: row_major(2).contiguous_full(),
+            contig: row_major(3).contiguous_full(),
             aligned: false,
             level: GL,
-            layout: row_major(2),
+            layout: row_major(3),
             vector_size: None,
         };
         let expected = LogicalSpec::<X86Target>::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Matmul { accum: true },
-                spec_shape: shape![2, 3, 3],
+                spec_shape: shape![32, 2, 3, 3],
                 dtypes: vec![Dtype::Uint8, Dtype::Sint8, Dtype::Uint16],
             },
             vec![lhs, rhs, out],
@@ -2995,27 +3026,27 @@ mod tests {
 
         let expected_parameters: Vec<TensorSpec<X86Target>> = vec![
             TensorSpec::new_noncanon_with_aux(
-                components[0].spec_shape[1..].to_vec(),
+                [0, 2, 3].map(|i| components[0].spec_shape[i]).into(),
                 components[0].dtypes[1],
                 operand_auxes[0].clone(),
             ),
             TensorSpec::new_noncanon_with_aux(
-                components[1].spec_shape[1..].to_vec(),
+                [0, 2, 3].map(|i| components[1].spec_shape[i]).into(),
                 components[1].dtypes[1],
                 operand_auxes[1].clone(),
             ),
             TensorSpec::new_noncanon_with_aux(
-                components[2].spec_shape[..2].to_vec(),
+                components[2].spec_shape[..3].to_vec(),
                 components[2].dtypes[0],
                 operand_auxes[2].clone(),
             ),
             TensorSpec::new_noncanon_with_aux(
-                components[2].spec_shape[1..].to_vec(),
+                [0, 2, 3].map(|i| components[2].spec_shape[i]).into(),
                 components[2].dtypes[1],
                 operand_auxes[3].clone(),
             ),
             TensorSpec::new_noncanon_with_aux(
-                vec![components[0].spec_shape[0], components[0].spec_shape[2]],
+                [0, 1, 3].map(|i| components[0].spec_shape[i]).into(),
                 components[0].dtypes[2],
                 operand_auxes.last().unwrap().clone(),
             ),
@@ -3027,12 +3058,24 @@ mod tests {
     #[test]
     fn test_compose_input_tiling_inference() {
         let spec = compose_logicalspec_test_data();
-        let output_tiling = Tiling::new_simple(shape![32, 128]);
+        let output_tiling = Tiling::new_simple(shape![8, 32, 128]);
         let expected = TilingInference(vec![
-            (Tiling::new_simple(shape![128, 128]), vec![None, Some(1)]),
-            (Tiling::new_simple(shape![128, 128]), vec![None, Some(1)]),
-            (Tiling::new_simple(shape![32, 128]), vec![Some(0), None]),
-            (Tiling::new_simple(shape![128, 128]), vec![None, Some(1)]),
+            (
+                Tiling::new_simple(shape![8, 128, 128]),
+                vec![Some(0), None, Some(2)],
+            ),
+            (
+                Tiling::new_simple(shape![8, 128, 128]),
+                vec![Some(0), None, Some(2)],
+            ),
+            (
+                Tiling::new_simple(shape![8, 32, 128]),
+                vec![Some(0), Some(1), None],
+            ),
+            (
+                Tiling::new_simple(shape![8, 128, 128]),
+                vec![Some(0), None, Some(2)],
+            ),
         ]);
         assert_eq!(
             spec.input_tilings_for_tile_out(&output_tiling),
@@ -3282,6 +3325,7 @@ mod tests {
             spec in arb_canonical_spec::<X86Target>(None, None)
         ) {
             X86Target::actions(&spec.0, None).for_each(|action| {
+                println!("spec: {}\naction: {action:?}", spec.0);  // TODO: Remove
                 let Ok(applied) = action.apply(&spec) else {
                     return;
                 };
@@ -3570,53 +3614,53 @@ mod tests {
     fn compose_logicalspec_test_data() -> LogicalSpec<X86Target> {
         let basic0 = PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
-            spec_shape: shape![128, 128, 128],
+            spec_shape: shape![16, 128, 128, 128],
             dtypes: vec![Dtype::Uint8, Dtype::Uint16, Dtype::Uint32],
         };
         let basic1 = PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
-            spec_shape: shape![128, 128, 128],
+            spec_shape: shape![16, 128, 128, 128],
             dtypes: vec![Dtype::Uint32, Dtype::Uint16, Dtype::Uint8],
         };
         let basic2 = PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
-            spec_shape: shape![128, 128, 128],
+            spec_shape: shape![16, 128, 128, 128],
             dtypes: vec![Dtype::Uint8, Dtype::Uint8, Dtype::Uint32],
         };
 
         let aux0_1 = TensorSpecAux {
-            contig: row_major(2).contiguous_full(),
+            contig: row_major(3).contiguous_full(),
             aligned: true,
             level: GL,
-            layout: row_major(2),
+            layout: row_major(3),
             vector_size: None,
         };
         let aux1_1 = TensorSpecAux {
-            contig: row_major(2).contiguous_full(),
+            contig: row_major(3).contiguous_full(),
             aligned: true,
             level: L1,
-            layout: row_major(2),
+            layout: row_major(3),
             vector_size: None,
         };
         let aux2_0 = TensorSpecAux {
-            contig: row_major(2).contiguous_full(),
+            contig: row_major(3).contiguous_full(),
             aligned: false,
             level: GL,
-            layout: row_major(2),
+            layout: row_major(3),
             vector_size: None,
         };
         let aux2_1 = TensorSpecAux {
-            contig: row_major(2).contiguous_full(),
+            contig: row_major(3).contiguous_full(),
             aligned: false,
             level: L1,
-            layout: row_major(2),
+            layout: row_major(3),
             vector_size: None,
         };
         let aux0_out = TensorSpecAux {
-            contig: row_major(2).contiguous_full(),
+            contig: row_major(3).contiguous_full(),
             aligned: true,
             level: RF,
-            layout: row_major(2),
+            layout: row_major(3),
             vector_size: None,
         };
 

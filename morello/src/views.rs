@@ -189,6 +189,18 @@ pub trait ViewExt: View {
         }
     }
 
+    fn one_prefix(self) -> OnePrefixView<Self>
+    where
+        Self: Sized,
+    {
+        let spec = self.spec().one_prefix();
+        OnePrefixView {
+            inner: self,
+            spec,
+            unique_id: OpaqueSymbol::new(),
+        }
+    }
+
     /// Yields a view of the matrix with its two logical dimensions swapped.
     ///
     /// The underlying data is not modified. Instead, both the dimension sizes and the
@@ -234,6 +246,7 @@ pub enum ViewE<Tgt: Target> {
     CacheView(CacheView<Box<ViewE<Tgt>>>),
     Tile(Tile<Box<ViewE<Tgt>>>),
     SqueezeDimsView(SqueezeDimsView<Box<ViewE<Tgt>>>),
+    OnePrefixView(OnePrefixView<Box<ViewE<Tgt>>>),
     TransposeView(TransposeView<Box<ViewE<Tgt>>>),
 }
 
@@ -247,6 +260,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::CacheView(cache_view) => cache_view.identifier(),
             ViewE::Tile(tile) => tile.identifier(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.identifier(),
+            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.identifier(),
             ViewE::TransposeView(transpose_view) => transpose_view.identifier(),
         }
     }
@@ -258,6 +272,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::CacheView(cache_view) => cache_view.backing_tensor(),
             ViewE::Tile(tile) => tile.backing_tensor(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.backing_tensor(),
+            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.backing_tensor(),
             ViewE::TransposeView(transpose_view) => transpose_view.backing_tensor(),
         }
     }
@@ -269,6 +284,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::CacheView(cache_view) => cache_view.spec(),
             ViewE::Tile(tile) => tile.spec(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.spec(),
+            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.spec(),
             ViewE::TransposeView(transpose_view) => transpose_view.spec(),
         }
     }
@@ -283,6 +299,9 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::Tile(tile) => tile.make_buffer_indexing_expr_with_layout(layout),
             ViewE::SqueezeDimsView(squeeze_dims_view) => {
                 squeeze_dims_view.make_buffer_indexing_expr_with_layout(layout)
+            }
+            ViewE::OnePrefixView(one_prefix_view) => {
+                one_prefix_view.make_buffer_indexing_expr_with_layout(layout)
             }
             ViewE::TransposeView(transpose_view) => {
                 transpose_view.make_buffer_indexing_expr_with_layout(layout)
@@ -300,6 +319,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::CacheView(cache_view) => cache_view.bind(args),
             ViewE::Tile(tile) => tile.bind(args),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.bind(args),
+            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.bind(args),
             ViewE::TransposeView(transpose_view) => transpose_view.bind(args),
         }
     }
@@ -311,6 +331,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::CacheView(cache_view) => cache_view.shape(),
             ViewE::Tile(tile) => tile.shape(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.shape(),
+            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.shape(),
             ViewE::TransposeView(transpose_view) => transpose_view.shape(),
         }
     }
@@ -324,6 +345,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::SqueezeDimsView(squeeze_dims_view) => {
                 squeeze_dims_view.make_buffer_indexing_expr()
             }
+            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.make_buffer_indexing_expr(),
             ViewE::TransposeView(transpose_view) => transpose_view.make_buffer_indexing_expr(),
         }
     }
@@ -335,6 +357,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::CacheView(cache_view) => cache_view.to_param(),
             ViewE::Tile(tile) => tile.to_param(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.to_param(),
+            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.to_param(),
             ViewE::TransposeView(transpose_view) => transpose_view.to_param(),
         }
     }
@@ -389,6 +412,19 @@ where
         ViewE::SqueezeDimsView(SqueezeDimsView {
             inner: Box::new(view.inner.into()),
             dims: view.dims,
+            spec: view.spec,
+            unique_id: view.unique_id,
+        })
+    }
+}
+
+impl<V> From<OnePrefixView<V>> for ViewE<V::Tgt>
+where
+    V: View + Into<ViewE<V::Tgt>>,
+{
+    fn from(view: OnePrefixView<V>) -> Self {
+        ViewE::OnePrefixView(OnePrefixView {
+            inner: Box::new(view.inner.into()),
             spec: view.spec,
             unique_id: view.unique_id,
         })
@@ -516,6 +552,13 @@ pub struct Tile<V: View> {
 pub struct SqueezeDimsView<V: View> {
     pub inner: V,
     pub dims: Vec<u8>,
+    spec: TensorSpec<V::Tgt>,
+    unique_id: OpaqueSymbol,
+}
+
+#[derive(Debug, Clone)]
+pub struct OnePrefixView<V: View> {
+    pub inner: V,
     spec: TensorSpec<V::Tgt>,
     unique_id: OpaqueSymbol,
 }
@@ -784,6 +827,37 @@ impl<T: View> View for SqueezeDimsView<T> {
         ViewE::from(SqueezeDimsView {
             inner: self.inner.bind(args),
             dims: self.dims,
+            spec: self.spec,
+            unique_id: self.unique_id,
+        })
+    }
+}
+
+impl<T: View> View for OnePrefixView<T> {
+    type Tgt = T::Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        self.unique_id
+    }
+
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        self.inner.backing_tensor()
+    }
+
+    fn spec(&self) -> &TensorSpec<Self::Tgt> {
+        &self.spec
+    }
+
+    fn make_buffer_indexing_expr_with_layout(&self, _layout: &Layout) -> NonAffineExpr<BufferVar> {
+        todo!()
+    }
+
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        ViewE::from(OnePrefixView {
+            inner: self.inner.bind(args),
             spec: self.spec,
             unique_id: self.unique_id,
         })

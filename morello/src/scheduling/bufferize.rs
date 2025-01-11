@@ -133,24 +133,24 @@ mod tests {
     fn test_bufferize_matmul_chain() {
         let basics0 = PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
-            spec_shape: shape![1, 2, 4],
+            spec_shape: shape![3, 12, 2, 4],
             dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
         };
         let basics1 = PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
-            spec_shape: shape![1, 4, 8],
+            spec_shape: shape![32, 1, 4, 8],
             dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
         };
         let basics2 = PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
-            spec_shape: shape![1, 8, 16],
+            spec_shape: shape![32, 1, 8, 16],
             dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
         };
         let aux = TensorSpecAux {
-            contig: row_major(2).contiguous_full(),
+            contig: row_major(3).contiguous_full(),
             aligned: true,
             level: CpuMemoryLevel::GL,
-            layout: row_major(2),
+            layout: row_major(3),
             vector_size: None,
         };
         let mut spec = Spec::<X86Target>(

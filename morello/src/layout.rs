@@ -908,6 +908,13 @@ pub fn col_major(rank: u8) -> Layout {
     Layout::new((0..rank).rev().map(|d| (d, PhysDim::Dynamic)).collect())
 }
 
+pub(crate) fn batched_col_major(rank: u8) -> Layout {
+    let rank_us = usize::from(rank);
+    let mut layout = row_major(rank);
+    layout.0.swap(rank_us - 1, rank_us - 2);
+    layout
+}
+
 pub fn nhwc() -> Layout {
     layout![
         (0, PhysDim::Dynamic),

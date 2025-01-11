@@ -1483,7 +1483,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(
-                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE.get(),
                             0
                         );
                         let step_idx_name = self.namer.fresh_name();

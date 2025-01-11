@@ -70,19 +70,25 @@ impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
         // Make views over the tiles we'll pass to the body of the loop. These are
         // tiles reshaped to drop the size-one dimensions and, in the case of the filters
         // argument, transposed. The result is matrix multiply-able tensor views!
-        let inner_image_tile = outer_image_tile.clone().squeeze_dims(2..rank);
-        let inner_filters_tile = outer_filters_tile.clone().squeeze_dims(2..rank).transpose();
-
-        let inner_output_view = Param::new(2, operands[2].clone()).squeeze_dims(2..rank);
+        let inner_image_tile = outer_image_tile.clone().squeeze_dims(2..rank).one_prefix();
+        let inner_filters_tile = outer_filters_tile
+            .clone()
+            .squeeze_dims(2..rank)
+            .transpose()
+            .one_prefix();
+        let inner_output_view = Param::new(2, operands[2].clone())
+            .squeeze_dims(2..rank)
+            .one_prefix();
 
         let body_spec = LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Matmul { accum: true },
-                spec_shape: operands[0].shape()[..2]
-                    .iter()
-                    .copied()
-                    .chain(iter::once(operands[1].shape()[0]))
-                    .collect(),
+                spec_shape: vec![
+                    nz!(1u32),
+                    operands[0].shape()[0],
+                    operands[0].shape()[1],
+                    operands[1].shape()[0],
+                ],
                 dtypes: dtypes.clone(),
             },
             vec![

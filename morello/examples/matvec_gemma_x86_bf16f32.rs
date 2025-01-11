@@ -1,7 +1,7 @@
 use morello::codegen::CodeGen;
 use morello::common::{DimSize, Dtype};
 use morello::cost::Cost;
-use morello::layout::{col_major, row_major, Layout, PhysDim};
+use morello::layout::{row_major, Layout, PhysDim};
 use morello::lspec;
 use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
@@ -24,11 +24,16 @@ fn main() {
 
     // Let's construct a multi-threaded matrix-matrix multiplication which takes two bf16
     // matrices and produces a f32 matrix.
+    let bcm_layout = Layout::new(vec![
+        (0, PhysDim::Dynamic),
+        (2, PhysDim::Dynamic),
+        (1, PhysDim::Dynamic),
+    ]);
     let spec = Spec::<X86Target>(
         lspec!(Matmul(
-            [M, K, N],
+            [nz!(1u32), M, K, N],
             (bf16, GL, row_major),
-            (bf16, GL, col_major),
+            (bf16, GL, bcm_layout.clone()),
             (f32, GL, row_major)
         )),
         X86Target::max_mem(),
@@ -38,7 +43,8 @@ fn main() {
     let interleaved = Layout::new(vec![
         (0, PhysDim::Dynamic),
         (1, PhysDim::Dynamic),
-        (1, PhysDim::OddEven(nz!(16u32))),
+        (2, PhysDim::Dynamic),
+        (2, PhysDim::OddEven(nz!(16u32))),
     ]);
 
     let implementation = spec
@@ -50,7 +56,7 @@ fn main() {
             None,
         )
         .subschedule(&[0], |z| {
-            z.tile_out(&[1, 16])
+            z.tile_out(&[1, 1, 16])
                 .move_param(0, CpuMemoryLevel::L1, row_major, None)
                 .move_param(0, CpuMemoryLevel::VRF, row_major, Some(nz!(16u32)))
                 .subschedule(&[0], |z| z.select(CpuKernel::VectorAssign))
@@ -60,13 +66,13 @@ fn main() {
                         .subschedule(&[1], |z| z.select(CpuKernel::VectorAssign))
                 })
         })
-        .tile_out_parallel(&[1, 128])
-        .tile_out(&[1, 1])
+        .tile_out_parallel(&[1, 1, 128])
+        .tile_out(&[1, 1, 1])
         .move_param(2, CpuMemoryLevel::L1, row_major, None)
         .move_param(2, CpuMemoryLevel::RF, row_major, None)
         .to_accum()
         .subschedule(&[1, 0, 0], |z| z.select(CpuKernel::MemsetZero))
-        .move_param(1, CpuMemoryLevel::L1, col_major, None)
+        .move_param(1, CpuMemoryLevel::L1, bcm_layout, None)
         .select(CpuKernel::DotProductLoopF32InterleavedBf16F32)
         .subschedule(&[1, 1], |body| body.select(CpuKernel::ValueAssign));
 

@@ -22,19 +22,19 @@ use nonzero::nonzero as nz;
 fn main() {
     let basics0 = PrimitiveBasics {
         typ: PrimitiveSpecType::Matmul { accum: false },
-        spec_shape: shape![2048, 2048, 2048],
+        spec_shape: shape![1, 2048, 2048, 2048],
         dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
     };
     let basics1 = PrimitiveBasics {
         typ: PrimitiveSpecType::Matmul { accum: false },
-        spec_shape: shape![2048, 2048, 2048],
+        spec_shape: shape![1, 2048, 2048, 2048],
         dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
     };
     let aux = TensorSpecAux {
-        contig: row_major(2).contiguous_full(),
+        contig: row_major(3).contiguous_full(),
         aligned: true,
         level: GL,
-        layout: row_major(2),
+        layout: row_major(3),
         vector_size: None,
     };
 
@@ -101,46 +101,51 @@ fn schedule_matmulaccum(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
         .subschedule(&[0], |pack_b| {
             // TODO: This stinks. Use vectors at least.
             pack_b
-                .tile_out(&[1, 1])
+                .tile_out(&[1, 1, 1])
                 .move_param(0, L1, row_major, None)
                 .move_param(1, L1, row_major, None)
                 .move_param(0, RF, row_major, None)
                 .subschedule(&[0], |m0| m0.select(CpuKernel::ValueAssign))
                 .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
         })
-        .tile_out(&[128, 1024])
-        .tile_out(&[4, 16])
+        .tile_out(&[1, 128, 1024])
+        .tile_out(&[1, 4, 16])
         .move_param(0, L1, row_major, None)
         .move_param(1, L1, layout_b(), None)
         .move_param(2, L1, row_major, None)
         .move_param(2, VRF, row_major, Some(nz!(8u32)))
         .subschedule(&[1, 0], |m| {
-            m.tile_out(&[1, 8]).select(CpuKernel::VectorAssign)
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
         })
         .subschedule(&[1, 2], |m| {
-            m.tile_out(&[1, 8]).select(CpuKernel::VectorAssign)
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
         })
         .split(1)
-        .tile_out(&[1, 16])
+        .tile_out(&[1, 1, 16])
         .move_param(1, VRF, layout_b(), Some(nz!(8u32)))
         .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::VectorAssign))
         .subschedule(&[1, 1, 1], |m| m.select(CpuKernel::BroadcastVecMultAdd))
 }
 
 fn schedule_zero(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
-    spec.tile_out(&[32, 1])
+    spec.tile_out(&[1, 32, 1])
         .move_param(0, L1, row_major, None)
-        .tile_out(&[16, 1])
+        .tile_out(&[1, 16, 1])
         .move_param(0, RF, row_major, None)
-        .subschedule(&[0], |s| s.tile_out(&[1, 1]).select(CpuKernel::MemsetZero))
-        .subschedule(&[1], |s| s.tile_out(&[1, 1]).select(CpuKernel::ValueAssign))
+        .subschedule(&[0], |s| {
+            s.tile_out(&[1, 1, 1]).select(CpuKernel::MemsetZero)
+        })
+        .subschedule(&[1], |s| {
+            s.tile_out(&[1, 1, 1]).select(CpuKernel::ValueAssign)
+        })
 }
 
 fn layout_b() -> Layout {
     let mat1_pack_size = nz!(16u32);
     Layout::new(vec![
-        (1, PhysDim::Dynamic),
         (0, PhysDim::Dynamic),
-        (1, PhysDim::Packed(mat1_pack_size)),
+        (2, PhysDim::Dynamic),
+        (1, PhysDim::Dynamic),
+        (2, PhysDim::Packed(mat1_pack_size)),
     ])
 }

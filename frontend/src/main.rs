@@ -4,6 +4,7 @@ use tikv_jemallocator::Jemalloc;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::info;
+use nonzero::nonzero as nz;
 
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::{io, path};

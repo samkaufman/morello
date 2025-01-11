@@ -4,7 +4,7 @@ use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::layout::{col_major, nhwc, row_major, Layout, PhysDim};
+use crate::layout::{batched_col_major, col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::scheduling::select::Select;
 use crate::scheduling::spatial_split::SpatialSplit;
@@ -555,12 +555,12 @@ impl CpuKernel {
                                     ..
                                 },
                             }
-                        ] if lhs_shape[..] == [nz!(1u32), nz!(2u32)]
-                          && rhs_shape[0] == nz!(2u32)
-                          && out_shape[0] == nz!(1u32)
-                          && rhs_shape[1].get() * 2 == rhs_vector_size.get()
-                          && out_shape[1].get() * 2 == rhs_vector_size.get()
-                          && rhs.layout() == &col_major(2) && out.layout().is_row_major()
+                        ] if lhs_shape[..] == [nz!(1u32), nz!(1u32), nz!(2u32)]
+                          && rhs_shape[..2] == [nz!(1u32), nz!(2u32)]
+                          && rhs_shape[2].get() * 2 == rhs_vector_size.get()
+                          && out_shape[..2] == [nz!(1u32), nz!(1u32)]
+                          && out_shape[2].get() * 2 == rhs_vector_size.get()
+                          && rhs.layout() == &batched_col_major(3) && out.layout().is_row_major()
                           && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
                     )
             }
@@ -592,8 +592,9 @@ impl CpuKernel {
                                     ..
                                 },
                             }
-                        ] if lhs_shape[1].get() % (DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT) == 0
-                          && out_shape[..] == [nz!(1u32), nz!(1u32)]
+                        ] if lhs_shape[0] == nz!(1u32)
+                          && lhs_shape[1].get() % (DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT) == 0
+                          && out_shape[..] == [nz!(1u32), nz!(1u32), nz!(1u32)]
                           && lhs.layout().is_row_major()
                           && rhs.layout() == &col_major(2)
                           && lhs.is_contiguous() && rhs.is_contiguous()
@@ -611,12 +612,14 @@ impl CpuKernel {
                 let layout0 = Layout::new(vec![
                     (0, PhysDim::Dynamic),
                     (1, PhysDim::Dynamic),
-                    (1, PhysDim::OddEven(nz!(16u32))),
+                    (2, PhysDim::Dynamic),
+                    (2, PhysDim::OddEven(nz!(16u32))),
                 ]);
                 let layout1 = Layout::new(vec![
-                    (1, PhysDim::Dynamic),
                     (0, PhysDim::Dynamic),
-                    (0, PhysDim::OddEven(nz!(16u32))),
+                    (2, PhysDim::Dynamic),
+                    (1, PhysDim::Dynamic),
+                    (1, PhysDim::OddEven(nz!(16u32))),
                 ]);
                 dotproductloop_applies(&operands, Dtype::Float32, &[layout0, layout1])
             }
@@ -1383,11 +1386,12 @@ fn dotproductloop_applies<Tgt: CpuTarget>(
                 },
             }
         ] if *ldt == lhs_dtype
-          && lhs_shape[1].get() % (DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
-          && out_shape[0] == nz!(1u32)
+          && lhs_shape[2].get() % (DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
+          && out_shape[0] == nz!(1u32)  // means {lhs, rhs}_shape also equal 1
           && out_shape[1] == nz!(1u32)
+          && out_shape[2] == nz!(1u32)
           && allowed_lhs_layouts.contains(lhs.layout())
-          && rhs.layout() == &col_major(2)
+          && rhs.layout() == &Layout::new([0, 2, 1].map(|d| (d, PhysDim::Dynamic)).into())
           && lhs.is_contiguous() && rhs.is_contiguous()
     )
 }
@@ -1562,8 +1566,11 @@ pub fn shared_broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemory
         return false;
     }
 
-    // Second parameter must have shape 1xn.
-    if operands[1].shape().len() != 2 || operands[1].shape()[0].get() != 1 {
+    // Second parameter must have shape 1x1xn.
+    if operands[1].shape().len() != 3
+        || operands[1].shape()[0].get() != 1
+        || operands[1].shape()[1].get() != 1
+    {
         return false;
     }
 
@@ -1713,7 +1720,7 @@ mod tests {
     use super::*;
     use crate::{
         common::{DimSize, Dtype},
-        layout::{col_major, row_major, Layout},
+        layout::{row_major, Layout},
         lspec,
         scheduling::{moves::Move, ActionT, ApplyError, NotApplicableReason},
         spec::{arb_canonical_spec, Spec},
@@ -1840,19 +1847,20 @@ mod tests {
     #[test]
     fn test_twovecbroadcastvecmult_applies_to_operands() {
         let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
-            [1, 2, 16],
+            [1, 1, 2, 16],
             (u8, CpuMemoryLevel::L1, row_major),
-            (i8, CpuMemoryLevel::VRF, col_major, 32),
+            (i8, CpuMemoryLevel::VRF, batched_col_major(3), 32),
             (i16, CpuMemoryLevel::VRF, row_major, 16),
             serial
         ));
+        assert!(logical_spec.is_canonical());
         assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_logical_spec(&logical_spec));
     }
 
     #[test]
     fn test_kernel_memory_constrains_placement() {
         let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
-            [1, 1, 16],
+            [1, 1, 1, 16],
             (u8, CpuMemoryLevel::RF, row_major),
             (u8, CpuMemoryLevel::VRF, row_major, 16),
             (u8, CpuMemoryLevel::VRF, row_major, 16),

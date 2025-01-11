@@ -311,7 +311,7 @@ fn move_is_cache_miss<Tgt: Target>(
 mod tests {
     use super::*;
     use crate::imp::Impl;
-    use crate::layout::{col_major, row_major, PhysDim};
+    use crate::layout::{batched_col_major, row_major, PhysDim};
     use crate::lspec;
     use crate::scheduling::Action;
     use crate::target::{CpuMemoryLevel, X86Target};
@@ -341,15 +341,10 @@ mod tests {
     // TODO: Add a variant where only physically innermost dimension is contiguous.
     #[test]
     fn test_move_planning_into_cache_with_extra_degenerate_dims_preserves_layout_and_contig() {
-        let fixed_layout = col_major(2);
-        let degenerate_layout = Layout::new(vec![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(nz!(8u32))),
-        ]);
+        let batched_cm = batched_col_major(3);
         let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
-            [8, 128, 8],
-            (f32, CpuMemoryLevel::GL, col_major),
+            [1, 8, 128, 8],
+            (f32, CpuMemoryLevel::GL, batched_cm.clone()),
             (f32, CpuMemoryLevel::GL, row_major),
             (f32, CpuMemoryLevel::GL, row_major)
         ));
@@ -361,15 +356,17 @@ mod tests {
             0,
             Dtype::Float32,
             CpuMemoryLevel::L1,
-            &degenerate_layout,
+            &Layout::new(vec![
+                (0, PhysDim::Dynamic),
+                (1, PhysDim::Dynamic), // param. is 8x128, col-maj., so this is useless.
+                (2, PhysDim::Dynamic),
+                (1, PhysDim::Packed(nz!(8u32))),
+            ]),
             None,
         )
         .unwrap();
-        assert_eq!(plan.new_spec.layout(), &fixed_layout);
-        assert_eq!(
-            plan.new_spec.contiguous_abs(),
-            fixed_layout.contiguous_full()
-        );
+        assert_eq!(plan.new_spec.layout(), &batched_cm);
+        assert_eq!(plan.new_spec.contiguous_abs(), batched_cm.contiguous_full());
     }
 
     fn child_impls_into_specs(imp: &ImplNode<X86Target>) -> Vec<Spec<X86Target>> {
@@ -388,9 +385,10 @@ mod tests {
     fn shared_test_subspecs_when_moving_into_degenerate_packed_layout(
         child_get: impl FnOnce(&Spec<X86Target>, Action<X86Target>) -> Vec<Spec<X86Target>>,
     ) {
+        let batched_cm = batched_col_major(3);
         let logical: LogicalSpec<X86Target> = lspec!(MatmulAccum(
-            [8, 128, 8],
-            (f32, CpuMemoryLevel::GL, col_major),
+            [1, 8, 128, 8],
+            (f32, CpuMemoryLevel::GL, batched_cm),
             (f32, CpuMemoryLevel::GL, row_major),
             (f32, CpuMemoryLevel::GL, row_major)
         ));
@@ -402,7 +400,8 @@ mod tests {
             destination_layout: Layout::new(vec![
                 (0, PhysDim::Dynamic),
                 (1, PhysDim::Dynamic),
-                (0, PhysDim::Packed(nz!(8u32))),
+                (2, PhysDim::Dynamic),
+                (1, PhysDim::Packed(nz!(8u32))),
             ]),
             destination_vector_size: None,
         });

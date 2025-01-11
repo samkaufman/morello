@@ -19,7 +19,7 @@ fn main() {
     // ANCHOR: specdef
     let mut spec = Spec::<X86Target>(
         lspec!(Matmul(
-            [1, 32, 1],
+            [1, 1, 32, 1],
             (u32, RF, row_major), // `RF` = tensor is in register file
             (u32, RF, row_major),
             (u32, RF, row_major),

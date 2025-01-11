@@ -1,4 +1,5 @@
 use itertools::iproduct;
+use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashSet;
@@ -271,6 +272,35 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             self.layout()
                 .dim_drop(&dropped_dims_set, self.contiguous_abs())
         };
+
+        TensorSpec::new_canon(
+            new_shape,
+            self.dtype(),
+            new_contig,
+            self.aligned(),
+            self.level(),
+            new_layout,
+            self.vector_size(),
+        )
+    }
+
+    pub(crate) fn one_prefix(&self) -> TensorSpec<Tgt> {
+        let mut new_shape = Vec::with_capacity(self.shape().len() + 1);
+        new_shape.push(nz!(1u32));
+        new_shape.extend_from_slice(self.shape());
+
+        let mut new_layout = self.layout().clone();
+        let was_initially_contiguous = new_layout.contiguous_full() == self.contiguous_abs();
+
+        for (logical_dim, _) in new_layout.0.iter_mut() {
+            *logical_dim += 1;
+        }
+        new_layout.0.insert(0, (0, PhysDim::Dynamic));
+
+        let mut new_contig = self.contiguous_abs();
+        if was_initially_contiguous {
+            new_contig = new_layout.contiguous_full();
+        }
 
         TensorSpec::new_canon(
             new_shape,
@@ -676,7 +706,6 @@ mod tests {
     use crate::target::{ArmTarget, CpuMemoryLevel, MemoryLevel, Target, X86Target};
     use crate::tensorspec::{arb_noncanon_tensorspec, TensorSpec, TensorSpecArbMaxShape};
     use crate::{layout, shape};
-    use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::proptest;
 

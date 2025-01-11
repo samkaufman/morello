@@ -9,7 +9,7 @@ use morello::target::{CpuMemoryLevel::GL, Target, X86Target};
 #[library_benchmark]
 fn copy_actions_into_vec() {
     let logical_spec: LogicalSpec<X86Target> = lspec!(Matmul(
-        [64, 64, 64],
+        [1, 64, 64, 64],
         (u32, GL, row_major),
         (u32, GL, row_major),
         (u32, GL, row_major),

@@ -19,7 +19,9 @@ impl<Tgt: Target> ActionT<Tgt> for Select<Tgt> {
 
         if !force && !k.applies_to_logical_spec(&spec.0) {
             // TODO: Use better error message-producing Error type.
-            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(None)));
+            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                "Kernel does not apply to Spec",
+            ))));
         }
 
         let arguments = operands

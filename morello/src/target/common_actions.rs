@@ -104,7 +104,7 @@ pub fn split_actions<Tgt: Target>(
     if !accum {
         panic!("split_actions called on non-accumulating Matmul");
     }
-    let [m, orig_k, n] = spec_shape[..] else {
+    let [b, m, orig_k, n] = spec_shape[..] else {
         unreachable!();
     };
 
@@ -112,8 +112,8 @@ pub fn split_actions<Tgt: Target>(
     dim_range(orig_k, false, tiling_depth)
         .filter(move |&new_k| {
             // TODO: Shouldn't this be rejected during application instead?
-            operands[0].is_valid_tile_shape(&[m, new_k], false)
-                && operands[1].is_valid_tile_shape(&[new_k, n], false)
+            operands[0].is_valid_tile_shape(&[b, m, new_k], false)
+                && operands[1].is_valid_tile_shape(&[b, new_k, n], false)
         })
         .map(|k| Action::Split(Split { k }))
 }

@@ -396,8 +396,8 @@ fn check_tile_out_applies<Tgt: Target>(
     }
     if output_shape
         .iter()
-        .enumerate()
-        .any(|(dim, dim_size)| *dim_size > current_out_shape[dim])
+        .zip(current_out_shape)
+        .any(|(out, cur)| out > cur)
     {
         return Err(ApplyError::NotApplicable(
             NotApplicableReason::TileShapeIsLarger,

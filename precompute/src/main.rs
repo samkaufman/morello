@@ -404,7 +404,7 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
     }
 
     bounds.push(lspec!(Matmul(
-        [args.size, args.size, args.size],
+        [nz!(1u32), args.size, args.size, args.size],
         (u32, CpuMemoryLevel::GL, row_major),
         (u32, CpuMemoryLevel::GL, row_major),
         (u32, CpuMemoryLevel::GL, row_major),

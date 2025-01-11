@@ -19,7 +19,7 @@ use std::io;
 fn main() {
     let mut spec = Spec::<X86Target>(
         lspec!(MatmulAccum(
-            [2048, 2048, 2048],
+            [1, 2048, 2048, 2048],
             (f32, GL, row_major),
             (f32, GL, row_major),
             (f32, GL, row_major),
@@ -31,9 +31,10 @@ fn main() {
 
     let mat1_pack_size = nz!(16u32);
     let layout_b = Layout::new(vec![
-        (1, PhysDim::Dynamic),
         (0, PhysDim::Dynamic),
-        (1, PhysDim::Packed(mat1_pack_size)),
+        (2, PhysDim::Dynamic),
+        (1, PhysDim::Dynamic),
+        (2, PhysDim::Packed(mat1_pack_size)),
     ]);
 
     let implementation = spec
@@ -42,27 +43,27 @@ fn main() {
         .subschedule(&[0], |pack_b| {
             // TODO: This stinks. Use vectors at least.
             pack_b
-                .tile_out(&[1, 1])
+                .tile_out(&[1, 1, 1])
                 .move_param(0, L1, row_major, None)
                 .move_param(1, L1, row_major, None)
                 .move_param(0, RF, row_major, None)
                 .subschedule(&[0], |m0| m0.select(CpuKernel::ValueAssign))
                 .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
         })
-        .tile_out(&[128, 1024])
-        .tile_out(&[4, 16])
+        .tile_out(&[1, 128, 1024])
+        .tile_out(&[1, 4, 16])
         .move_param(0, L1, row_major, None)
         .move_param(1, L1, layout_b.clone(), None)
         .move_param(2, L1, row_major, None)
         .move_param(2, VRF, row_major, Some(nz!(8u32)))
         .subschedule(&[1, 0], |m| {
-            m.tile_out(&[1, 8]).select(CpuKernel::VectorAssign)
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
         })
         .subschedule(&[1, 2], |m| {
-            m.tile_out(&[1, 8]).select(CpuKernel::VectorAssign)
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
         })
         .split(1)
-        .tile_out(&[1, 16])
+        .tile_out(&[1, 1, 16])
         .move_param(1, VRF, layout_b.clone(), Some(nz!(8u32)))
         .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::VectorAssign))
         .subschedule(&[1, 1, 1], |m| m.select(CpuKernel::BroadcastVecMultAdd));

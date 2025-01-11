@@ -7,13 +7,14 @@ use crate::{
     target::Target,
     tensorspec::TensorSpec,
 };
+use itertools::izip;
 use ndarray::{linalg::general_mat_mul, prelude::*, RemoveAxis};
 use ndarray_conv::{ConvExt, ConvMode, PaddingMode};
 use num_traits::{real::Real, AsPrimitive};
 use std::{
     fmt::{self, Debug, Formatter},
     io::{self, BufWriter, Write},
-    ops::{DivAssign, Sub},
+    ops::{AddAssign as _, DivAssign, Sub},
     process::Command,
     str::FromStr,
 };
@@ -110,14 +111,14 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .try_into()
                         .unwrap_or_else(|_| panic!("expected 3 args"));
                     let lhs = lhs
-                        .into_dimensionality::<Ix2>()
-                        .expect("lhs should be rank 2");
+                        .into_dimensionality::<Ix3>()
+                        .expect("lhs should be rank 3");
                     let rhs = rhs
-                        .into_dimensionality::<Ix2>()
-                        .expect("rhs should be rank 2");
+                        .into_dimensionality::<Ix3>()
+                        .expect("rhs should be rank 3");
                     let mut out = out
-                        .into_dimensionality::<Ix2>()
-                        .expect("out should be rank 2");
+                        .into_dimensionality::<Ix3>()
+                        .expect("out should be rank 3");
                     if !accum {
                         out.zero();
                     }
@@ -198,17 +199,20 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             {
                 let mut result = vec![]; // TODO: reserve
 
-                let mut outermost_out = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
+                let mut outermost_out = args.pop().unwrap().into_dimensionality::<Ix3>().unwrap();
                 outermost_out.zero();
 
                 // Compute the innermost matmul.
                 let innermost_component = components.last().unwrap();
                 let innermost_output_idx = innermost_component.typ.unique_output_index().unwrap();
-                let first_rhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
-                let first_lhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
+                let first_rhs = args.pop().unwrap().into_dimensionality::<Ix3>().unwrap();
+                let first_lhs = args.pop().unwrap().into_dimensionality::<Ix3>().unwrap();
                 let first_dtype = innermost_component.dtypes[innermost_output_idx];
-                let mut first_out =
-                    DynArray::zeros((first_lhs.shape()[0], first_rhs.shape()[1]), first_dtype);
+                let first_lhs_shape = first_lhs.shape();
+                let mut first_out = DynArray::zeros(
+                    (first_lhs_shape[0], first_lhs_shape[1], first_rhs.shape()[1]),
+                    first_dtype,
+                );
                 first_lhs.dot_inplace(&first_rhs, &mut first_out);
                 result.push(first_rhs.into_dyn());
                 result.push(first_lhs.into_dyn());
@@ -217,15 +221,18 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 let mut next_lhs = first_out;
                 for component in components.iter().take(components.len() - 2).skip(1) {
                     let dtype = component.dtypes[component.typ.unique_output_index().unwrap()];
-                    let rhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
-                    let mut out = DynArray::zeros((next_lhs.shape()[0], rhs.shape()[1]), dtype);
+                    let rhs = args.pop().unwrap().into_dimensionality::<Ix3>().unwrap();
+                    let mut out = DynArray::zeros(
+                        (next_lhs.shape()[0], next_lhs.shape()[1], rhs.shape()[1]),
+                        dtype,
+                    );
                     next_lhs.dot_inplace(&rhs, &mut out);
                     next_lhs = out;
                     result.push(rhs.into_dyn());
                 }
 
                 // Compute the final matmul.
-                let rhs = args.pop().unwrap().into_dimensionality::<Ix2>().unwrap();
+                let rhs = args.pop().unwrap().into_dimensionality::<Ix3>().unwrap();
                 next_lhs.dot_inplace(&rhs, &mut outermost_out);
                 result.push(rhs.into_dyn());
 
@@ -462,53 +469,50 @@ impl<D: ndarray::Dimension> DynArray<D> {
     }
 }
 
-impl DynArray<Ix2> {
-    pub fn dot_inplace(&self, rhs: &DynArray<Ix2>, out: &mut DynArray<Ix2>) {
+macro_rules! dot_inplace_impl {
+    ($self:expr, $rhs:expr, $out:expr, $ty:ty) => {{
+        let one_value = 1 as $ty;
+        let lhs_batched = $self.saturating_cast::<$ty>();
+        let rhs_batched = $rhs.saturating_cast::<$ty>();
+        izip!(
+            lhs_batched.outer_iter(),
+            rhs_batched.outer_iter(),
+            $out.outer_iter_mut()
+        )
+        .for_each(|(l, r, mut o)| {
+            general_mat_mul(one_value, &l, &r, one_value, &mut o.view_mut());
+        });
+    }};
+}
+
+impl DynArray<Ix3> {
+    pub fn dot_inplace(&self, rhs: &DynArray<Ix3>, out: &mut DynArray<Ix3>) {
         match out {
-            DynArray::Uint8(o) => {
-                let l = self.saturating_cast::<u8>();
-                let r = rhs.saturating_cast::<u8>();
-                general_mat_mul(1, &l, &r, 1, o);
-            }
-            DynArray::Sint8(o) => {
-                let l = self.saturating_cast::<i8>();
-                let r = rhs.saturating_cast::<i8>();
-                general_mat_mul(1, &l, &r, 1, o);
-            }
-            DynArray::Uint16(o) => {
-                let l = self.saturating_cast::<u16>();
-                let r = rhs.saturating_cast::<u16>();
-                general_mat_mul(1, &l, &r, 1, o);
-            }
-            DynArray::Sint16(o) => {
-                let l = self.saturating_cast::<i16>();
-                let r = rhs.saturating_cast::<i16>();
-                general_mat_mul(1, &l, &r, 1, o);
-            }
-            DynArray::Uint32(o) => {
-                let l = self.saturating_cast::<u32>();
-                let r = rhs.saturating_cast::<u32>();
-                general_mat_mul(1, &l, &r, 1, o);
-            }
-            DynArray::Sint32(o) => {
-                let l = self.saturating_cast::<i32>();
-                let r = rhs.saturating_cast::<i32>();
-                general_mat_mul(1, &l, &r, 1, o);
-            }
-            DynArray::Float32(o) => {
-                let l = self.saturating_cast::<f32>();
-                let r = rhs.saturating_cast::<f32>();
-                general_mat_mul(1.0, &l, &r, 1.0, o);
-            }
+            DynArray::Uint8(o) => dot_inplace_impl!(self, rhs, o, u8),
+            DynArray::Sint8(o) => dot_inplace_impl!(self, rhs, o, i8),
+            DynArray::Uint16(o) => dot_inplace_impl!(self, rhs, o, u16),
+            DynArray::Sint16(o) => dot_inplace_impl!(self, rhs, o, i16),
+            DynArray::Uint32(o) => dot_inplace_impl!(self, rhs, o, u32),
+            DynArray::Sint32(o) => dot_inplace_impl!(self, rhs, o, i32),
+            DynArray::Float32(o) => dot_inplace_impl!(self, rhs, o, f32),
             DynArray::Bfloat16(o) => {
-                let l = self.saturating_cast::<half::bf16>();
-                let r = rhs.saturating_cast::<half::bf16>();
-                let intermed = l.dot(&r);
-                *o += &intermed;
+                let lhs_batched = self.saturating_cast::<half::bf16>();
+                let rhs_batched = rhs.saturating_cast::<half::bf16>();
+                izip!(
+                    lhs_batched.outer_iter(),
+                    rhs_batched.outer_iter(),
+                    o.outer_iter_mut()
+                )
+                .for_each(|(l, r, mut o)| {
+                    let intermed = l.dot(&r);
+                    o.view_mut().add_assign(&intermed);
+                });
             }
         }
     }
+}
 
+impl DynArray<Ix2> {
     pub fn conv_2d(&self, kernel: &DynArray<Ix2>) -> DynArray<Ix2> {
         match (self, kernel) {
             (DynArray::Uint8(img), DynArray::Uint8(ker)) => img
