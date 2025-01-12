@@ -105,6 +105,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     pub fn execute(&self, mut args: Vec<DynArray<IxDyn>>) -> Vec<DynArray<IxDyn>> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => match basics.typ {
+                PrimitiveSpecType::OnePrefix => {
+                    let [inp, mut out] = args
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("expected 2 args"));
+                    out.assign(&inp);
+                    vec![inp, out]
+                }
                 PrimitiveSpecType::Matmul { accum } => {
                     // TODO: Check shapes and dtypes are correct for this Spec.
                     let [lhs, rhs, out] = args

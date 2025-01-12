@@ -58,6 +58,8 @@ pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'st
 )]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum CpuKernel {
+    /// Does nothing, but implements OnePrefix Specs, passing input through to output.
+    OnePrefixNoOp,
     /// Simple scalar multiplication (`+=`).
     MultAdd,
     /// Lowers to Clang's scalar-vector multiply-accumulate.
@@ -292,6 +294,7 @@ impl<T: CpuTarget> Target for T {
 
         let possible_kernels: &[CpuKernel] = match spec {
             LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, ..) => match typ {
+                PrimitiveSpecType::OnePrefix => &[CpuKernel::OnePrefixNoOp],
                 PrimitiveSpecType::Matmul { accum } => {
                     if *accum {
                         const MATMUL_ACCUM_KERNELS: [CpuKernel; 8] = [
@@ -450,7 +453,8 @@ impl CpuKernel {
             | CpuKernel::DotProductLoopF32InterleavedBf16F32
             | CpuKernel::DotProductLoopBf16Bf16F32
             | CpuKernel::DivideVec => 3,
-            CpuKernel::PhysicalTransposeByte128
+            CpuKernel::OnePrefixNoOp
+            | CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
             | CpuKernel::VectorInterleaveBf16F32
             | CpuKernel::VectorDeinterleaveF32Bf16
@@ -487,6 +491,7 @@ impl CpuKernel {
         let operands = logical_spec.parameters();
 
         match self {
+            CpuKernel::OnePrefixNoOp => matches!(typ, PrimitiveSpecType::OnePrefix),
             CpuKernel::MultAdd => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
                     && operands.iter().all(|o| {
@@ -1237,6 +1242,7 @@ impl CpuKernel {
 
     pub fn main_cost<P: View>(&self, parameters: &[P]) -> MainCost {
         match self {
+            CpuKernel::OnePrefixNoOp => 0,
             CpuKernel::BroadcastVecMultAdd
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::BroadcastVecMultAddBf16F32 => {

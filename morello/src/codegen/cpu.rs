@@ -621,6 +621,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             }) => {
                 let cpu_kernel = kernel_type.into_cpu_kernel().unwrap();
                 match cpu_kernel {
+                    CpuKernel::OnePrefixNoOp => {
+                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
+                            self.c_index(a, b, None)
+                        });
+                        writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0])
+                    }
                     CpuKernel::ValueSoftmaxComplete => {
                         self.headers.emit_math_include = true;
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
