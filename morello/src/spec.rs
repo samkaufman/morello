@@ -621,7 +621,7 @@ impl PrimitiveBasics {
                 },
                 _,
             ) => {
-                debug_assert_eq!(smaller_output.shape().len() + 1, spec_shape.len());
+                debug_assert_eq!(smaller_output.shape().len(), spec_shape.len());
                 let scan_dim_us = usize::from(*scan_dim);
                 let tiled_input = smaller_output.shape().clone();
                 if tiled_input[scan_dim_us] != spec_shape[scan_dim_us] {
