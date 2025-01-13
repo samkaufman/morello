@@ -32,7 +32,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToAccum {
         else {
             // TODO: Use a more specific NotApplicableReason.
             return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-                "ToAccum is only defined for this Spec",
+                "ToAccum is not defined for this Spec kind",
             ))));
         };
         if *accum {

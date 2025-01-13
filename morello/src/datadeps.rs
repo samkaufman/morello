@@ -3,7 +3,7 @@ use crate::{
     spec::{FillValue, PrimitiveSpecType},
 };
 use serde::{Deserialize, Serialize};
-use std::{hash::Hash, slice};
+use std::hash::Hash;
 
 // TODO: Simplify code by making this the foundation of our Spec enum.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
