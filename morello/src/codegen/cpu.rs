@@ -1836,10 +1836,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         let axes_to_emit = axis_order_and_steps(l).collect::<Vec<_>>();
 
         // Map non-degen. axis names to fresh loop iterator names.
-        let iter_var_names = axes_to_emit
-            .iter()
-            .map(|(axis, _)| (*axis, self.namer.fresh_name()))
-            .collect::<HashMap<_, _>>();
+        let mut iter_var_names = HashMap::new();
+        iter_var_names.reserve(axes_to_emit.len());
+        for (axis, _) in &axes_to_emit {
+            iter_var_names
+                .entry(*axis)
+                .or_insert_with(|| self.namer.fresh_name());
+        }
 
         // Associate each of the tile indices in each LoopTile with the correct
         // name and store that association in the `self.loop_iter_names`.
@@ -1850,10 +1853,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 };
                 let axis = loop_tile.axes[usize::from(dim)];
                 if let Some(axis_loop_iter_name) = iter_var_names.get(&axis) {
-                    let insertion_result = self
-                        .loop_iter_bindings
+                    // The following might override loop iter. bindings if we emit the same loop
+                    // twice. This happens if emit_rolled_loop is called from emit_unrolled_loop.
+                    self.loop_iter_bindings
                         .insert(tt.clone(), Either::Left(axis_loop_iter_name.clone()));
-                    debug_assert!(insertion_result.is_none());
                 }
             }
         }
