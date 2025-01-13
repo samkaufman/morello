@@ -14,6 +14,7 @@ use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
 use crate::views::{Param, Tile, View, ViewE};
 use itertools::Either;
+use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -47,6 +48,11 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
+
+        // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
+        if let Some(daufm_result) = tile_out_daufm(spec, self) {
+            return daufm_result;
+        };
 
         let Some(output_idx) = logical_spec.unique_output_index() else {
             return Err(ApplyError::NotApplicable(
@@ -158,6 +164,11 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
     fn solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         match &spec.0 {
             LogicalSpec::Primitive(basics, ..) => {
+                // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
+                if tile_out_daufm(spec, self).is_some() {
+                    todo!("Implement solver for SoftmaxDenominatorAndUnscaledFromMax");
+                };
+
                 let Some(output_tensor) = spec.0.unique_output() else {
                     return Err(ApplyError::NotApplicable(
                         NotApplicableReason::MultipleOutputs,
@@ -472,6 +483,112 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
             LogicalSpec::Compose { .. } => todo!(),
         }
     }
+}
+
+fn tile_out_daufm<Tgt: Target>(
+    spec: &Spec<Tgt>,
+    tileout: &TileOut,
+) -> Option<Result<ImplNode<Tgt>, ApplyError>> {
+    let LogicalSpec::Primitive(
+        PrimitiveBasics {
+            typ:
+                PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+                    accum: true,
+                    scan_dim,
+                },
+            ..
+        },
+        ..,
+    ) = &spec.0
+    else {
+        return None;
+    };
+
+    let operands = spec.0.parameters();
+
+    let current_output = &operands[3];
+    let current_out_shape = current_output.shape();
+    let rank = u8::try_from(current_out_shape.len()).unwrap();
+
+    let new_output_shape = tileout.tiled_output_shape(current_out_shape);
+    if tileout.parallel() {
+        todo!("Support parallel loops over non-scan dimension");
+    }
+
+    assert_eq!(
+        new_output_shape.len(),
+        current_out_shape.len(),
+        "Expected {} dimensions; got {}",
+        current_out_shape.len(),
+        new_output_shape.len()
+    );
+    if let Err(e) = check_tile_out_applies(
+        current_out_shape,
+        &new_output_shape,
+        current_output,
+        tileout.parallel(),
+    ) {
+        return Some(Err(e));
+    }
+
+    // Tiling happens in three steps:
+    // 1. Construct the simple tile corresponding to the new output shape.
+    let smaller_output_tiling = Tiling::new_simple(new_output_shape.clone().either_into());
+    let new_smaller_output_tile =
+        match smaller_output_tiling.apply(Param::new(3, current_output.clone())) {
+            Ok(t) => t,
+            Err(err) => return Some(Err(tile_to_apply_err(err))),
+        };
+    let smaller_output = LoopTile {
+        parameter_index: 3,
+        axes: (0..rank).collect(),
+        tile: new_smaller_output_tile.boxed_viewe(),
+    };
+
+    // 2. Construct tilings which respect the data deps. of the new output tile. These tilings
+    //    cover the first two parameters, which are inputs, as well as the third parameter,
+    //    which is the denominator output.
+    let mut onescan_shape: Shape = new_output_shape.clone().either_into();
+    onescan_shape[usize::from(*scan_dim)] = nz!(1u32);
+    let updated_input_tilings = [
+        Tiling::new_simple(new_output_shape.either_into()), // input
+        Tiling::new_simple(onescan_shape.clone()),          // max
+        Tiling::new_simple(onescan_shape),                  // output: denominator
+    ];
+
+    // 3. Reify the tilings into Tiles we'll store with this action. Tiles objects track
+    // the index and shape of the Impl parameter being tiled.
+    let mut new_tiles: Vec<LoopTile<Tgt>> = vec![];
+    for (operand_idx, (original_input, updated_input_tiling)) in
+        operands.iter().zip(updated_input_tilings).enumerate()
+    {
+        let tiling_shape = updated_input_tiling.shape();
+        if !original_input.is_valid_tile_shape(tiling_shape, false) {
+            return Some(Err(ApplyError::NotApplicable(
+                NotApplicableReason::TileShapeInvalid,
+            )));
+        }
+
+        if original_input.shape() != &tiling_shape[..] {
+            let operand_idx_u8 = u8::try_from(operand_idx).unwrap();
+            let tile = match updated_input_tiling
+                .apply(Param::new(operand_idx_u8, original_input.clone()))
+            {
+                Ok(t) => t.boxed_viewe(),
+                Err(err) => return Some(Err(tile_to_apply_err(err))),
+            };
+            new_tiles.push(LoopTile {
+                parameter_index: operand_idx_u8,
+                axes: (0..rank).collect(),
+                tile,
+            });
+        }
+    }
+    new_tiles.push(smaller_output);
+
+    Some(loop_spec_with_shrunken_tiles(
+        operands, new_tiles, &spec.0, false, spec,
+    ))
 }
 
 fn loop_spec_with_shrunken_tiles<Tgt: Target>(
