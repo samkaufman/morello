@@ -127,7 +127,7 @@ fn schedule_matmulaccum(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
                 .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
         })
         .tile_out(&[1, 128, 1024])
-        .tile_out(&[1, 8, 16])
+        .tile_out(&[1, 4, 16])
         .move_param(0, L1, row_major, None)
         .move_param(1, L1, layout_b(), None)
         .move_param(2, L1, row_major, None)
