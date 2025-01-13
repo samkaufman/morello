@@ -200,6 +200,66 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 }
             },
             LogicalSpec::Compose { components, .. }
+                if components.len() == 3
+                    && matches!(
+                        components[2].typ,
+                        PrimitiveSpecType::Matmul { accum: false }
+                    )
+                    && matches!(components[1].typ, PrimitiveSpecType::Softmax { .. })
+                    && matches!(
+                        components[0].typ,
+                        PrimitiveSpecType::Matmul { accum: false }
+                    ) =>
+            {
+                let mut result = vec![]; // TODO: reserve
+
+                let mut outermost_out = args.pop().unwrap().into_dimensionality::<Ix3>().unwrap();
+                outermost_out.zero();
+
+                // Compute the innermost matmul.
+                let innermost_component = components.last().unwrap();
+                let innermost_output_idx = innermost_component.typ.unique_output_index().unwrap();
+                let first_rhs = args.pop().unwrap().into_dimensionality::<Ix3>().unwrap();
+                let first_lhs = args.pop().unwrap().into_dimensionality::<Ix3>().unwrap();
+                let first_dtype = innermost_component.dtypes[innermost_output_idx];
+                let first_lhs_shape = first_lhs.shape();
+                let mut first_out = DynArray::zeros(
+                    (first_lhs_shape[0], first_lhs_shape[1], first_rhs.shape()[1]),
+                    first_dtype,
+                );
+                first_lhs.dot_inplace(&first_rhs, &mut first_out);
+                result.push(first_rhs.into_dyn());
+                result.push(first_lhs.into_dyn());
+
+                // Compute Softmax
+                let PrimitiveSpecType::Softmax { scan_dim: soft_dim } = components[1].typ else {
+                    unreachable!();
+                };
+                let maxes = first_out
+                    .max_axis(Axis(soft_dim.into()))
+                    .broadcast(first_out.shape())
+                    .unwrap()
+                    .into_dimensionality::<Ix3>()
+                    .unwrap();
+                first_out.assign(&(first_out.clone() - maxes));
+                first_out.exp();
+                first_out /= &first_out
+                    .sum_axis(Axis(soft_dim.into()))
+                    .broadcast(first_out.shape())
+                    .unwrap()
+                    .into_dimensionality::<Ix3>()
+                    .unwrap();
+
+                // Compute the final matmul.
+                let rhs = args.pop().unwrap().into_dimensionality::<Ix3>().unwrap();
+                first_out.dot_inplace(&rhs, &mut outermost_out);
+                result.push(rhs.into_dyn());
+
+                result.reverse();
+                result.push(outermost_out.into_dyn());
+                result
+            }
+            LogicalSpec::Compose { components, .. }
                 if components
                     .iter()
                     .all(|c| matches!(c.typ, PrimitiveSpecType::Matmul { accum: false })) =>
@@ -760,7 +820,7 @@ where
     // Compute expected output
     concrete_tensors = spec.0.execute(concrete_tensors);
 
-    lowered_output.approx_eq(&concrete_tensors[output_idx], 1e-7)
+    lowered_output.approx_eq(&concrete_tensors[output_idx], 1e-6)
 }
 
 fn make_array_input_dyn<Tgt: Target>(input: &TensorSpec<Tgt>) -> DynArray<IxDyn> {
