@@ -11,6 +11,7 @@ use ndarray::{linalg::general_mat_mul, prelude::*, RemoveAxis};
 use ndarray_conv::{ConvExt, ConvMode, PaddingMode};
 use num_traits::{real::Real, AsPrimitive};
 use std::{
+    fmt::{self, Debug, Formatter},
     io::{self, BufWriter, Write},
     ops::{DivAssign, Sub},
     process::Command,
@@ -643,6 +644,24 @@ impl<D> From<Array<f32, D>> for DynArray<D> {
 impl<D> From<Array<half::bf16, D>> for DynArray<D> {
     fn from(value: Array<half::bf16, D>) -> Self {
         DynArray::Bfloat16(value)
+    }
+}
+
+impl<D> Debug for DynArray<D>
+where
+    D: ndarray::Dimension,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            DynArray::Uint8(a) => write!(f, "DynArray::Uint8({:?})", a),
+            DynArray::Sint8(a) => write!(f, "DynArray::Sint8({:?})", a),
+            DynArray::Uint16(a) => write!(f, "DynArray::Uint16({:?})", a),
+            DynArray::Sint16(a) => write!(f, "DynArray::Sint16({:?})", a),
+            DynArray::Uint32(a) => write!(f, "DynArray::Uint32({:?})", a),
+            DynArray::Sint32(a) => write!(f, "DynArray::Sint32({:?})", a),
+            DynArray::Float32(a) => write!(f, "DynArray::Float32({:?})", a),
+            DynArray::Bfloat16(a) => write!(f, "DynArray::Bfloat16({:?})", a),
+        }
     }
 }
 
