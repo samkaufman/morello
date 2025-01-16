@@ -919,6 +919,35 @@ mod tests {
             }
         }
 
+        #[test]
+        fn test_rtree_never_contains_overlaps(
+            rects in proptest::collection::vec(arb_rect::<3>(), 2..=3),
+        ) {
+            let mut tree = RTree::<RTreeRect<3, Rc<u8>>>::new();
+            for r in &rects {
+                // Box values so that we can later compare memory addresses to determine
+                // whether a rects are the same.
+                tree.merge_insert(&r.bottom.arr, &r.top.arr, Rc::new(r.value));
+            }
+
+            for r in tree.iter() {
+                let envelope = AABB::from_corners(r.bottom.clone(), r.top.clone());
+                let intersecting = tree.locate_in_envelope_intersecting(&envelope);
+                for other in intersecting {
+                    if Rc::ptr_eq(&other.value, &r.value) {
+                        continue;
+                    }
+                    prop_assert!(
+                        r.value != other.value || !r.envelope().intersects(&other.envelope()),
+                        "rectangles {:?} and {:?} intersected; all: {:?}",
+                        r,
+                        other,
+                        tree.iter().collect::<Vec<_>>(),
+                    );
+                }
+            }
+        }
+
 
         #[test]
         fn test_rtree_never_contains_overlaps(
