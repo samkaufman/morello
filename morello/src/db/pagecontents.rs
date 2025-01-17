@@ -106,6 +106,9 @@ impl RTreePageContents {
             top.push((rng.end - 1).into());
         }
 
+        // Remove anything currently in this region.
+        self.0.subtract(&bottom, &top);
+
         let value = normalized_action_costs
             .0
             .first()
@@ -118,5 +121,13 @@ impl RTreePageContents {
                 )
             });
         self.0.merge_insert(&bottom, &top, value, true);
+
+        debug_assert_eq!(
+            self.0
+                .locate_in_envelope_intersecting(&bottom, &top)
+                .count(),
+            1,
+            "Expected exactly one entry in the region we just filled"
+        );
     }
 }
