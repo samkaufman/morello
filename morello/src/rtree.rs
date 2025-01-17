@@ -31,7 +31,11 @@ trait RTreeGeneric<T> {
     where
         T: PartialEq + Eq + Hash + Clone;
 
-    fn subtract<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
+    fn subtract(&mut self, low: &[BimapSInt], high: &[BimapSInt])
+    where
+        T: Clone; // TODO: Remove this bound. Shouldn't be needed.
+
+    fn subtract_tree<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
     where
         T: Clone;
 
@@ -98,16 +102,25 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
+            pub fn subtract(&mut self, low: &[BimapSInt], high: &[BimapSInt])
+            where
+                T: Clone, // TODO: Remove this bound. Shouldn't be needed.
+            {
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::subtract(t, low, high), )*
+                }
+            }
+
             /// Update by subtracting the space filled by another [RTreeGeneric].
             /// That tree's values are ignored.
             ///
             /// Note: The current implementation is very slow.
-            pub fn subtract<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
+            pub fn subtract_tree<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
             where
                 T: Clone
             {
                 match self {
-                    $( RTreeDyn::$name(t) => RTreeGeneric::subtract(t, subtrahend_tree), )*
+                    $( RTreeDyn::$name(t) => RTreeGeneric::subtract_tree(t, subtrahend_tree), )*
                 };
             }
 
@@ -116,6 +129,21 @@ macro_rules! rtreedyn_cases {
                     $( RTreeDyn::$name(t) => Box::new(
                         t.iter().map(|r| (&r.bottom.arr[..], &r.top.arr[..], &r.value))
                     ), )*
+                }
+            }
+
+            pub fn locate_in_envelope_intersecting(
+                &self,
+                bottom: &[BimapSInt],
+                top: &[BimapSInt],
+            ) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
+                match self {
+                    $( RTreeDyn::$name(t) => {
+                        Box::new(t.locate_in_envelope_intersecting(&AABB::from_points(&[
+                            bottom.try_into().unwrap(),
+                            top.try_into().unwrap(),
+                        ])).map(|r| (&r.bottom.arr[..], &r.top.arr[..], &r.value)))
+                    } )*
                 }
             }
 
@@ -312,7 +340,17 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         }
     }
 
-    fn subtract<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
+    fn subtract(&mut self, low: &[BimapSInt], high: &[BimapSInt])
+    where
+        T: Clone,
+    {
+        assert_eq!(low.len(), high.len());
+        let mut subtrahend_tree = RTreeDyn::empty(low.len());
+        subtrahend_tree.insert(low, high, ());
+        self.subtract_tree(&subtrahend_tree);
+    }
+
+    fn subtract_tree<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
     where
         T: Clone,
     {
@@ -726,7 +764,7 @@ mod tests {
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
         subtrahend.merge_insert(&[1, 1], &[2, 2], ());
 
-        minuhend.subtract(&RTreeDyn::D2(subtrahend));
+        minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(
             minuhend.into_iter().collect::<HashSet<_>>(),
             HashSet::from([
@@ -753,7 +791,7 @@ mod tests {
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
         subtrahend.merge_insert(&[1, 1], &[9, 9], ());
 
-        minuhend.subtract(&RTreeDyn::D2(subtrahend));
+        minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(minuhend.into_iter().count(), 0);
     }
 
@@ -766,7 +804,7 @@ mod tests {
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
         subtrahend.merge_insert(&[1, 2], &[7, 3], ());
 
-        minuhend.subtract(&RTreeDyn::D2(subtrahend));
+        minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(
             minuhend.into_iter().collect::<HashSet<_>>(),
             HashSet::from([

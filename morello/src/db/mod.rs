@@ -130,7 +130,7 @@ pub enum GetPreference<T, V> {
 }
 
 /// Intersections yielded by [FilesDatabase::intersect].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Intersection<T> {
     pub(crate) bottom: Vec<BimapInt>,
     pub(crate) top: Vec<BimapInt>,
@@ -474,7 +474,7 @@ impl FilesDatabase {
             } = &*self.load_live_page(&key);
             let page_tree = &page_contents.as_ref().0;
             debug_assert_eq!(page_tree.dim_count(), rank);
-            minuhend.subtract(page_tree);
+            minuhend.subtract_tree(page_tree);
         }
     }
 
