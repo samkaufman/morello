@@ -149,10 +149,6 @@ impl<Tgt: Target> ToAccumSolver<Tgt> {
 impl<Tgt: Target> BottomUpSolver for ToAccumSolver<Tgt> {
     type Tgt = Tgt;
 
-    fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
-    }
-
     fn dependencies_for_range<B>(
         &mut self,
         _bimap: &B,

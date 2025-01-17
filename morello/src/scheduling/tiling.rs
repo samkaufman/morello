@@ -626,10 +626,6 @@ fn tile_out_daufm<Tgt: Target>(
 impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
     type Tgt = Tgt;
 
-    fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
-    }
-
     fn dependencies_for_range<B>(
         &mut self,
         bimap: &B,
@@ -714,10 +710,6 @@ impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
 
 impl<Tgt: Target> BottomUpSolver for SplitSolver<Tgt> {
     type Tgt = Tgt;
-
-    fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
-    }
 
     fn dependencies_for_range<B>(
         &mut self,
