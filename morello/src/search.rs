@@ -1,11 +1,12 @@
 use itertools::Itertools;
-use nonzero::nonzero as nz;
 
+use std::borrow::Borrow;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::Hash;
 use std::num::NonZeroUsize;
 
 use crate::cost::{Cost, NormalizedCost};
-use crate::db::{ActionCostVec, ActionNum, FilesDatabase, TableKey};
+use crate::db::{ActionCostVec, ActionNum, DbKey, FilesDatabase, TableKey};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::grid::linear::{BimapInt, BimapSInt};
@@ -13,7 +14,7 @@ use crate::rtree::RTreeDyn;
 use crate::scheduling::{Action, ActionT, BottomUpSolver, VisitUpdater};
 use crate::spec::Spec;
 use crate::target::Target;
-use crate::utils::diagonals_shifted;
+use crate::utils::{diagonals_shifted, spec_diagonals_flat_shifted};
 
 // TODO: Make this private once #[bench] gets stable.
 #[doc(hidden)]
@@ -31,9 +32,9 @@ enum ImplReducerResults {
 }
 
 /// An [VisitUpdater] which logs completed Specs in a Vec.
-struct TrackingUpdater<'a, Tgt: Target, U> {
+struct TrackingUpdater<U, K> {
     inner_updater: U,
-    goal_solvers_outstanding: HashMap<&'a Spec<Tgt>, usize>,
+    goal_solvers_outstanding: HashMap<K, usize>,
     current_solver_name: String, // TODO: Remove current_solver_name
 }
 
@@ -57,6 +58,7 @@ where
         .0
 }
 
+// TODO: Adapt this to actually have some performance benefit w.r.t. the block-first algorithm.
 pub fn top_down_many<Tgt>(
     db: &FilesDatabase,
     goals: &[Spec<Tgt>],
@@ -92,7 +94,9 @@ where
     let mut combined_results = vec![ActionCostVec::default(); goals.len()];
     for (page_group, original_indices) in grouped_canonical_goals.values() {
         // TODO: Deduplicate Specs in `page_group`.
-        synthesize_block(db, top_k, page_group);
+        for goal in page_group.iter() {
+            synthesize_block(db, top_k, goal, goal);
+        }
         for (query, &original_index) in page_group.iter().zip(original_indices) {
             let result = db
                 .get(query)
@@ -105,30 +109,43 @@ where
 
 /// Synthesize all blocks between `low` and `high`, inclusive. Membership is determined by
 /// the given `surmap` from [Spec]s to coordinates.
-fn synthesize_block<Tgt>(
-    db: &FilesDatabase,
-    top_k: usize,
-    // TODO: Switch to low-high from goals
-    // surmap: &S,
-    // low: &Spec<Tgt>,
-    // high: &Spec<Tgt>,
-    goals: &[Spec<Tgt>],
-) where
+fn synthesize_block<Tgt>(db: &FilesDatabase, top_k: usize, low: &Spec<Tgt>, high: &Spec<Tgt>)
+where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
-    debug_assert!(goals.iter().all(|g| g.0.is_canonical()));
-
     let bimap = db.spec_bimap();
+    let low_projection = BiMap::apply(&bimap, low);
+    let high_projection = BiMap::apply(&bimap, high);
+    debug_assert_eq!(low_projection.0, high_projection.0);
+
+    // Assert that every Spec in the given block is canonical.
+    debug_assert!(spec_diagonals_flat_shifted(
+        &bimap,
+        &low_projection.0,
+        &low_projection.1,
+        &high_projection.1
+    )
+    .all(|goal| goal.is_canonical()));
+
     let mut solvers = Action::bottom_up_solvers().collect::<Vec<_>>();
-    let mut reducers = goals
-        .iter()
-        .map(|g| (g, ImplReducer::new(top_k, vec![])))
-        .collect::<HashMap<_, _>>();
+
+    let mut reducers = HashMap::new();
+    let mut goal_solvers_outstanding = HashMap::new();
+    spec_diagonals_flat_shifted(
+        &bimap,
+        &low_projection.0,
+        &low_projection.1,
+        &high_projection.1,
+    )
+    .for_each(|g| {
+        reducers.insert(g.clone(), ImplReducer::new(top_k, vec![]));
+        goal_solvers_outstanding.insert(g.clone(), solvers.len());
+    });
     let mut tracking_updater = TrackingUpdater {
         inner_updater: &mut reducers,
-        goal_solvers_outstanding: goals.iter().map(|g| (g, solvers.len())).collect(),
+        goal_solvers_outstanding,
         current_solver_name: "".to_string(),
     };
 
@@ -137,35 +154,43 @@ fn synthesize_block<Tgt>(
     let mut deps_trees = HashMap::<TableKey, RTreeDyn<usize>>::new();
     for (solver_idx, solver) in solvers.iter_mut().enumerate() {
         tracking_updater.current_solver_name = format!("solver {}", solver_idx);
-        for goal in goals {
-            // TODO: Use dependencies_for_range instead.
-            solver.apply_no_dependency_updates(goal, &mut tracking_updater);
-            for (dep_low, dep_high) in solver.dependencies_for_spec(goal) {
-                // dep_low and dep_high are not guaranteed to be canonical. This can be useful in
-                // constructing some ranges, such as those from 1x1 to mxn where the 1x1 point might
-                // have different contiguousness.
-                let (dep_key, dep_pt_low) = BiMap::apply(&bimap, &dep_low);
-                let (dep_key_high, dep_pt_high) = BiMap::apply(&bimap, &dep_high);
-                debug_assert_eq!(
-                    dep_key, dep_key_high,
-                    "Dep. keys should be the same between {} and {}",
-                    dep_low, dep_high
-                );
-                let dep_pt_low_i64 = dep_pt_low
-                    .iter()
-                    .map(|&x| BimapSInt::from(x))
-                    .collect::<Vec<_>>();
-                let dep_pt_high_i64 = dep_pt_high
-                    .iter()
-                    .map(|&x| BimapSInt::from(x))
-                    .collect::<Vec<_>>();
 
-                // Update the R-Tree with the new dependency.
-                let e = deps_trees
-                    .entry(dep_key.clone()) // TODO: Don't clone
-                    .or_insert_with(|| RTreeDyn::empty(dep_pt_low.len()));
-                e.merge_insert(&dep_pt_low_i64, &dep_pt_high_i64, solver_idx);
-            }
+        // TODO: Call a ranged `apply_no_dependency_updates` equivalent instead of this loop.
+        spec_diagonals_flat_shifted(
+            &bimap,
+            &low_projection.0,
+            &low_projection.1,
+            &high_projection.1,
+        )
+        .for_each(|goal| {
+            solver.apply_no_dependency_updates(&goal, &mut tracking_updater);
+        });
+
+        for (dep_low, dep_high) in solver.dependencies_for_range(&bimap, low, high) {
+            // dep_low and dep_high are not guaranteed to be canonical. This can be useful in
+            // constructing some ranges, such as those from 1x1 to mxn where the 1x1 point might
+            // have different contiguousness.
+            let (dep_key, dep_pt_low) = BiMap::apply(&bimap, &dep_low);
+            let (dep_key_high, dep_pt_high) = BiMap::apply(&bimap, &dep_high);
+            debug_assert_eq!(
+                dep_key, dep_key_high,
+                "Dep. keys should be the same between {} and {}",
+                dep_low, dep_high
+            );
+            let dep_pt_low_i64 = dep_pt_low
+                .iter()
+                .map(|&x| BimapSInt::from(x))
+                .collect::<Vec<_>>();
+            let dep_pt_high_i64 = dep_pt_high
+                .iter()
+                .map(|&x| BimapSInt::from(x))
+                .collect::<Vec<_>>();
+
+            // Update the R-Tree with the new dependency.
+            let e = deps_trees
+                .entry(dep_key.clone()) // TODO: Don't clone
+                .or_insert_with(|| RTreeDyn::empty(dep_pt_low.len()));
+            e.merge_insert(&dep_pt_low_i64, &dep_pt_high_i64, solver_idx);
         }
     }
 
@@ -181,62 +206,33 @@ fn synthesize_block<Tgt>(
         //       through the solver calls.
         let mut missing_subspecs_rtree = deps_tree.clone();
         db.subtract_from(table_key, &mut missing_subspecs_rtree);
-        let mut missing_subspecs_set = HashSet::<Spec<Tgt>>::new();
-        missing_subspecs_rtree.iter().for_each(|(bottom, top, _)| {
-            diagonals_shifted(bottom, top).flatten().for_each(|pt| {
-                let pt_u32 = pt
-                    .iter()
-                    .map(|&x| {
-                        BimapInt::try_from(x).unwrap_or_else(|_| {
-                            panic!("Can't convert elem of {pt:?}. Bottom is {bottom:?}")
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let pt_tuple = (table_key.clone(), pt_u32);
-                let mut spec: Spec<Tgt> = BiMap::apply_inverse(&bimap, &pt_tuple);
-                spec.canonicalize().unwrap();
-                debug_assert_eq!(
-                    BiMap::apply(&bimap, &spec).0,
-                    *table_key,
-                    "canonicalization changed the table key: {spec}"
-                );
-                debug_assert!(
-                    BiMap::apply(&bimap, &spec)
-                        .1
-                        .iter()
-                        .zip(bottom)
-                        .zip(top)
-                        .all(|((&pt, &bottom_pt), &top_pt)| {
-                            let pt = BimapSInt::from(pt);
-                            pt >= bottom_pt && pt <= top_pt
-                        }),
-                    "canonicalization moved Spec point outside the dependency range: {spec}"
-                );
-                let spec_is_internal_goal = tracking_updater
-                    .goal_solvers_outstanding
-                    .contains_key(&spec);
-                if !spec_is_internal_goal {
-                    missing_subspecs_set.insert(spec);
-                }
-            });
-        });
 
+        // TODO: What do we do about the non-canonical points here? Or are they trimmed before put?
         // TODO: Recurse once, not once for each dependency tree.
-        top_down_many(
-            db,
-            // TODO: Use `into_iter` instead of cloning.
-            &missing_subspecs_set.iter().cloned().collect::<Vec<_>>(),
-            top_k,
-            Some(nz!(1usize)),
-        );
+        missing_subspecs_rtree
+            .iter()
+            .for_each(|(dep_bottom, dep_top, solver_idx)| {
+                // TODO: Call synthesize_block once per block, not once per solver.
 
-        // TODO: Remove the following.
-        for spec in &missing_subspecs_set {
-            assert!(
-                db.get(spec).is_some(),
-                "Spec should be in the database: {spec}"
-            );
-        }
+                let dep_bottom_u32 = dep_bottom
+                    .iter()
+                    .map(|&x| u32::try_from(x).unwrap())
+                    .collect::<Vec<_>>();
+                let dep_top_u32 = dep_top
+                    .iter()
+                    .map(|&x| u32::try_from(x).unwrap())
+                    .collect::<Vec<_>>();
+
+                let mut composed_key = (table_key.clone(), dep_bottom_u32);
+                let mut spec_bottom: Spec<Tgt> = BiMap::apply_inverse(&bimap, &composed_key);
+                spec_bottom.canonicalize().unwrap();
+
+                composed_key.1 = dep_top_u32;
+                let mut spec_top: Spec<Tgt> = BiMap::apply_inverse(&bimap, &composed_key);
+                spec_top.canonicalize().unwrap();
+
+                synthesize_block(db, top_k, &spec_bottom, &spec_top);
+            });
 
         // Spatial join on the database to collect all dependencies. At this point, after
         // recursion, all external dependencies should be in the database.
@@ -256,8 +252,6 @@ fn synthesize_block<Tgt>(
                     spec.canonicalize().unwrap();
 
                     let solver_idx = intersection.dep_meta;
-                    let completed_spec = spec.clone(); // TODO: Clone needed?
-
                     let ncosts = intersection
                         .action_costs
                         .0
@@ -267,7 +261,7 @@ fn synthesize_block<Tgt>(
 
                     let completed_spec_is_goal = tracking_updater
                         .goal_solvers_outstanding
-                        .contains_key(&completed_spec);
+                        .contains_key(&spec);
                     if completed_spec_is_goal {
                         // This can happen if the recursive call incidentally solves a goal as
                         // because it's a dependency (perhaps transitively) of another goal. This
@@ -275,11 +269,7 @@ fn synthesize_block<Tgt>(
                         // prevented.
                         log::warn!("Goal Spec showed up in external visit: {spec}");
                     }
-                    solvers[solver_idx].visit_dependency(
-                        &completed_spec,
-                        &ncosts,
-                        &mut tracking_updater,
-                    );
+                    solvers[solver_idx].visit_dependency(&spec, &ncosts, &mut tracking_updater);
                 });
         });
     }
@@ -291,7 +281,7 @@ fn synthesize_block<Tgt>(
     // solver IDs, then the Specs are just put into the database. If there are, then we
     // will track which Specs are updated as a consequence of a solver visit and enqueue
     // those.
-    let mut visit_queue = HashMap::<&Spec<Tgt>, (Vec<(ActionNum, Cost)>, Vec<usize>)>::new();
+    let mut visit_queue = HashMap::new();
     // Fill the visit_queue with the Specs completed with external dependencies only.
     assert!(
         tracking_updater
@@ -302,28 +292,15 @@ fn synthesize_block<Tgt>(
         tracking_updater.goal_solvers_outstanding,
         solvers.len()
     );
-    for goal in goals {
-        let incomplete_solvers = tracking_updater
-            .goal_solvers_outstanding
-            .get_mut(goal)
-            .unwrap();
-        if *incomplete_solvers != 0 {
-            continue;
-        }
-        let (spec_db_key, spec_pt) = BiMap::apply(&bimap, goal);
-        let spec_pt_i64 = spec_pt
-            .iter()
-            .map(|&x| BimapSInt::from(x))
-            .collect::<Vec<_>>();
-        let requesting_solver_idxs = deps_trees
-            .get(&spec_db_key)
-            .map(|t| t.locate_all_at_point(&spec_pt_i64).copied().collect())
-            .unwrap_or_default();
-        let reducer = tracking_updater.inner_updater.remove(&goal).unwrap();
-        let decisions = reducer.finalize();
-        visit_queue.insert(goal, (decisions, requesting_solver_idxs));
-        *incomplete_solvers = usize::MAX;
-    }
+
+    process_visit_queue(
+        &bimap,
+        &low_projection,
+        &high_projection,
+        &mut tracking_updater,
+        &deps_trees,
+        &mut visit_queue,
+    );
 
     // Repeatedly scan the visit_queue, putting into the database and enqueueing new Specs
     // affected by visits. (Pushes completion up the internal dep. lattice.)
@@ -340,39 +317,29 @@ fn synthesize_block<Tgt>(
                 .map(|x| NormalizedCost::new(x.1.clone(), spec.0.volume()))
                 .collect::<Vec<_>>();
             for solver_id in solver_ids {
-                solvers[solver_id].visit_dependency(spec, &normalized_costs, &mut tracking_updater);
+                solvers[solver_id].visit_dependency(
+                    &spec,
+                    &normalized_costs,
+                    &mut tracking_updater,
+                );
             }
 
-            db.put(spec.clone(), decisions);
+            #[cfg(debug_assertions)]
+            if db.get(&spec).is_some() {
+                log::warn!("Re-putting {spec}");
+            }
+            db.put(spec, decisions);
         }
 
-        // Fill the visit_queue with the completed Specs.
-        for completed_spec in goals {
-            // TODO: The body of this loop is almost identical to the above.
-            let incomplete_solvers = tracking_updater
-                .goal_solvers_outstanding
-                .get_mut(completed_spec)
-                .unwrap();
-            if *incomplete_solvers != 0 {
-                continue;
-            }
-            let (spec_db_key, spec_pt) = BiMap::apply(&bimap, completed_spec);
-            let spec_pt_i64 = spec_pt
-                .iter()
-                .map(|&x| BimapSInt::from(x))
-                .collect::<Vec<_>>();
-            let requesting_solver_idxs = deps_trees
-                .get(&spec_db_key)
-                .map(|tree| tree.locate_all_at_point(&spec_pt_i64).copied().collect())
-                .unwrap_or_default();
-            let reducer = tracking_updater
-                .inner_updater
-                .remove(&completed_spec)
-                .unwrap();
-            let decisions = reducer.finalize();
-            visit_queue.insert(completed_spec, (decisions, requesting_solver_idxs));
-            *incomplete_solvers = usize::MAX;
-        }
+        // TODO: Repeatedly scanning all goals is an inefficient way to dispatch this queue.
+        process_visit_queue(
+            &bimap,
+            &low_projection,
+            &high_projection,
+            &mut tracking_updater,
+            &deps_trees,
+            &mut visit_queue,
+        );
     }
 
     #[cfg(debug_assertions)]
@@ -380,7 +347,7 @@ fn synthesize_block<Tgt>(
         let incomplete_goals = tracking_updater
             .goal_solvers_outstanding
             .iter()
-            .filter_map(|(&g, &o)| {
+            .filter_map(|(g, &o)| {
                 if o != usize::MAX {
                     Some(format!("{g}[{o}]"))
                 } else {
@@ -395,6 +362,48 @@ fn synthesize_block<Tgt>(
             );
         }
     }
+}
+
+/// Scan the queue and process any Specs for which all solvers are complete.
+fn process_visit_queue<Tgt, B>(
+    bimap: &B,
+    low_projection: &(TableKey, Vec<BimapInt>),
+    high_projection: &(TableKey, Vec<BimapInt>),
+    tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
+    deps_trees: &HashMap<TableKey, RTreeDyn<usize>>,
+    visit_queue: &mut HashMap<Spec<Tgt>, (Vec<(ActionNum, Cost)>, Vec<usize>)>,
+) where
+    Tgt: Target,
+    B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
+{
+    debug_assert_eq!(low_projection.0, high_projection.0);
+    spec_diagonals_flat_shifted(
+        bimap,
+        &low_projection.0,
+        &low_projection.1,
+        &high_projection.1,
+    )
+    .for_each(|goal| {
+        let incomplete_solvers = tracking_updater
+            .goal_solvers_outstanding
+            .get_mut(&goal)
+            .unwrap();
+        if *incomplete_solvers == 0 {
+            let (spec_db_key, spec_pt) = BiMap::apply(bimap, &goal);
+            let spec_pt_i64 = spec_pt
+                .iter()
+                .map(|&x| BimapSInt::from(x))
+                .collect::<Vec<_>>();
+            let requesting_solver_idxs = deps_trees
+                .get(&spec_db_key)
+                .map(|t| t.locate_all_at_point(&spec_pt_i64).copied().collect())
+                .unwrap_or_default();
+            let reducer = tracking_updater.inner_updater.remove(&goal).unwrap();
+            let decisions = reducer.finalize();
+            visit_queue.insert(goal, (decisions, requesting_solver_idxs));
+            *incomplete_solvers = usize::MAX;
+        }
+    });
 }
 
 impl ImplReducer {
@@ -477,10 +486,11 @@ impl ImplReducer {
     }
 }
 
-impl<Tgt, U> VisitUpdater<Tgt> for TrackingUpdater<'_, Tgt, U>
+impl<Tgt, U, K> VisitUpdater<Tgt> for TrackingUpdater<U, K>
 where
     Tgt: Target,
     U: VisitUpdater<Tgt>,
+    K: Borrow<Spec<Tgt>> + Eq + Hash,
 {
     fn complete_action(
         &mut self,

@@ -1,12 +1,13 @@
 use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Shape};
 use crate::cost::NormalizedCost;
+use crate::grid::general::BiMap;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::scheduling::{
     check_tile_out_applies, tile_to_apply_err, Action, ActionT, ActionTopDownSolver, ApplyError,
-    BottomUpSolver, NaiveBottomUpActionProvider, NaiveBottomUpSolver, NotApplicableReason,
+    BottomUpSolver, DbKey, NaiveBottomUpActionProvider, NaiveBottomUpSolver, NotApplicableReason,
     VisitUpdater,
 };
 use crate::scheduling_sugar::SchedulingSugar;
@@ -626,14 +627,18 @@ impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
     type Tgt = Tgt;
 
     fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        self.dependencies_for_range(spec, spec)
+        todo!()
     }
 
-    fn dependencies_for_range(
+    fn dependencies_for_range<B>(
         &mut self,
-        low: &Spec<Tgt>,
-        high: &Spec<Tgt>,
-    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        bimap: &B,
+        low: &Spec<Self::Tgt>,
+        high: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    where
+        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
+    {
         todo!("Call complete_spec for whatever has no dependencies");
 
         // TODO: If top is parallel and bottom is serial-only, split into two two ranges.
@@ -711,14 +716,18 @@ impl<Tgt: Target> BottomUpSolver for SplitSolver<Tgt> {
     type Tgt = Tgt;
 
     fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        self.dependencies_for_range(spec, spec)
+        todo!()
     }
 
-    fn dependencies_for_range(
+    fn dependencies_for_range<B>(
         &mut self,
-        low: &Spec<Tgt>,
-        high: &Spec<Tgt>,
-    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        bimap: &B,
+        low: &Spec<Self::Tgt>,
+        high: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    where
+        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
+    {
         // MatmulAccum only.
         let LogicalSpec::Primitive(ref basics, ref auxes, serial) = low.0 else {
             return vec![];

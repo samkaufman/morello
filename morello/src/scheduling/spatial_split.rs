@@ -1,10 +1,12 @@
 use crate::common::Shape;
 use crate::cost::NormalizedCost;
+use crate::grid::general::BiMap;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::scheduling::{
-    tile_to_apply_err, ActionT, ApplyError, BottomUpSolver, NotApplicableReason, VisitUpdater,
+    tile_to_apply_err, ActionT, ApplyError, BottomUpSolver, DbKey, NotApplicableReason,
+    VisitUpdater,
 };
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
@@ -146,14 +148,22 @@ impl<Tgt: Target> BottomUpSolver for SpatialSplitSolver<Tgt> {
     type Tgt = Tgt;
 
     fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        self.dependencies_for_range(spec, spec)
+        if spec_is_conv(spec) {
+            todo!("should match implementation in dependencies_for_range");
+        } else {
+            vec![]
+        }
     }
 
-    fn dependencies_for_range(
+    fn dependencies_for_range<B>(
         &mut self,
-        low: &Spec<Tgt>,
-        high: &Spec<Tgt>,
-    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        _bimap: &B,
+        low: &Spec<Self::Tgt>,
+        high: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    where
+        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
+    {
         if spec_is_conv(low) || spec_is_conv(high) {
             todo!()
         } else {

@@ -1,5 +1,7 @@
 use crate::common::DimSize;
 use crate::cost::{Cost, NormalizedCost};
+use crate::db::DbKey;
+use crate::grid::general::BiMap;
 use crate::imp::blocks::Block;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
@@ -148,14 +150,18 @@ impl<Tgt: Target> BottomUpSolver for ToAccumSolver<Tgt> {
     type Tgt = Tgt;
 
     fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        self.dependencies_for_range(spec, spec)
+        todo!()
     }
 
-    fn dependencies_for_range(
+    fn dependencies_for_range<B>(
         &mut self,
-        low: &Spec<Tgt>,
-        high: &Spec<Tgt>,
-    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        _bimap: &B,
+        low: &Spec<Self::Tgt>,
+        high: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    where
+        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
+    {
         let mut dependencies = vec![];
         if spec_is_plain_matmul(low) {
             if !spec_is_plain_matmul(high) {
