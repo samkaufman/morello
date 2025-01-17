@@ -1,11 +1,12 @@
 use crate::common::DimSize;
 use crate::cost::NormalizedCost;
+use crate::grid::general::BiMap;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{
-    make_inner_compose, make_outer_compose, ActionT, ApplyError, BottomUpSolver,
+    make_inner_compose, make_outer_compose, ActionT, ApplyError, BottomUpSolver, DbKey,
     NotApplicableReason, VisitUpdater,
 };
 use crate::spec::{LogicalSpec, Spec};
@@ -132,14 +133,22 @@ impl<Tgt: Target> BottomUpSolver for BufferizeSolver<Tgt> {
     type Tgt = Tgt;
 
     fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        self.dependencies_for_range(spec, spec)
+        if matches!(&spec.0, LogicalSpec::Compose { .. }) {
+            todo!("Should match implementation in dependencies_for_range");
+        } else {
+            vec![]
+        }
     }
 
-    fn dependencies_for_range(
+    fn dependencies_for_range<B>(
         &mut self,
-        low: &Spec<Tgt>,
-        high: &Spec<Tgt>,
-    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        _bimap: &B,
+        low: &Spec<Self::Tgt>,
+        high: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    where
+        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
+    {
         if matches!(&low.0, LogicalSpec::Compose { .. })
             || matches!(&high.0, LogicalSpec::Compose { .. })
         {
