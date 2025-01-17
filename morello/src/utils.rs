@@ -1,3 +1,6 @@
+use crate::db::DbKey;
+use crate::db::TableKey;
+use crate::grid::general::BiMap;
 use crate::grid::general::SurMap;
 use crate::grid::linear::BimapInt;
 use crate::spec::Spec;
@@ -19,10 +22,13 @@ pub struct ToWriteFmt<T: io::Write>(pub T);
 // Wraps a [fmt::Write] to prepend [str] to each line.
 pub struct LinePrefixWrite<'a, W: fmt::Write>(W, &'a str, bool);
 
+/// See the documents for [sum_seqs].
 pub struct SumSeqs<T>(Box<dyn Iterator<Item = Vec<T>> + Send>, bool);
 
+/// A [SumSeqs] which translates each vector by another, fixed vector.
 pub struct SumSeqsShifted<'a, T>(SumSeqs<T>, &'a [T]);
 
+/// See the docs for [diagonals].
 pub struct Diagonals<T> {
     maxes: Vec<T>,
     stage: T,
@@ -91,6 +97,10 @@ impl<T: Add<Output = T> + Copy> Iterator for SumSeqsShifted<'_, T> {
             }
             v
         })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
     }
 }
 
@@ -260,6 +270,8 @@ pub fn diagonals_shifted<'b, T: PrimInt>(bottom: &'b [T], top: &[T]) -> Diagonal
     }
 }
 
+/// Returns an iterator of vectors of non-negative integers that sum to 'total' but never exceed
+/// `maxes` in any dimension.
 pub fn sum_seqs<T: PrimInt + Send + 'static>(maxes: &[T], total: T) -> SumSeqs<T> {
     let maxes = maxes.to_vec();
     let len = maxes.len();
@@ -303,6 +315,46 @@ pub fn sum_seqs<T: PrimInt + Send + 'static>(maxes: &[T], total: T) -> SumSeqs<T
 
         SumSeqs(Box::new(flat_map_iter), is_empty)
     }
+}
+
+pub(crate) fn spec_diagonals_flat_shifted<'a, Tgt, B>(
+    bimap: &'a B,
+    table_key: &'a TableKey,
+    bottom: &'a [BimapInt],
+    top: &'a [BimapInt],
+) -> impl Iterator<Item = Spec<Tgt>> + 'a
+where
+    Tgt: Target,
+    B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey> + 'a,
+{
+    diagonals_shifted(bottom, top).flatten().map(move |pt| {
+        let pt_u32 = pt
+            .iter()
+            .map(|&x| {
+                BimapInt::try_from(x).unwrap_or_else(|_| {
+                    panic!("Can't convert elem of {pt:?}. Bottom is {bottom:?}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let pt_tuple = (table_key.clone(), pt_u32);
+        let mut spec: Spec<Tgt> = BiMap::apply_inverse(bimap, &pt_tuple);
+        spec.canonicalize().unwrap();
+        debug_assert_eq!(
+            BiMap::apply(bimap, &spec).0,
+            *table_key,
+            "canonicalization changed the table key: {spec}"
+        );
+        debug_assert!(
+            BiMap::apply(bimap, &spec)
+                .1
+                .iter()
+                .zip(bottom)
+                .zip(top)
+                .all(|((&pt, &bottom_pt), &top_pt)| pt >= bottom_pt && pt <= top_pt),
+            "canonicalization moved Spec point outside the dependency range: {spec}"
+        );
+        spec
+    })
 }
 
 pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &str) -> String {

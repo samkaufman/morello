@@ -147,10 +147,10 @@ macro_rules! rtreedyn_cases {
             ) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
                 match self {
                     $( RTreeDyn::$name(t) => {
-                        Box::new(t.locate_in_envelope_intersecting(&AABB::from_points(&[
+                        Box::new(t.locate_in_envelope_intersecting(&AABB::from_corners(
                             bottom.try_into().unwrap(),
                             top.try_into().unwrap(),
-                        ])).map(|r| (&r.bottom.arr[..], &r.top.arr[..], &r.value)))
+                        )).map(|r| (&r.bottom.arr[..], &r.top.arr[..], &r.value)))
                     } )*
                 }
             }
@@ -851,10 +851,10 @@ mod tests {
     #[test]
     fn test_rtree_subtract_1() {
         let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
-        minuhend.merge_insert(&[1, 1], &[3, 3], ());
+        minuhend.merge_insert(&[1, 1], &[3, 3], (), true);
 
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
-        subtrahend.merge_insert(&[1, 1], &[2, 2], ());
+        subtrahend.merge_insert(&[1, 1], &[2, 2], (), true);
 
         minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(
@@ -877,11 +877,11 @@ mod tests {
     #[test]
     fn test_rtree_subtract_2() {
         let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
-        minuhend.merge_insert(&[1, 1], &[3, 3], ());
-        minuhend.merge_insert(&[5, 1], &[5, 7], ());
+        minuhend.merge_insert(&[1, 1], &[3, 3], (), true);
+        minuhend.merge_insert(&[5, 1], &[5, 7], (), true);
 
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
-        subtrahend.merge_insert(&[1, 1], &[9, 9], ());
+        subtrahend.merge_insert(&[1, 1], &[9, 9], (), true);
 
         minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(minuhend.into_iter().count(), 0);
@@ -890,11 +890,11 @@ mod tests {
     #[test]
     fn test_rtree_subtract_3() {
         let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
-        minuhend.merge_insert(&[1, 1], &[3, 7], ());
-        minuhend.merge_insert(&[5, 1], &[7, 7], ());
+        minuhend.merge_insert(&[1, 1], &[3, 7], (), true);
+        minuhend.merge_insert(&[5, 1], &[7, 7], (), true);
 
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
-        subtrahend.merge_insert(&[1, 2], &[7, 3], ());
+        subtrahend.merge_insert(&[1, 2], &[7, 3], (), true);
 
         minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(

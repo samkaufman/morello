@@ -1,6 +1,7 @@
 use crate::common::DimSize;
 use crate::cost::{Cost, MainCost, NormalizedCost};
-use crate::db::ActionNum;
+use crate::db::{ActionNum, DbKey};
+use crate::grid::general::BiMap;
 use crate::imp::loops::compute_loop_main_cost;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
@@ -9,10 +10,11 @@ use crate::search::ImplReducer;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
-
+use crate::utils::spec_diagonals_flat_shifted;
 use crate::views::{Param, Tensor, TileError, View, ViewE};
 use auto_impl::auto_impl;
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -73,11 +75,14 @@ pub trait BottomUpSolver {
     ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>;
 
     // TODO: Document specifically what's in the [low, high] set.
-    fn dependencies_for_range(
+    fn dependencies_for_range<B>(
         &mut self,
+        bimap: &B,
         low: &Spec<Self::Tgt>,
         high: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>;
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    where
+        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>;
 
     fn visit_dependency<U>(
         &mut self,
@@ -178,13 +183,17 @@ macro_rules! action_dispatch {
                 }
             }
 
-            fn dependencies_for_range(
+            fn dependencies_for_range<B>(
                 &mut self,
-                low: &Spec<Tgt>,
-                high: &Spec<Tgt>,
-            ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+                bimap: &B,
+                low: &Spec<Self::Tgt>,
+                high: &Spec<Self::Tgt>,
+            ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+            where
+                B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
+            {
                 match self {
-                    $( Self::$variant(a) => a.dependencies_for_range(low, high) ),*
+                    $( Self::$variant(a) => a.dependencies_for_range(bimap, low, high) ),*
                 }
             }
 
@@ -313,9 +322,10 @@ pub enum NotApplicableReason {
     Other(Option<&'static str>),
 }
 
-impl<Tgt> VisitUpdater<Tgt> for HashMap<&Spec<Tgt>, ImplReducer>
+impl<Tgt, K> VisitUpdater<Tgt> for HashMap<K, ImplReducer>
 where
     Tgt: Target,
+    K: Borrow<Spec<Tgt>> + Eq + Hash,
 {
     fn complete_action(
         &mut self,
@@ -705,12 +715,23 @@ where
         out
     }
 
-    fn dependencies_for_range(
+    fn dependencies_for_range<B>(
         &mut self,
+        bimap: &B,
         low: &Spec<Self::Tgt>,
         high: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)> {
-        todo!()
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    where
+        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
+    {
+        // TODO: Does this cover the right set of Specs? Mapping isn't defined!
+        let low_projection = BiMap::apply(bimap, low);
+        let high_projection = BiMap::apply(bimap, high);
+        let table_key = &low_projection.0;
+        debug_assert_eq!(table_key, &high_projection.0);
+        spec_diagonals_flat_shifted(bimap, table_key, &low_projection.1, &high_projection.1)
+            .flat_map(|spec| self.dependencies_for_spec(&spec))
+            .collect()
     }
 
     fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
@@ -737,8 +758,8 @@ where
             if slot.is_some() {
                 if slot != &new_slot_entry {
                     panic!(
-                        "subspec {spec} already set to a different value for {}",
-                        working_impl.working_spec.borrow().spec
+                        "subspec {spec} already set to a different value for parent {}",
+                        RefCell::borrow(&working_impl.working_spec).spec
                     );
                 }
                 log::warn!("subspec {spec} already set");
