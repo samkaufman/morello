@@ -132,14 +132,6 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
 impl<Tgt: Target> BottomUpSolver for BufferizeSolver<Tgt> {
     type Tgt = Tgt;
 
-    fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        if matches!(&spec.0, LogicalSpec::Compose { .. }) {
-            todo!("Should match implementation in dependencies_for_range");
-        } else {
-            vec![]
-        }
-    }
-
     fn dependencies_for_range<B>(
         &mut self,
         _bimap: &B,

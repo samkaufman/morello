@@ -146,14 +146,6 @@ impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
 impl<Tgt: Target> BottomUpSolver for SpatialSplitSolver<Tgt> {
     type Tgt = Tgt;
 
-    fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        if spec_is_conv(spec) {
-            todo!("should match implementation in dependencies_for_range");
-        } else {
-            vec![]
-        }
-    }
-
     fn dependencies_for_range<B>(
         &mut self,
         _bimap: &B,

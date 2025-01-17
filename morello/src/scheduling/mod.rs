@@ -69,11 +69,6 @@ pub trait ActionT<Tgt: Target> {
 pub trait BottomUpSolver {
     type Tgt: Target;
 
-    fn dependencies_for_spec(
-        &mut self,
-        spec: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>;
-
     // TODO: Document specifically what's in the [low, high] set.
     fn dependencies_for_range<B>(
         &mut self,
@@ -173,15 +168,6 @@ macro_rules! action_dispatch {
 
         impl<Tgt: Target> BottomUpSolver for $solver<Tgt> {
             type Tgt = Tgt;
-
-            fn dependencies_for_spec(
-                &mut self,
-                spec: &Spec<Tgt>,
-            ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-                match self {
-                    $( Self::$variant(a) => a.dependencies_for_spec(spec) ),*
-                }
-            }
 
             fn dependencies_for_range<B>(
                 &mut self,
@@ -667,54 +653,6 @@ where
 {
     type Tgt = Tgt;
 
-    fn dependencies_for_spec(
-        &mut self,
-        spec: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)> {
-        // TODO: Test that this never returns and correctly visits duplicate sub-Specs.
-        // TODO: Test that this can be called twice without messing up our internal state.
-
-        let working_spec = Rc::new(RefCell::new(NaiveWorkingSpec {
-            spec: spec.clone(),
-            impls: vec![],
-            incomplete_impls: 0,
-        }));
-
-        let mut out = vec![];
-        for action in P::actions(&spec.0) {
-            match action.top_down_solver(spec) {
-                Ok(solver) => {
-                    let subspecs = solver.subspecs().collect::<Vec<_>>();
-                    if subspecs.is_empty() {
-                        continue;
-                    }
-                    let working_impl = Rc::new(RefCell::new(NaiveWorkingImpl {
-                        working_spec: Rc::clone(&working_spec),
-                        solver,
-                        action_num: action.encode(spec),
-                        subspec_costs: vec![None; subspecs.len()],
-                    }));
-                    let mut working_spec_mut = RefCell::borrow_mut(&working_spec);
-                    working_spec_mut.impls.push(Rc::downgrade(&working_impl));
-                    if !subspecs.is_empty() {
-                        working_spec_mut.incomplete_impls += 1;
-                    }
-
-                    for (subspec_idx, subspec) in subspecs.into_iter().enumerate() {
-                        out.push((subspec.clone(), subspec.clone()));
-                        self.requests_map
-                            .entry(subspec)
-                            .or_default()
-                            .push((Rc::clone(&working_impl), subspec_idx));
-                    }
-                }
-                Err(ApplyError::NotApplicable(_)) => {}
-                Err(ApplyError::SpecNotCanonical) => panic!("given non-canon Spec: {spec}"),
-            }
-        }
-        out
-    }
-
     fn dependencies_for_range<B>(
         &mut self,
         bimap: &B,
@@ -730,7 +668,50 @@ where
         let table_key = &low_projection.0;
         debug_assert_eq!(table_key, &high_projection.0);
         spec_diagonals_flat_shifted(bimap, table_key, &low_projection.1, &high_projection.1)
-            .flat_map(|spec| self.dependencies_for_spec(&spec))
+            .flat_map(|spec| {
+                // TODO: Test that this never returns and correctly visits duplicate sub-Specs.
+                // TODO: Test that this can be called twice without messing up our internal state.
+
+                let working_spec = Rc::new(RefCell::new(NaiveWorkingSpec {
+                    spec: spec.clone(),
+                    impls: vec![],
+                    incomplete_impls: 0,
+                }));
+
+                let mut out = vec![];
+                for action in P::actions(&spec.0) {
+                    match action.top_down_solver(&spec) {
+                        Ok(solver) => {
+                            let subspecs = solver.subspecs().collect::<Vec<_>>();
+                            if subspecs.is_empty() {
+                                continue;
+                            }
+                            let working_impl = Rc::new(RefCell::new(NaiveWorkingImpl {
+                                working_spec: Rc::clone(&working_spec),
+                                solver,
+                                action_num: action.encode(&spec),
+                                subspec_costs: vec![None; subspecs.len()],
+                            }));
+                            let mut working_spec_mut = RefCell::borrow_mut(&working_spec);
+                            working_spec_mut.impls.push(Rc::downgrade(&working_impl));
+                            if !subspecs.is_empty() {
+                                working_spec_mut.incomplete_impls += 1;
+                            }
+
+                            for (subspec_idx, subspec) in subspecs.into_iter().enumerate() {
+                                out.push((subspec.clone(), subspec.clone()));
+                                self.requests_map
+                                    .entry(subspec)
+                                    .or_default()
+                                    .push((Rc::clone(&working_impl), subspec_idx));
+                            }
+                        }
+                        Err(ApplyError::NotApplicable(_)) => {}
+                        Err(ApplyError::SpecNotCanonical) => panic!("given non-canon Spec: {spec}"),
+                    }
+                }
+                out
+            })
             .collect()
     }
 
@@ -807,7 +788,7 @@ where
     where
         U: VisitUpdater<Self::Tgt>,
     {
-        // TODO: Avoid the redundant (with dependencies_for_spec) scan of actions.
+        // TODO: Avoid the redundant (with dependencies_for_range) scan of actions.
         let mut all_actions_complete = true;
         for action in P::actions(&spec.0) {
             match action.top_down_solver(spec) {
