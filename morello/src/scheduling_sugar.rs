@@ -480,6 +480,8 @@ impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt> {
                 }
             } else if children.len() == 1 {
                 this.replace_children(iter::once(inner(&children[0], path, f)))
+            } else if path.is_empty() {
+                panic!("subschedule path is too short");
             } else if path[0] >= children.len() {
                 panic!(
                     "subschedule path referenced child {} but only {} children",
