@@ -5,8 +5,8 @@ use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::scheduling::{
-    tile_to_apply_err, ActionT, ApplyError, BottomUpSolver, DbKey, NotApplicableReason,
-    VisitUpdater,
+    tile_to_apply_err, ActionT, ApplyError, BottomUpSolver, DbKey, DependencyRequest,
+    NotApplicableReason, VisitUpdater,
 };
 use crate::smallvec::smallvec;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
@@ -15,12 +15,16 @@ use crate::views::{Param, Tile, View, ViewE, ViewExt};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use std::iter;
+use std::marker::PhantomData;
 
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct SpatialSplit;
 
-#[derive(Default)]
-pub struct SpatialSplitSolver<Tgt>(std::marker::PhantomData<Tgt>);
+#[derive(Debug)]
+pub struct SpatialSplitSolver<Tgt>(PhantomData<Tgt>);
+
+#[derive(Debug)]
+pub struct SpatialSplitSolverRequest<Tgt>(PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
     type BSolver = SpatialSplitSolver<Tgt>;
@@ -139,27 +143,36 @@ impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
     }
 
     fn bottom_up_solvers() -> Self::BSolverIter {
-        iter::once(Self::BSolver::default())
+        iter::once(SpatialSplitSolver(PhantomData))
     }
 }
 
 impl<Tgt: Target> BottomUpSolver for SpatialSplitSolver<Tgt> {
     type Tgt = Tgt;
+    type Request = SpatialSplitSolverRequest<Tgt>;
 
     fn dependencies_for_range<B>(
         &mut self,
         _bimap: &B,
         low: &Spec<Self::Tgt>,
         high: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    ) -> Self::Request
     where
         B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
     {
         if spec_is_conv(low) || spec_is_conv(high) {
             todo!()
         } else {
-            vec![]
+            SpatialSplitSolverRequest(PhantomData)
         }
+    }
+}
+
+impl<Tgt: Target> DependencyRequest for SpatialSplitSolverRequest<Tgt> {
+    type Tgt = Tgt;
+
+    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
+        &[]
     }
 
     fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
@@ -168,10 +181,12 @@ impl<Tgt: Target> BottomUpSolver for SpatialSplitSolver<Tgt> {
     {
         if !spec_is_conv(spec) {
             updater.complete_spec(spec);
+        } else {
+            todo!("Handle any non-splittable Convs as well")
         }
     }
 
-    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
+    fn visit_dependency<U>(&mut self, _spec: &Spec<Tgt>, _cost: &[NormalizedCost], _updater: &mut U)
     where
         U: VisitUpdater<Tgt>,
     {

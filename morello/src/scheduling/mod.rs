@@ -68,6 +68,7 @@ pub trait ActionT<Tgt: Target> {
 /// [Spec]'s actions from those dependencies.
 pub trait BottomUpSolver {
     type Tgt: Target;
+    type Request: DependencyRequest<Tgt = Self::Tgt>;
 
     // TODO: Document specifically what's in the [low, high] set.
     fn dependencies_for_range<B>(
@@ -75,9 +76,15 @@ pub trait BottomUpSolver {
         bimap: &B,
         low: &Spec<Self::Tgt>,
         high: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    ) -> Self::Request
     where
         B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>;
+}
+
+pub trait DependencyRequest {
+    type Tgt: Target;
+
+    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)];
 
     fn visit_dependency<U>(
         &mut self,
@@ -124,7 +131,9 @@ pub trait ActionEncodeDecode<Tgt: Target> {
 }
 
 macro_rules! action_dispatch {
-    ( $(#[$meta:meta])* $name:ident, $solver:ident, $(($variant:tt, $innertype:ty)),*$(,)* ) => {
+    (
+        $(#[$meta:meta])* $name:ident, $solver:ident, $request:ident, $(($variant:tt, $innertype:ty)),*$(,)*
+    ) => {
         $(#[$meta])*
         #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
         #[serde(bound(
@@ -138,6 +147,11 @@ macro_rules! action_dispatch {
         #[allow(non_snake_case)]
         pub enum $solver<Tgt: Target> {
             $( $variant(<$innertype as ActionT<Tgt>>::BSolver) ),*
+        }
+
+        #[allow(non_snake_case)]
+        pub enum $request<Tgt: Target> {
+            $( $variant(<<$innertype as ActionT<Tgt>>::BSolver as BottomUpSolver>::Request) ),*
         }
 
         impl<Tgt: Target> ActionT<Tgt> for $name<Tgt> {
@@ -168,18 +182,29 @@ macro_rules! action_dispatch {
 
         impl<Tgt: Target> BottomUpSolver for $solver<Tgt> {
             type Tgt = Tgt;
+            type Request = $request<Tgt>;
 
             fn dependencies_for_range<B>(
                 &mut self,
                 bimap: &B,
                 low: &Spec<Self::Tgt>,
                 high: &Spec<Self::Tgt>,
-            ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+            ) -> Self::Request
             where
                 B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
             {
                 match self {
-                    $( Self::$variant(a) => a.dependencies_for_range(bimap, low, high) ),*
+                    $( Self::$variant(a) => $request::$variant(a.dependencies_for_range(bimap, low, high)) ),*
+                }
+            }
+        }
+
+        impl<Tgt: Target> DependencyRequest for $request<Tgt> {
+            type Tgt = Tgt;
+
+            fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
+                match self {
+                    $( Self::$variant(a) => a.requested_ranges() ),*
                 }
             }
 
@@ -216,6 +241,14 @@ macro_rules! action_dispatch {
                 }
             }
         )?
+
+        // $(
+        //     impl<Tgt: Target> From<<<$innertype as ActionT<Tgt>>::BSolver as BottomUpSolver>::Request> for $request<Tgt> {
+        //         fn from(value: <<$innertype as ActionT<Tgt>>::BSolver as BottomUpSolver>::Request) -> Self {
+        //             $request::$variant(value)
+        //         }
+        //     }
+        // )?
     };
 }
 
@@ -226,6 +259,7 @@ action_dispatch! {
     /// decision from another for a given Spec.
     Action,
     ActionBottomUpSolver,
+    ActionBottomUpSolverRequest,
     (TileOut, tiling::TileOut),
     (Split, tiling::Split),
     (Move, moves::Move::<Tgt>),
@@ -264,6 +298,12 @@ pub struct MoveActionSolver<Tgt: Target> {
 
 #[derive(Debug, Default)]
 pub struct NaiveBottomUpSolver<Tgt: Target, P> {
+    _phantom: PhantomData<(Tgt, P)>,
+}
+
+#[derive(Debug, Default)]
+pub struct NaiveBottomUpSolverRequest<Tgt: Target, P> {
+    requests: Vec<(Spec<Tgt>, Spec<Tgt>)>, // TODO: Redundant with requests_maps' keys
     requests_map: HashMap<Spec<Tgt>, Vec<(Rc<RefCell<NaiveWorkingImpl<Tgt>>>, usize)>>,
     _phantom: PhantomData<P>,
 }
@@ -652,13 +692,14 @@ where
     P: NaiveBottomUpActionProvider<Tgt>,
 {
     type Tgt = Tgt;
+    type Request = NaiveBottomUpSolverRequest<Tgt, P>;
 
     fn dependencies_for_range<B>(
         &mut self,
         bimap: &B,
         low: &Spec<Self::Tgt>,
         high: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    ) -> Self::Request
     where
         B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
     {
@@ -667,52 +708,73 @@ where
         let high_projection = BiMap::apply(bimap, high);
         let table_key = &low_projection.0;
         debug_assert_eq!(table_key, &high_projection.0);
-        spec_diagonals_flat_shifted(bimap, table_key, &low_projection.1, &high_projection.1)
-            .flat_map(|spec| {
-                // TODO: Test that this never returns and correctly visits duplicate sub-Specs.
-                // TODO: Test that this can be called twice without messing up our internal state.
+        let mut requests_map = HashMap::<Spec<Tgt>, Vec<_>>::new();
+        let requests =
+            spec_diagonals_flat_shifted(bimap, table_key, &low_projection.1, &high_projection.1)
+                .flat_map(|spec| {
+                    // TODO: Test that this never returns and correctly visits duplicate sub-Specs.
+                    // TODO: Test that this can be called twice without messing up our internal state.
 
-                let working_spec = Rc::new(RefCell::new(NaiveWorkingSpec {
-                    spec: spec.clone(),
-                    impls: vec![],
-                    incomplete_impls: 0,
-                }));
+                    let working_spec = Rc::new(RefCell::new(NaiveWorkingSpec {
+                        spec: spec.clone(),
+                        impls: vec![],
+                        incomplete_impls: 0,
+                    }));
 
-                let mut out = vec![];
-                for action in P::actions(&spec.0) {
-                    match action.top_down_solver(&spec) {
-                        Ok(solver) => {
-                            let subspecs = solver.subspecs().collect::<Vec<_>>();
-                            if subspecs.is_empty() {
-                                continue;
+                    let mut out = vec![];
+                    for action in P::actions(&spec.0) {
+                        match action.top_down_solver(&spec) {
+                            Ok(solver) => {
+                                let subspecs = solver.subspecs().collect::<Vec<_>>();
+                                if subspecs.is_empty() {
+                                    continue;
+                                }
+                                let working_impl = Rc::new(RefCell::new(NaiveWorkingImpl {
+                                    working_spec: Rc::clone(&working_spec),
+                                    solver,
+                                    action_num: action.encode(&spec),
+                                    subspec_costs: vec![None; subspecs.len()],
+                                }));
+                                let mut working_spec_mut = RefCell::borrow_mut(&working_spec);
+                                working_spec_mut.impls.push(Rc::downgrade(&working_impl));
+                                if !subspecs.is_empty() {
+                                    working_spec_mut.incomplete_impls += 1;
+                                }
+
+                                for (subspec_idx, subspec) in subspecs.into_iter().enumerate() {
+                                    out.push((subspec.clone(), subspec.clone()));
+                                    requests_map
+                                        .entry(subspec)
+                                        .or_default()
+                                        .push((Rc::clone(&working_impl), subspec_idx));
+                                }
                             }
-                            let working_impl = Rc::new(RefCell::new(NaiveWorkingImpl {
-                                working_spec: Rc::clone(&working_spec),
-                                solver,
-                                action_num: action.encode(&spec),
-                                subspec_costs: vec![None; subspecs.len()],
-                            }));
-                            let mut working_spec_mut = RefCell::borrow_mut(&working_spec);
-                            working_spec_mut.impls.push(Rc::downgrade(&working_impl));
-                            if !subspecs.is_empty() {
-                                working_spec_mut.incomplete_impls += 1;
-                            }
-
-                            for (subspec_idx, subspec) in subspecs.into_iter().enumerate() {
-                                out.push((subspec.clone(), subspec.clone()));
-                                self.requests_map
-                                    .entry(subspec)
-                                    .or_default()
-                                    .push((Rc::clone(&working_impl), subspec_idx));
+                            Err(ApplyError::NotApplicable(_)) => {}
+                            Err(ApplyError::SpecNotCanonical) => {
+                                panic!("given non-canon Spec: {spec}")
                             }
                         }
-                        Err(ApplyError::NotApplicable(_)) => {}
-                        Err(ApplyError::SpecNotCanonical) => panic!("given non-canon Spec: {spec}"),
                     }
-                }
-                out
-            })
-            .collect()
+                    out
+                })
+                .collect();
+        NaiveBottomUpSolverRequest {
+            requests,
+            requests_map,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<Tgt, P> DependencyRequest for NaiveBottomUpSolverRequest<Tgt, P>
+where
+    Tgt: Target,
+    P: NaiveBottomUpActionProvider<Tgt>,
+{
+    type Tgt = Tgt;
+
+    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
+        &self.requests
     }
 
     fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
