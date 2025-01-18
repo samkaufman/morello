@@ -7,7 +7,7 @@ use crate::imp::ImplNode;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::{
     make_accum_inits_for_spec, Action, ActionEncodeDecode, ActionT, ApplyError, BottomUpSolver,
-    NotApplicableReason, VisitUpdater,
+    DependencyRequest, NotApplicableReason, VisitUpdater,
 };
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
@@ -16,14 +16,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::iter;
 use std::num::NonZeroU64;
+use std::marker::PhantomData;
 
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ToAccum;
 
 type AccumMapKey<Tgt> = (TensorSpec<Tgt>, bool, MemoryLimits);
 
-#[derive(Default)]
-pub struct ToAccumSolver<Tgt: Target> {
+pub struct ToAccumSolver<Tgt>(PhantomData<Tgt>);
+
+pub struct ToAccumSolverRequest<Tgt: Target> {
+    dependencies: Vec<(Spec<Tgt>, Spec<Tgt>)>,
     zeroes: HashMap<Spec<Tgt>, Vec<NormalizedCost>>,
     accums: HashMap<AccumMapKey<Tgt>, HashMap<Spec<Tgt>, Vec<NormalizedCost>>>,
 }
@@ -81,11 +84,55 @@ impl<Tgt: Target> ActionT<Tgt> for ToAccum {
     }
 
     fn bottom_up_solvers() -> Self::BSolverIter {
-        iter::once(Self::BSolver::default())
+        iter::once(ToAccumSolver(PhantomData))
     }
 }
 
-impl<Tgt: Target> ToAccumSolver<Tgt> {
+impl<Tgt: Target> BottomUpSolver for ToAccumSolver<Tgt> {
+    type Tgt = Tgt;
+    type Request = ToAccumSolverRequest<Tgt>;
+
+    fn dependencies_for_range<B>(
+        &mut self,
+        _bimap: &B,
+        low: &Spec<Self::Tgt>,
+        high: &Spec<Self::Tgt>,
+    ) -> Self::Request
+    where
+        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
+    {
+        let mut dependencies = vec![];
+        if spec_is_plain_matmul(low) {
+            if !spec_is_plain_matmul(high) {
+                unimplemented!("non-Matmul high with Matmul low");
+            }
+
+            dependencies.reserve_exact(2);
+
+            // Request the accumulating Matmul sub-Specs
+            let accum_low = Spec(low.0.clone_as_accum(), low.1.clone());
+            let accum_high = Spec(high.0.clone_as_accum(), high.1.clone());
+            debug_assert!(accum_low.is_canonical());
+            debug_assert!(accum_high.is_canonical());
+            dependencies.push((accum_low, accum_high));
+
+            // Request the Zero implementations as well.
+            let zero_low = zero_for_spec(low);
+            let zero_high = zero_for_spec(high);
+            debug_assert!(zero_low.is_canonical());
+            debug_assert!(zero_high.is_canonical());
+            dependencies.push((zero_low, zero_high));
+        }
+
+        ToAccumSolverRequest {
+            dependencies,
+            zeroes: Default::default(),
+            accums: Default::default(),
+        }
+    }
+}
+
+impl<Tgt: Target> ToAccumSolverRequest<Tgt> {
     /// Helper for [visit_dependency]. Called when both the Zero and MatmulAccum dependencies are
     /// available.
     fn visit_candidate_dependency_pair<U>(
@@ -137,41 +184,11 @@ impl<Tgt: Target> ToAccumSolver<Tgt> {
     }
 }
 
-impl<Tgt: Target> BottomUpSolver for ToAccumSolver<Tgt> {
+impl<Tgt: Target> DependencyRequest for ToAccumSolverRequest<Tgt> {
     type Tgt = Tgt;
 
-    fn dependencies_for_range<B>(
-        &mut self,
-        _bimap: &B,
-        low: &Spec<Self::Tgt>,
-        high: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
-    where
-        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
-    {
-        let mut dependencies = vec![];
-        if spec_is_plain_matmul(low) {
-            if !spec_is_plain_matmul(high) {
-                unimplemented!("non-Matmul high with Matmul low");
-            }
-
-            dependencies.reserve_exact(2);
-
-            // Request the accumulating Matmul sub-Specs
-            let accum_low = Spec(low.0.clone_as_accum(), low.1.clone());
-            let accum_high = Spec(high.0.clone_as_accum(), high.1.clone());
-            debug_assert!(accum_low.is_canonical());
-            debug_assert!(accum_high.is_canonical());
-            dependencies.push((accum_low, accum_high));
-
-            // Request the Zero implementations as well.
-            let zero_low = zero_for_spec(low);
-            let zero_high = zero_for_spec(high);
-            debug_assert!(zero_low.is_canonical());
-            debug_assert!(zero_high.is_canonical());
-            dependencies.push((zero_low, zero_high));
-        }
-        dependencies
+    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
+        &self.dependencies
     }
 
     fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)

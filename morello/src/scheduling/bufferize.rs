@@ -7,7 +7,7 @@ use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{
     make_inner_compose, make_outer_compose, ActionT, ApplyError, BottomUpSolver, DbKey,
-    NotApplicableReason, VisitUpdater,
+    DependencyRequest, NotApplicableReason, VisitUpdater,
 };
 use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
@@ -15,6 +15,7 @@ use crate::tensorspec::TensorSpec;
 use crate::views::{Tensor, View};
 use serde::{Deserialize, Serialize};
 use std::iter;
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -25,8 +26,11 @@ pub struct Bufferize<Tgt: Target> {
     pub vector_size: Option<DimSize>,
 }
 
-#[derive(Default)]
-pub struct BufferizeSolver<Tgt>(std::marker::PhantomData<Tgt>);
+#[derive(Debug)]
+pub struct BufferizeSolver<Tgt>(PhantomData<Tgt>);
+
+#[derive(Debug)]
+pub struct BufferizeSolverRequest<Tgt: Target>(PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
     type BSolver = BufferizeSolver<Tgt>;
@@ -125,19 +129,20 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
     }
 
     fn bottom_up_solvers() -> Self::BSolverIter {
-        iter::once(Self::BSolver::default())
+        iter::once(BufferizeSolver(PhantomData))
     }
 }
 
 impl<Tgt: Target> BottomUpSolver for BufferizeSolver<Tgt> {
     type Tgt = Tgt;
+    type Request = BufferizeSolverRequest<Tgt>;
 
     fn dependencies_for_range<B>(
         &mut self,
         _bimap: &B,
         low: &Spec<Self::Tgt>,
         high: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    ) -> Self::Request
     where
         B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
     {
@@ -146,8 +151,16 @@ impl<Tgt: Target> BottomUpSolver for BufferizeSolver<Tgt> {
         {
             todo!()
         } else {
-            vec![]
+            BufferizeSolverRequest(PhantomData)
         }
+    }
+}
+
+impl<Tgt: Target> DependencyRequest for BufferizeSolverRequest<Tgt> {
+    type Tgt = Tgt;
+
+    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
+        &[]
     }
 
     fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
@@ -159,7 +172,7 @@ impl<Tgt: Target> BottomUpSolver for BufferizeSolver<Tgt> {
         }
     }
 
-    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
+    fn visit_dependency<U>(&mut self, _spec: &Spec<Tgt>, _cost: &[NormalizedCost], _updater: &mut U)
     where
         U: VisitUpdater<Tgt>,
     {

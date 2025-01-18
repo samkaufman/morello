@@ -12,6 +12,11 @@ use crate::scheduling::{
     ActionTopDownSolver, ApplyError, BottomUpSolver, NaiveBottomUpActionProvider,
     NaiveBottomUpSolver, NotApplicableReason, PrimitiveTileOutSolver, VisitUpdater,
 };
+use crate::scheduling::{
+    check_tile_out_applies, tile_to_apply_err, Action, ActionT, ActionTopDownSolver, ApplyError,
+    BottomUpSolver, DbKey, DependencyRequest, NaiveBottomUpActionProvider, NaiveBottomUpSolver,
+    NotApplicableReason, VisitUpdater,
+};
 use crate::spec::{
     CanonicalizeError, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
     PrimitiveSpecType, Spec,
@@ -63,6 +68,12 @@ pub struct TileOutActionProvider<Tgt: Target>(std::marker::PhantomData<Tgt>);
 
 #[derive(Default)]
 pub struct SplitActionProvider<Tgt: Target>(std::marker::PhantomData<Tgt>);
+
+#[derive(Debug)]
+pub struct TileOutSolverRequest<Tgt: Target>(Vec<(Spec<Tgt>, Spec<Tgt>)>);
+
+#[derive(Debug)]
+pub struct SplitSolverRequest<Tgt: Target>(Vec<(Spec<Tgt>, Spec<Tgt>)>);
 
 impl TileOut {
     fn tiled_output_shape(
@@ -623,13 +634,14 @@ fn tile_out_loop_spec_with_shrunken_tiles<Tgt: Target>(
 
 impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
     type Tgt = Tgt;
+    type Request = TileOutSolverRequest<Tgt>;
 
     fn dependencies_for_range<B>(
         &mut self,
         bimap: &B,
         low: &Spec<Self::Tgt>,
         high: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    ) -> Self::Request
     where
         B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
     {
@@ -656,7 +668,7 @@ impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
             let Ok(unit_subspec) = one_tiled_spec.subspecs().exactly_one() else {
                 panic!("Expected exactly one subspec");
             };
-            vec![(unit_subspec, high.clone())]
+            TileOutSolverRequest(vec![(unit_subspec, high.clone())])
         } else {
             let mut result = Vec::with_capacity(output_rank);
             for dim in 0..output_rank_u8 {
@@ -687,18 +699,26 @@ impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
                 };
                 result.push((unit_subspec, high.clone()));
             }
-            result
+            TileOutSolverRequest(result)
         }
     }
+}
 
-    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
+impl<Tgt: Target> DependencyRequest for TileOutSolverRequest<Tgt> {
+    type Tgt = Tgt;
+
+    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
+        &self.0
+    }
+
+    fn visit_dependency<U>(&mut self, _spec: &Spec<Tgt>, _cost: &[NormalizedCost], _updater: &mut U)
     where
         U: VisitUpdater<Tgt>,
     {
         todo!()
     }
 
-    fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
+    fn apply_no_dependency_updates<U>(&mut self, _spec: &Spec<Self::Tgt>, _updater: &mut U)
     where
         U: VisitUpdater<Self::Tgt>,
     {
@@ -708,22 +728,23 @@ impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
 
 impl<Tgt: Target> BottomUpSolver for SplitSolver<Tgt> {
     type Tgt = Tgt;
+    type Request = SplitSolverRequest<Tgt>;
 
     fn dependencies_for_range<B>(
         &mut self,
-        bimap: &B,
+        _bimap: &B,
         low: &Spec<Self::Tgt>,
         high: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>
+    ) -> Self::Request
     where
         B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
     {
         // MatmulAccum only.
         let LogicalSpec::Primitive(ref basics, ref auxes, serial) = low.0 else {
-            return vec![];
+            return SplitSolverRequest(vec![]);
         };
         if !matches!(basics.typ, PrimitiveSpecType::Matmul { accum: true }) {
-            return vec![];
+            return SplitSolverRequest(vec![]);
         }
 
         // Range from `low` to a clone with k = 1.
@@ -735,7 +756,15 @@ impl<Tgt: Target> BottomUpSolver for SplitSolver<Tgt> {
         );
         self.requests
             .push((smallest_dependency.clone(), high.clone()));
-        vec![(smallest_dependency, high.clone())]
+        SplitSolverRequest(vec![(smallest_dependency, high.clone())])
+    }
+}
+
+impl<Tgt: Target> DependencyRequest for SplitSolverRequest<Tgt> {
+    type Tgt = Tgt;
+
+    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
+        &self.0
     }
 
     fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
@@ -751,7 +780,7 @@ impl<Tgt: Target> BottomUpSolver for SplitSolver<Tgt> {
         }
     }
 
-    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
+    fn visit_dependency<U>(&mut self, _spec: &Spec<Tgt>, _cost: &[NormalizedCost], _updater: &mut U)
     where
         U: VisitUpdater<Tgt>,
     {
