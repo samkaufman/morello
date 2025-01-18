@@ -3,7 +3,6 @@ use std::{fmt, ops::Rem};
 use crate::{
     common::Dtype,
     expr::{AffineForm, Atom, Bounds, NonAffineExpr},
-    layout::BufferVar,
     utils::indent,
 };
 
@@ -48,10 +47,7 @@ pub struct VecType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum CExprVar {
-    Buffer(BufferVar),
-    CName(String),
-}
+pub struct CName(pub String);
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum InitType {
@@ -252,8 +248,8 @@ impl CBuffer {
     }
 }
 
-impl Atom for CExprVar {}
-impl Bounds for CExprVar {}
+impl Atom for CName {}
+impl Bounds for CName {}
 
 pub fn c_type(dtype: Dtype) -> &'static str {
     match dtype {

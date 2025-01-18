@@ -5,7 +5,7 @@ use std::fmt::{self, Write};
 use std::iter;
 use std::rc::Rc;
 
-use super::c_utils::{c_type, printf_fmt, CBuffer, CExprVar, InitType, VecType};
+use super::c_utils::{c_type, printf_fmt, CBuffer, CName, InitType, VecType};
 use super::header::HeaderEmitter;
 use super::namegen::NameGenerator;
 use crate::common::{DimSize, Dtype};
@@ -1975,17 +1975,16 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             .collect()
     }
 
-    /// Lowers BufferVars from index expressions to corresponding C loop iterator names.
+    /// Lowers [BufferVar]s from index expressions to corresponding C loop iterator names.
     ///
-    /// BufferVars which haven't been bound in `loop_iter_bindings` are preserved as
-    /// [CExprVar::Buffer] leaves.
-    fn sub_expr_bindings(&self, unbound_expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<CExprVar> {
+    /// Panics if a [BufferVar] isn't in `loop_iter_bindings`.
+    fn sub_expr_bindings(&self, unbound_expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<CName> {
         unbound_expr.map_vars(&mut |v| match self.loop_iter_bindings.get(&v) {
             Some(Either::Left(var_name)) => {
-                AffineForm::from(NonAffine::Leaf(CExprVar::CName(var_name.clone())))
+                AffineForm::from(NonAffine::Leaf(CName(var_name.clone())))
             }
             Some(Either::Right(c)) => NonAffineExpr::constant(*c),
-            None => AffineForm::from(NonAffine::Leaf(CExprVar::Buffer(v))),
+            None => panic!("var was not bound: {v:?}"),
         })
     }
 
@@ -2265,7 +2264,7 @@ fn get_vector(
         })
 }
 
-fn expr_to_c(e: &AffineForm<NonAffine<CExprVar>>) -> String {
+fn expr_to_c(e: &AffineForm<NonAffine<CName>>) -> String {
     let mut buf =
         e.0.iter()
             .map(|Term(coef, sym)| {
@@ -2290,16 +2289,10 @@ fn expr_to_c(e: &AffineForm<NonAffine<CExprVar>>) -> String {
     format!("({})", buf)
 }
 
-fn cexpr_subexpr_to_c(subexpr: &NonAffine<CExprVar>) -> String {
+fn cexpr_subexpr_to_c(subexpr: &NonAffine<CName>) -> String {
     match subexpr {
         NonAffine::Constant(c) => c.to_string(),
-        NonAffine::Leaf(v) => match v {
-            CExprVar::CName(name) => name.clone(),
-            CExprVar::Buffer(_) => {
-                // TODO: Guarantee all terms are C names at the type level.
-                unreachable!("Expected all terms to be C names");
-            }
-        },
+        NonAffine::Leaf(CName(name)) => name.clone(),
         NonAffine::FloorDiv(v, d) => format!("({} / {})", expr_to_c(v), d),
         NonAffine::Mod(v, m) => format!("({} % {})", expr_to_c(v), m),
     }
@@ -2326,7 +2319,7 @@ const fn endian_convert_fn(dtype: Dtype) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::expr_to_c;
-    use crate::codegen::c_utils::CExprVar;
+    use crate::codegen::c_utils::CName;
     use crate::expr::{AffineForm, NonAffine, Term};
 
     #[test]
@@ -2336,15 +2329,15 @@ mod tests {
 
     #[test]
     fn test_intercept_zero_not_emitted() {
-        let x = CExprVar::CName(String::from("x"));
+        let x = CName(String::from("x"));
         let xa = NonAffine::Leaf(x);
         assert_eq!(expr_to_c(&AffineForm(vec![Term(2, xa)], 0)), "(2 * x)")
     }
 
     #[test]
     fn test_lower_to_c_expr() {
-        let x = CExprVar::CName(String::from("x"));
-        let y = CExprVar::CName(String::from("y"));
+        let x = CName(String::from("x"));
+        let y = CName(String::from("y"));
         assert_eq!(expr_to_c(&AffineForm(vec![], 1)), "(1)");
         assert_eq!(
             expr_to_c(&AffineForm(vec![Term(1, NonAffine::Leaf(x))], 1)),
