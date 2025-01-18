@@ -11,7 +11,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::grid::linear::{BimapInt, BimapSInt};
 use crate::rtree::RTreeDyn;
-use crate::scheduling::{Action, ActionT, BottomUpSolver, VisitUpdater};
+use crate::scheduling::{Action, ActionT, BottomUpSolver, DependencyRequest, VisitUpdater};
 use crate::spec::Spec;
 use crate::target::Target;
 use crate::utils::{diagonals_shifted, spec_diagonals_flat_shifted};
@@ -130,6 +130,8 @@ where
     .all(|goal| goal.is_canonical()));
 
     let mut solvers = Action::bottom_up_solvers().collect::<Vec<_>>();
+    let mut dep_requests = vec![];
+    dep_requests.reserve_exact(solvers.len());
 
     let mut reducers = HashMap::new();
     let mut goal_solvers_outstanding = HashMap::new();
@@ -156,6 +158,8 @@ where
         tracking_updater.current_solver_name = format!("solver {}", solver_idx);
 
         // TODO: Call a ranged `apply_no_dependency_updates` equivalent instead of this loop.
+        dep_requests.push(solver.dependencies_for_range(&bimap, low, high));
+        let dr = &mut dep_requests[solver_idx];
         spec_diagonals_flat_shifted(
             &bimap,
             &low_projection.0,
@@ -163,10 +167,10 @@ where
             &high_projection.1,
         )
         .for_each(|goal| {
-            solver.apply_no_dependency_updates(&goal, &mut tracking_updater);
+            dr.apply_no_dependency_updates(&goal, &mut tracking_updater);
         });
 
-        for (dep_low, dep_high) in solver.dependencies_for_range(&bimap, low, high) {
+        for (dep_low, dep_high) in dr.requested_ranges() {
             // dep_low and dep_high are not guaranteed to be canonical. This can be useful in
             // constructing some ranges, such as those from 1x1 to mxn where the 1x1 point might
             // have different contiguousness.
@@ -269,7 +273,11 @@ where
                         // prevented.
                         log::warn!("Goal Spec showed up in external visit: {spec}");
                     }
-                    solvers[solver_idx].visit_dependency(&spec, &ncosts, &mut tracking_updater);
+                    dep_requests[solver_idx].visit_dependency(
+                        &spec,
+                        &ncosts,
+                        &mut tracking_updater,
+                    );
                 });
         });
     }
@@ -317,7 +325,7 @@ where
                 .map(|x| NormalizedCost::new(x.1.clone(), spec.0.volume()))
                 .collect::<Vec<_>>();
             for solver_id in solver_ids {
-                solvers[solver_id].visit_dependency(
+                dep_requests[solver_id].visit_dependency(
                     &spec,
                     &normalized_costs,
                     &mut tracking_updater,
