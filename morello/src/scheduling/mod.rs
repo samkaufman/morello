@@ -540,7 +540,7 @@ fn make_outer_compose<Tgt: Target>(
     outer_operand_auxes.reserve_exact(outer_input_count + 2);
     outer_operand_auxes.extend_from_slice(&parent_operand_auxes[..outer_input_count]);
     let insertion_point =
-        1 + outer_operand_auxes.len() - outer_components.last().unwrap().typ.input_count();
+        1 + outer_input_count - outer_components.last().unwrap().typ.input_count();
     outer_operand_auxes.insert(insertion_point, intermediate_tensor.0.aux.clone());
     outer_operand_auxes.push(parent_operand_auxes.last().unwrap().clone());
     let mut outer_compose = Spec(
@@ -557,20 +557,23 @@ fn make_outer_compose<Tgt: Target>(
     );
     outer_compose.canonicalize().unwrap();
 
-    // TODO: Wrap in SpecApp
-    let mut params = vec![];
-    params.reserve_exact(outer_input_count + 2);
-    params.extend((0..outer_input_count).map(|i| {
-        ViewE::from(Param::new(i.try_into().unwrap(), {
-            outer_compose.0.parameter(i)
-        }))
-    }));
-    params.insert(insertion_point, ViewE::from(intermediate_tensor));
-    params.push(ViewE::from(Param::new(
+    let mut args = vec![];
+    args.reserve_exact(outer_input_count + 2);
+    for (parent_idx, idx) in (0..insertion_point)
+        .chain((insertion_point + 1)..(outer_input_count + 1))
+        .enumerate()
+    {
+        args.push(ViewE::from(Param::new(
+            parent_idx.try_into().unwrap(),
+            outer_compose.0.parameter(idx),
+        )));
+    }
+    args.insert(insertion_point, ViewE::from(intermediate_tensor));
+    args.push(ViewE::from(Param::new(
         (parent_operand_auxes.len() - 1).try_into().unwrap(),
         outer_compose.0.unique_output().unwrap(),
     )));
-    SpecApp::new(outer_compose, params)
+    SpecApp::new(outer_compose, args)
 }
 
 /// Converts an internal [TileError] to an external [ApplyError].
