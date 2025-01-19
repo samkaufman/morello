@@ -586,7 +586,12 @@ fn tile_to_apply_err(err: TileError) -> ApplyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{memorylimits::MemVec, spec::arb_canonical_spec, target::X86Target};
+    use crate::{
+        imp::visit_leaves,
+        memorylimits::MemVec,
+        spec::arb_canonical_spec,
+        target::{ArmTarget, X86Target},
+    };
     use proptest::prelude::*;
 
     proptest! {
@@ -623,5 +628,80 @@ mod tests {
                 }
             }
         }
+
+        #[test]
+        fn test_actions_introduce_subspec_arguments_with_matching_parameters_x86(
+            spec in arb_canonical_spec::<X86Target>(None, None),
+        ) {
+            shared_test_actions_introduce_subspec_arguments_with_matching_parameters(spec)?;
+        }
+
+        #[test]
+        fn test_actions_introduce_subspec_arguments_with_matching_parameters_arm(
+            spec in arb_canonical_spec::<ArmTarget>(None, None),
+        ) {
+            shared_test_actions_introduce_subspec_arguments_with_matching_parameters(spec)?;
+        }
+    }
+
+    // TODO: Add a solver version, if possible.
+    fn shared_test_actions_introduce_subspec_arguments_with_matching_parameters<Tgt: Target>(
+        spec: Spec<Tgt>,
+    ) -> Result<(), proptest::prelude::TestCaseError> {
+        for action in Tgt::actions(&spec.0, None) {
+            // Skip Moves since they sometimes introduce Move Specs with mismatched
+            // TensorSpecs.
+            if matches!(action, Action::Move { .. }) {
+                continue;
+            }
+
+            match action.apply(&spec) {
+                Ok(rewritten) => {
+                    let mut mismatch: Option<SpecApp<_>> = None;
+                    visit_leaves(&rewritten, &mut |leaf| {
+                        if let ImplNode::SpecApp(spec_app) = leaf {
+                            // TODO: Do we really need this?
+                            // Also skip Move sub-Specs, which can be introduced by actions other
+                            // than Move.
+                            if matches!(
+                                spec_app.0 .0,
+                                LogicalSpec::Primitive(
+                                    PrimitiveBasics {
+                                        typ: PrimitiveSpecType::Move,
+                                        ..
+                                    },
+                                    ..
+                                )
+                            ) {
+                                return true;
+                            }
+
+                            let spec_parameters = spec_app.0 .0.parameters();
+                            let argument_tensorspecs = spec_app
+                                .1
+                                .iter()
+                                .map(|v| v.spec().clone())
+                                .collect::<Vec<_>>();
+                            if spec_parameters != argument_tensorspecs {
+                                mismatch = Some(spec_app.clone());
+                                return false;
+                            }
+                        }
+                        true
+                    });
+                    prop_assert!(
+                        mismatch.is_none(),
+                        "incorrect sub-Spec arguments after rewriting {} with {:?}: {}",
+                        spec,
+                        action,
+                        mismatch.unwrap()
+                    );
+                }
+                Err(ApplyError::NotApplicable(_)) => (),
+                // TODO: Replace panic with a proptest-friendly result
+                Err(e) => panic!("unexpected error: {:?}", e),
+            };
+        }
+        Ok(())
     }
 }

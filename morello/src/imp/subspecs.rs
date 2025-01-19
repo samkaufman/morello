@@ -8,7 +8,7 @@ use crate::tensorspec::TensorSpec;
 use crate::views::{View, ViewE};
 use itertools::Itertools;
 use std::borrow::Borrow;
-use std::fmt::Debug;
+use std::fmt::{self, Debug, Display};
 
 #[derive(Debug, Clone)]
 pub struct SpecApp<A: View>(pub Spec<A::Tgt>, pub Vec<A>);
@@ -85,6 +85,19 @@ impl<A: View> Impl<A::Tgt> for SpecApp<A> {
 
     fn spec(&self) -> Option<&Spec<A::Tgt>> {
         Some(self.0.borrow())
+    }
+}
+
+impl<A: View> Display for SpecApp<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}(", self.0)?;
+        for (idx, arg) in self.1.iter().enumerate() {
+            if idx > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "_: {}", arg.spec())?;
+        }
+        write!(f, ")")
     }
 }
 

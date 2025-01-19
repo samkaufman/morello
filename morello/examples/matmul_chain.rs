@@ -180,7 +180,7 @@ fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
                         .subschedule(&[0], |m| m.synthesize(&db, None))
                         .subschedule(&[1, 1], |m| m.synthesize(&db, None))
                         .subschedule(&[1, 0], |m| {
-                            m.place(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
+                            m.select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
                         })
                 })
                 .subschedule(&[0], |m| m.synthesize(&db, None))
