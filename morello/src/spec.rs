@@ -1,4 +1,4 @@
-use crate::common::{DimSize, Shape, Dtype};
+use crate::common::{DimSize, Dtype, Shape};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};

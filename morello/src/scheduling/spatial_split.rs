@@ -2,10 +2,7 @@ use crate::common::Shape;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
-use crate::scheduling::{
-    ActionT,
-    tile_to_apply_err, ApplyError, NotApplicableReason,
-};
+use crate::scheduling::{tile_to_apply_err, ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::views::{Param, Tile, View, ViewE, ViewExt};

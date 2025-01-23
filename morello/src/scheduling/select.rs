@@ -1,7 +1,7 @@
 use crate::imp::kernels::KernelApp;
 use crate::imp::ImplNode;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
-use crate::scheduling::{ApplyError, ActionT, NotApplicableReason};
+use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
 use crate::spec::Spec;
 use crate::target::{Kernel, Target};
 use crate::views::{Param, ViewE};
