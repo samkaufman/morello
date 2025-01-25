@@ -174,8 +174,8 @@ where
             // dep_low and dep_high are not guaranteed to be canonical. This can be useful in
             // constructing some ranges, such as those from 1x1 to mxn where the 1x1 point might
             // have different contiguousness.
-            let (dep_key, dep_pt_low) = BiMap::apply(&bimap, &dep_low);
-            let (dep_key_high, dep_pt_high) = BiMap::apply(&bimap, &dep_high);
+            let (dep_key, dep_pt_low) = BiMap::apply(&bimap, dep_low);
+            let (dep_key_high, dep_pt_high) = BiMap::apply(&bimap, dep_high);
             debug_assert_eq!(
                 dep_key, dep_key_high,
                 "Dep. keys should be the same between {} and {}",

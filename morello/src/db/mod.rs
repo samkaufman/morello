@@ -1029,43 +1029,6 @@ fn block_size_dim(dim: usize, dim_count: usize) -> u8 {
     }
 }
 
-/// Computes the shape of a block in the database.
-///
-/// Given a maximum block shape and the coordinate of that block in the database, this will
-/// truncate at the edges. If the given database shape is `None` in that dimension, that dimension
-/// will be the full block size.
-fn block_shape<'a, F>(
-    block_pt: &'a [u32],
-    db_shape: &'a [Option<NonZeroUsize>],
-    block_max_size_fn: F,
-) -> impl ExactSizeIterator<Item = BimapInt> + 'a
-where
-    F: Fn(usize, usize) -> u32 + 'a,
-{
-    let rank = db_shape.len();
-    assert_eq!(block_pt.len(), rank);
-    db_shape.iter().enumerate().map(move |(i, db_max_option)| {
-        let full_block_size = block_max_size_fn(i, rank);
-        if let Some(db_max) = db_max_option {
-            let remaining_size =
-                u32::try_from(db_max.get()).unwrap() - block_pt[i] * full_block_size;
-            remaining_size.min(full_block_size)
-        } else {
-            full_block_size
-        }
-    })
-}
-
-fn db_shape<Tgt: Target>(rank: usize) -> Vec<Option<NonZeroUsize>> {
-    let mut shape = vec![None; rank];
-    let MemoryLimits::Standard(m) = Tgt::max_mem();
-    for (level_idx, dest_idx) in ((rank - m.len())..rank).enumerate() {
-        shape[dest_idx] =
-            Some(NonZeroUsize::new((m.get_binary_scaled(level_idx) + 1).into()).unwrap());
-    }
-    shape
-}
-
 /// Compute the block coordinate from a global coordinate.
 fn blockify_point(pt: &[BimapInt]) -> Vec<BimapInt> {
     let rank = pt.len();
