@@ -12,7 +12,6 @@ pub mod imp;
 pub mod layout;
 pub mod memorylimits;
 pub mod nameenv;
-mod ndarray;
 pub mod opaque_symbol;
 pub mod pprint;
 mod rtree;

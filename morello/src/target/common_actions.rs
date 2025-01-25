@@ -6,7 +6,7 @@ use itertools::Either;
 
 use super::{MemoryLevel, Target};
 use crate::{
-    common::{DimSize, Dtype, Shape},
+    common::{DimSize, Shape},
     scheduling::{
         bufferize::Bufferize,
         moves::Move,

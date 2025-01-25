@@ -27,8 +27,6 @@ use wtinylfu::WTinyLfuCache;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
-use std::marker::PhantomData;
-use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
 use std::sync::{mpsc, Arc};
@@ -960,43 +958,6 @@ fn db_key_scale(dim: usize, value: BimapInt, dim_count: usize) -> (BimapInt, u8)
     (quotient, remainder.try_into().unwrap())
 }
 
-/// Computes the shape of a block in the database.
-///
-/// Given a maximum block shape and the coordinate of that block in the database, this will
-/// truncate at the edges. If the given database shape is `None` in that dimension, that dimension
-/// will be the full block size.
-fn block_shape<'a, F>(
-    block_pt: &'a [u32],
-    db_shape: &'a [Option<NonZeroUsize>],
-    block_max_size_fn: F,
-) -> impl ExactSizeIterator<Item = BimapInt> + 'a
-where
-    F: Fn(usize, usize) -> u32 + 'a,
-{
-    let rank = db_shape.len();
-    assert_eq!(block_pt.len(), rank);
-    db_shape.iter().enumerate().map(move |(i, db_max_option)| {
-        let full_block_size = block_max_size_fn(i, rank);
-        if let Some(db_max) = db_max_option {
-            let remaining_size =
-                u32::try_from(db_max.get()).unwrap() - block_pt[i] * full_block_size;
-            remaining_size.min(full_block_size)
-        } else {
-            full_block_size
-        }
-    })
-}
-
-fn db_shape<Tgt: Target>(rank: usize) -> Vec<Option<NonZeroUsize>> {
-    let mut shape = vec![None; rank];
-    let MemoryLimits::Standard(m) = Tgt::max_mem();
-    for (level_idx, dest_idx) in ((rank - m.len())..rank).enumerate() {
-        shape[dest_idx] =
-            Some(NonZeroUsize::new((m.get_binary_scaled(level_idx) + 1).into()).unwrap());
-    }
-    shape
-}
-
 /// Converts a given global coordinate into block and within-block coordinates.
 fn blockify_point(mut pt: Vec<BimapInt>) -> (Vec<BimapInt>, Vec<u8>) {
     let rank = pt.len();
@@ -1257,32 +1218,6 @@ mod tests {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "{} := {:?}", self.spec, self.actions_costs)
         }
-    }
-
-    #[test]
-    fn test_block_shape() {
-        let db_shape = [4, 7]
-            .into_iter()
-            .map(|v| Some(v.try_into().unwrap()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            block_shape(&[0, 0], &db_shape, |_, _| 2)
-                .collect_vec()
-                .as_slice(),
-            &[2, 2]
-        );
-        assert_eq!(
-            block_shape(&[1, 1], &db_shape, |_, _| 2)
-                .collect_vec()
-                .as_slice(),
-            &[2, 2]
-        );
-        assert_eq!(
-            block_shape(&[1, 3], &db_shape, |_, _| 2)
-                .collect_vec()
-                .as_slice(),
-            &[2, 1]
-        );
     }
 
     proptest! {
