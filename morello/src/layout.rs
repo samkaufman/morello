@@ -406,8 +406,8 @@ impl Layout {
             let Layout(dims) = self;
             for idx in 1..dims.len() {
                 if dims[idx - 1].0 == dims[idx].0
-                    && dims[idx - 1].1 != PhysDim::Dynamic
-                    && dims[idx].1 != PhysDim::Dynamic
+                    && matches!(dims[idx - 1].1, PhysDim::Dynamic | PhysDim::Packed(_))
+                    && matches!(dims[idx].1, PhysDim::Dynamic | PhysDim::Packed(_))
                 {
                     panic!(
                         "Consecutive packed dimensions for logical dimension {} in layout: {:?}",
