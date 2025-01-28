@@ -253,7 +253,10 @@ impl Layout {
         Ok(strides)
     }
 
-    // TODO: Do we really need callers to build a HashSet?
+    /// Build a [Layout] with physical dimensions corresponding to the given
+    /// logical dimensions removed.
+    ///
+    /// The remaining dimensions will have their logical indices shifted.
     pub fn dim_drop(&self, dropped_dims: &HashSet<u8>, contiguous_abs: Contig) -> (Layout, Contig) {
         if dropped_dims.is_empty() {
             return (self.clone(), contiguous_abs);
@@ -270,13 +273,17 @@ impl Layout {
                     .count(),
             )
             .unwrap();
-        let new_layout = Layout::new(
-            dims.iter()
-                .filter(|(d, _)| !dropped_dims.contains(d))
-                .copied()
-                .collect(),
-        );
-        (new_layout, new_contig)
+
+        let mut new_dims = Vec::with_capacity(dims.len().saturating_sub(1));
+        for (logical_dim, phys_dim) in dims {
+            if dropped_dims.contains(logical_dim) {
+                continue;
+            }
+            let new_logical_dim = logical_dim
+                - u8::try_from(dropped_dims.iter().filter(|&&d| d < *logical_dim).count()).unwrap();
+            new_dims.push((new_logical_dim, *phys_dim));
+        }
+        (Layout::new(new_dims), new_contig)
     }
 
     pub fn swap_dims(&self, dims: (u8, u8), contiguous_abs: Contig) -> (Layout, Contig) {
@@ -900,7 +907,7 @@ mod tests {
         sample::select,
         strategy::{Just, Strategy},
     };
-    use std::{collections::HashSet, num::NonZeroU8};
+    use std::{collections::HashSet, iter, num::NonZeroU8};
 
     #[test]
     fn test_expand_physical_shape_1() {
@@ -991,6 +998,31 @@ mod tests {
             .update_for_tiling(&shape![128, 128], &shape![8, 1], cm.contiguous_full())
             .unwrap();
         assert_eq!(inner_contig, cm.contiguous_full());
+    }
+
+    #[test]
+    fn test_dim_drop_1() {
+        let layout = layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)];
+        let initial_contig = layout.contiguous_full();
+        let (new_layout, new_contig) = layout.dim_drop(&iter::once(0u8).collect(), initial_contig);
+        assert_eq!(new_layout, layout![(0, PhysDim::Dynamic)]);
+        assert_eq!(new_contig, new_layout.contiguous_full());
+    }
+
+    #[test]
+    fn test_dim_drop_2() {
+        let layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(4))
+        ];
+        let initial_contig = layout.contiguous_full();
+        let (new_layout, new_contig) = layout.dim_drop(&iter::once(1u8).collect(), initial_contig);
+        assert_eq!(
+            new_layout,
+            layout![(0, PhysDim::Dynamic), (0, PhysDim::Packed(4))]
+        );
+        assert_eq!(new_contig, new_layout.contiguous_full());
     }
 
     proptest! {
