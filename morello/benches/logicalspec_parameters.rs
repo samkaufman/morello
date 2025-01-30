@@ -10,35 +10,32 @@ use morello::target::{Target, X86Target};
 
 #[export_name = "morello_bench_logicalspec_parameters::matmul_spec"]
 fn matmul_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
-    let rm2 = row_major(2);
     lspec!(Matmul(
         [size, size, size],
-        (u32, Tgt::default_level(), rm2.clone()),
-        (u32, Tgt::default_level(), rm2.clone()),
-        (u32, Tgt::default_level(), rm2),
+        (u32, Tgt::default_level(), row_major),
+        (u32, Tgt::default_level(), row_major),
+        (u32, Tgt::default_level(), row_major),
         serial
     ))
 }
 
 #[export_name = "morello_bench_logicalspec_parameters::conv_spec"]
 fn conv_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
-    let rm4 = row_major(4);
     lspec!(Conv(
         [size, size, size, size, size, size, size],
-        (u32, Tgt::default_level(), rm4.clone()),
-        (u32, Tgt::default_level(), rm4.clone()),
-        (u32, Tgt::default_level(), rm4),
+        (u32, Tgt::default_level(), row_major),
+        (u32, Tgt::default_level(), row_major),
+        (u32, Tgt::default_level(), row_major),
         serial
     ))
 }
 
 #[export_name = "morello_bench_logicalspec_parameters::move_spec"]
 fn move_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
-    let rm2 = row_major(2);
     lspec!(Move(
         [size, size],
-        (u32, Tgt::default_level(), rm2.clone()),
-        (u32, Tgt::default_level(), rm2),
+        (u32, Tgt::default_level(), row_major),
+        (u32, Tgt::default_level(), row_major),
         serial
     ))
 }

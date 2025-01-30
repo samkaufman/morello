@@ -172,9 +172,8 @@ mod tests {
 
     #[test]
     fn test_can_pprint_a_specapp_with_no_aux() {
-        let rm1 = row_major(1);
         let logical_spec: LogicalSpec<X86Target> =
-            lspec!(Move([4], (u8, GL, rm1.clone()), (u8, L1, rm1)));
+            lspec!(Move([4], (u8, GL, row_major), (u8, L1, row_major)));
         let args = logical_spec
             .parameters()
             .into_iter()

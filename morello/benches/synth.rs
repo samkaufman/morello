@@ -10,12 +10,11 @@ use morello::target::{Target, X86Target};
 
 #[export_name = "morello_bench_synth::matmul_spec"]
 fn matmul_spec<Tgt: Target>(size: u32) -> Spec<Tgt> {
-    let rm2 = row_major(2);
     let logical_spec = lspec!(Matmul(
         [size, size, size],
-        (u32, Tgt::default_level(), rm2.clone()),
-        (u32, Tgt::default_level(), rm2.clone()),
-        (u32, Tgt::default_level(), rm2),
+        (u32, Tgt::default_level(), row_major),
+        (u32, Tgt::default_level(), row_major),
+        (u32, Tgt::default_level(), row_major),
         serial
     ));
     Spec(logical_spec, X86Target::max_mem())

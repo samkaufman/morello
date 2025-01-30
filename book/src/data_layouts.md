@@ -27,10 +27,10 @@ value respectively. A 6x8 matrix with a row-major layout looks like this:
 This is called a row-major layout because the row dimension (dimension 0) varies the
 slowest as you sequentially scan values in memory.
 
-In Morello, a row-major layout is constructed with `row_major(2)`. Why that `2`? Morello
-abuses the term 'row-major’ to refer to any layout where logical dimensions are laid out
-sequentially, even if the tensor has more or fewer than 2 dimensions. `row_major(n)` is
-actually sugar for:
+In Morello, a row-major layout is constructed with `row_major(shp)`. Morello
+abuses the term 'row-major’ to refer to any layout where logical dimensions are
+laid out sequentially, even if the tensor has more or fewer than 2 dimensions.
+As long as all dimensions are greater than size 1, `row_major` is sugar for:
 
 ```rust
 Layout::new(vec![
@@ -62,9 +62,9 @@ Layouts can also express packing, sometimes called layout tiling (e.g., in
 
 ```rust
 Layout::new(vec![
-  (1, PhysDim::Dynamic),  
-  (0, PhysDim::Dynamic),  
-  (1, PhysDim::Packed(nz!(4u32))),  
+  (1, PhysDim::Dynamic),
+  (0, PhysDim::Dynamic),
+  (1, PhysDim::Packed(nz!(4u32))),
 ])
 ```
 

@@ -20,9 +20,9 @@ fn main() {
     let mut spec = Spec::<X86Target>(
         lspec!(Matmul(
             [1, 32, 1],
-            (u32, RF, row_major(2)), // `2` = the rank of tensor
-            (u32, RF, row_major(2)), // `RF` = tensor is in register file
-            (u32, RF, row_major(2)),
+            (u32, RF, row_major), // `RF` = tensor is in register file
+            (u32, RF, row_major),
+            (u32, RF, row_major),
             serial
         )),
         X86Target::max_mem(),

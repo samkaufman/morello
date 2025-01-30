@@ -9,3 +9,5 @@ cc 91b76cc15cfcd64d3a1bee58bbe471ae47692d65bdabc6300d1a7534ba349828 # shrinks to
 cc 25caf3b0753ddfdbc8f938a064b790901468be751ab1d29adcfe64401c59cf8d # shrinks to test_input = ([2, 2], New([(0, Some(2)), (1, Some(2))]), [2, 1], [0, 0]), first_int = 2
 cc 55bd2ca7b786d35c96f7ee04b181b56ba92b953fa458c2f9216329e9c5918205 # shrinks to (shape, layout) = ([2], New([(0, Some(1))]))
 cc 669c5981e90fdf394800d86084e24530f5c9522237763b672c5947b262ef2e92 # shrinks to (shape, layout) = ([6], New([(0, Some(2))]))
+cc c96d6f668bd374fe22b89229f8871daa55fc92b89718de8bf865337d543fd8c0 # shrinks to shape = [1]
+cc e27ad5c31e54f2da84d404dad10e342050c7401300fe1405c47f8b14f3b77cdf # shrinks to (shape, layout, contig) = ([1], Layout([(0, Dynamic)]), 0)

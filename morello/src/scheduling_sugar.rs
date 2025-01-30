@@ -5,7 +5,7 @@ use crate::grid::general::BiMap;
 use crate::imp::functions::FunctionApp;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
-use crate::layout::Layout;
+use crate::layout::LayoutBuilder;
 use crate::scheduling::bufferize::Bufferize;
 use crate::scheduling::moves::Move;
 use crate::scheduling::select::Select;
@@ -35,7 +35,7 @@ pub trait SchedulingSugar<Tgt: Target> {
         &self,
         source_idx: u8,
         destination_level: Tgt::Level,
-        destination_layout: Layout,
+        destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn cast(
@@ -43,17 +43,17 @@ pub trait SchedulingSugar<Tgt: Target> {
         source_idx: u8,
         destination_dtype: Dtype,
         destination_level: Tgt::Level,
-        destination_layout: Layout,
+        destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_accum(&self) -> ImplNode<Tgt>;
     fn to_softmax_parts(
         &self,
         max_level: Tgt::Level,
-        max_layout: Layout,
+        max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
         denominator_level: Tgt::Level,
-        denominator_layout: Layout,
+        denominator_layout: impl LayoutBuilder,
         denominator_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_max_and_denominator(&self) -> ImplNode<Tgt>;
@@ -61,7 +61,7 @@ pub trait SchedulingSugar<Tgt: Target> {
         &self,
         index: usize,
         level: Tgt::Level,
-        layout: Layout,
+        layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn spatial_split(&self) -> ImplNode<Tgt>;
@@ -114,15 +114,16 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         &self,
         source_idx: u8,
         destination_level: Tgt::Level,
-        destination_layout: Layout,
+        destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        let destination_dtype = self.0.parameters()[usize::from(source_idx)].dtype();
+        let dest = self.0.parameters().swap_remove(usize::from(source_idx));
+        let destination_dtype = dest.dtype();
         let action = Action::Move(Move {
             source_idx,
             destination_dtype,
             destination_level,
-            destination_layout,
+            destination_layout: destination_layout.build(dest.shape()),
             destination_vector_size,
         });
         apply_unwrap(self, action)
@@ -133,14 +134,15 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         source_idx: u8,
         destination_dtype: Dtype,
         destination_level: Tgt::Level,
-        destination_layout: Layout,
+        destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
+        let dest_shape = self.0.parameter_shape(source_idx.into());
         let action = Action::Move(Move {
             source_idx,
             destination_dtype,
             destination_level,
-            destination_layout,
+            destination_layout: destination_layout.build(&dest_shape),
             destination_vector_size,
         });
         apply_unwrap(self, action)
@@ -154,12 +156,15 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn to_softmax_parts(
         &self,
         max_level: Tgt::Level,
-        max_layout: Layout,
+        max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
         denominator_level: Tgt::Level,
-        denominator_layout: Layout,
+        denominator_layout: impl LayoutBuilder,
         denominator_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
+        let first_parameter_shape = self.0.parameter_shape(0);
+        let max_layout = max_layout.build(&first_parameter_shape);
+        let denominator_layout = denominator_layout.build(&first_parameter_shape);
         apply_unwrap(
             self,
             Action::ToSoftmaxParts(ToSoftmaxParts {
@@ -184,7 +189,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         &self,
         index: usize,
         level: Tgt::Level,
-        layout: Layout,
+        layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_unwrap(
@@ -192,7 +197,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
             Action::Bufferize(Bufferize {
                 index,
                 level,
-                layout,
+                layout: layout.build(&self.0.parameter_shape(index)),
                 vector_size,
             }),
         )
@@ -243,7 +248,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         &self,
         source_idx: u8,
         destination_level: Tgt::Level,
-        destination_layout: Layout,
+        destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
@@ -261,7 +266,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         source_idx: u8,
         destination_dtype: Dtype,
         destination_level: Tgt::Level,
-        destination_layout: Layout,
+        destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
@@ -282,10 +287,10 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     fn to_softmax_parts(
         &self,
         max_level: Tgt::Level,
-        max_layout: Layout,
+        max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
         denominator_level: Tgt::Level,
-        denominator_layout: Layout,
+        denominator_layout: impl LayoutBuilder,
         denominator_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
@@ -308,7 +313,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         &self,
         index: usize,
         level: Tgt::Level,
-        layout: Layout,
+        layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {

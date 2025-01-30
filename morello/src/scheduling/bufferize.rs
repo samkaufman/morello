@@ -159,7 +159,7 @@ mod tests {
             X86Target::max_mem(),
         );
         spec.canonicalize().unwrap();
-        let imp = spec.bufferize(1, CpuMemoryLevel::GL, row_major(2), None);
+        let imp = spec.bufferize(1, CpuMemoryLevel::GL, row_major, None);
 
         assert_eq!(imp.children().len(), 2);
         assert!(matches!(imp, ImplNode::Pipeline(_)));

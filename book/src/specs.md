@@ -12,9 +12,9 @@ For example, the following constructs a Spec targeting X86:
 Spec::<X86Target>(
     lspec!(Matmul(
         [M, K, N],
-        (bf16, GL, row_major(2)),
-        (bf16, GL, col_major(2)),
-        (f32, GL, row_major(2)),
+        (bf16, GL, row_major),
+        (bf16, GL, col_major),
+        (f32, GL, row_major),
         serial
     )),
     X86Target::max_mem(),

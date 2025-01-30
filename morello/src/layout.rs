@@ -10,6 +10,10 @@ use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fmt::Display, hash::Hash};
 
+pub trait LayoutBuilder {
+    fn build(self, shape: &[DimSize]) -> Layout;
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
 pub struct Layout(pub Vec<(u8, PhysDim)>);
 
@@ -49,6 +53,20 @@ pub enum StridesError {
     NonseqPhysicalDims(u8),
     #[error("Layout does not apply to shape {0:?}")]
     InvalidShape(Shape),
+}
+
+impl LayoutBuilder for Layout {
+    fn build(self, _shape: &[DimSize]) -> Layout {
+        // TODO: Check that the layout applies to the shape.
+        self
+    }
+}
+
+/// Implements [LayoutBuilder] for functions which accept the rank of the tensor.
+impl<F: Fn(u8) -> Layout> LayoutBuilder for F {
+    fn build(self, shape: &[DimSize]) -> Layout {
+        self(u8::try_from(shape.len()).unwrap())
+    }
 }
 
 impl Layout {

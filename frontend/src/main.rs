@@ -178,12 +178,14 @@ where
     };
     let logical_spec = match query_spec {
         QuerySpec::Transpose { size } => {
-            let rm2 = row_major(2);
-            let cm2 = col_major(2);
-            lspec!(Move([*size, *size], (u32, GL, rm2), (u32, GL, cm2), serial))
+            lspec!(Move(
+                [*size, *size],
+                (u32, GL, row_major),
+                (u32, GL, col_major),
+                serial
+            ))
         }
         QuerySpec::Matmul { size } | QuerySpec::MatmulU8S8S16 { size } => {
-            let rm2 = row_major(2);
             let [dt_a, dt_b, dt_c] = match query_spec {
                 QuerySpec::Matmul { .. } => [Dtype::Uint32; 3],
                 QuerySpec::MatmulU8S8S16 { .. } => [Dtype::Uint8, Dtype::Sint8, Dtype::Sint16],
@@ -191,9 +193,9 @@ where
             };
             lspec!(Matmul(
                 [*size, *size, *size],
-                (dt_a, GL, rm2.clone()),
-                (dt_b, GL, rm2.clone()),
-                (dt_c, GL, rm2),
+                (dt_a, GL, row_major),
+                (dt_b, GL, row_major),
+                (dt_c, GL, row_major),
                 serial
             ))
         }
@@ -204,33 +206,21 @@ where
             filters_size,
             size,
         } => {
-            let rm = row_major(4);
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Conv { accum: false },
-                    spec_shape: vec![
-                        *batch,
-                        *filters,
-                        *channels,
-                        *size,
-                        *size,
-                        *filters_size,
-                        *filters_size,
-                    ],
-                    dtypes: vec![Dtype::Uint32; 3],
-                },
-                vec![
-                    TensorSpecAux::<Tgt> {
-                        contig: rm.contiguous_full(),
-                        aligned: true,
-                        level: CpuMemoryLevel::GL,
-                        layout: rm,
-                        vector_size: None,
-                    };
-                    3
+            lspec!(Conv(
+                [
+                    *batch,
+                    *filters,
+                    *channels,
+                    *size,
+                    *size,
+                    *filters_size,
+                    *filters_size
                 ],
-                true,
-            )
+                (u32, GL, row_major),
+                (u32, GL, row_major),
+                (u32, GL, row_major),
+                serial
+            ))
         }
         QuerySpec::Softmax { rank, size } => {
             let layouts = [row_major(*rank), row_major(*rank)];

@@ -8,12 +8,11 @@ use morello::target::{CpuMemoryLevel::GL, Target, X86Target};
 
 #[library_benchmark]
 fn copy_actions_into_vec() {
-    let rm2 = row_major(2);
     let logical_spec: LogicalSpec<X86Target> = lspec!(Matmul(
         [64, 64, 64],
-        (u32, GL, rm2.clone()),
-        (u32, GL, rm2.clone()),
-        (u32, GL, rm2),
+        (u32, GL, row_major),
+        (u32, GL, row_major),
+        (u32, GL, row_major),
         serial
     ));
     black_box(X86Target::actions(&logical_spec, None).collect::<Vec<_>>());

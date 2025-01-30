@@ -395,7 +395,7 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
     bounds.extend((1..=move_needed_rank).map(|rank| {
         lspec!(FillZero(
             iter::repeat(args.size).take(rank.into()),
-            (u32, CpuMemoryLevel::GL, row_major(rank)),
+            (u32, CpuMemoryLevel::GL, row_major),
             serial
         ))
     }));
@@ -405,9 +405,9 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
 
     bounds.push(lspec!(Matmul(
         [args.size, args.size, args.size],
-        (u32, CpuMemoryLevel::GL, row_major(2)),
-        (u32, CpuMemoryLevel::GL, row_major(2)),
-        (u32, CpuMemoryLevel::GL, row_major(2)),
+        (u32, CpuMemoryLevel::GL, row_major),
+        (u32, CpuMemoryLevel::GL, row_major),
+        (u32, CpuMemoryLevel::GL, row_major),
         serial
     )));
     if args.through == ThroughSpec::Matmul {
@@ -453,8 +453,8 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
 fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
     lspec!(Move(
         iter::repeat(size).take(rank.into()),
-        (u32, CpuMemoryLevel::GL, row_major(rank)),
-        (u32, CpuMemoryLevel::GL, row_major(rank)),
+        (u32, CpuMemoryLevel::GL, row_major),
+        (u32, CpuMemoryLevel::GL, row_major),
         serial
     ))
 }

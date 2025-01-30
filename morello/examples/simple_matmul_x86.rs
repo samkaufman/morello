@@ -24,17 +24,15 @@ fn main() {
     //
     // This is a non-accumulating Spec (`Matmul` rather than `MatmulAccum`), which means that the
     // implementation will set rather then add values to the output tensor.
-    let layout = row_major(2);
-
     const M: u32 = 64;
     const K: u32 = 64;
     const N: u32 = 64;
     let spec = Spec::<X86Target>(
         lspec!(Matmul(
             [M, K, N],
-            (u32, GL, layout.clone()),
-            (u32, GL, layout.clone()),
-            (u32, GL, layout),
+            (u32, GL, row_major),
+            (u32, GL, row_major),
+            (u32, GL, row_major),
             serial
         )),
         X86Target::max_mem(),
@@ -47,9 +45,9 @@ fn main() {
     // changing the Spec, allow the remainder of the schedule to assume tensors are in L1.
     let implementation_l1 = spec
         .tile_out(&[16, 16])
-        .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
-        .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
-        .move_param(2, CpuMemoryLevel::L1, row_major(2), None);
+        .move_param(0, CpuMemoryLevel::L1, row_major, None)
+        .move_param(1, CpuMemoryLevel::L1, row_major, None)
+        .move_param(2, CpuMemoryLevel::L1, row_major, None);
 
     // This results in the following Impl:
     // ```
@@ -92,15 +90,15 @@ fn main() {
         .split(4)
         // Move the 1x4 left-hand input tensor into the register. This results in two
         // sub-Specs---a Move from L1 into RF and the continuation of the MatrmulAccum.
-        .move_param(0, CpuMemoryLevel::RF, row_major(2), None)
+        .move_param(0, CpuMemoryLevel::RF, row_major, None)
         // Let's schedule the introduced Move sub-Spec with `move_schedule` (defined below).
         .subschedule(&[1, 0], move_schedule)
         // Move the 4x1 right-hand input tensor into registers as well.
-        .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
+        .move_param(1, CpuMemoryLevel::RF, row_major, None)
         .subschedule(&[1, 1, 0], move_schedule)
         // And, finally, move the 1x1 output tensor into RF, scheduling
         // the load and store sub-Specs...
-        .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
+        .move_param(2, CpuMemoryLevel::RF, row_major, None)
         .subschedule(&[1, 1, 1, 0], move_schedule)
         .subschedule(&[1, 1, 1, 2], move_schedule)
         // ...and compute the 1x1x1 matix multiply with `+= a * b`.
@@ -219,7 +217,7 @@ fn main() {
 //  l1_tile[index] = v;
 /// ```
 fn zero_schedule(zero: &Spec<X86Target>) -> ImplNode<X86Target> {
-    zero.move_param(0, CpuMemoryLevel::RF, row_major(2), None)
+    zero.move_param(0, CpuMemoryLevel::RF, row_major, None)
         .subschedule(&[0], |z| z.select(CpuKernel::MemsetZero))
         .subschedule(&[1], |move_back| move_back.select(CpuKernel::ValueAssign))
 }

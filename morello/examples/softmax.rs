@@ -53,7 +53,7 @@ fn main() {
         // Tile across the batch dimension. (We cannot tile across the scan dimension.)
         .tile_out(&[1, SIZE.get()])
         // Split into sub-Specs for computing denominator-and-max and then one to complete softmax.
-        .to_softmax_parts(GL, row_major(RANK), None, GL, row_major(RANK), None)
+        .to_softmax_parts(GL, row_major, None, GL, row_major, None)
         // This [0] corresponds to SoftmaxDenominatorAndMax
         .subschedule(&[0], |subspec| subspec.to_max_and_denominator())
         // This [0, 0] corresponds to Max

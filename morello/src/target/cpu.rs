@@ -1597,9 +1597,9 @@ mod tests {
     fn test_twovecbroadcastvecmult_applies_to_operands() {
         let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
             [1, 2, 16],
-            (u8, CpuMemoryLevel::L1, row_major(2)),
-            (i8, CpuMemoryLevel::VRF, col_major(2), 32),
-            (i16, CpuMemoryLevel::VRF, row_major(2), 16),
+            (u8, CpuMemoryLevel::L1, row_major),
+            (i8, CpuMemoryLevel::VRF, col_major, 32),
+            (i16, CpuMemoryLevel::VRF, row_major, 16),
             serial
         ));
         assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_logical_spec(&logical_spec));
@@ -1609,9 +1609,9 @@ mod tests {
     fn test_kernel_memory_constrains_placement() {
         let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
             [1, 1, 16],
-            (u8, CpuMemoryLevel::RF, row_major(2)),
-            (u8, CpuMemoryLevel::VRF, row_major(2), 16),
-            (u8, CpuMemoryLevel::VRF, row_major(2), 16),
+            (u8, CpuMemoryLevel::RF, row_major),
+            (u8, CpuMemoryLevel::VRF, row_major, 16),
+            (u8, CpuMemoryLevel::VRF, row_major, 16),
             serial
         ));
         let spec = Spec(

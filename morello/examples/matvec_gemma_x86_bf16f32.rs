@@ -27,9 +27,9 @@ fn main() {
     let spec = Spec::<X86Target>(
         lspec!(Matmul(
             [M, K, N],
-            (bf16, GL, row_major(2)),
-            (bf16, GL, col_major(2)),
-            (f32, GL, row_major(2))
+            (bf16, GL, row_major),
+            (bf16, GL, col_major),
+            (f32, GL, row_major)
         )),
         X86Target::max_mem(),
     );
@@ -51,8 +51,8 @@ fn main() {
         )
         .subschedule(&[0], |z| {
             z.tile_out(&[1, 16])
-                .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
-                .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(16u32)))
+                .move_param(0, CpuMemoryLevel::L1, row_major, None)
+                .move_param(0, CpuMemoryLevel::VRF, row_major, Some(nz!(16u32)))
                 .subschedule(&[0], |z| z.select(CpuKernel::VectorAssign))
                 .subschedule(&[1], |z| {
                     z.move_param(1, CpuMemoryLevel::VRF, interleaved.clone(), Some(nz!(8u32)))
@@ -62,11 +62,11 @@ fn main() {
         })
         .tile_out_parallel(&[1, 128])
         .tile_out(&[1, 1])
-        .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
-        .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
+        .move_param(2, CpuMemoryLevel::L1, row_major, None)
+        .move_param(2, CpuMemoryLevel::RF, row_major, None)
         .to_accum()
         .subschedule(&[1, 0, 0], |z| z.select(CpuKernel::MemsetZero))
-        .move_param(1, CpuMemoryLevel::L1, col_major(2), None)
+        .move_param(1, CpuMemoryLevel::L1, col_major, None)
         .select(CpuKernel::DotProductLoopF32InterleavedBf16F32)
         .subschedule(&[1, 1], |body| body.select(CpuKernel::ValueAssign));
 

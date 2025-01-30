@@ -2399,67 +2399,71 @@ pub mod macros {
         ( @inner $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),*, $s:literal ) ) => {{
             use $crate::spec::macros::internal::IntoDimSize;
 
-            let auxes = [ $( lspec!(@tensorspecaux_tup $($opterms)*) ),* ];
-            let dtypes = auxes.iter().map(|v| v.0.clone()).collect();
+            let dtypes = [ $( lspec!(@dt_head $($opterms)*) ),* ];
             let basics = $crate::spec::PrimitiveBasics {
                 typ: lspec!(@primitive_spec_type $typ),
                 spec_shape: ($shp).into_iter().map(|x| x.into_dim_size()).collect(),
-                dtypes,
+                dtypes: dtypes.try_into().unwrap(),
             };
+
+            let mut parameter_shapes = basics.parameter_shapes();
+            parameter_shapes.reverse();
+            let auxes = [ $( lspec!(@tensorspecaux &parameter_shapes.pop().unwrap(), $($opterms)*) ),* ];
             $crate::spec::LogicalSpec::Primitive(
                 basics,
-                auxes.into_iter().map(|v| v.1).collect(),
+                auxes.try_into().unwrap(),
                 $s,
             )
         }};
 
-        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, c0, ua ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, None, false, false)
+        ( @dt_head $dt:tt, $($rest:tt)* ) => {
+            lspec!(@dt_convert $dt)
         };
-        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, c0 ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, None, false, true)
+
+        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, c0, ua ) => {
+            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, false, false)
         };
-        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, ua ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, None, true, false)
+        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, c0 ) => {
+            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, false, true)
         };
-        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, None, true, true)
+        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, ua ) => {
+            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, true, false)
         };
-        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, $vs:expr, c0, ua ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, Some($vs), false, false)
+        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr ) => {
+            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, true, true)
         };
-        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, $vs:expr, c0 ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, Some($vs), false, true)
+        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr, c0, ua ) => {
+            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), false, false)
         };
-        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, $vs:expr, ua ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, Some($vs), true, false)
+        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr, c0 ) => {
+            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), false, true)
         };
-        ( @tensorspecaux_tup $dt:tt, $level:expr, $layout:expr, $vs:expr ) => {
-            lspec!(@tensorspecaux_tup_inner $dt, $level, $layout, Some($vs), true, true)
+        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr, ua ) => {
+            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), true, false)
+        };
+        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr ) => {
+            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), true, true)
         };
 
         // TODO: Accept contiguousnesses other than fully contig. or not at all.
-        ( @tensorspecaux_tup_inner $dt:tt, $level:expr, $layout:expr, $vs:expr,
+        ( @tensorspecaux_inner $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr,
           $c:literal, $a:literal ) =>
         {{
-            let layout: $crate::layout::Layout = $layout;
+            let layout = $crate::layout::LayoutBuilder::build($layout, $shp);
             let contig = if $c {
                 layout.contiguous_full()
             } else {
                 layout.contiguous_none()
             };
-            (
-                lspec!(@dt_convert $dt),
-                $crate::tensorspec::TensorSpecAux {
-                    contig,
-                    aligned: $a,
-                    level: $level,
-                    layout,
-                    vector_size: ($vs).map(|x: u32| {
-                        $crate::common::DimSize::try_from(x).unwrap()
-                    }),
-                },
-            )
+            $crate::tensorspec::TensorSpecAux {
+                contig,
+                aligned: $a,
+                level: $level,
+                layout,
+                vector_size: ($vs).map(|x: u32| {
+                    $crate::common::DimSize::try_from(x).unwrap()
+                }),
+            }
         }};
 
         ( @primitive_spec_type FillZero ) => {
@@ -2540,9 +2544,9 @@ mod tests {
     fn test_lspec_1() {
         let spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
             [2, 3, 3],
-            (u8, GL, row_major(2)),
-            (i8, GL, row_major(2), c0),
-            (u16, GL, row_major(2), ua),
+            (u8, GL, row_major),
+            (i8, GL, row_major, c0),
+            (u16, GL, row_major, ua),
             serial
         ));
         let lhs = TensorSpecAux {
@@ -2991,14 +2995,14 @@ mod tests {
                 })
         ) {
             let (compose_spec, index) = tinp;
-            let LogicalSpec::Compose { components, .. } = &compose_spec.0 else {
+            let LogicalSpec::Compose { .. } = &compose_spec.0 else {
                 unreachable!();
             };
 
             let pipeline = compose_spec.bufferize(
                 index,
                 CpuMemoryLevel::RF,
-                row_major(components[index].input_shapes()[0].len().try_into().unwrap()),
+                row_major,
                 None
             );
             let spec_parameters = compose_spec.0.parameters();

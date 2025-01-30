@@ -350,9 +350,9 @@ mod tests {
         ]);
         let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
             [8, 128, 8],
-            (f32, CpuMemoryLevel::GL, fixed_layout.clone()),
-            (f32, CpuMemoryLevel::GL, row_major(2)),
-            (f32, CpuMemoryLevel::GL, row_major(2))
+            (f32, CpuMemoryLevel::GL, col_major),
+            (f32, CpuMemoryLevel::GL, row_major),
+            (f32, CpuMemoryLevel::GL, row_major)
         ));
         let spec = Spec(logical_spec, X86Target::max_mem());
         let parameters = spec.0.parameters();
@@ -391,9 +391,9 @@ mod tests {
     ) {
         let logical: LogicalSpec<X86Target> = lspec!(MatmulAccum(
             [8, 128, 8],
-            (f32, CpuMemoryLevel::GL, col_major(2)),
-            (f32, CpuMemoryLevel::GL, row_major(2)),
-            (f32, CpuMemoryLevel::GL, row_major(2))
+            (f32, CpuMemoryLevel::GL, col_major),
+            (f32, CpuMemoryLevel::GL, row_major),
+            (f32, CpuMemoryLevel::GL, row_major)
         ));
         let spec = Spec(logical, X86Target::max_mem());
         let action = Action::Move(Move {

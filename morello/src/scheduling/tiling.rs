@@ -558,9 +558,9 @@ mod tests {
     fn shared_test_non_multiple_tiling_returns_error(action: Action<X86Target>) {
         let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
             [8, 8, 8],
-            (f32, CpuMemoryLevel::GL, col_major(2)),
-            (f32, CpuMemoryLevel::GL, row_major(2)),
-            (f32, CpuMemoryLevel::GL, row_major(2))
+            (f32, CpuMemoryLevel::GL, col_major),
+            (f32, CpuMemoryLevel::GL, row_major),
+            (f32, CpuMemoryLevel::GL, row_major)
         ));
         let spec = Spec(logical_spec, X86Target::max_mem());
         let application = action.apply(&spec);
