@@ -622,20 +622,17 @@ fn loop_spec_with_shrunken_tiles<Tgt: Target>(
         })?;
 
     // Return a Loop containing the Spec as its body.
-    let body = Box::new(
-        {
-            let spec = Spec(inner_spec, spec.1.clone());
-            let arguments = spec
-                .0
-                .parameters()
-                .into_iter()
-                .enumerate()
-                .map(|(i, o)| ViewE::from(Param::new(i.try_into().unwrap(), o)))
-                .collect();
-            SpecApp(spec, arguments)
-        }
-        .into(),
-    );
+    let body = Box::new({
+        let spec = Spec(inner_spec, spec.1.clone());
+        let arguments = spec
+            .0
+            .parameters()
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| ViewE::from(Param::new(i.try_into().unwrap(), o)))
+            .collect();
+        SpecApp(spec, arguments).into()
+    });
     Ok(ImplNode::Loop(Loop {
         tiles,
         body,
