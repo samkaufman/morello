@@ -14,13 +14,13 @@ use itertools::{izip, Itertools};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 
-use std::fmt;
 use std::fmt::Display;
 use std::iter::once;
 use std::iter::Iterator;
 use std::marker::PhantomData;
 use std::panic;
 use std::{assert_eq, debug_assert_eq};
+use std::{fmt, iter};
 
 #[cfg(test)]
 const ARBITRARY_SPEC_MAX_SIZE: DimSize = nonzero::nonzero!(8u32);
@@ -148,6 +148,19 @@ pub enum FillValue {
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct TilingInference(pub Vec<(Tiling, Vec<Option<u8>>)>);
+
+#[derive(Debug, Clone)]
+enum DimAssociation {
+    SpecDim(usize),
+    SpecDimDifference(usize, usize, DimSize),
+    Constant(DimSize),
+}
+
+macro_rules! sdims {
+    ($($dim:expr),*$(,)*) => {{
+        vec![$(DimAssociation::SpecDim($dim)),*]
+    }};
+}
 
 /// A [BiMap] which extends [LogicalSpecSurMap] with memory limits dimensions.
 ///
@@ -325,9 +338,42 @@ pub fn arb_canonical_spec<Tgt: Target>(
 impl PrimitiveBasics {
     pub fn replace_io(&mut self, new_operands: &[(&[DimSize], Dtype)]) {
         self.dtypes = new_operands.iter().map(|o| o.1).collect();
-        self.spec_shape = self
-            .typ
-            .shape_from_parameters(new_operands.iter().map(|t| t.0));
+
+        // Collect associations before clearing spec_shape.
+        let all_associations = (0..self.typ.operand_count())
+            .map(|i| self.spec_dim_associations(i.try_into().unwrap()))
+            .collect::<Vec<_>>();
+
+        self.spec_shape.clear();
+        for (operand, associations) in new_operands.iter().zip(&all_associations) {
+            for (association, size) in associations.iter().zip(operand.0) {
+                match association {
+                    DimAssociation::SpecDim(spec_dim) => {
+                        if *spec_dim >= self.spec_shape.len() {
+                            self.spec_shape.resize(spec_dim + 1, nz!(1u32));
+                        }
+                        self.spec_shape[*spec_dim] = *size;
+                    }
+                    DimAssociation::SpecDimDifference(..) => {}
+                    DimAssociation::Constant(c) => {
+                        debug_assert_eq!(c, size);
+                    }
+                }
+            }
+        }
+
+        // In debug mode, check the dimensions defined by SpecDimDifference.
+        #[cfg(debug_assertions)]
+        for (operand, associations) in new_operands.iter().zip(all_associations) {
+            for (association, size) in associations.iter().zip(operand.0) {
+                if let DimAssociation::SpecDimDifference(lhs_dim, rhs_dim, shift) = association {
+                    let lhs = self.spec_shape[*lhs_dim];
+                    let rhs = self.spec_shape[*rhs_dim];
+                    let expected = DimSize::new(shift.get() + lhs.get() - rhs.get()).unwrap();
+                    debug_assert_eq!(expected, *size);
+                }
+            }
+        }
     }
 
     pub fn aux_from_operand_auxes<'a, Tgt, I>(&self, operand_auxes: I) -> Vec<TensorSpecAux<Tgt>>
@@ -376,110 +422,18 @@ impl PrimitiveBasics {
     }
 
     pub fn parameter_shape(&self, idx: usize) -> Shape {
-        match self.typ {
-            PrimitiveSpecType::OnePrefix => match idx {
-                0 => self.spec_shape.clone(),
-                1 => {
-                    let mut shape = vec![];
-                    shape.reserve_exact(self.spec_shape.len() + 1);
-                    shape.push(nz!(1u32));
-                    shape.extend_from_slice(&self.spec_shape);
-                    shape
+        self.spec_dim_associations(idx.try_into().unwrap())
+            .into_iter()
+            .map(|a| match a {
+                DimAssociation::SpecDim(i) => self.spec_shape[i],
+                DimAssociation::SpecDimDifference(lhs_dim, rhs_dim, shift) => {
+                    let lhs = self.spec_shape[lhs_dim];
+                    let rhs = self.spec_shape[rhs_dim];
+                    DimSize::new(shift.get() + lhs.get() - rhs.get()).unwrap()
                 }
-                _ => panic!("OnePrefix has only 2 parameters"),
-            },
-            PrimitiveSpecType::Matmul { .. } => match idx {
-                0 => vec![self.spec_shape[0], self.spec_shape[1], self.spec_shape[2]],
-                1 => vec![self.spec_shape[0], self.spec_shape[2], self.spec_shape[3]],
-                2 => vec![self.spec_shape[0], self.spec_shape[1], self.spec_shape[3]],
-                _ => panic!("Matmul has only 3 parameters"),
-            },
-            PrimitiveSpecType::Conv { .. } => {
-                let [b, f, c, h, w, fh, fw] = self.spec_shape[..] else {
-                    panic!("Conv must have rank 7")
-                };
-                debug_assert!(
-                    h >= fh && w >= fw,
-                    "Conv spatial dims. {}x{} were larger than filter {}x{}",
-                    h,
-                    w,
-                    fh,
-                    fw
-                );
-                match idx {
-                    0 => vec![b, c, h, w],
-                    1 => vec![f, c, fh, fw],
-                    2 => conv_infer_output_shape(&[b, c, h, w], &[f, c, fh, fw]),
-                    _ => panic!("Conv has only 3 parameters"),
-                }
-            }
-            PrimitiveSpecType::Broadcast { dim } => match idx {
-                0 => {
-                    let mut shape = self.spec_shape.clone();
-                    shape[usize::from(dim)] = nz!(1u32);
-                    shape
-                }
-                1 => self.spec_shape.clone(),
-                _ => panic!("Broadcast has only 2 parameters"),
-            },
-            PrimitiveSpecType::DivideVec => {
-                if idx > 3 {
-                    panic!("DivideVec has only 3 parameters")
-                }
-                self.spec_shape.clone()
-            }
-            PrimitiveSpecType::DivideVecScalar { scan_dim } => match idx {
-                0 | 2 => self.spec_shape.clone(),
-                1 => {
-                    let mut shape = self.spec_shape.clone();
-                    shape[usize::from(scan_dim)] = nz!(1u32);
-                    shape
-                }
-                _ => panic!("DivideVecScalar has only 2 parameters"),
-            },
-            PrimitiveSpecType::Softmax { .. } => match idx {
-                0 | 1 => self.spec_shape.to_vec(),
-                _ => panic!("Softmax has only 2 parameters"),
-            },
-            PrimitiveSpecType::SoftmaxComplete { scan_dim } => match idx {
-                0 | 3 => self.spec_shape.clone(),
-                1 | 2 => {
-                    let mut reduced = self.spec_shape.clone();
-                    reduced[usize::from(scan_dim)] = nz!(1u32);
-                    reduced
-                }
-                _ => panic!("SoftmaxComplete has only 4 parameters"),
-            },
-            PrimitiveSpecType::SoftmaxDenominator { scan_dim: dim, .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim: dim, .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim: dim, .. }
-            | PrimitiveSpecType::Max { dim, .. } => match idx {
-                0 => self.spec_shape.clone(),
-                x if x < self.typ.operand_count() => {
-                    let mut reduced = self.spec_shape.clone();
-                    reduced[usize::from(dim)] = nz!(1u32);
-                    reduced
-                }
-                _ => panic!(),
-            },
-            PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { scan_dim, .. } => match idx {
-                0 | 3 => self.spec_shape.clone(),
-                1 | 2 => {
-                    let mut reduced = self.spec_shape.clone();
-                    reduced[usize::from(scan_dim)] = nz!(1u32);
-                    reduced
-                }
-                _ => panic!("SoftmaxDenominatorAndUnscaledFromMax has only 4 parameters"),
-            },
-            PrimitiveSpecType::Move => match idx {
-                0 | 1 => self.spec_shape.clone(),
-                _ => panic!("Move has only 2 parameters"),
-            },
-            PrimitiveSpecType::Fill { value: _ } => match idx {
-                0 => self.spec_shape.clone(),
-                _ => panic!("Zero has only 1 parameter"),
-            },
-        }
+                DimAssociation::Constant(d) => d,
+            })
+            .collect()
     }
 
     pub fn unique_output_shape(&self) -> Option<Shape> {
@@ -807,6 +761,132 @@ impl PrimitiveBasics {
                 smaller_output
             ),
         })
+    }
+
+    /// Returns indices for each parameter associating them with an index in the underlying
+    /// spec_shape or a constant.
+    fn spec_dim_associations(&self, parameter_idx: u8) -> Vec<DimAssociation> {
+        match self.typ {
+            PrimitiveSpecType::Matmul { accum: _ } => match parameter_idx {
+                0 => sdims![0, 1, 2],
+                1 => sdims![0, 2, 3],
+                2 => sdims![0, 1, 3],
+                _ => panic!("Matmul has only 3 parameters"),
+            },
+            PrimitiveSpecType::Conv { accum: _ } => {
+                let [b, f, c, h, w, fh, fw] = [0, 1, 2, 3, 4, 5, 6];
+                match parameter_idx {
+                    0 => sdims![b, c, h, w],
+                    1 => sdims![f, c, fh, fw],
+                    2 => vec![
+                        DimAssociation::SpecDim(b),
+                        DimAssociation::SpecDim(f),
+                        DimAssociation::SpecDimDifference(h, fh, nz!(1u32)),
+                        DimAssociation::SpecDimDifference(w, fw, nz!(1u32)),
+                    ],
+                    _ => panic!("Conv has only 3 parameters"),
+                }
+            }
+            PrimitiveSpecType::Fill { value: _ }
+            | PrimitiveSpecType::Move
+            | PrimitiveSpecType::Softmax { .. }
+            | PrimitiveSpecType::DivideVec => {
+                let cnt = self.typ.operand_count();
+                if usize::from(parameter_idx) < cnt {
+                    (0..self.spec_shape.len())
+                        .map(DimAssociation::SpecDim)
+                        .collect::<Vec<_>>()
+                } else {
+                    panic!("Spec only has {cnt} parameters");
+                }
+            }
+            PrimitiveSpecType::SoftmaxComplete { scan_dim } => {
+                let mut bindings = (0..self.spec_shape.len())
+                    .map(DimAssociation::SpecDim)
+                    .collect::<Vec<_>>();
+                match parameter_idx {
+                    0 | 3 => bindings,
+                    1 | 2 => {
+                        bindings[usize::from(scan_dim)] = DimAssociation::Constant(nz!(1u32));
+                        bindings
+                    }
+                    _ => panic!("SoftmaxComplete has only 4 parameters"),
+                }
+            }
+            PrimitiveSpecType::SoftmaxDenominator { scan_dim: dim, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim: dim, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim: dim, .. }
+            | PrimitiveSpecType::Max { dim, .. } => {
+                let cnt = self.typ.operand_count();
+                let mut bindings = (0..self.spec_shape.len())
+                    .map(DimAssociation::SpecDim)
+                    .collect::<Vec<_>>();
+                match parameter_idx {
+                    0 => bindings,
+                    x if usize::from(x) < cnt => {
+                        // TODO: Remove
+                        if usize::from(dim) >= bindings.len() {
+                            panic!(
+                                "hit the bad dimension {dim} with Spec shape {:?}",
+                                self.spec_shape
+                            );
+                        }
+
+                        bindings[usize::from(dim)] = DimAssociation::Constant(nz!(1u32));
+                        bindings
+                    }
+                    _ => panic!("Spec only has {cnt} parameters"),
+                }
+            }
+            PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { scan_dim, accum: _ } => {
+                let mut bindings = (0..self.spec_shape.len())
+                    .map(DimAssociation::SpecDim)
+                    .collect::<Vec<_>>();
+                match parameter_idx {
+                    0 | 3 => {}
+                    1 | 2 => bindings[usize::from(scan_dim)] = DimAssociation::Constant(nz!(1u32)),
+                    _ => panic!("SoftmaxDenominatorAndUnscaledFromMax has only 4 parameters"),
+                };
+                bindings
+            }
+            PrimitiveSpecType::OnePrefix => {
+                let input_associations = (0..self.spec_shape.len()).map(DimAssociation::SpecDim);
+                match parameter_idx {
+                    0 => input_associations.collect(),
+                    1 => iter::once(DimAssociation::Constant(nz!(1u32)))
+                        .chain(input_associations)
+                        .collect(),
+                    _ => panic!("OnePrefix has only 2 parameters"),
+                }
+            }
+            PrimitiveSpecType::Broadcast { dim } => {
+                let mut output_associations = (0..self.spec_shape.len())
+                    .map(DimAssociation::SpecDim)
+                    .collect::<Vec<_>>();
+                match parameter_idx {
+                    0 => {
+                        output_associations[usize::from(dim)] = DimAssociation::Constant(nz!(1u32));
+                        output_associations
+                    }
+                    1 => output_associations,
+                    _ => panic!("Broadcast has only 2 parameters"),
+                }
+            }
+            PrimitiveSpecType::DivideVecScalar { scan_dim } => {
+                let mut numer_out_associations = (0..self.spec_shape.len())
+                    .map(DimAssociation::SpecDim)
+                    .collect::<Vec<_>>();
+                match parameter_idx {
+                    0 | 2 => numer_out_associations,
+                    1 => {
+                        numer_out_associations[usize::from(scan_dim)] =
+                            DimAssociation::Constant(nz!(1u32));
+                        numer_out_associations
+                    }
+                    _ => panic!("DivideVecScalar has only 3 parameters"),
+                }
+            }
+        }
     }
 }
 
