@@ -9,13 +9,9 @@ use crate::imp::ImplNode;
 use crate::layout::row_major;
 use crate::scheduling::{
     check_tile_out_applies, collect_nested_specs, tile_to_apply_err, Action, ActionT,
-    ActionTopDownSolver, ApplyError, BottomUpSolver, NaiveBottomUpActionProvider,
-    NaiveBottomUpSolver, NotApplicableReason, PrimitiveTileOutSolver, VisitUpdater,
-};
-use crate::scheduling::{
-    check_tile_out_applies, tile_to_apply_err, Action, ActionT, ActionTopDownSolver, ApplyError,
-    BottomUpSolver, DbKey, DependencyRequest, NaiveBottomUpActionProvider, NaiveBottomUpSolver,
-    NotApplicableReason, VisitUpdater,
+    ActionTopDownSolver, ApplyError, BottomUpSolver, DependencyRequest,
+    NaiveBottomUpActionProvider, NaiveBottomUpSolver, NotApplicableReason, PrimitiveTileOutSolver,
+    VisitUpdater,
 };
 use crate::spec::{
     CanonicalizeError, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
