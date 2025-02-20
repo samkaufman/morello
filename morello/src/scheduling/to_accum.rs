@@ -45,22 +45,13 @@ impl<Tgt: Target> ActionT<Tgt> for ToAccum {
             LogicalSpec::Compose { components, .. } => &components[0],
         };
 
-        let PrimitiveBasics {
-            typ:
-                PrimitiveSpecType::Matmul { accum }
-                | PrimitiveSpecType::Conv { accum }
-                | PrimitiveSpecType::Max { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. },
-            ..
-        } = head
-        else {
+        let Some(accum) = head.accum() else {
             // TODO: Use a more specific NotApplicableReason.
             return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
                 "ToAccum is not defined for this Spec kind",
             ))));
         };
-        if *accum {
+        if accum {
             // TODO: Use a more specific NotApplicableReason.
             return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
                 "Already accumulating",
