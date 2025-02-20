@@ -214,7 +214,8 @@ where
 ///
 /// The given may return `false` to short-circuit, which will be propogated to the caller of this
 /// function.
-pub fn visit_leaves<Tgt, F>(imp: &ImplNode<Tgt>, f: &mut F) -> bool
+#[cfg(test)]
+pub(crate) fn visit_leaves<Tgt, F>(imp: &ImplNode<Tgt>, f: &mut F) -> bool
 where
     Tgt: Target,
     F: FnMut(&ImplNode<Tgt>) -> bool,

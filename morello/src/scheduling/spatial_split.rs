@@ -1,12 +1,11 @@
 use crate::common::Shape;
 use crate::cost::NormalizedCost;
-use crate::grid::general::BiMap;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::scheduling::{
-    tile_to_apply_err, ActionT, ApplyError, BottomUpSolver, DbKey, DependencyRequest,
-    NotApplicableReason, VisitUpdater,
+    tile_to_apply_err, ActionT, ApplyError, BottomUpSolver, DependencyRequest, NotApplicableReason,
+    SpecGeometry, VisitUpdater,
 };
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
@@ -15,6 +14,7 @@ use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use std::iter;
 use std::marker::PhantomData;
+use std::rc::Rc;
 
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct SpatialSplit;
@@ -23,7 +23,9 @@ pub struct SpatialSplit;
 pub struct SpatialSplitSolver<Tgt>(PhantomData<Tgt>);
 
 #[derive(Debug)]
-pub struct SpatialSplitSolverRequest<Tgt>(PhantomData<Tgt>);
+pub struct SpatialSplitSolverRequest<Tgt: Target> {
+    dependencies: SpecGeometry<Tgt>,
+}
 
 impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
     type BSolver = SpatialSplitSolver<Tgt>;
@@ -152,28 +154,22 @@ impl<Tgt: Target> BottomUpSolver for SpatialSplitSolver<Tgt> {
     type Tgt = Tgt;
     type Request = SpatialSplitSolverRequest<Tgt>;
 
-    fn dependencies_for_range<B>(
-        &mut self,
-        _bimap: &B,
-        low: &Spec<Self::Tgt>,
-        high: &Spec<Self::Tgt>,
-    ) -> Self::Request
-    where
-        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
-    {
-        if spec_is_conv(low) || spec_is_conv(high) {
-            todo!()
-        } else {
-            SpatialSplitSolverRequest(PhantomData)
-        }
+    fn request(&mut self, dependents: &SpecGeometry<Tgt>) -> Self::Request {
+        let mut dependencies = SpecGeometry::new(Rc::clone(dependents.bimap()));
+        dependents.iter().for_each(|rect| {
+            if spec_is_conv(rect.bottom()) || spec_is_conv(rect.top()) {
+                todo!("fill in dependencies");
+            }
+        });
+        SpatialSplitSolverRequest { dependencies }
     }
 }
 
 impl<Tgt: Target> DependencyRequest for SpatialSplitSolverRequest<Tgt> {
     type Tgt = Tgt;
 
-    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
-        &[]
+    fn queries(&self) -> Option<&SpecGeometry<Tgt>> {
+        None
     }
 
     fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)

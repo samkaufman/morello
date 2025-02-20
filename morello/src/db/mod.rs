@@ -3,7 +3,7 @@ mod pagecontents;
 use crate::common::DimSize;
 use crate::cost::{Cost, NormalizedCost};
 use crate::datadeps::SpecKey;
-use crate::db::pagecontents::PageContents;
+use crate::db::pagecontents::{PageContents, RTreePageContents};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap};
 use crate::grid::linear::{BimapInt, BimapSInt};
@@ -16,7 +16,6 @@ use crate::scheduling::{Action, ActionEncodeDecode, ActionT as _};
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
-use pagecontents::RTreePageContents;
 
 use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
@@ -485,16 +484,7 @@ impl FilesDatabase {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
     {
-        let surmap = SpecSurMap::<Tgt, _, _, _> {
-            logical_spec_surmap: LogicalSpecSurMap::new(
-                PrimitiveBasicsBimap {
-                    binary_scale_shapes: self.binary_scale_shapes,
-                },
-                |_: &[DimSize], dtype| TensorSpecAuxNonDepBimap::new(dtype),
-            ),
-            memory_limits_bimap: MemoryLimitsBimap::default(),
-        };
-        surmap.into_bimap()
+        db_spec_bimap(self.binary_scale_shapes)
     }
 
     fn load_live_page<'a>(&'a self, key: &Prehashed<PageKey>) -> impl Deref<Target = Page> + 'a {
@@ -940,6 +930,26 @@ fn read_any_format(file: fs::File) -> Result<Page, ReadAnyFormatError> {
         contents,
         modified: false,
     })
+}
+
+pub(crate) fn db_spec_bimap<Tgt>(
+    binary_scale_shapes: bool,
+) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+{
+    let surmap = SpecSurMap::<Tgt, _, _, _> {
+        logical_spec_surmap: LogicalSpecSurMap::new(
+            PrimitiveBasicsBimap {
+                binary_scale_shapes,
+            },
+            |_: &[DimSize], dtype| TensorSpecAuxNonDepBimap::new(dtype),
+        ),
+        memory_limits_bimap: MemoryLimitsBimap::default(),
+    };
+    surmap.into_bimap()
 }
 
 #[cfg(feature = "db-stats")]

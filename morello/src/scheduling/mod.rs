@@ -1,23 +1,28 @@
 use crate::alignment::aligned_approx;
 use crate::common::{DimSize, Dtype};
 use crate::cost::{Cost, MainCost, NormalizedCost};
-use crate::db::{ActionNum, DbKey};
+use crate::datadeps::SpecKey;
+use crate::db::{ActionNum, DbKey, TableKey};
 use crate::grid::general::BiMap;
+use crate::grid::linear::{BimapInt, BimapSInt};
 use crate::imp::loops::compute_loop_main_cost;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
+use crate::rtree::RTreeDyn;
 use crate::search::ImplReducer;
-use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
-use crate::utils::{snap_memvec_up, spec_diagonals_flat_shifted};
+use crate::utils::{diagonals_shifted, snap_memvec_up};
 use crate::views::{Param, Tensor, TileError, View, ViewE};
 use auto_impl::auto_impl;
+use once_cell::unsync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::iter;
@@ -71,21 +76,15 @@ pub trait BottomUpSolver {
     type Tgt: Target;
     type Request: DependencyRequest<Tgt = Self::Tgt>;
 
-    // TODO: Document specifically what's in the [low, high] set.
-    fn dependencies_for_range<B>(
-        &mut self,
-        bimap: &B,
-        low: &Spec<Self::Tgt>,
-        high: &Spec<Self::Tgt>,
-    ) -> Self::Request
-    where
-        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>;
+    fn request(&mut self, dependents: &SpecGeometry<Self::Tgt>) -> Self::Request;
 }
 
+/// A type, returned by [BottomUpSolver], which provides some dependencies of a [Spec]s' possible
+/// implementations and then can be used to compute the costs of those possible implementations.
 pub trait DependencyRequest {
     type Tgt: Target;
 
-    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)];
+    fn queries(&self) -> Option<&SpecGeometry<Self::Tgt>>;
 
     fn visit_dependency<U>(
         &mut self,
@@ -95,6 +94,9 @@ pub trait DependencyRequest {
     ) where
         U: VisitUpdater<Self::Tgt>;
 
+    // TODO: Add a visit_dependency_range fn.
+
+    // TODO: We need a rectangle-level version of this or do it during initialization.
     fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
     where
         U: VisitUpdater<Self::Tgt>;
@@ -112,6 +114,7 @@ pub trait VisitUpdater<Tgt: Target> {
         normalized_cost: NormalizedCost,
     );
 
+    // TODO: Take `self` as a value to enforce lifetime.
     /// Finalize a Spec after [VisitUpdater::complete_action] called for all possible decisions.
     fn complete_spec(&mut self, spec: &Spec<Tgt>);
 }
@@ -124,6 +127,26 @@ pub trait NaiveBottomUpActionProvider<Tgt: Target> {
     fn debugging() -> Option<String> {
         None
     }
+}
+
+/// Wraps an [RTreeDyn] to restruct mutations to those which are relatively independent of the
+/// database's underlying space.
+///
+/// **Note:** This API is unstable and experimental.
+#[derive(Clone)]
+pub struct SpecGeometry<Tgt: Target>(
+    HashMap<TableKey, RTreeDyn<()>>,
+    Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>>,
+);
+
+// TODO: Can we take more of these fields by reference? This requires a lot of cloning.
+#[derive(Clone)]
+pub struct SpecGeometryRect<Tgt: Target> {
+    key: TableKey,
+    bottom: Vec<BimapInt>,
+    top: Vec<BimapInt>,
+    cached_specs: OnceCell<(Spec<Tgt>, Spec<Tgt>)>,
+    bimap: Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>>,
 }
 
 pub trait ActionEncodeDecode<Tgt: Target> {
@@ -185,17 +208,9 @@ macro_rules! action_dispatch {
             type Tgt = Tgt;
             type Request = $request<Tgt>;
 
-            fn dependencies_for_range<B>(
-                &mut self,
-                bimap: &B,
-                low: &Spec<Self::Tgt>,
-                high: &Spec<Self::Tgt>,
-            ) -> Self::Request
-            where
-                B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
-            {
+            fn request(&mut self, dependents: &SpecGeometry<Tgt>) -> Self::Request {
                 match self {
-                    $( Self::$variant(a) => $request::$variant(a.dependencies_for_range(bimap, low, high)) ),*
+                    $( Self::$variant(a) => $request::$variant(a.request(dependents)) ),*
                 }
             }
         }
@@ -203,9 +218,9 @@ macro_rules! action_dispatch {
         impl<Tgt: Target> DependencyRequest for $request<Tgt> {
             type Tgt = Tgt;
 
-            fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
+            fn queries(&self) -> Option<&SpecGeometry<Tgt>> {
                 match self {
-                    $( Self::$variant(a) => a.requested_ranges() ),*
+                    $( Self::$variant(a) => a.queries() ),*
                 }
             }
 
@@ -296,9 +311,9 @@ pub struct NaiveBottomUpSolver<Tgt: Target, P> {
     _phantom: PhantomData<(Tgt, P)>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct NaiveBottomUpSolverRequest<Tgt: Target, P> {
-    requests: Vec<(Spec<Tgt>, Spec<Tgt>)>, // TODO: Redundant with requests_maps' keys
+    requests: SpecGeometry<Tgt>, // TODO: Redundant with requests_maps' keys
     requests_map: HashMap<Spec<Tgt>, Vec<(Rc<RefCell<NaiveWorkingImpl<Tgt>>>, usize)>>,
     _phantom: PhantomData<P>,
 }
@@ -359,6 +374,296 @@ where
     }
 
     fn complete_spec(&mut self, _spec: &Spec<Tgt>) {}
+}
+
+impl<Tgt: Target> SpecGeometry<Tgt> {
+    pub fn new(bimap: Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>>) -> Self {
+        Self(HashMap::new(), bimap)
+    }
+
+    pub fn single(
+        spec: &Spec<Tgt>,
+        bimap: Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>>,
+    ) -> Self {
+        let mut sg = Self::new(bimap);
+        sg.insert_spec(spec);
+        sg
+    }
+
+    pub fn bimap(&self) -> &Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>> {
+        &self.1
+    }
+
+    pub fn insert_spec(&mut self, spec: &Spec<Tgt>) {
+        let (key, pt) = self.1.apply(spec);
+        let pt_i64 = pt.iter().map(|v| BimapSInt::from(*v)).collect::<Vec<_>>();
+        self.0
+            .entry(key)
+            .or_insert_with(|| RTreeDyn::empty(pt.len()))
+            .merge_insert(&pt_i64, &pt_i64, ());
+    }
+
+    pub fn insert_rect(&mut self, rect: SpecGeometryRect<Tgt>) {
+        // TODO: Assert BiMaps are the same.
+        let SpecGeometryRect {
+            key,
+            bottom,
+            top,
+            cached_specs: _,
+            bimap: _,
+        } = rect;
+        let bottom_i64 = bottom.iter().map(|&v| v.into()).collect::<Vec<_>>();
+        let top_i64 = top.iter().map(|&v| v.into()).collect::<Vec<_>>();
+        self.0
+            .entry(key)
+            .or_insert_with(|| RTreeDyn::empty(bottom.len()))
+            .merge_insert(&bottom_i64, &top_i64, ());
+    }
+
+    pub fn extend(&mut self, source: impl Iterator<Item = SpecGeometryRect<Tgt>>) {
+        source.for_each(|rect| {
+            self.insert_rect(rect);
+        });
+    }
+
+    pub fn accums(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> + '_ {
+        self.iter().flat_map(|rect| rect.accums())
+    }
+
+    /// Yields `Zero` Specs for the outputs of every Spec in the [SpecGeometry].
+    pub fn outputs_zeros(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> + '_ {
+        self.iter().flat_map(|rect| rect.outputs_zeros())
+    }
+
+    /// Iterates over rectangles's bottom and top [Spec]s.
+    pub fn iter(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> + '_ {
+        self.0.iter().flat_map(move |(key, rtree)| {
+            rtree.iter().map(move |rect| SpecGeometryRect {
+                key: key.clone(),
+                bottom: rect.0.iter().map(|v| (*v).try_into().unwrap()).collect(),
+                top: rect.1.iter().map(|v| (*v).try_into().unwrap()).collect(),
+                cached_specs: OnceCell::new(),
+                bimap: Rc::clone(&self.1),
+            })
+        })
+    }
+}
+
+impl<Tgt: Target> From<SpecGeometryRect<Tgt>> for SpecGeometry<Tgt> {
+    fn from(rect: SpecGeometryRect<Tgt>) -> Self {
+        let SpecGeometryRect {
+            key,
+            bottom,
+            top,
+            cached_specs: _,
+            bimap,
+        } = rect;
+        let bottom_i64 = bottom.iter().map(|v| (*v).into()).collect::<Vec<_>>();
+        let top_i64 = top.iter().map(|v| (*v).into()).collect::<Vec<_>>();
+        let mut rtree = RTreeDyn::empty(bottom.len());
+        rtree.insert(&bottom_i64, &top_i64, ());
+        SpecGeometry(std::iter::once((key, rtree)).collect(), bimap)
+    }
+}
+
+impl<Tgt: Target> Debug for SpecGeometry<Tgt> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SpecGeometry")
+            .field(&self.0)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<Tgt: Target> SpecGeometryRect<Tgt> {
+    // TODO: Remove. Only exists for wrapping RTree rect in [synthesize_block].
+    pub(crate) fn new(
+        key: TableKey,
+        bottom: Vec<BimapInt>,
+        top: Vec<BimapInt>,
+        bimap: Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>>,
+    ) -> Self {
+        Self {
+            key,
+            bottom,
+            top,
+            cached_specs: OnceCell::new(),
+            bimap,
+        }
+    }
+
+    // TODO: Remove. Only exists for wrapping RTree rect in [synthesize_block].
+    pub(crate) fn single(
+        spec: &Spec<Tgt>,
+        bimap: Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>>,
+    ) -> Self {
+        let (key, pt) = bimap.apply(spec);
+        Self {
+            key,
+            bottom: pt.clone(),
+            top: pt,
+            cached_specs: OnceCell::new(),
+            bimap,
+        }
+    }
+
+    // TODO: Remove. Only exists for wrapping RTree rect in [synthesize_block].
+    pub(crate) fn bimap(&self) -> Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>> {
+        Rc::clone(&self.bimap)
+    }
+
+    pub fn table_key(&self) -> &TableKey {
+        &self.key
+    }
+
+    pub fn bottom(&self) -> &Spec<Tgt> {
+        &self.specs().0
+    }
+
+    pub fn top(&self) -> &Spec<Tgt> {
+        &self.specs().1
+    }
+
+    pub fn bottom_point(&self) -> &[BimapInt] {
+        &self.bottom
+    }
+
+    pub fn top_point(&self) -> &[BimapInt] {
+        &self.top
+    }
+
+    pub fn accums(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> {
+        let key @ (spec_key, _) = self.table_key();
+
+        let mut result: Option<SpecGeometryRect<Tgt>> = None;
+        // If it has an accumulating variant, it's in the first dimension.
+        // TODO: Abstract this `match` away somehow.
+        let has_accum = match spec_key {
+            SpecKey::Matmul { .. }
+            | SpecKey::Conv { .. }
+            | SpecKey::SoftmaxDenominatorAndMax { .. }
+            | SpecKey::Max { .. }
+            | SpecKey::SoftmaxDenominator { .. }
+            | SpecKey::SoftmaxDenominatorAndUnscaled { .. }
+            | SpecKey::SoftmaxDenominatorAndUnscaledFromMax { .. } => true,
+            SpecKey::Softmax { .. }
+            | SpecKey::SoftmaxComplete { .. }
+            | SpecKey::Move { .. }
+            | SpecKey::Fill { .. }
+            | SpecKey::OnePrefix { .. }
+            | SpecKey::Broadcast { .. }
+            | SpecKey::DivideVec { .. }
+            | SpecKey::DivideVecScalar { .. }
+            | SpecKey::Compose { .. } => false,
+        };
+        if has_accum && self.bottom_point()[0] > 0 {
+            let mut bottom = self.bottom_point().to_vec();
+            let mut top = self.top_point().to_vec();
+            bottom[0] = 0;
+            top[0] = 0;
+            result = Some(SpecGeometryRect::new(
+                key.clone(),
+                bottom,
+                top,
+                self.bimap(),
+            ));
+        }
+        result.into_iter()
+    }
+
+    /// Yields `Zero` Specs for the outputs of every Spec in the [SpecGeometryRect].
+    pub fn outputs_zeros(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> {
+        let bimap = self.bimap();
+
+        let TensorSpec {
+            shape: top_output_shape,
+            dtype: top_output_dtype,
+            aux: top_output_aux,
+        } = self.top().0.unique_output().unwrap();
+        let TensorSpec {
+            shape: bottom_output_shape,
+            dtype: bottom_output_dtype,
+            aux: bottom_output_aux,
+        } = self.bottom().0.unique_output().unwrap();
+
+        let mut zero_top = Spec(
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Fill {
+                        value: FillValue::Zero,
+                    },
+                    spec_shape: top_output_shape,
+                    dtypes: vec![top_output_dtype],
+                },
+                vec![top_output_aux],
+                self.top().0.serial_only(),
+            ),
+            self.top().1.clone(),
+        );
+        let mut zero_bottom = Spec(
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Fill {
+                        value: FillValue::Zero,
+                    },
+                    spec_shape: bottom_output_shape,
+                    dtypes: vec![bottom_output_dtype],
+                },
+                vec![bottom_output_aux],
+                self.bottom().0.serial_only(),
+            ),
+            self.bottom().1.clone(),
+        );
+        zero_top.canonicalize().unwrap();
+        zero_bottom.canonicalize().unwrap();
+
+        let (zero_key, zero_top_pt) = bimap.apply(&zero_top);
+        let (zero_bottom_key, zero_bottom_pt) = bimap.apply(&zero_bottom);
+        debug_assert_eq!(zero_key, zero_bottom_key);
+
+        iter::once(SpecGeometryRect::<Tgt>::new(
+            zero_key,
+            zero_bottom_pt,
+            zero_top_pt,
+            bimap,
+        ))
+    }
+
+    /// Returns an iterator over the [Spec]s in this rectangle.
+    pub fn iter_specs(&self) -> impl Iterator<Item = Spec<Tgt>> + '_ {
+        let low_pt = self.bottom_point();
+        let high_pt = self.top_point();
+        diagonals_shifted(low_pt, high_pt).flatten().map(|pt| {
+            let composed_key = (self.key.clone(), pt.to_vec());
+            let mut spec = self.bimap.apply_inverse(&composed_key);
+            spec.canonicalize().unwrap();
+            spec
+        })
+    }
+
+    /// Returns the bottom and top [Spec]s for [bottom_point] and [top_point].
+    ///
+    /// These are lazily cached.
+    fn specs(&self) -> &(Spec<Tgt>, Spec<Tgt>) {
+        self.cached_specs
+            .get_or_try_init(|| -> Result<_, ()> {
+                let mut projection = (
+                    self.key.clone(),
+                    self.bottom_point()
+                        .iter()
+                        .map(|v| BimapInt::try_from(*v).unwrap())
+                        .collect::<Vec<_>>(),
+                );
+                let bottom = self.bimap.apply_inverse(&projection);
+                projection.1 = self
+                    .top_point()
+                    .iter()
+                    .map(|v| BimapInt::try_from(*v).unwrap())
+                    .collect::<Vec<_>>();
+                let top = self.bimap.apply_inverse(&projection);
+                Ok((bottom, top))
+            })
+            .unwrap()
+    }
 }
 
 // TODO: Encode without iterating actions.
@@ -671,70 +976,55 @@ where
     type Tgt = Tgt;
     type Request = NaiveBottomUpSolverRequest<Tgt, P>;
 
-    fn dependencies_for_range<B>(
-        &mut self,
-        bimap: &B,
-        low: &Spec<Self::Tgt>,
-        high: &Spec<Self::Tgt>,
-    ) -> Self::Request
-    where
-        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
-    {
-        // TODO: Does this cover the right set of Specs? Mapping isn't defined!
-        let low_projection = BiMap::apply(bimap, low);
-        let high_projection = BiMap::apply(bimap, high);
-        let table_key = &low_projection.0;
-        debug_assert_eq!(table_key, &high_projection.0);
+    fn request(&mut self, dependents: &SpecGeometry<Tgt>) -> Self::Request {
         let mut requests_map = HashMap::<Spec<Tgt>, Vec<_>>::new();
-        let requests =
-            spec_diagonals_flat_shifted(bimap, table_key, &low_projection.1, &high_projection.1)
-                .flat_map(|spec| {
-                    // TODO: Test that this never returns and correctly visits duplicate sub-Specs.
-                    // TODO: Test that this can be called twice without messing up our internal state.
+        let mut requests = SpecGeometry::new(Rc::clone(&dependents.1));
+        dependents.iter().for_each(|rect| {
+            rect.iter_specs().for_each(|spec| {
+                // TODO: Test that this never returns and correctly visits duplicate sub-Specs.
+                // TODO: Test that this can be called twice without messing up our internal state.
 
-                    let working_spec = Rc::new(RefCell::new(NaiveWorkingSpec {
-                        spec: spec.clone(),
-                        impls: vec![],
-                        incomplete_impls: 0,
-                    }));
+                let working_spec = Rc::new(RefCell::new(NaiveWorkingSpec {
+                    spec: spec.clone(),
+                    impls: vec![],
+                    incomplete_impls: 0,
+                }));
 
-                    let mut out = vec![];
-                    for action in P::actions(&spec.0) {
-                        match action.top_down_solver(&spec) {
-                            Ok(solver) => {
-                                let subspecs = solver.subspecs().collect::<Vec<_>>();
-                                if subspecs.is_empty() {
-                                    continue;
-                                }
-                                let working_impl = Rc::new(RefCell::new(NaiveWorkingImpl {
-                                    working_spec: Rc::clone(&working_spec),
-                                    solver,
-                                    action_num: action.encode(&spec),
-                                    subspec_costs: vec![None; subspecs.len()],
-                                }));
-                                let mut working_spec_mut = RefCell::borrow_mut(&working_spec);
-                                working_spec_mut.impls.push(Rc::downgrade(&working_impl));
-                                if !subspecs.is_empty() {
-                                    working_spec_mut.incomplete_impls += 1;
-                                }
-
-                                for (subspec_idx, subspec) in subspecs.into_iter().enumerate() {
-                                    out.push((subspec.clone(), subspec.clone()));
-                                    requests_map
-                                        .entry(subspec)
-                                        .or_default()
-                                        .push((Rc::clone(&working_impl), subspec_idx));
-                                }
+                for action in P::actions(&spec.0) {
+                    match action.top_down_solver(&spec) {
+                        Ok(solver) => {
+                            let subspecs = solver.subspecs().collect::<Vec<_>>();
+                            if subspecs.is_empty() {
+                                continue;
                             }
-                            Err(ApplyError::NotApplicable(_)) => {}
-                            Err(ApplyError::SpecNotCanonical) => {
-                                panic!("given non-canon Spec: {spec}")
+                            let working_impl = Rc::new(RefCell::new(NaiveWorkingImpl {
+                                working_spec: Rc::clone(&working_spec),
+                                solver,
+                                action_num: action.encode(&spec),
+                                subspec_costs: vec![None; subspecs.len()],
+                            }));
+                            let mut working_spec_mut = RefCell::borrow_mut(&working_spec);
+                            working_spec_mut.impls.push(Rc::downgrade(&working_impl));
+                            if !subspecs.is_empty() {
+                                working_spec_mut.incomplete_impls += 1;
+                            }
+
+                            for (subspec_idx, subspec) in subspecs.into_iter().enumerate() {
+                                requests.insert_spec(&subspec);
+                                requests_map
+                                    .entry(subspec)
+                                    .or_default()
+                                    .push((Rc::clone(&working_impl), subspec_idx));
                             }
                         }
+                        Err(ApplyError::NotApplicable(_)) => {}
+                        Err(ApplyError::SpecNotCanonical) => {
+                            panic!("given non-canon Spec: {spec}")
+                        }
                     }
-                    out
-                })
-                .collect();
+                }
+            })
+        });
         NaiveBottomUpSolverRequest {
             requests,
             requests_map,
@@ -750,8 +1040,8 @@ where
 {
     type Tgt = Tgt;
 
-    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
-        &self.requests
+    fn queries(&self) -> Option<&SpecGeometry<Tgt>> {
+        Some(&self.requests)
     }
 
     fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
@@ -827,7 +1117,7 @@ where
     where
         U: VisitUpdater<Self::Tgt>,
     {
-        // TODO: Avoid the redundant (with dependencies_for_range) scan of actions.
+        // TODO: Avoid the redundant (with dependencies) scan of actions.
         let mut all_actions_complete = true;
         for action in P::actions(&spec.0) {
             match action.top_down_solver(spec) {

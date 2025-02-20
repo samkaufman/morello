@@ -1,29 +1,34 @@
 use crate::alignment::aligned_approx;
-use crate::common::{DimSize, Shape};
+use crate::common::{Contig, DimSize, Shape};
 use crate::cost::NormalizedCost;
-use crate::grid::general::BiMap;
+use crate::grid::linear::BimapSInt;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
+use crate::layout::{Layout, PhysDim};
 use crate::scheduling::{
     check_tile_out_applies, tile_to_apply_err, Action, ActionT, ActionTopDownSolver, ApplyError,
-    BottomUpSolver, DbKey, DependencyRequest, NaiveBottomUpActionProvider, NaiveBottomUpSolver,
-    NotApplicableReason, VisitUpdater,
+    BottomUpSolver, DependencyRequest, NaiveBottomUpActionProvider, NaiveBottomUpSolver,
+    NotApplicableReason, SpecGeometry, VisitUpdater,
 };
 use crate::scheduling_sugar::SchedulingSugar;
-use crate::spec::{self, FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{
+    self, FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec,
+    DimAssociation,
+};
 use crate::target::common_actions::{split_actions, tile_out_actions};
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
 use crate::views::{Param, Tile, View, ViewE};
-use itertools::{Either, Itertools};
+use itertools::{izip, Either, Itertools};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use std::iter;
+use std::rc::Rc;
 
 /// Whether `tile_out` actions should tile in all dimensions per Spec.
-pub(crate) const MULTI_DIM_TILING: bool = false;
+pub(crate) const MULTI_DIM_TILING: bool = true;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub enum TileOut {
@@ -58,10 +63,10 @@ pub struct TileOutActionProvider<Tgt: Target>(std::marker::PhantomData<Tgt>);
 pub struct SplitActionProvider<Tgt: Target>(std::marker::PhantomData<Tgt>);
 
 #[derive(Debug)]
-pub struct TileOutSolverRequest<Tgt: Target>(Vec<(Spec<Tgt>, Spec<Tgt>)>);
+pub struct TileOutSolverRequest<Tgt: Target>(SpecGeometry<Tgt>);
 
 #[derive(Debug)]
-pub struct SplitSolverRequest<Tgt: Target>(Vec<(Spec<Tgt>, Spec<Tgt>)>);
+pub struct SplitSolverRequest<Tgt: Target>(SpecGeometry<Tgt>);
 
 impl TileOut {
     fn tiled_output_shape(
@@ -633,79 +638,35 @@ impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
     type Tgt = Tgt;
     type Request = TileOutSolverRequest<Tgt>;
 
-    fn dependencies_for_range<B>(
-        &mut self,
-        bimap: &B,
-        low: &Spec<Self::Tgt>,
-        high: &Spec<Self::Tgt>,
-    ) -> Self::Request
-    where
-        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
-    {
-        todo!("Call complete_spec for whatever has no dependencies");
-
+    fn request(&mut self, dependents: &SpecGeometry<Tgt>) -> Self::Request {
         // TODO: If top is parallel and bottom is serial-only, split into two two ranges.
         //       Right now, if they differ, we'll over-visit the serial-only children.
 
-        let both_serial_only = low.0.serial_only() && high.0.serial_only();
-        let multi_dim = MULTI_DIM_TILING || !both_serial_only;
+        // TODO: slice every rect into-same-except-shape rather than expecting exactly one output
+        let dependencies = SpecGeometry::new(Rc::clone(&dependents.1));
 
-        let parameter_shapes = high.0.parameter_shapes();
-        let output_shape = &parameter_shapes[high.0.unique_output_index().unwrap()];
-        let output_rank = output_shape.len();
-        let output_rank_u8 = u8::try_from(output_rank).unwrap();
+        dependents.iter().for_each(|rect| {
+            let parameter_shapes = rect.top().0.parameter_shapes();
+            let high_output_shape = &parameter_shapes[rect.top().0.unique_output_index().unwrap()];
+            let output_rank = high_output_shape.len();
+            let output_rank_u8 = u8::try_from(output_rank).unwrap();
 
-        if multi_dim {
-            let unit_output_shape = vec![nz!(1u32); output_rank];
-            let one_tile_action = TileOut::MultiLoop {
-                output_shape: unit_output_shape,
-                parallel: false,
-            };
-            let one_tiled_spec = one_tile_action.top_down_solver(low).unwrap();
-            let Ok(unit_subspec) = one_tiled_spec.subspecs().exactly_one() else {
-                panic!("Expected exactly one subspec");
-            };
-            TileOutSolverRequest(vec![(unit_subspec, high.clone())])
-        } else {
-            let mut result = Vec::with_capacity(output_rank);
-            for dim in 0..output_rank_u8 {
-                if output_shape[usize::from(dim)] == nz!(1u32) {
-                    continue;
-                }
-
-                let one_tile_action = TileOut::SingleLoop {
-                    dim,
-                    size: nz!(1u32),
-                    parallel: !low.0.serial_only() && !high.0.serial_only(),
-                };
-
-                // TODO: Simplify the below.
-                // let one_tiled_spec = one_tile_action.top_down_solver(low).unwrap();
-                let one_tiled_spec = match one_tile_action.top_down_solver(high) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        panic!(
-                            "Expected top_down_solver to succeed: {:?}\n---\n{}\n{:?}",
-                            e, low, one_tile_action
-                        );
-                    }
-                };
-
-                let Ok(unit_subspec) = one_tiled_spec.subspecs().exactly_one() else {
-                    panic!("Expected exactly one subspec");
-                };
-                result.push((unit_subspec, high.clone()));
+            if MULTI_DIM_TILING || !rect.bottom().0.serial_only() || !rect.top().0.serial_only() {
+                todo!();
+            } else {
+                todo!();
             }
-            TileOutSolverRequest(result)
-        }
+        });
+
+        TileOutSolverRequest(dependencies)
     }
 }
 
 impl<Tgt: Target> DependencyRequest for TileOutSolverRequest<Tgt> {
     type Tgt = Tgt;
 
-    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
-        &self.0
+    fn queries(&self) -> Option<&SpecGeometry<Tgt>> {
+        Some(&self.0)
     }
 
     fn visit_dependency<U>(&mut self, _spec: &Spec<Tgt>, _cost: &[NormalizedCost], _updater: &mut U)
@@ -715,11 +676,36 @@ impl<Tgt: Target> DependencyRequest for TileOutSolverRequest<Tgt> {
         todo!()
     }
 
-    fn apply_no_dependency_updates<U>(&mut self, _spec: &Spec<Self::Tgt>, _updater: &mut U)
+    fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
     where
         U: VisitUpdater<Self::Tgt>,
     {
-        todo!()
+        // TODO: Have a faster check, especially for Compose.
+        let output_idx = spec.0.unique_output_index().unwrap();
+        let output_shape = spec.0.parameter_shape(output_idx);
+        match &spec.0 {
+            LogicalSpec::Primitive(..) => {
+                if output_shape.iter().any(|d| d == &nz!(1u32)) {
+                    updater.complete_spec(spec);
+                }
+            }
+            LogicalSpec::Compose { .. } => {
+                if MULTI_DIM_TILING || !spec.0.serial_only() {
+                    let tileout = TileOut::MultiLoop {
+                        output_shape: vec![nz!(1u32); output_shape.len()],
+                        parallel: false,
+                    };
+                    if let Err(ApplyError::NotApplicable(
+                        NotApplicableReason::TileShapeMatchesOriginal,
+                    )) = tileout.apply_unchecked_canon(spec)
+                    {
+                        updater.complete_spec(spec);
+                    }
+                } else {
+                    todo!()
+                }
+            }
+        };
     }
 }
 
@@ -727,41 +713,16 @@ impl<Tgt: Target> BottomUpSolver for SplitSolver<Tgt> {
     type Tgt = Tgt;
     type Request = SplitSolverRequest<Tgt>;
 
-    fn dependencies_for_range<B>(
-        &mut self,
-        _bimap: &B,
-        low: &Spec<Self::Tgt>,
-        high: &Spec<Self::Tgt>,
-    ) -> Self::Request
-    where
-        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
-    {
-        // MatmulAccum only.
-        let LogicalSpec::Primitive(ref basics, ref auxes, serial) = low.0 else {
-            return SplitSolverRequest(vec![]);
-        };
-        if !matches!(basics.typ, PrimitiveSpecType::Matmul { accum: true }) {
-            return SplitSolverRequest(vec![]);
-        }
-
-        // Range from `low` to a clone with k = 1.
-        let mut smallest_basics = basics.clone();
-        smallest_basics.spec_shape[1] = nz!(1u32);
-        let smallest_dependency = Spec(
-            LogicalSpec::Primitive(smallest_basics, auxes.clone(), serial),
-            low.1.clone(),
-        );
-        self.requests
-            .push((smallest_dependency.clone(), high.clone()));
-        SplitSolverRequest(vec![(smallest_dependency, high.clone())])
+    fn request(&mut self, dependents: &SpecGeometry<Tgt>) -> Self::Request {
+        todo!()
     }
 }
 
 impl<Tgt: Target> DependencyRequest for SplitSolverRequest<Tgt> {
     type Tgt = Tgt;
 
-    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
-        &self.0
+    fn queries(&self) -> Option<&SpecGeometry<Tgt>> {
+        Some(&self.0)
     }
 
     fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
@@ -855,14 +816,219 @@ fn tiling_apply_epilogue<Tgt: Target>(
     }))
 }
 
+// TODO: Shouldn't be pub
+/// Compute the layout and contig for all arguments for all tile sizes of a [Spec].
+///
+/// This requires both `spec_shape` and tensor shapes because `spec_shape` is referenced
+/// when computing cutoffs' offsets from a [DimAssociation].
+pub(crate) fn compute_layout_contig_rects<'a>(
+    spec_shape: &[DimSize],
+    tensor_descriptions: &'a [(&[DimSize], &Layout, Contig, &[DimAssociation])],
+    fixed_spec_dimensions: &[usize],
+) -> impl Iterator<Item = (Vec<BimapSInt>, Vec<BimapSInt>, Vec<(Layout, Contig)>)> + 'a {
+    let multidim_cutoffs =
+        combine_contig_cutoffs(spec_shape, tensor_descriptions, fixed_spec_dimensions);
+    compute_layout_contigs_for_cutoff_rects(tensor_descriptions, multidim_cutoffs)
+}
+
+/// Map the rectangles defined by `multidim_cutoffs` to the [Layout] and [Contig] for each argument
+/// of all tiled [Spec]s in that rectangle.
+fn compute_layout_contigs_for_cutoff_rects<'a>(
+    tensor_descriptions: &'a [(&[DimSize], &Layout, Contig, &[DimAssociation])],
+    multidim_cutoffs: Vec<Vec<u32>>,
+) -> impl Iterator<Item = (Vec<BimapSInt>, Vec<BimapSInt>, Vec<(Layout, Contig)>)> + 'a {
+    debug_assert!(multidim_cutoffs
+        .iter()
+        .all(|dim_cutoffs| dim_cutoffs.is_sorted()));
+
+    multidim_cutoffs
+        .into_iter()
+        .map(|mc| mc.into_iter().tuple_windows::<(_, _)>())
+        .multi_cartesian_product()
+        .map(move |dims| {
+            // `dims` is a Vec of axis-aligned ranges describing a single cutoff-bounded rectangle.
+            let mut value = vec![];
+            value.reserve_exact(tensor_descriptions.len());
+            for (parent_shape, layout, contig, dim_associations) in tensor_descriptions {
+                // Choose a representative point inside the tensor parameter.
+                // TODO: Cache or reorganize the algorithm to visit each tensor rectangle just once.
+                let representative_tile_shape = dim_associations
+                    .iter()
+                    .map(|association| match association {
+                        DimAssociation::SpecDim(associated_dim) => {
+                            DimSize::new(dims[*associated_dim].1 - 1).unwrap()
+                        }
+                        DimAssociation::SpecDimDifference(lhs_dim, rhs_dim, shift) => {
+                            let lhs = dims[*lhs_dim].1 - 1;
+                            let rhs = dims[*rhs_dim].1 - 1;
+                            DimSize::new(shift.get() + lhs - rhs).unwrap()
+                        }
+                        DimAssociation::Constant(size) => *size,
+                    })
+                    .collect::<Vec<_>>();
+                match layout.update_for_tiling(parent_shape, &representative_tile_shape, *contig) {
+                    Ok((new_layout, new_contig)) => value.push((new_layout, new_contig)),
+                    Err(_) => break,
+                };
+            }
+            if value.len() != tensor_descriptions.len() {
+                value.clear();
+            }
+
+            let bottom = dims
+                .iter()
+                .map(|(b, _)| BimapSInt::from(*b))
+                .collect::<Vec<_>>();
+            let top = dims
+                .iter()
+                .map(|(_, t)| BimapSInt::from(*t - 1))
+                .collect::<Vec<_>>();
+            (bottom, top, value)
+        })
+}
+
+/// Compute cutoffs for all Spec dimensions.
+///
+/// fixed_spec_dimensions: Spec dimensions which are given no cutoffs and, for the purposes of
+///   projecting [DimAssociation::SpecDimDifference], are treated as constant. The result will
+///   contain no cutoffs for these dimensions (the [Vec]s will be empty).
+///
+/// Internally, this combines the results of [compute_contig_cutoffs_single_tensor] for each tensor.
+/// Combination involves merging cutoffs from multiple tensor dimensions corresponding to the same
+/// Spec dimension, as well as shifting them according to the coordination relation between Spec
+/// and tensor dimensions (as defined by the [DimAssociation]s in `tensor_descriptions`).
+fn combine_contig_cutoffs(
+    spec_shape: &[DimSize],
+    tensor_descriptions: &[(&[DimSize], &Layout, Contig, &[DimAssociation])],
+    fixed_spec_dimensions: &[usize],
+) -> Vec<Vec<u32>> {
+    // TODO: Inline axis_grouped_cutoffs if possible
+
+    // Compute cutoffs for each tensor and group them by Spec axis.
+    let mut axis_grouped_cutoffs = vec![vec![]; spec_shape.len()];
+    for (original_shape, layout, _, dim_associations) in tensor_descriptions {
+        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(original_shape, layout);
+        assert_eq!(dim_cutoffs_vec.len(), dim_associations.len());
+        for (i, association) in dim_associations.iter().enumerate() {
+            for cutoff in &dim_cutoffs_vec[i] {
+                match association {
+                    DimAssociation::SpecDim(associated_dim) => {
+                        if !fixed_spec_dimensions.contains(associated_dim) {
+                            axis_grouped_cutoffs[*associated_dim].push(*cutoff);
+                        }
+                    }
+                    DimAssociation::SpecDimDifference(lhs_dim, rhs_dim, shift) => {
+                        debug_assert_ne!(lhs_dim, rhs_dim);
+                        let mut lhs_fixed = false;
+                        let mut rhs_fixed = false;
+                        for dim in fixed_spec_dimensions {
+                            if dim == lhs_dim {
+                                lhs_fixed = true;
+                            }
+                            if dim == rhs_dim {
+                                rhs_fixed = true;
+                            }
+                        }
+                        if lhs_fixed && rhs_fixed {
+                            continue;
+                        }
+
+                        if lhs_fixed {
+                            let lhs = spec_shape[*lhs_dim].get();
+                            let shifted_cutoff = *cutoff + lhs - shift.get();
+                            axis_grouped_cutoffs[*rhs_dim].push(shifted_cutoff);
+                        } else if rhs_fixed {
+                            let rhs = spec_shape[*rhs_dim].get();
+                            let shifted_cutoff = *cutoff + rhs - shift.get();
+                            axis_grouped_cutoffs[*lhs_dim].push(shifted_cutoff);
+                        } else {
+                            panic!("one dimension must be fixed");
+                        }
+                    }
+                    DimAssociation::Constant(_) => {}
+                }
+            }
+        }
+    }
+
+    // TODO: Use `merge` instead to avoid a sort (dim_cutoffs should be sorted).
+    for unsorted_cutoffs in &mut axis_grouped_cutoffs {
+        unsorted_cutoffs.sort_unstable();
+        unsorted_cutoffs.dedup();
+    }
+
+    debug_assert_eq!(axis_grouped_cutoffs.len(), spec_shape.len());
+    axis_grouped_cutoffs
+}
+
+/// Computes the cutoffs for each dimension of a tensor in ascending order.
+///
+/// This is a helper function for [combine_contig_cutoffs].
+fn compute_contig_cutoffs_single_tensor(
+    original_shape: &[DimSize],
+    layout: &Layout,
+) -> Vec<Vec<u32>> {
+    // We always want to break out index=0 (size=1), so we'll initialize with [1, 2].
+    let mut result = vec![vec![1, 2]; original_shape.len()];
+
+    // Find the smallest Packed/OddEven multiple for every logical dim. that has one.
+    // We'll use this next to break out tile sizes which are multiples of that size.
+    // This accomodates our restriction that we can't split Packed/OddEven physical
+    // dimensions with tiling.
+    let mut frequencies: Vec<Option<DimSize>> = vec![None; original_shape.len()];
+    for (logical_dim, physical_dim) in layout.0.iter().rev() {
+        match physical_dim {
+            PhysDim::Packed(size) | PhysDim::OddEven(size) => {
+                if let Some(existing_size) = frequencies[usize::from(*logical_dim)] {
+                    let min_size = existing_size.min(*size);
+                    debug_assert!(
+                        existing_size.get() % min_size.get() == 0
+                            || size.get() % min_size.get() == 0,
+                        "One size should be a multiple of the other"
+                    );
+                    frequencies[usize::from(*logical_dim)] = Some(min_size);
+                } else {
+                    frequencies[usize::from(*logical_dim)] = Some(*size);
+                }
+            }
+            PhysDim::Dynamic => {}
+        }
+    }
+
+    for (dim_cutoffs, freq_opt, size) in izip!(result.iter_mut(), &frequencies, original_shape) {
+        if let Some(freq) = freq_opt {
+            let mut multiple = (*freq).max(nz!(2u32));
+            while multiple < *size {
+                dim_cutoffs.push(multiple.get());
+                dim_cutoffs.push(multiple.get() + 1);
+                multiple = DimSize::new(multiple.get() * 2).unwrap();
+            }
+        };
+        if size.get() > 1 {
+            dim_cutoffs.push(size.get());
+            dim_cutoffs.push(size.get() + 1);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{row_major, Layout, PhysDim};
-    use crate::scheduling::Action;
-    use crate::target::{CpuMemoryLevel, X86Target};
+    use crate::db::db_spec_bimap;
+    use crate::grid::canon::CanonicalBimap;
+    use crate::grid::general::BiMap;
+    use crate::imp::visit_leaves;
+    use crate::layout::{arb_shape_and_same_rank_layout, col_major, row_major, Layout, PhysDim};
+    use crate::scheduling::{Action, SpecGeometry};
+    use crate::spec::arb_canonical_spec;
+    use crate::target::{ArmTarget, CpuMemoryLevel, X86Target};
+
     use crate::{lspec, shape};
     use nonzero::nonzero as nz;
+    use proptest::prelude::*;
+    use proptest::{prop_assert_eq, proptest};
+    use std::collections::HashSet;
 
     /// Test that a TileOut::SingleLoop with a non-multiple size fails to apply.
     ///
@@ -895,6 +1061,242 @@ mod tests {
         shared_test_non_multiple_tiling_returns_error(Action::Split(Split { k: nz!(6u32) }))
     }
 
+    #[test]
+    fn test_compute_layout_contig_rects_1() {
+        let rm = row_major(2);
+        let spec_shape = shape![6, 6];
+        let da = [DimAssociation::SpecDim(0), DimAssociation::SpecDim(1)];
+        let tensor_descriptions = vec![(&spec_shape[..], &rm, rm.contiguous_full(), &da[..])];
+        let fixed_spec_dimensions = &[];
+
+        // TODO: Construct an R-Tree rather than testing for the specific output rectangles.
+        let expected = HashSet::from([
+            (
+                (vec![1, 1]).clone(),
+                (vec![1, 1]).clone(),
+                vec![(rm.clone(), rm.contiguous_full())],
+            ),
+            (vec![2, 1], vec![5, 1], vec![(rm.clone(), 1)]),
+            (
+                vec![1, 2],
+                vec![1, 5],
+                vec![(rm.clone(), rm.contiguous_full())],
+            ),
+            (
+                vec![2, 6],
+                vec![5, 6],
+                vec![(rm.clone(), rm.contiguous_full())],
+            ),
+            (vec![6, 1], vec![6, 1], vec![(rm.clone(), 1)]),
+            (vec![6, 2], vec![6, 5], vec![(rm.clone(), 1)]),
+            (vec![2, 2], vec![5, 5], vec![(rm.clone(), 1)]),
+            (
+                vec![1, 6],
+                vec![1, 6],
+                vec![(rm.clone(), rm.contiguous_full())],
+            ),
+            (
+                vec![6, 6],
+                vec![6, 6],
+                vec![(rm.clone(), rm.contiguous_full())],
+            ),
+        ]);
+
+        let result: HashSet<_> =
+            compute_layout_contig_rects(&spec_shape, &tensor_descriptions, fixed_spec_dimensions)
+                .collect();
+        assert_eq!(result, expected);
+    }
+
+    proptest! {
+        #[test]
+        fn test_tileoutsolver_requests_match_apply_deps_x86(
+            spec in arb_canonical_spec::<X86Target>(None, None),
+        ) {
+            shared_test_tileoutsolver_requests_match_apply_deps(spec)?;
+        }
+
+        #[test]
+        fn test_tileoutsolver_requests_match_apply_deps_arm(
+            spec in arb_canonical_spec::<ArmTarget>(None, None),
+        ) {
+            shared_test_tileoutsolver_requests_match_apply_deps(spec)?;
+        }
+
+        #[test]
+        fn test_tiling_splitting_introduces_consistent_dependencies(
+            spec in arb_canonical_spec::<X86Target>(None, None)
+                // TODO: Remove this prop_filter
+                .prop_filter("spec should be matmul, fill, etc.", |s| {
+                    matches!(s.0, LogicalSpec::Primitive(PrimitiveBasics {
+                        typ: PrimitiveSpecType::Matmul { .. } |
+                             PrimitiveSpecType::Conv { .. } |
+                             PrimitiveSpecType::Fill { .. } |
+                             PrimitiveSpecType::SoftmaxComplete { .. } |
+                             PrimitiveSpecType::SoftmaxDenominator { .. } |
+                             PrimitiveSpecType::Max { .. },
+                        .. }, ..))
+                })
+        ) {
+            // TODO: Add some sort of test for parallel?
+
+            let output_idx = spec.0.unique_output_index().unwrap();
+            let tensor_shapes = spec.0.parameter_shapes();
+            let output_shape = &tensor_shapes[output_idx];
+            let parameter_count = spec.0.operand_count();
+            let associations = (0..parameter_count)
+                .map(|i| {
+                    match &spec.0 {
+                        LogicalSpec::Primitive(primitive_basics, ..) =>
+                            primitive_basics.spec_dim_associations(i.try_into().unwrap()),
+                        LogicalSpec::Compose { .. } => unreachable!(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let tensor_descriptions = (0..parameter_count).map(|i| {
+                let layout = spec.0.parameter_layout(i);
+                let contig = spec.0.parameter_contiguous_abs(i);
+                (tensor_shapes[i].as_slice(), layout, contig, associations[i].as_slice())
+            }).collect::<Vec<_>>();
+
+            let LogicalSpec::Primitive(primitive_basics, _, _) = &spec.0 else {
+                unreachable!();
+            };
+
+            let mut actions = vec![];
+            for (dim, &output_size) in output_shape.iter().enumerate() {
+                for size in 1..output_size.get() {
+                    if output_size.get() % size != 0 {
+                        continue;
+                    }
+                    actions.push(Action::TileOut(TileOut::SingleLoop {
+                        dim: u8::try_from(dim).unwrap(),
+                        size: DimSize::new(size).unwrap(),
+                        parallel: false,
+                    }));
+                }
+            }
+            for sizes in output_shape.iter().map(|d| {
+                (1..=d.get()).filter(|x| d.get() % x == 0)
+            }).multi_cartesian_product() {
+                if sizes.iter().zip(output_shape).all(|(s, d)| *s == d.get()) {
+                    continue;
+                }
+                actions.push(Action::TileOut(TileOut::MultiLoop {
+                    output_shape: sizes.iter().map(|&s| DimSize::new(s).unwrap()).collect(),
+                    parallel: false,
+                }));
+            }
+            if let LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) = &spec.0 {
+                if matches!(typ, PrimitiveSpecType::Matmul { accum: true }) {
+                    for k in 1..tensor_shapes[0][1].get() {
+                        if tensor_shapes[0][1].get() % k != 0 {
+                            continue;
+                        }
+                        actions.push(Action::Split(Split { k: DimSize::new(k).unwrap() }));
+                    }
+                }
+            }
+
+            let rects: Vec<_> =
+                compute_layout_contig_rects(&primitive_basics.spec_shape, &tensor_descriptions, &[]).collect();
+
+            for action in actions {
+                match action.apply(&spec) {
+                    Ok(applied_impl) => {
+                        let mut subspec = None;
+                        visit_leaves(&applied_impl, &mut |leaf| {
+                            if let ImplNode::SpecApp(spec_app) = leaf {
+                                assert!(subspec.is_none(), "Only one sub-Spec should be present");
+                                subspec = Some(spec_app.0.clone());
+                            }
+                            true
+                        });
+                        let subspec = subspec.unwrap();
+
+                        let spec_shape = match &subspec.0 {
+                            LogicalSpec::Primitive(basics, _, _) => &basics.spec_shape,
+                            LogicalSpec::Compose { .. } => todo!(),
+                        };
+                        let point = spec_shape.iter().map(|&d| BimapSInt::from(d.get())).collect::<Vec<_>>();
+                        let located = locate_rect_containing_point(rects.iter(), &point);
+                        prop_assert!(located.is_some(), "R-Tree should contain the point {:?}", point);
+                        prop_assert_eq!(located.unwrap().len(), subspec.0.operand_count());
+                        for (idx, (layout, contig)) in located.unwrap().iter().enumerate() {
+                            let expected_layout = subspec.0.parameter_layout(idx);
+                            let expected_contig = subspec.0.parameter_contiguous_abs(idx);
+                            prop_assert_eq!(layout, expected_layout);
+                            prop_assert_eq!(contig, &expected_contig);
+                        }
+                    },
+                    Err(err) => {
+                        let mut spec_shape = match &spec.0 {
+                            LogicalSpec::Primitive(basics, _, _) => basics.spec_shape.to_vec(),
+                            LogicalSpec::Compose { .. } => todo!(),
+                        };
+                        match &action {
+                            Action::TileOut(TileOut::SingleLoop { dim, size, .. }) => {
+                                match associations[output_idx][usize::from(*dim)] {
+                                    DimAssociation::SpecDim(d) => {
+                                        spec_shape[d] = *size;
+                                    }
+                                    DimAssociation::SpecDimDifference(..) => todo!(),
+                                    DimAssociation::Constant(_) => {}
+                                }
+                            }
+                            Action::TileOut(TileOut::MultiLoop { output_shape, .. }) => {
+                                for (dim, &size) in output_shape.iter().enumerate() {
+                                    match associations[output_idx][dim] {
+                                        DimAssociation::SpecDim(d) => {
+                                            spec_shape[d] = size;
+                                        }
+                                    DimAssociation::SpecDimDifference(..) => todo!(),
+                                        DimAssociation::Constant(_) => {}
+                                    }
+                                }
+                            }
+                            Action::Split(Split { k }) => {
+                                let DimAssociation::SpecDim(spec_dim) = associations[0][1] else {
+                                    unreachable!();
+                                };
+                                spec_shape[spec_dim] = *k;
+                            }
+                            _ => {}
+                        }
+
+                        let point = spec_shape.iter().map(|d| BimapSInt::from(d.get())).collect::<Vec<_>>();
+                        let located = locate_rect_containing_point(rects.iter(), &point);
+                        prop_assert!(located.is_some(), "R-Tree should contain the point {:?}", point);
+                        prop_assert!(
+                            located.unwrap().is_empty(),
+                            "Point {point:?} should have an empty value; action: {action:?} from {spec} produced {err:?}",
+                        );
+                    },
+                };
+            }
+        }
+
+        #[test]
+        fn test_compute_contig_cutoffs_single_tensor_results_are_sorted(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+            for dim_cutoffs in &dim_cutoffs_vec {
+                prop_assert!(dim_cutoffs.is_sorted(), "{dim_cutoffs:?} is not sorted");
+            }
+        }
+
+        #[test]
+        fn test_compute_contig_cutoffs_single_tensor_breaks_out_first_index(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+            for dim_cutoffs in &dim_cutoffs_vec {
+                prop_assert_eq!(&dim_cutoffs[..2], &[1, 2]);
+            }
+        }
+    }
+
     fn shared_test_non_multiple_tiling_returns_error(action: Action<X86Target>) {
         let bcm_layout = Layout::new(vec![
             (0, PhysDim::Dynamic),
@@ -916,5 +1318,73 @@ mod tests {
             ),
             "expected NotApplicable(Other) but got {application:?}",
         );
+    }
+
+    /// Test that TileOutSolver's dependencies for single Specs match `apply`.
+    ///
+    /// Use the [FilesDatabase]'s [BiMap] to determine which Specs are members of the returned
+    /// dependency request.
+    fn shared_test_tileoutsolver_requests_match_apply_deps<Tgt>(
+        spec: Spec<Tgt>,
+    ) -> Result<(), proptest::test_runner::TestCaseError>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    {
+        let mut solver = TileOutSolver::<Tgt>::default();
+        let single_spec_set = SpecGeometry::new(Rc::new(db_spec_bimap(false)));
+        let mut solver_dependencies = HashSet::new();
+        if let Some(geometry) = solver
+            .request(&SpecGeometry::single(
+                &spec,
+                Rc::clone(single_spec_set.bimap()),
+            ))
+            .queries()
+        {
+            geometry.iter().for_each(|rect| {
+                rect.iter_specs().for_each(|s| {
+                    solver_dependencies.insert(s);
+                });
+            });
+        }
+        let apply_dependencies: HashSet<Spec<Tgt>> = TileOutActionProvider::<Tgt>::actions(&spec.0)
+            .into_iter()
+            .flat_map(|action| {
+                action
+                    .apply(&spec)
+                    .map(|expanded_impl| {
+                        let mut subspecs = vec![];
+                        visit_leaves(&expanded_impl, &mut |leaf| {
+                            if let ImplNode::SpecApp(spec_app) = leaf {
+                                subspecs.push(spec_app.0.clone());
+                            }
+                            true
+                        });
+                        subspecs
+                    })
+                    .unwrap_or_default()
+            })
+            .collect::<HashSet<_>>();
+        prop_assert_eq!(apply_dependencies, solver_dependencies);
+        Ok(())
+    }
+
+    fn locate_rect_containing_point<'a, R, V>(rects: R, point: &[BimapSInt]) -> Option<&'a V>
+    where
+        R: Iterator<Item = &'a (Vec<BimapSInt>, Vec<BimapSInt>, V)> + 'a,
+        V: 'a,
+    {
+        for (bottom, top, value) in rects {
+            if bottom
+                .iter()
+                .zip(top.iter())
+                .zip(point.iter())
+                .all(|((&b, &t), &p)| b <= p && p <= t)
+            {
+                return Some(value);
+            }
+        }
+        None
     }
 }

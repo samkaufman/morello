@@ -1,15 +1,14 @@
 use crate::common::DimSize;
-use crate::cost::NormalizedCost;
-use crate::grid::general::BiMap;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{
-    make_inner_compose, make_outer_compose, ActionT, ApplyError, BottomUpSolver, DbKey,
-    DependencyRequest, NotApplicableReason, VisitUpdater,
+    make_inner_compose, make_outer_compose, Action, ActionT, ApplyError,
+    NaiveBottomUpActionProvider, NaiveBottomUpSolver, NotApplicableReason,
 };
 use crate::spec::{LogicalSpec, Spec};
+use crate::target::common_actions::tile_out_actions;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::views::Tensor;
@@ -26,14 +25,11 @@ pub struct Bufferize<Tgt: Target> {
     pub vector_size: Option<DimSize>,
 }
 
-#[derive(Debug)]
-pub struct BufferizeSolver<Tgt>(PhantomData<Tgt>);
-
-#[derive(Debug)]
-pub struct BufferizeSolverRequest<Tgt: Target>(PhantomData<Tgt>);
+#[derive(Default)]
+pub struct BufferizeActionProvider<Tgt>(PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
-    type BSolver = BufferizeSolver<Tgt>;
+    type BSolver = NaiveBottomUpSolver<Tgt, BufferizeActionProvider<Tgt>>;
     type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
@@ -128,54 +124,17 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
     }
 
     fn bottom_up_solvers() -> Self::BSolverIter {
-        iter::once(BufferizeSolver(PhantomData))
+        iter::once(Self::BSolver::default())
     }
 }
 
-impl<Tgt: Target> BottomUpSolver for BufferizeSolver<Tgt> {
-    type Tgt = Tgt;
-    type Request = BufferizeSolverRequest<Tgt>;
-
-    fn dependencies_for_range<B>(
-        &mut self,
-        _bimap: &B,
-        low: &Spec<Self::Tgt>,
-        high: &Spec<Self::Tgt>,
-    ) -> Self::Request
-    where
-        B: BiMap<Domain = Spec<Self::Tgt>, Codomain = DbKey>,
-    {
-        if matches!(&low.0, LogicalSpec::Compose { .. })
-            || matches!(&high.0, LogicalSpec::Compose { .. })
-        {
-            todo!()
-        } else {
-            BufferizeSolverRequest(PhantomData)
-        }
-    }
-}
-
-impl<Tgt: Target> DependencyRequest for BufferizeSolverRequest<Tgt> {
-    type Tgt = Tgt;
-
-    fn requested_ranges(&self) -> &[(Spec<Self::Tgt>, Spec<Self::Tgt>)] {
-        &[]
+impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for BufferizeActionProvider<Tgt> {
+    fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
+        tile_out_actions(logical_spec).collect()
     }
 
-    fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
-    where
-        U: VisitUpdater<Self::Tgt>,
-    {
-        if !matches!(&spec.0, LogicalSpec::Compose { .. }) {
-            updater.complete_spec(spec);
-        }
-    }
-
-    fn visit_dependency<U>(&mut self, _spec: &Spec<Tgt>, _cost: &[NormalizedCost], _updater: &mut U)
-    where
-        U: VisitUpdater<Tgt>,
-    {
-        todo!()
+    fn debugging() -> Option<String> {
+        Some("TileOut".to_string())
     }
 }
 

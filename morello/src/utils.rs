@@ -1,11 +1,4 @@
-use crate::db::DbKey;
-use crate::db::TableKey;
-use crate::grid::general::BiMap;
-use crate::grid::general::SurMap;
-use crate::grid::linear::BimapInt;
 use crate::memorylimits::MemVec;
-use crate::spec::Spec;
-use crate::target::Target;
 use num_traits::PrimInt;
 use std::fmt;
 use std::io;
@@ -309,46 +302,6 @@ pub fn sum_seqs<T: PrimInt + Send + 'static>(maxes: &[T], total: T) -> SumSeqs<T
     }
 }
 
-pub(crate) fn spec_diagonals_flat_shifted<'a, Tgt, B>(
-    bimap: &'a B,
-    table_key: &'a TableKey,
-    bottom: &'a [BimapInt],
-    top: &'a [BimapInt],
-) -> impl Iterator<Item = Spec<Tgt>> + 'a
-where
-    Tgt: Target,
-    B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey> + 'a,
-{
-    diagonals_shifted(bottom, top).flatten().map(move |pt| {
-        let pt_u32 = pt
-            .iter()
-            .map(|&x| {
-                BimapInt::try_from(x).unwrap_or_else(|_| {
-                    panic!("Can't convert elem of {pt:?}. Bottom is {bottom:?}")
-                })
-            })
-            .collect::<Vec<_>>();
-        let pt_tuple = (table_key.clone(), pt_u32);
-        let mut spec: Spec<Tgt> = BiMap::apply_inverse(bimap, &pt_tuple);
-        spec.canonicalize().unwrap();
-        debug_assert_eq!(
-            BiMap::apply(bimap, &spec).0,
-            *table_key,
-            "canonicalization changed the table key: {spec}"
-        );
-        debug_assert!(
-            BiMap::apply(bimap, &spec)
-                .1
-                .iter()
-                .zip(bottom)
-                .zip(top)
-                .all(|((&pt, &bottom_pt), &top_pt)| pt >= bottom_pt && pt <= top_pt),
-            "canonicalization moved Spec point outside the dependency range: {spec}"
-        );
-        spec
-    })
-}
-
 pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &str) -> String {
     c.into_iter()
         .map(|d| d.to_string())
@@ -358,34 +311,6 @@ pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &
 
 pub fn indent(depth: usize) -> String {
     " ".repeat(depth * INDENT_SIZE)
-}
-
-// TODO: Search the repo. for more places to use this.
-// TODO: Document this function.
-pub(crate) fn iter_spec_tile<'s, Tgt, S>(
-    surmap: &'s S,
-    low: &Spec<Tgt>,
-    high: &Spec<Tgt>,
-) -> impl Iterator<Item = Spec<Tgt>> + 's
-where
-    Tgt: Target,
-    S: SurMap<Domain = Spec<Tgt>, Codomain = Vec<BimapInt>>,
-{
-    let low_pt = surmap.apply(low);
-    let high_pt = surmap.apply(high);
-    let lowered_high = low_pt
-        .iter()
-        .zip(&high_pt)
-        .map(|(&l, &h)| h - l)
-        .collect::<Vec<_>>();
-    diagonals(&lowered_high).flatten().flat_map(move |v| {
-        let shifted_up = low_pt
-            .iter()
-            .zip(&v)
-            .map(|(&l, &d)| l + d)
-            .collect::<Vec<_>>();
-        surmap.apply_inverse(&shifted_up)
-    })
 }
 
 #[cfg(test)]

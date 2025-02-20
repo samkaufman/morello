@@ -1,9 +1,9 @@
-use crate::common::{DimSize, Dtype, Shape};
+use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::datadeps::SpecKey;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
-use crate::layout::row_major;
+use crate::layout::{row_major, Layout};
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
 use crate::target::Target;
 use crate::tensorspec::{self, check_tensor_vector_size, TensorSpec, TensorSpecAux};
@@ -150,9 +150,12 @@ pub enum FillValue {
 pub struct TilingInference(pub Vec<(Tiling, Vec<Option<u8>>)>);
 
 #[derive(Debug, Clone)]
-enum DimAssociation {
+pub enum DimAssociation {
+    /// Tensor dimension is equal to a Spec dimension.
     SpecDim(usize),
+    // Tensor dimension is one Spec dimension minus another, plus a constant.
     SpecDimDifference(usize, usize, DimSize),
+    /// Tensor dimension is a constant.
     Constant(DimSize),
 }
 
@@ -765,7 +768,7 @@ impl PrimitiveBasics {
 
     /// Returns indices for each parameter associating them with an index in the underlying
     /// spec_shape or a constant.
-    fn spec_dim_associations(&self, parameter_idx: u8) -> Vec<DimAssociation> {
+    pub(crate) fn spec_dim_associations(&self, parameter_idx: u8) -> Vec<DimAssociation> {
         match self.typ {
             PrimitiveSpecType::Matmul { accum: _ } => match parameter_idx {
                 0 => sdims![0, 1, 2],
@@ -1547,6 +1550,20 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
+    pub fn parameter_layout(&self, index: usize) -> &Layout {
+        match self {
+            LogicalSpec::Primitive(_, auxes, _) => &auxes[index].layout,
+            LogicalSpec::Compose { .. } => todo!(),
+        }
+    }
+
+    pub fn parameter_contiguous_abs(&self, index: usize) -> Contig {
+        match self {
+            LogicalSpec::Primitive(_, auxes, _) => auxes[index].contig,
+            LogicalSpec::Compose { .. } => todo!(),
+        }
+    }
+
     pub fn inputs(&self) -> Vec<TensorSpec<Tgt>> {
         (0..self.operand_count())
             .filter(|i| !self.parameter_is_output(*i))
@@ -1961,29 +1978,73 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    pub fn clone_as_accum(&self) -> Self {
-        let mut cloned = self.clone();
-        match &mut cloned {
+    // TODO: Add a test that this is consistent with `mut_accum`
+    pub(crate) fn accum(&self) -> Option<bool> {
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => match &basics.typ {
+                PrimitiveSpecType::Matmul { accum }
+                | PrimitiveSpecType::Conv { accum }
+                | PrimitiveSpecType::Max { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
+                    Some(*accum)
+                }
+                _ => None,
+            },
+            LogicalSpec::Compose { components, .. } => match &components[0].typ {
+                PrimitiveSpecType::Matmul { accum }
+                | PrimitiveSpecType::Conv { accum }
+                | PrimitiveSpecType::Max { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
+                    Some(*accum)
+                }
+                _ => None,
+            },
+        }
+    }
+
+    pub(crate) fn mut_accum(&mut self) -> Option<&mut bool> {
+        match self {
             LogicalSpec::Primitive(basics, _, _) => match &mut basics.typ {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
                 | PrimitiveSpecType::Max { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
-                    *accum = true;
+                    Some(accum)
                 }
-                _ => panic!("Cannot clone_as_accum: {:?}", self),
+                _ => None,
             },
             LogicalSpec::Compose { components, .. } => match &mut components[0].typ {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
                 | PrimitiveSpecType::Max { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
-                    *accum = true;
+                    Some(accum)
                 }
-                _ => panic!("Cannot clone_as_accum: {:?}", self),
+                _ => None,
             },
+        }
+    }
+
+    pub(crate) fn clone_as_accum(&self) -> Self {
+        let mut cloned = self.clone();
+        if let Some(a) = cloned.mut_accum() {
+            *a = true;
+        }
+        cloned
+    }
+
+    pub(crate) fn clone_as_non_accum(&self) -> Self {
+        let mut cloned = self.clone();
+        if let Some(a) = cloned.mut_accum() {
+            *a = false;
         }
         cloned
     }

@@ -381,6 +381,8 @@ impl Layout {
         tile_shape: &[DimSize],
         contig: Contig,
     ) -> Result<(Layout, Contig), LayoutError> {
+        assert_eq!(parent_shape.len(), tile_shape.len());
+
         // TODO: Can we remove this case without affecting behavior?
         if tile_shape.iter().all(|d| d.get() == 1) {
             let rm_layout = row_major(tile_shape.len().try_into().unwrap());
@@ -924,6 +926,27 @@ pub fn nhwc() -> Layout {
     ]
 }
 
+#[cfg(test)]
+pub fn arb_shape_and_same_rank_layout() -> impl proptest::strategy::Strategy<Value = (Shape, Layout)>
+{
+    use proptest::prelude::*;
+    use std::num::NonZeroU8;
+
+    proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(|shape| {
+        let shape = shape
+            .into_iter()
+            .map(|x| DimSize::new(x).unwrap())
+            .collect::<Vec<_>>();
+        let shape_nz = NonZeroU8::try_from(u8::try_from(shape.len()).unwrap()).unwrap();
+        let bounds = LayoutArbRankBounds {
+            min_rank: shape_nz,
+            max_rank: Some(shape_nz),
+        };
+        let all_layouts = any_with::<Layout>(bounds);
+        (Just(Shape::from(shape)), all_layouts)
+    })
+}
+
 pub mod macros {
     #[macro_export]
     macro_rules! layout {
@@ -960,7 +983,7 @@ mod tests {
     };
     use itertools::Itertools;
     use proptest::{
-        arbitrary::{any, any_with},
+        arbitrary::any,
         prelude::prop,
         prop_assert, prop_assert_eq, prop_assume, proptest,
         sample::select,
@@ -1572,22 +1595,6 @@ mod tests {
             layout.strides(&[nz!(4u32), nz!(6u32)]),
             Err(StridesError::NonseqPhysicalDims(1))
         );
-    }
-
-    fn arb_shape_and_same_rank_layout() -> impl Strategy<Value = (Shape, Layout)> {
-        proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(|shape| {
-            let shape = shape
-                .into_iter()
-                .map(|x| DimSize::new(x).unwrap())
-                .collect::<Vec<_>>();
-            let shape_nz = NonZeroU8::try_from(u8::try_from(shape.len()).unwrap()).unwrap();
-            let bounds = LayoutArbRankBounds {
-                min_rank: shape_nz,
-                max_rank: Some(shape_nz),
-            };
-            let all_layouts = any_with::<Layout>(bounds);
-            (Just(Shape::from(shape)), all_layouts)
-        })
     }
 
     fn arb_shape_layout_contig() -> impl Strategy<Value = (Shape, Layout, Contig)> {
