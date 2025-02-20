@@ -520,6 +520,47 @@ impl PrimitiveBasics {
         self.dtypes[idx]
     }
 
+    // TODO: Add a test that this is consistent with `mut_accum`
+    pub(crate) fn accum(&self) -> Option<bool> {
+        match self.typ {
+            PrimitiveSpecType::Matmul { accum }
+            | PrimitiveSpecType::Conv { accum }
+            | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. }
+            | PrimitiveSpecType::Max { accum, .. } => Some(accum),
+            PrimitiveSpecType::Fill { .. }
+            | PrimitiveSpecType::Move
+            | PrimitiveSpecType::Softmax { .. }
+            | PrimitiveSpecType::SoftmaxComplete { .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
+            | PrimitiveSpecType::OnePrefix
+            | PrimitiveSpecType::Broadcast { .. }
+            | PrimitiveSpecType::DivideVec { .. }
+            | PrimitiveSpecType::DivideVecScalar { .. } => None,
+        }
+    }
+
+    pub(crate) fn mut_accum(&mut self) -> Option<&mut bool> {
+        match &mut self.typ {
+            PrimitiveSpecType::Matmul { accum }
+            | PrimitiveSpecType::Conv { accum }
+            | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. }
+            | PrimitiveSpecType::Max { accum, .. } => Some(accum),
+            PrimitiveSpecType::Fill { .. }
+            | PrimitiveSpecType::Move
+            | PrimitiveSpecType::Softmax { .. }
+            | PrimitiveSpecType::SoftmaxComplete { .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
+            | PrimitiveSpecType::OnePrefix
+            | PrimitiveSpecType::Broadcast { .. }
+            | PrimitiveSpecType::DivideVec { .. }
+            | PrimitiveSpecType::DivideVecScalar { .. } => None,
+        }
+    }
+
     pub fn causes_side_effects(&self) -> bool {
         match self.typ {
             PrimitiveSpecType::Matmul { accum }
@@ -2126,55 +2167,15 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     // TODO: Add a test that this is consistent with `mut_accum`
     pub(crate) fn accum(&self) -> Option<bool> {
         match self {
-            LogicalSpec::Primitive(basics, _, _) => match &basics.typ {
-                PrimitiveSpecType::Matmul { accum }
-                | PrimitiveSpecType::Conv { accum }
-                | PrimitiveSpecType::Max { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
-                    Some(*accum)
-                }
-                _ => None,
-            },
-            LogicalSpec::Compose { components, .. } => match &components[0].typ {
-                PrimitiveSpecType::Matmul { accum }
-                | PrimitiveSpecType::Conv { accum }
-                | PrimitiveSpecType::Max { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
-                    Some(*accum)
-                }
-                _ => None,
-            },
+            LogicalSpec::Primitive(basics, _, _) => basics.accum(),
+            LogicalSpec::Compose { components, .. } => components[0].accum(),
         }
     }
 
     pub(crate) fn mut_accum(&mut self) -> Option<&mut bool> {
         match self {
-            LogicalSpec::Primitive(basics, _, _) => match &mut basics.typ {
-                PrimitiveSpecType::Matmul { accum }
-                | PrimitiveSpecType::Conv { accum }
-                | PrimitiveSpecType::Max { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
-                    Some(accum)
-                }
-                _ => None,
-            },
-            LogicalSpec::Compose { components, .. } => match &mut components[0].typ {
-                PrimitiveSpecType::Matmul { accum }
-                | PrimitiveSpecType::Conv { accum }
-                | PrimitiveSpecType::Max { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
-                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
-                    Some(accum)
-                }
-                _ => None,
-            },
+            LogicalSpec::Primitive(basics, _, _) => basics.mut_accum(),
+            LogicalSpec::Compose { components, .. } => components[0].mut_accum(),
         }
     }
 
