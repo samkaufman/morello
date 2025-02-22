@@ -234,3 +234,18 @@ where
         true
     }
 }
+
+/// Like [visit_leaves] but only visits nested [Spec]s.
+#[cfg(test)]
+pub(crate) fn visit_subspecs<Tgt, F>(imp: &ImplNode<Tgt>, f: &mut F) -> bool
+where
+    Tgt: Target,
+    F: FnMut(&Spec<Tgt>) -> bool,
+{
+    visit_leaves(imp, &mut |leaf| {
+        if let ImplNode::SpecApp(spec_app) = leaf {
+            return f(&spec_app.0);
+        }
+        true
+    })
+}

@@ -426,8 +426,8 @@ impl<Tgt: Target> SpecGeometry<Tgt> {
     }
 
     /// Yields `Fill` Specs for the outputs of every Spec in the [SpecGeometry].
-    pub fn outputs_fills(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> + '_ {
-        self.iter().flat_map(|rect| rect.outputs_fills())
+    pub fn outputs_inits(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> + '_ {
+        self.iter().flat_map(|rect| rect.outputs_inits())
     }
 
     /// Iterates over rectangles's bottom and top [Spec]s.
@@ -536,7 +536,7 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
         let mut result: Option<SpecGeometryRect<Tgt>> = None;
         // If it has an accumulating variant, it's in the first dimension.
         // TODO: Abstract this `match` away somehow.
-        let has_accum = match spec_key {
+        match spec_key {
             SpecKey::Matmul { .. }
             | SpecKey::Conv { .. }
             | SpecKey::SoftmaxDenominatorAndMax { .. }
@@ -554,88 +554,80 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
             | SpecKey::DivideVecScalar { .. }
             | SpecKey::Compose { .. } => false,
         };
-        if has_accum && self.bottom_point()[0] > 0 {
-            let mut bottom = self.bottom_point().to_vec();
-            let mut top = self.top_point().to_vec();
-            bottom[0] = 0;
-            top[0] = 0;
-            result = Some(SpecGeometryRect::new(
-                key.clone(),
-                bottom,
-                top,
-                self.bimap(),
-            ));
-        }
+
         result.into_iter()
     }
 
     /// Yields `Fill` Specs for the outputs of every Spec in the [SpecGeometryRect].
-    pub fn outputs_fills(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> {
+    ///
+    /// The returned [SpecGeometryRect]s may intersect.
+    pub fn outputs_inits(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> {
         let bimap = self.bimap();
 
-        let top_output_idx = self.top().0.unique_output_index().unwrap();
-        let bottom_output_idx = self.bottom().0.unique_output_index().unwrap();
-        let TensorSpec {
-            shape: top_output_shape,
-            dtype: top_output_dtype,
-            aux: top_output_aux,
-        } = self.top().0.parameter(top_output_idx);
-        let TensorSpec {
-            shape: bottom_output_shape,
-            dtype: bottom_output_dtype,
-            aux: bottom_output_aux,
-        } = self.bottom().0.parameter(bottom_output_idx);
+        let mut fill_rects = vec![];
 
-        let fill_value = self
-            .top()
-            .0
-            .initial_accumulating_value_for_output(top_output_idx)
-            .expect("rect should have Spec kinds supporting accumulating");
-        debug_assert_eq!(
-            fill_value,
-            self.bottom()
-                .0
-                .initial_accumulating_value_for_output(bottom_output_idx)
-                .unwrap()
-        );
+        let (top_spec, bottom_spec) = (self.top(), self.bottom());
+        debug_assert_eq!(top_spec.0.operand_count(), bottom_spec.0.operand_count());
+        for parameter_idx in 0..top_spec.0.operand_count() {
+            if !top_spec.0.parameter_is_output(parameter_idx) {
+                continue;
+            }
 
-        let mut fill_top = Spec(
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Fill { value: fill_value },
-                    spec_shape: top_output_shape,
-                    dtypes: vec![top_output_dtype],
-                },
-                vec![top_output_aux],
-                self.top().0.serial_only(),
-            ),
-            self.top().1.clone(),
-        );
-        let mut fill_bottom = Spec(
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Fill { value: fill_value },
-                    spec_shape: bottom_output_shape,
-                    dtypes: vec![bottom_output_dtype],
-                },
-                vec![bottom_output_aux],
-                self.bottom().0.serial_only(),
-            ),
-            self.bottom().1.clone(),
-        );
-        fill_top.canonicalize().unwrap();
-        fill_bottom.canonicalize().unwrap();
+            let TensorSpec {
+                shape: top_output_shape,
+                dtype: top_output_dtype,
+                aux: top_output_aux,
+            } = self.top().0.parameter(parameter_idx);
+            let TensorSpec {
+                shape: bottom_output_shape,
+                dtype: bottom_output_dtype,
+                aux: bottom_output_aux,
+            } = self.bottom().0.parameter(parameter_idx);
 
-        let (fill_key, fill_top_pt) = bimap.apply(&fill_top);
-        let (fill_bottom_key, fill_bottom_pt) = bimap.apply(&fill_bottom);
-        debug_assert_eq!(fill_key, fill_bottom_key);
+            let mut fill_top = Spec(
+                LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Fill {
+                            value: todo!("get the value"),
+                        },
+                        spec_shape: top_output_shape,
+                        dtypes: vec![top_output_dtype],
+                    },
+                    vec![top_output_aux],
+                    self.top().0.serial_only(),
+                ),
+                self.top().1.clone(),
+            );
+            let mut fill_bottom = Spec(
+                LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Fill {
+                            value: todo!("get the value"),
+                        },
+                        spec_shape: bottom_output_shape,
+                        dtypes: vec![bottom_output_dtype],
+                    },
+                    vec![bottom_output_aux],
+                    self.bottom().0.serial_only(),
+                ),
+                self.bottom().1.clone(),
+            );
+            fill_top.canonicalize().unwrap();
+            fill_bottom.canonicalize().unwrap();
 
-        iter::once(SpecGeometryRect::<Tgt>::new(
-            fill_key,
-            fill_bottom_pt,
-            fill_top_pt,
-            bimap,
-        ))
+            let (fill_key, fill_top_pt) = bimap.apply(&fill_top);
+            let (fill_bottom_key, fill_bottom_pt) = bimap.apply(&fill_bottom);
+            debug_assert_eq!(fill_key, fill_bottom_key);
+
+            fill_rects.push(SpecGeometryRect::<Tgt>::new(
+                fill_key,
+                fill_bottom_pt,
+                fill_top_pt,
+                Rc::clone(&bimap),
+            ))
+        }
+
+        fill_rects.into_iter()
     }
 
     /// Returns an iterator over the [Spec]s in this rectangle.
@@ -909,7 +901,7 @@ impl Display for NotApplicableReason {
     }
 }
 
-/// Returns applications of Zeroes corresponding to the outputs of the given Spec.
+/// Returns applications of Fills corresponding to the outputs of the given Spec.
 fn make_accum_inits_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> Vec<ImplNode<Tgt>> {
     (0..u8::try_from(spec.0.operand_count()).unwrap())
         .flat_map(|parameter_idx| {
