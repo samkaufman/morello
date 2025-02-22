@@ -360,17 +360,17 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
             let rhs_envelope =
                 AABB::from_corners(rhs_bottom.try_into().unwrap(), rhs_top.try_into().unwrap());
             for intersecting_rect in self.drain_in_envelope_intersecting(rhs_envelope) {
-                let fragments = rect_subtract(
-                    &intersecting_rect.bottom.arr,
-                    &intersecting_rect.top.arr,
-                    rhs_bottom,
-                    rhs_top,
-                );
-                new_fragments.extend(
-                    fragments
-                        .into_iter()
-                        .map(|(bottom, top)| (bottom, top, intersecting_rect.value.clone())),
-                );
+                let RTreeRect { bottom, top, value } = intersecting_rect;
+                let mut fragments = rect_subtract(&bottom.arr, &top.arr, rhs_bottom, rhs_top);
+                if let Some((last_bottom, last_top)) = fragments.pop() {
+                    new_fragments.reserve(fragments.len() + 1);
+                    new_fragments.extend(
+                        fragments
+                            .into_iter()
+                            .map(|(bottom, top)| (bottom, top, value.clone())),
+                    );
+                    new_fragments.push((last_bottom, last_top, value));
+                }
             }
             // TODO: Is there really no bulk insert?
             for (bottom, top, value) in new_fragments.drain(..) {
