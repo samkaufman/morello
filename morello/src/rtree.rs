@@ -31,13 +31,21 @@ trait RTreeGeneric<T> {
     where
         T: PartialEq + Eq + Hash + Clone;
 
-    fn subtract(&mut self, low: &[BimapSInt], high: &[BimapSInt])
-    where
-        T: Clone; // TODO: Remove this bound. Shouldn't be needed.
-
-    fn subtract_tree<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
+    fn subtract(
+        &mut self,
+        low: &[BimapSInt],
+        high: &[BimapSInt],
+    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>
     where
         T: Clone;
+
+    fn subtract_tree<V>(
+        &mut self,
+        subtrahend_tree: &RTreeDyn<V>,
+    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T, V)>
+    where
+        T: Clone,
+        V: Clone;
 
     fn intersection_candidates_with_other_tree<'a, A>(
         &'a self,
@@ -102,7 +110,9 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn subtract(&mut self, low: &[BimapSInt], high: &[BimapSInt])
+            pub fn subtract(
+                &mut self, low: &[BimapSInt], high: &[BimapSInt]
+            ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>
             where
                 T: Clone, // TODO: Remove this bound. Shouldn't be needed.
             {
@@ -115,13 +125,16 @@ macro_rules! rtreedyn_cases {
             /// That tree's values are ignored.
             ///
             /// Note: The current implementation is very slow.
-            pub fn subtract_tree<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
+            pub fn subtract_tree<V>(
+                &mut self, subtrahend_tree: &RTreeDyn<V>
+            ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T, V)>
             where
-                T: Clone
+                T: Clone,
+                V: Clone,
             {
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::subtract_tree(t, subtrahend_tree), )*
-                };
+                }
             }
 
             pub fn iter(&self) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
@@ -340,37 +353,63 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         }
     }
 
-    fn subtract(&mut self, low: &[BimapSInt], high: &[BimapSInt])
+    fn subtract(
+        &mut self,
+        low: &[BimapSInt],
+        high: &[BimapSInt],
+    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>
     where
         T: Clone,
     {
         assert_eq!(low.len(), high.len());
         let mut subtrahend_tree = RTreeDyn::empty(low.len());
         subtrahend_tree.insert(low, high, ());
-        self.subtract_tree(&subtrahend_tree);
+        self.subtract_tree(&subtrahend_tree)
+            .into_iter()
+            .map(|(b, t, v, _)| (b, t, v))
+            .collect()
     }
 
-    fn subtract_tree<V>(&mut self, subtrahend_tree: &RTreeDyn<V>)
+    fn subtract_tree<V>(
+        &mut self,
+        subtrahend_tree: &RTreeDyn<V>,
+    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T, V)>
     where
         T: Clone,
+        V: Clone,
     {
+        let mut subtracted_partitions = vec![];
         let mut new_fragments = vec![];
-        for (rhs_bottom, rhs_top, _) in subtrahend_tree.iter() {
+        for (rhs_bottom, rhs_top, rhs_value) in subtrahend_tree.iter() {
             debug_assert!(new_fragments.is_empty());
             let rhs_envelope =
                 AABB::from_corners(rhs_bottom.try_into().unwrap(), rhs_top.try_into().unwrap());
             for intersecting_rect in self.drain_in_envelope_intersecting(rhs_envelope) {
                 let RTreeRect { bottom, top, value } = intersecting_rect;
-                let mut fragments = rect_subtract(&bottom.arr, &top.arr, rhs_bottom, rhs_top);
-                if let Some((last_bottom, last_top)) = fragments.pop() {
-                    new_fragments.reserve(fragments.len() + 1);
-                    new_fragments.extend(
-                        fragments
-                            .into_iter()
-                            .map(|(bottom, top)| (bottom, top, value.clone())),
-                    );
-                    new_fragments.push((last_bottom, last_top, value));
-                }
+                let fragments = rect_subtract(&bottom.arr, &top.arr, rhs_bottom, rhs_top);
+                new_fragments.extend(
+                    fragments
+                        .into_iter()
+                        .map(|(bottom, top)| (bottom, top, value.clone())),
+                );
+                let intersection_bottom = bottom
+                    .arr
+                    .iter()
+                    .zip(rhs_bottom)
+                    .map(|(b, rb)| *b.max(rb))
+                    .collect::<Vec<_>>();
+                let intersection_top = top
+                    .arr
+                    .iter()
+                    .zip(rhs_top)
+                    .map(|(t, rt)| *t.min(rt))
+                    .collect::<Vec<_>>();
+                subtracted_partitions.push((
+                    intersection_bottom,
+                    intersection_top,
+                    value,
+                    rhs_value.clone(),
+                ));
             }
             // TODO: Is there really no bulk insert?
             for (bottom, top, value) in new_fragments.drain(..) {
@@ -381,6 +420,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 });
             }
         }
+        subtracted_partitions
     }
 
     fn intersection_candidates_with_other_tree<'a, A>(
@@ -764,7 +804,7 @@ mod tests {
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
         subtrahend.merge_insert(&[1, 1], &[2, 2], ());
 
-        minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
+        let intersections = minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(
             minuhend.into_iter().collect::<HashSet<_>>(),
             HashSet::from([
@@ -780,56 +820,71 @@ mod tests {
                 },
             ])
         );
+        assert_eq!(intersections, &[(vec![1, 1], vec![2, 2], (), ())]);
     }
 
     #[test]
     fn test_rtree_subtract_2() {
-        let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
-        minuhend.merge_insert(&[1, 1], &[3, 3], ());
-        minuhend.merge_insert(&[5, 1], &[5, 7], ());
+        let mut minuhend: RTree<RTreeRect<2, _>> = RTree::new();
+        minuhend.merge_insert(&[1, 1], &[3, 3], "a");
+        minuhend.merge_insert(&[5, 1], &[5, 7], "b");
 
-        let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
-        subtrahend.merge_insert(&[1, 1], &[9, 9], ());
+        let mut subtrahend: RTree<RTreeRect<2, _>> = RTree::new();
+        subtrahend.merge_insert(&[1, 1], &[9, 9], "c");
 
-        minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
+        let intersections = minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(minuhend.into_iter().count(), 0);
+        assert_eq!(
+            intersections,
+            &[
+                (vec![1, 1], vec![3, 3], "a", "c"),
+                (vec![5, 1], vec![5, 7], "b", "c"),
+            ]
+        );
     }
 
     #[test]
     fn test_rtree_subtract_3() {
-        let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
-        minuhend.merge_insert(&[1, 1], &[3, 7], ());
-        minuhend.merge_insert(&[5, 1], &[7, 7], ());
+        let mut minuhend: RTree<RTreeRect<2, _>> = RTree::new();
+        minuhend.merge_insert(&[1, 1], &[3, 7], "a");
+        minuhend.merge_insert(&[5, 1], &[7, 7], "b");
 
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
         subtrahend.merge_insert(&[1, 2], &[7, 3], ());
 
-        minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
+        let intersections = minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(
             minuhend.into_iter().collect::<HashSet<_>>(),
             HashSet::from([
                 RTreeRect {
                     bottom: [1, 1].into(),
                     top: [3, 1].into(),
-                    value: ()
+                    value: "a"
                 },
                 RTreeRect {
                     bottom: [5, 1].into(),
                     top: [7, 1].into(),
-                    value: ()
+                    value: "b"
                 },
                 RTreeRect {
                     bottom: [1, 4].into(),
                     top: [3, 7].into(),
-                    value: ()
+                    value: "a"
                 },
                 RTreeRect {
                     bottom: [5, 4].into(),
                     top: [7, 7].into(),
-                    value: ()
+                    value: "b"
                 },
             ])
-        )
+        );
+        assert_eq!(
+            intersections,
+            &[
+                (vec![1, 2], vec![3, 3], "a", ()),
+                (vec![5, 2], vec![7, 3], "b", ()),
+            ]
+        );
     }
 
     proptest! {
