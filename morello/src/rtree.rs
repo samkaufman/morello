@@ -197,6 +197,12 @@ struct RTreePt<const D: usize> {
     arr: [BimapSInt; D],
 }
 
+struct RectPartitionIntersection {
+    lhs_subrectangles: Vec<(Vec<BimapSInt>, Vec<BimapSInt>)>,
+    rhs_subrectangles: Vec<(Vec<BimapSInt>, Vec<BimapSInt>)>,
+    intersection: (Vec<BimapSInt>, Vec<BimapSInt>),
+}
+
 /// An [rstar::SelectionFunction] which removes a set of [rstar::RTreeObject]s.
 #[derive(Debug)]
 struct BatchRemoveSelFn<O: rstar::RTreeObject> {
@@ -613,6 +619,44 @@ fn rect_subtract(
         working_top[dim] = working_top[dim].min(subtrahend_top[dim]);
     }
     result
+}
+
+/// Compute the intersection of two rectangles and subtract the intersection from each rectangle.
+/// The result is a [RectPartitionIntersection] which contains the intersection and the
+/// subrectangles/tiles which cover the remainders of each rectangle. If the two rectangles do not
+/// intersect, the result will be `None`.
+fn rect_partition_intersection(
+    lhs_bottom: &[i64],
+    lhs_top: &[i64],
+    rhs_bottom: &[i64],
+    rhs_top: &[i64],
+) -> Option<RectPartitionIntersection> {
+    assert_eq!(lhs_bottom.len(), lhs_top.len());
+    assert_eq!(rhs_bottom.len(), rhs_top.len());
+    assert_eq!(lhs_bottom.len(), rhs_bottom.len());
+
+    let mut intersection_bottom = vec![];
+    let mut intersection_top = vec![];
+    for dim in 0..lhs_bottom.len() {
+        let low = lhs_bottom[dim].max(rhs_bottom[dim]);
+        let high = lhs_top[dim].min(rhs_top[dim]);
+        if low > high {
+            return None;
+        }
+        intersection_bottom.push(low);
+        intersection_top.push(high);
+    }
+
+    let lhs_subrectangles =
+        rect_subtract(lhs_bottom, lhs_top, &intersection_bottom, &intersection_top);
+    let rhs_subrectangles =
+        rect_subtract(rhs_bottom, rhs_top, &intersection_bottom, &intersection_top);
+
+    Some(RectPartitionIntersection {
+        lhs_subrectangles,
+        rhs_subrectangles,
+        intersection: (intersection_bottom, intersection_top),
+    })
 }
 
 fn count_matching_dimensions<const D: usize, T>(
@@ -1159,5 +1203,89 @@ mod tests {
             tree.iter().map(|r| r.envelope()).collect::<Vec<_>>(),
             &[merged_envelope]
         );
+    }
+
+    #[test]
+    fn test_rect_partition_intersection_no_overlap() {
+        let lhs_bottom = vec![0, 0];
+        let lhs_top = vec![1, 1];
+        let rhs_bottom = vec![2, 2];
+        let rhs_top = vec![3, 3];
+        let result = rect_partition_intersection(&lhs_bottom, &lhs_top, &rhs_bottom, &rhs_top);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_rect_partition_intersection_full_overlap() {
+        let lhs_bottom = vec![0, 0];
+        let lhs_top = vec![3, 3];
+        let rhs_bottom = vec![1, 1];
+        let rhs_top = vec![2, 2];
+
+        let expected_lhs_coverage = HashSet::from([
+            vec![0, 0],
+            vec![0, 1],
+            vec![0, 2],
+            vec![0, 3],
+            vec![1, 0],
+            vec![2, 0],
+            vec![1, 3],
+            vec![2, 3],
+            vec![3, 0],
+            vec![3, 1],
+            vec![3, 2],
+            vec![3, 3],
+        ]);
+
+        let result =
+            rect_partition_intersection(&lhs_bottom, &lhs_top, &rhs_bottom, &rhs_top).unwrap();
+        assert_eq!(result.intersection, (vec![1, 1], vec![2, 2]));
+        let merged_lhs_coverage: HashSet<_> = result
+            .lhs_subrectangles
+            .iter()
+            .flat_map(|(bottom, top)| covered_points(bottom, top))
+            .collect();
+        assert_eq!(merged_lhs_coverage, expected_lhs_coverage);
+        assert_eq!(result.rhs_subrectangles, vec![]);
+    }
+
+    #[test]
+    fn test_rect_partition_intersection_partial_overlap() {
+        let lhs_bottom = vec![0, 0];
+        let lhs_top = vec![2, 2];
+        let rhs_bottom = vec![1, 1];
+        let rhs_top = vec![3, 3];
+
+        let expected_lhs_coverage =
+            HashSet::from([vec![0, 0], vec![1, 0], vec![0, 1], vec![2, 0], vec![0, 2]]);
+        let expected_rhs_coverage =
+            HashSet::from([vec![3, 1], vec![1, 3], vec![2, 3], vec![3, 2], vec![3, 3]]);
+
+        let result =
+            rect_partition_intersection(&lhs_bottom, &lhs_top, &rhs_bottom, &rhs_top).unwrap();
+        assert_eq!(result.intersection, (vec![1, 1], vec![2, 2]));
+
+        let merged_lhs_coverage: HashSet<_> = result
+            .lhs_subrectangles
+            .iter()
+            .flat_map(|(bottom, top)| covered_points(bottom, top))
+            .collect();
+        let merged_rhs_coverage: HashSet<_> = result
+            .rhs_subrectangles
+            .iter()
+            .flat_map(|(bottom, top)| covered_points(bottom, top))
+            .collect();
+        assert_eq!(merged_lhs_coverage, expected_lhs_coverage);
+        assert_eq!(merged_rhs_coverage, expected_rhs_coverage);
+    }
+
+    fn covered_points(bottom: &[BimapSInt], top: &[BimapSInt]) -> HashSet<Vec<BimapSInt>> {
+        assert_eq!(bottom.len(), top.len());
+        bottom
+            .iter()
+            .zip(top)
+            .map(|(b, t)| (*b..=*t))
+            .multi_cartesian_product()
+            .collect()
     }
 }
