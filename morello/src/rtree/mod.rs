@@ -38,6 +38,21 @@ trait RTreeGeneric<T> {
     ) where
         T: PartialEq + Eq + Hash + Clone;
 
+    /// Insert a rectangle into this [RTree], partitioning it and and any contained. Intersecting
+    /// sub-rectangles are combined into one with a new value computed by `fold`.
+    ///
+    /// For example:
+    ///
+    /// ```ignore
+    /// tree.insert(&[0, 0], &[1, 1], 1);
+    /// tree.fold_insert(&[1, 1], &[2, 2], 3, |a, b| a + b);
+    /// assert_eq!(tree.locate_at_point(&[1, 1]), Some(4));
+    /// ```
+    fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, fold: F)
+    where
+        T: Clone,
+        F: FnMut(T, T) -> T;
+
     /// Update by subtracting the space filled by another [RTreeGeneric].
     /// That tree's values are ignored.
     ///
@@ -106,6 +121,16 @@ macro_rules! rtreedyn_cases {
             {
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::merge_insert(t, low, high, value, disallow_overlap), )*
+                }
+            }
+
+            fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, fold: F)
+            where
+                T: Clone,
+                F: FnMut(T, T) -> T,
+            {
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::fold_insert(t, low, high, value, fold), )*
                 }
             }
 
@@ -354,6 +379,58 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 self.insert(part);
             }
             self.insert(to_insert);
+        }
+    }
+
+    fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, mut fold: F)
+    where
+        T: Clone,
+        F: FnMut(T, T) -> T,
+    {
+        let mut worklist = vec![(low.to_vec(), high.to_vec(), value)];
+        while let Some((r_low, r_high, r_value)) = worklist.pop() {
+            let mut rhs_subrects = vec![];
+            let intersectee_option = self
+                .drain_in_envelope_intersecting(AABB::from_corners(
+                    r_low.clone().try_into().unwrap(),
+                    r_high.clone().try_into().unwrap(),
+                ))
+                .take(1)
+                .next();
+            if let Some(intersectee) = intersectee_option {
+                let result = rect_partition_intersection(
+                    &r_low,
+                    &r_high,
+                    &intersectee.bottom.arr,
+                    &intersectee.top.arr,
+                )
+                .unwrap();
+                rhs_subrects.extend(result.rhs_subrectangles.into_iter().map(|(bottom, top)| {
+                    RTreeRect {
+                        bottom: bottom.try_into().unwrap(),
+                        top: top.try_into().unwrap(),
+                        value: intersectee.value.clone(),
+                    }
+                }));
+                worklist.extend(
+                    result
+                        .lhs_subrectangles
+                        .into_iter()
+                        .map(|(bottom, top)| (bottom, top, r_value.clone())),
+                );
+                worklist.push((
+                    result.intersection.0,
+                    result.intersection.1,
+                    fold(r_value.clone(), intersectee.value),
+                ));
+            } else {
+                self.insert(RTreeRect {
+                    bottom: r_low.try_into().unwrap(),
+                    top: r_high.try_into().unwrap(),
+                    value: r_value,
+                });
+            }
+            rhs_subrects.into_iter().for_each(|r| self.insert(r));
         }
     }
 
@@ -857,10 +934,10 @@ mod tests {
     #[test]
     fn test_rtree_subtract_1() {
         let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
-        minuhend.merge_insert(&[1, 1], &[3, 3], ());
+        minuhend.merge_insert(&[1, 1], &[3, 3], (), true);
 
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
-        subtrahend.merge_insert(&[1, 1], &[2, 2], ());
+        subtrahend.merge_insert(&[1, 1], &[2, 2], (), true);
 
         minuhend.subtract(&subtrahend);
         assert_eq!(
@@ -883,11 +960,11 @@ mod tests {
     #[test]
     fn test_rtree_subtract_2() {
         let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
-        minuhend.merge_insert(&[1, 1], &[3, 3], ());
-        minuhend.merge_insert(&[5, 1], &[5, 7], ());
+        minuhend.merge_insert(&[1, 1], &[3, 3], (), true);
+        minuhend.merge_insert(&[5, 1], &[5, 7], (), true);
 
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
-        subtrahend.merge_insert(&[1, 1], &[9, 9], ());
+        subtrahend.merge_insert(&[1, 1], &[9, 9], (), true);
 
         minuhend.subtract(&subtrahend);
         assert_eq!(minuhend.into_iter().count(), 0);
@@ -896,11 +973,11 @@ mod tests {
     #[test]
     fn test_rtree_subtract_3() {
         let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
-        minuhend.merge_insert(&[1, 1], &[3, 7], ());
-        minuhend.merge_insert(&[5, 1], &[7, 7], ());
+        minuhend.merge_insert(&[1, 1], &[3, 7], (), true);
+        minuhend.merge_insert(&[5, 1], &[7, 7], (), true);
 
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
-        subtrahend.merge_insert(&[1, 2], &[7, 3], ());
+        subtrahend.merge_insert(&[1, 2], &[7, 3], (), true);
 
         minuhend.subtract(&subtrahend);
         assert_eq!(
@@ -928,6 +1005,43 @@ mod tests {
                 },
             ])
         )
+    }
+
+    #[test]
+    fn test_fold_insert_no_intersection() {
+        let mut tree = RTreeDyn::empty(2);
+        tree.insert(&[0, 0], &[1, 1], 1);
+        tree.fold_insert(&[2, 2], &[3, 3], 2, |a, b| a + b);
+        assert_eq!(tree.locate_at_point(&[0, 0]), Some(&1));
+        assert_eq!(tree.locate_at_point(&[2, 2]), Some(&2));
+    }
+
+    #[test]
+    fn test_fold_insert_with_intersection() {
+        let mut tree = RTreeDyn::empty(2);
+        tree.insert(&[0, 0], &[2, 2], 1);
+        tree.fold_insert(&[1, 1], &[3, 3], 2, |a, b| a + b);
+        assert_eq!(tree.locate_at_point(&[0, 0]), Some(&1));
+        assert_eq!(tree.locate_at_point(&[1, 1]), Some(&3));
+        assert_eq!(tree.locate_at_point(&[3, 3]), Some(&2));
+    }
+
+    #[test]
+    fn test_fold_insert_multiple_intersections() {
+        let mut tree = RTreeDyn::empty(2);
+        tree.insert(&[0, 0], &[2, 2], 1);
+        println!("after first insert");
+        tree.fold_insert(&[1, 1], &[3, 3], 2, |a, b| a + b);
+        println!("after first fold_insert");
+        for entry in tree.iter() {
+            println!("{:?}", entry);
+        }
+        tree.fold_insert(&[2, 2], &[4, 4], 3, |a, b| a + b);
+        println!("after second fold_insert");
+        assert_eq!(tree.locate_at_point(&[0, 0]), Some(&1));
+        assert_eq!(tree.locate_at_point(&[1, 1]), Some(&3));
+        assert_eq!(tree.locate_at_point(&[2, 2]), Some(&6));
+        assert_eq!(tree.locate_at_point(&[4, 4]), Some(&3));
     }
 
     proptest! {
