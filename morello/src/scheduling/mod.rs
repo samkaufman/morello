@@ -87,7 +87,7 @@ pub trait DependencyRequest {
 
     fn visit_dependency<U>(
         &mut self,
-        spec: &Spec<Self::Tgt>,
+        rectangle: &SpecGeometryRect<Self::Tgt>,
         cost: &[NormalizedCost],
         updater: &mut U,
     ) where
@@ -220,7 +220,7 @@ macro_rules! action_dispatch {
 
             fn visit_dependency<U>(
                 &mut self,
-                spec: &Spec<Tgt>,
+                rectangle: &SpecGeometryRect<Tgt>,
                 cost: &[NormalizedCost],
                 updater: &mut U,
             )
@@ -229,7 +229,7 @@ macro_rules! action_dispatch {
             {
                 match self {
                     $( Self::$variant(a) => {
-                        a.visit_dependency(spec, cost, updater)
+                        a.visit_dependency(rectangle, cost, updater)
                     } ),*
                 }
             }
@@ -502,7 +502,7 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
             key,
             bottom: pt.clone(),
             top: pt,
-            cached_specs: OnceCell::new(),
+            cached_specs: OnceCell::with_value((spec.clone(), spec.clone())),
             bimap,
         }
     }
@@ -1062,73 +1062,79 @@ where
         Some(&self.requests)
     }
 
-    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
-    where
+    fn visit_dependency<U>(
+        &mut self,
+        rectangle: &SpecGeometryRect<Tgt>,
+        cost: &[NormalizedCost],
+        updater: &mut U,
+    ) where
         U: VisitUpdater<Self::Tgt>,
     {
         if cost.len() >= 2 {
             todo!("Support k > 1");
         }
 
-        debug_assert!(spec.is_canonical());
-        let Some(requests) = self.requests_map.get_mut(spec) else {
-            panic!("spec never requested: {spec}");
-        };
+        rectangle.iter_specs().for_each(|spec| {
+            debug_assert!(spec.is_canonical());
+            let Some(requests) = self.requests_map.get_mut(&spec) else {
+                panic!("spec never requested: {spec}");
+            };
 
-        for (working_impl_rc, request_subspec_idx) in requests {
-            let mut working_impl = RefCell::borrow_mut(working_impl_rc);
+            for (working_impl_rc, request_subspec_idx) in requests {
+                let mut working_impl = RefCell::borrow_mut(working_impl_rc);
 
-            let new_slot_entry = Some(
-                cost.first()
-                    .map(|c| c.clone().into_main_cost_for_volume(spec.0.volume())),
-            );
-            let slot = &mut working_impl.subspec_costs[*request_subspec_idx];
-            if slot.is_some() {
-                if slot != &new_slot_entry {
-                    panic!(
-                        "subspec {spec} already set to a different value for parent {}",
-                        RefCell::borrow(&working_impl.working_spec).spec
-                    );
+                let new_slot_entry = Some(
+                    cost.first()
+                        .map(|c| c.clone().into_main_cost_for_volume(spec.0.volume())),
+                );
+                let slot = &mut working_impl.subspec_costs[*request_subspec_idx];
+                if slot.is_some() {
+                    if slot != &new_slot_entry {
+                        panic!(
+                            "subspec {spec} already set to a different value for parent {}",
+                            RefCell::borrow(&working_impl.working_spec).spec
+                        );
+                    }
+                    log::warn!("subspec {spec} already set");
+                    return;
                 }
-                log::warn!("subspec {spec} already set");
-                return;
+                *slot = new_slot_entry;
+
+                if working_impl.subspec_costs.iter().all(|o| o.is_some()) {
+                    let solver = &working_impl.solver;
+                    let mut working_spec = RefCell::borrow_mut(&working_impl.working_spec);
+
+                    // Once all dependencies for a particular action are available and SAT, call
+                    // [VisitUpdater::complete_action].
+                    if working_impl
+                        .subspec_costs
+                        .iter()
+                        .all(|o| matches!(o, Some(Some(_))))
+                    {
+                        let cost = solver.compute_cost(
+                            working_impl
+                                .subspec_costs
+                                .iter()
+                                .map(|cost_option| cost_option.clone().unwrap().unwrap()),
+                        );
+
+                        let normalized_cost = NormalizedCost::new(cost, spec.0.volume());
+                        updater.complete_action(
+                            &working_spec.spec,
+                            working_impl.action_num,
+                            normalized_cost,
+                        );
+                    }
+
+                    // Once all dependencies are available but not necessarily SAT, do some bookkeeping
+                    // around NaiveWorkingImpls.
+                    working_spec.incomplete_impls -= 1;
+                    if working_spec.incomplete_impls == 0 {
+                        updater.complete_spec(&working_spec.spec);
+                    }
+                }
             }
-            *slot = new_slot_entry;
-
-            if working_impl.subspec_costs.iter().all(|o| o.is_some()) {
-                let solver = &working_impl.solver;
-                let mut working_spec = RefCell::borrow_mut(&working_impl.working_spec);
-
-                // Once all dependencies for a particular action are available and SAT, call
-                // [VisitUpdater::complete_action].
-                if working_impl
-                    .subspec_costs
-                    .iter()
-                    .all(|o| matches!(o, Some(Some(_))))
-                {
-                    let cost = solver.compute_cost(
-                        working_impl
-                            .subspec_costs
-                            .iter()
-                            .map(|cost_option| cost_option.clone().unwrap().unwrap()),
-                    );
-
-                    let normalized_cost = NormalizedCost::new(cost, spec.0.volume());
-                    updater.complete_action(
-                        &working_spec.spec,
-                        working_impl.action_num,
-                        normalized_cost,
-                    );
-                }
-
-                // Once all dependencies are available but not necessarily SAT, do some bookkeeping
-                // around NaiveWorkingImpls.
-                working_spec.incomplete_impls -= 1;
-                if working_spec.incomplete_impls == 0 {
-                    updater.complete_spec(&working_spec.spec);
-                }
-            }
-        }
+        });
     }
 
     fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
