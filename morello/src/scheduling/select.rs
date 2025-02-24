@@ -80,8 +80,4 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for SelectActionProvider<Tgt>
             .filter(|a| matches!(a, Action::Select(_)))
             .collect()
     }
-
-    fn debugging() -> Option<String> {
-        Some("Select".to_string())
-    }
 }

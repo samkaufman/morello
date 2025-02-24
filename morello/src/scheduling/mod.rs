@@ -121,11 +121,6 @@ pub trait VisitUpdater<Tgt: Target> {
 /// An actions provider for [NaiveBottomUpSolver].
 pub trait NaiveBottomUpActionProvider<Tgt: Target> {
     fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>>;
-
-    // TODO: Remove
-    fn debugging() -> Option<String> {
-        None
-    }
 }
 
 /// Wraps an [RTreeDyn] to restruct mutations to those which are relatively independent of the

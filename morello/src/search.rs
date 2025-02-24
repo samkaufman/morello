@@ -43,7 +43,6 @@ enum ImplReducerResults {
 struct TrackingUpdater<U, K> {
     inner_updater: U,
     goal_solvers_outstanding: HashMap<K, usize>,
-    current_solver_name: String, // TODO: Remove current_solver_name
 }
 
 // Computes an optimal Impl for `goal` and stores it in `db`.
@@ -139,15 +138,12 @@ where
     let mut tracking_updater = TrackingUpdater {
         inner_updater: &mut reducers,
         goal_solvers_outstanding,
-        current_solver_name: "".to_string(),
     };
 
     // Build R-Trees of all goals' dependencies.
     // TODO: Use a Tgt-specific ActionT type.
     let mut deps_trees = HashMap::<TableKey, RTreeDyn<usize>>::new();
     for (solver_idx, solver) in solvers.iter_mut().enumerate() {
-        tracking_updater.current_solver_name = format!("solver {}", solver_idx);
-
         // TODO: Call a ranged `apply_no_dependency_updates` equivalent instead of this loop.
         requests.push(solver.request(&block.clone().into()));
         block.iter_specs().for_each(|goal| {
@@ -237,7 +233,6 @@ where
                     spec.canonicalize().unwrap();
 
                     let solver_idx = intersection.dep_meta;
-                    tracking_updater.current_solver_name = format!("solver {}", solver_idx); // TODO: Remove
 
                     let ncosts = intersection
                         .action_costs
@@ -296,7 +291,6 @@ where
                 .map(|x| NormalizedCost::new(x.1.clone(), spec.0.volume()))
                 .collect::<Vec<_>>();
             for solver_id in solver_ids {
-                tracking_updater.current_solver_name = format!("solver {}", solver_id); // TODO: Remove
                 requests[solver_id].visit_dependency(
                     &spec,
                     &normalized_costs,
