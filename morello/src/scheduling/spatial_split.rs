@@ -5,7 +5,7 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::scheduling::{
     tile_to_apply_err, ActionT, ApplyError, BottomUpSolver, DependencyRequest, NotApplicableReason,
-    SpecGeometry, VisitUpdater,
+    SpecGeometry, SpecGeometryRect, VisitUpdater,
 };
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
@@ -183,8 +183,12 @@ impl<Tgt: Target> DependencyRequest for SpatialSplitSolverRequest<Tgt> {
         }
     }
 
-    fn visit_dependency<U>(&mut self, _spec: &Spec<Tgt>, _cost: &[NormalizedCost], _updater: &mut U)
-    where
+    fn visit_dependency<U>(
+        &mut self,
+        _rect: &SpecGeometryRect<Tgt>,
+        _cost: &[NormalizedCost],
+        _updater: &mut U,
+    ) where
         U: VisitUpdater<Tgt>,
     {
         todo!()

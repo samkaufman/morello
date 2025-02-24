@@ -6,7 +6,7 @@ use crate::imp::ImplNode;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::{
     make_accum_inits_for_spec, Action, ActionEncodeDecode, ActionT, ApplyError, BottomUpSolver,
-    DependencyRequest, NotApplicableReason, SpecGeometry, VisitUpdater,
+    DependencyRequest, NotApplicableReason, SpecGeometry, SpecGeometryRect, VisitUpdater,
 };
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
@@ -175,58 +175,64 @@ impl<Tgt: Target> DependencyRequest for ToAccumSolverRequest<Tgt> {
         }
     }
 
-    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
-    where
+    fn visit_dependency<U>(
+        &mut self,
+        rectangle: &SpecGeometryRect<Tgt>,
+        cost: &[NormalizedCost],
+        updater: &mut U,
+    ) where
         U: VisitUpdater<Tgt>,
     {
-        debug_assert!(spec.is_canonical());
-        let LogicalSpec::Primitive(basics, _, _) = &spec.0 else {
-            unreachable!();
-        };
+        rectangle.iter_specs().for_each(|spec| {
+            debug_assert!(spec.is_canonical());
+            let LogicalSpec::Primitive(basics, _, _) = &spec.0 else {
+                unreachable!();
+            };
 
-        match basics.typ {
-            PrimitiveSpecType::Fill {
-                value: FillValue::Zero,
-            } => {
-                let insert_result = self.zeroes.insert(spec.clone(), cost.into());
-                debug_assert!(insert_result.is_none(), "visited twice: {}", spec);
-                let zero_volume = spec.0.volume();
-                let accum_key = abstract_goal(spec);
-                if let Some(accums_map) = self.accums.remove(&accum_key) {
-                    for (accum_spec, accum_costs) in accums_map {
-                        self.visit_candidate_dependency_pair(
-                            cost,
-                            &accum_costs,
-                            zero_volume,
-                            accum_spec.0.volume(),
-                            &accum_spec,
-                            updater,
-                        );
+            match basics.typ {
+                PrimitiveSpecType::Fill {
+                    value: FillValue::Zero,
+                } => {
+                    let insert_result = self.zeroes.insert(spec.clone(), cost.into());
+                    debug_assert!(insert_result.is_none(), "visited twice: {}", spec);
+                    let zero_volume = spec.0.volume();
+                    let accum_key = abstract_goal(&spec);
+                    if let Some(accums_map) = self.accums.remove(&accum_key) {
+                        for (accum_spec, accum_costs) in accums_map {
+                            self.visit_candidate_dependency_pair(
+                                cost,
+                                &accum_costs,
+                                zero_volume,
+                                accum_spec.0.volume(),
+                                &accum_spec,
+                                updater,
+                            );
+                        }
                     }
                 }
-            }
-            _ => {
-                // zero_for_spec works both for constructing the Zero dependency of the Matmul *and*
-                // the MatmulAccum's paired Zero.
-                let corresponding_zero = zero_for_spec(spec);
-                if let Some(zero_costs) = self.zeroes.get(&corresponding_zero) {
-                    // Already visited the Zero dependency. Compute the final ToAccum Impl's cost.
-                    self.visit_candidate_dependency_pair(
-                        zero_costs,
-                        cost,
-                        corresponding_zero.0.volume(),
-                        spec.0.volume(),
-                        spec,
-                        updater,
-                    );
-                } else {
-                    let accum_key = abstract_goal(spec);
-                    let final_tensorspec_map = self.accums.entry(accum_key).or_default();
-                    let insert_result = final_tensorspec_map.insert(spec.clone(), cost.into());
-                    debug_assert!(insert_result.is_none());
+                _ => {
+                    // zero_for_spec works both for constructing the Zero dependency of the Matmul *and*
+                    // the MatmulAccum's paired Zero.
+                    let corresponding_zero = zero_for_spec(&spec);
+                    if let Some(zero_costs) = self.zeroes.get(&corresponding_zero) {
+                        // Already visited the Zero dependency. Compute the final ToAccum Impl's cost.
+                        self.visit_candidate_dependency_pair(
+                            zero_costs,
+                            cost,
+                            corresponding_zero.0.volume(),
+                            spec.0.volume(),
+                            &spec,
+                            updater,
+                        );
+                    } else {
+                        let accum_key = abstract_goal(&spec);
+                        let final_tensorspec_map = self.accums.entry(accum_key).or_default();
+                        let insert_result = final_tensorspec_map.insert(spec.clone(), cost.into());
+                        debug_assert!(insert_result.is_none());
+                    }
                 }
-            }
-        };
+            };
+        });
     }
 }
 
