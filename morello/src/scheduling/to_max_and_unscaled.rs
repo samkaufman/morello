@@ -117,10 +117,6 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for ToMaxAndUnscaledActionPro
         // TODO: Return the actions!
         vec![]
     }
-
-    fn debugging() -> Option<String> {
-        Some("ToMaxAndUnscaled".to_string())
-    }
 }
 
 // TODO: This shares a lot of code with softmax_scalar_tensor.  Refactor to share code.
