@@ -86,8 +86,8 @@ impl<Tgt: Target> BottomUpSolver for ToAccumSolver<Tgt> {
     fn request(&mut self, dependents: &SpecGeometry<Tgt>) -> Self::Request {
         let mut dependencies = SpecGeometry::<Tgt>::new(Rc::clone(dependents.bimap()));
         dependencies.extend(dependents.accums());
-        let zeros = dependencies.outputs_zeros().collect::<Vec<_>>();
-        dependencies.extend(zeros.into_iter());
+        let fills = dependencies.outputs_fills().collect::<Vec<_>>();
+        dependencies.extend(fills.into_iter());
         ToAccumSolverRequest {
             dependencies,
             zeroes: HashMap::new(),

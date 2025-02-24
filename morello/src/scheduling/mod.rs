@@ -431,9 +431,9 @@ impl<Tgt: Target> SpecGeometry<Tgt> {
         self.iter().flat_map(|rect| rect.accums())
     }
 
-    /// Yields `Zero` Specs for the outputs of every Spec in the [SpecGeometry].
-    pub fn outputs_zeros(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> + '_ {
-        self.iter().flat_map(|rect| rect.outputs_zeros())
+    /// Yields `Fill` Specs for the outputs of every Spec in the [SpecGeometry].
+    pub fn outputs_fills(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> + '_ {
+        self.iter().flat_map(|rect| rect.outputs_fills())
     }
 
     /// Iterates over rectangles's bottom and top [Spec]s.
@@ -516,6 +516,10 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
         &self.key
     }
 
+    pub fn spec_key(&self) -> &SpecKey {
+        &self.key.0
+    }
+
     pub fn bottom(&self) -> &Spec<Tgt> {
         &self.specs().0
     }
@@ -571,27 +575,40 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
         result.into_iter()
     }
 
-    /// Yields `Zero` Specs for the outputs of every Spec in the [SpecGeometryRect].
-    pub fn outputs_zeros(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> {
+    /// Yields `Fill` Specs for the outputs of every Spec in the [SpecGeometryRect].
+    pub fn outputs_fills(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> {
         let bimap = self.bimap();
 
+        let top_output_idx = self.top().0.unique_output_index().unwrap();
+        let bottom_output_idx = self.bottom().0.unique_output_index().unwrap();
         let TensorSpec {
             shape: top_output_shape,
             dtype: top_output_dtype,
             aux: top_output_aux,
-        } = self.top().0.unique_output().unwrap();
+        } = self.top().0.parameter(top_output_idx);
         let TensorSpec {
             shape: bottom_output_shape,
             dtype: bottom_output_dtype,
             aux: bottom_output_aux,
-        } = self.bottom().0.unique_output().unwrap();
+        } = self.bottom().0.parameter(bottom_output_idx);
 
-        let mut zero_top = Spec(
+        let fill_value = self
+            .top()
+            .0
+            .initial_accumulating_value_for_output(top_output_idx)
+            .expect("rect should have Spec kinds supporting accumulating");
+        debug_assert_eq!(
+            fill_value,
+            self.bottom()
+                .0
+                .initial_accumulating_value_for_output(bottom_output_idx)
+                .unwrap()
+        );
+
+        let mut fill_top = Spec(
             LogicalSpec::Primitive(
                 PrimitiveBasics {
-                    typ: PrimitiveSpecType::Fill {
-                        value: FillValue::Zero,
-                    },
+                    typ: PrimitiveSpecType::Fill { value: fill_value },
                     spec_shape: top_output_shape,
                     dtypes: vec![top_output_dtype],
                 },
@@ -600,12 +617,10 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
             ),
             self.top().1.clone(),
         );
-        let mut zero_bottom = Spec(
+        let mut fill_bottom = Spec(
             LogicalSpec::Primitive(
                 PrimitiveBasics {
-                    typ: PrimitiveSpecType::Fill {
-                        value: FillValue::Zero,
-                    },
+                    typ: PrimitiveSpecType::Fill { value: fill_value },
                     spec_shape: bottom_output_shape,
                     dtypes: vec![bottom_output_dtype],
                 },
@@ -614,17 +629,17 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
             ),
             self.bottom().1.clone(),
         );
-        zero_top.canonicalize().unwrap();
-        zero_bottom.canonicalize().unwrap();
+        fill_top.canonicalize().unwrap();
+        fill_bottom.canonicalize().unwrap();
 
-        let (zero_key, zero_top_pt) = bimap.apply(&zero_top);
-        let (zero_bottom_key, zero_bottom_pt) = bimap.apply(&zero_bottom);
-        debug_assert_eq!(zero_key, zero_bottom_key);
+        let (fill_key, fill_top_pt) = bimap.apply(&fill_top);
+        let (fill_bottom_key, fill_bottom_pt) = bimap.apply(&fill_bottom);
+        debug_assert_eq!(fill_key, fill_bottom_key);
 
         iter::once(SpecGeometryRect::<Tgt>::new(
-            zero_key,
-            zero_bottom_pt,
-            zero_top_pt,
+            fill_key,
+            fill_bottom_pt,
+            fill_top_pt,
             bimap,
         ))
     }
