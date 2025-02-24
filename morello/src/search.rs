@@ -15,7 +15,7 @@ use crate::cost::{Cost, NormalizedCost};
 use crate::db::{ActionCostVec, ActionNum, FilesDatabase, GetPreference, TableKey};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::grid::linear::BimapSInt;
+use crate::grid::linear::{BimapInt, BimapSInt};
 use crate::rtree::RTreeDyn;
 use crate::scheduling::{
     Action, ActionT, BottomUpSolver, DependencyRequest, SpecGeometryRect, VisitUpdater,
@@ -196,11 +196,11 @@ where
                 // TODO: Call synthesize_block once per block, not once per solver.
                 let dep_bottom_u32 = dep_bottom
                     .iter()
-                    .map(|&x| u32::try_from(x).unwrap())
+                    .map(|&x| BimapInt::try_from(x).unwrap())
                     .collect::<Vec<_>>();
                 let dep_top_u32 = dep_top
                     .iter()
-                    .map(|&x| u32::try_from(x).unwrap())
+                    .map(|&x| BimapInt::try_from(x).unwrap())
                     .collect::<Vec<_>>();
                 synthesize_block(
                     db,
@@ -221,37 +221,45 @@ where
         db.intersect(table_key, deps_tree).for_each(|intersection| {
             // TODO: Instead of resolving Specs individually, resolve ranges (possibly broken by
             //       dimensions/normalization group).
+            let solver_idx = intersection.dep_meta;
+            let ncosts = intersection
+                .action_costs
+                .0
+                .iter()
+                .map(|(_, c)| c.clone())
+                .collect::<Vec<_>>();
+            requests[solver_idx].visit_dependency(
+                &SpecGeometryRect::new(
+                    table_key.clone(),
+                    intersection.bottom.iter().map(|&x| x as u32).collect(),
+                    intersection.top.iter().map(|&x| x as u32).collect(),
+                    block.bimap(),
+                ),
+                &ncosts,
+                &mut tracking_updater,
+            );
+
+            // TODO: Remove the following
+            #[cfg(debug_assertions)]
             diagonals_shifted(&intersection.bottom, &intersection.top)
                 .flatten()
                 .for_each(|pt| {
                     // For each point (canonical Spec) in the intersection, have each solver
                     // associated with that intersection visit. If that results in a completion of a
                     // Spec, push that onto a queue and loop.
-
-                    let composed_key = (table_key.clone(), pt.to_vec());
-                    let mut spec: Spec<Tgt> = BiMap::apply_inverse(&db.spec_bimap(), &composed_key);
-                    spec.canonicalize().unwrap();
-
-                    let solver_idx = intersection.dep_meta;
-
-                    let ncosts = intersection
-                        .action_costs
-                        .0
-                        .iter()
-                        .map(|(_, c)| c.clone())
-                        .collect::<Vec<_>>();
-
-                    let completed_spec_is_goal = tracking_updater
+                    let spec: Spec<Tgt> =
+                        BiMap::apply_inverse(&db.spec_bimap(), &(table_key.clone(), pt.to_vec()));
+                    assert!(spec.is_canonical(), "Spec should be canonical: {spec}");
+                    if tracking_updater
                         .goal_solvers_outstanding
-                        .contains_key(&spec);
-                    if completed_spec_is_goal {
+                        .contains_key(&spec)
+                    {
                         // This can happen if the recursive call incidentally solves a goal as
                         // because it's a dependency (perhaps transitively) of another goal. This
                         // isn't a correctness issue, but it's wasted work which could probably be
                         // prevented.
                         log::warn!("Goal Spec showed up in external visit: {spec}");
                     }
-                    requests[solver_idx].visit_dependency(&spec, &ncosts, &mut tracking_updater);
                 });
         });
     }
@@ -291,8 +299,9 @@ where
                 .map(|x| NormalizedCost::new(x.1.clone(), spec.0.volume()))
                 .collect::<Vec<_>>();
             for solver_id in solver_ids {
+                // TODO: Instead of creating a SpecGeometryRect for each Spec, work at block level.
                 requests[solver_id].visit_dependency(
-                    &spec,
+                    &SpecGeometryRect::single(&spec, Rc::new(db.spec_bimap())),
                     &normalized_costs,
                     &mut tracking_updater,
                 );
