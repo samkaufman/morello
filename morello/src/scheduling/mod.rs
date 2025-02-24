@@ -1330,38 +1330,14 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
-        // TODO: Add an ARM variant
         #[test]
-        fn test_fast_path_is_equivalent_to_slow(spec in arb_canonical_spec::<X86Target>(None, None)) {
-            for action in X86Target::actions(&spec.0) {
-                match (action.top_down_solver(&spec), action.apply(&spec)) {
-                    (Ok(solver), Ok(applied)) => {
-                        let subspecs = solver.subspecs().collect::<Vec<_>>();
-                        let mut applied_subspecs = Vec::new();
-                        collect_nested_specs(&applied, &mut applied_subspecs);
-                        prop_assert_eq!(&subspecs, &applied_subspecs);
+        fn test_fast_path_is_equivalent_to_slow_x86(spec in arb_canonical_spec::<X86Target>(None, None)) {
+            shared_test_fast_path_is_equivalent_to_slow(spec)?;
+        }
 
-                        // Generate some quick-n'-dirty sub-Spec costs and confirm that the fast
-                        // and slow paths yield the same final cost.
-                        let subspec_costs = (0..u8::try_from(subspecs.len()).unwrap())
-                            .map(|subspec_idx| {
-                                Cost {
-                                    main: subspec_idx.into(),
-                                    peaks: MemVec::zero::<X86Target>(),
-                                    depth: subspec_idx,
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        let solver_cost = solver.compute_cost(subspec_costs.iter().cloned());
-                        let applied_cost = compute_impl_cost(&applied, &mut subspec_costs.into_iter());
-                        prop_assert_eq!(solver_cost, applied_cost);
-                    },
-                    (Err(a), Err(b)) => prop_assert_eq!(a, b),
-                    (l, r) => {
-                        prop_assert!(false, "solver returned {l:?} but apply returned {r:?}");
-                    }
-                }
-            }
+        #[test]
+        fn test_fast_path_is_equivalent_to_slow_arm(spec in arb_canonical_spec::<ArmTarget>(None, None)) {
+            shared_test_fast_path_is_equivalent_to_slow(spec)?;
         }
 
         // TODO: Add an ARM variant
@@ -1446,6 +1422,39 @@ mod tests {
                 // TODO: Replace panic with a proptest-friendly result
                 Err(e) => panic!("unexpected error: {:?}", e),
             };
+        }
+        Ok(())
+    }
+
+    fn shared_test_fast_path_is_equivalent_to_slow<Tgt: Target>(
+        spec: Spec<Tgt>,
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        for action in Tgt::actions(&spec.0) {
+            match (action.top_down_solver(&spec), action.apply(&spec)) {
+                (Ok(solver), Ok(applied)) => {
+                    let subspecs = solver.subspecs().collect::<Vec<_>>();
+                    let mut applied_subspecs = Vec::new();
+                    collect_nested_specs(&applied, &mut applied_subspecs);
+                    prop_assert_eq!(&subspecs, &applied_subspecs);
+
+                    // Generate some quick-n'-dirty sub-Spec costs and confirm that the fast
+                    // and slow paths yield the same final cost.
+                    let subspec_costs = (0..u8::try_from(subspecs.len()).unwrap())
+                        .map(|subspec_idx| Cost {
+                            main: subspec_idx.into(),
+                            peaks: MemVec::zero::<Tgt>(),
+                            depth: subspec_idx,
+                        })
+                        .collect::<Vec<_>>();
+                    let solver_cost = solver.compute_cost(subspec_costs.iter().cloned());
+                    let applied_cost = compute_impl_cost(&applied, &mut subspec_costs.into_iter());
+                    prop_assert_eq!(solver_cost, applied_cost);
+                }
+                (Err(a), Err(b)) => prop_assert_eq!(a, b),
+                (l, r) => {
+                    prop_assert!(false, "solver returned {l:?} but apply returned {r:?}");
+                }
+            }
         }
         Ok(())
     }
