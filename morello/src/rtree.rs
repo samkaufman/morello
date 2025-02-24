@@ -462,16 +462,16 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         V: Clone,
     {
         let mut subtracted_partitions = vec![];
-        let mut new_fragments = vec![];
+        let mut new_subrectangles = vec![];
         for (rhs_bottom, rhs_top, rhs_value) in subtrahend_tree.iter() {
-            debug_assert!(new_fragments.is_empty());
+            debug_assert!(new_subrectangles.is_empty());
             let rhs_envelope =
                 AABB::from_corners(rhs_bottom.try_into().unwrap(), rhs_top.try_into().unwrap());
             for intersecting_rect in self.drain_in_envelope_intersecting(rhs_envelope) {
                 let RTreeRect { bottom, top, value } = intersecting_rect;
-                let fragments = rect_subtract(&bottom.arr, &top.arr, rhs_bottom, rhs_top);
-                new_fragments.extend(
-                    fragments
+                let subrectangles = rect_subtract(&bottom.arr, &top.arr, rhs_bottom, rhs_top);
+                new_subrectangles.extend(
+                    subrectangles
                         .into_iter()
                         .map(|(bottom, top)| (bottom, top, value.clone())),
                 );
@@ -495,7 +495,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 ));
             }
             // TODO: Is there really no bulk insert?
-            for (bottom, top, value) in new_fragments.drain(..) {
+            for (bottom, top, value) in new_subrectangles.drain(..) {
                 self.insert(RTreeRect {
                     top: top.try_into().unwrap(),
                     bottom: bottom.try_into().unwrap(),
