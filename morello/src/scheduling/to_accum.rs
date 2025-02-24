@@ -188,14 +188,12 @@ impl<Tgt: Target> DependencyRequest for ToAccumSolverRequest<Tgt> {
                 } => {
                     let insert_result = self.zeroes.insert(spec.clone(), cost.into());
                     debug_assert!(insert_result.is_none(), "visited twice: {}", spec);
-                    let zero_volume = spec.0.volume();
-                    let accum_key = abstract_goal(&spec);
-                    if let Some(accums_map) = self.accums.remove(&accum_key) {
+                    if let Some(accums_map) = self.accums.remove(&abstract_goal(&spec)) {
                         for (accum_spec, accum_costs) in accums_map {
                             self.visit_candidate_dependency_pair(
                                 cost,
                                 &accum_costs,
-                                zero_volume,
+                                spec.0.volume(),
                                 accum_spec.0.volume(),
                                 &accum_spec,
                                 updater,
