@@ -97,8 +97,4 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for BroadcastFirstActionProvi
         // TODO: Return actions! (Missing here and in Targets' actions.)
         vec![]
     }
-
-    fn debugging() -> Option<String> {
-        Some("BroadcastFirst".to_string())
-    }
 }

@@ -144,10 +144,6 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for MoveActionProvider<Tgt> {
     fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
         move_actions(logical_spec).collect()
     }
-
-    fn debugging() -> Option<String> {
-        Some("Move".to_string())
-    }
 }
 
 fn plan_movelet<'a, Tgt: Target>(

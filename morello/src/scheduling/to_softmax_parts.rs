@@ -226,20 +226,12 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for ToSoftmaxPartsActionProvi
         // TODO: Return the actions!
         vec![]
     }
-
-    fn debugging() -> Option<String> {
-        Some("ToSoftmaxParts".to_string())
-    }
 }
 
 impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for ToSoftmaxPartsRecomputeActionProvider<Tgt> {
     fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
         // TODO: Return the actions!
         vec![]
-    }
-
-    fn debugging() -> Option<String> {
-        Some("ToSoftmaxPartsRecompute".to_string())
     }
 }
 

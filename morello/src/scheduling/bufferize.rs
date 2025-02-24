@@ -132,10 +132,6 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for BufferizeActionProvider<T
     fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
         tile_out_actions(logical_spec).collect()
     }
-
-    fn debugging() -> Option<String> {
-        Some("TileOut".to_string())
-    }
 }
 
 #[cfg(test)]

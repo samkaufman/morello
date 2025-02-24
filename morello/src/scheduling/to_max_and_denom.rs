@@ -89,8 +89,4 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for ToMaxAndDenominatorAction
         // TODO: Return the actions!
         vec![]
     }
-
-    fn debugging() -> Option<String> {
-        Some("ToMaxAndDenominator".to_string())
-    }
 }

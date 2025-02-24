@@ -750,19 +750,11 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for TileOutActionProvider<Tgt
     fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
         tile_out_actions(logical_spec).collect()
     }
-
-    fn debugging() -> Option<String> {
-        Some("TileOut".to_string())
-    }
 }
 
 impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for SplitActionProvider<Tgt> {
     fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
         split_actions(logical_spec).collect()
-    }
-
-    fn debugging() -> Option<String> {
-        Some("Split".to_string())
     }
 }
 
