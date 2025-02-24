@@ -438,26 +438,26 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
     where
         T: Clone,
     {
-        let mut new_fragments = vec![];
+        let mut new_subrectangles = vec![];
         for rhs in subtrahend_tree.iter() {
-            debug_assert!(new_fragments.is_empty());
+            debug_assert!(new_subrectangles.is_empty());
             let rhs_envelope = rhs.envelope();
             for intersecting_rect in self.drain_in_envelope_intersecting(rhs_envelope) {
                 let RTreeRect { bottom, top, value } = intersecting_rect;
-                let mut fragments =
+                let mut subrectangles =
                     rect_subtract(&bottom.arr, &top.arr, &rhs.bottom.arr, &rhs.top.arr);
-                if let Some((last_bottom, last_top)) = fragments.pop() {
-                    new_fragments.reserve(fragments.len() + 1);
-                    new_fragments.extend(
-                        fragments
+                if let Some((last_bottom, last_top)) = subrectangles.pop() {
+                    new_subrectangles.reserve(subrectangles.len() + 1);
+                    new_subrectangles.extend(
+                        subrectangles
                             .into_iter()
                             .map(|(bottom, top)| (bottom, top, value.clone())),
                     );
-                    new_fragments.push((last_bottom, last_top, value));
+                    new_subrectangles.push((last_bottom, last_top, value));
                 }
             }
             // TODO: Is there really no bulk insert?
-            for (bottom, top, value) in new_fragments.drain(..) {
+            for (bottom, top, value) in new_subrectangles.drain(..) {
                 self.insert(RTreeRect {
                     top: top.try_into().unwrap(),
                     bottom: bottom.try_into().unwrap(),
