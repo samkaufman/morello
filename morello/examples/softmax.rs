@@ -78,8 +78,9 @@ fn main() {
         .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db, None))
         .subschedule(&[0, 1, 1, 0], |subspec| subspec.synthesize(&db, None))
         .subschedule(&[0, 1, 1, 1, 0], |subspec| subspec.synthesize(&db, None))
-        .subschedule(&[0, 1, 1, 1, 1, 1], |subspec| subspec.synthesize(&db, None))
-        // This [1] corresponds to SoftmaxComplete
+        .subschedule(&[0, 1, 1, 1, 1, 0], |subspec| subspec.synthesize(&db, None))
+        .subschedule(&[0, 1, 1, 1, 1, 2], |subspec| subspec.synthesize(&db, None))
+        // // This [1] corresponds to SoftmaxComplete
         .subschedule(&[1], |softmax_complete| {
             softmax_complete
                 .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
