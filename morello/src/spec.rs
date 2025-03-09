@@ -862,10 +862,18 @@ impl PrimitiveSpecType {
         }
     }
 
+    // TODO: Rename
     pub fn output_is_read(&self) -> bool {
         match self {
-            PrimitiveSpecType::Matmul { accum } | PrimitiveSpecType::Conv { accum } => *accum,
-            _ => false,
+            PrimitiveSpecType::Matmul { accum }
+            | PrimitiveSpecType::Conv { accum }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. }
+            | PrimitiveSpecType::Max { accum, .. }
+            | PrimitiveSpecType::SoftmaxDenominator { accum, .. } => *accum,
+            PrimitiveSpecType::Fill { .. }
+            | PrimitiveSpecType::Move
+            | PrimitiveSpecType::Softmax { .. }
+            | PrimitiveSpecType::SoftmaxComplete { .. } => false,
         }
     }
 
