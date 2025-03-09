@@ -4,7 +4,6 @@ use tikv_jemallocator::Jemalloc;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::info;
-use nonzero::nonzero as nz;
 
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::{io, path};
@@ -189,7 +188,7 @@ where
                 _ => unreachable!(),
             };
             lspec!(Matmul(
-                [*size, *size, *size],
+                [DimSize::new(1).unwrap(), *size, *size, *size],
                 (dt_a, GL, row_major),
                 (dt_b, GL, row_major),
                 (dt_c, GL, row_major),
