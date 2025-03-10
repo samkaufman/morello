@@ -536,6 +536,14 @@ impl PrimitiveBasics {
                     ..
                 },
                 true,
+            )
+            | (
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Matmul { accum: false },
+                    spec_shape,
+                    ..
+                },
+                _,
             ) => TilingInference(vec![
                 (
                     Tiling::new_sliding(
@@ -560,7 +568,7 @@ impl PrimitiveBasics {
                             smaller_output.shape()[2],
                         ],
                         vec![
-                            smaller_output.shape()[0],
+                            smaller_output.step_sizes()[0],
                             spec_shape[2],
                             smaller_output.step_sizes()[2],
                         ],
