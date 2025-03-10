@@ -1626,7 +1626,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             let buffer = self.name_env.get(arg.backing_tensor().unwrap()).unwrap();
                             let buffer_indexing_expr =
                                 zero_points(arg.make_buffer_indexing_expr()) + idx;
-                            println!("About to index with expr: {:?}", buffer_indexing_expr);
                             self.c_index_vec(buffer, &buffer_indexing_expr, None)
                         })
                         .collect::<Vec<_>>()
@@ -1984,7 +1983,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 AffineForm::from(NonAffine::Leaf(CName(var_name.clone())))
             }
             Some(Either::Right(c)) => NonAffineExpr::constant(*c),
-            None => panic!("var was not bound: {v:?}"),
+            None => {
+                // This shouldn't happen. If it does, it is probably because emit_rolled_loop didn't
+                // encounter the BufferVar while enumerating `tile_dim_terms()` or `axes_to_emit`.
+                panic!("var was not bound: {v:?}")
+            }
         })
     }
 
