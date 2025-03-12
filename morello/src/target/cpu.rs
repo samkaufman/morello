@@ -189,7 +189,9 @@ impl<T: CpuTarget> Target for T {
                 .cartesian_product(&all_packing_sizes)
                 .filter_map(|(packing_dim, &packing_size)| {
                     debug_assert_ne!(packing_size.get(), 1);
-                    if shape[packing_dim].get() % packing_size.get() != 0 {
+                    if packing_dim == usize::from(dims.last().unwrap().0)
+                        || shape[packing_dim].get() % packing_size.get() != 0
+                    {
                         return None;
                     }
                     Some(Layout::new(
@@ -212,7 +214,9 @@ impl<T: CpuTarget> Target for T {
                 .cartesian_product(&all_oddeven_sizes)
                 .filter_map(|(packing_dim, &packing_size)| {
                     debug_assert_ne!(packing_size.get(), 1);
-                    if shape[packing_dim].get() % packing_size.get() != 0 {
+                    if packing_dim == usize::from(dims.last().unwrap().0)
+                        || shape[packing_dim].get() % packing_size.get() != 0
+                    {
                         return None;
                     }
                     Some(Layout::new(
