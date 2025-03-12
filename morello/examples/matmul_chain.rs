@@ -100,7 +100,7 @@ fn main() {
         }
     }
 
-    // // Benchmark.
+    // Benchmark.
     const ITERS: u32 = 10;
     let result = imp
         .bench(ITERS, None)
