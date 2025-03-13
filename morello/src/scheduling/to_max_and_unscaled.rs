@@ -8,7 +8,7 @@ use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
-use crate::views::{Param, Tensor, View, ViewE};
+use crate::views::{Param, Tensor, View};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;

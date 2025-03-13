@@ -15,7 +15,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 
-        let LogicalSpec::Primitive(head, auxes, serial_only) = logical_spec else {
+        let LogicalSpec::Primitive(head, _, serial_only) = logical_spec else {
             // TODO: Add a more specific NotApplicableReason
             return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
                 "ToMaxAndDenominator only defined for Primitive",

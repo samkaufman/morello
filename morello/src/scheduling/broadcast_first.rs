@@ -1,17 +1,14 @@
-use crate::common::{DimSize, Shape};
-use crate::imp::loops::{Loop, LoopTile};
+use crate::common::DimSize;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
-use crate::scheduling::{tile_to_apply_err, ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
-use crate::views::{Param, Tensor, Tile, View, ViewE, ViewExt};
-use nonzero::nonzero as nz;
+use crate::views::{Param, Tensor, ViewE};
 use serde::{Deserialize, Serialize};
-use std::iter;
 use std::rc::Rc;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
