@@ -1230,6 +1230,22 @@ mod tests {
                 }
             }
         }
+
+        #[test]
+        fn test_dim_drop_returns_valid_contig(
+            (shape, layout, contig) in arb_shape_layout_contig()
+        ) {
+            let rank = u8::try_from(shape.len()).unwrap();
+            for dims_to_drop in (0..rank).powerset() {
+                // TODO: Remove this check once we enable support for empty (rank=0) layouts
+                if dims_to_drop.len() == shape.len() {
+                    continue;
+                }
+                let (new_layout, new_contig) =
+                    layout.dim_drop(&dims_to_drop.into_iter().collect(), contig);
+                prop_assert!(new_layout.is_valid_contiguous_abs(new_contig));
+            }
+        }
     }
 
     fn test_layout_fully_contiguous_or_not_strategy(
