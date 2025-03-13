@@ -18,30 +18,24 @@ use std::io;
 use std::panic;
 
 fn main() {
-    // First, we'll define the Spec for the program we will implement: a 64x64x64 matrix
-    // multiplication with unsigned, 32-bit integer inputs and output.
-    //
-    // This is a non-accumulating Spec (`Matmul` rather than `MatmulAccum`), which means that the
-    // implementation will set rather then add values to the output tensor.
     const RANK: u8 = 2;
     const SIZE: DimSize = nz!(128u32);
-    let layouts = [row_major(RANK), row_major(RANK)];
     let logical_spec = LogicalSpec::Primitive(
         PrimitiveBasics {
             typ: PrimitiveSpecType::Softmax { scan_dim: 1 },
             spec_shape: vec![SIZE; usize::from(RANK)],
             dtypes: vec![Dtype::Float32; usize::from(RANK)],
         },
-        layouts
-            .into_iter()
-            .map(|layout| TensorSpecAux {
-                contig: layout.contiguous_full(),
+        vec![
+            TensorSpecAux {
+                contig: row_major(RANK).contiguous_full(),
                 aligned: true,
                 level: CpuMemoryLevel::GL,
-                layout,
+                layout: row_major(RANK),
                 vector_size: None,
-            })
-            .collect(),
+            };
+            2
+        ],
         true,
     );
     let spec = Spec::<X86Target>(logical_spec, X86Target::max_mem());
@@ -52,18 +46,14 @@ fn main() {
     let implementation = spec
         // Tile across the batch dimension. (We cannot tile across the scan dimension.)
         .tile_out(&[1, SIZE.get()])
-        // Split into sub-Specs for computing denominator-and-max and then one to complete softmax.
         .to_softmax_parts(GL, row_major(RANK), None, GL, row_major(RANK), None)
-        // This [0] corresponds to SoftmaxDenominatorAndUnscaled
         .subschedule(&[0], |subspec| {
             subspec.to_max_and_unscaled(GL, row_major(RANK), None)
         })
-        // This [0, 0] corresponds to Max
         .subschedule(&[0, 0], |subspec| {
             subspec.to_accum().split(1).synthesize(&db, None)
         })
         .subschedule(&[0, 0, 0], |s| s.synthesize(&db, None))
-        // and [0, 1] corresponds to SoftmaxDenominatorAndUnscaledFromMax1
         .subschedule(&[0, 1], |subspec| {
             subspec
                 .to_accum()
@@ -85,7 +75,6 @@ fn main() {
                         .subschedule(&[1, 1, 1, 1], |m| m.synthesize(&db, None))
                 })
         })
-        // [1] corresponds to DivideVecScalar
         .subschedule(&[1], |subspec| {
             subspec
                 .tile_out(&[1, 4])

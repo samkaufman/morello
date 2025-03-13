@@ -19,11 +19,6 @@ use std::io;
 use std::panic;
 
 fn main() {
-    // First, we'll define the Spec for the program we will implement: a 64x64x64 matrix
-    // multiplication with unsigned, 32-bit integer inputs and output.
-    //
-    // This is a non-accumulating Spec (`Matmul` rather than `MatmulAccum`), which means that the
-    // implementation will set rather then add values to the output tensor.
     const RANK: u8 = 2;
     const SIZE: DimSize = nz!(1024u32);
     let layouts = [row_major(RANK), row_major(RANK)];
@@ -80,7 +75,7 @@ fn main() {
         .subschedule(&[0, 1, 1, 1, 0], |subspec| subspec.synthesize(&db, None))
         .subschedule(&[0, 1, 1, 1, 1, 0], |subspec| subspec.synthesize(&db, None))
         .subschedule(&[0, 1, 1, 1, 1, 2], |subspec| subspec.synthesize(&db, None))
-        // // This [1] corresponds to SoftmaxComplete
+        // This [1] corresponds to SoftmaxComplete
         .subschedule(&[1], |softmax_complete| {
             softmax_complete
                 .move_param(0, CpuMemoryLevel::L1, row_major(2), None)

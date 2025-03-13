@@ -85,6 +85,7 @@ pub enum Action<Tgt: Target> {
     BroadcastFirst(BroadcastFirst<Tgt>),
     /// Rewrites a Softmax into a SoftmaxDenominatorAndUnscaled and a DivideVecScalar.
     ToSoftmaxParts(ToSoftmaxParts<Tgt>),
+    /// Rewrites a Softmax into SoftmaxDenominatorAndMax followed by SoftmaxComplete.
     ToSoftmaxPartsRecompute(ToSoftmaxPartsRecompute<Tgt>),
     /// Rewrites a SoftmaxDenominatorAndMax into a Max followed by SoftmaxDenominator.
     ToMaxAndDenominator(ToMaxAndDenominator),
