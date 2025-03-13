@@ -283,7 +283,7 @@ impl Layout {
         let Layout(dims) = self;
         let first_contig_idx = dims.len() - usize::from(contiguous_abs);
 
-        let new_contig = contiguous_abs
+        let mut new_contig = contiguous_abs
             - u8::try_from(
                 dims[first_contig_idx..]
                     .iter()
@@ -299,6 +299,36 @@ impl Layout {
             }
             let new_logical_dim = logical_dim
                 - u8::try_from(dropped_dims.iter().filter(|&&d| d < *logical_dim).count()).unwrap();
+
+            // Skip if the last dim is Dynamic, this one is Packed, and logical dims match.
+            match (new_dims.last_mut(), phys_dim) {
+                (None, _) => {
+                    // fall through
+                }
+                (Some((last_logical_dim, _)), _) if *last_logical_dim != new_logical_dim => {
+                    // fall through
+                }
+                (Some((_, PhysDim::Dynamic)), PhysDim::Packed(_)) => {
+                    // This Packed is redundant. Skip it.
+                    new_contig -= 1;
+                    continue;
+                }
+                (Some((_, PhysDim::Packed(last_pack))), PhysDim::Packed(pack)) => {
+                    *last_pack = (last_pack.get() * pack.get()).try_into().unwrap();
+                    new_contig -= 1;
+                    continue;
+                }
+                (Some((_, PhysDim::OddEven(_))), PhysDim::Packed(_))
+                | (Some(_), PhysDim::OddEven(_)) => {
+                    // fall through
+                }
+                (Some((_, PhysDim::Packed(_))), PhysDim::Dynamic)
+                | (Some((_, PhysDim::OddEven(_))), PhysDim::Dynamic)
+                | (Some((_, PhysDim::Dynamic)), PhysDim::Dynamic) => {
+                    unreachable!("invalid Layout")
+                }
+            }
+
             new_dims.push((new_logical_dim, *phys_dim));
         }
         (Layout::new(new_dims), new_contig)
@@ -1038,7 +1068,9 @@ mod tests {
         let (new_layout, new_contig) = layout.dim_drop(&iter::once(1u8).collect(), initial_contig);
         assert_eq!(
             new_layout,
-            layout![(0, PhysDim::Dynamic), (0, PhysDim::Packed(4))]
+            // Would be [(0, PhysDim::Dynamic), (0, PhysDim::Packed(4))], but for merging adjacent
+            // dimensions.
+            layout![(0, PhysDim::Dynamic)]
         );
         assert_eq!(new_contig, new_layout.contiguous_full());
     }
@@ -1262,7 +1294,10 @@ mod tests {
                 |(_, dim_order, physical_tile_shape, _)| {
                     for idx in 1..dim_order.len() {
                         if dim_order[idx - 1] == dim_order[idx]
-                            && matches!(physical_tile_shape[idx - 1], PhysDim::Packed(_))
+                            && matches!(
+                                physical_tile_shape[idx - 1],
+                                PhysDim::Dynamic | PhysDim::Packed(_)
+                            )
                             && matches!(physical_tile_shape[idx], PhysDim::Packed(_))
                         {
                             return false;
@@ -1373,30 +1408,15 @@ mod tests {
     }
 
     #[test]
-    fn test_strides_ok_dim2() {
+    fn test_strides_ok_3d() {
         let layout = Layout::new(vec![
             (2, PhysDim::Dynamic),
-            (2, PhysDim::Packed(nz!(2u32))),
             (0, PhysDim::Dynamic),
             (1, PhysDim::Dynamic),
-            (1, PhysDim::Packed(nz!(2u32))),
         ]);
         assert_eq!(
             layout.strides(&[nz!(2u32), nz!(4u32), nz!(6u32)]),
             Ok(vec![nz!(4u32), nz!(1u32), nz!(8u32)])
-        );
-    }
-
-    #[test]
-    fn test_strides_ok_multiple_in_sequence() {
-        let layout = Layout::new(vec![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (1, PhysDim::Packed(nz!(2u32))),
-        ]);
-        assert_eq!(
-            layout.strides(&[nz!(4u32), nz!(6u32)]),
-            Ok(vec![nz!(6u32), nz!(1u32)])
         );
     }
 
