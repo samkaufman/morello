@@ -19,7 +19,7 @@ use crate::scheduling::to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecomput
 use crate::scheduling::ActionT as _;
 use crate::scheduling::{Action, ApplyError};
 use crate::search::top_down;
-use crate::spec::Spec;
+use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
 use crate::views::ViewE;
 use std::iter;
@@ -253,12 +253,16 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
+        let LogicalSpec::Compose { components, .. } = &self.0 else {
+            panic!("Not a Compose");
+        };
+        let consumer = &components[index];
         apply_unwrap(
             self,
             Action::Bufferize(Bufferize {
                 index,
                 level,
-                layout: layout.build(&self.0.parameter_shape(index)),
+                layout: layout.build(&consumer.parameter_shape(0)),
                 vector_size,
             }),
         )
