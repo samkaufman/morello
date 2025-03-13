@@ -115,7 +115,7 @@ where
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
-    assert!(db.max_k().map_or(true, |k| k >= top_k));
+    assert!(db.max_k().is_none_or(|k| k >= top_k));
     if top_k > 1 {
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
