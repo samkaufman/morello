@@ -292,9 +292,27 @@ impl<T: CpuTarget> Target for T {
         let iter = move_actions(spec);
         let iter = iter.chain(tile_out_actions(spec, tiling_depth));
 
+        // OnePrefix is an unfortunate special case. The only viable action is applying
+        // its no-op kernel.
+        if matches!(
+            spec,
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::OnePrefix,
+                    ..
+                },
+                ..
+            )
+        ) {
+            return Box::new(iter::once(Action::Select(Select(
+                (CpuKernel::OnePrefixNoOp).into(),
+                false,
+            ))));
+        }
+
         let possible_kernels: &[CpuKernel] = match spec {
             LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, ..) => match typ {
-                PrimitiveSpecType::OnePrefix => &[CpuKernel::OnePrefixNoOp],
+                PrimitiveSpecType::OnePrefix => unreachable!(),
                 PrimitiveSpecType::Matmul { accum } => {
                     if *accum {
                         const MATMUL_ACCUM_KERNELS: [CpuKernel; 8] = [
@@ -1805,29 +1823,33 @@ mod tests {
             spec in arb_canonical_spec::<X86Target>(None, None),
             tiling_depth in Just(None).prop_union(Just(Some(nz!(1u32)))).or(Just(Some(nz!(2u32)))),
         ) {
+            let lspec = &spec.0;
             let mut seen_source_idxs = HashSet::new();
-            for action in X86Target::actions(&spec.0, tiling_depth) {
+            for action in X86Target::actions(lspec, tiling_depth) {
                 if let Action::Move(Move { source_idx, .. }) = action {
                     seen_source_idxs.insert(source_idx);
                 }
             }
 
-            let moveable_parameter_idxs = spec
-                .0
-                .parameters()
-                .into_iter()
-                .enumerate()
-                .filter_map(|(idx, parameter)| {
-                    let dest_layouts = X86Target::move_destination_layouts(
-                        parameter.shape(), parameter.dtype()
-                    );
-                    if dest_layouts.is_empty() {
-                        None
-                    } else {
-                        Some(u8::try_from(idx).unwrap())
-                    }
-                })
-                .collect::<HashSet<_>>();
+            let mut moveable_parameter_idxs = HashSet::new();
+            // OnePrefix is the exception. It should have no Moves.
+            if !matches!(
+                lspec,
+                LogicalSpec::Primitive(PrimitiveBasics { typ: PrimitiveSpecType::OnePrefix, ..}, ..)
+            ) {
+                lspec
+                    .parameters()
+                    .into_iter()
+                    .enumerate()
+                    .for_each(|(idx, parameter)| {
+                        let dest_layouts = X86Target::move_destination_layouts(
+                            parameter.shape(), parameter.dtype()
+                        );
+                        if !dest_layouts.is_empty() {
+                            moveable_parameter_idxs.insert(u8::try_from(idx).unwrap());
+                        }
+                    });
+            }
             prop_assert_eq!(
                 &seen_source_idxs,
                 &moveable_parameter_idxs,
