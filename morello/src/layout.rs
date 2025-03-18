@@ -293,7 +293,7 @@ impl Layout {
             .unwrap();
 
         let mut new_dims = Vec::with_capacity(dims.len().saturating_sub(1));
-        for (logical_dim, phys_dim) in dims {
+        for (idx, (logical_dim, phys_dim)) in dims.iter().enumerate() {
             if dropped_dims.contains(logical_dim) {
                 continue;
             }
@@ -310,12 +310,16 @@ impl Layout {
                 }
                 (Some((_, PhysDim::Dynamic)), PhysDim::Packed(_)) => {
                     // This Packed is redundant. Skip it.
-                    new_contig -= 1;
+                    if idx >= first_contig_idx {
+                        new_contig -= 1;
+                    }
                     continue;
                 }
                 (Some((_, PhysDim::Packed(last_pack))), PhysDim::Packed(pack)) => {
                     *last_pack = (last_pack.get() * pack.get()).try_into().unwrap();
-                    new_contig -= 1;
+                    if idx >= first_contig_idx {
+                        new_contig -= 1;
+                    }
                     continue;
                 }
                 (Some((_, PhysDim::OddEven(_))), PhysDim::Packed(_))
@@ -1071,6 +1075,120 @@ mod tests {
             // Would be [(0, PhysDim::Dynamic), (0, PhysDim::Packed(4))], but for merging adjacent
             // dimensions.
             layout![(0, PhysDim::Dynamic)]
+        );
+        assert_eq!(new_contig, new_layout.contiguous_full());
+    }
+
+    #[test]
+    fn test_dim_drop_3() {
+        let layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(4)),
+            (2, PhysDim::Dynamic)
+        ];
+        let initial_contig = layout.contiguous_full();
+        let (new_layout, new_contig) = layout.dim_drop(&iter::once(1u8).collect(), initial_contig);
+        assert_eq!(
+            new_layout,
+            layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
+        );
+        assert_eq!(new_contig, new_layout.contiguous_full());
+    }
+
+    #[test]
+    fn test_dim_drop_4() {
+        let layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(4)),
+            (2, PhysDim::Dynamic)
+        ];
+        let initial_contig = 3;
+        let (new_layout, new_contig) = layout.dim_drop(&iter::once(1u8).collect(), initial_contig);
+        assert_eq!(
+            new_layout,
+            layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
+        );
+        // Merging the Dynamic and Packed physical dimensions for logical dimension 0, which are
+        // adjacent after dropping dimension 1, results in a loss of contiguousness. Initially,
+        // we knew `(0, PhysDim::Packed(4))` was contiguous but `(0, PhysDim::Dynamic)` was not.
+        // After merging, we lose the information about those 4-value strips. The final contig.
+        // value becomes 1, corresponding to what was `(2, PhysDim::Dynamic)` and is now
+        // `(1, PhysDim::Dynamic)`.
+        assert_eq!(new_contig, 1);
+    }
+
+    #[test]
+    fn test_dim_drop_5() {
+        let layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(4)),
+            (2, PhysDim::Dynamic)
+        ];
+        let initial_contig = 3;
+        let (new_layout, new_contig) = layout.dim_drop(&iter::once(0u8).collect(), initial_contig);
+        assert_eq!(
+            new_layout,
+            layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
+        );
+        assert_eq!(new_contig, 2);
+    }
+
+    #[test]
+    fn test_dim_drop_6() {
+        let layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(4)),
+            (2, PhysDim::Dynamic)
+        ];
+        let initial_contig = 2;
+        let (new_layout, new_contig) = layout.dim_drop(&iter::once(1u8).collect(), initial_contig);
+        assert_eq!(
+            new_layout,
+            layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
+        );
+        // As in test_dim_drop_4, we lose some contiguousness information here as a result
+        // of merging during dim_drop.
+        assert_eq!(new_contig, 1);
+    }
+
+    #[test]
+    fn test_dim_drop_7() {
+        let layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(4)),
+            (2, PhysDim::Dynamic)
+        ];
+        let initial_contig = layout.contiguous_full();
+        let (new_layout, new_contig) = layout.dim_drop(&iter::once(0u8).collect(), initial_contig);
+        assert_eq!(
+            new_layout,
+            layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
+        );
+        assert_eq!(new_contig, new_layout.contiguous_full());
+    }
+
+    #[test]
+    fn test_dim_drop_8() {
+        let layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(4)),
+            (2, PhysDim::Dynamic)
+        ];
+        let initial_contig = layout.contiguous_full();
+        let (new_layout, new_contig) = layout.dim_drop(&iter::once(2u8).collect(), initial_contig);
+        assert_eq!(
+            new_layout,
+            layout![
+                (0, PhysDim::Dynamic),
+                (1, PhysDim::Dynamic),
+                (0, PhysDim::Packed(4))
+            ]
         );
         assert_eq!(new_contig, new_layout.contiguous_full());
     }
