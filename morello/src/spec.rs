@@ -839,24 +839,14 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
         type_strategy
             .prop_flat_map(move |typ| {
                 let cnt = typ.operand_count();
-                let dtypes_strategy = match &typ {
-                    // Softmax and OnePrefix have two Dtypes which must match.
-                    PrimitiveSpecType::Softmax { .. }
-                    | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
-                    | PrimitiveSpecType::SoftmaxComplete { .. }
-                    | PrimitiveSpecType::OnePrefix => match args.first_input_dtype {
-                        Some(d) => Just(vec![d; cnt]).sboxed(),
-                        None => any::<Dtype>().prop_map(move |d| vec![d; cnt]).sboxed(),
-                    },
-                    _ => match args.first_input_dtype {
-                        Some(d) => proptest::collection::vec(any::<Dtype>(), cnt - 1)
-                            .prop_map(move |mut v| {
-                                v.insert(0, d);
-                                v
-                            })
-                            .sboxed(),
-                        None => proptest::collection::vec(any::<Dtype>(), cnt).sboxed(),
-                    },
+                let dtypes_strategy = match args.first_input_dtype {
+                    Some(d) => proptest::collection::vec(any::<Dtype>(), cnt - 1)
+                        .prop_map(move |mut v| {
+                            v.insert(0, d);
+                            v
+                        })
+                        .sboxed(),
+                    None => proptest::collection::vec(any::<Dtype>(), cnt).sboxed(),
                 };
                 (Just(typ), dtypes_strategy)
             })
@@ -2295,14 +2285,12 @@ impl BiMap for PrimitiveBasicsBimap {
                 },
                 once(!accum as _).chain(shifted_shape).collect(),
             ),
-            PrimitiveSpecType::OnePrefix => {
-                debug_assert_eq!(dtypes.len(), 2);
-                debug_assert_eq!(dtypes[0], dtypes[1]);
-                (
-                    SpecKey::OnePrefix { dtype: dtypes[0] },
-                    shifted_shape.collect(),
-                )
-            }
+            PrimitiveSpecType::OnePrefix => (
+                SpecKey::OnePrefix {
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                },
+                shifted_shape.collect(),
+            ),
             PrimitiveSpecType::Move => (
                 SpecKey::Move {
                     dtypes: dtypes.as_slice().try_into().unwrap(),
@@ -2462,10 +2450,10 @@ impl BiMap for PrimitiveBasicsBimap {
                     dtypes,
                 }
             }
-            SpecKey::OnePrefix { dtype } => PrimitiveBasics {
+            SpecKey::OnePrefix { dtypes } => PrimitiveBasics {
                 typ: PrimitiveSpecType::OnePrefix,
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
-                dtypes: vec![*dtype, *dtype],
+                dtypes: dtypes.into(),
             },
             SpecKey::Move { dtypes } => PrimitiveBasics {
                 typ: PrimitiveSpecType::Move,

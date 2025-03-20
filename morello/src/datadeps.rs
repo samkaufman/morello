@@ -9,7 +9,7 @@ use std::hash::Hash;
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub enum SpecKey {
     OnePrefix {
-        dtype: Dtype,
+        dtypes: [Dtype; 2],
     },
     Matmul {
         dtypes: [Dtype; 3],
@@ -88,7 +88,7 @@ impl SpecKey {
                 Box::new(dtypes.iter().copied())
             }
             SpecKey::SoftmaxDenominator { dtypes, .. } => Box::new(dtypes.iter().copied()),
-            SpecKey::OnePrefix { dtype } => Box::new([*dtype, *dtype].into_iter()),
+            SpecKey::OnePrefix { dtypes } => Box::new(dtypes.iter().copied()),
             SpecKey::Fill { dtype, value: _ } => Box::new(std::iter::once(*dtype)),
             SpecKey::Compose { .. } => unimplemented!(),
         }

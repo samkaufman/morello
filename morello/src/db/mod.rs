@@ -1241,7 +1241,9 @@ pub fn iter_blocks_in_single_dim_range(
 fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::PathBuf {
     let ((spec_key, table_key_rest), block_pt) = superblock_key;
     let mut path = match spec_key {
-        SpecKey::OnePrefix { dtype } => root.join("OnePrefix").join(dtype.to_string()),
+        SpecKey::OnePrefix { dtypes } => root
+            .join("OnePrefix")
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::Matmul { dtypes } => root
             .join("Matmul")
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
