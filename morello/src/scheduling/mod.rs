@@ -12,6 +12,7 @@ use crate::rtree::RTreeDyn;
 use crate::search::ImplReducer;
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target};
+use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::utils::diagonals_shifted;
 use crate::views::{Param, Tensor, TileError, View, ViewE};
@@ -311,10 +312,12 @@ pub struct NaiveBottomUpSolver<Tgt: Target, P> {
     _phantom: PhantomData<(Tgt, P)>,
 }
 
+type RequestsVec<Tgt> = Vec<(Rc<RefCell<NaiveWorkingImpl<Tgt>>>, usize)>;
+
 #[derive(Debug)]
 pub struct NaiveBottomUpSolverRequest<Tgt: Target, P> {
     requests: SpecGeometry<Tgt>, // TODO: Redundant with requests_maps' keys
-    requests_map: HashMap<Spec<Tgt>, Vec<(Rc<RefCell<NaiveWorkingImpl<Tgt>>>, usize)>>,
+    requests_map: HashMap<Spec<Tgt>, RequestsVec<Tgt>>,
     _phantom: PhantomData<P>,
 }
 

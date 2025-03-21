@@ -971,7 +971,7 @@ mod tests {
         prop_assert, prop_assert_eq, prop_assume, proptest,
         strategy::{Just, Strategy},
     };
-    use std::{collections::HashSet, iter, num::NonZeroU8};
+    use std::{collections::HashSet, iter};
 
     #[test]
     fn test_parenthesized_shorthand_packed() {

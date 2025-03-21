@@ -1,13 +1,12 @@
 use crate::common::{DimSize, Dtype, Shape};
-use crate::cost::NormalizedCost;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{
-    Action, ActionT, ApplyError, BottomUpSolver, NaiveBottomUpActionProvider, NaiveBottomUpSolver,
-    NotApplicableReason, VisitUpdater,
+    Action, ActionT, ApplyError, NaiveBottomUpActionProvider, NaiveBottomUpSolver,
+    NotApplicableReason,
 };
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Target, LEVEL_COUNT};
