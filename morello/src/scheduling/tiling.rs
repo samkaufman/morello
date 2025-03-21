@@ -1019,7 +1019,7 @@ mod tests {
     use crate::grid::canon::CanonicalBimap;
     use crate::grid::general::BiMap;
     use crate::imp::visit_leaves;
-    use crate::layout::{arb_shape_and_same_rank_layout, col_major, row_major, Layout, PhysDim};
+    use crate::layout::{arb_shape_and_same_rank_layout, row_major, Layout, PhysDim};
     use crate::scheduling::{Action, SpecGeometry};
     use crate::spec::arb_canonical_spec;
     use crate::target::{ArmTarget, CpuMemoryLevel, X86Target};

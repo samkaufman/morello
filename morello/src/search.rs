@@ -232,8 +232,8 @@ where
             requests[solver_idx].visit_dependency(
                 &SpecGeometryRect::new(
                     table_key.clone(),
-                    intersection.bottom.iter().map(|&x| x as u32).collect(),
-                    intersection.top.iter().map(|&x| x as u32).collect(),
+                    intersection.bottom.to_vec(),
+                    intersection.top.to_vec(),
                     block.bimap(),
                 ),
                 &ncosts,
@@ -342,6 +342,7 @@ where
 }
 
 /// Scan the queue and process any Specs for which all solvers are complete.
+#[allow(clippy::type_complexity)]
 fn process_visit_queue<Tgt>(
     block: &SpecGeometryRect<Tgt>,
     tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,

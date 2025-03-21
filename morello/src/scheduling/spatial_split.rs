@@ -155,7 +155,7 @@ impl<Tgt: Target> BottomUpSolver for SpatialSplitSolver<Tgt> {
     type Request = SpatialSplitSolverRequest<Tgt>;
 
     fn request(&mut self, dependents: &SpecGeometry<Tgt>) -> Self::Request {
-        let mut dependencies = SpecGeometry::new(Rc::clone(dependents.bimap()));
+        let dependencies = SpecGeometry::new(Rc::clone(dependents.bimap()));
         dependents.iter().for_each(|rect| {
             if spec_is_conv(rect.bottom()) || spec_is_conv(rect.top()) {
                 todo!("fill in dependencies");
