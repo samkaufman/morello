@@ -142,7 +142,7 @@ where
 
     // Build R-Trees of all goals' dependencies.
     // TODO: Use a Tgt-specific ActionT type.
-    let mut deps_trees = HashMap::<TableKey, RTreeDyn<usize>>::new();
+    let mut deps_trees = HashMap::<TableKey, RTreeDyn<HashSet<usize>>>::new();
     for (solver_idx, solver) in solvers.iter_mut().enumerate() {
         // TODO: Call a ranged `apply_no_dependency_updates` equivalent instead of this loop.
         requests.push(solver.request(&block.clone().into()));
@@ -170,14 +170,22 @@ where
                     deps_trees.insert(rect.table_key().clone(), RTreeDyn::empty(dep_pt_low.len()));
                 }
                 let deps_tree_entry = deps_trees.get_mut(rect.table_key()).unwrap();
-                deps_tree_entry.merge_insert(&dep_pt_low_i64, &dep_pt_high_i64, solver_idx, true);
+                deps_tree_entry.fold_insert(
+                    &dep_pt_low_i64,
+                    &dep_pt_high_i64,
+                    [solver_idx].into_iter().collect(),
+                    |mut a, b| {
+                        a.extend(b);
+                        a
+                    },
+                );
             });
         }
     }
 
     // Start satisfying external (non-goal) dependencies. First, iterate over intersecting tiles,
     // then intersection-join with `deps_trees`, passing each to BottomUpSolver::visit_dependency.
-    // TODO: Avoid recursion for dependencies which are *not* external!
+    // TODO: Avoid recursion for *internal* dependencies.
     for (table_key, deps_tree) in &deps_trees {
         // Walk over every element of the dependency tree to collect all Specs which weren't in the
         // database and aren't current goals. Then recurse. Note that these Specs may span multiple
@@ -193,7 +201,6 @@ where
         missing_subspecs_rtree
             .iter()
             .for_each(|(dep_bottom, dep_top, _)| {
-                // TODO: Call synthesize_block once per block, not once per solver.
                 let dep_bottom_u32 = dep_bottom
                     .iter()
                     .map(|&x| BimapInt::try_from(x).unwrap())
@@ -202,17 +209,15 @@ where
                     .iter()
                     .map(|&x| BimapInt::try_from(x).unwrap())
                     .collect::<Vec<_>>();
-                synthesize_block(
-                    db,
-                    top_k,
-                    // TODO: Don't build SpecGeometryRect. The point is preserving the BiMap by construction.
-                    &SpecGeometryRect::new(
-                        table_key.clone(),
-                        dep_bottom_u32,
-                        dep_top_u32,
-                        block.bimap(),
-                    ),
+                // TODO: Don't build SpecGeometryRect. The point is preserving the BiMap by construction.
+                let subblock = SpecGeometryRect::new(
+                    table_key.clone(),
+                    dep_bottom_u32,
+                    dep_top_u32,
+                    block.bimap(),
                 );
+                debug_assert!(!subblock.intersects(block));
+                synthesize_block(db, top_k, &subblock);
             });
 
         // Spatial join on the database to collect all dependencies. At this point, after recursion,
@@ -221,23 +226,24 @@ where
         db.intersect(table_key, deps_tree).for_each(|intersection| {
             // TODO: Instead of resolving Specs individually, resolve ranges (possibly broken by
             //       dimensions/normalization group).
-            let solver_idx = intersection.dep_meta;
             let ncosts = intersection
                 .action_costs
                 .0
                 .iter()
                 .map(|(_, c)| c.clone())
                 .collect::<Vec<_>>();
-            requests[solver_idx].visit_dependency(
-                &SpecGeometryRect::new(
-                    table_key.clone(),
-                    intersection.bottom.to_vec(),
-                    intersection.top.to_vec(),
-                    block.bimap(),
-                ),
-                &ncosts,
-                &mut tracking_updater,
-            );
+            intersection.dep_meta.iter().for_each(|&solver_idx| {
+                requests[solver_idx].visit_dependency(
+                    &SpecGeometryRect::new(
+                        table_key.clone(),
+                        intersection.bottom.to_vec(),
+                        intersection.top.to_vec(),
+                        block.bimap(),
+                    ),
+                    &ncosts,
+                    &mut tracking_updater,
+                );
+            });
 
             // TODO: Remove the following
             #[cfg(debug_assertions)]
@@ -266,7 +272,6 @@ where
 
     // TODO: Start pushing results bottom-up within the goal block. Remember that
     //       we need links within coordinates of the space, but not between.
-    // TODO: The following placeholder implementation sucks.
     // visit_queue maps Specs to decisions and requesting solver IDs. If there are no
     // solver IDs, then the Specs are just put into the database. If there are, then we
     // will track which Specs are updated as a consequence of a solver visit and enqueue
@@ -282,7 +287,7 @@ where
         tracking_updater.goal_solvers_outstanding,
     );
 
-    process_visit_queue(block, &mut tracking_updater, &deps_trees, &mut visit_queue);
+    process_completed_goals(block, &mut tracking_updater, &deps_trees, &mut visit_queue);
 
     // Repeatedly scan the visit_queue, putting into the database and enqueueing new Specs
     // affected by visits. (Pushes completion up the internal dep. lattice.)
@@ -315,7 +320,7 @@ where
         }
 
         // TODO: Repeatedly scanning all goals is an inefficient way to dispatch this queue.
-        process_visit_queue(block, &mut tracking_updater, &deps_trees, &mut visit_queue);
+        process_completed_goals(block, &mut tracking_updater, &deps_trees, &mut visit_queue);
     }
 
     #[cfg(debug_assertions)]
@@ -340,12 +345,15 @@ where
     }
 }
 
-/// Scan the queue and process any Specs for which all solvers are complete.
+/// Scans all Specs in a block. If all corresponding solvers have completed
+/// (according to `tracking_updater`), it adds the Spec and its final action and
+/// cost to the visit queue, and updates the [TrackingUpdater] to mark the goal
+/// as processed (`usize::MAX`).
 #[allow(clippy::type_complexity)]
-fn process_visit_queue<Tgt>(
+fn process_completed_goals<Tgt>(
     block: &SpecGeometryRect<Tgt>,
     tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
-    deps_trees: &HashMap<TableKey, RTreeDyn<usize>>,
+    deps_trees: &HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
     visit_queue: &mut HashMap<Spec<Tgt>, (Vec<(ActionNum, Cost)>, Vec<usize>)>,
 ) where
     Tgt: Target,
@@ -361,13 +369,24 @@ fn process_visit_queue<Tgt>(
                 .iter()
                 .map(|&x| BimapSInt::from(x))
                 .collect::<Vec<_>>();
-            let requesting_solver_idxs = deps_trees
-                .get(&spec_db_key)
-                .map(|t| t.locate_all_at_point(&spec_pt_i64).copied().collect())
-                .unwrap_or_default();
+            let mut requesting_solver_idxs = Vec::new();
+            if let Some(tree) = deps_trees.get(&spec_db_key) {
+                debug_assert!(
+                    tree.locate_all_at_point(&spec_pt_i64).count() <= 1,
+                    "More than one block found at point: {spec_pt_i64:?}"
+                );
+                if let Some(solver_idxs) = tree.locate_at_point(&spec_pt_i64) {
+                    requesting_solver_idxs.extend(solver_idxs.iter().copied());
+                }
+            }
             let reducer = tracking_updater.inner_updater.remove(&goal).unwrap();
             let decisions = reducer.finalize();
-            visit_queue.insert(goal, (decisions, requesting_solver_idxs));
+            if visit_queue
+                .insert(goal, (decisions, requesting_solver_idxs))
+                .is_some()
+            {
+                panic!("Duplicate goal in visit queue");
+            }
             *incomplete_solvers = usize::MAX;
         }
     });
