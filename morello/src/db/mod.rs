@@ -399,8 +399,8 @@ impl FilesDatabase {
     }
 
     // TODO: Return normalized cost or rescaled?
-    // TODO: We should return ptrs. to T, not require it to be Copy.
-    pub(crate) fn intersect<'a, T: Copy>(
+    // TODO: We should return ptrs. to T, not require it to be Clone.
+    pub(crate) fn intersect<'a, T: Clone>(
         &'a self,
         table_key: &'a TableKey,
         rtree: &'a RTreeDyn<T>,
@@ -449,7 +449,7 @@ impl FilesDatabase {
                             bottom: intersect_bottom_u32,
                             top: intersect_top_u32,
                             action_costs: v,
-                            dep_meta: *dep_meta,
+                            dep_meta: dep_meta.clone(),
                         }
                     },
                 )

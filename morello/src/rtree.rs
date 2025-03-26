@@ -125,9 +125,9 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, fold: F)
+            pub fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, fold: F)
             where
-                T: Clone,
+                T: Clone,  // TODO: Shouldn't need to be Clone. Instead, give references.
                 F: FnMut(T, T) -> T,
             {
                 match self {

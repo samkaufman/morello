@@ -17,6 +17,7 @@ use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::utils::{diagonals_shifted, snap_memvec_up};
 use crate::views::{Param, Tensor, TileError, View, ViewE};
 use auto_impl::auto_impl;
+use itertools::izip;
 use once_cell::unsync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
@@ -530,6 +531,17 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
 
     pub fn top_point(&self) -> &[BimapInt] {
         &self.top
+    }
+
+    pub(crate) fn intersects(&self, other: &SpecGeometryRect<Tgt>) -> bool {
+        for (self_bottom, self_top, other_bottom, other_top) in
+            izip!(&self.bottom, &self.top, &other.bottom, &other.top)
+        {
+            if self_top < other_bottom || self_bottom > other_top {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn accums(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> {
