@@ -13,7 +13,8 @@ use crate::grid::general::BiMap;
 use crate::grid::linear::{BimapInt, BimapSInt};
 use crate::rtree::RTreeDyn;
 use crate::scheduling::{
-    Action, ActionT, BottomUpSolver, DependencyRequest, SpecGeometryRect, VisitUpdater,
+    Action, ActionBottomUpSolver, ActionBottomUpSolverRequest, ActionT, BottomUpSolver,
+    DependencyRequest, SpecGeometryRect, VisitUpdater,
 };
 use crate::spec::Spec;
 use crate::target::Target;
@@ -127,8 +128,6 @@ where
     debug_assert!(block.iter_specs().all(|g| g.is_canonical()));
 
     let mut solvers = Action::bottom_up_solvers().collect::<Vec<_>>();
-    let mut requests = vec![]; // map solver indices to their requests
-    requests.reserve_exact(solvers.len());
 
     let mut reducers = HashMap::new();
     let mut goal_solvers_outstanding = HashMap::new();
@@ -141,6 +140,55 @@ where
         goal_solvers_outstanding,
     };
 
+    let (mut requests, deps_trees) =
+        build_dependency_rtrees(block, &mut tracking_updater, &mut solvers);
+    solve_external(
+        block,
+        &mut tracking_updater,
+        &deps_trees,
+        &mut requests,
+        db,
+        top_k,
+    );
+    solve_internal(block, &mut tracking_updater, &deps_trees, &mut requests, db);
+
+    #[cfg(debug_assertions)]
+    {
+        let incomplete_goals = tracking_updater
+            .goal_solvers_outstanding
+            .iter()
+            .filter_map(|(g, &o)| {
+                if o != usize::MAX {
+                    Some(format!("{g}[{o}]"))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if !incomplete_goals.is_empty() {
+            panic!(
+                "Some goals were not completed: {}",
+                incomplete_goals.join(", ")
+            );
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn build_dependency_rtrees<Tgt>(
+    block: &SpecGeometryRect<Tgt>,
+    tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
+    solvers: &mut [ActionBottomUpSolver<Tgt>],
+) -> (
+    Vec<ActionBottomUpSolverRequest<Tgt>>,
+    HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
+)
+where
+    Tgt: Target,
+{
+    let mut requests = vec![]; // map solver indices to their requests
+    requests.reserve_exact(solvers.len());
+
     // Build R-Trees of all goals' dependencies.
     // TODO: Use a Tgt-specific ActionT type.
     let mut deps_trees = HashMap::<TableKey, RTreeDyn<HashSet<usize>>>::new();
@@ -148,7 +196,7 @@ where
         // TODO: Call a ranged `apply_no_dependency_updates` equivalent instead of this loop.
         requests.push(solver.request(&block.clone().into()));
         block.iter_specs().for_each(|goal| {
-            requests[solver_idx].apply_no_dependency_updates(&goal, &mut tracking_updater);
+            requests[solver_idx].apply_no_dependency_updates(&goal, tracking_updater);
         });
 
         if let Some(query) = requests[solver_idx].queries() {
@@ -183,11 +231,25 @@ where
             });
         }
     }
+    (requests, deps_trees)
+}
 
-    // Start satisfying external (non-goal) dependencies. First, iterate over intersecting tiles,
-    // then intersection-join with `deps_trees`, passing each to BottomUpSolver::visit_dependency.
-    // TODO: Avoid recursion for *internal* dependencies.
-    for (table_key, deps_tree) in &deps_trees {
+/// Satisfying external (non-goal) dependencies. First, iterate over intersecting tiles,
+/// then intersection-join with `deps_trees`, passing each to BottomUpSolver::visit_dependency.
+/// TODO: Avoid recursion for *internal* dependencies.
+fn solve_external<Tgt>(
+    block: &SpecGeometryRect<Tgt>,
+    tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
+    deps_trees: &HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
+    requests: &mut [ActionBottomUpSolverRequest<Tgt>],
+    db: &FilesDatabase,
+    top_k: usize,
+) where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+{
+    for (table_key, deps_tree) in deps_trees {
         // Walk over every element of the dependency tree to collect all Specs which weren't in the
         // database and aren't current goals. Then recurse. Note that these Specs may span multiple
         // database pages.
@@ -242,7 +304,7 @@ where
                         block.bimap(),
                     ),
                     &ncosts,
-                    &mut tracking_updater,
+                    tracking_updater,
                 );
             });
 
@@ -270,15 +332,26 @@ where
                 });
         });
     }
+}
 
-    // TODO: Start pushing results bottom-up within the goal block. Remember that
-    //       we need links within coordinates of the space, but not between.
+/// Visit internal Specs, propagating results internally.
+fn solve_internal<Tgt>(
+    block: &SpecGeometryRect<Tgt>,
+    tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
+    deps_trees: &HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
+    requests: &mut [ActionBottomUpSolverRequest<Tgt>],
+    db: &FilesDatabase,
+) where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+{
     // visit_queue maps Specs to decisions and requesting solver IDs. If there are no
     // solver IDs, then the Specs are just put into the database. If there are, then we
     // will track which Specs are updated as a consequence of a solver visit and enqueue
     // those.
     let mut visit_queue = HashMap::new();
-    // Fill the visit_queue with the Specs completed with external dependencies only.
+    // Assert at least one Spec was completed.
     assert!(
         tracking_updater
             .goal_solvers_outstanding
@@ -287,62 +360,32 @@ where
         "No Specs were completed with external dependencies only, stalling algorithm: {:?}",
         tracking_updater.goal_solvers_outstanding,
     );
+    process_completed_goals(block, tracking_updater, deps_trees, &mut visit_queue);
 
-    process_completed_goals(block, &mut tracking_updater, &deps_trees, &mut visit_queue);
-
-    // Repeatedly scan the visit_queue, putting into the database and enqueueing new Specs
-    // affected by visits. (Pushes completion up the internal dep. lattice.)
     let mut visited = HashSet::<Spec<Tgt>>::new(); // TODO: Remove `visited`
     while !visit_queue.is_empty() {
         for (spec, (decisions, solver_ids)) in visit_queue.drain() {
             if !visited.insert(spec.clone()) {
                 panic!("Spec should not be visited twice: {spec}");
             }
-
-            // TODO: This converts to NormalizedCost, but do solvers just denormalize again?
             let normalized_costs = decisions
                 .iter()
                 .map(|x| NormalizedCost::new(x.1.clone(), spec.0.volume()))
                 .collect::<Vec<_>>();
             for solver_id in solver_ids {
-                // TODO: Instead of creating a SpecGeometryRect for each Spec, work at block level.
                 requests[solver_id].visit_dependency(
                     &SpecGeometryRect::single(&spec, Rc::new(db.spec_bimap())),
                     &normalized_costs,
-                    &mut tracking_updater,
+                    tracking_updater,
                 );
             }
-
             #[cfg(debug_assertions)]
             if db.get(&spec).is_some() {
                 log::warn!("Re-putting {spec}");
             }
             db.put(spec, decisions);
         }
-
-        // TODO: Repeatedly scanning all goals is an inefficient way to dispatch this queue.
-        process_completed_goals(block, &mut tracking_updater, &deps_trees, &mut visit_queue);
-    }
-
-    #[cfg(debug_assertions)]
-    {
-        let incomplete_goals = tracking_updater
-            .goal_solvers_outstanding
-            .iter()
-            .filter_map(|(g, &o)| {
-                if o != usize::MAX {
-                    Some(format!("{g}[{o}]"))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        if !incomplete_goals.is_empty() {
-            panic!(
-                "Some goals were not completed: {}",
-                incomplete_goals.join(", ")
-            );
-        }
+        process_completed_goals(block, tracking_updater, deps_trees, &mut visit_queue);
     }
 }
 
