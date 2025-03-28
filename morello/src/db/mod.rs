@@ -12,7 +12,7 @@ use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::rtree::RTreeDyn;
-use crate::scheduling::{Action, ActionEncodeDecode, ActionT as _};
+use crate::scheduling::{Action, ActionEncodeDecode, ActionT as _, SpecGeometry};
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
@@ -458,7 +458,18 @@ impl FilesDatabase {
         })
     }
 
-    pub(crate) fn subtract_from<U: Clone>(&self, table_key: &TableKey, minuhend: &mut RTreeDyn<U>) {
+    pub(crate) fn subtract_from<Tgt: Target>(&self, minuhend: &mut SpecGeometry<Tgt>) {
+        // TODO: Somehow enforce that SpecGeometry's BiMap matches the databases's BiMap.
+        for (table_key, tree) in minuhend.0.iter_mut() {
+            self.subtract_from_rtree(table_key, tree)
+        }
+    }
+
+    pub(crate) fn subtract_from_rtree<U: Clone>(
+        &self,
+        table_key: &TableKey,
+        minuhend: &mut RTreeDyn<U>,
+    ) {
         let rank = minuhend.dim_count();
         let page_shape = (0..rank)
             .map(|dim| block_size_dim(dim, rank))

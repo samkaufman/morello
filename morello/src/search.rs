@@ -19,7 +19,7 @@ use crate::grid::linear::{BimapInt, BimapSInt};
 use crate::rtree::RTreeDyn;
 use crate::scheduling::{
     Action, ActionBottomUpSolver, ActionBottomUpSolverRequest, ActionT, BottomUpSolver,
-    DependencyRequest, SpecGeometryRect, VisitUpdater,
+    DependencyRequest, SpecGeometry, SpecGeometryRect, VisitUpdater,
 };
 use crate::spec::Spec;
 use crate::target::Target;
@@ -126,13 +126,23 @@ where
     // Assert that every Spec in the given block is canonical.
     debug_assert!(block.iter_specs().all(|g| g.is_canonical()));
 
+    // TODO: Avoid cloning block. Instead, move the block in.
+    let mut goals = SpecGeometry::from(block.clone());
+    db.subtract_from(&mut goals);
+    if goals.is_empty() {
+        return;
+    }
+
     let mut solvers = Action::bottom_up_solvers().collect::<Vec<_>>();
 
     let mut reducers = HashMap::new();
     let mut goal_solvers_outstanding = HashMap::new();
-    block.iter_specs().for_each(|g| {
-        reducers.insert(g.clone(), ImplReducer::new(top_k, vec![]));
-        goal_solvers_outstanding.insert(g.clone(), solvers.len());
+    goals.iter().for_each(|rect| {
+        // TODO: Using SpecGeometry::iter allocates a bunch of rects unnecessarily.
+        rect.iter_specs().for_each(|g| {
+            reducers.insert(g.clone(), ImplReducer::new(top_k, vec![]));
+            goal_solvers_outstanding.insert(g.clone(), solvers.len());
+        });
     });
     let mut tracking_updater = TrackingUpdater {
         inner_updater: &mut reducers,
@@ -140,16 +150,22 @@ where
     };
 
     let (mut requests, deps_trees) =
-        build_dependency_rtrees(block, &mut tracking_updater, &mut solvers);
+        build_dependency_rtrees(&goals, &mut tracking_updater, &mut solvers);
     solve_external(
-        block,
+        &goals,
         &mut tracking_updater,
         &deps_trees,
         &mut requests,
         db,
         top_k,
     );
-    solve_internal(block, &mut tracking_updater, &deps_trees, &mut requests, db);
+    solve_internal(
+        &goals,
+        &mut tracking_updater,
+        &deps_trees,
+        &mut requests,
+        db,
+    );
 
     #[cfg(debug_assertions)]
     {
@@ -175,7 +191,7 @@ where
 
 #[allow(clippy::type_complexity)]
 fn build_dependency_rtrees<Tgt>(
-    block: &SpecGeometryRect<Tgt>,
+    goals: &SpecGeometry<Tgt>,
     tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
     solvers: &mut [ActionBottomUpSolver<Tgt>],
 ) -> (
@@ -193,9 +209,11 @@ where
     let mut deps_trees = HashMap::<TableKey, RTreeDyn<HashSet<usize>>>::new();
     for (solver_idx, solver) in solvers.iter_mut().enumerate() {
         // TODO: Call a ranged `apply_no_dependency_updates` equivalent instead of this loop.
-        requests.push(solver.request(&block.clone().into()));
-        block.iter_specs().for_each(|goal| {
-            requests[solver_idx].apply_no_dependency_updates(&goal, tracking_updater);
+        requests.push(solver.request(goals));
+        goals.iter().for_each(|block| {
+            block.iter_specs().for_each(|goal| {
+                requests[solver_idx].apply_no_dependency_updates(&goal, tracking_updater);
+            });
         });
 
         if let Some(query) = requests[solver_idx].queries() {
@@ -237,7 +255,7 @@ where
 /// then intersection-join with `deps_trees`, passing each to BottomUpSolver::visit_dependency.
 /// TODO: Avoid recursion for *internal* dependencies.
 fn solve_external<Tgt>(
-    block: &SpecGeometryRect<Tgt>,
+    goals: &SpecGeometry<Tgt>,
     tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
     deps_trees: &HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
     requests: &mut [ActionBottomUpSolverRequest<Tgt>],
@@ -256,7 +274,7 @@ fn solve_external<Tgt>(
         //       already in the database's R-Trees. Ideally, we preserve the geometry all the way
         //       through the solver calls.
         let mut missing_subspecs_rtree = deps_tree.clone();
-        db.subtract_from(table_key, &mut missing_subspecs_rtree);
+        db.subtract_from_rtree(table_key, &mut missing_subspecs_rtree);
 
         // TODO: What do we do about the non-canonical points here? Or are they trimmed before put?
         // TODO: Recurse once, not once for each dependency tree.
@@ -276,9 +294,9 @@ fn solve_external<Tgt>(
                     table_key.clone(),
                     dep_bottom_u32,
                     dep_top_u32,
-                    block.bimap(),
+                    Rc::clone(goals.bimap()),
                 );
-                debug_assert!(!subblock.intersects(block));
+                debug_assert!(!goals.iter().any(|b| b.intersects(&subblock)));
                 synthesize_block(db, top_k, &subblock);
             });
 
@@ -300,7 +318,7 @@ fn solve_external<Tgt>(
                         table_key.clone(),
                         intersection.bottom.to_vec(),
                         intersection.top.to_vec(),
-                        block.bimap(),
+                        Rc::clone(goals.bimap()),
                     ),
                     &ncosts,
                     tracking_updater,
@@ -335,7 +353,7 @@ fn solve_external<Tgt>(
 
 /// Visit internal Specs, propagating results internally.
 fn solve_internal<Tgt>(
-    block: &SpecGeometryRect<Tgt>,
+    goals: &SpecGeometry<Tgt>,
     tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
     deps_trees: &HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
     requests: &mut [ActionBottomUpSolverRequest<Tgt>],
@@ -350,7 +368,8 @@ fn solve_internal<Tgt>(
     // will track which Specs are updated as a consequence of a solver visit and enqueue
     // those.
     let mut visit_queue = HashMap::new();
-    // Assert at least one Spec was completed.
+    // Assert at least one Spec was completed. Since this algorithm cascades completions
+    // within the set of goals, we can't start if nothing is initially completed.
     assert!(
         tracking_updater
             .goal_solvers_outstanding
@@ -359,7 +378,7 @@ fn solve_internal<Tgt>(
         "No Specs were completed with external dependencies only, stalling algorithm: {:?}",
         tracking_updater.goal_solvers_outstanding,
     );
-    process_completed_goals(block, tracking_updater, deps_trees, &mut visit_queue);
+    process_completed_goals(goals, tracking_updater, deps_trees, &mut visit_queue);
 
     let mut visited = HashSet::<Spec<Tgt>>::new(); // TODO: Remove `visited`
     while !visit_queue.is_empty() {
@@ -384,7 +403,7 @@ fn solve_internal<Tgt>(
             }
             db.put(spec, decisions);
         }
-        process_completed_goals(block, tracking_updater, deps_trees, &mut visit_queue);
+        process_completed_goals(goals, tracking_updater, deps_trees, &mut visit_queue);
     }
 }
 
@@ -394,44 +413,46 @@ fn solve_internal<Tgt>(
 /// as processed (`usize::MAX`).
 #[allow(clippy::type_complexity)]
 fn process_completed_goals<Tgt>(
-    block: &SpecGeometryRect<Tgt>,
+    goals: &SpecGeometry<Tgt>,
     tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
     deps_trees: &HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
     visit_queue: &mut HashMap<Spec<Tgt>, (Vec<(ActionNum, Cost)>, Vec<usize>)>,
 ) where
     Tgt: Target,
 {
-    block.iter_specs().for_each(|goal| {
-        let incomplete_solvers = tracking_updater
-            .goal_solvers_outstanding
-            .get_mut(&goal)
-            .unwrap();
-        if *incomplete_solvers == 0 {
-            let (spec_db_key, spec_pt) = block.bimap().apply(&goal);
-            let spec_pt_i64 = spec_pt
-                .iter()
-                .map(|&x| BimapSInt::from(x))
-                .collect::<Vec<_>>();
-            let mut requesting_solver_idxs = Vec::new();
-            if let Some(tree) = deps_trees.get(&spec_db_key) {
-                debug_assert!(
-                    tree.locate_all_at_point(&spec_pt_i64).count() <= 1,
-                    "More than one block found at point: {spec_pt_i64:?}"
-                );
-                if let Some(solver_idxs) = tree.locate_at_point(&spec_pt_i64) {
-                    requesting_solver_idxs.extend(solver_idxs.iter().copied());
+    goals.iter().for_each(|block| {
+        block.iter_specs().for_each(|goal| {
+            let incomplete_solvers = tracking_updater
+                .goal_solvers_outstanding
+                .get_mut(&goal)
+                .unwrap();
+            if *incomplete_solvers == 0 {
+                let (spec_db_key, spec_pt) = block.bimap().apply(&goal);
+                let spec_pt_i64 = spec_pt
+                    .iter()
+                    .map(|&x| BimapSInt::from(x))
+                    .collect::<Vec<_>>();
+                let mut requesting_solver_idxs = Vec::new();
+                if let Some(tree) = deps_trees.get(&spec_db_key) {
+                    debug_assert!(
+                        tree.locate_all_at_point(&spec_pt_i64).count() <= 1,
+                        "More than one block found at point: {spec_pt_i64:?}"
+                    );
+                    if let Some(solver_idxs) = tree.locate_at_point(&spec_pt_i64) {
+                        requesting_solver_idxs.extend(solver_idxs.iter().copied());
+                    }
                 }
+                let reducer = tracking_updater.inner_updater.remove(&goal).unwrap();
+                let decisions = reducer.finalize();
+                if visit_queue
+                    .insert(goal, (decisions, requesting_solver_idxs))
+                    .is_some()
+                {
+                    panic!("Duplicate goal in visit queue");
+                }
+                *incomplete_solvers = usize::MAX;
             }
-            let reducer = tracking_updater.inner_updater.remove(&goal).unwrap();
-            let decisions = reducer.finalize();
-            if visit_queue
-                .insert(goal, (decisions, requesting_solver_idxs))
-                .is_some()
-            {
-                panic!("Duplicate goal in visit queue");
-            }
-            *incomplete_solvers = usize::MAX;
-        }
+        });
     });
 }
 

@@ -23,6 +23,10 @@ trait RTreeGeneric<T> {
 
     fn size(&self) -> usize;
 
+    fn is_empty(&self) -> bool {
+        self.size() == 0
+    }
+
     fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T>;
 
     fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_>;
@@ -96,6 +100,12 @@ macro_rules! rtreedyn_cases {
             pub fn size(&self) -> usize {
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::size(t), )*
+                }
+            }
+
+            pub fn is_empty(&self) -> bool {
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::is_empty(t), )*
                 }
             }
 
