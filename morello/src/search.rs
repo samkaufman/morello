@@ -46,6 +46,12 @@ struct TrackingUpdater<U, K> {
     goal_solvers_outstanding: HashMap<K, usize>,
 }
 
+#[derive(Default)]
+struct SynthesisStatistics {
+    pub max_depth: usize,
+    pub max_breadth: usize,
+}
+
 // Computes an optimal Impl for `goal` and stores it in `db`.
 pub fn top_down<Tgt>(db: &FilesDatabase, goal: &Spec<Tgt>, top_k: usize) -> Vec<(ActionNum, Cost)>
 where
@@ -77,6 +83,8 @@ where
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
 
+    let mut stats = SynthesisStatistics::default();
+
     // Group goals by database page.
     let mut grouped_canonical_goals = HashMap::<_, (Vec<_>, Vec<usize>)>::new();
     for (idx, goal) in goals.iter().enumerate() {
@@ -101,6 +109,8 @@ where
                 db,
                 top_k,
                 &SpecGeometryRect::single(goal, Rc::new(db.spec_bimap())),
+                0,
+                &mut stats,
             );
         }
         for (query, &original_index) in page_group.iter().zip(original_indices) {
@@ -110,17 +120,30 @@ where
             combined_results[original_index] = result;
         }
     }
+
+    log::info!(
+        "max depth={}; max breadth={}",
+        stats.max_depth,
+        stats.max_breadth
+    );
     combined_results
 }
 
 /// Synthesize all blocks between `low` and `high`, inclusive. Membership is determined by
 /// the given `surmap` from [Spec]s to coordinates.
-fn synthesize_block<Tgt>(db: &FilesDatabase, top_k: usize, block: &SpecGeometryRect<Tgt>)
-where
+fn synthesize_block<Tgt>(
+    db: &FilesDatabase,
+    top_k: usize,
+    block: &SpecGeometryRect<Tgt>,
+    depth: usize,
+    stats: &mut SynthesisStatistics,
+) where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
+    stats.max_depth = stats.max_depth.max(depth);
+
     // TODO: Assert or otherwise enforce that the block's bimap equals the `db`'s bimap.
 
     // Assert that every Spec in the given block is canonical.
@@ -158,6 +181,8 @@ where
         &mut requests,
         db,
         top_k,
+        depth,
+        stats,
     );
     solve_internal(
         &goals,
@@ -261,11 +286,15 @@ fn solve_external<Tgt>(
     requests: &mut [ActionBottomUpSolverRequest<Tgt>],
     db: &FilesDatabase,
     top_k: usize,
+    depth: usize,
+    stats: &mut SynthesisStatistics,
 ) where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
+    let mut breadth = 0;
+
     for (table_key, deps_tree) in deps_trees {
         // Walk over every element of the dependency tree to collect all Specs which weren't in the
         // database and aren't current goals. Then recurse. Note that these Specs may span multiple
@@ -297,7 +326,8 @@ fn solve_external<Tgt>(
                     Rc::clone(goals.bimap()),
                 );
                 debug_assert!(!goals.iter().any(|b| b.intersects(&subblock)));
-                synthesize_block(db, top_k, &subblock);
+                synthesize_block(db, top_k, &subblock, depth + 1, stats);
+                breadth += 1;
             });
 
         // Spatial join on the database to collect all dependencies. At this point, after recursion,
@@ -349,6 +379,8 @@ fn solve_external<Tgt>(
                 });
         });
     }
+
+    stats.max_breadth = stats.max_breadth.max(breadth);
 }
 
 /// Visit internal Specs, propagating results internally.
