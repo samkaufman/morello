@@ -131,7 +131,7 @@ pub trait NaiveBottomUpActionProvider<Tgt: Target> {
 /// **Note:** This API is unstable and experimental.
 #[derive(Clone)]
 pub struct SpecGeometry<Tgt: Target>(
-    HashMap<TableKey, RTreeDyn<()>>,
+    pub(crate) HashMap<TableKey, RTreeDyn<()>>,
     Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>>,
 );
 
@@ -440,7 +440,11 @@ impl<Tgt: Target> SpecGeometry<Tgt> {
         self.iter().flat_map(|rect| rect.outputs_fills())
     }
 
-    /// Iterates over rectangles's bottom and top [Spec]s.
+    pub fn is_empty(&self) -> bool {
+        self.0.values().all(|tree| tree.is_empty())
+    }
+
+    /// Iterates over rectangles' bottom and top [Spec]s.
     pub fn iter(&self) -> impl Iterator<Item = SpecGeometryRect<Tgt>> + '_ {
         self.0.iter().flat_map(move |(key, rtree)| {
             rtree.iter().map(move |rect| SpecGeometryRect {
@@ -487,6 +491,8 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
         top: Vec<BimapInt>,
         bimap: Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>>,
     ) -> Self {
+        assert_eq!(bottom.len(), top.len());
+        assert!(bottom.iter().zip(&top).all(|(b, t)| b <= t));
         Self {
             key,
             bottom,
