@@ -50,12 +50,19 @@ trait RTreeGeneric<T> {
     ///
     /// ```ignore
     /// tree.insert(&[0, 0], &[1, 1], 1);
-    /// tree.fold_insert(&[1, 1], &[2, 2], 3, |a, b| a + b);
+    /// tree.fold_insert(&[1, 1], &[2, 2], 3, false, |a, b| a + b);
     /// assert_eq!(tree.locate_at_point(&[1, 1]), Some(4));
     /// ```
-    fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, fold: F)
-    where
-        T: Clone,
+    fn fold_insert<F>(
+        &mut self,
+        low: &[BimapSInt],
+        high: &[BimapSInt],
+        value: T,
+        merge: bool,
+        fold: F,
+    ) where
+        // TODO: Shouldn't need to be Clone. Instead, give references.
+        T: Clone + Eq, // Eq needed if `merge` is set
         F: FnMut(T, T) -> T;
 
     fn subtract(
@@ -143,13 +150,14 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, fold: F)
+            pub fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, merge: bool, fold: F)
             where
-                T: Clone,  // TODO: Shouldn't need to be Clone. Instead, give references.
+                // TODO: Shouldn't need to be Clone. Instead, give references.
+                T: Clone + Eq,  // Eq needed if `merge` is set
                 F: FnMut(T, T) -> T,
             {
                 match self {
-                    $( RTreeDyn::$name(t) => RTreeGeneric::fold_insert(t, low, high, value, fold), )*
+                    $( RTreeDyn::$name(t) => RTreeGeneric::fold_insert(t, low, high, value, merge, fold), )*
                 }
             }
 
@@ -394,9 +402,15 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         insert_and_subtract_overlap(self, to_insert);
     }
 
-    fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, mut fold: F)
-    where
-        T: Clone,
+    fn fold_insert<F>(
+        &mut self,
+        low: &[BimapSInt],
+        high: &[BimapSInt],
+        value: T,
+        merge: bool,
+        mut fold: F,
+    ) where
+        T: Clone + Eq,
         F: FnMut(T, T) -> T,
     {
         let mut worklist = vec![(low.to_vec(), high.to_vec(), value)];
@@ -435,6 +449,8 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     result.intersection.1,
                     fold(r_value.clone(), intersectee.value),
                 ));
+            } else if merge {
+                self.merge_insert(&r_low, &r_high, r_value);
             } else {
                 self.insert(RTreeRect {
                     bottom: r_low.try_into().unwrap(),
@@ -442,7 +458,15 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     value: r_value,
                 });
             }
-            rhs_subrects.into_iter().for_each(|r| self.insert(r));
+
+            if merge {
+                rhs_subrects.into_iter().for_each(|r| {
+                    let RTreeRect { top, bottom, value } = r;
+                    self.merge_insert(&bottom.arr, &top.arr, value)
+                })
+            } else {
+                rhs_subrects.into_iter().for_each(|r| self.insert(r));
+            }
         }
     }
 
@@ -1168,7 +1192,7 @@ mod tests {
     fn test_fold_insert_no_intersection() {
         let mut tree = RTreeDyn::empty(2);
         tree.insert(&[0, 0], &[1, 1], 1);
-        tree.fold_insert(&[2, 2], &[3, 3], 2, |a, b| a + b);
+        tree.fold_insert(&[2, 2], &[3, 3], 2, false, |a, b| a + b);
         assert_eq!(tree.locate_at_point(&[0, 0]), Some(&1));
         assert_eq!(tree.locate_at_point(&[2, 2]), Some(&2));
     }
@@ -1177,7 +1201,7 @@ mod tests {
     fn test_fold_insert_with_intersection() {
         let mut tree = RTreeDyn::empty(2);
         tree.insert(&[0, 0], &[2, 2], 1);
-        tree.fold_insert(&[1, 1], &[3, 3], 2, |a, b| a + b);
+        tree.fold_insert(&[1, 1], &[3, 3], 2, false, |a, b| a + b);
         assert_eq!(tree.locate_at_point(&[0, 0]), Some(&1));
         assert_eq!(tree.locate_at_point(&[1, 1]), Some(&3));
         assert_eq!(tree.locate_at_point(&[3, 3]), Some(&2));
@@ -1188,12 +1212,12 @@ mod tests {
         let mut tree = RTreeDyn::empty(2);
         tree.insert(&[0, 0], &[2, 2], 1);
         println!("after first insert");
-        tree.fold_insert(&[1, 1], &[3, 3], 2, |a, b| a + b);
+        tree.fold_insert(&[1, 1], &[3, 3], 2, false, |a, b| a + b);
         println!("after first fold_insert");
         for entry in tree.iter() {
             println!("{:?}", entry);
         }
-        tree.fold_insert(&[2, 2], &[4, 4], 3, |a, b| a + b);
+        tree.fold_insert(&[2, 2], &[4, 4], 3, false, |a, b| a + b);
         println!("after second fold_insert");
         assert_eq!(tree.locate_at_point(&[0, 0]), Some(&1));
         assert_eq!(tree.locate_at_point(&[1, 1]), Some(&3));
