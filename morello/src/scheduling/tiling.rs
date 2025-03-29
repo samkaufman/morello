@@ -11,12 +11,7 @@ use crate::scheduling::{
     check_tile_out_applies, collect_nested_specs, tile_to_apply_err, Action, ActionT,
     ActionTopDownSolver, ApplyError, BottomUpSolver, DependencyRequest,
     NaiveBottomUpActionProvider, NaiveBottomUpSolver, NotApplicableReason, PrimitiveTileOutSolver,
-    SpecGeometry, VisitUpdater,
-};
-use crate::scheduling::{
-    check_tile_out_applies, tile_to_apply_err, Action, ActionT, ActionTopDownSolver, ApplyError,
-    BottomUpSolver, DependencyRequest, NaiveBottomUpActionProvider, NaiveBottomUpSolver,
-    NotApplicableReason, SpecGeometry, SpecGeometryRect, VisitUpdater,
+    SpecGeometry, SpecGeometryRect, VisitUpdater,
 };
 use crate::spec::{
     DimAssociation, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,

@@ -15,7 +15,7 @@ mod aabb;
 
 pub type RTreeEntryRef<'a, T> = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
 
-/// A trait abstracting over differently ranked RTree<RTreeRect<_, T>> variants.
+/// A private trait abstracting over differently ranked RTree<RTreeRect<_, T>> variants.
 /// It's used internally to implement RTreeDyn (each variant dispatches).
 #[enum_dispatch]
 trait RTreeGeneric<T> {
@@ -254,6 +254,11 @@ struct BatchRemoveSelFn<E> {
     envelope: Option<E>,
 }
 
+struct SameValueIntersectionSelFn<'a, const D: usize, T> {
+    envelope: <RTreeRect<D, T> as RTreeObject>::Envelope,
+    value: &'a T,
+}
+
 impl<'a, T> IntoIterator for &'a RTreeDyn<T> {
     type Item = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
     type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
@@ -350,7 +355,6 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
                 // If the candidate is contained by the to-be-inserted rectangle and has a matching
                 // value, remove it.
-                let candidate_envelope = candidate.envelope();
                 if insert_envelope.contains_envelope(&candidate_envelope) && value_matches {
                     to_remove.queue_removal(candidate_envelope);
                     continue;
@@ -399,37 +403,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         }
 
         if !skip_insert {
-            // Subtract the to_insert from any intersecting rectangles with the same value.
-            // TODO: Reuse the result of the previous intersection call to avoid a second traversal.
-            to_remove.clear();
-            let mut parts_to_insert = vec![];
-            for intersecting_rect in self.locate_in_envelope_intersecting(&to_insert.envelope()) {
-                if intersecting_rect.value != to_insert.value {
-                    continue;
-                }
-                for part in rect_subtract(
-                    &intersecting_rect.bottom.arr,
-                    &intersecting_rect.top.arr,
-                    &to_insert.bottom.arr,
-                    &to_insert.top.arr,
-                ) {
-                    let (bottom, top) = part;
-                    let value = intersecting_rect.value.clone();
-                    let part_rect = RTreeRect {
-                        bottom: bottom.try_into().unwrap(),
-                        top: top.try_into().unwrap(),
-                        value,
-                    };
-                    parts_to_insert.push(part_rect);
-                }
-                to_remove.queue_removal(intersecting_rect.envelope());
-            }
-            for _ in self.drain_with_selection_function(&to_remove) {}
-
-            for part in parts_to_insert {
-                self.insert(part);
-            }
-            self.insert(to_insert);
+            insert_and_subtract_overlap(self, to_insert);
         }
     }
 
@@ -699,6 +673,55 @@ where
     fn should_unpack_leaf(&self, leaf: &O) -> bool {
         self.to_remove.contains(&leaf.envelope())
     }
+}
+
+impl<const D: usize, T> rstar::SelectionFunction<RTreeRect<D, T>>
+    for SameValueIntersectionSelFn<'_, D, T>
+where
+    T: PartialEq + Eq,
+{
+    fn should_unpack_parent(&self, envelope: &<RTreeRect<D, T> as RTreeObject>::Envelope) -> bool {
+        envelope.intersects(&self.envelope)
+    }
+
+    fn should_unpack_leaf(&self, leaf: &RTreeRect<D, T>) -> bool {
+        leaf.envelope().intersects(&self.envelope) && leaf.value == *self.value
+    }
+}
+
+/// Insert a new rectangle, partitioning any intersecting rectangles with the same value and
+/// removing the overlapping parts.
+fn insert_and_subtract_overlap<const D: usize, T>(
+    tree: &mut RTree<RTreeRect<D, T>>,
+    to_insert: RTreeRect<D, T>,
+) where
+    T: Clone + Eq,
+{
+    let selection_fn = SameValueIntersectionSelFn {
+        envelope: to_insert.envelope(),
+        value: &to_insert.value,
+    };
+    let mut parts_to_insert = vec![];
+    for removed in tree.drain_with_selection_function(selection_fn) {
+        // For every intersection removed, call rect_subtract to compute non-intersecting
+        // partitions.
+        for (bottom, top) in rect_subtract(
+            &removed.bottom.arr,
+            &removed.top.arr,
+            &to_insert.bottom.arr,
+            &to_insert.top.arr,
+        ) {
+            parts_to_insert.push(RTreeRect {
+                bottom: bottom.try_into().unwrap(),
+                top: top.try_into().unwrap(),
+                value: removed.value.clone(),
+            });
+        }
+    }
+    for part in parts_to_insert {
+        tree.insert(part);
+    }
+    tree.insert(to_insert);
 }
 
 /// Subtract the subtrahend rectangle from the minuend rectangle (both defined by inclusive points),
