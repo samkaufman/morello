@@ -15,13 +15,17 @@ mod aabb;
 
 pub type RTreeEntryRef<'a, T> = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
 
-/// A trait abstracting over differently ranked RTree<RTreeRect<_, T>> variants.
+/// A private trait abstracting over differently ranked RTree<RTreeRect<_, T>> variants.
 /// It's used internally to implement RTreeDyn (each variant dispatches).
 #[enum_dispatch]
 trait RTreeGeneric<T> {
     type Intersectable<A>;
 
     fn size(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.size() == 0
+    }
 
     fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T>;
 
@@ -99,6 +103,12 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
+            pub fn is_empty(&self) -> bool {
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::is_empty(t), )*
+                }
+            }
+
             pub fn dim_count(&self) -> usize {
                 match self {
                     $( RTreeDyn::$name(_) => $n, )*
@@ -133,9 +143,9 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, fold: F)
+            pub fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, fold: F)
             where
-                T: Clone,
+                T: Clone,  // TODO: Shouldn't need to be Clone. Instead, give references.
                 F: FnMut(T, T) -> T,
             {
                 match self {
@@ -238,10 +248,20 @@ struct RectPartitionIntersection {
 
 /// An [rstar::SelectionFunction] which removes a set of [rstar::RTreeObject]s.
 #[derive(Debug)]
-struct BatchRemoveSelFn<E> {
+struct BatchRemoveSelFn<O: rstar::RTreeObject> {
     // TODO: Own references, not clones.
-    to_remove: HashSet<E>,
-    envelope: Option<E>,
+    to_remove: HashSet<O>,
+    envelope: Option<O::Envelope>,
+}
+
+struct SameValueIntersectionSelFn<'a, const D: usize, T> {
+    envelope: <RTreeRect<D, T> as RTreeObject>::Envelope,
+    value: &'a T,
+}
+
+struct ContainedAndAdjacentSelFn<const D: usize, T> {
+    to_insert: RTreeRect<D, T>,
+    relevant_area: <RTreeRect<D, T> as RTreeObject>::Envelope,
 }
 
 impl<'a, T> IntoIterator for &'a RTreeDyn<T> {
@@ -293,26 +313,9 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
             value,
         };
 
-        // If disallow_overlap is true, check for overlaps with different values first
-        // TODO: Implement without requiring a separate locate_ traversal.
-        if disallow_overlap {
-            let new_envelope = new_rect.envelope();
-            for candidate in self.locate_in_envelope_intersecting(&new_envelope) {
-                if candidate.value != new_rect.value
-                    && candidate.envelope().intersects(&new_envelope)
-                {
-                    // TODO: Convert to a panic once fixed.
-                    log::warn!(
-                        "New rectangle overlaps with existing rectangle that has a different value"
-                    );
-                }
-            }
-        }
-
         // Find the first rectangle which matches except for one dimension which is larger or
         // matches (and has the same cost).
-        let mut to_remove =
-            BatchRemoveSelFn::<<RTreeRect<D, T> as rstar::RTreeObject>::Envelope>::default();
+        let mut to_remove = BatchRemoveSelFn::<RTreeRect<D, T>>::default();
         let mut to_insert = new_rect;
         let mut should_repeat = true;
         let mut skip_insert = false;
@@ -333,6 +336,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 let candidate_envelope = candidate.envelope();
                 let insert_envelope = to_insert.envelope();
                 if candidate_envelope.contains_envelope(&insert_envelope) && value_matches {
+                    // Assert the MainCost, but not the later tuple elements, are unchanged.
                     should_repeat = false;
                     skip_insert = true;
                     break;
@@ -340,9 +344,11 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
                 // If the candidate is contained by the to-be-inserted rectangle and has a matching
                 // value, remove it.
-                let candidate_envelope = candidate.envelope();
                 if insert_envelope.contains_envelope(&candidate_envelope) && value_matches {
-                    to_remove.queue_removal(candidate_envelope);
+                    // TODO: Avoid the following clone.
+                    to_remove.queue_removal(candidate.clone());
+                    // Assert the MainCost, but not the later tuple elements, are unchanged.
+                    // TODO: Remove the following assert and lift short-circuit.
                     continue;
                 }
 
@@ -352,75 +358,40 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 //
                 // TODO: This condition+loop is wasteful.
                 if value_matches
-                    && count_merging_dimension(
+                    && all_dimensions_adjacent_or_overlap(
                         &to_insert.bottom.arr,
                         &to_insert.top.arr,
                         &candidate.bottom.arr,
                         &candidate.top.arr,
-                    ) == Some(D - 1)
+                    )
+                    && count_matching_dimensions(
+                        &to_insert.bottom.arr,
+                        &to_insert.top.arr,
+                        &candidate.bottom.arr,
+                        &candidate.top.arr,
+                    ) == D - 1
                 {
                     should_repeat = true;
 
                     let mut merged_envelope = to_insert.envelope();
                     merged_envelope.merge(&candidate_envelope);
-                    let (merged_lower, merged_upper) = merged_envelope.into_pair();
-                    to_insert.bottom = merged_lower;
-                    to_insert.top = merged_upper;
+                    to_insert.top = merged_envelope.upper().clone();
+                    to_insert.bottom = merged_envelope.lower().clone();
 
-                    to_remove.queue_removal(candidate_envelope);
+                    to_remove.queue_removal(candidate.clone());
                 }
             }
 
-            for _ in self.drain_with_selection_function(&to_remove) {}
-            // TODO: Enable the following once the overwrite issue is fixed
-            // let mut remove_count = 0usize;
-            // let expected_removals = to_remove.to_remove.len();
-            // for _ in self.drain_with_selection_function(&to_remove) {
-            //     remove_count += 1;
-            // }
-            // if expected_removals == remove_count {
-            //     panic!(
-            //         "Removed {} rectangles but expected to remove {}",
-            //         remove_count,
-            //         expected_removals
-            //     );
-            // }
+            let mut remove_count = 0usize;
+            let expected_removals = to_remove.to_remove.len();
+            for _ in self.drain_with_selection_function(&to_remove) {
+                remove_count += 1;
+            }
+            assert_eq!(expected_removals, remove_count);
             to_remove.clear();
         }
 
-        if !skip_insert {
-            // Subtract the to_insert from any intersecting rectangles with the same value.
-            // TODO: Reuse the result of the previous intersection call to avoid a second traversal.
-            to_remove.clear();
-            let mut parts_to_insert = vec![];
-            for intersecting_rect in self.locate_in_envelope_intersecting(&to_insert.envelope()) {
-                if intersecting_rect.value != to_insert.value {
-                    continue;
-                }
-                for part in rect_subtract(
-                    &intersecting_rect.bottom.arr,
-                    &intersecting_rect.top.arr,
-                    &to_insert.bottom.arr,
-                    &to_insert.top.arr,
-                ) {
-                    let (bottom, top) = part;
-                    let value = intersecting_rect.value.clone();
-                    let part_rect = RTreeRect {
-                        bottom: bottom.try_into().unwrap(),
-                        top: top.try_into().unwrap(),
-                        value,
-                    };
-                    parts_to_insert.push(part_rect);
-                }
-                to_remove.queue_removal(intersecting_rect.envelope());
-            }
-            for _ in self.drain_with_selection_function(&to_remove) {}
-
-            for part in parts_to_insert {
-                self.insert(part);
-            }
-            self.insert(to_insert);
-        }
+        insert_and_subtract_overlap(self, to_insert);
     }
 
     fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, mut fold: F)
@@ -644,28 +615,34 @@ impl<const D: usize> Point for RTreePt<D> {
     }
 }
 
-impl<E> BatchRemoveSelFn<E> {
+impl<O> BatchRemoveSelFn<O>
+where
+    O: rstar::RTreeObject,
+{
     fn clear(&mut self) {
         self.to_remove.clear();
         self.envelope = None;
     }
 }
 
-impl<E> BatchRemoveSelFn<E>
+impl<O> BatchRemoveSelFn<O>
 where
-    E: rstar::Envelope + Eq + Hash,
+    O: rstar::RTreeObject + Eq + Hash,
 {
-    fn queue_removal(&mut self, candidate_envelope: E) {
+    fn queue_removal(&mut self, candidate: O) {
         if let Some(e) = &mut self.envelope {
-            e.merge(&candidate_envelope);
+            e.merge(&candidate.envelope());
         } else {
-            self.envelope = Some(candidate_envelope.clone());
+            self.envelope = Some(candidate.envelope());
         }
-        self.to_remove.insert(candidate_envelope);
+        self.to_remove.insert(candidate);
     }
 }
 
-impl<E> Default for BatchRemoveSelFn<E> {
+impl<O> Default for BatchRemoveSelFn<O>
+where
+    O: rstar::RTreeObject,
+{
     fn default() -> Self {
         BatchRemoveSelFn {
             to_remove: HashSet::new(),
@@ -674,10 +651,9 @@ impl<E> Default for BatchRemoveSelFn<E> {
     }
 }
 
-impl<O> rstar::SelectionFunction<O> for &BatchRemoveSelFn<O::Envelope>
+impl<O> rstar::SelectionFunction<O> for &BatchRemoveSelFn<O>
 where
     O: rstar::RTreeObject + Eq + Hash,
-    O::Envelope: Eq + Hash,
 {
     fn should_unpack_parent(&self, envelope: &<O as RTreeObject>::Envelope) -> bool {
         self.envelope
@@ -687,8 +663,91 @@ where
     }
 
     fn should_unpack_leaf(&self, leaf: &O) -> bool {
-        self.to_remove.contains(&leaf.envelope())
+        self.to_remove.contains(leaf)
     }
+}
+
+impl<const D: usize, T> rstar::SelectionFunction<RTreeRect<D, T>>
+    for ContainedAndAdjacentSelFn<D, T>
+where
+    T: PartialEq + Eq,
+{
+    fn should_unpack_parent(&self, envelope: &<RTreeRect<D, T> as RTreeObject>::Envelope) -> bool {
+        self.relevant_area.intersects(envelope)
+    }
+
+    fn should_unpack_leaf(&self, candidate: &RTreeRect<D, T>) -> bool {
+        if candidate.value == self.to_insert.value {
+            let to_insert_envelope = self.to_insert.envelope();
+            if to_insert_envelope.contains_envelope(&candidate.envelope()) {
+                return true;
+            }
+            if all_dimensions_adjacent_or_overlap(
+                &self.to_insert.bottom.arr,
+                &self.to_insert.top.arr,
+                &candidate.bottom.arr,
+                &candidate.top.arr,
+            ) && count_matching_dimensions(
+                &self.to_insert.bottom.arr,
+                &self.to_insert.top.arr,
+                &candidate.bottom.arr,
+                &candidate.top.arr,
+            ) == D - 1
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl<'a, const D: usize, T> rstar::SelectionFunction<RTreeRect<D, T>>
+    for SameValueIntersectionSelFn<'a, D, T>
+where
+    T: Eq,
+{
+    fn should_unpack_parent(&self, envelope: &<RTreeRect<D, T> as RTreeObject>::Envelope) -> bool {
+        self.envelope.intersects(envelope)
+    }
+
+    fn should_unpack_leaf(&self, leaf: &RTreeRect<D, T>) -> bool {
+        leaf.value == *self.value && self.envelope.intersects(&leaf.envelope())
+    }
+}
+
+/// Insert a new rectangle, partitioning any intersecting rectangles with the same value and
+/// removing the overlapping parts.
+fn insert_and_subtract_overlap<const D: usize, T>(
+    tree: &mut RTree<RTreeRect<D, T>>,
+    to_insert: RTreeRect<D, T>,
+) where
+    T: Clone + Eq,
+{
+    let selection_fn = SameValueIntersectionSelFn {
+        envelope: to_insert.envelope(),
+        value: &to_insert.value,
+    };
+    let mut parts_to_insert = vec![];
+    for removed in tree.drain_with_selection_function(selection_fn) {
+        // For every intersection removed, call rect_subtract to compute non-intersecting
+        // partitions.
+        for (bottom, top) in rect_subtract(
+            &removed.bottom.arr,
+            &removed.top.arr,
+            &to_insert.bottom.arr,
+            &to_insert.top.arr,
+        ) {
+            parts_to_insert.push(RTreeRect {
+                bottom: bottom.try_into().unwrap(),
+                top: top.try_into().unwrap(),
+                value: removed.value.clone(),
+            });
+        }
+    }
+    for part in parts_to_insert {
+        tree.insert(part);
+    }
+    tree.insert(to_insert);
 }
 
 /// Subtract the subtrahend rectangle from the minuend rectangle (both defined by inclusive points),
@@ -879,6 +938,11 @@ mod tests {
             ([0, 0, 2], [1, 1, 3]),
             ([0, 0, 1], [1, 1, 2]),
         ]);
+    }
+
+    #[test]
+    fn test_merge_insert_one_wide_gap() {
+        assert_merged(&[([0, 0], [1, 2]), ([0, 4], [1, 6]), ([0, 3], [1, 3])]);
     }
 
     #[test]
