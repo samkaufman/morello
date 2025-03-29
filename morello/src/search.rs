@@ -264,7 +264,8 @@ where
                 deps_tree_entry.fold_insert(
                     &dep_pt_low_i64,
                     &dep_pt_high_i64,
-                    [solver_idx].into_iter().collect(),
+                    iter::once(solver_idx).collect(),
+                    true,
                     |mut a, b| {
                         a.extend(b);
                         a

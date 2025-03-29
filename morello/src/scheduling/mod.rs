@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fmt::Debug;
 use std::fmt::Display;
+use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::iter;
 use std::marker::PhantomData;
@@ -699,6 +699,17 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
                 Ok((bottom, top))
             })
             .unwrap()
+    }
+}
+
+impl<Tgt: Target> fmt::Debug for SpecGeometryRect<Tgt> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpecGeometryRect")
+            .field("key", &self.key)
+            .field("bottom", &self.bottom)
+            .field("top", &self.top)
+            .field("cached_specs", &self.cached_specs)
+            .finish_non_exhaustive()
     }
 }
 
