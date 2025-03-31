@@ -1137,8 +1137,9 @@ where
                 if slot.is_some() {
                     if slot != &new_slot_entry {
                         panic!(
-                            "subspec {spec} already set to a different value for parent {}",
-                            RefCell::borrow(&working_impl.working_spec).spec
+                            "subspec {spec} already set to a different value: {:?} != {:?}",
+                            slot.as_ref().unwrap(),
+                            new_slot_entry.as_ref().unwrap()
                         );
                     }
                     log::warn!("subspec {spec} already set");
