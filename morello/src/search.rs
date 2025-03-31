@@ -221,7 +221,7 @@ fn build_dependency_rtrees<Tgt>(
     solvers: &mut [ActionBottomUpSolver<Tgt>],
 ) -> (
     Vec<ActionBottomUpSolverRequest<Tgt>>,
-    HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
+    HashMap<TableKey, RTreeDyn<BTreeSet<usize>>>,
 )
 where
     Tgt: Target,
@@ -231,7 +231,7 @@ where
 
     // Build R-Trees of all goals' dependencies.
     // TODO: Use a Tgt-specific ActionT type.
-    let mut deps_trees = HashMap::<TableKey, RTreeDyn<HashSet<usize>>>::new();
+    let mut deps_trees = HashMap::<TableKey, RTreeDyn<BTreeSet<usize>>>::new();
     for (solver_idx, solver) in solvers.iter_mut().enumerate() {
         // TODO: Call a ranged `apply_no_dependency_updates` equivalent instead of this loop.
         requests.push(solver.request(goals));
@@ -283,7 +283,7 @@ where
 fn solve_external<Tgt>(
     goals: &SpecGeometry<Tgt>,
     tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
-    deps_trees: &HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
+    deps_trees: &HashMap<TableKey, RTreeDyn<BTreeSet<usize>>>,
     requests: &mut [ActionBottomUpSolverRequest<Tgt>],
     db: &FilesDatabase,
     top_k: usize,
@@ -388,7 +388,7 @@ fn solve_external<Tgt>(
 fn solve_internal<Tgt>(
     goals: &SpecGeometry<Tgt>,
     tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
-    deps_trees: &HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
+    deps_trees: &HashMap<TableKey, RTreeDyn<BTreeSet<usize>>>,
     requests: &mut [ActionBottomUpSolverRequest<Tgt>],
     db: &FilesDatabase,
 ) where
@@ -448,7 +448,7 @@ fn solve_internal<Tgt>(
 fn process_completed_goals<Tgt>(
     goals: &SpecGeometry<Tgt>,
     tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
-    deps_trees: &HashMap<TableKey, RTreeDyn<HashSet<usize>>>,
+    deps_trees: &HashMap<TableKey, RTreeDyn<BTreeSet<usize>>>,
     visit_queue: &mut HashMap<Spec<Tgt>, (Vec<(ActionNum, Cost)>, Vec<usize>)>,
 ) where
     Tgt: Target,
