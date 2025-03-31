@@ -326,7 +326,20 @@ fn solve_external<Tgt>(
                     dep_top_u32,
                     Rc::clone(goals.bimap()),
                 );
-                debug_assert!(!goals.iter().any(|b| b.intersects(&subblock)));
+                debug_assert!(
+                    !goals.iter().any(|b| b.intersects(&subblock)),
+                    "Immediately recursed on: {}",
+                    subblock
+                        .iter_specs()
+                        .collect::<HashSet<_>>()
+                        .union(
+                            &goals
+                                .iter()
+                                .flat_map(|b| b.iter_specs().collect::<HashSet<_>>())
+                                .collect()
+                        )
+                        .join(", ")
+                );
                 synthesize_block(db, top_k, &subblock, depth + 1, stats);
                 breadth += 1;
             });
