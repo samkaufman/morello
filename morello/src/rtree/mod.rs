@@ -7,7 +7,6 @@ use rstar::Envelope as _;
 use rstar::{Point, PointDistance, RTree, RTreeObject};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -926,6 +925,7 @@ mod tests {
     use proptest::prelude::*;
     use proptest::strategy::{Just, Strategy};
     use proptest::{prop_assert, prop_assert_eq, proptest};
+    use std::collections::HashSet;
     use std::rc::Rc;
 
     #[derive(proptest_derive::Arbitrary, Debug)]
