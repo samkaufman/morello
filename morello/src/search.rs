@@ -41,9 +41,9 @@ enum ImplReducerResults {
 }
 
 /// An [VisitUpdater] which logs completed Specs in a Vec.
-struct TrackingUpdater<U, K> {
-    inner_updater: U,
-    goal_solvers_outstanding: HashMap<K, usize>,
+struct TrackingUpdater<'a, Tgt: Target> {
+    inner_updater: &'a mut HashMap<Spec<Tgt>, ImplReducer>,
+    goal_solvers_outstanding: HashMap<Spec<Tgt>, usize>,
 }
 
 #[derive(Default)]
@@ -217,7 +217,7 @@ fn synthesize_block<Tgt>(
 #[allow(clippy::type_complexity)]
 fn build_dependency_rtrees<Tgt>(
     goals: &SpecGeometry<Tgt>,
-    tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
+    tracking_updater: &mut TrackingUpdater<Tgt>,
     solvers: &mut [ActionBottomUpSolver<Tgt>],
 ) -> (
     Vec<ActionBottomUpSolverRequest<Tgt>>,
@@ -282,7 +282,7 @@ where
 /// TODO: Avoid recursion for *internal* dependencies.
 fn solve_external<Tgt>(
     goals: &SpecGeometry<Tgt>,
-    tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
+    tracking_updater: &mut TrackingUpdater<Tgt>,
     deps_trees: &HashMap<TableKey, RTreeDyn<BTreeSet<usize>>>,
     requests: &mut [ActionBottomUpSolverRequest<Tgt>],
     db: &FilesDatabase,
@@ -400,7 +400,7 @@ fn solve_external<Tgt>(
 /// Visit internal Specs, propagating results internally.
 fn solve_internal<Tgt>(
     goals: &SpecGeometry<Tgt>,
-    tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
+    tracking_updater: &mut TrackingUpdater<Tgt>,
     deps_trees: &HashMap<TableKey, RTreeDyn<BTreeSet<usize>>>,
     requests: &mut [ActionBottomUpSolverRequest<Tgt>],
     db: &FilesDatabase,
@@ -460,7 +460,7 @@ fn solve_internal<Tgt>(
 #[allow(clippy::type_complexity)]
 fn process_completed_goals<Tgt>(
     goals: &SpecGeometry<Tgt>,
-    tracking_updater: &mut TrackingUpdater<&mut HashMap<Spec<Tgt>, ImplReducer>, Spec<Tgt>>,
+    tracking_updater: &mut TrackingUpdater<Tgt>,
     deps_trees: &HashMap<TableKey, RTreeDyn<BTreeSet<usize>>>,
     visit_queue: &mut HashMap<Spec<Tgt>, (Vec<(ActionNum, Cost)>, Vec<usize>)>,
 ) where
@@ -582,11 +582,9 @@ impl ImplReducer {
     }
 }
 
-impl<Tgt, U, K> VisitUpdater<Tgt> for TrackingUpdater<U, K>
+impl<Tgt> VisitUpdater<Tgt> for TrackingUpdater<'_, Tgt>
 where
     Tgt: Target,
-    U: VisitUpdater<Tgt>,
-    K: Borrow<Spec<Tgt>> + Eq + Hash,
 {
     fn complete_action(
         &mut self,
