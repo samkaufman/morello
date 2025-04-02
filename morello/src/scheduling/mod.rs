@@ -1395,14 +1395,14 @@ mod tests {
             shared_test_fast_path_is_equivalent_to_slow(spec)?;
         }
 
-        // TODO: Add an ARM variant
         #[test]
-        fn test_action_encode_consistent_with_decode(spec in arb_canonical_spec::<X86Target>(None, None)) {
-            for action in X86Target::actions(&spec.0) {
-                let encoding = action.encode(&spec);
-                let decoded = Action::decode(&spec, encoding);
-                prop_assert_eq!(action, decoded);
-            }
+        fn test_action_encode_consistent_with_decode_x86(spec in arb_canonical_spec::<X86Target>(None, None)) {
+            shared_test_action_encode_consistent_with_decode(spec)?;
+        }
+
+        #[test]
+        fn test_action_encode_consistent_with_decode_arm(spec in arb_canonical_spec::<ArmTarget>(None, None)) {
+            shared_test_action_encode_consistent_with_decode(spec)?;
         }
 
         #[test]
@@ -1432,6 +1432,17 @@ mod tests {
         ) {
             shared_test_actions_do_not_introduce_self_nested_subspec(spec)?;
         }
+    }
+
+    fn shared_test_action_encode_consistent_with_decode<Tgt: Target>(
+        spec: Spec<Tgt>,
+    ) -> Result<(), proptest::prelude::TestCaseError> {
+        for action in Tgt::actions(&spec.0) {
+            let encoding = action.encode(&spec);
+            let decoded = Action::decode(&spec, encoding);
+            prop_assert_eq!(action, decoded);
+        }
+        Ok(())
     }
 
     // TODO: Add a solver version, if possible.
