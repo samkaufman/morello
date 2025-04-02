@@ -142,6 +142,9 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
 
 impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for MoveActionProvider<Tgt> {
     fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
+        if logical_spec.is_oneprefix() {
+            return vec![];
+        }
         move_actions(logical_spec).collect()
     }
 }

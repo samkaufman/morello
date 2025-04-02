@@ -2200,6 +2200,20 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             }
         }
     }
+
+    pub(crate) fn is_oneprefix(&self) -> bool {
+        matches!(
+            self,
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::OnePrefix,
+                    ..
+                },
+                _,
+                _
+            )
+        )
+    }
 }
 
 impl<Tgt: Target> Display for LogicalSpec<Tgt> {

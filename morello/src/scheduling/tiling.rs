@@ -17,6 +17,9 @@ use crate::spec::{
     DimAssociation, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
     PrimitiveSpecType, Spec,
 };
+use crate::spec::{
+    self, DimAssociation, FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec,
+};
 use crate::target::common_actions::{split_actions, tile_out_actions};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
@@ -684,7 +687,7 @@ impl<Tgt: Target> DependencyRequest for TileOutSolverRequest<Tgt> {
         let output_shape = spec.0.parameter_shape(output_idx);
         match &spec.0 {
             LogicalSpec::Primitive(..) => {
-                if output_shape.iter().any(|d| d == &nz!(1u32)) {
+                if output_shape.iter().all(|d| d == &nz!(1u32)) {
                     updater.complete_spec(spec);
                 }
             }
@@ -751,6 +754,10 @@ impl<Tgt: Target> DependencyRequest for SplitSolverRequest<Tgt> {
 
 impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for TileOutActionProvider<Tgt> {
     fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
+        // OnePrefix is a special case. The only viable action is applying its no-op kernel.
+        if logical_spec.is_oneprefix() {
+            return vec![];
+        }
         tile_out_actions(logical_spec).collect()
     }
 }
