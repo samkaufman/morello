@@ -1,4 +1,4 @@
-use super::common_actions::{move_actions, split_actions, tile_out_actions};
+use super::common_actions::{bufferize_actions, move_actions, split_actions, tile_out_actions};
 use crate::codegen::c_utils::VecType;
 use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
@@ -8,7 +8,6 @@ use crate::layout;
 use crate::layout::{batched_col_major, col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::scheduling::broadcast_first::BroadcastFirst;
-use crate::scheduling::bufferize::Bufferize;
 use crate::scheduling::select::Select;
 use crate::scheduling::spatial_split::SpatialSplit;
 use crate::scheduling::to_accum::ToAccum;
@@ -20,6 +19,7 @@ use crate::shape;
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{Kernel, MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::{gen_vector_sizes, gen_vector_sizes_opt, TensorSpec, TensorSpecAux};
+use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::View;
 
 use divrem::DivRem;
@@ -299,16 +299,7 @@ impl<T: CpuTarget> Target for T {
 
         // OnePrefix is an unfortunate special case. The only viable action is applying
         // its no-op kernel.
-        if matches!(
-            spec,
-            LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::OnePrefix,
-                    ..
-                },
-                ..
-            )
-        ) {
+        if spec.is_oneprefix() {
             return Box::new(iter::once(Action::Select(Select(
                 (CpuKernel::OnePrefixNoOp).into(),
                 false,
@@ -1670,56 +1661,6 @@ impl CanonicalBimap for CpuMemoryLevel {
     }
 }
 
-fn bufferize_actions<Tgt: Target>(
-    spec: &LogicalSpec<Tgt>,
-) -> impl Iterator<Item = Action<Tgt>> + '_ {
-    let LogicalSpec::Compose {
-        components,
-        operand_auxes: _,
-        serial_only: _,
-    } = spec
-    else {
-        panic!("bufferize_actions called on non-Compose Spec");
-    };
-
-    let mut results = vec![];
-
-    for index in 0..(components.len() - 1) {
-        let comp = &components[index + 1];
-        let comp_out_idx = comp.typ.unique_output_index().unwrap();
-        let intermediate_shape = comp.parameter_shape(comp_out_idx);
-        let intermediate_dtype = comp.dtypes[comp_out_idx];
-
-        for level in Tgt::levels() {
-            let vector_bytes = level.vector_bytes();
-
-            for layout in Tgt::move_destination_layouts(&intermediate_shape, intermediate_dtype) {
-                // TODO: Need to implement `can_move_to`-style logic here.
-
-                if !vector_bytes.is_empty() {
-                    for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
-                        results.push(Action::Bufferize(Bufferize {
-                            index,
-                            level,
-                            layout: layout.clone(),
-                            vector_size: Some(vector_size),
-                        }));
-                    }
-                } else {
-                    results.push(Action::Bufferize(Bufferize {
-                        index,
-                        level,
-                        layout,
-                        vector_size: None,
-                    }));
-                }
-            }
-        }
-    }
-
-    results.into_iter()
-}
-
 fn physicaltransposebyte_applies_to_operands<Tgt>(
     typ: &PrimitiveSpecType,
     operands: &[TensorSpec<Tgt>],
@@ -2036,10 +1977,7 @@ mod tests {
 
             let mut moveable_parameter_idxs = HashSet::new();
             // OnePrefix is the exception. It should have no Moves.
-            if !matches!(
-                lspec,
-                LogicalSpec::Primitive(PrimitiveBasics { typ: PrimitiveSpecType::OnePrefix, ..}, ..)
-            ) {
+            if !lspec.is_oneprefix() {
                 lspec
                     .parameters()
                     .into_iter()

@@ -8,7 +8,7 @@ use crate::scheduling::{
     NaiveBottomUpActionProvider, NaiveBottomUpSolver, NotApplicableReason,
 };
 use crate::spec::{LogicalSpec, Spec};
-use crate::target::common_actions::tile_out_actions;
+use crate::target::common_actions::bufferize_actions;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::views::{Tensor, View};
@@ -131,7 +131,10 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
 
 impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for BufferizeActionProvider<Tgt> {
     fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
-        tile_out_actions(logical_spec).collect()
+        match logical_spec {
+            LogicalSpec::Primitive(..) => vec![],
+            LogicalSpec::Compose { .. } => bufferize_actions(logical_spec).collect(),
+        }
     }
 }
 
