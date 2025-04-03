@@ -17,9 +17,6 @@ use crate::spec::{
     DimAssociation, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
     PrimitiveSpecType, Spec,
 };
-use crate::spec::{
-    self, DimAssociation, FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec,
-};
 use crate::target::common_actions::{split_actions, tile_out_actions};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};

@@ -1,22 +1,22 @@
 use iai_callgrind::{library_benchmark, library_benchmark_group, main, LibraryBenchmarkConfig};
-use morello::utils::bit_length_inverse;
-use std::hint::black_box;
-
-use morello::cost::Cost;
+use morello::cost::{CostIntensity, NormalizedCost};
 use morello::db::ActionNum;
 use morello::memorylimits::MemVec;
 use morello::search::ImplReducer;
+use morello::utils::bit_length_inverse;
+use nonzero::nonzero as nz;
+use std::hint::black_box;
 
 #[export_name = "morello_bench_impl_reducer::init_reduce_costs"]
-fn init_reduce_costs(k: u16) -> (Vec<(ActionNum, Cost)>, ImplReducer) {
+fn init_reduce_costs(k: u16) -> (Vec<(ActionNum, NormalizedCost)>, ImplReducer) {
     let reducer = ImplReducer::new(usize::from(k), vec![]);
     // Generate some "random" entries to reduce.
     let entries = (0..k + 10000)
         .map(|i| {
             (
                 i % 10,
-                Cost {
-                    main: ((i + 11) % 13).into(),
+                NormalizedCost {
+                    intensity: CostIntensity::new(((i + 11) % 13).into(), nz!(1u64)),
                     peaks: MemVec::new([
                         ((i + 2) % 5).into(),
                         ((i + 3) % 4).into(),
