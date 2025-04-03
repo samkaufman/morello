@@ -1,10 +1,7 @@
 use indexmap::IndexMap;
 use itertools::Itertools;
-
-use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::hash::Hash;
 use std::iter;
 use std::mem::{replace, take};
 use std::num::NonZeroUsize;
@@ -36,8 +33,8 @@ pub struct ImplReducer {
 
 #[derive(Debug)]
 enum ImplReducerResults {
-    One(Option<(Cost, ActionNum)>),
-    Many(BTreeSet<(Cost, ActionNum)>),
+    One(Option<(NormalizedCost, ActionNum)>),
+    Many(BTreeSet<(NormalizedCost, ActionNum)>),
 }
 
 /// An [VisitUpdater] which logs completed Specs in a Vec.
@@ -434,7 +431,7 @@ fn solve_internal<Tgt>(
             }
             let normalized_costs = decisions
                 .iter()
-                .map(|x| NormalizedCost::new(x.1.clone(), spec.0.volume()))
+                .map(|(_, c)| NormalizedCost::new(c.clone(), spec.0.volume()))
                 .collect::<Vec<_>>();
             for solver_id in solver_ids {
                 requests[solver_id].visit_dependency(
@@ -490,8 +487,12 @@ fn process_completed_goals<Tgt>(
                 }
                 let reducer = tracking_updater.inner_updater.remove(&goal).unwrap();
                 let decisions = reducer.finalize();
+                let denormalized_decisions = decisions
+                    .into_iter()
+                    .map(|(a, n)| (a, n.into_main_cost_for_volume(goal.0.volume())))
+                    .collect::<Vec<_>>();
                 if visit_queue
-                    .insert(goal, (decisions, requesting_solver_idxs))
+                    .insert(goal, (denormalized_decisions, requesting_solver_idxs))
                     .is_some()
                 {
                     panic!("Duplicate goal in visit queue");
@@ -521,56 +522,59 @@ impl ImplReducer {
         }
     }
 
-    pub fn insert(&mut self, new_action_num: ActionNum, new_cost: Cost) {
-        let new_action = (new_cost, new_action_num);
+    pub fn insert(&mut self, new_action_num: ActionNum, new_cost: NormalizedCost) {
+        let new_cost_action = (new_cost, new_action_num);
         match &mut self.results {
             ImplReducerResults::One(None) => {
-                self.results = ImplReducerResults::One(Some(new_action));
+                self.results = ImplReducerResults::One(Some(new_cost_action));
             }
-            ImplReducerResults::One(Some(action)) if *action > new_action => {
-                self.results = ImplReducerResults::One(Some(new_action));
+            ImplReducerResults::One(Some(cost_action)) if *cost_action > new_cost_action => {
+                self.results = ImplReducerResults::One(Some(new_cost_action));
             }
-            ImplReducerResults::Many(ref mut actions) => {
-                if actions.len() < self.top_k {
+            ImplReducerResults::Many(ref mut cost_actions) => {
+                if cost_actions.len() < self.top_k {
                     // We have not yet filled the top_k, so just insert.
-                    actions.insert(new_action);
-                } else if actions.iter().any(|(cost, _)| *cost == new_action.0) {
-                    debug_assert_eq!(actions.len(), self.top_k);
+                    cost_actions.insert(new_cost_action);
+                } else if cost_actions
+                    .iter()
+                    .any(|(cost, _)| *cost == new_cost_action.0)
+                {
+                    debug_assert_eq!(cost_actions.len(), self.top_k);
 
                     // We have filled the top_k and found the same cost in results, so
                     //   replace something if it improves preference count, and do
                     //   nothing if not.
-                    if let Some((_, action)) = actions
+                    if let Some((_, action)) = cost_actions
                         .iter()
                         .enumerate()
                         // Since we know that results is sorted by Cost, this filter
                         //   only takes contiguous elements with the same cost.
                         .filter(|&(i, (cost, _))| {
-                            i < self.preferences.len() && *cost == new_action.0
+                            i < self.preferences.len() && *cost == new_cost_action.0
                         })
-                        .find(|&(i, _)| self.preferences[i] == new_action.1)
+                        .find(|&(i, _)| self.preferences[i] == new_cost_action.1)
                     {
-                        actions.remove(&action.clone());
-                        actions.insert(new_action);
+                        cost_actions.remove(&action.clone());
+                        cost_actions.insert(new_cost_action);
                     }
                 } else {
-                    debug_assert_eq!(actions.len(), self.top_k);
+                    debug_assert_eq!(cost_actions.len(), self.top_k);
 
                     // We have filled the top_k, but there is no same cost in results,
                     //   so replace the last element if it is worse than the new one.
-                    actions.insert(new_action);
-                    actions.pop_last();
+                    cost_actions.insert(new_cost_action);
+                    cost_actions.pop_last();
                 }
 
-                debug_assert!(actions.iter().tuple_windows().all(|(a, b)| a.0 <= b.0));
-                debug_assert!(actions.len() <= self.top_k);
-                debug_assert!(actions.iter().map(|(_, a)| a).all_unique());
+                debug_assert!(cost_actions.iter().tuple_windows().all(|(a, b)| a.0 <= b.0));
+                debug_assert!(cost_actions.len() <= self.top_k);
+                debug_assert!(cost_actions.iter().map(|(_, a)| a).all_unique());
             }
             _ => {}
         }
     }
 
-    fn finalize(self) -> Vec<(ActionNum, Cost)> {
+    fn finalize(self) -> Vec<(ActionNum, NormalizedCost)> {
         match self.results {
             ImplReducerResults::One(None) => vec![],
             ImplReducerResults::One(Some((cost, action_num))) => vec![(action_num, cost)],
@@ -608,6 +612,7 @@ where
 mod tests {
     use super::*;
     use crate::common::DimSize;
+    use crate::cost::CostIntensity;
     use crate::db::FilesDatabase;
     use crate::layout::row_major;
     use crate::lspec;
@@ -707,7 +712,7 @@ mod tests {
 
         #[test]
         fn test_implreducer_can_sort_any_top_k_actions(
-            (top_k, mut action_costs) in arb_top_k_and_action_costs()
+            (top_k, mut action_costs) in arb_top_k_and_action_normalized_costs()
         ) {
             let preferences = vec![];
             let mut reducer = ImplReducer::new(top_k, preferences);
@@ -730,24 +735,24 @@ mod tests {
         prop::collection::hash_set(any::<ActionNum>(), 1..top_k)
     }
 
-    fn arb_costs(top_k: usize) -> impl Strategy<Value = Vec<Cost>> {
-        prop::collection::vec(any::<Cost>(), 1..top_k)
+    fn arb_normalized_costs(top_k: usize) -> impl Strategy<Value = Vec<NormalizedCost>> {
+        prop::collection::vec(any::<NormalizedCost>(), 1..top_k)
     }
 
     prop_compose! {
-        fn arb_top_k_and_action_costs()(top_k in 2..128usize)
+        fn arb_top_k_and_action_normalized_costs()(top_k in 2..128usize)
         (
             top_k in Just(top_k),
             action_indices in arb_action_indices(top_k),
-            costs in arb_costs(top_k)
-        ) -> (usize, Vec<(Cost, ActionNum)>) {
+            costs in arb_normalized_costs(top_k)
+        ) -> (usize, Vec<(NormalizedCost, ActionNum)>) {
             (top_k, costs.into_iter().zip(action_indices).collect())
         }
     }
 
-    fn create_simple_cost(main: u32) -> Cost {
-        Cost {
-            main,
+    fn create_simple_normalized_cost(main: u32) -> NormalizedCost {
+        NormalizedCost {
+            intensity: CostIntensity::new(main.into(), nz!(1u64)),
             peaks: MemVec::zero::<X86Target>(),
             depth: 0,
         }
@@ -769,7 +774,7 @@ mod tests {
         let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
-        let cost1 = create_simple_cost(1);
+        let cost1 = create_simple_normalized_cost(1);
 
         reducer.insert(1, cost1.clone());
         reducer.insert(0, cost1.clone());
@@ -785,9 +790,9 @@ mod tests {
         let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
-        let cost3 = create_simple_cost(3);
+        let cost1 = create_simple_normalized_cost(1);
+        let cost2 = create_simple_normalized_cost(2);
+        let cost3 = create_simple_normalized_cost(3);
 
         reducer.insert(0, cost1.clone());
         reducer.insert(1, cost3.clone());
@@ -803,7 +808,7 @@ mod tests {
         let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
-        let cost1 = create_simple_cost(1);
+        let cost1 = create_simple_normalized_cost(1);
 
         reducer.insert(1, cost1.clone());
         reducer.insert(0, cost1.clone());
@@ -819,8 +824,8 @@ mod tests {
         let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
+        let cost1 = create_simple_normalized_cost(1);
+        let cost2 = create_simple_normalized_cost(2);
 
         reducer.insert(1, cost1.clone());
         reducer.insert(0, cost2.clone());
@@ -836,7 +841,7 @@ mod tests {
         let preferences = vec![0, 2, 3];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
-        let cost1 = create_simple_cost(1);
+        let cost1 = create_simple_normalized_cost(1);
 
         reducer.insert(0, cost1.clone());
         reducer.insert(1, cost1.clone());
@@ -853,8 +858,8 @@ mod tests {
         let preferences = vec![0, 2, 3];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
+        let cost1 = create_simple_normalized_cost(1);
+        let cost2 = create_simple_normalized_cost(2);
 
         reducer.insert(0, cost2.clone());
         reducer.insert(1, cost2.clone());
@@ -871,8 +876,8 @@ mod tests {
         let preferences = vec![3, u16::MAX, 0];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
+        let cost1 = create_simple_normalized_cost(1);
+        let cost2 = create_simple_normalized_cost(2);
 
         reducer.insert(0, cost1.clone());
         reducer.insert(1, cost2.clone());
@@ -892,9 +897,9 @@ mod tests {
         let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
-        let cost3 = create_simple_cost(3);
+        let cost1 = create_simple_normalized_cost(1);
+        let cost2 = create_simple_normalized_cost(2);
+        let cost3 = create_simple_normalized_cost(3);
 
         reducer.insert(0, cost1.clone());
         reducer.insert(1, cost3.clone());
@@ -911,8 +916,8 @@ mod tests {
         let preferences = vec![];
         let mut reducer = ImplReducer::new(top_k, preferences);
 
-        let cost1 = create_simple_cost(1);
-        let cost2 = create_simple_cost(2);
+        let cost1 = create_simple_normalized_cost(1);
+        let cost2 = create_simple_normalized_cost(2);
 
         reducer.insert(0, cost1.clone());
         reducer.insert(1, cost1.clone());

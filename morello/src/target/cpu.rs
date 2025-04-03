@@ -19,7 +19,6 @@ use crate::shape;
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{Kernel, MemoryLevel, Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::{gen_vector_sizes, gen_vector_sizes_opt, TensorSpec, TensorSpecAux};
-use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::View;
 
 use divrem::DivRem;

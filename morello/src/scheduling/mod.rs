@@ -373,8 +373,7 @@ where
         normalized_cost: NormalizedCost,
     ) {
         let reducer = self.get_mut(spec).unwrap();
-        let cost = normalized_cost.into_main_cost_for_volume(spec.0.volume());
-        reducer.insert(action, cost);
+        reducer.insert(action, normalized_cost);
     }
 
     fn complete_spec(&mut self, _spec: &Spec<Tgt>) {}

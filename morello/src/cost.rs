@@ -90,18 +90,7 @@ impl Ord for Cost {
         if main_cmp != Ordering::Equal {
             return main_cmp;
         }
-
-        // Define memory consumption ordering lexicographically, just so we have some total
-        // order for Costs.
-        debug_assert_eq!(self.peaks.len(), other.peaks.len());
-        for i in 0..self.peaks.len() {
-            let peaks_cmp = self.peaks.get_unscaled(i).cmp(&other.peaks.get_unscaled(i));
-            if peaks_cmp != Ordering::Equal {
-                return peaks_cmp;
-            }
-        }
-
-        self.depth.cmp(&other.depth)
+        cost_tail_cmp(&self.peaks, self.depth, &other.peaks, other.depth)
     }
 }
 
@@ -120,6 +109,22 @@ impl NormalizedCost {
             peaks: self.peaks,
             depth: self.depth,
         }
+    }
+}
+
+impl PartialOrd for NormalizedCost {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for NormalizedCost {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let intensity_cmp = self.intensity.0.cmp(&other.intensity.0);
+        if intensity_cmp != Ordering::Equal {
+            return intensity_cmp;
+        }
+        cost_tail_cmp(&self.peaks, self.depth, &other.peaks, other.depth)
     }
 }
 
@@ -144,6 +149,22 @@ impl CostIntensity {
             .try_into()
             .expect("cost should fit in u32")
     }
+}
+
+fn cost_tail_cmp(lhs_peaks: &MemVec, lhs_depth: u8, rhs_peaks: &MemVec, rhs_depth: u8) -> Ordering {
+    // Define memory consumption ordering lexicographically, just so we have some total
+    // order for Costs.
+    debug_assert_eq!(lhs_peaks.len(), rhs_peaks.len());
+    for i in 0..lhs_peaks.len() {
+        let peaks_cmp = lhs_peaks
+            .get_binary_scaled(i)
+            .cmp(&rhs_peaks.get_binary_scaled(i));
+        if peaks_cmp != Ordering::Equal {
+            return peaks_cmp;
+        }
+    }
+
+    lhs_depth.cmp(&rhs_depth)
 }
 
 #[cfg(test)]

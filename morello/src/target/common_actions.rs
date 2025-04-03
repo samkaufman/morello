@@ -179,6 +179,35 @@ pub fn move_actions<Tgt: Target>(
                 }
             }
         }
+
+        // For cache destinations, generate moves that preserve original layout, unless
+        // it was already added. This preserves the layout's contiguity when moving
+        // into cache.
+        let original_layout = operand.layout();
+        if !contains_source_layout {
+            for level in Tgt::possible_destination_levels(operand.level()) {
+                if !level.is_addressed() {
+                    // This is a cache level, generate a move with the original layout
+                    for &destination_dtype in
+                        iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
+                    {
+                        results.extend(
+                            gen_vector_sizes_opt(destination_dtype, level.vector_bytes()).map(
+                                |vector_size| {
+                                    Action::Move(Move {
+                                        source_idx: i,
+                                        destination_dtype,
+                                        destination_level: level,
+                                        destination_layout: original_layout.clone(),
+                                        destination_vector_size: vector_size,
+                                    })
+                                },
+                            ),
+                        )
+                    }
+                }
+            }
+        }
     }
 
     results.into_iter()
@@ -226,35 +255,6 @@ pub fn bufferize_actions<Tgt: Target>(
                         layout,
                         vector_size: None,
                     }));
-                }
-            }
-        }
-
-        // For cache destinations, generate moves that preserve original layout, unless
-        // it was already added. This preserves the layout's contiguity when moving
-        // into cache.
-        let original_layout = operand.layout();
-        if !contains_source_layout {
-            for level in Tgt::possible_destination_levels(operand.level()) {
-                if !level.is_addressed() {
-                    // This is a cache level, generate a move with the original layout
-                    for &destination_dtype in
-                        iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
-                    {
-                        results.extend(
-                            gen_vector_sizes_opt(destination_dtype, level.vector_bytes()).map(
-                                |vector_size| {
-                                    Action::Move(Move {
-                                        source_idx: i,
-                                        destination_dtype,
-                                        destination_level: level,
-                                        destination_layout: original_layout.clone(),
-                                        destination_vector_size: vector_size,
-                                    })
-                                },
-                            ),
-                        )
-                    }
                 }
             }
         }
