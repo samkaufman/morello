@@ -106,7 +106,7 @@ pub trait DependencyRequest {
 /// call [VisitUpdater::complete] for satisfied solutions. (No call for unsat.)
 #[auto_impl(&mut)]
 pub trait VisitUpdater<Tgt: Target> {
-    /// Store the cost-action for a particular [Spec]-action.
+    /// Store the cost and action number for a single implementation of `spec`.
     fn complete_action(
         &mut self,
         spec: &Spec<Tgt>,
@@ -1164,7 +1164,8 @@ where
                                 .map(|cost_option| cost_option.clone().unwrap().unwrap()),
                         );
 
-                        let normalized_cost = NormalizedCost::new(cost, spec.0.volume());
+                        let normalized_cost =
+                            NormalizedCost::new(cost, working_spec.spec.0.volume());
                         updater.complete_action(
                             &working_spec.spec,
                             working_impl.action_num,
@@ -1565,6 +1566,42 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod shared_tests {
+    pub mod internal {
+        use crate::{
+            cost::NormalizedCost, db::ActionNum, scheduling::VisitUpdater, search::ImplReducer,
+            spec::Spec, target::Target,
+        };
+
+        pub struct MockVisitUpdater<Tgt: Target> {
+            pub goal: Spec<Tgt>,
+            pub reducer: ImplReducer,
+            pub goal_completed: bool,
+        }
+
+        impl<Tgt: Target> VisitUpdater<Tgt> for MockVisitUpdater<Tgt> {
+            fn complete_action(
+                &mut self,
+                spec: &Spec<Tgt>,
+                action_num: ActionNum,
+                normalized_cost: NormalizedCost,
+            ) {
+                if self.goal_completed {
+                    panic!("complete_action called after complete_spec");
+                }
+                assert_eq!(&self.goal, spec);
+                self.reducer.insert(action_num, normalized_cost);
+            }
+
+            fn complete_spec(&mut self, spec: &Spec<Tgt>) {
+                if self.goal_completed {
+                    panic!("complete_spec called twice");
+                }
+                assert_eq!(&self.goal, spec);
+                self.goal_completed = true;
+            }
+        }
+    }
+
     #[macro_export]
     macro_rules! emit_shared_naivebottomupactionprovider_tests {
         ($tgt:ty, $provider:ty, $suffix:ident) => {
@@ -1575,6 +1612,8 @@ pub(crate) mod shared_tests {
                 ) {
                     use std::collections::HashSet;
                     use std::default::Default;
+                    use std::rc::Rc;
+                    use proptest::prelude::*;
                     use $crate::db::db_spec_bimap;
                     use $crate::scheduling::{
                         SpecGeometry, BottomUpSolver, NaiveBottomUpSolver, DependencyRequest
@@ -1582,8 +1621,7 @@ pub(crate) mod shared_tests {
 
                     let mut solver = NaiveBottomUpSolver::<$tgt, $provider>::default();
                     let single_spec_geometry = SpecGeometry::single(
-                        &spec,
-                        std::rc::Rc::new(db_spec_bimap(false)),
+                        &spec, Rc::new(db_spec_bimap(false))
                     );
                     let request = solver.request(&single_spec_geometry);
 
@@ -1608,7 +1646,160 @@ pub(crate) mod shared_tests {
                         }
                     }
 
-                    proptest::prelude::prop_assert_eq!(query_specs, expansion_specs);
+                    prop_assert_eq!(query_specs, expansion_specs);
+                }
+
+                #[test]
+                fn [< test_naivebottomupsolver_computes_same_decision_for_single_canonical_spec_ $suffix >](
+                    spec in $crate::spec::arb_canonical_spec::<$tgt>(None, None),
+                    visit_deps_reverse in proptest::prelude::any::<bool>(),
+                ) {
+                    use std::collections::{HashMap, HashSet};
+                    use std::default::Default;
+                    use std::rc::Rc;
+                    use proptest::prelude::*;
+                    use nonzero::nonzero as nz;
+                    use $crate::cost::{CostIntensity, NormalizedCost};
+                    use $crate::db::db_spec_bimap;
+                    use $crate::memorylimits::MemVec;
+                    use $crate::scheduling::{
+                        ActionEncodeDecode, Cost, SpecGeometry, SpecGeometryRect, BottomUpSolver,
+                        NaiveBottomUpSolver, DependencyRequest, compute_impl_cost
+                    };
+                    use $crate::search::ImplReducer;
+                    use $crate::scheduling::shared_tests::internal::MockVisitUpdater;
+                    use $crate::target::LEVEL_COUNT;
+
+                    let mut solver = NaiveBottomUpSolver::<$tgt, $provider>::default();
+                    let single_spec_geometry = SpecGeometry::single(
+                        &spec, Rc::new(db_spec_bimap(false))
+                    );
+                    let mut request = solver.request(&single_spec_geometry);
+
+                    let mut query_specs = Vec::new();
+                    if let Some(queries_geometry) = request.queries() {
+                        queries_geometry.iter().for_each(|rect| {
+                            query_specs.extend(rect.iter_specs());
+                        });
+                    }
+                    if visit_deps_reverse {
+                        query_specs.reverse();
+                    }
+
+                    let mut updater = MockVisitUpdater {
+                        goal: spec.clone(),
+                        reducer: ImplReducer::new(1, vec![]),
+                        goal_completed: false,
+                    };
+                    request.apply_no_dependency_updates(&spec, &mut updater);
+
+                    // Check that everything in query_specs is unique.
+                    let mut unique_specs = HashSet::new();
+                    for query_spec in &query_specs {
+                        prop_assert!(unique_specs.insert(query_spec));
+                    }
+
+                    // TODO: Make a test variant which doesn't just push dependency unit rects.
+                    // TODO: Make a test variant where we feed k>1 costs
+                    let mut small_db = HashMap::<Spec<$tgt>, NormalizedCost>::new();
+                    for (idx, dependency) in query_specs.iter().enumerate() {
+                        let mut dep_costs_vec = vec![];
+                        if let Some(dep_ncost) = small_db.get(dependency) {
+                            dep_costs_vec.push(dep_ncost.clone());
+                        } else {
+                            let ncost = NormalizedCost {
+                                intensity: CostIntensity::new(
+                                    (idx % 8).try_into().unwrap(),
+                                    nz!(1u64),
+                                ),
+                                peaks: MemVec::new(
+                                    [(u64::try_from(idx).unwrap() % 2); LEVEL_COUNT]
+                                ),
+                                depth: (idx % 3).try_into().unwrap(),
+                            };
+                            small_db.insert(dependency.clone(), ncost.clone());
+                            dep_costs_vec.push(ncost);
+                        }
+                        request.visit_dependency(
+                            &SpecGeometryRect::single(
+                                dependency, Rc::clone(single_spec_geometry.bimap())
+                            ),
+                            &dep_costs_vec,
+                            &mut updater,
+                        );
+                    }
+                    prop_assert!(updater.goal_completed);
+
+                    // Compare to the result of a simpler solver.
+                    let mut reducer = ImplReducer::new(1, vec![]);
+                    let actions_iter =
+                        <$provider as NaiveBottomUpActionProvider<$tgt>>::actions(&spec.0);
+                    for action in actions_iter {
+                        let Ok(lowered_impl) = action.apply(&spec) else {
+                            continue;
+                        };
+                        let mut action_subcosts: Vec<Cost> = vec![];
+                        lowered_impl.visit_leaves(&mut |leaf| {
+                            if let ImplNode::SpecApp(spec_app) = leaf {
+                                let normalized = small_db
+                                    .get(&spec_app.0)
+                                    .expect("subspec should be in small_db")
+                                    .clone();
+                                action_subcosts.push(normalized.into_main_cost_for_volume(
+                                    spec_app.0.0.volume(),
+                                ));
+                            }
+                            true
+                        });
+                        let computed_ncost = NormalizedCost::new(compute_impl_cost(
+                            &lowered_impl,
+                            &mut action_subcosts.into_iter(),
+                        ), spec.0.volume());
+                        reducer.insert(action.encode(&spec), computed_ncost);
+                    }
+
+                    prop_assert_eq!(reducer.finalize(), updater.reducer.finalize())
+                }
+
+                #[test]
+                fn [< test_naivebottomupsolver_yields_same_subspecs_for_single_canonical_spec_ $suffix >](
+                    spec in $crate::spec::arb_canonical_spec::<$tgt>(None, None),
+                ) {
+                    use std::collections::HashSet;
+                    use std::default::Default;
+                    use std::rc::Rc;
+                    use proptest::prelude::*;
+                    use $crate::db::db_spec_bimap;
+                    use $crate::scheduling::{
+                        SpecGeometry, BottomUpSolver, NaiveBottomUpSolver, DependencyRequest
+                    };
+
+                    let mut solver = NaiveBottomUpSolver::<$tgt, $provider>::default();
+                    let single_spec_geometry = SpecGeometry::single(
+                        &spec, Rc::new(db_spec_bimap(false))
+                    );
+                    let request = solver.request(&single_spec_geometry);
+
+                    let mut query_subspecs = HashSet::new();
+                    if let Some(queries_geometry) = request.queries() {
+                        queries_geometry.iter().for_each(|rect| {
+                            query_subspecs.extend(rect.iter_specs());
+                        });
+                    }
+
+                    let mut action_subspecs = HashSet::new();
+                    for action in <$provider as NaiveBottomUpActionProvider<$tgt>>::actions(&spec.0) {
+                        if let Ok(lowered_impl) = action.apply(&spec) {
+                            lowered_impl.visit_leaves(&mut |leaf| {
+                                if let ImplNode::SpecApp(spec_app) = leaf {
+                                    action_subspecs.insert(spec_app.0.clone());
+                                }
+                                true
+                            });
+                        }
+                    }
+
+                    prop_assert_eq!(query_subspecs, action_subspecs);
                 }
             } }
         };
