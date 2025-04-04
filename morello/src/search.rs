@@ -574,7 +574,7 @@ impl ImplReducer {
         }
     }
 
-    fn finalize(self) -> Vec<(ActionNum, NormalizedCost)> {
+    pub fn finalize(self) -> Vec<(ActionNum, NormalizedCost)> {
         match self.results {
             ImplReducerResults::One(None) => vec![],
             ImplReducerResults::One(Some((cost, action_num))) => vec![(action_num, cost)],
