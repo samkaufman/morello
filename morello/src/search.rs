@@ -303,6 +303,12 @@ fn solve_external<Tgt>(
         let mut missing_subspecs_rtree = deps_tree.clone();
         db.subtract_from_rtree(table_key, &mut missing_subspecs_rtree);
 
+        // Remove any goals present in the dependency tree. These aren't external.
+        // TODO: Somehow ensure that BiMaps match at the type level.
+        if let Some(goal_tree) = goals.0.get(table_key) {
+            missing_subspecs_rtree.subtract_tree(goal_tree);
+        }
+
         // TODO: What do we do about the non-canonical points here? Or are they trimmed before put?
         // TODO: Recurse once, not once for each dependency tree.
         missing_subspecs_rtree
