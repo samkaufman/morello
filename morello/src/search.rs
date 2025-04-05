@@ -160,7 +160,12 @@ fn synthesize_block<Tgt>(
     goals.iter().for_each(|rect| {
         // TODO: Using SpecGeometry::iter allocates a bunch of rects unnecessarily.
         rect.iter_specs().for_each(|g| {
-            reducers.insert(g.clone(), ImplReducer::new(top_k, vec![]));
+            if reducers
+                .insert(g.clone(), ImplReducer::new(top_k, vec![]))
+                .is_some()
+            {
+                panic!("Duplicate goal found: {g}; goals = {goals:?}");
+            }
             goal_solvers_outstanding.insert(g.clone(), solvers.len());
         });
     });
