@@ -22,6 +22,7 @@ pub struct ToAccum;
 
 type AccumMapKey<Tgt> = (TensorSpec<Tgt>, bool, MemoryLimits);
 
+#[derive(Default)]
 pub struct ToAccumSolver<Tgt>(PhantomData<Tgt>);
 
 pub struct ToAccumSolverRequest<Tgt: Target> {
@@ -75,7 +76,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToAccum {
     }
 
     fn bottom_up_solvers() -> Self::BSolverIter {
-        iter::once(ToAccumSolver(PhantomData))
+        iter::once(ToAccumSolver::default())
     }
 }
 
@@ -261,4 +262,37 @@ fn abstract_goal<Tgt: Target>(spec: &Spec<Tgt>) -> AccumMapKey<Tgt> {
     let mut limits = spec.1.clone();
     limits.zero_levels_slower_than_all::<Tgt>(&[output_tensorspec.level()]);
     (output_tensorspec, serial_only, limits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        emit_bottomupsolver_queries_same_action_dependencies, emit_bottomupsolver_tests,
+        target::{ArmTarget, X86Target},
+    };
+
+    emit_bottomupsolver_tests!(
+        ToAccumSolver::<X86Target>::default(),
+        X86Target,
+        toaccum_x86
+    );
+    emit_bottomupsolver_tests!(
+        ToAccumSolver::<ArmTarget>::default(),
+        ArmTarget,
+        toaccum_arm
+    );
+
+    emit_bottomupsolver_queries_same_action_dependencies!(
+        ToAccumSolver::<X86Target>::default(),
+        X86Target,
+        |lspec| X86Target::actions(lspec).filter(|a| matches!(a, Action::ToAccum(_))),
+        toaccum_x86
+    );
+    emit_bottomupsolver_queries_same_action_dependencies!(
+        ToAccumSolver::<ArmTarget>::default(),
+        ArmTarget,
+        |lspec| ArmTarget::actions(lspec).filter(|a| matches!(a, Action::ToAccum(_))),
+        toaccum_arm
+    );
 }

@@ -186,16 +186,16 @@ where
 mod tests {
     use super::*;
     use crate::{
-        emit_shared_naivebottomupactionprovider_tests,
+        emit_naivebottomupsolver_tests,
         target::{ArmTarget, X86Target},
     };
 
-    emit_shared_naivebottomupactionprovider_tests!(
+    emit_naivebottomupsolver_tests!(
         X86Target,
         ToMaxAndUnscaledActionProvider<X86Target>,
         tomaxandunscaled_x86
     );
-    emit_shared_naivebottomupactionprovider_tests!(
+    emit_naivebottomupsolver_tests!(
         ArmTarget,
         ToMaxAndUnscaledActionProvider<ArmTarget>,
         tomaxandunscaled_arm

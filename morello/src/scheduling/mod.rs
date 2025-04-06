@@ -16,7 +16,7 @@ use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::utils::diagonals_shifted;
 use crate::views::{Param, Tensor, TileError, View, ViewE};
 use auto_impl::auto_impl;
-use itertools::izip;
+use itertools::{izip, Itertools};
 use once_cell::unsync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
@@ -398,6 +398,7 @@ impl<Tgt: Target> SpecGeometry<Tgt> {
     }
 
     pub fn insert_spec(&mut self, spec: &Spec<Tgt>) {
+        debug_assert!(spec.is_canonical());
         let (key, pt) = self.1.apply(spec);
         let pt_i64 = pt.iter().map(|v| BimapSInt::from(*v)).collect::<Vec<_>>();
         self.0
@@ -482,7 +483,6 @@ impl<Tgt: Target> Debug for SpecGeometry<Tgt> {
 }
 
 impl<Tgt: Target> SpecGeometryRect<Tgt> {
-    // TODO: Remove. Only exists for wrapping RTree rect in [synthesize_block].
     pub(crate) fn new(
         key: TableKey,
         bottom: Vec<BimapInt>,
@@ -491,6 +491,22 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
     ) -> Self {
         assert_eq!(bottom.len(), top.len());
         assert!(bottom.iter().zip(&top).all(|(b, t)| b <= t));
+        #[cfg(debug_assertions)]
+        {
+            let mut key = (key.clone(), bottom.clone());
+            for v in bottom
+                .iter()
+                .zip(&top)
+                .map(|(l, h)| (*l..=*h))
+                .multi_cartesian_product()
+            {
+                key.1 = v;
+                let spec = bimap.apply_inverse(&key);
+                if !spec.is_canonical() {
+                    panic!("Rect contains non-canonical Spec: {spec}");
+                }
+            }
+        }
         Self {
             key,
             bottom,
@@ -500,11 +516,14 @@ impl<Tgt: Target> SpecGeometryRect<Tgt> {
         }
     }
 
-    // TODO: Remove. Only exists for wrapping RTree rect in [synthesize_block].
+    /// Creates a new [SpecGeometryRect] which contains a single [Spec].
+    ///
+    /// The caller must ensure that the [Spec] is canonical. Behavior is undefined otherwise.
     pub(crate) fn single(
         spec: &Spec<Tgt>,
         bimap: Rc<dyn BiMap<Domain = Spec<Tgt>, Codomain = DbKey>>,
     ) -> Self {
+        debug_assert!(spec.is_canonical());
         let (key, pt) = bimap.apply(spec);
         Self {
             key,
@@ -1565,7 +1584,7 @@ mod tests {
 }
 
 #[cfg(test)]
-pub(crate) mod shared_tests {
+mod shared_tests {
     pub mod internal {
         use crate::{
             cost::NormalizedCost, db::ActionNum, scheduling::VisitUpdater, search::ImplReducer,
@@ -1603,8 +1622,127 @@ pub(crate) mod shared_tests {
     }
 
     #[macro_export]
-    macro_rules! emit_shared_naivebottomupactionprovider_tests {
+    macro_rules! emit_bottomupsolver_queries_same_action_dependencies {
+        ($mksolver:expr, $tgt:ty, $actions:expr, $suffix:ident) => {
+            paste::paste! { proptest::prelude::proptest! {
+                #[test]
+                fn [< test_bottomupsolver_queries_for_single_canonical_matches_actions_ $suffix >](
+                    spec in $crate::spec::arb_canonical_spec::<$tgt>(None, None)
+                ) {
+                    use std::collections::HashSet;
+                    use std::default::Default;
+                    use std::rc::Rc;
+                    use proptest::prelude::*;
+                    use $crate::db::db_spec_bimap;
+                    use $crate::scheduling::{
+                        SpecGeometry, BottomUpSolver, DependencyRequest
+                    };
+
+                    let mut solver = $mksolver;
+                    let single_spec_geometry = SpecGeometry::single(
+                        &spec, Rc::new(db_spec_bimap(false))
+                    );
+                    let request = solver.request(&single_spec_geometry);
+
+                    let mut query_specs = HashSet::new();
+                    let mut action_subspecs = HashSet::new();
+                    if let Some(queries_geometry) = request.queries() {
+                        for rect in queries_geometry.iter() {
+                            query_specs.extend(rect.iter_specs());
+                        }
+                    }
+                    for action in $actions(&spec.0) {
+                        if let Ok(lowered_impl) = action.apply(&spec) {
+                            lowered_impl.visit_leaves(&mut |leaf| {
+                                if let ImplNode::SpecApp(spec_app) = leaf {
+                                    action_subspecs.insert(spec_app.0.clone());
+                                }
+                                true
+                            });
+                        }
+                    }
+
+                    prop_assert_eq!(query_specs, action_subspecs);
+                }
+            } }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! emit_bottomupsolver_tests {
+        ($mksolver:expr, $tgt:ty, $suffix:ident) => {
+            paste::paste! { proptest::prelude::proptest! {
+                #[test]
+                fn [< test_bottomupsolver_queries_for_single_canonical_spec_are_canonical_ $suffix >](
+                    spec in $crate::spec::arb_canonical_spec::<$tgt>(None, None)
+                ) {
+                    use std::default::Default;
+                    use std::rc::Rc;
+                    use proptest::prelude::*;
+                    use $crate::db::db_spec_bimap;
+                    use $crate::scheduling::{
+                        SpecGeometry, BottomUpSolver, DependencyRequest
+                    };
+
+                    let mut solver = $mksolver;
+                    let single_spec_geometry = SpecGeometry::single(
+                        &spec, Rc::new(db_spec_bimap(false))
+                    );
+                    let request = solver.request(&single_spec_geometry);
+
+                    if let Some(queries_geometry) = request.queries() {
+                        for rect in queries_geometry.iter() {
+                            for spec in rect.iter_specs() {
+                                prop_assert!(spec.is_canonical());
+                            }
+                        }
+                    }
+                }
+
+                #[test]
+                fn [< test_bottomupsolver_queries_iter_specs_for_single_canonical_spec_are_unique_ $suffix >](
+                    spec in $crate::spec::arb_canonical_spec::<$tgt>(None, None)
+                ) {
+                    use std::collections::HashSet;
+                    use std::default::Default;
+                    use std::rc::Rc;
+                    use proptest::prelude::*;
+                    use $crate::db::db_spec_bimap;
+                    use $crate::scheduling::{
+                        SpecGeometry, BottomUpSolver, DependencyRequest
+                    };
+
+                    let mut solver = $mksolver;
+                    let single_spec_geometry = SpecGeometry::single(
+                        &spec, Rc::new(db_spec_bimap(false))
+                    );
+                    let request = solver.request(&single_spec_geometry);
+
+                    if let Some(queries_geometry) = request.queries() {
+                        let mut seen = HashSet::new();
+                        for rect in queries_geometry.iter() {
+                            for spec in rect.iter_specs() {
+                                prop_assert!(
+                                    seen.insert(spec.clone()),
+                                    "duplicate spec in queries: {spec}"
+                                );
+                            }
+                        }
+                    }
+                }
+            } }
+        };
+    }
+
+    #[macro_export]
+    macro_rules! emit_naivebottomupsolver_tests {
         ($tgt:ty, $provider:ty, $suffix:ident) => {
+            $crate::emit_bottomupsolver_tests!(
+                NaiveBottomUpSolver::<$tgt, $provider>::default(),
+                $tgt,
+                $suffix
+            );
+
             paste::paste! { proptest::prelude::proptest! {
                 #[test]
                 fn [< test_naivebottomupsolver_queries_for_single_canonical_spec_ $suffix >](
