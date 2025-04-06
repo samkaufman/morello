@@ -1439,7 +1439,6 @@ fn combine_contig_cutoffs(
 mod tests {
     use super::*;
     use crate::db::db_spec_bimap;
-    use crate::emit_shared_naivebottomupactionprovider_tests;
     use crate::grid::canon::CanonicalBimap;
     use crate::grid::general::BiMap;
     use crate::imp::Impl;
@@ -1454,7 +1453,9 @@ mod tests {
         X86Target,
     };
     use crate::tensorspec::TensorSpecArbMaxShape;
-
+    use crate::{
+        emit_bottomupsolver_queries_same_action_dependencies, emit_naivebottomupsolver_tests,
+    };
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::{prop_assert_eq, proptest};
@@ -2223,24 +2224,32 @@ mod tests {
         Ok(())
     }
 
-    emit_shared_naivebottomupactionprovider_tests!(
+    emit_naivebottomupsolver_tests!(X86Target, TileOutActionProvider<X86Target>, tileout_x86);
+    emit_naivebottomupsolver_tests!(ArmTarget, TileOutActionProvider<ArmTarget>, tileout_arm);
+    emit_naivebottomupsolver_tests!(X86Target, SplitActionProvider<X86Target>, split_x86);
+    emit_naivebottomupsolver_tests!(ArmTarget, SplitActionProvider<ArmTarget>, split_arm);
+    emit_bottomupsolver_queries_same_action_dependencies!(
+        TileOutSolver::<X86Target>::default(),
         X86Target,
-        TileOutActionProvider<X86Target>,
+        TileOutActionProvider::<X86Target>::actions,
         tileout_x86
     );
-    emit_shared_naivebottomupactionprovider_tests!(
+    emit_bottomupsolver_queries_same_action_dependencies!(
+        TileOutSolver::<ArmTarget>::default(),
         ArmTarget,
-        TileOutActionProvider<ArmTarget>,
+        TileOutActionProvider::<ArmTarget>::actions,
         tileout_arm
     );
-    emit_shared_naivebottomupactionprovider_tests!(
+    emit_bottomupsolver_queries_same_action_dependencies!(
+        SplitSolver::<X86Target>::default(),
         X86Target,
-        SplitActionProvider<X86Target>,
+        SplitActionProvider::<X86Target>::actions,
         split_x86
     );
-    emit_shared_naivebottomupactionprovider_tests!(
+    emit_bottomupsolver_queries_same_action_dependencies!(
+        SplitSolver::<ArmTarget>::default(),
         ArmTarget,
-        SplitActionProvider<ArmTarget>,
+        SplitActionProvider::<ArmTarget>::actions,
         split_arm
     );
 

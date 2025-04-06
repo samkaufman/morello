@@ -150,7 +150,7 @@ mod tests {
     use crate::target::{ArmTarget, CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use crate::views::{Param, ViewE};
-    use crate::{emit_shared_naivebottomupactionprovider_tests, shape};
+    use crate::{emit_naivebottomupsolver_tests, shape};
 
     /// Test that bufferizing a chain of 3 Matmuls produces the correct sub-Spec applications.
     #[test]
@@ -249,12 +249,12 @@ mod tests {
         ));
     }
 
-    emit_shared_naivebottomupactionprovider_tests!(
+    emit_naivebottomupsolver_tests!(
         X86Target,
         BufferizeActionProvider<X86Target>,
         bufferize_x86
     );
-    emit_shared_naivebottomupactionprovider_tests!(
+    emit_naivebottomupsolver_tests!(
         ArmTarget,
         BufferizeActionProvider<ArmTarget>,
         bufferize_arm

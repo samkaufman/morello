@@ -86,18 +86,10 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for SelectActionProvider<Tgt>
 mod tests {
     use super::*;
     use crate::{
-        emit_shared_naivebottomupactionprovider_tests,
+        emit_naivebottomupsolver_tests,
         target::{ArmTarget, X86Target},
     };
 
-    emit_shared_naivebottomupactionprovider_tests!(
-        X86Target,
-        SelectActionProvider<X86Target>,
-        select_x86
-    );
-    emit_shared_naivebottomupactionprovider_tests!(
-        ArmTarget,
-        SelectActionProvider<ArmTarget>,
-        select_arm
-    );
+    emit_naivebottomupsolver_tests!(X86Target, SelectActionProvider<X86Target>, select_x86);
+    emit_naivebottomupsolver_tests!(ArmTarget, SelectActionProvider<ArmTarget>, select_arm);
 }

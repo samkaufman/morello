@@ -334,10 +334,11 @@ mod tests {
     use crate::imp::Impl;
     use crate::layout;
     use crate::layout::{batched_col_major, row_major};
+    use crate::scheduling::moves::NaiveBottomUpActionProvider;
     use crate::scheduling::Action;
     use crate::spec;
     use crate::target::{ArmTarget, CpuMemoryLevel, X86Target};
-    use crate::{emit_shared_naivebottomupactionprovider_tests, lspec};
+    use crate::{emit_naivebottomupsolver_tests, lspec};
 
     #[test]
     fn test_subspecs_when_moving_into_degenerate_packed_layout_solver() {
@@ -432,14 +433,6 @@ mod tests {
         };
     }
 
-    emit_shared_naivebottomupactionprovider_tests!(
-        X86Target,
-        MoveActionProvider<X86Target>,
-        move_x86
-    );
-    emit_shared_naivebottomupactionprovider_tests!(
-        ArmTarget,
-        MoveActionProvider<ArmTarget>,
-        move_arm
-    );
+    emit_naivebottomupsolver_tests!(X86Target, MoveActionProvider<X86Target>, move_x86);
+    emit_naivebottomupsolver_tests!(ArmTarget, MoveActionProvider<ArmTarget>, move_arm);
 }

@@ -20,7 +20,7 @@ use std::rc::Rc;
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct SpatialSplit;
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct SpatialSplitSolver<Tgt>(PhantomData<Tgt>);
 
 #[derive(Debug)]
@@ -206,4 +206,36 @@ fn spec_is_conv<Tgt: Target>(spec: &Spec<Tgt>) -> bool {
             _
         )
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::target::{ArmTarget, X86Target};
+    use crate::{emit_bottomupsolver_queries_same_action_dependencies, emit_bottomupsolver_tests};
+    use std::default::Default;
+
+    emit_bottomupsolver_tests!(
+        SpatialSplitSolver::<X86Target>::default(),
+        X86Target,
+        spatialsplit_x86
+    );
+    emit_bottomupsolver_tests!(
+        SpatialSplitSolver::<ArmTarget>::default(),
+        ArmTarget,
+        spatialsplit_arm
+    );
+    emit_bottomupsolver_queries_same_action_dependencies!(
+        SpatialSplitSolver::<X86Target>::default(),
+        X86Target,
+        X86Target::actions,
+        spatialsplit_x86
+    );
+
+    emit_bottomupsolver_queries_same_action_dependencies!(
+        SpatialSplitSolver::<ArmTarget>::default(),
+        ArmTarget,
+        ArmTarget::actions,
+        spatialsplit_arm
+    );
 }
