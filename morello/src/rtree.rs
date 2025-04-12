@@ -872,6 +872,7 @@ mod tests {
     //         })
     // }
 
+    #[allow(clippy::type_complexity)]
     fn arb_rect_subtract() -> impl Strategy<Value = ((Vec<i64>, Vec<i64>), (Vec<i64>, Vec<i64>))> {
         proptest::collection::vec((0..6i64, 0..6i64, 0..6i64, 0..6i64), 0..4).prop_map(
             |dim_tuples| {
