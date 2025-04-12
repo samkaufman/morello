@@ -180,6 +180,9 @@ pub(crate) fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tg
     if !src.is_contiguous() {
         cost *= 2;
     }
+    if !dest.is_contiguous() {
+        cost *= 2;
+    }
     cost
 }
 
