@@ -7,7 +7,7 @@ edition = "2021"
 default = ["verification"]
 clap = ["dep:clap"]
 db-stats = ["dep:csv"]
-verification = ["dep:ndarray", "dep:num-traits", "dep:ndarray-conv"]
+verification = ["dep:ndarray", "dep:ndarray-conv"]
 
 [dependencies]
 atty = "0.2"
@@ -23,7 +23,7 @@ log = "0.4.0"
 ndarray = { version = "0.15.6", optional = true, features = ["approx"] }
 ndarray-conv = { version = "0.3.3", optional = true }
 num-rational = { version = "0.4.2", features = ["std", "serde"], default-features = false }
-num-traits = { version = "0.2.16", optional = true }
+num-traits = { version = "0.2.16" }
 prettytable-rs = "^0.10"
 rand = "0.8.5"
 rayon = "1.7.0"
