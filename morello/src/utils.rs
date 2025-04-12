@@ -3,7 +3,6 @@ use num_traits::PrimInt;
 use std::fmt;
 use std::io;
 use std::iter;
-use std::ops::Range;
 
 const INDENT_SIZE: usize = 2;
 
@@ -261,49 +260,9 @@ pub fn indent(depth: usize) -> String {
     " ".repeat(depth * INDENT_SIZE)
 }
 
-pub(crate) fn iter_multidim_range<F>(dim_ranges: &[Range<u32>], strides: &[usize], mut callback: F)
-where
-    F: FnMut(usize, &[u32]),
-{
-    assert_eq!(dim_ranges.len(), strides.len());
-    if dim_ranges.is_empty() || dim_ranges.iter().any(|rng| rng.is_empty()) {
-        return;
-    }
-
-    let mut current_pt = dim_ranges.iter().map(|rng| rng.start).collect::<Vec<_>>();
-
-    let mut buffer_index = current_pt
-        .iter()
-        .zip(strides)
-        .map(|(&dim, &stride)| usize::try_from(dim).unwrap() * stride)
-        .sum();
-
-    loop {
-        callback(buffer_index, &current_pt);
-
-        let mut dimension = current_pt.len() - 1; // Start with the innermost dimension
-        loop {
-            current_pt[dimension] += 1;
-            buffer_index += strides[dimension];
-            if current_pt[dimension] < dim_ranges[dimension].end {
-                break;
-            }
-            if dimension == 0 {
-                return;
-            }
-
-            buffer_index -= strides[dimension]
-                * usize::try_from(current_pt[dimension] - dim_ranges[dimension].start).unwrap();
-            current_pt[dimension] = dim_ranges[dimension].start;
-            dimension -= 1;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use itertools::Itertools;
     use proptest::prelude::*;
     use std::fmt::Write;
 
@@ -385,49 +344,6 @@ mod tests {
     }
 
     proptest! {
-        #[test]
-        fn test_iter_multidim_range_matches_itertools_product(
-            rngs in proptest::collection::vec((0u32..5, 0u32..5, 0u32..5), 1..4)
-        ) {
-            let dim_ranges: Vec<Range<u32>> = rngs
-                .iter()
-                .map(|(s, l, _)| *s..(*s + *l))
-                .collect::<Vec<_>>();
-
-            let shape = rngs
-                .iter()
-                .map(|(s, l, d)| usize::try_from(*s + *l + *d).unwrap())
-                .collect::<Vec<_>>();
-            let strides = (1..shape.len())
-                .map(|i| shape[i..].iter().product())
-                .chain(std::iter::once(1))
-                .collect::<Vec<_>>();
-
-            let mut fast_pts = Vec::new();
-            let mut fast_indices = Vec::new();
-            iter_multidim_range(&dim_ranges, &strides, |i, pt| {
-                fast_indices.push(i);
-                fast_pts.push(pt.to_vec());
-            });
-
-            let itertools_product_pts = dim_ranges
-                .into_iter()
-                .multi_cartesian_product()
-                .collect::<Vec<_>>();
-            let itertools_product_indices = itertools_product_pts
-                .iter()
-                .map(|pt| {
-                    pt.iter()
-                        .zip(&strides)
-                        .map(|(&dim, &stride)| usize::try_from(dim).unwrap() * stride)
-                        .sum()
-                })
-                .collect::<Vec<_>>();
-
-            assert_eq!(fast_pts, itertools_product_pts);
-            assert_eq!(fast_indices, itertools_product_indices);
-        }
-
         #[test]
         fn test_diagonals_always_returns_positive_points(
             maxes in proptest::collection::vec(0i8..=3, 1..=3)
