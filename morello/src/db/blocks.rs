@@ -71,6 +71,7 @@ impl RTreeBlock {
         tree_block
     }
 
+    #[cfg(feature = "db-stats")]
     pub fn rect_count(&self) -> usize {
         self.0.size()
     }

@@ -52,7 +52,7 @@ impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
         let [outer_image_tile, outer_filters_tile] = [0, 1].map(|idx| {
             let shape = operands[idx].shape()[..2]
                 .iter()
-                .chain(iter::repeat(&nz!(1u32)).take((rank - 2).into()))
+                .chain(iter::repeat_n(&nz!(1u32), (rank - 2).into()))
                 .copied()
                 .collect::<Shape>();
             let step_sizes = shape.clone();

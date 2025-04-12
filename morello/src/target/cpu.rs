@@ -363,7 +363,7 @@ impl<T: CpuTarget> Target for T {
                         &[]
                     }
                 }
-                PrimitiveSpecType::Move { .. } => {
+                PrimitiveSpecType::Move => {
                     const MOVE_KERNELS: [CpuKernel; 8] = [
                         CpuKernel::ValueAssign,
                         CpuKernel::VectorAssign,

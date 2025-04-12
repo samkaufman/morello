@@ -509,7 +509,7 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
-            | PrimitiveSpecType::DivideVec { .. }
+            | PrimitiveSpecType::DivideVec
             | PrimitiveSpecType::DivideVecScalar { .. }
             | PrimitiveSpecType::Broadcast { .. }
             | PrimitiveSpecType::Move => false,
@@ -552,7 +552,7 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: false, .. }
             | PrimitiveSpecType::Broadcast { dim: _ } => panic!("Not an accumulating Spec"),
-            PrimitiveSpecType::DivideVec { .. } => todo!(),
+            PrimitiveSpecType::DivideVec => todo!(),
             PrimitiveSpecType::DivideVecScalar { .. } => todo!(),
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => todo!(),
         }
@@ -1105,7 +1105,7 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::Max { accum: false, .. } => &[In, Out],
             PrimitiveSpecType::Move => &[In, Out],
             PrimitiveSpecType::Fill { .. } => &[Out],
-            PrimitiveSpecType::DivideVec { .. } => &[In, In, Out],
+            PrimitiveSpecType::DivideVec => &[In, In, Out],
             PrimitiveSpecType::DivideVecScalar { .. } => &[In, In, Out],
         }
     }
@@ -1265,7 +1265,7 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::SoftmaxDenominator { .. } => write!(f, "SoftmaxDenominator"),
             PrimitiveSpecType::Max { dim, accum } if *accum => write!(f, "MaxAccum{dim}"),
             PrimitiveSpecType::Max { dim, .. } => write!(f, "Max{dim}"),
-            PrimitiveSpecType::Move { .. } => write!(f, "Move"),
+            PrimitiveSpecType::Move => write!(f, "Move"),
             PrimitiveSpecType::Fill {
                 value: FillValue::Zero,
             } => write!(f, "FillZero"),

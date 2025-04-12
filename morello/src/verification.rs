@@ -178,7 +178,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominator { .. } => todo!(),
-                PrimitiveSpecType::DivideVec { .. } => todo!(),
+                PrimitiveSpecType::DivideVec => todo!(),
                 PrimitiveSpecType::DivideVecScalar { .. } => todo!(),
                 PrimitiveSpecType::Max { .. } => todo!(),
                 PrimitiveSpecType::Move => {

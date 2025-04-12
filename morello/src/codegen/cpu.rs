@@ -594,7 +594,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     "{}/* {}({}) */",
                     indent(depth),
                     p.0,
-                    iter::repeat("_").take(p.1.len()).join(", ")
+                    iter::repeat_n("_", p.1.len()).join(", ")
                 )?;
                 let args: String =
                     p.1.iter()
