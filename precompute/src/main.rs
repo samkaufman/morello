@@ -384,7 +384,7 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
 
     bounds.extend((1..=move_needed_rank).map(|rank| {
         lspec!(FillZero(
-            iter::repeat(args.size).take(rank.into()),
+            iter::repeat_n(args.size, rank.into()),
             (u32, CpuMemoryLevel::GL, row_major),
             serial
         ))
@@ -442,7 +442,7 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
 /// Returns a logical Move Spec of given size and rank.
 fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
     lspec!(Move(
-        iter::repeat(size).take(rank.into()),
+        iter::repeat_n(size, rank.into()),
         (u32, CpuMemoryLevel::GL, row_major),
         (u32, CpuMemoryLevel::GL, row_major),
         serial
