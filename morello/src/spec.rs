@@ -3388,9 +3388,9 @@ mod tests {
             spec in arb_canonical_spec::<X86Target>(None, None)
         ) {
             for action in X86Target::actions(&spec.0) {
-                if let Ok(ImplNode::MoveLet(move_let)) = action.apply(&spec) {
-                    assert_ne!(&move_let.source_spec, move_let.introduced.spec(),
-                        "Copying MoveLet introduced by action {:?}", action);
+                if let Ok(ImplNode::Alloc(alloc)) = action.apply(&spec) {
+                    assert_ne!(&alloc.source_spec, alloc.introduced.spec(),
+                        "Copying Alloc introduced by action {:?}", action);
                 }
             }
         }

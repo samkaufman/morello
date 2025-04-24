@@ -520,12 +520,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     self.emit_rolled_loop(w, l, depth)
                 }
             }
-            ImplNode::MoveLet(move_let) => {
-                match &move_let.introduced {
+            ImplNode::Alloc(alloc_binding) => {
+                match &alloc_binding.introduced {
                     ViewE::Tensor(tensor) => {
                         // Emit variable declaration(s) and store association between the
                         // CBuffer and Tensor.
-                        let spec = move_let.introduced.spec();
+                        let spec = alloc_binding.introduced.spec();
                         let dest_buffer = self.make_buffer(
                             spec.shape(),
                             spec.vector_size(),
@@ -539,15 +539,15 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     _ => unreachable!(),
                 };
 
-                if let Some(prologue) = move_let.prologue() {
+                if let Some(prologue) = alloc_binding.prologue() {
                     self.emit(w, prologue, depth)?;
                 }
-                self.emit(w, move_let.main_stage(), depth)?;
-                if let Some(epilogue) = move_let.epilogue() {
+                self.emit(w, alloc_binding.main_stage(), depth)?;
+                if let Some(epilogue) = alloc_binding.epilogue() {
                     self.emit(w, epilogue, depth)?;
                 }
 
-                if let ViewE::Tensor(tensor) = &move_let.introduced {
+                if let ViewE::Tensor(tensor) = &alloc_binding.introduced {
                     self.name_env.remove(tensor).unwrap().emit_free(w, depth)?;
                 }
                 Ok(())

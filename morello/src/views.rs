@@ -512,8 +512,8 @@ where
 /// A reference to an Impl node parameter.
 ///
 /// Remember that some scheduling actions result in multi-node Impls, such as for movement which
-/// may produce a MoveLet binding and a nested Block. In this case, parameters---and, therefore,
-/// the referents of a Param---differ between the MoveLet and Block.
+/// may produce a Alloc binding and a nested Block. In this case, parameters---and, therefore,
+/// the referents of a Param---differ between the Alloc and Block.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param<Tgt: Target>(pub u8, pub TensorSpec<Tgt>, pub(crate) OpaqueSymbol);
 

@@ -1,5 +1,5 @@
 use crate::common::{DimSize, Dtype};
-use crate::imp::moves::{move_cost, movelet_memory_allocation, MoveLet};
+use crate::imp::allocs::{alloc_memory_allocation, move_cost, Alloc};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
@@ -23,7 +23,7 @@ pub struct Move<Tgt: Target> {
 }
 
 /// Data useful to both a Move's [ActionSolver] or [ImplNode].
-struct MoveLetPlan<'a, Tgt: Target> {
+struct AllocPlan<'a, Tgt: Target> {
     outer_moved_operand_spec: &'a TensorSpec<Tgt>,
     new_spec: TensorSpec<Tgt>,
     prologue_spec: Option<Spec<Tgt>>,
@@ -38,7 +38,7 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 
-        let MoveLetPlan {
+        let AllocPlan {
             outer_moved_operand_spec,
             new_spec,
             prologue_spec,
@@ -46,7 +46,7 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
             new_body_spec,
             new_operands,
             is_cache_miss,
-        } = plan_movelet(
+        } = plan_alloc(
             spec,
             &operands,
             self.source_idx,
@@ -91,7 +91,7 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
             ImplNode::from(SpecApp::new(new_body_spec, inner_operands))
         };
 
-        Ok(ImplNode::MoveLet(MoveLet::new(
+        Ok(ImplNode::Alloc(Alloc::new(
             self.source_idx,
             outer_moved_operand_spec.clone(),
             inner_moved_operand,
@@ -104,7 +104,7 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
 
     fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         let operands = spec.0.parameters();
-        let plan = plan_movelet(
+        let plan = plan_alloc(
             spec,
             &operands,
             self.source_idx,
@@ -114,7 +114,7 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
             self.destination_vector_size,
         )?;
         let base_main_cost = move_cost(plan.outer_moved_operand_spec, &plan.new_spec);
-        let allocation = movelet_memory_allocation(&plan.new_spec);
+        let allocation = alloc_memory_allocation(&plan.new_spec);
         Ok(ActionSolver::Move {
             prologue: plan.prologue_spec,
             body: plan.new_body_spec,
@@ -125,7 +125,7 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
     }
 }
 
-fn plan_movelet<'a, Tgt: Target>(
+fn plan_alloc<'a, Tgt: Target>(
     spec: &Spec<Tgt>,
     operands: &'a [TensorSpec<Tgt>],
     source_idx: u8,
@@ -133,7 +133,7 @@ fn plan_movelet<'a, Tgt: Target>(
     destination_level: Tgt::Level,
     destination_layout: &Layout,
     destination_vector_size: Option<DimSize>,
-) -> Result<MoveLetPlan<'a, Tgt>, ApplyError> {
+) -> Result<AllocPlan<'a, Tgt>, ApplyError> {
     let outer_moved_operand_spec = &operands[usize::from(source_idx)];
 
     let destination_layout_canonicalized = destination_layout
@@ -258,7 +258,7 @@ fn plan_movelet<'a, Tgt: Target>(
     new_body_spec.0.replace_io(&new_operands);
     new_body_spec.canonicalize().unwrap();
 
-    Ok(MoveLetPlan {
+    Ok(AllocPlan {
         outer_moved_operand_spec,
         new_spec,
         prologue_spec,
@@ -350,7 +350,7 @@ mod tests {
         ));
         let spec = Spec(logical_spec, X86Target::max_mem());
         let parameters = spec.0.parameters();
-        let plan = plan_movelet(
+        let plan = plan_alloc(
             &spec,
             &parameters,
             0,

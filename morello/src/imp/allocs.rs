@@ -9,7 +9,7 @@ use crate::views::{View, ViewE};
 use std::iter;
 
 #[derive(Debug, Clone)]
-pub struct MoveLet<Tgt: Target> {
+pub struct Alloc<Tgt: Target> {
     pub parameter_idx: u8,
     // TODO: Needed if the body already has the new tensor?
     pub source_spec: TensorSpec<Tgt>,
@@ -20,7 +20,7 @@ pub struct MoveLet<Tgt: Target> {
     pub spec: Option<Spec<Tgt>>,
 }
 
-impl<Tgt: Target> MoveLet<Tgt> {
+impl<Tgt: Target> Alloc<Tgt> {
     pub fn new(
         parameter_idx: u8,
         source_spec: TensorSpec<Tgt>,
@@ -73,7 +73,7 @@ impl<Tgt: Target> MoveLet<Tgt> {
     }
 }
 
-impl<Tgt: Target> Impl<Tgt> for MoveLet<Tgt> {
+impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
     type BindOut = Self;
 
     fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
@@ -100,7 +100,7 @@ impl<Tgt: Target> Impl<Tgt> for MoveLet<Tgt> {
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
-        movelet_memory_allocation(self.introduced.spec())
+        alloc_memory_allocation(self.introduced.spec())
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
@@ -186,7 +186,7 @@ pub(crate) fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tg
     cost
 }
 
-pub(crate) fn movelet_memory_allocation<Tgt: Target>(
+pub(crate) fn alloc_memory_allocation<Tgt: Target>(
     introduced_spec: &TensorSpec<Tgt>,
 ) -> MemoryAllocation {
     let bytes_consumed = introduced_spec.bytes_used();

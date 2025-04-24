@@ -1,7 +1,7 @@
 use crate::{
     cost::MainCost,
     imp::{
-        blocks::Block, functions::FunctionApp, kernels::KernelApp, loops::Loop, moves::MoveLet,
+        allocs::Alloc, blocks::Block, functions::FunctionApp, kernels::KernelApp, loops::Loop,
         pipeline::Pipeline, subspecs::SpecApp,
     },
     memorylimits::{MemVec, MemoryAllocation},
@@ -13,11 +13,11 @@ use crate::{
 };
 use enum_dispatch::enum_dispatch;
 
+pub mod allocs;
 pub mod blocks;
 pub mod functions;
 pub mod kernels;
 pub mod loops;
-pub mod moves;
 pub mod pipeline;
 pub mod subspecs;
 
@@ -72,7 +72,7 @@ pub trait ImplExt<Tgt: Target>: Impl<Tgt> {
 crate::impl_impl_for_enum!(
     ImplNode,
     Loop => Loop<Tgt>,
-    MoveLet => MoveLet<Tgt>,
+    Alloc => Alloc<Tgt>,
     Block => Block<Tgt>,
     Pipeline => Pipeline<Tgt>,
     Kernel => KernelApp<ViewE<Tgt>>,
