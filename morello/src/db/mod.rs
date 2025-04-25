@@ -12,8 +12,9 @@ use crate::imp::{Impl, ImplNode};
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::rtree::RTreeDyn;
-use crate::scheduling::{Action, ActionEncodeDecode, ActionT as _, SpecGeometry};
+use crate::scheduling::{Action, ActionEncodeDecode, ActionT as _};
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
+use crate::spec_geometry::SpecGeometry;
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 

@@ -536,7 +536,7 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::OnePrefix
             | PrimitiveSpecType::Broadcast { .. }
-            | PrimitiveSpecType::DivideVec { .. }
+            | PrimitiveSpecType::DivideVec
             | PrimitiveSpecType::DivideVecScalar { .. } => None,
         }
     }
@@ -556,7 +556,7 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::OnePrefix
             | PrimitiveSpecType::Broadcast { .. }
-            | PrimitiveSpecType::DivideVec { .. }
+            | PrimitiveSpecType::DivideVec
             | PrimitiveSpecType::DivideVecScalar { .. } => None,
         }
     }

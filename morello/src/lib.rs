@@ -18,6 +18,7 @@ pub mod scheduling;
 pub mod scheduling_sugar;
 pub mod search;
 pub mod spec;
+pub mod spec_geometry;
 pub mod target;
 pub mod tensorspec;
 pub mod tiling;
