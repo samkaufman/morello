@@ -2,14 +2,14 @@ use morello::codegen::CodeGen;
 use morello::common::{DimSize, Dtype};
 use morello::cost::Cost;
 use morello::layout::{row_major, Layout, PhysDim};
-use morello::lspec;
 use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
+use morello::spec;
 use morello::spec::Spec;
 use morello::target::{
     CpuKernel,
     CpuMemoryLevel::{self, GL},
-    Target, X86Target,
+    X86Target,
 };
 use morello::utils::ToWriteFmt;
 
@@ -29,15 +29,12 @@ fn main() {
         (2, PhysDim::Dynamic),
         (1, PhysDim::Dynamic),
     ]);
-    let spec = Spec::<X86Target>(
-        lspec!(Matmul(
-            [nz!(1u32), M, K, N],
-            (bf16, GL, row_major),
-            (bf16, GL, bcm_layout.clone()),
-            (f32, GL, row_major)
-        )),
-        X86Target::max_mem(),
-    );
+    let spec: Spec<X86Target> = spec!(Matmul(
+        [nz!(1u32), M, K, N],
+        (bf16, GL, row_major),
+        (bf16, GL, bcm_layout.clone()),
+        (f32, GL, row_major)
+    ));
 
     // Manually schedule the matrix multiplication.
     let interleaved = Layout::new(vec![

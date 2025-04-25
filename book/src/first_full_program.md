@@ -18,12 +18,12 @@ cargo add --git https://github.com/samkaufman/morello morello
 ## Define the Goal Spec
 
 In `src/main.rs`, begin by constructing the dot product Spec from the last
-section. We'll use the `lspec` macro. While, in the last section, our Spec only
+section. We'll use the `spec` macro. While, in the last section, our Spec only
 described whether or not a matrix multiplication should accumulate into the
 output and the size of its three, we'll now include information about the data
-type, memory level, and layout of its input and output tensors, as well as a
+type, memory level, layout of its input and output tensors, as well as a
 flag indicating that this the implementation should run on a single thread
-(`serial`).
+(`serial`), and the maximum usable memory at each level.
 
 ```rust
 {{#include ../example_01.rs:specdef_use}}

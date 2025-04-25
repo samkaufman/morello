@@ -312,8 +312,8 @@ mod tests {
     use super::*;
     use crate::imp::Impl;
     use crate::layout::{batched_col_major, row_major, PhysDim};
-    use crate::lspec;
     use crate::scheduling::Action;
+    use crate::spec;
     use crate::target::{CpuMemoryLevel, X86Target};
     use nonzero::nonzero as nz;
 
@@ -342,13 +342,12 @@ mod tests {
     #[test]
     fn test_move_planning_into_cache_with_extra_degenerate_dims_preserves_layout_and_contig() {
         let batched_cm = batched_col_major(3);
-        let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+        let spec: Spec<X86Target> = spec!(MatmulAccum(
             [1, 8, 128, 8],
             (f32, CpuMemoryLevel::GL, batched_cm.clone()),
             (f32, CpuMemoryLevel::GL, row_major),
             (f32, CpuMemoryLevel::GL, row_major)
         ));
-        let spec = Spec(logical_spec, X86Target::max_mem());
         let parameters = spec.0.parameters();
         let plan = plan_alloc(
             &spec,
@@ -386,13 +385,12 @@ mod tests {
         child_get: impl FnOnce(&Spec<X86Target>, Action<X86Target>) -> Vec<Spec<X86Target>>,
     ) {
         let batched_cm = batched_col_major(3);
-        let logical: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+        let spec: Spec<X86Target> = spec!(MatmulAccum(
             [1, 8, 128, 8],
             (f32, CpuMemoryLevel::GL, batched_cm),
             (f32, CpuMemoryLevel::GL, row_major),
             (f32, CpuMemoryLevel::GL, row_major)
         ));
-        let spec = Spec(logical, X86Target::max_mem());
         let action = Action::Move(Move {
             source_idx: 0,
             destination_dtype: Dtype::Float32,

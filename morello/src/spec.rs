@@ -2886,6 +2886,8 @@ fn eat<'a, T, U: Into<usize>>(slice: &mut &'a [T], idx: U) -> &'a [T] {
 pub mod macros {
     pub mod internal {
         use crate::common::DimSize;
+        use crate::spec::{LogicalSpec, Spec, Target};
+
         pub trait IntoDimSize {
             fn into_dim_size(self) -> DimSize;
         }
@@ -2898,6 +2900,10 @@ pub mod macros {
             fn into_dim_size(self) -> DimSize {
                 DimSize::new(self).unwrap()
             }
+        }
+
+        pub fn spec_with_max_mem<Tgt: Target>(logical_spec: LogicalSpec<Tgt>) -> Spec<Tgt> {
+            Spec(logical_spec, Tgt::max_mem())
         }
     }
 
@@ -2920,24 +2926,24 @@ pub mod macros {
     #[macro_export]
     macro_rules! lspec {
         ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),+, serial ) ) => {{
-            lspec!(@inner $typ($shp, $( ($($opterms)*) ),* , true))
+            $crate::lspec!(@inner $typ($shp, $( ($($opterms)*) ),* , true))
         }};
         ( $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),+ ) ) => {{
-            lspec!(@inner $typ($shp, $( ($($opterms)*) ),* , false))
+            $crate::lspec!(@inner $typ($shp, $( ($($opterms)*) ),* , false))
         }};
         ( @inner $typ:tt( $shp:expr, $( ($($opterms:tt)*) ),*, $s:literal ) ) => {{
             use $crate::spec::macros::internal::IntoDimSize;
 
-            let dtypes = [ $( lspec!(@dt_head $($opterms)*) ),* ];
+            let dtypes = [ $( $crate::lspec!(@dt_head $($opterms)*) ),* ];
             let basics = $crate::spec::PrimitiveBasics {
-                typ: lspec!(@primitive_spec_type $typ),
+                typ: $crate::lspec!(@primitive_spec_type $typ),
                 spec_shape: ($shp).into_iter().map(|x| x.into_dim_size()).collect(),
                 dtypes: dtypes.try_into().unwrap(),
             };
 
             let mut parameter_shapes = basics.parameter_shapes();
             parameter_shapes.reverse();
-            let auxes = [ $( lspec!(@tensorspecaux &parameter_shapes.pop().unwrap(), $($opterms)*) ),* ];
+            let auxes = [ $( $crate::lspec!(@tensorspecaux &parameter_shapes.pop().unwrap(), $($opterms)*) ),* ];
             $crate::spec::LogicalSpec::Primitive(
                 basics,
                 auxes.try_into().unwrap(),
@@ -2946,32 +2952,32 @@ pub mod macros {
         }};
 
         ( @dt_head $dt:tt, $($rest:tt)* ) => {
-            lspec!(@dt_convert $dt)
+            $crate::lspec!(@dt_convert $dt)
         };
 
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, c0, ua ) => {
-            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, false, false)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, false, false)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, c0 ) => {
-            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, false, true)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, false, true)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, ua ) => {
-            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, true, false)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, true, false)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr ) => {
-            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, true, true)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, true, true)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr, c0, ua ) => {
-            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), false, false)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), false, false)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr, c0 ) => {
-            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), false, true)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), false, true)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr, ua ) => {
-            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), true, false)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), true, false)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr ) => {
-            lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), true, true)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), true, true)
         };
 
         // TODO: Accept contiguousnesses other than fully contig. or not at all.
@@ -3045,6 +3051,37 @@ pub mod macros {
             $val
         };
     }
+
+    /// Construct a full `Spec<Tgt>`.
+    ///
+    /// Usage:
+    ///   spec!(Move([m,n], (u32,GL,row_major), (u32,GL,row_major)));
+    ///   spec!(Move([m,n], (u32,GL,row_major), (u32,GL,row_major)), [lim0, lim1, ...]);
+    #[macro_export]
+    macro_rules! spec {
+        // Literal limits array: build a Standard MemoryLimits
+        ( $typ:ident $args:tt , [ $($limits:expr),* $(,)? ] ) => {{
+            let logical_spec = $crate::lspec!($typ $args);
+            let limits_arr: [u64; $crate::target::LEVEL_COUNT] = [ $( $limits as u64 ),* ];
+            $crate::spec::Spec(
+                logical_spec,
+                $crate::memorylimits::MemoryLimits::Standard(
+                    $crate::memorylimits::MemVec::new(limits_arr)
+                ),
+            )
+        }};
+        // Dynamic limits expression: wrap directly with provided MemoryLimits
+        ( $typ:ident $args:tt , $mem_limits:expr $(,)? ) => {{
+            $crate::spec::Spec(
+                $crate::lspec!($typ $args),
+                $mem_limits,
+            )
+        }};
+        // Default: no memory limits provided, so use the target's maximum memory limits
+        ( $typ:ident $args:tt ) => {{
+            $crate::spec::macros::internal::spec_with_max_mem($crate::lspec!($typ $args))
+        }};
+    }
 }
 
 #[cfg(test)]
@@ -3062,7 +3099,7 @@ mod tests {
     use crate::tensorspec::{TensorSpecArbMaxShape, TensorSpecAuxNonDepBimap};
     use crate::utils::{next_binary_power, sum_seqs};
     use crate::views::View;
-    use crate::{lspec, shape};
+    use crate::{lspec, shape, spec};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use std::iter;
@@ -3109,6 +3146,21 @@ mod tests {
             true,
         );
         assert_eq!(spec, expected);
+    }
+
+    #[test]
+    fn test_spec_macro_shorthand() {
+        let s: Spec<X86Target> = spec!(
+            Move([2, 3], (u32, GL, row_major), (u32, GL, row_major)),
+            [1024, 512, 256, 128]
+        );
+        let expected_ls: LogicalSpec<X86Target> =
+            lspec!(Move([2, 3], (u32, GL, row_major), (u32, GL, row_major)));
+        assert_eq!(s.0, expected_ls);
+        assert_eq!(
+            s.1,
+            MemoryLimits::Standard(MemVec::new([1024, 512, 256, 128]))
+        );
     }
 
     #[test]

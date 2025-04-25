@@ -4,20 +4,19 @@ use std::hint::black_box;
 
 use morello::db::FilesDatabase;
 use morello::layout::row_major;
-use morello::lspec;
+use morello::spec;
 use morello::spec::Spec;
 use morello::target::{Target, X86Target};
 
 #[export_name = "morello_bench_synth::matmul_spec"]
 fn matmul_spec<Tgt: Target>(size: u32) -> Spec<Tgt> {
-    let logical_spec = lspec!(Matmul(
+    spec!(Matmul(
         [1, size, size, size],
         (u32, Tgt::default_level(), row_major),
         (u32, Tgt::default_level(), row_major),
         (u32, Tgt::default_level(), row_major),
         serial
-    ));
-    Spec(logical_spec, X86Target::max_mem())
+    ))
 }
 
 fn synth(goal: &Spec<X86Target>) {

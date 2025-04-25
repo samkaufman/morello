@@ -1,14 +1,14 @@
 use morello::codegen::CodeGen;
 use morello::cost::Cost;
 use morello::layout::{row_major, Layout, PhysDim};
-use morello::lspec;
 use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
+use morello::spec;
 use morello::spec::Spec;
 use morello::target::CpuKernel;
 use morello::target::{
     CpuMemoryLevel::{GL, L1, RF, VRF},
-    Target, X86Target,
+    X86Target,
 };
 use morello::utils::ToWriteFmt;
 
@@ -17,16 +17,13 @@ use nonzero::nonzero as nz;
 use std::io;
 
 fn main() {
-    let mut spec = Spec::<X86Target>(
-        lspec!(MatmulAccum(
-            [1, 2048, 2048, 2048],
-            (f32, GL, row_major),
-            (f32, GL, row_major),
-            (f32, GL, row_major),
-            serial
-        )),
-        X86Target::max_mem(),
-    );
+    let mut spec: Spec<X86Target> = spec!(MatmulAccum(
+        [1, 2048, 2048, 2048],
+        (f32, GL, row_major),
+        (f32, GL, row_major),
+        (f32, GL, row_major),
+        serial
+    ));
     spec.canonicalize().unwrap();
 
     let mat1_pack_size = nz!(16u32);

@@ -647,7 +647,7 @@ mod tests {
     use crate::layout::{row_major, Layout, PhysDim};
     use crate::scheduling::Action;
     use crate::target::{CpuMemoryLevel, X86Target};
-    use crate::{lspec, shape};
+    use crate::{shape, spec};
     use nonzero::nonzero as nz;
 
     /// Test that a TileOut::SingleLoop with a non-multiple size fails to apply.
@@ -687,13 +687,12 @@ mod tests {
             (2, PhysDim::Dynamic),
             (1, PhysDim::Dynamic),
         ]);
-        let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+        let spec: Spec<X86Target> = spec!(MatmulAccum(
             [4, 8, 8, 8],
             (f32, CpuMemoryLevel::GL, bcm_layout),
             (f32, CpuMemoryLevel::GL, row_major),
             (f32, CpuMemoryLevel::GL, row_major)
         ));
-        let spec = Spec(logical_spec, X86Target::max_mem());
         let application = action.apply(&spec);
         assert!(
             matches!(

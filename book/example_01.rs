@@ -17,16 +17,13 @@ use morello::codegen::CodeGen;
 
 fn main() {
     // ANCHOR: specdef
-    let mut spec = Spec::<X86Target>(
-        lspec!(Matmul(
-            [1, 1, 32, 1],
-            (u32, RF, row_major), // `RF` = tensor is in register file
-            (u32, RF, row_major),
-            (u32, RF, row_major),
-            serial
-        )),
-        X86Target::max_mem(),
-    );
+    let mut spec: Spec<X86Target> = spec!(Matmul(
+        [1, 1, 32, 1],
+        (u32, RF, row_major), // `RF` = tensor is in register file
+        (u32, RF, row_major),
+        (u32, RF, row_major),
+        serial
+    ));
     spec.canonicalize().unwrap();
     // ANCHOR_END: specdef
 

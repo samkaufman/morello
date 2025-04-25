@@ -4,9 +4,9 @@ use morello::codegen::CodeGen;
 use morello::cost::Cost;
 use morello::imp::ImplNode;
 use morello::layout::row_major;
-use morello::lspec;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
+use morello::spec;
 use morello::spec::Spec;
 use morello::target::CpuKernel;
 use morello::target::{
@@ -27,14 +27,14 @@ fn main() {
     const M: u32 = 64;
     const K: u32 = 64;
     const N: u32 = 64;
-    let spec = Spec::<X86Target>(
-        lspec!(Matmul(
+    let spec = spec!(
+        Matmul(
             [1, M, K, N],
             (u32, GL, row_major),
             (u32, GL, row_major),
             (u32, GL, row_major),
             serial
-        )),
+        ),
         X86Target::max_mem(),
     );
     println!("Logical Spec: {}", spec.0);

@@ -1743,6 +1743,7 @@ mod tests {
         layout::{row_major, Layout},
         lspec,
         scheduling::{moves::Move, ActionT, ApplyError, NotApplicableReason},
+        spec,
         spec::{arb_canonical_spec, Spec},
         target::{Target, X86Target},
         views::Param,
@@ -1882,16 +1883,15 @@ mod tests {
 
     #[test]
     fn test_kernel_memory_constrains_placement() {
-        let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
-            [1, 1, 1, 16],
-            (u8, CpuMemoryLevel::RF, row_major),
-            (u8, CpuMemoryLevel::VRF, row_major, 16),
-            (u8, CpuMemoryLevel::VRF, row_major, 16),
-            serial
-        ));
-        let spec = Spec(
-            logical_spec,
-            MemoryLimits::Standard(MemVec::zero::<X86Target>()),
+        let spec: Spec<X86Target> = spec!(
+            MatmulAccum(
+                [1, 1, 1, 16],
+                (u8, CpuMemoryLevel::RF, row_major),
+                (u8, CpuMemoryLevel::VRF, row_major, 16),
+                (u8, CpuMemoryLevel::VRF, row_major, 16),
+                serial
+            ),
+            MemoryLimits::Standard(MemVec::zero::<X86Target>())
         );
         assert!(spec.is_canonical());
 
