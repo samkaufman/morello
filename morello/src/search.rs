@@ -16,9 +16,10 @@ use crate::grid::linear::{BimapInt, BimapSInt};
 use crate::rtree::RTreeDyn;
 use crate::scheduling::{
     Action, ActionBottomUpSolver, ActionBottomUpSolverRequest, ActionT, BottomUpSolver,
-    DependencyRequest, SpecGeometry, SpecGeometryRect, VisitUpdater,
+    DependencyRequest, VisitUpdater,
 };
 use crate::spec::Spec;
+use crate::spec_geometry::{SpecGeometry, SpecGeometryRect};
 use crate::target::Target;
 use crate::utils::diagonals_shifted;
 
@@ -763,7 +764,7 @@ mod tests {
 
     fn create_simple_normalized_cost(main: u32) -> NormalizedCost {
         NormalizedCost {
-            intensity: CostIntensity::new(main.into(), nz!(1u64)),
+            intensity: CostIntensity::new(main, nz!(1u64)),
             peaks: MemVec::zero::<X86Target>(),
             depth: 0,
         }

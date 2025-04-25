@@ -638,7 +638,7 @@ impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
         //       Right now, if they differ, we'll over-visit the serial-only children.
 
         // TODO: slice every rect into-same-except-shape rather than expecting exactly one output
-        let dependencies = SpecGeometry::new(Rc::clone(&dependents.1));
+        let dependencies = SpecGeometry::new(Rc::clone(dependents.bimap()));
 
         dependents.iter().for_each(|rect| {
             let parameter_shapes = rect.top().0.parameter_shapes();
@@ -2179,50 +2179,50 @@ mod tests {
     /// Use the [FilesDatabase]'s [BiMap] to determine which Specs are members of the returned
     /// dependency request.
     fn shared_test_tileoutsolver_requests_match_apply_deps<Tgt>(
-        spec: Spec<Tgt>,
-    ) -> Result<(), proptest::test_runner::TestCaseError>
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    spec: Spec<Tgt>,
+) -> Result<(), proptest::test_runner::TestCaseError>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+{
+    let mut solver = TileOutSolver::<Tgt>::default();
+    let single_spec_set = SpecGeometry::new(Rc::new(db_spec_bimap(false)));
+    let mut solver_dependencies = HashSet::new();
+    if let Some(geometry) = solver
+        .request(&SpecGeometry::single(
+            &spec,
+            Rc::clone(single_spec_set.bimap()),
+        ))
+        .queries()
     {
-        let mut solver = TileOutSolver::<Tgt>::default();
-        let single_spec_set = SpecGeometry::new(Rc::new(db_spec_bimap(false)));
-        let mut solver_dependencies = HashSet::new();
-        if let Some(geometry) = solver
-            .request(&SpecGeometry::single(
-                &spec,
-                Rc::clone(single_spec_set.bimap()),
-            ))
-            .queries()
-        {
-            geometry.iter().for_each(|rect| {
-                rect.iter_specs().for_each(|s| {
-                    solver_dependencies.insert(s);
-                });
+        geometry.iter().for_each(|rect| {
+            rect.iter_specs().for_each(|s| {
+                solver_dependencies.insert(s);
             });
-        }
-        let apply_dependencies: HashSet<Spec<Tgt>> = TileOutActionProvider::<Tgt>::actions(&spec.0)
-            .into_iter()
-            .flat_map(|action| {
-                action
-                    .apply(&spec)
-                    .map(|expanded_impl| {
-                        let mut subspecs = vec![];
-                        expanded_impl.visit_leaves(&mut |leaf| {
-                            if let ImplNode::SpecApp(spec_app) = leaf {
-                                subspecs.push(spec_app.0.clone());
-                            }
-                            true
-                        });
-                        subspecs
-                    })
-                    .unwrap_or_default()
-            })
-            .collect::<HashSet<_>>();
-        prop_assert_eq!(apply_dependencies, solver_dependencies);
-        Ok(())
+        });
     }
+    let apply_dependencies: HashSet<Spec<Tgt>> = TileOutActionProvider::<Tgt>::actions(&spec.0)
+        .into_iter()
+        .flat_map(|action| {
+            action
+                .apply(&spec)
+                .map(|expanded_impl| {
+                    let mut subspecs = vec![];
+                    expanded_impl.visit_leaves(&mut |leaf| {
+                        if let ImplNode::SpecApp(spec_app) = leaf {
+                            subspecs.push(spec_app.0.clone());
+                        }
+                        true
+                    });
+                    subspecs
+                })
+                .unwrap_or_default()
+        })
+        .collect::<HashSet<_>>();
+    prop_assert_eq!(apply_dependencies, solver_dependencies);
+    Ok(())
+}
 
     emit_naivebottomupsolver_tests!(X86Target, TileOutActionProvider<X86Target>, tileout_x86);
     emit_naivebottomupsolver_tests!(ArmTarget, TileOutActionProvider<ArmTarget>, tileout_arm);
