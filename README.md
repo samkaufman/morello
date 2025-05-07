@@ -8,6 +8,11 @@ The book introduces the key ideas behind Morello, walking through increasingly
 sophisticated neural networks and features of Morello. It's appropriate for any
 developer interested in making their neural network inference workload run more quickly.
 
+Additionally, a report discussing the system and its underlying ideas in more
+detail can be found at:
+
+[https://doi.org/10.48550/arXiv.2505.01637](https://doi.org/10.48550/arXiv.2505.01637)
+
 ## Installation
 
 You can start running Morello locally by `git clone`ing the project.
