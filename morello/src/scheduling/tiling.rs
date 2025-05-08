@@ -1239,57 +1239,6 @@ fn spec_canonicalize_to_apply_err(canon_error: crate::spec::CanonicalizeError) -
     }
 }
 
-/// Computes the cutoffs for each dimension of a tensor in ascending order.
-///
-/// This is a helper function for [combine_contig_cutoffs].
-fn compute_contig_cutoffs_single_tensor(
-    original_shape: &[DimSize],
-    layout: &Layout,
-) -> Vec<Vec<u32>> {
-    // We always want to break out index=0 (size=1), so we'll initialize with [1, 2].
-    let mut result = vec![vec![1, 2]; original_shape.len()];
-
-    // Find the smallest Packed/OddEven multiple for every logical dim. that has one.
-    // We'll use this next to break out tile sizes which are multiples of that size.
-    // This accomodates our restriction that we can't split Packed/OddEven physical
-    // dimensions with tiling.
-    let mut frequencies: Vec<Option<DimSize>> = vec![None; original_shape.len()];
-    for (logical_dim, physical_dim) in layout.dims.iter().rev() {
-        match physical_dim {
-            PhysDim::Packed(size) | PhysDim::OddEven(size) => {
-                if let Some(existing_size) = frequencies[usize::from(*logical_dim)] {
-                    let min_size = existing_size.min(*size);
-                    debug_assert!(
-                        existing_size.get() % min_size.get() == 0
-                            || size.get() % min_size.get() == 0,
-                        "One size should be a multiple of the other"
-                    );
-                    frequencies[usize::from(*logical_dim)] = Some(min_size);
-                } else {
-                    frequencies[usize::from(*logical_dim)] = Some(*size);
-                }
-            }
-            PhysDim::Dynamic => {}
-        }
-    }
-
-    for (dim_cutoffs, freq_opt, size) in izip!(result.iter_mut(), &frequencies, original_shape) {
-        if let Some(freq) = freq_opt {
-            let mut multiple = (*freq).max(nz!(2u32));
-            while multiple < *size {
-                dim_cutoffs.push(multiple.get());
-                dim_cutoffs.push(multiple.get() + 1);
-                multiple = DimSize::new(multiple.get() * 2).unwrap();
-            }
-        };
-        if size.get() > 1 {
-            dim_cutoffs.push(size.get());
-            dim_cutoffs.push(size.get() + 1);
-        }
-    }
-    result
-}
-
 // TODO: Shouldn't be pub
 /// Compute the layout and contig for all arguments for all tile sizes of a [Spec].
 ///
@@ -1435,6 +1384,60 @@ fn combine_contig_cutoffs(
     axis_grouped_cutoffs
 }
 
+/// Computes the cutoffs for each dimension of a tensor in ascending order.
+///
+/// Each returned `Vec<u32>` contains the cutoffs for the corresponding logical dimension. The final
+/// element will always be `size + 1`, where `size` is the size of the logical dimension.
+///
+/// This is a helper function for [combine_contig_cutoffs].
+fn compute_contig_cutoffs_single_tensor(
+    original_shape: &[DimSize],
+    layout: &Layout,
+) -> Vec<Vec<u32>> {
+    // We always want to break out index=0 (size=1), so we'll initialize with [1, 2].
+    let mut result = vec![vec![1, 2]; original_shape.len()];
+
+    // Find the smallest Packed/OddEven multiple for every logical dim. that has one.
+    // We'll use this next to break out tile sizes which are multiples of that size.
+    // This accomodates our restriction that we can't split Packed/OddEven physical
+    // dimensions with tiling.
+    let mut frequencies: Vec<Option<DimSize>> = vec![None; original_shape.len()];
+    for (logical_dim, physical_dim) in layout.dims.iter().rev() {
+        match physical_dim {
+            PhysDim::Packed(size) | PhysDim::OddEven(size) => {
+                if let Some(existing_size) = frequencies[usize::from(*logical_dim)] {
+                    let min_size = existing_size.min(*size);
+                    debug_assert!(
+                        existing_size.get() % min_size.get() == 0
+                            || size.get() % min_size.get() == 0,
+                        "One size should be a multiple of the other"
+                    );
+                    frequencies[usize::from(*logical_dim)] = Some(min_size);
+                } else {
+                    frequencies[usize::from(*logical_dim)] = Some(*size);
+                }
+            }
+            PhysDim::Dynamic => {}
+        }
+    }
+
+    for (dim_cutoffs, freq_opt, size) in izip!(result.iter_mut(), &frequencies, original_shape) {
+        if let Some(freq) = freq_opt {
+            let mut multiple = (*freq).max(nz!(2u32));
+            while multiple < *size {
+                dim_cutoffs.push(multiple.get());
+                dim_cutoffs.push(multiple.get() + 1);
+                multiple = DimSize::new(multiple.get() * 2).unwrap();
+            }
+        };
+        if size.get() > 1 {
+            dim_cutoffs.push(size.get());
+            dim_cutoffs.push(size.get() + 1);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1511,6 +1514,30 @@ mod tests {
             compute_layout_contig_rects(&spec_shape, &tensor_descriptions, fixed_spec_dimensions)
                 .collect();
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_compute_contig_cutoffs_single_tensor_base() {
+        let shape = shape![1];
+        let layout = row_major(1);
+        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+        assert_eq!(dim_cutoffs_vec, vec![vec![1, 2]]);
+    }
+
+    #[test]
+    fn test_compute_contig_cutoffs_single_tensor_1d_rowmajor_1() {
+        let shape = shape![8, 4];
+        let layout = row_major(2);
+        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+        assert_eq!(dim_cutoffs_vec, vec![vec![1, 2, 8, 9], vec![1, 2, 4, 5]]);
+    }
+
+    #[test]
+    fn test_compute_contig_cutoffs_single_tensor_1d_packed() {
+        let shape = shape![8];
+        let layout = Layout::new(vec![(0, PhysDim::Packed(nz!(4u32)))]);
+        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+        assert_eq!(dim_cutoffs_vec, vec![vec![1, 2, 4, 5, 8, 9]]);
     }
 
     proptest! {
@@ -1697,6 +1724,17 @@ mod tests {
             let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
             for dim_cutoffs in &dim_cutoffs_vec {
                 prop_assert_eq!(&dim_cutoffs[..2], &[1, 2]);
+            }
+        }
+
+        #[test]
+        fn test_compute_contig_cutoffs_single_tensor_last_element_is_size_plus_one(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+            for (dim_cutoffs, &dim_size) in dim_cutoffs_vec.iter().zip(shape.iter()) {
+                let expected = dim_size.get() + 1;
+                prop_assert_eq!(dim_cutoffs.last(), Some(&expected));
             }
         }
     }
@@ -2179,50 +2217,50 @@ mod tests {
     /// Use the [FilesDatabase]'s [BiMap] to determine which Specs are members of the returned
     /// dependency request.
     fn shared_test_tileoutsolver_requests_match_apply_deps<Tgt>(
-    spec: Spec<Tgt>,
-) -> Result<(), proptest::test_runner::TestCaseError>
-where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
-{
-    let mut solver = TileOutSolver::<Tgt>::default();
-    let single_spec_set = SpecGeometry::new(Rc::new(db_spec_bimap(false)));
-    let mut solver_dependencies = HashSet::new();
-    if let Some(geometry) = solver
-        .request(&SpecGeometry::single(
-            &spec,
-            Rc::clone(single_spec_set.bimap()),
-        ))
-        .queries()
+        spec: Spec<Tgt>,
+    ) -> Result<(), proptest::test_runner::TestCaseError>
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
     {
-        geometry.iter().for_each(|rect| {
-            rect.iter_specs().for_each(|s| {
-                solver_dependencies.insert(s);
+        let mut solver = TileOutSolver::<Tgt>::default();
+        let single_spec_set = SpecGeometry::new(Rc::new(db_spec_bimap(false)));
+        let mut solver_dependencies = HashSet::new();
+        if let Some(geometry) = solver
+            .request(&SpecGeometry::single(
+                &spec,
+                Rc::clone(single_spec_set.bimap()),
+            ))
+            .queries()
+        {
+            geometry.iter().for_each(|rect| {
+                rect.iter_specs().for_each(|s| {
+                    solver_dependencies.insert(s);
+                });
             });
-        });
+        }
+        let apply_dependencies: HashSet<Spec<Tgt>> = TileOutActionProvider::<Tgt>::actions(&spec.0)
+            .into_iter()
+            .flat_map(|action| {
+                action
+                    .apply(&spec)
+                    .map(|expanded_impl| {
+                        let mut subspecs = vec![];
+                        expanded_impl.visit_leaves(&mut |leaf| {
+                            if let ImplNode::SpecApp(spec_app) = leaf {
+                                subspecs.push(spec_app.0.clone());
+                            }
+                            true
+                        });
+                        subspecs
+                    })
+                    .unwrap_or_default()
+            })
+            .collect::<HashSet<_>>();
+        prop_assert_eq!(apply_dependencies, solver_dependencies);
+        Ok(())
     }
-    let apply_dependencies: HashSet<Spec<Tgt>> = TileOutActionProvider::<Tgt>::actions(&spec.0)
-        .into_iter()
-        .flat_map(|action| {
-            action
-                .apply(&spec)
-                .map(|expanded_impl| {
-                    let mut subspecs = vec![];
-                    expanded_impl.visit_leaves(&mut |leaf| {
-                        if let ImplNode::SpecApp(spec_app) = leaf {
-                            subspecs.push(spec_app.0.clone());
-                        }
-                        true
-                    });
-                    subspecs
-                })
-                .unwrap_or_default()
-        })
-        .collect::<HashSet<_>>();
-    prop_assert_eq!(apply_dependencies, solver_dependencies);
-    Ok(())
-}
 
     emit_naivebottomupsolver_tests!(X86Target, TileOutActionProvider<X86Target>, tileout_x86);
     emit_naivebottomupsolver_tests!(ArmTarget, TileOutActionProvider<ArmTarget>, tileout_arm);
