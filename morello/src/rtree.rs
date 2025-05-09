@@ -140,10 +140,10 @@ struct RTreePt<const D: usize> {
 
 /// An [rstar::SelectionFunction] which removes a set of [rstar::RTreeObject]s.
 #[derive(Debug)]
-struct BatchRemoveSelFn<O: rstar::RTreeObject> {
+struct BatchRemoveSelFn<E> {
     // TODO: Own references, not clones.
-    to_remove: HashSet<O>,
-    envelope: Option<O::Envelope>,
+    to_remove: HashSet<E>,
+    envelope: Option<E>,
 }
 
 impl<'a, T> IntoIterator for &'a RTreeDyn<T> {
@@ -204,7 +204,8 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
         // Find the first rectangle which matches except for one dimension which is larger or
         // matches (and has the same cost).
-        let mut to_remove = BatchRemoveSelFn::<RTreeRect<D, T>>::default();
+        let mut to_remove =
+            BatchRemoveSelFn::<<RTreeRect<D, T> as rstar::RTreeObject>::Envelope>::default();
         let mut to_insert = new_rect;
         let mut should_repeat = true;
         let mut skip_insert = false;
@@ -236,7 +237,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 let candidate_envelope = candidate.envelope();
                 if insert_envelope.contains_envelope(&candidate_envelope) && value_matches {
                     // TODO: Avoid the following clone.
-                    to_remove.queue_removal(candidate.clone());
+                    to_remove.queue_removal(candidate_envelope);
                     // Assert the MainCost, but not the later tuple elements, are unchanged.
                     // TODO: Remove the following assert and lift short-circuit.
                     continue;
@@ -262,7 +263,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     to_insert.top = merged_envelope.upper();
                     to_insert.bottom = merged_envelope.lower();
 
-                    to_remove.queue_removal(candidate.clone());
+                    to_remove.queue_removal(candidate_envelope);
                 }
             }
 
@@ -303,7 +304,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     };
                     parts_to_insert.push(part_rect);
                 }
-                to_remove.queue_removal(intersecting_rect.clone());
+                to_remove.queue_removal(intersecting_rect.envelope());
             }
             for _ in self.drain_with_selection_function(&to_remove) {}
 
@@ -393,34 +394,28 @@ impl<const D: usize> Point for RTreePt<D> {
     }
 }
 
-impl<O> BatchRemoveSelFn<O>
-where
-    O: rstar::RTreeObject,
-{
+impl<E> BatchRemoveSelFn<E> {
     fn clear(&mut self) {
         self.to_remove.clear();
         self.envelope = None;
     }
 }
 
-impl<O> BatchRemoveSelFn<O>
+impl<E> BatchRemoveSelFn<E>
 where
-    O: rstar::RTreeObject + Eq + Hash,
+    E: rstar::Envelope + Eq + Hash,
 {
-    fn queue_removal(&mut self, candidate: O) {
+    fn queue_removal(&mut self, candidate_envelope: E) {
         if let Some(e) = &mut self.envelope {
-            e.merge(&candidate.envelope());
+            e.merge(&candidate_envelope);
         } else {
-            self.envelope = Some(candidate.envelope());
+            self.envelope = Some(candidate_envelope.clone());
         }
-        self.to_remove.insert(candidate);
+        self.to_remove.insert(candidate_envelope);
     }
 }
 
-impl<O> Default for BatchRemoveSelFn<O>
-where
-    O: rstar::RTreeObject,
-{
+impl<E> Default for BatchRemoveSelFn<E> {
     fn default() -> Self {
         BatchRemoveSelFn {
             to_remove: HashSet::new(),
@@ -429,9 +424,10 @@ where
     }
 }
 
-impl<O> rstar::SelectionFunction<O> for &BatchRemoveSelFn<O>
+impl<O> rstar::SelectionFunction<O> for &BatchRemoveSelFn<O::Envelope>
 where
     O: rstar::RTreeObject + Eq + Hash,
+    O::Envelope: Eq + Hash,
 {
     fn should_unpack_parent(&self, envelope: &<O as RTreeObject>::Envelope) -> bool {
         self.envelope
@@ -441,7 +437,7 @@ where
     }
 
     fn should_unpack_leaf(&self, leaf: &O) -> bool {
-        self.to_remove.contains(leaf)
+        self.to_remove.contains(&leaf.envelope())
     }
 }
 
