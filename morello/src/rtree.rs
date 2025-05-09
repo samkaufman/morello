@@ -248,8 +248,12 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 //
                 // TODO: This condition+loop is wasteful.
                 if value_matches
-                    && all_dimensions_adjacent_or_overlap(&to_insert, candidate)
-                    && count_matching_dimensions(&to_insert, candidate) == D - 1
+                    && count_merging_dimension(
+                        &to_insert.bottom.arr,
+                        &to_insert.top.arr,
+                        &candidate.bottom.arr,
+                        &candidate.top.arr,
+                    ) == Some(D - 1)
                 {
                     should_repeat = true;
 
@@ -482,14 +486,40 @@ fn rect_subtract(
     result
 }
 
-fn count_matching_dimensions<const D: usize, T>(
-    new_rect: &RTreeRect<D, T>,
-    candidate: &RTreeRect<D, T>,
+/// Returns number of matching dimensions between two rectangles, or `None` if they are not all
+/// adjacent or overlap.
+fn count_merging_dimension(
+    new_rect_bottom: &[BimapSInt],
+    new_rect_top: &[BimapSInt],
+    candidate_bottom: &[BimapSInt],
+    candidate_top: &[BimapSInt],
+) -> Option<usize> {
+    if !all_dimensions_adjacent_or_overlap(
+        new_rect_bottom,
+        new_rect_top,
+        candidate_bottom,
+        candidate_top,
+    ) {
+        None
+    } else {
+        Some(count_matching_dimensions(
+            new_rect_bottom,
+            new_rect_top,
+            candidate_bottom,
+            candidate_top,
+        ))
+    }
+}
+
+fn count_matching_dimensions(
+    new_rect_bottom: &[BimapSInt],
+    new_rect_top: &[BimapSInt],
+    candidate_bottom: &[BimapSInt],
+    candidate_top: &[BimapSInt],
 ) -> usize {
     let mut matching_dimensions = 0usize;
-    for dim in 0..D {
-        if new_rect.bottom.arr[dim] == candidate.bottom.arr[dim]
-            && new_rect.top.arr[dim] == candidate.top.arr[dim]
+    for dim in 0..new_rect_bottom.len() {
+        if new_rect_bottom[dim] == candidate_bottom[dim] && new_rect_top[dim] == candidate_top[dim]
         {
             matching_dimensions += 1;
         }
@@ -497,17 +527,19 @@ fn count_matching_dimensions<const D: usize, T>(
     matching_dimensions
 }
 
-fn all_dimensions_adjacent_or_overlap<const D: usize, T>(
-    lhs: &RTreeRect<D, T>,
-    rhs: &RTreeRect<D, T>,
+fn all_dimensions_adjacent_or_overlap(
+    lhs_bottom: &[BimapSInt],
+    lhs_top: &[BimapSInt],
+    rhs_bottom: &[BimapSInt],
+    rhs_top: &[BimapSInt],
 ) -> bool {
-    for dim in 0..D {
-        let lhs_bottom = lhs.bottom.arr[dim];
-        let lhs_top = lhs.top.arr[dim];
-        let rhs_bottom = rhs.bottom.arr[dim];
-        let rhs_top = rhs.top.arr[dim];
-        if (lhs_bottom.saturating_sub(1)..=lhs_top).contains(&rhs_top)
-            || (lhs_bottom..=lhs_top.saturating_add(1)).contains(&rhs_bottom)
+    for dim in 0..lhs_bottom.len() {
+        let lhs_bottom_val = lhs_bottom[dim];
+        let lhs_top_val = lhs_top[dim];
+        let rhs_bottom_val = rhs_bottom[dim];
+        let rhs_top_val = rhs_top[dim];
+        if (lhs_bottom_val.saturating_sub(1)..=lhs_top_val).contains(&rhs_top_val)
+            || (lhs_bottom_val..=lhs_top_val.saturating_add(1)).contains(&rhs_bottom_val)
         {
             continue;
         }
