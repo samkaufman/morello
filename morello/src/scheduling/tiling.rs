@@ -1,5 +1,4 @@
-use crate::common::Dtype;
-use crate::common::{DimSize, Shape};
+use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::cost::NormalizedCost;
 use crate::grid::linear::BimapSInt;
 use crate::imp::loops::{Loop, LoopTile};
@@ -26,6 +25,7 @@ use itertools::{izip, Either, Itertools};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
+use std::cmp::Ordering;
 use std::iter;
 use std::iter::once;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -765,6 +765,18 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for SplitActionProvider<Tgt> 
     }
 }
 
+/// Description of a tensor parameter for layout/contig computation.
+#[derive(Clone)]
+pub struct TensorDescription<'a, Tgt: Target> {
+    pub parent_shape: &'a [DimSize],
+    pub layout: &'a Layout,
+    pub contig: Contig,
+    pub dim_associations: &'a [DimAssociation],
+    pub vector_size: Option<DimSize>,
+    pub dtype: Dtype,
+    pub level: Tgt::Level,
+}
+
 /// Creates a main body ImplNode by cloning the spec, updating component shapes, setting serial_only
 /// flag, and canonicalizing.
 ///
@@ -1244,13 +1256,13 @@ fn spec_canonicalize_to_apply_err(canon_error: crate::spec::CanonicalizeError) -
 ///
 /// This requires both `spec_shape` and tensor shapes because `spec_shape` is referenced
 /// when computing cutoffs' offsets from a [DimAssociation].
-pub(crate) fn compute_layout_contig_rects<'a>(
+pub(crate) fn compute_layout_contig_rects<'a, Tgt: Target>(
     spec_shape: &[DimSize],
     tensor_descriptions: &'a [(&[DimSize], &Layout, &[DimAssociation])],
     fixed_spec_dimensions: &[usize],
 ) -> impl Iterator<Item = (Vec<BimapSInt>, Vec<BimapSInt>, Vec<Layout>)> + 'a {
     let multidim_cutoffs =
-        combine_contig_cutoffs(spec_shape, tensor_descriptions, fixed_spec_dimensions);
+        combine_contig_cutoffs::<Tgt>(spec_shape, tensor_descriptions, fixed_spec_dimensions);
     compute_layout_contigs_for_cutoff_rects(tensor_descriptions, multidim_cutoffs)
 }
 
@@ -1320,7 +1332,7 @@ fn compute_layout_contigs_for_cutoff_rects<'a>(
 /// Combination involves merging cutoffs from multiple tensor dimensions corresponding to the same
 /// Spec dimension, as well as shifting them according to the coordination relation between Spec
 /// and tensor dimensions (as defined by the [DimAssociation]s in `tensor_descriptions`).
-fn combine_contig_cutoffs(
+fn combine_contig_cutoffs<Tgt: Target>(
     spec_shape: &[DimSize],
     tensor_descriptions: &[(&[DimSize], &Layout, &[DimAssociation])],
     fixed_spec_dimensions: &[usize],
@@ -1330,7 +1342,7 @@ fn combine_contig_cutoffs(
     // Compute cutoffs for each tensor and group them by Spec axis.
     let mut axis_grouped_cutoffs = vec![vec![]; spec_shape.len()];
     for (original_shape, layout, dim_associations) in tensor_descriptions {
-        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(original_shape, layout);
+        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(original_shape, layout, None);
         assert_eq!(dim_cutoffs_vec.len(), dim_associations.len());
         for (i, association) in dim_associations.iter().enumerate() {
             for cutoff in &dim_cutoffs_vec[i] {
@@ -1389,10 +1401,13 @@ fn combine_contig_cutoffs(
 /// Each returned `Vec<u32>` contains the cutoffs for the corresponding logical dimension. The final
 /// element will always be `size + 1`, where `size` is the size of the logical dimension.
 ///
+/// The result is not guaranteed to be a minimal set of cutoffs. (TODO: Fix that!)
+///
 /// This is a helper function for [combine_contig_cutoffs].
 fn compute_contig_cutoffs_single_tensor(
     original_shape: &[DimSize],
     layout: &Layout,
+    vector_size: Option<DimSize>,
 ) -> Vec<Vec<u32>> {
     // We always want to break out index=0 (size=1), so we'll initialize with [1, 2].
     let mut result = vec![vec![1, 2]; original_shape.len()];
@@ -1435,6 +1450,45 @@ fn compute_contig_cutoffs_single_tensor(
             dim_cutoffs.push(size.get() + 1);
         }
     }
+
+    // TODO: We don't need to consider the vector size as a possible multiple for *every* dim.
+    //   Better would be to insert a vector size cutoff where correct and clear the smaller.
+    if let Some(vector_size) = vector_size {
+        let mut inner_volume = 1;
+        let mut inner_logical_shape = vec![1u32; original_shape.len()];
+        for (logical_dim, physical_dim) in layout.dims.iter().rev() {
+            let logical_dim_us = usize::from(*logical_dim);
+            let size = match physical_dim {
+                PhysDim::Packed(size) | PhysDim::OddEven(size) => {
+                    inner_logical_shape[logical_dim_us] *= size.get();
+                    size.get()
+                }
+                PhysDim::Dynamic => {
+                    let old_logical_size = inner_logical_shape[usize::from(*logical_dim)];
+                    inner_logical_shape[logical_dim_us] = original_shape[logical_dim_us].get();
+                    inner_logical_shape[logical_dim_us] / old_logical_size
+                }
+            };
+            inner_volume *= size;
+            match inner_volume.cmp(&vector_size.get()) {
+                Ordering::Greater => todo!(),
+                Ordering::Equal => break,
+                Ordering::Less => {}
+            }
+        }
+        println!("inner logical shape: {:?}", inner_logical_shape);
+        for (dim_cutoffs, &min_size) in result.iter_mut().zip(&inner_logical_shape) {
+            // drop all cutoffs below `min_size`, then prepend `min_size`
+            let first_valid = dim_cutoffs
+                .iter()
+                .position(|&c| c > min_size)
+                .unwrap_or(dim_cutoffs.len());
+            dim_cutoffs.drain(..first_valid);
+            debug_assert_ne!(dim_cutoffs.first(), Some(&min_size));
+            dim_cutoffs.insert(0, min_size);
+        }
+    }
+
     result
 }
 
@@ -1446,7 +1500,6 @@ mod tests {
     use crate::grid::general::BiMap;
     use crate::imp::Impl;
     use crate::layout::{arb_shape_and_same_rank_layout, row_major, Layout, PhysDim};
-    use crate::lspec;
     use crate::scheduling::{Action, SpecGeometry};
     use crate::shape;
     use crate::spec;
@@ -1460,6 +1513,7 @@ mod tests {
     use crate::{
         emit_bottomupsolver_queries_same_action_dependencies, emit_naivebottomupsolver_tests,
     };
+    use crate::{lspec, sdims};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use proptest::{prop_assert_eq, proptest};
@@ -1598,9 +1652,12 @@ mod tests {
             (vec![6, 6], vec![6, 6], vec![rm.clone()]),
         ]);
 
-        let result: HashSet<_> =
-            compute_layout_contig_rects(&spec_shape, &tensor_descriptions, fixed_spec_dimensions)
-                .collect();
+        let result: HashSet<_> = compute_layout_contig_rects::<X86Target>(
+            &spec_shape,
+            &tensor_descriptions,
+            fixed_spec_dimensions,
+        )
+        .collect();
         assert_eq!(result, expected);
     }
 
@@ -1608,7 +1665,7 @@ mod tests {
     fn test_compute_contig_cutoffs_single_tensor_base() {
         let shape = shape![1];
         let layout = row_major(1);
-        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout, None);
         assert_eq!(dim_cutoffs_vec, vec![vec![1, 2]]);
     }
 
@@ -1616,7 +1673,7 @@ mod tests {
     fn test_compute_contig_cutoffs_single_tensor_1d_rowmajor_1() {
         let shape = shape![8, 4];
         let layout = row_major(2);
-        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout, None);
         assert_eq!(dim_cutoffs_vec, vec![vec![1, 2, 8, 9], vec![1, 2, 4, 5]]);
     }
 
@@ -1624,8 +1681,63 @@ mod tests {
     fn test_compute_contig_cutoffs_single_tensor_1d_packed() {
         let shape = shape![8];
         let layout = Layout::new(vec![(0, PhysDim::Packed(nz!(4u32)))]);
-        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+        let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout, None);
         assert_eq!(dim_cutoffs_vec, vec![vec![1, 2, 4, 5, 8, 9]]);
+    }
+
+    #[test]
+    fn test_compute_layout_contig_rects_conv_fixed_kernel_no_rects() {
+        // spec_shape [b, f, c, h, w, fh, fw]
+        let spec_shape_dims = shape![1, 1, 1, 3, 3, 2, 2];
+
+        // Image tensor: shape [b, c, h, w]
+        let img_shape_dims = shape![1, 1, 3, 3];
+        let img_layout = row_major(img_shape_dims.len().try_into().unwrap());
+        let img_contig = img_layout.contiguous_full();
+        let img_da = sdims![0, 2, 3, 4];
+
+        // Filter tensor: shape [f, c, fh, fw]
+        let flt_shape_dims = shape![1, 1, 2, 2];
+        let flt_layout = row_major(flt_shape_dims.len().try_into().unwrap());
+        let flt_contig = flt_layout.contiguous_full();
+        let flt_da = sdims![1, 2, 5, 6];
+
+        // Output tensor: shape [b, f, out_h, out_w]
+        let out_h = DimSize::new(spec_shape_dims[3].get() - spec_shape_dims[5].get() + 1).unwrap();
+        let out_w = DimSize::new(spec_shape_dims[4].get() - spec_shape_dims[6].get() + 1).unwrap();
+        let out_shape_dims = [
+            nz!(1u32), // b
+            nz!(1u32), // f
+            out_h,
+            out_w,
+        ];
+        let out_layout = row_major(out_shape_dims.len().try_into().unwrap());
+        let out_contig = out_layout.contiguous_full();
+        let out_da = [
+            DimAssociation::SpecDim(0),                         // b
+            DimAssociation::SpecDim(1),                         // f
+            DimAssociation::SpecDimDifference(3, 5, nz!(1u32)), // h - fh + 1
+            DimAssociation::SpecDimDifference(4, 6, nz!(1u32)), // w - fw + 1
+        ];
+
+        let result: HashSet<_> = compute_layout_contig_rects::<X86Target>(
+            &spec_shape_dims,
+            &[
+                (&img_shape_dims[..], &img_layout, &img_da[..]),
+                (&flt_shape_dims[..], &flt_layout, &flt_da[..]),
+                (&out_shape_dims[..], &out_layout, &out_da[..]),
+            ],
+            &[5, 6], // Fix fh and fw
+        )
+        .collect();
+
+        // When fixed_spec_dimensions cause their corresponding cutoff lists in
+        // combine_contig_cutoffs to be empty, the multi_cartesian_product in
+        // compute_layout_contigs_for_cutoff_rects yields no items.
+        assert!(
+            result.is_empty(),
+            "Expected no rectangles when kernel dimensions are fixed, leading to empty cutoff lists for them."
+        );
     }
 
     proptest! {
@@ -1661,10 +1773,9 @@ mod tests {
             // TODO: Add some sort of test for parallel?
 
             let output_idx = spec.0.unique_output_index().unwrap();
-            let tensor_shapes = spec.0.parameter_shapes();
-            let output_shape = &tensor_shapes[output_idx];
-            let parameter_count = spec.0.operand_count();
-            let associations = (0..parameter_count)
+            let parameters = spec.0.parameters();
+            let output_shape = &parameters[output_idx].shape();
+            let associations = (0..parameters.len())
                 .map(|i| {
                     match &spec.0 {
                         LogicalSpec::Primitive(primitive_basics, ..) =>
@@ -1673,9 +1784,9 @@ mod tests {
                     }
                 })
                 .collect::<Vec<_>>();
-            let tensor_descriptions = (0..parameter_count).map(|i| {
+            let tensor_descriptions = (0..parameters.len()).map(|i| {
                 let layout = spec.0.parameter_layout(i);
-                (tensor_shapes[i].as_slice(), layout, associations[i].as_slice())
+                (parameters[i].shape(), layout, associations[i].as_slice())
             }).collect::<Vec<_>>();
 
             let LogicalSpec::Primitive(primitive_basics, _, _) = &spec.0 else {
@@ -1698,7 +1809,7 @@ mod tests {
             for sizes in output_shape.iter().map(|d| {
                 (1..=d.get()).filter(|x| d.get() % x == 0)
             }).multi_cartesian_product() {
-                if sizes.iter().zip(output_shape).all(|(s, d)| *s == d.get()) {
+                if sizes.iter().zip(*output_shape).all(|(s, d)| *s == d.get()) {
                     continue;
                 }
                 actions.push(Action::TileOut(TileOut::MultiLoop {
@@ -1708,8 +1819,8 @@ mod tests {
             }
             if let LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) = &spec.0 {
                 if matches!(typ, PrimitiveSpecType::Matmul { accum: true }) {
-                    for k in 1..tensor_shapes[0][1].get() {
-                        if tensor_shapes[0][1].get() % k != 0 {
+                    for k in 1..parameters[0].shape()[1].get() {
+                        if parameters[0].shape()[1].get() % k != 0 {
                             continue;
                         }
                         actions.push(Action::Split(Split { k: DimSize::new(k).unwrap() }));
@@ -1718,7 +1829,7 @@ mod tests {
             }
 
             let rects: Vec<_> =
-                compute_layout_contig_rects(&primitive_basics.spec_shape, &tensor_descriptions, &[]).collect();
+                compute_layout_contig_rects::<X86Target>(&primitive_basics.spec_shape, &tensor_descriptions, &[]).collect();
 
             for action in actions {
                 match action.apply(&spec) {
@@ -1788,7 +1899,8 @@ mod tests {
                         prop_assert!(located.is_some(), "R-Tree should contain the point {:?}", point);
                         prop_assert!(
                             located.unwrap().is_empty(),
-                            "Point {point:?} should have an empty value; action: {action:?} from {spec} produced {err:?}",
+                            "Point {point:?} should have an empty value but had {:?}; action: {action:?} from {spec} produced {err:?}",
+                            located.unwrap(),
                         );
                     },
                 };
@@ -1799,7 +1911,7 @@ mod tests {
         fn test_compute_contig_cutoffs_single_tensor_results_are_sorted(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
-            let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+            let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout, None);
             for dim_cutoffs in &dim_cutoffs_vec {
                 prop_assert!(dim_cutoffs.is_sorted(), "{dim_cutoffs:?} is not sorted");
             }
@@ -1809,7 +1921,7 @@ mod tests {
         fn test_compute_contig_cutoffs_single_tensor_breaks_out_first_index(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
-            let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+            let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout, None);
             for dim_cutoffs in &dim_cutoffs_vec {
                 prop_assert_eq!(&dim_cutoffs[..2], &[1, 2]);
             }
@@ -1819,7 +1931,7 @@ mod tests {
         fn test_compute_contig_cutoffs_single_tensor_last_element_is_size_plus_one(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
-            let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout);
+            let dim_cutoffs_vec = compute_contig_cutoffs_single_tensor(&shape, &layout, None);
             for (dim_cutoffs, &dim_size) in dim_cutoffs_vec.iter().zip(shape.iter()) {
                 let expected = dim_size.get() + 1;
                 prop_assert_eq!(dim_cutoffs.last(), Some(&expected));
