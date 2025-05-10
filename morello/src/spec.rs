@@ -174,6 +174,7 @@ pub enum DimAssociation {
     Constant(DimSize),
 }
 
+#[macro_export]
 macro_rules! sdims {
     ($($dim:expr),*$(,)*) => {{
         vec![$(DimAssociation::SpecDim($dim)),*]
@@ -1704,6 +1705,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
+    pub fn vector_size(&self, index: usize) -> Option<DimSize> {
+        match self {
+            LogicalSpec::Primitive(_, auxes, _) => auxes[index].vector_size,
+            LogicalSpec::Compose { .. } => todo!(),
+        }
+    }
+
     pub fn inputs(&self) -> Vec<TensorSpec<Tgt>> {
         (0..self.operand_count())
             .filter(|i| !self.parameter_is_output(*i))
@@ -1713,33 +1721,33 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
     /// Returns the output parameter if there is just one.
     pub fn unique_output(&self) -> Option<TensorSpec<Tgt>> {
-        self.unique_output_index().map(|idx| self.parameter(idx))
-    }
+    self.unique_output_index().map(|idx| self.parameter(idx))
+}
 
     /// Returns the index of the output parameter if there is just one.
     pub fn unique_output_index(&self) -> Option<usize> {
-        match self {
-            LogicalSpec::Primitive(basics, _, _) => basics.typ.unique_output_index(),
-            LogicalSpec::Compose { .. } => {
-                let mut found_output = None;
-                let mut param_idx = self.operand_count();
-                while param_idx > 0 {
-                    param_idx -= 1;
-                    if self.parameter_is_output(param_idx) {
-                        found_output = Some(param_idx);
-                        break;
-                    }
+    match self {
+        LogicalSpec::Primitive(basics, _, _) => basics.typ.unique_output_index(),
+        LogicalSpec::Compose { .. } => {
+            let mut found_output = None;
+            let mut param_idx = self.operand_count();
+            while param_idx > 0 {
+                param_idx -= 1;
+                if self.parameter_is_output(param_idx) {
+                    found_output = Some(param_idx);
+                    break;
                 }
-                while param_idx > 0 {
-                    param_idx -= 1;
-                    if self.parameter_is_output(param_idx) {
-                        return None;
-                    }
-                }
-                found_output
             }
+            while param_idx > 0 {
+                param_idx -= 1;
+                if self.parameter_is_output(param_idx) {
+                    return None;
+                }
+            }
+            found_output
         }
     }
+}
 
     pub fn parameter_is_output(&self, index: usize) -> bool {
         match self {
@@ -2188,25 +2196,25 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
     /// Returns the product of Spec dimensions.
     pub fn volume(&self) -> NonZeroU64 {
-        match self {
-            LogicalSpec::Primitive(basics, _, _) => {
-                // Compute product in u64 to avoid overflow for large shapes.
-                NonZeroU64::new(
-                    basics
-                        .spec_shape
-                        .iter()
-                        .map(|d| u64::from(d.get()))
-                        .product(),
-                )
-                .unwrap()
-            }
-            LogicalSpec::Compose { .. } => {
-                // Returning a 1 here basically disables intensity-scaling.
-                // TODO: Return an actual volume.
-                nz!(1u64)
-            }
+    match self {
+        LogicalSpec::Primitive(basics, _, _) => {
+            // Compute product in u64 to avoid overflow for large shapes.
+            NonZeroU64::new(
+                basics
+                    .spec_shape
+                    .iter()
+                    .map(|d| u64::from(d.get()))
+                    .product(),
+            )
+            .unwrap()
+        }
+        LogicalSpec::Compose { .. } => {
+            // Returning a 1 here basically disables intensity-scaling.
+            // TODO: Return an actual volume.
+            nz!(1u64)
         }
     }
+}
 
     pub(crate) fn is_oneprefix(&self) -> bool {
         matches!(
