@@ -1446,6 +1446,7 @@ mod tests {
     use crate::grid::general::BiMap;
     use crate::imp::Impl;
     use crate::layout::{arb_shape_and_same_rank_layout, row_major, Layout, PhysDim};
+    use crate::lspec;
     use crate::scheduling::{Action, SpecGeometry};
     use crate::shape;
     use crate::spec;
@@ -1479,6 +1480,93 @@ mod tests {
             output_shape: shape![1, 4, 6],
             parallel: false,
         }))
+    }
+
+    #[test]
+    fn test_tiling_to_vector_halves_produces_unaligned_contiguous_subspec() {
+        let spec = Spec::<X86Target>(
+            lspec!(Matmul(
+                [1, 8, 1, 16],
+                (u8, CpuMemoryLevel::GL, row_major),
+                (u8, CpuMemoryLevel::GL, row_major),
+                (u8, CpuMemoryLevel::VRF, row_major, 16),
+                serial
+            )),
+            X86Target::max_mem(),
+        );
+        let action = Action::TileOut(TileOut::MultiLoop {
+            output_shape: shape![1, 1, 8],
+            parallel: false,
+        });
+        let imp = action.apply(&spec).unwrap();
+
+        let ImplNode::Loop(Loop { bodies, .. }) = imp else {
+            panic!("Expected a Loop");
+        };
+        assert_eq!(bodies.len(), 1);
+        let ImplNode::SpecApp(spec_app) = &bodies[0] else {
+            panic!("Expected a SpecApp");
+        };
+        let new_parameter = spec_app.0 .0.parameter(2);
+        assert!(new_parameter.is_contiguous());
+    }
+
+    #[test]
+    fn test_tiling_across_separated_vector_produces_aligned_noncontiguous_subspec() {
+        let spec = Spec::<X86Target>(
+            lspec!(Matmul(
+                [1, 8, 1, 32],
+                (u8, CpuMemoryLevel::GL, row_major),
+                (u8, CpuMemoryLevel::GL, row_major),
+                (u8, CpuMemoryLevel::VRF, row_major, 16),
+                serial
+            )),
+            X86Target::max_mem(),
+        );
+        let action = Action::TileOut(TileOut::MultiLoop {
+            output_shape: shape![1, 4, 16],
+            parallel: false,
+        });
+        let imp = action.apply(&spec).unwrap();
+
+        let ImplNode::Loop(Loop { bodies, .. }) = imp else {
+            panic!("Expected a Loop");
+        };
+        assert_eq!(bodies.len(), 1);
+        let ImplNode::SpecApp(spec_app) = &bodies[0] else {
+            panic!("Expected a SpecApp");
+        };
+        let new_parameter = spec_app.0 .0.parameter(2);
+        assert!(!new_parameter.is_contiguous());
+    }
+
+    #[test]
+    fn test_tiling_across_vector_halves_produces_unaligned_noncontiguous_subspec() {
+        let spec = Spec::<X86Target>(
+            lspec!(Matmul(
+                [1, 8, 1, 16],
+                (u8, CpuMemoryLevel::GL, row_major),
+                (u8, CpuMemoryLevel::GL, row_major),
+                (u8, CpuMemoryLevel::VRF, row_major, 16),
+                serial
+            )),
+            X86Target::max_mem(),
+        );
+        let action = Action::TileOut(TileOut::MultiLoop {
+            output_shape: shape![1, 4, 8],
+            parallel: false,
+        });
+        let imp = action.apply(&spec).unwrap();
+
+        let ImplNode::Loop(Loop { bodies, .. }) = imp else {
+            panic!("Expected a Loop");
+        };
+        assert_eq!(bodies.len(), 1);
+        let ImplNode::SpecApp(spec_app) = &bodies[0] else {
+            panic!("Expected a SpecApp");
+        };
+        let new_parameter = spec_app.0 .0.parameter(2);
+        assert!(!new_parameter.is_contiguous());
     }
 
     #[test]

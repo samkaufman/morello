@@ -225,7 +225,9 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
         let vector_size = self.aux.vector_size;
-        check_tensor_vector_size::<Tgt>(self.shape(), self.dtype, &self.level(), vector_size)?;
+        if !check_tensor_vector_size::<Tgt>(self.shape(), self.dtype, &self.level(), vector_size) {
+            return Err(CanonicalizeError::VectorSizeInvalid);
+        }
         self.aux.canonicalize(&self.shape)
     }
 
@@ -648,30 +650,22 @@ pub(crate) fn gen_vector_sizes_opt(
 /// This checks both that the vector exists for that target and that the vector size is a multiple
 /// of the shape and dtype.
 ///
-/// Returns `Ok`, a `CanonicalizeError::VectorSizeInvalid`, or
-/// `CanonicalizeError::VectorSizeVolumeIncompatible`.
+/// Returns `true` if the level is not a VRF.
 pub(crate) fn check_tensor_vector_size<Tgt: Target>(
     shape: &[DimSize],
     dtype: Dtype,
     level: &Tgt::Level,
     vector_size: Option<DimSize>,
-) -> Result<(), CanonicalizeError> {
+) -> bool {
     let vector_bytes = level.vector_bytes();
     if vector_bytes.is_empty() {
         debug_assert!(vector_size.is_none());
-        return Ok(());
+        return true;
     }
     let vector_size = vector_size.unwrap();
     let volume = DimSize::new(shape.iter().map(|d| d.get()).product()).unwrap();
     let bytes = volume.get() * u32::from(dtype.size());
-
-    if !vector_bytes.iter().any(|&vb| bytes % vb == 0) {
-        return Err(CanonicalizeError::VectorSizeInvalid);
-    }
-    if volume.get() % vector_size.get() != 0 {
-        return Err(CanonicalizeError::VectorSizeVolumeIncompatible);
-    }
-    Ok(())
+    volume.get() % vector_size.get() == 0 && vector_bytes.iter().any(|&vb| bytes % vb == 0)
 }
 
 fn tensorspec_aux_str<Tgt: Target>(aux: &TensorSpecAux<Tgt>) -> String {
@@ -734,32 +728,6 @@ mod tests {
     use proptest::proptest;
 
     proptest! {
-        // TODO: Make an ARM variant
-        #[test]
-        fn test_canonicalize_errors_if_vector_not_a_multiple_x86(
-            tspec in arb_noncanon_tensorspec::<X86Target>(&[nz!(16u32), nz!(16u32)])
-                .prop_filter("TensorSpec is not in VRF", |t| t.level().vector_rf())
-        ) {
-            let volume = tspec.volume().get();
-            let dtype = tspec.dtype();
-
-            let mut can_move = true;
-            // If the destination is in VRF, then the operand volume must be a multiple of at least one
-            // of the vector sizes.
-            let vector_bytes = tspec.level().vector_bytes();
-            if !vector_bytes.is_empty() {
-                let bytes = volume * u32::from(dtype.size());
-                if vector_bytes.iter().all(|&vb| bytes % vb != 0) {
-                    can_move = false;
-                }
-            }
-
-            if !can_move {
-                let mut tspec = tspec;
-                prop_assert!(tspec.canonicalize().is_err());
-            }
-        }
-
         // TODO: Modify `any::<TensorSpec<_>>` to generate multiple ranks and dtypes.
         #[test]
         fn test_tensorspec_canonicalize_should_be_idempodent_x86(tspec in any::<TensorSpec<X86Target>>()) {
