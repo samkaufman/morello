@@ -1780,8 +1780,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let shape = &basics.spec_shape;
                     for (aux, dtype) in primitive_aux.iter_mut().zip(&basics.dtypes) {
                         let vs = aux.vector_size;
-                        check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.level, vs)
-                            .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
+                        if !check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.level, vs) {
+                            return Err(CanonicalizeError::TensorSpecAuxCanonicalizeError(
+                                tensorspec::CanonicalizeError::VectorSizeInvalid,
+                            ));
+                        }
 
                         aux.canonicalize(shape)
                             .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
@@ -1809,8 +1812,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         izip!(basics.parameter_shapes(), &basics.dtypes, primitive_aux)
                     {
                         let vs = aux.vector_size;
-                        check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.level, vs)
-                            .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
+                        if !check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.level, vs) {
+                            return Err(CanonicalizeError::TensorSpecAuxCanonicalizeError(
+                                tensorspec::CanonicalizeError::VectorSizeInvalid,
+                            ));
+                        }
 
                         aux.canonicalize(&shp)
                             .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
@@ -1851,9 +1857,10 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let dtype = component.parameter_dtype(parameter_idx);
                     let level = &aux.level;
                     let vs = aux.vector_size;
-                    if let Err(e) = check_tensor_vector_size::<Tgt>(&shape, dtype, level, vs) {
-                        status_to_return =
-                            Err(CanonicalizeError::TensorSpecAuxCanonicalizeError(e));
+                    if !check_tensor_vector_size::<Tgt>(&shape, dtype, level, vs) {
+                        status_to_return = Err(CanonicalizeError::TensorSpecAuxCanonicalizeError(
+                            tensorspec::CanonicalizeError::VectorSizeInvalid,
+                        ));
                     }
                 });
                 assert_eq!(visited, operand_auxes.len());
@@ -1870,7 +1877,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let shape = &basics.spec_shape;
                     for (aux, dtype) in primitive_aux.iter().zip(&basics.dtypes) {
                         let vs = aux.vector_size;
-                        if check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.level, vs).is_err() {
+                        if !check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.level, vs) {
                             return false;
                         }
 
@@ -1897,7 +1904,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         izip!(basics.parameter_shapes(), &basics.dtypes, primitive_aux)
                     {
                         let vs = aux.vector_size;
-                        if check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.level, vs).is_err() {
+                        if !check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.level, vs) {
                             return false;
                         }
 
@@ -1942,7 +1949,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let dtype = component.parameter_dtype(parameter_idx);
                     let level = &aux.level;
                     let vs = aux.vector_size;
-                    if check_tensor_vector_size::<Tgt>(&shape, dtype, level, vs).is_err() {
+                    if !check_tensor_vector_size::<Tgt>(&shape, dtype, level, vs) {
                         status_to_return = false;
                     }
                 });

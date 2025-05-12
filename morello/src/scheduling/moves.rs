@@ -5,7 +5,8 @@ use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::{
-    ActionT, ActionTopDownSolver, ApplyError, MoveActionSolver, Action, NaiveBottomUpActionProvider, NaiveBottomUpSolver, NotApplicableReason,
+    Action, ActionT, ActionTopDownSolver, ApplyError, MoveActionSolver,
+    NaiveBottomUpActionProvider, NaiveBottomUpSolver, NotApplicableReason,
 };
 use crate::spec::{LogicalSpec, OperandDirection, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::common_actions::move_actions;
@@ -159,6 +160,23 @@ fn plan_alloc<'a, Tgt: Target>(
     destination_vector_size: Option<DimSize>,
 ) -> Result<AllocPlan<'a, Tgt>, ApplyError> {
     let outer_moved_operand_spec = &operands[usize::from(source_idx)];
+
+    // If VRF, moved parameter must be a multiple of thn vector size.
+    let vector_bytes = destination_level.vector_bytes();
+    debug_assert_eq!(vector_bytes.is_empty(), destination_vector_size.is_none());
+    if !vector_bytes.is_empty() {
+        let vector_size = destination_vector_size.unwrap();
+        let shape = outer_moved_operand_spec.shape();
+        let volume = DimSize::new(shape.iter().map(|d| d.get()).product()).unwrap();
+        let bytes = volume.get() * u32::from(destination_dtype.size());
+        let valid =
+            volume.get() % vector_size.get() == 0 && vector_bytes.iter().any(|&vb| bytes % vb == 0);
+        if !valid {
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::VectorSizeInvalid,
+            ));
+        }
+    }
 
     let mut destination_layout_canonicalized = destination_layout
         .canonicalize(outer_moved_operand_spec.shape())
@@ -339,6 +357,32 @@ mod tests {
     use crate::spec;
     use crate::target::{ArmTarget, CpuMemoryLevel, X86Target};
     use crate::{emit_naivebottomupsolver_tests, lspec};
+    use nonzero::nonzero as nz;
+
+    #[test]
+    fn test_moves_into_non_multiple_vector_size_fail() {
+        let spec = Spec::<X86Target>(
+            lspec!(Matmul(
+                [1, 1, 1, 24],
+                (u8, CpuMemoryLevel::GL, row_major),
+                (u8, CpuMemoryLevel::GL, row_major),
+                (u8, CpuMemoryLevel::L1, row_major),
+                serial
+            )),
+            X86Target::max_mem(),
+        );
+        let action = Action::Move(Move {
+            source_idx: 2,
+            destination_dtype: Dtype::Uint8,
+            destination_level: CpuMemoryLevel::VRF,
+            destination_layout: row_major(3),
+            destination_vector_size: Some(nz!(16u32)),
+        });
+        match action.apply(&spec) {
+            Err(ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid)) => {}
+            r => panic!("Expected NotApplicableReason::VectorSizeInvalid, got {r:?}"),
+        };
+    }
 
     #[test]
     fn test_subspecs_when_moving_into_degenerate_packed_layout_solver() {
