@@ -31,8 +31,8 @@ pub use self::cpu::CpuCodeGenThreadStyle;
 
 const CLI_FLAGS: [&str; 4] = ["-std=gnu99", "-O3", "-rtlib=compiler-rt", "-o"];
 
-// TODO: Add -fopenmp if we're using an OpenMP pool.
-const X86_CLI_VEC_FLAGS: [&str; 2] = ["-mavx2", "-mfma"];
+// TODO: Add -fopenmp only if we're using an OpenMP pool.
+const X86_CLI_VEC_FLAGS: [&str; 3] = ["-mavx2", "-mfma", "-fopenmp"];
 const ARM_CLI_VEC_FLAGS: [&str; 0] = [];
 const X86_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "x86_64"];
 const ARM_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "arm64"];
@@ -224,6 +224,7 @@ where
         };
 
         if !clang_proc.status.success() {
+            eprintln!("clang: {}", String::from_utf8_lossy(&clang_proc.stderr));
             return Err(BuildError::CompilerFailed {
                 status: clang_proc.status,
                 stderr: String::from_utf8_lossy(&clang_proc.stderr).into(),

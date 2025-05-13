@@ -39,7 +39,14 @@ jobs:
   smoke-test-example:
     strategy:
       matrix:
-        example: [matmul_chain, matmul_x86, simple_matmul_x86, matvec_gemma_x86_bf16f32, softmax_naive, softmax2]
+        example:
+          - matmul_chain
+          - matmul_x86
+          - matmul_parallel_x86
+          - simple_matmul_x86
+          - matvec_gemma_x86_bf16f32
+          - softmax_naive
+          - softmax2
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
