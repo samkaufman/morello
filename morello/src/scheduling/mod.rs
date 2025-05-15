@@ -646,6 +646,19 @@ mod tests {
         ) {
             shared_test_actions_introduce_subspec_arguments_with_matching_parameters(spec)?;
         }
+        #[test]
+        fn test_no_action_produces_identical_logicalspec_x86(
+            spec in arb_canonical_spec::<X86Target>(None, None),
+        ) {
+            shared_test_no_action_produces_identical_logicalspec::<X86Target>(spec)?;
+        }
+
+        #[test]
+        fn test_no_action_produces_identical_logicalspec_arm(
+            spec in arb_canonical_spec::<ArmTarget>(None, None),
+        ) {
+            shared_test_no_action_produces_identical_logicalspec::<ArmTarget>(spec)?;
+        }
     }
 
     // TODO: Add a solver version, if possible.
@@ -705,6 +718,36 @@ mod tests {
                 // TODO: Replace panic with a proptest-friendly result
                 Err(e) => panic!("unexpected error: {:?}", e),
             };
+        }
+        Ok(())
+    }
+
+    /// Test that no action produces a LogicalSpec identical to the that of the original.
+    ///
+    /// If this test fails, it doesn't necessarily mean that a cycle has been introduced into the
+    /// search space. If the memory limits decrease, the search will still terminate. However, it
+    /// almost certainly isn't productive. (Why solve the same problem with less memory?)
+    fn shared_test_no_action_produces_identical_logicalspec<Tgt: Target>(
+        spec: Spec<Tgt>,
+    ) -> Result<(), proptest::prelude::TestCaseError> {
+        for action in Tgt::actions(&spec.0) {
+            let Ok(applied) = action.apply(&spec) else {
+                continue;
+            };
+            let mut found_identical = false;
+            visit_leaves(&applied, &mut |leaf| {
+                if let ImplNode::SpecApp(spec_app) = leaf {
+                    if spec_app.0 .0 == spec.0 {
+                        found_identical = true;
+                        return false;
+                    }
+                }
+                true
+            });
+            prop_assert!(
+                !found_identical,
+                "Action {action:?} produced identical LogicalSpec to input Spec {spec}"
+            );
         }
         Ok(())
     }
