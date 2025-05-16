@@ -263,50 +263,6 @@ impl Layout {
             .all(|(i, (d, s))| i == usize::from(*d) && *s == PhysDim::Dynamic)
     }
 
-    /// Returns the step size over each logical dimension.
-    ///
-    /// For example,
-    /// ```
-    /// # use morello::layout::col_major;
-    /// # use morello::common::Shape;
-    /// # use nonzero::nonzero as nz;
-    /// let layout = col_major(2);
-    /// assert_eq!(
-    ///     layout.strides(&[nz!(4u32), nz!(6u32)]),
-    ///     Ok(Shape::from(vec![nz!(1u32), nz!(4u32)]))
-    /// );
-    /// ```
-    ///
-    /// This function returns a [StridesError::NonseqPhysicalDims] for [Layout]s which map each
-    /// logical dimension to contiguous sequences of physical dimensions. Put another way, it is not
-    /// defined for layouts which "re-visit" a logical dimension while iterating over physical
-    /// dimensions.
-    pub fn strides(&self, logical_shape: &[DimSize]) -> Result<Shape, StridesError> {
-        let Layout { dims, contig: _ } = self;
-
-        if usize::from(*dims.iter().map(|(d, _)| d).max().unwrap()) + 1 != logical_shape.len() {
-            return Err(StridesError::InvalidShape(logical_shape.into()));
-        }
-
-        let mut seen = vec![false; logical_shape.len()];
-        let mut strides = smallvec![nz!(1u32); logical_shape.len()];
-        let mut last_stride = nz!(1u32);
-        for (logical_dim, _) in &dims.iter().rev().chunk_by(|(dim, _)| *dim) {
-            // We won't visit the chunk's contents. We're just interested in the dimension's
-            // physical order.
-            let logical_dim_usize = usize::from(logical_dim);
-            if seen[logical_dim_usize] {
-                return Err(StridesError::NonseqPhysicalDims(logical_dim));
-            }
-            strides[logical_dim_usize] = last_stride;
-            last_stride = last_stride
-                .checked_mul(logical_shape[logical_dim_usize])
-                .unwrap();
-            seen[logical_dim_usize] = true;
-        }
-        Ok(strides)
-    }
-
     /// Build a [Layout] with physical dimensions corresponding to the given
     /// logical dimensions removed.
     ///
@@ -1503,55 +1459,6 @@ mod tests {
         let pt1 = NonAffineExpr::from(BufferVar::Pt(1, expr_id));
         let expected = pt0.clone() * 8 + (pt1.clone() % 8) / 2 + (pt1 % 2) * 4;
         assert_eq!(iexpr, expected, "{iexpr} != {expected}");
-    }
-
-    #[test]
-    fn test_strides_ok_simple() {
-        let layout = row_major(2);
-        assert_eq!(
-            layout.strides(&[nz!(4u32), nz!(6u32)]),
-            Ok(smallvec![nz!(6u32), nz!(1u32)])
-        );
-    }
-
-    #[test]
-    fn test_strides_ok_3d() {
-        let layout = layout![2, 0, 1];
-        assert_eq!(
-            layout.strides(&[nz!(2u32), nz!(4u32), nz!(6u32)]),
-            Ok(smallvec![nz!(4u32), nz!(1u32), nz!(8u32)])
-        );
-    }
-
-    #[test]
-    fn test_strides_err_revisiting() {
-        let layout = layout![1, 0, 1 p(2)];
-        assert_eq!(
-            layout.strides(&[nz!(4u32), nz!(6u32)]),
-            Err(StridesError::NonseqPhysicalDims(1))
-        );
-    }
-
-    #[test]
-    fn test_merge_consecutive_dimensions_dynamic_packed_contig_update() {
-        let mut layout = Layout {
-            dims: vec![
-                (1, PhysDim::Dynamic),
-                (0, PhysDim::Dynamic),
-                (0, PhysDim::Packed(nz!(4u32))),
-            ],
-            contig: 2,
-        };
-        // This should merge the physical dimensions for logical dimension 0. They comprise the
-        // contiguous region, so `contig` should become 1.
-        layout.merge_consecutive_dimensions();
-        assert_eq!(
-            layout,
-            Layout {
-                dims: vec![(1, PhysDim::Dynamic), (0, PhysDim::Dynamic),],
-                contig: 1,
-            }
-        );
     }
 
     fn arb_shape_and_same_rank_layout() -> impl Strategy<Value = (Shape, Layout)> {
