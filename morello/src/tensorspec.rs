@@ -381,6 +381,10 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
         if !self.layout.is_row_major() && shape.iter().all(|d| d.get() == 1) {
             false
         } else {
+            if self.layout.expand_physical_shape(shape).is_err() {
+                return false;
+            }
+
             let Layout { dims, contig } = &self.layout;
 
             // Count the number of packings applied to each logical dimension.
@@ -680,12 +684,13 @@ fn arb_tensorspecaux<Tgt: Target>(
     max_shape: &[DimSize],
     dtype: Dtype,
 ) -> impl proptest::strategy::Strategy<Value = TensorSpecAux<Tgt>> {
+    use crate::layout::LayoutArbRankBounds;
     use proptest::prelude::*;
     use proptest::sample::select;
 
     let max_shape = Shape::from(max_shape);
     (
-        select(Tgt::all_layouts_for_shape(&max_shape, dtype)),
+        any_with::<Layout>(LayoutArbRankBounds::fixed_rank_unwrap(max_shape.len())),
         select(Tgt::levels().to_vec()),
     )
         .prop_flat_map(move |(layout, level)| {

@@ -863,6 +863,22 @@ impl Display for Layout {
 }
 
 #[cfg(test)]
+impl LayoutArbRankBounds {
+    pub(crate) fn fixed_rank_unwrap<T>(rank: T) -> Self
+    where
+        T: TryInto<u8> + Copy,
+        <T as TryInto<u8>>::Error: std::fmt::Debug,
+    {
+        use std::num::NonZeroU8;
+
+        Self {
+            min_rank: NonZeroU8::try_from(rank.try_into().unwrap()).unwrap(),
+            max_rank: Some(NonZeroU8::try_from(rank.try_into().unwrap()).unwrap()),
+        }
+    }
+}
+
+#[cfg(test)]
 impl Default for LayoutArbRankBounds {
     fn default() -> Self {
         Self {
