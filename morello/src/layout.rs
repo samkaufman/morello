@@ -16,6 +16,20 @@ pub trait LayoutBuilder {
     fn build(self, shape: &[DimSize]) -> Layout;
 }
 
+/// Maps a tensor's value coordinates to offsets in a buffer, and computes the contiguousness of a
+/// tensor in memory.
+///
+/// Layouts can be seen as functions from a concrete tensor shape and a point in its logical space
+/// to a memory offset. The offsets are only defined with respect to a particular concrete shape.
+/// As a result, a single [Layout] abstracts over both a tensor and its tilings: only the shape
+/// (and potentially the contiguousness) change.
+///
+/// Layouts are not defined for all shapes. They may only be defined for shapes which are size-one
+/// in some dimensions or require some dimensions to be multiples of some size (e.g., evenly
+/// divisible by some packing factor).
+///
+/// Layouts have canonical forms with respect to concrete shapes. The canonical form is logically
+/// equivalent for that shape, but not necessarily other shapes.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
 pub struct Layout {
     pub(crate) dims: Vec<(u8, PhysDim)>,
