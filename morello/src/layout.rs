@@ -879,10 +879,13 @@ pub fn col_major(rank: u8) -> Layout {
 }
 
 pub(crate) fn batched_col_major(rank: u8) -> Layout {
-    let rank_us = usize::from(rank);
-    let mut layout = row_major(rank);
-    layout.dims.swap(rank_us - 1, rank_us - 2);
-    layout
+    if rank == 0 {
+        return Layout::new(vec![]);
+    }
+    let mut dims = Vec::with_capacity(usize::from(rank));
+    dims.push((0, PhysDim::Dynamic));
+    dims.extend((0..(rank - 1)).rev().map(|d| (d + 1, PhysDim::Dynamic)));
+    Layout::new(dims)
 }
 
 pub fn nhwc() -> Layout {
@@ -927,6 +930,7 @@ mod tests {
         arbitrary::{any, any_with},
         prelude::prop,
         prop_assert, prop_assert_eq, prop_assume, proptest,
+        sample::select,
         strategy::{Just, Strategy},
     };
     use std::{collections::HashSet, iter, num::NonZeroU8};
@@ -1461,6 +1465,20 @@ mod tests {
         assert_eq!(iexpr, expected, "{iexpr} != {expected}");
     }
 
+    #[test]
+    fn test_batched_col_major_standard() {
+        let layout4 = batched_col_major(4);
+        assert_eq!(
+            layout4.dims,
+            vec![
+                (0, PhysDim::Dynamic),
+                (3, PhysDim::Dynamic),
+                (2, PhysDim::Dynamic),
+                (1, PhysDim::Dynamic)
+            ]
+        );
+    }
+
     fn arb_shape_and_same_rank_layout() -> impl Strategy<Value = (Shape, Layout)> {
         proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(|shape| {
             let shape = shape
@@ -1474,6 +1492,13 @@ mod tests {
             };
             let all_layouts = any_with::<Layout>(bounds);
             (Just(Shape::from(shape)), all_layouts)
+        })
+    }
+
+    fn arb_shape_layout_contig() -> impl Strategy<Value = (Shape, Layout, Contig)> {
+        arb_shape_and_same_rank_layout().prop_flat_map(|(shape, layout)| {
+            let contigs = layout.all_contiguous_abs().collect::<Vec<_>>();
+            (Just(shape), Just(layout), select(contigs))
         })
     }
 }
