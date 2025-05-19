@@ -5,7 +5,7 @@ use crate::grid::general::BiMap;
 use crate::imp::functions::FunctionApp;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
-use crate::layout::{Layout, LayoutBuilder};
+use crate::layout::LayoutBuilder;
 use crate::scheduling::broadcast_first::BroadcastFirst;
 use crate::scheduling::bufferize::Bufferize;
 use crate::scheduling::moves::Move;
@@ -19,9 +19,10 @@ use crate::scheduling::to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecomput
 use crate::scheduling::ActionT as _;
 use crate::scheduling::{Action, ApplyError};
 use crate::search::top_down;
-use crate::spec::{LogicalSpec, Spec};
+use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::views::ViewE;
+use nonzero::nonzero as nz;
 use std::iter;
 
 /// A trait extending [ImplNode]s and [Spec]s with methods for more conveniently applying [Action]s.
@@ -59,10 +60,10 @@ pub trait SchedulingSugar<Tgt: Target> {
     fn to_softmax_parts(
         &self,
         max_level: impl Into<Tgt::Level>,
-        max_layout: Layout,
+        max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
         exps_level: impl Into<Tgt::Level>,
-        exps_layout: Layout,
+        exps_layout: impl LayoutBuilder,
         exps_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_softmax_parts_recompute(
@@ -78,7 +79,7 @@ pub trait SchedulingSugar<Tgt: Target> {
     fn to_max_and_unscaled(
         &self,
         max_level: impl Into<Tgt::Level>,
-        max_layout: Layout,
+        max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn bufferize(
@@ -92,7 +93,7 @@ pub trait SchedulingSugar<Tgt: Target> {
     fn broadcast_first(
         &self,
         level: impl Into<Tgt::Level>,
-        layout: Layout,
+        layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
@@ -226,12 +227,14 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn to_softmax_parts(
         &self,
         denominator_level: impl Into<Tgt::Level>,
-        denominator_layout: Layout,
+        denominator_layout: impl LayoutBuilder,
         denominator_vector_size: Option<DimSize>,
         exps_level: impl Into<Tgt::Level>,
-        exps_layout: Layout,
+        exps_layout: impl LayoutBuilder,
         exps_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
+        let denominator_layout = denominator_layout.build(&self.0.parameter_shape(0));
+        let exps_layout = exps_layout.build(&self.0.parameter_shape(0));
         apply_unwrap(
             self,
             Action::ToSoftmaxParts(ToSoftmaxParts {
@@ -280,9 +283,23 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn to_max_and_unscaled(
         &self,
         max_level: impl Into<Tgt::Level>,
-        max_layout: Layout,
+        max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
+        let LogicalSpec::Primitive(head, _, _) = &self.0 else {
+            panic!("Not a Primitive");
+        };
+        let PrimitiveBasics {
+            typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim, .. },
+            spec_shape,
+            ..
+        } = head
+        else {
+            panic!("Not a SoftmaxDenominatorAndUnscaled");
+        };
+        let mut max_shape = spec_shape.clone();
+        max_shape[usize::from(*scan_dim)] = nz!(1u32);
+        let max_layout = max_layout.build(&max_shape);
         apply_unwrap(
             self,
             Action::ToMaxAndUnscaled(ToMaxAndUnscaled {
@@ -304,12 +321,13 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
             panic!("Not a Compose");
         };
         let consumer = &components[index];
+        let layout = layout.build(&consumer.parameter_shape(0));
         apply_unwrap(
             self,
             Action::Bufferize(Bufferize {
                 index,
                 level: level.into(),
-                layout: layout.build(&consumer.parameter_shape(0)),
+                layout,
                 vector_size,
             }),
         )
@@ -322,12 +340,17 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn broadcast_first(
         &self,
         level: impl Into<Tgt::Level>,
-        layout: Layout,
+        layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
+        let head_shape = match &self.0 {
+            LogicalSpec::Primitive(basics, ..) => &basics.spec_shape,
+            LogicalSpec::Compose { components: _, .. } => todo!("Add support for Compose"),
+        };
+        let broadcast_layout = layout.build(head_shape);
         let action = Action::BroadcastFirst(BroadcastFirst {
             broadcast_level: level.into(),
-            broadcast_layout: layout,
+            broadcast_layout,
             broadcast_vector_size: vector_size,
         });
         apply_unwrap(self, action)
@@ -441,10 +464,10 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     fn to_softmax_parts(
         &self,
         max_level: impl Into<Tgt::Level>,
-        max_layout: Layout,
+        max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
         exps_level: impl Into<Tgt::Level>,
-        exps_layout: Layout,
+        exps_layout: impl LayoutBuilder,
         exps_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
@@ -487,7 +510,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     fn to_max_and_unscaled(
         &self,
         max_level: impl Into<Tgt::Level>,
-        max_layout: Layout,
+        max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
@@ -514,7 +537,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     fn broadcast_first(
         &self,
         level: impl Into<Tgt::Level>,
-        layout: Layout,
+        layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {

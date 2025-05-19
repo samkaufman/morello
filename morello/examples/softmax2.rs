@@ -44,9 +44,9 @@ fn main() {
     let implementation = spec
         // Tile across the batch dimension. (We cannot tile across the scan dimension.)
         .tile_out(&[1, SIZE.get()])
-        .to_softmax_parts(GL, row_major(RANK), None, GL, row_major(RANK), None)
+        .to_softmax_parts(GL, row_major, None, GL, row_major, None)
         .subschedule(&[0], |subspec| {
-            subspec.to_max_and_unscaled(GL, row_major(RANK), None)
+            subspec.to_max_and_unscaled(GL, row_major, None)
         })
         .subschedule(&[0, 0], |subspec| subspec.to_accum().split(1))
         .subschedule(&[0, 0, 0], |subspec| {
@@ -101,7 +101,7 @@ fn main() {
         .subschedule(&[1], |subspec| {
             subspec
                 .tile_out(&[1, 4])
-                .broadcast_first(VRF, row_major(RANK), Some(nz!(4u32)))
+                .broadcast_first(VRF, row_major, Some(nz!(4u32)))
                 .subschedule(&[0], |broadcast| {
                     broadcast
                         .move_param(0, CpuMemoryLevel::L1)

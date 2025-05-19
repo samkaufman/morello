@@ -151,14 +151,12 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     use morello::db::FilesDatabase;
     use morello::target::CpuMemoryLevel::{GL, L1, RF, VRF};
 
-    const RANK: u8 = 3;
-
     let db = FilesDatabase::new(None, true, 1, 10_000, 1);
 
     spec.tile_out(&[1, 1, 2048])
-        .to_softmax_parts(GL, row_major(RANK), None, GL, row_major(RANK), None)
+        .to_softmax_parts(GL, row_major, None, GL, row_major, None)
         .subschedule(&[0], |subspec| {
-            subspec.to_max_and_unscaled(GL, row_major(RANK), None)
+            subspec.to_max_and_unscaled(GL, row_major, None)
         })
         .subschedule(&[0, 0], |subspec| {
             subspec.to_accum().split(1).synthesize(&db)
@@ -177,8 +175,8 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
                 .move_param(1, RF)
                 .move_param(2, RF)
                 .subschedule(&[1, 1], |s| {
-                    s.move_relayout(0, VRF, row_major(RANK), Some(nz!(8u32)))
-                        .move_relayout(3, VRF, row_major(RANK), Some(nz!(8u32)))
+                    s.move_relayout(0, VRF, row_major, Some(nz!(8u32)))
+                        .move_relayout(3, VRF, row_major, Some(nz!(8u32)))
                         .subschedule(&[0], |m| m.synthesize(&db))
                         .subschedule(&[1, 1], |m| m.synthesize(&db))
                         .subschedule(&[1, 0], |m| {
@@ -193,11 +191,11 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
         .subschedule(&[1], |subspec| {
             subspec
                 .tile_out(&[1, 1, 8])
-                .broadcast_first(VRF, row_major(RANK), Some(nz!(8u32)))
+                .broadcast_first(VRF, row_major, Some(nz!(8u32)))
                 .subschedule(&[0], |broadcast| {
                     broadcast
-                        .move_relayout(0, L1, row_major(RANK), None)
-                        .move_relayout(0, RF, row_major(RANK), None)
+                        .move_relayout(0, L1, row_major, None)
+                        .move_relayout(0, RF, row_major, None)
                         .synthesize(&db)
                         .subschedule(&[0], |s| s.synthesize(&db))
                 })
