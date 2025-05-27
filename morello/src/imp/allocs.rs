@@ -156,17 +156,28 @@ pub(crate) fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tg
     let src_hit_cost = src.level().cache_hit_cost();
     let dest_hit_cost = dest.level().cache_hit_cost();
 
-    let src_cache_lines = MainCost::from(
-        src.layout()
-            .estimate_cache_lines::<Tgt>(src.shape(), src.dtype()),
-    );
-    let dest_cache_lines = MainCost::from(
-        dest.layout()
-            .estimate_cache_lines::<Tgt>(dest.shape(), dest.dtype()),
-    );
+    let mut src_cost = 0;
+    let mut dest_cost = 0;
 
-    let src_cost = src_hit_cost * src_cache_lines;
-    let dest_cost = dest_hit_cost * dest_cache_lines;
+    if src.level().has_layout() {
+        let src_cache_lines = MainCost::from(
+            src.layout()
+                .estimate_cache_lines::<Tgt>(src.shape(), src.dtype()),
+        );
+        src_cost = src_hit_cost * src_cache_lines;
+    } else {
+        assert_eq!(src_hit_cost, 0);
+    }
+
+    if dest.level().has_layout() {
+        let dest_cache_lines = MainCost::from(
+            dest.layout()
+                .estimate_cache_lines::<Tgt>(dest.shape(), dest.dtype()),
+        );
+        dest_cost = dest_hit_cost * dest_cache_lines;
+    } else {
+        assert_eq!(dest_hit_cost, 0);
+    }
 
     let mut cost: MainCost = src_cost + dest_cost;
     if !src.is_contiguous() {

@@ -3,13 +3,12 @@ use crate::common::{DimSize, Shape};
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
-use crate::layout::row_major;
+use crate::layout::Layout;
 use crate::scheduling::{
-    check_tile_out_applies, collect_nested_specs, tile_to_apply_err, ActionSolver, ActionT,
-    ApplyError, NotApplicableReason, PrimitiveTileOutSolver,
+    check_tile_out_applies, tile_to_apply_err, ActionT, ApplyError, NotApplicableReason,
 };
 use crate::spec::{
-    CanonicalizeError, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
+    CanonicalizeError, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
     PrimitiveSpecType, Spec,
 };
 use crate::target::{MemoryLevel, Target};
@@ -120,103 +119,103 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         tile_out_loop_spec_with_shrunken_tiles(component_input_tilings, new_tiles, parallel, spec)
     }
 
-    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
-        match &spec.0 {
-            LogicalSpec::Primitive(basics, ..) => {
-                // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
-                if tile_out_daufm(spec, self).is_some() {
-                    todo!("Implement solver for SoftmaxDenominatorAndUnscaledFromMax");
-                };
-
-                let Some(output_tensor) = spec.0.unique_output() else {
-                    return Err(ApplyError::NotApplicable(
-                        NotApplicableReason::MultipleOutputs,
-                    ));
-                };
-                let untiled_output_shape = output_tensor.shape();
-                let tile_shape = self.tiled_output_shape(untiled_output_shape);
-                let parallel = self.parallel();
-
-                check_tile_out_applies(
-                    untiled_output_shape,
-                    &tile_shape,
-                    &output_tensor,
-                    parallel,
-                )?;
-
-                // Check if any dimension will create boundary regions
-                // This happens when tile size doesn't evenly divide the untiled size
-                let will_have_boundaries = tile_shape
-                    .iter()
-                    .zip(untiled_output_shape.iter())
-                    .any(|(tile_size, untiled_size)| untiled_size.get() % tile_size.get() != 0);
-
-                match basics.typ {
-                    PrimitiveSpecType::Matmul { .. } => {
-                        if will_have_boundaries {
-                            // TODO: Speed up this path.
-                            let slow_path_impl = self.apply_unchecked_canon(spec)?;
-                            let mut slow_path_subspecs = Vec::new();
-                            collect_nested_specs(&slow_path_impl, &mut slow_path_subspecs);
-                            return Ok(PrimitiveTileOutSolver {
-                                outer_spec: spec.clone(),
-                                body_specs: slow_path_subspecs,
-                            }
-                            .into());
-                        } else {
-                            let main_body_spec = ActionSolver::tiled_subspec_fast(
-                                [(0, 0), (1, 1), (3, 2)].into_iter(),
-                                spec,
-                                &tile_shape,
-                                parallel,
-                            )?;
-
-                            return Ok(PrimitiveTileOutSolver {
-                                outer_spec: spec.clone(),
-                                body_specs: vec![main_body_spec],
-                            }
-                            .into());
-                        }
-                    }
-                    PrimitiveSpecType::Move
-                    | PrimitiveSpecType::Fill {
-                        value: FillValue::Zero,
-                    } => {
-                        if will_have_boundaries {
-                            // TODO: Speed up this path.
-                            let slow_path_impl = self.apply_unchecked_canon(spec)?;
-                            let mut slow_path_subspecs = Vec::new();
-                            collect_nested_specs(&slow_path_impl, &mut slow_path_subspecs);
-                            return Ok(PrimitiveTileOutSolver {
-                                outer_spec: spec.clone(),
-                                body_specs: slow_path_subspecs,
-                            }
-                            .into());
-                        } else {
-                            let rank = basics.spec_shape.len();
-                            let main_body_spec = ActionSolver::tiled_subspec_fast(
-                                (0..rank).map(|i| (i, i)),
-                                spec,
-                                &tile_shape,
-                                parallel,
-                            )?;
-
-                            return Ok(PrimitiveTileOutSolver {
-                                outer_spec: spec.clone(),
-                                body_specs: vec![main_body_spec],
-                            }
-                            .into());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            LogicalSpec::Compose { .. } => {}
-        };
-
-        self.apply_unchecked_canon(spec)
-            .map(|applied| ActionSolver::Fallback(Box::new(applied)))
-    }
+    // fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+    //     match &spec.0 {
+    //         LogicalSpec::Primitive(basics, ..) => {
+    //             // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
+    //             if tile_out_daufm(spec, self).is_some() {
+    //                 todo!("Implement solver for SoftmaxDenominatorAndUnscaledFromMax");
+    //             };
+    //
+    //             let Some(output_tensor) = spec.0.unique_output() else {
+    //                 return Err(ApplyError::NotApplicable(
+    //                     NotApplicableReason::MultipleOutputs,
+    //                 ));
+    //             };
+    //             let untiled_output_shape = output_tensor.shape();
+    //             let tile_shape = self.tiled_output_shape(untiled_output_shape);
+    //             let parallel = self.parallel();
+    //
+    //             check_tile_out_applies(
+    //                 untiled_output_shape,
+    //                 &tile_shape,
+    //                 &output_tensor,
+    //                 parallel,
+    //             )?;
+    //
+    //             // Check if any dimension will create boundary regions
+    //             // This happens when tile size doesn't evenly divide the untiled size
+    //             let will_have_boundaries = tile_shape
+    //                 .iter()
+    //                 .zip(untiled_output_shape.iter())
+    //                 .any(|(tile_size, untiled_size)| untiled_size.get() % tile_size.get() != 0);
+    //
+    //             match basics.typ {
+    //                 PrimitiveSpecType::Matmul { .. } => {
+    //                     if will_have_boundaries {
+    //                         // TODO: Speed up this path.
+    //                         let slow_path_impl = self.apply_unchecked_canon(spec)?;
+    //                         let mut slow_path_subspecs = Vec::new();
+    //                         collect_nested_specs(&slow_path_impl, &mut slow_path_subspecs);
+    //                         return Ok(PrimitiveTileOutSolver {
+    //                             outer_spec: spec.clone(),
+    //                             body_specs: slow_path_subspecs,
+    //                         }
+    //                         .into());
+    //                     } else {
+    //                         let main_body_spec = ActionSolver::tiled_subspec_fast(
+    //                             [(0, 0), (1, 1), (3, 2)].into_iter(),
+    //                             spec,
+    //                             &tile_shape,
+    //                             parallel,
+    //                         )?;
+    //
+    //                         return Ok(PrimitiveTileOutSolver {
+    //                             outer_spec: spec.clone(),
+    //                             body_specs: vec![main_body_spec],
+    //                         }
+    //                         .into());
+    //                     }
+    //                 }
+    //                 PrimitiveSpecType::Move
+    //                 | PrimitiveSpecType::Fill {
+    //                     value: FillValue::Zero,
+    //                 } => {
+    //                     if will_have_boundaries {
+    //                         // TODO: Speed up this path.
+    //                         let slow_path_impl = self.apply_unchecked_canon(spec)?;
+    //                         let mut slow_path_subspecs = Vec::new();
+    //                         collect_nested_specs(&slow_path_impl, &mut slow_path_subspecs);
+    //                         return Ok(PrimitiveTileOutSolver {
+    //                             outer_spec: spec.clone(),
+    //                             body_specs: slow_path_subspecs,
+    //                         }
+    //                         .into());
+    //                     } else {
+    //                         let rank = basics.spec_shape.len();
+    //                         let main_body_spec = ActionSolver::tiled_subspec_fast(
+    //                             (0..rank).map(|i| (i, i)),
+    //                             spec,
+    //                             &tile_shape,
+    //                             parallel,
+    //                         )?;
+    //
+    //                         return Ok(PrimitiveTileOutSolver {
+    //                             outer_spec: spec.clone(),
+    //                             body_specs: vec![main_body_spec],
+    //                         }
+    //                         .into());
+    //                     }
+    //                 }
+    //                 _ => {}
+    //             }
+    //         }
+    //         LogicalSpec::Compose { .. } => {}
+    //     };
+    //
+    //     self.apply_unchecked_canon(spec)
+    //         .map(|applied| ActionSolver::Fallback(Box::new(applied)))
+    // }
 }
 
 impl TileOut {
@@ -574,8 +573,7 @@ fn tile_out_loop_spec_with_shrunken_tiles<Tgt: Target>(
     spec: &Spec<Tgt>,
 ) -> Result<ImplNode<Tgt>, ApplyError> {
     let main_body = create_main_body(&tiles, &component_parameter_shapes, parallel, spec)?;
-    let boundary_bodies =
-        create_tile_out_boundary_regions(&tiles, &component_parameter_shapes, spec)?;
+    let boundary_bodies = create_tile_out_boundary_regions(&tiles, spec)?;
     let bodies: Vec<_> = once(main_body.into()).chain(boundary_bodies).collect();
     Ok(ImplNode::Loop(Loop {
         tiles,
@@ -625,7 +623,6 @@ fn create_main_body<Tgt: Target>(
 /// returned vector.
 fn create_tile_out_boundary_regions<Tgt: Target>(
     tiles: &[LoopTile<Tgt>],
-    component_parameter_shapes: &[Vec<Shape>],
     spec: &Spec<Tgt>,
 ) -> Result<Vec<ImplNode<Tgt>>, ApplyError> {
     let output_index = spec
@@ -665,10 +662,6 @@ fn create_tile_out_boundary_regions<Tgt: Target>(
 
     let boundary_region_ids: Vec<usize> = bitvector_combinations(&per_axis_bitvectors).collect();
 
-    // Reconstruct the inner_spec from the component_parameter_shapes
-    let mut inner_spec = spec.0.clone();
-    update_component_shapes(&mut inner_spec, component_parameter_shapes)?;
-
     // Generate bodies for boundary regions
     let mut bodies = Vec::with_capacity(boundary_region_ids.len());
     for &region_id in &boundary_region_ids {
@@ -685,7 +678,7 @@ fn create_tile_out_boundary_regions<Tgt: Target>(
         };
 
         // Create the region spec with the adjusted shapes (without recursing into boundary regions)
-        let mut region_logical_spec = inner_spec.clone();
+        let mut region_logical_spec = spec.0.clone();
         update_component_shapes(
             &mut region_logical_spec,
             &input_tilings_result.component_parameter_shapes,
@@ -843,17 +836,13 @@ fn create_region_output_tiling<Tgt: Target>(
     let original_param = &spec.0.parameters()[output_tile.parameter_index as usize];
     let original_param_shape = original_param.shape();
 
-    let mut region_tile_shape: Vec<DimSize> = vec![nz!(1u32); original_param_shape.len()];
+    let mut region_tile_shape = original_param_shape.to_vec();
     for (dim_idx, &tile_size) in output_tile.tile.shape().iter().enumerate() {
         let original_size = original_param_shape[dim_idx];
         let actual_axis = output_tile.axes[dim_idx];
-
         if region_id.get() & (1_usize << actual_axis) != 0 {
             let remainder = NonZeroU32::new(original_size.get() % tile_size.get()).unwrap();
             region_tile_shape[dim_idx] = remainder;
-        } else {
-            let main_extent = original_size.get() - (original_size.get() % tile_size.get());
-            region_tile_shape[dim_idx] = main_extent.try_into().unwrap();
         }
     }
     debug_assert_ne!(region_tile_shape, original_param_shape);
@@ -946,7 +935,7 @@ fn update_aux_for_tiling<Tgt: Target>(
     new_shape: &[DimSize],
 ) {
     if !aux.level.has_layout() {
-        aux.layout = row_major(u8::try_from(new_shape.len()).expect("rank fits in u8"));
+        aux.layout = Layout::empty();
     } else if let Ok(new_layout) = aux.layout.update_for_tiling(original_shape, new_shape) {
         aux.layout = new_layout;
     }
@@ -1114,38 +1103,28 @@ mod tests {
         };
         let conv = PrimitiveBasics {
             typ: PrimitiveSpecType::Conv { accum: false },
-            spec_shape: shape![1, 5, 6, 4, 2, 3, 1],
+            spec_shape: shape![1, 5, 6, 2, 2, 3, 1],
             dtypes: vec![Dtype::Sint8, Dtype::Uint16, Dtype::Uint8],
         };
-        let rm4 = row_major(4);
-        let rm7 = row_major(7);
-        let l1rm4 = TensorSpecAux {
-            level: CpuMemoryLevel::L1,
-            layout: rm4.clone(),
-            vector_size: None,
-        };
-        let rfrm4 = TensorSpecAux {
-            level: CpuMemoryLevel::RF,
-            layout: rm4.clone(),
-            vector_size: None,
-        };
         let operand_auxes: Vec<TensorSpecAux<Avx2Target>> = vec![
-            l1rm4.clone(),
-            rfrm4.clone(),
-            l1rm4,
             TensorSpecAux {
                 level: CpuMemoryLevel::L1,
-                layout: rm7.clone(),
+                layout: row_major(&shape![1, 5, 2, 2]),
+                vector_size: None,
+            },
+            TensorSpecAux {
+                level: CpuMemoryLevel::L1,
+                layout: row_major(&shape![1, 6, 4, 2]),
                 vector_size: None,
             },
             TensorSpecAux {
                 level: CpuMemoryLevel::RF,
-                layout: rm7.clone(),
+                layout: row_major(&shape![5, 6, 3, 1]),
                 vector_size: None,
             },
             TensorSpecAux {
                 level: CpuMemoryLevel::L1,
-                layout: rm7,
+                layout: row_major(&shape![1, 5, 2, 2]),
                 vector_size: None,
             },
         ];
@@ -1213,20 +1192,20 @@ mod tests {
     #[test]
     fn test_tile_out_daufm() {
         // Create a SoftmaxDenominatorAndUnscaledFromMax Spec
-        let spec = Spec::<Avx2Target>(
+        let mut spec = Spec::<Avx2Target>(
             LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
                         scan_dim: 2,
                         accum: true,
                     },
-                    spec_shape: smallvec![nz!(4u32), nz!(8u32), nz!(16u32)],
+                    spec_shape: shape![4, 8, 16],
                     dtypes: vec![Dtype::Float32; 4],
                 },
                 vec![
                     TensorSpecAux {
                         level: CpuMemoryLevel::GL,
-                        layout: row_major(3),
+                        layout: row_major(&shape![4, 8, 16]),
                         vector_size: None,
                     };
                     4
@@ -1235,6 +1214,7 @@ mod tests {
             ),
             Avx2Target::max_mem(),
         );
+        spec.canonicalize().unwrap();
 
         let tile_action = TileOut::SingleLoop {
             dim: 2,
@@ -1539,15 +1519,25 @@ mod tests {
             spec_shape: shape![1, 4, 4], // [b, m, n] - matches MatmulAccum output
             dtypes: vec![Dtype::Float32, Dtype::Float32],
         };
-        let aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
+        let lhs_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
             level: CpuMemoryLevel::GL,
-            layout: row_major(3),
+            layout: row_major(&shape![1, 4, 8]),
+            vector_size: None,
+        };
+        let rhs_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
+            level: CpuMemoryLevel::GL,
+            layout: row_major(&shape![1, 8, 4]),
+            vector_size: None,
+        };
+        let out_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
+            level: CpuMemoryLevel::GL,
+            layout: row_major(&shape![1, 4, 4]),
             vector_size: None,
         };
         let mut compose_spec = Spec(
             LogicalSpec::Compose {
                 components: vec![matmul_accum, move_component],
-                operand_auxes: vec![aux.clone(), aux.clone(), aux],
+                operand_auxes: vec![lhs_aux, rhs_aux, out_aux],
                 serial_only: false,
             },
             Avx2Target::max_mem(),

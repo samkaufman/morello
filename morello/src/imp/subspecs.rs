@@ -53,6 +53,10 @@ impl<A: View> SpecApp<A> {
             args_vec.iter().map(|a| a.spec().clone()),
             serial_only,
         );
+        debug_assert!(args_vec
+            .iter()
+            .enumerate()
+            .all(|(i, a)| a.spec().shape() == primitive.parameter_shape(i).as_slice()));
         debug_assert_eq!(primitive.operand_count(), args_vec.len());
         let mut spec = Spec(primitive, memory_limits);
         spec.canonicalize().unwrap();

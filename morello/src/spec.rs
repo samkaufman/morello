@@ -5,7 +5,7 @@ use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
 use crate::layout::row_major;
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
-use crate::target::Target;
+use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::{self, check_tensor_vector_size, TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::{bit_length_inverse, bit_length_u32, join_into_string, prev_power_of_two_u32};
@@ -1652,19 +1652,21 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
 
                     // It source and destination are fully contiguous and the dtypes and layouts
-                    // match, then we can canonicalize to a row-major bitwise move. This is a
-                    // workaround for not being able to split interleaved layouts with a tile, but
-                    // can be generalized to be a useful symmetry-breaking predicate later on.
-                    // TODO: Do just that: generalize this caonicalizaton rule.
+                    // match, then we can canonicalize to a row-major bitwise move (or an empty
+                    // Layout for RF). This is a workaround for not being able to split interleaved
+                    // layouts with a tile, but can be generalized to be a useful symmetry-breaking
+                    // predicate later on.
+                    // TODO: Do just that: generalize this canonicalization rule.
                     if basics.dtypes.iter().all_equal()
                         && primitive_aux.iter().map(|a| &a.layout).all_equal()
                         && primitive_aux
                             .iter()
                             .all(|aux| aux.layout.is_fully_contiguous())
                     {
-                        let rm = row_major(shape.len().try_into().unwrap());
                         for aux in primitive_aux.iter_mut() {
-                            aux.layout = rm.clone();
+                            if aux.level.has_layout() {
+                                aux.layout = row_major(shape);
+                            }
                         }
                     }
                 }
@@ -3136,11 +3138,17 @@ pub mod macros {
         ( @tensorspecaux_inner $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr,
           $c:literal ) =>
         {{
-            let mut layout = $crate::layout::LayoutBuilder::build($layout, $shp);
-            if $c {
-                layout.set_contiguous_full();
+            let mut layout;
+            if !$crate::target::MemoryLevel::has_layout(&($level)) {
+                let _ = $shp; // make sure to evaluate $shp in case its a pop()
+                layout = $crate::layout::Layout::empty();
             } else {
-                layout.set_contiguous_none();
+                layout = $crate::layout::LayoutBuilder::build($layout, $shp);
+                if $c {
+                    layout.set_contiguous_full();
+                } else {
+                    layout.set_contiguous_none();
+                }
             }
             $crate::tensorspec::TensorSpecAux {
                 level: ($level).into(),
@@ -3252,6 +3260,7 @@ pub mod __private {
 mod tests {
     use super::*;
     use crate::grid::general::AsBimap;
+    use crate::imp::subspecs::SpecApp;
     use crate::imp::{Impl, ImplNode};
     use crate::layout::row_major;
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
@@ -3281,10 +3290,10 @@ mod tests {
         ));
         let lhs = TensorSpecAux {
             level: GL,
-            layout: row_major(3),
+            layout: row_major(&shape![32, 2, 3]),
             vector_size: None,
         };
-        let mut rhs_layout = row_major(3);
+        let mut rhs_layout = row_major(&shape![32, 3, 3]);
         rhs_layout.set_contiguous_none();
         let rhs = TensorSpecAux {
             level: GL,
@@ -3293,7 +3302,7 @@ mod tests {
         };
         let out = TensorSpecAux {
             level: GL,
-            layout: row_major(3),
+            layout: row_major(&shape![32, 2, 3]),
             vector_size: None,
         };
         let expected = LogicalSpec::<Avx2Target>::Primitive(
@@ -3767,6 +3776,30 @@ mod tests {
         }
 
         #[test]
+        fn test_actions_produce_valid_layouts(
+            spec in arb_canonical_spec::<Avx2Target>(None, None)
+        ) {
+            Avx2Target::actions(&spec.0).for_each(|action| {
+                let Ok(applied) = action.apply(&spec) else {
+                    return;
+                };
+                applied.visit_leaves(&mut |leaf| {
+                    if let ImplNode::SpecApp(SpecApp(spec, args)) = leaf {
+                        let chained_tensorspecs = spec.0.parameters().into_iter().chain(args.iter().map(|a| a.spec()).cloned());
+                        for tspec in chained_tensorspecs {
+                            if tspec.level().has_layout() {
+                                assert!(!tspec.layout().is_empty() || tspec.shape().iter().all(|d| d.get() == 1));
+                            } else {
+                                assert!(tspec.layout().is_empty());
+                            }
+                        }
+                    }
+                    true
+                });
+            });
+        }
+
+        #[test]
         fn test_primitivebasicsbimap_is_invertible(basics in any::<PrimitiveBasics>()) {
             // TODO: Also test binary_scale_shapes = true
             let bimap = PrimitiveBasicsBimap {
@@ -4071,34 +4104,29 @@ mod tests {
             dtypes: vec![Dtype::Uint8, Dtype::Uint8, Dtype::Uint32],
         };
 
-        let aux0_1_layout = row_major(3);
         let aux0_1 = TensorSpecAux {
             level: GL,
-            layout: aux0_1_layout,
+            layout: row_major(&basic0.parameter_shape(0)),
             vector_size: None,
         };
-        let aux1_1_layout = row_major(3);
         let aux1_1 = TensorSpecAux {
             level: L1,
-            layout: aux1_1_layout,
+            layout: row_major(&basic1.parameter_shape(1)),
             vector_size: None,
         };
-        let aux2_0_layout = row_major(3);
         let aux2_0 = TensorSpecAux {
             level: GL,
-            layout: aux2_0_layout,
+            layout: row_major(&basic2.parameter_shape(0)),
             vector_size: None,
         };
-        let aux2_1_layout = row_major(3);
         let aux2_1 = TensorSpecAux {
             level: L1,
-            layout: aux2_1_layout,
+            layout: row_major(&basic2.parameter_shape(1)),
             vector_size: None,
         };
-        let aux0_out_layout = row_major(3);
         let aux0_out = TensorSpecAux {
             level: RF,
-            layout: aux0_out_layout,
+            layout: row_major(&basic0.parameter_shape(2)),
             vector_size: None,
         };
 

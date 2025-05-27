@@ -137,23 +137,35 @@ fn plan_alloc<'a, Tgt: Target>(
 ) -> Result<AllocPlan<'a, Tgt>, ApplyError> {
     let outer_moved_operand_spec = &operands[usize::from(source_idx)];
 
-    let mut destination_layout_canonicalized = destination_layout
-        .canonicalize(outer_moved_operand_spec.shape())
-        .unwrap();
-    let is_cache_miss = move_is_cache_miss(
-        outer_moved_operand_spec,
-        destination_dtype,
-        &destination_level,
-        &destination_layout_canonicalized,
-    );
-    if !is_cache_miss {
-        destination_layout_canonicalized.set_contiguous_full();
-        // Canonicalize again in case setting contiguous affected anything.
-        // TODO: Don't call canonicalize twice.
-        destination_layout_canonicalized = destination_layout_canonicalized
+    let (destination_layout_canonicalized, is_cache_miss) = if !destination_level.has_layout() {
+        let empty_layout = Layout::empty();
+        let is_cache_miss = move_is_cache_miss(
+            outer_moved_operand_spec,
+            destination_dtype,
+            &destination_level,
+            &empty_layout,
+        );
+        (empty_layout, is_cache_miss)
+    } else {
+        let mut layout_canon = destination_layout
             .canonicalize(outer_moved_operand_spec.shape())
             .unwrap();
-    }
+        let is_cache_miss = move_is_cache_miss(
+            outer_moved_operand_spec,
+            destination_dtype,
+            &destination_level,
+            &layout_canon,
+        );
+        if !is_cache_miss {
+            layout_canon.set_contiguous_full();
+            // Canonicalize again in case setting contiguous affected anything.
+            // TODO: Don't call canonicalize twice.
+            layout_canon = layout_canon
+                .canonicalize(outer_moved_operand_spec.shape())
+                .unwrap();
+        }
+        (layout_canon, is_cache_miss)
+    };
     let mut new_spec = TensorSpec::<Tgt>::new_noncanon(
         outer_moved_operand_spec.shape().into(),
         destination_dtype,
@@ -181,7 +193,7 @@ fn plan_alloc<'a, Tgt: Target>(
     }
 
     assert!(
-        new_spec.layout().applies_to_shape(new_spec.shape()),
+        !new_spec.level().has_layout() || new_spec.layout().applies_to_shape(new_spec.shape()),
         "Destination layout {:?} does not apply to shape {:?}",
         new_spec.layout(),
         new_spec.shape()
@@ -339,10 +351,9 @@ mod tests {
     // TODO: Add a variant where only physically innermost dimension is contiguous.
     #[test]
     fn test_move_planning_into_cache_with_extra_degenerate_dims_preserves_layout_and_contig() {
-        let batched_cm = batched_col_major(3);
         let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [1, 8, 128, 8],
-            (f32, CpuMemoryLevel::GL, batched_cm.clone()),
+            (f32, CpuMemoryLevel::GL, batched_col_major),
             (f32, CpuMemoryLevel::GL, row_major),
             (f32, CpuMemoryLevel::GL, row_major)
         ));
@@ -357,8 +368,13 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(plan.new_spec.layout(), &batched_cm);
-        assert_eq!(plan.new_spec.contiguous_abs(), batched_cm.contiguous_full());
+        assert_eq!(
+            plan.new_spec.layout(),
+            &batched_col_major(&spec.0.parameter_shape(0))
+                .canonicalize(&spec.0.parameter_shape(0))
+                .unwrap()
+        );
+        assert!(plan.new_spec.is_contiguous());
     }
 
     fn child_impls_into_specs(imp: &ImplNode<Avx2Target>) -> Vec<Spec<Avx2Target>> {
@@ -377,10 +393,9 @@ mod tests {
     fn shared_test_subspecs_when_moving_into_degenerate_packed_layout(
         child_get: impl FnOnce(&Spec<Avx2Target>, Action<Avx2Target>) -> Vec<Spec<Avx2Target>>,
     ) {
-        let batched_cm = batched_col_major(3);
         let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [1, 8, 128, 8],
-            (f32, CpuMemoryLevel::GL, batched_cm),
+            (f32, CpuMemoryLevel::GL, batched_col_major),
             (f32, CpuMemoryLevel::GL, row_major),
             (f32, CpuMemoryLevel::GL, row_major)
         ));

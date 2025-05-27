@@ -420,15 +420,25 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<Avx2Target>> {
     }
 
     bounds.extend({
-        let layout = row_major(4);
-        let a = TensorSpecAux {
-            level: CpuMemoryLevel::GL,
-            layout,
-            vector_size: None,
-        };
         args.filters_size
             .iter()
             .map(|&fs| {
+                let s = DimSize::new(args.size.get() - 1 + fs.get()).unwrap();
+                let img_aux = TensorSpecAux {
+                    level: CpuMemoryLevel::GL,
+                    layout: row_major(&[args.batch, args.channels, s, s]),
+                    vector_size: None,
+                };
+                let filters_aux = TensorSpecAux {
+                    level: CpuMemoryLevel::GL,
+                    layout: row_major(&[args.filters, args.channels, fs, fs]),
+                    vector_size: None,
+                };
+                let output_aux = TensorSpecAux {
+                    level: CpuMemoryLevel::GL,
+                    layout: row_major(&[args.batch, args.filters, args.size, args.size]),
+                    vector_size: None,
+                };
                 LogicalSpec::Primitive(
                     PrimitiveBasics {
                         typ: PrimitiveSpecType::Conv { accum: false },
@@ -443,7 +453,7 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<Avx2Target>> {
                         ],
                         dtypes: vec![Dtype::Uint32; 3],
                     },
-                    vec![a.clone(), a.clone(), a.clone()],
+                    vec![img_aux, filters_aux, output_aux],
                     true,
                 )
             })

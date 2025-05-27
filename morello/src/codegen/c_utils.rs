@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::{fmt, ops::Rem};
 
+use itertools::Either;
+
 use crate::{
     common::Dtype,
     expr::{AffineForm, Atom, Bounds, NonAffineExpr},
@@ -19,12 +21,8 @@ pub enum CBuffer {
         size: u32,
         dtype: Dtype,
     },
-    ValueVar {
-        name: String,
-        dtype: Dtype,
-    },
-    VecVars {
-        inner_vecs: Vec<(String, &'static VecType)>,
+    RegVars {
+        inner_vecs: Vec<(String, Either<Dtype, &'static VecType>)>,
     },
     Ptr {
         name: String,
@@ -59,14 +57,14 @@ impl CBuffer {
         match self {
             CBuffer::HeapArray { name, .. }
             | CBuffer::StackArray { name, .. }
-            | CBuffer::ValueVar { name, .. }
             | CBuffer::Ptr { name, .. } => Some(name),
-            CBuffer::VecVars { .. } => None,
+            CBuffer::RegVars { inner_vecs } if inner_vecs.len() == 1 => Some(&inner_vecs[0].0),
+            CBuffer::RegVars { .. } => None,
         }
     }
 
     pub fn needs_unroll(&self) -> bool {
-        matches!(self, CBuffer::VecVars { .. })
+        matches!(self, CBuffer::RegVars { .. })
     }
 
     pub fn emit<W: fmt::Write>(&self, w: &mut W, init_type: InitType, depth: usize) -> fmt::Result {
@@ -123,18 +121,23 @@ impl CBuffer {
                 }
                 Ok(())
             }
-            CBuffer::VecVars { inner_vecs, .. } => {
+            CBuffer::RegVars { inner_vecs, .. } => {
                 let epi = if init_type == InitType::Zero {
                     " = {0}"
                 } else {
                     ""
                 };
-                let mut groups: HashMap<&'static VecType, Vec<&String>> = HashMap::new();
-                for (name, vec_type) in inner_vecs {
-                    groups.entry(*vec_type).or_default().push(name);
+                let mut groups: HashMap<Either<Dtype, &'static VecType>, Vec<&String>> =
+                    HashMap::new();
+                for (name, typ) in inner_vecs {
+                    groups.entry(*typ).or_default().push(name);
                 }
-                for (vec_type, names) in groups {
-                    write!(w, "{}{}", indent(depth), vec_type.name)?;
+                for (typ, names) in groups {
+                    let type_name = match typ {
+                        Either::Left(dtype) => c_type(dtype),
+                        Either::Right(vec_type) => vec_type.name,
+                    };
+                    write!(w, "{}{}", indent(depth), type_name)?;
                     for (i, name) in names.iter().enumerate() {
                         let prefix = if i == 0 { " " } else { ", " };
                         write!(w, "{}{}{}", prefix, name, epi)?;
@@ -142,14 +145,6 @@ impl CBuffer {
                     writeln!(w, ";")?;
                 }
                 Ok(())
-            }
-            CBuffer::ValueVar { name, dtype } => {
-                let epi = if init_type == InitType::Zero {
-                    " = {0}"
-                } else {
-                    ""
-                };
-                writeln!(w, "{}{} {}{};", indent(depth), c_type(*dtype), name, epi)
             }
             CBuffer::Ptr { .. } => unimplemented!(),
         }
@@ -194,18 +189,16 @@ impl CBuffer {
                 writeln!(w, "{}free({name});", indent(depth))?;
                 Ok(())
             }
-            CBuffer::StackArray { .. } | CBuffer::ValueVar { .. } | CBuffer::VecVars { .. } => {
-                Ok(())
-            }
+            CBuffer::StackArray { .. } | CBuffer::RegVars { .. } => Ok(()),
             CBuffer::Ptr { .. } => unimplemented!(),
         }
     }
 
-    /// Returns a specific vector register name and its internal offset.
+    /// Returns a specific register name and its internal offset.
     ///
     /// This checks the upper and lower bounds of the given expression. If they both fall inside the
-    /// same single vector, this returns that vector. Otherwise, it panics.
-    pub(super) fn inner_vec_from_expr<T>(
+    /// same single register, this returns that register. Otherwise, it panics.
+    pub(super) fn inner_reg_from_expr<T>(
         &self,
         expr: &NonAffineExpr<T>,
     ) -> (String, NonAffineExpr<T>)
@@ -213,30 +206,42 @@ impl CBuffer {
         T: Bounds + Clone + fmt::Debug,
         NonAffineExpr<T>: Rem<i32, Output = NonAffineExpr<T>>,
     {
-        let CBuffer::VecVars { inner_vecs, .. } = self else {
-            unreachable!();
-        };
-        let (_, vec_type) = inner_vecs[0];
-
         let AffineForm(linear_terms, _) = expr;
         assert!(
             linear_terms.is_empty(),
             "unexpectedly contained linear terms: {expr:?}",
         );
-
+        let CBuffer::RegVars { inner_vecs } = self else {
+            unreachable!();
+        };
         let Some((bmin, bmax)) = expr.bounds() else {
             panic!("expr's bounds are undefined: {expr:?}");
         };
-        let vector_size = i32::from(vec_type.value_cnt);
-        let min_vec_idx = bmin / vector_size;
-        let max_vec_idx = bmax / vector_size;
-        assert_eq!(
-            min_vec_idx, max_vec_idx,
-            "expr spans multiple vectors: {expr:?}"
-        );
 
-        let (iv_name, _) = &inner_vecs[usize::try_from(min_vec_idx).unwrap()];
-        (iv_name.clone(), expr.clone() % vector_size)
+        match inner_vecs[0] {
+            (_, Either::Left(_)) => {
+                debug_assert!(inner_vecs.iter().all(|(_, t)| matches!(t, Either::Left(_))));
+                assert_eq!(bmin, bmax, "expr spans multiple vectors: {expr:?}");
+                let (iv_name, _) = &inner_vecs[usize::try_from(bmin).unwrap()];
+                (iv_name.clone(), NonAffineExpr::zero())
+            }
+            (_, Either::Right(vec_type)) => {
+                debug_assert!(inner_vecs
+                    .iter()
+                    .all(|(_, t)| matches!(t, Either::Right(_))));
+
+                let vector_size = i32::from(vec_type.value_cnt);
+                let min_vec_idx = bmin / vector_size;
+                let max_vec_idx = bmax / vector_size;
+                assert_eq!(
+                    min_vec_idx, max_vec_idx,
+                    "expr spans multiple vectors: {expr:?}"
+                );
+
+                let (iv_name, _) = &inner_vecs[usize::try_from(min_vec_idx).unwrap()];
+                (iv_name.clone(), expr.clone() % vector_size)
+            }
+        }
     }
 }
 

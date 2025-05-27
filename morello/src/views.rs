@@ -1,9 +1,9 @@
 use crate::{
     common::{DimSize, Shape},
     expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term},
-    layout::{BufferVar, Layout, LayoutError},
+    layout::{row_major, BufferVar, Layout, LayoutError},
     opaque_symbol::OpaqueSymbol,
-    target::Target,
+    target::{MemoryLevel, Target},
     tensorspec::TensorSpec,
 };
 use smallvec::smallvec;
@@ -746,7 +746,15 @@ impl<Tgt: Target> View for Tensor<Tgt> {
     }
 
     fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
-        layout.buffer_indexing_expr(self.1, self.shape())
+        let logical_shape = self.shape();
+        if self.0.level().has_layout() {
+            layout.buffer_indexing_expr(self.1, logical_shape)
+        } else {
+            debug_assert!(self.spec().layout().is_empty());
+            debug_assert!(layout.is_empty());
+            debug_assert_eq!(logical_shape, self.spec().shape());
+            row_major(logical_shape).buffer_indexing_expr(self.1, logical_shape)
+        }
     }
 
     fn bind(

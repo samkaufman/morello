@@ -48,8 +48,11 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     ///
     /// All returned layouts are applicable to the given shape
     /// ([Layout::applies_to_shape] returns `true` for each [Layout]).
-    /// The returned layouts are a subset of those returned by [Self::all_layouts_for_shape].
-    fn move_destination_layouts(shape: &[DimSize], dtype: Dtype) -> Vec<Layout>;
+    /// The returned layouts are a non-strict subset of those returned by
+    /// [Self::all_layouts_for_shape].
+    fn move_destination_layouts(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
+        Self::all_layouts_for_shape(shape, dtype)
+    }
 
     /// Yield target-specific actions which apply to a given [LogicalSpec].
     fn actions(spec: &LogicalSpec<Self>) -> Self::ActionsIter<'_>;

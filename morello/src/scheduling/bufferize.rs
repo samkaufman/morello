@@ -147,15 +147,36 @@ mod tests {
             spec_shape: shape![32, 1, 8, 16],
             dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
         };
-        let aux = TensorSpecAux {
+
+        let aux0_1 = TensorSpecAux {
             level: CpuMemoryLevel::GL,
-            layout: row_major(3),
+            layout: row_major(&basics0.parameter_shape(1)),
+            vector_size: None,
+        };
+        let aux1_1 = TensorSpecAux {
+            level: CpuMemoryLevel::GL,
+            layout: row_major(&basics1.parameter_shape(1)),
+            vector_size: None,
+        };
+        let aux2_0 = TensorSpecAux {
+            level: CpuMemoryLevel::GL,
+            layout: row_major(&basics2.parameter_shape(0)),
+            vector_size: None,
+        };
+        let aux2_1 = TensorSpecAux {
+            level: CpuMemoryLevel::GL,
+            layout: row_major(&basics2.parameter_shape(1)),
+            vector_size: None,
+        };
+        let aux0_out = TensorSpecAux {
+            level: CpuMemoryLevel::GL,
+            layout: row_major(&basics0.parameter_shape(2)),
             vector_size: None,
         };
         let mut spec = Spec::<Avx2Target>(
             LogicalSpec::Compose {
-                components: vec![basics2.clone(), basics1.clone(), basics0.clone()],
-                operand_auxes: vec![aux.clone(), aux.clone(), aux.clone(), aux.clone(), aux],
+                components: vec![basics0.clone(), basics1.clone(), basics2.clone()],
+                operand_auxes: vec![aux0_1, aux1_1, aux2_0, aux2_1, aux0_out],
                 serial_only: true,
             },
             Avx2Target::max_mem(),
@@ -183,8 +204,8 @@ mod tests {
         else {
             panic!("expected a serial, non-accum Matmul Primitive, got {first_child_lspec:?}");
         };
-        assert_eq!(first_child_shape, &basics0.spec_shape);
-        assert_eq!(first_child_dtypes, &basics0.dtypes);
+        assert_eq!(first_child_shape, &basics2.spec_shape);
+        assert_eq!(first_child_dtypes, &basics2.dtypes);
         assert_eq!(first_child_params.len(), 3);
         assert!(matches!(
             first_child_params[0],
@@ -209,7 +230,7 @@ mod tests {
         else {
             panic!("expected a serial Compose LogicalSpec, got {second_child_lspec:?}");
         };
-        assert_eq!(components, &[basics2.clone(), basics1.clone()]);
+        assert_eq!(components, &[basics0.clone(), basics1.clone()]);
         assert_eq!(second_child_params.len(), 4);
         assert!(matches!(
             second_child_params[0],

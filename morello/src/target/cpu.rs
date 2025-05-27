@@ -184,8 +184,6 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn all_layouts_for_shape(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
-        assert!(!shape.is_empty());
-
         let all_target_vector_bytes = Self::levels()
             .into_iter()
             .flat_map(|lvl| lvl.vector_bytes().iter().copied())
@@ -194,24 +192,35 @@ impl<T: CpuTarget> Target for T {
         // The following could be faster. It keeps two copies of the non-packed layouts
         // (`base` and the first few values in `result`) and it doesn't compute the size
         // of the `result` ahead-of-time, potentially causing some Vec resizes.
-        let rank = u8::try_from(shape.len()).unwrap();
-        let unpacked_layouts = match rank {
-            2 => vec![row_major(2), col_major(2)],
-            4 => vec![row_major(4), nhwc()],
-            _ => vec![row_major(rank)],
-        };
+        let only_ones = shape.iter().all(|&d| d.get() == 1);
+        let mut base = Vec::with_capacity(2);
+        base.push(row_major(shape));
+        if !only_ones {
+            if shape.len() == 2 {
+                base.push(col_major(shape));
+                if base[1] == base[0] {
+                    base.pop();
+                }
+            } else if shape.len() == 4 {
+                base.push(nhwc(shape));
+                if base[1] == base[0] {
+                    base.pop();
+                }
+            }
+        }
 
-        // Extend with all possible packings.
-        // TODO: Reduce code duplication in the following
-        let mut result = unpacked_layouts.clone();
+        let mut result = base.clone();
 
         let all_packing_sizes = pack_sizes_all(dtype, &all_target_vector_bytes).collect::<Vec<_>>();
-        result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
+        result.extend(base.iter().flat_map(|original_layout| {
             let Layout { dims, contig: _ } = original_layout;
-            (0..dims.len())
+            dims.iter()
+                .map(|(d, _)| *d)
+                .unique()
                 .cartesian_product(&all_packing_sizes)
                 .filter_map(|(packing_dim, &packing_size)| {
                     debug_assert_ne!(packing_size.get(), 1);
+                    let packing_dim = usize::from(packing_dim);
                     if packing_dim == usize::from(dims.last().unwrap().0)
                         || !shape[packing_dim].get().is_multiple_of(packing_size.get())
                     {
@@ -231,22 +240,24 @@ impl<T: CpuTarget> Target for T {
 
         let all_oddeven_sizes =
             oddeven_sizes_all(dtype, &all_target_vector_bytes).collect::<Vec<_>>();
-        result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
+        result.extend(base.iter().flat_map(|original_layout| {
             let Layout { dims, contig: _ } = original_layout;
-            (0..dims.len())
+            dims.iter()
+                .map(|dim| dim.0)
+                .unique()
                 .cartesian_product(&all_oddeven_sizes)
                 .filter_map(|(packing_dim, &packing_size)| {
                     debug_assert_ne!(packing_size.get(), 1);
-                    if !shape[packing_dim].get().is_multiple_of(packing_size.get()) {
+                    if !shape[usize::from(packing_dim)]
+                        .get()
+                        .is_multiple_of(packing_size.get())
+                    {
                         return None;
                     }
                     Some(Layout::new(
                         dims.iter()
                             .cloned()
-                            .chain(iter::once((
-                                packing_dim.try_into().unwrap(),
-                                PhysDim::OddEven(packing_size),
-                            )))
+                            .chain(iter::once((packing_dim, PhysDim::OddEven(packing_size))))
                             .collect(),
                     ))
                 })
@@ -264,11 +275,22 @@ impl<T: CpuTarget> Target for T {
         // (`base` and the first few values in `result`) and it doesn't compute the size
         // of the `result` ahead-of-time, potentially causing some Vec resizes.
         let only_ones = shape.iter().all(|&d| d.get() == 1);
-        let base = match (shape.len(), only_ones) {
-            (2, false) => vec![row_major(2), col_major(2)],
-            (4, false) => vec![row_major(4), nhwc()],
-            (r, _) => vec![row_major(r.try_into().unwrap())],
-        };
+        let mut base = Vec::with_capacity(2);
+        base.push(row_major(shape));
+        if !only_ones {
+            if shape.len() == 2 {
+                base.push(col_major(shape));
+                if base[1] == base[0] {
+                    base.pop();
+                }
+            } else if shape.len() == 4 {
+                base.push(nhwc(shape));
+                if base[1] == base[0] {
+                    base.pop();
+                }
+            }
+        }
+
         let mut result = base.clone();
         result.extend(base.iter().flat_map(|original_layout| {
             packed_layouts_for_standard_layout(
@@ -709,7 +731,8 @@ impl CpuKernel {
                           && rhs_shape[2].get() * 2 == rhs_vector_size.get()
                           && out_shape[..2] == [nz!(1u32), nz!(1u32)]
                           && out_shape[2].get() * 2 == rhs_vector_size.get()
-                          && rhs.layout() == &batched_col_major(3) && out.layout().is_row_major()
+                          && rhs.layout() == &batched_col_major(rhs_shape)
+                          && out.layout().is_row_major()
                           && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
                           && lhs.level() == CpuMemoryLevel::L1
                           && rhs.level() == CpuMemoryLevel::VRF
@@ -743,7 +766,7 @@ impl CpuKernel {
                           && lhs_shape[1].get() % (DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT) == 0
                           && out_shape[..] == [nz!(1u32), nz!(1u32), nz!(1u32)]
                           && lhs.layout().is_row_major()
-                          && rhs.layout() == &col_major(2)
+                          && rhs.layout().is_col_major()
                           && lhs.is_contiguous() && rhs.is_contiguous()
                           && lhs.level() == CpuMemoryLevel::L1
                           && rhs.level() == CpuMemoryLevel::L1
@@ -752,7 +775,11 @@ impl CpuKernel {
             }
             CpuKernel::DotProductLoopF32Bf16F32 => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
-                    && dotproductloop_applies(&operands, Dtype::Float32, &[row_major(2)])
+                    && dotproductloop_applies(
+                        &operands,
+                        Dtype::Float32,
+                        [row_major(operands[0].shape())],
+                    )
             }
             CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
                 // TODO: Simplify with a closure instead of constructing all layouts AOT.
@@ -761,11 +788,15 @@ impl CpuKernel {
                 }
                 let layout0 = layout![0, 1, 2, 2 oe(16)];
                 let layout1 = layout![0, 2, 1, 1 oe(16)];
-                dotproductloop_applies(&operands, Dtype::Float32, &[layout0, layout1])
+                dotproductloop_applies(&operands, Dtype::Float32, [layout0, layout1])
             }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
-                    && dotproductloop_applies(&operands, Dtype::Bfloat16, &[row_major(2)])
+                    && dotproductloop_applies(
+                        &operands,
+                        Dtype::Bfloat16,
+                        [row_major(operands[0].shape())],
+                    )
             }
             CpuKernel::PhysicalTransposeByte128 => {
                 physicaltransposebyte_applies_to_operands(typ, &operands, 16)
@@ -1529,11 +1560,14 @@ impl CpuKernel {
     }
 }
 
-fn dotproductloop_applies<Tgt: CpuTarget>(
+fn dotproductloop_applies<const N: usize, Tgt: CpuTarget>(
     operands: &[TensorSpec<Tgt>],
     lhs_dtype: Dtype,
-    allowed_lhs_layouts: &[Layout],
+    allowed_lhs_layouts: [Layout; N],
 ) -> bool {
+    let Ok(expected_rhs_layout) = layout![0, 2, 1].canonicalize(operands[1].shape()) else {
+        return false;
+    };
     matches!(
         operands,
         [
@@ -1557,9 +1591,11 @@ fn dotproductloop_applies<Tgt: CpuTarget>(
           && out_shape[0] == nz!(1u32)  // means {lhs, rhs}_shape also equal 1
           && out_shape[1] == nz!(1u32)
           && out_shape[2] == nz!(1u32)
-          && allowed_lhs_layouts.contains(lhs.layout())
-          && rhs.layout() == &Layout::new([0, 2, 1].map(|d| (d, PhysDim::Dynamic)).into())
-          && lhs.is_contiguous() && rhs.is_contiguous()
+          && allowed_lhs_layouts
+               .into_iter()
+               .filter_map(|l| l.canonicalize(lhs_shape).ok())
+               .contains(lhs.layout())
+          && rhs.layout() == &expected_rhs_layout
           && lhs.level() == CpuMemoryLevel::L1
           && rhs.level() == CpuMemoryLevel::L1
           && out.level() == CpuMemoryLevel::RF
@@ -1714,7 +1750,7 @@ where
     if !operands[0].layout().is_row_major() {
         return false;
     }
-    if operands[1].layout() != &col_major(2) {
+    if !operands[1].layout().is_col_major() {
         return false;
     }
     true
@@ -1772,6 +1808,7 @@ where
 ///
 /// The specific sizes of the inner/packed dimension depend on the given layout, tensor
 /// shape, and tensor [Dtype].
+#[allow(dead_code)]
 fn packed_layouts_for_standard_layout<'a>(
     original_layout: &'a Layout,
     shape: &'a [DimSize],
@@ -1874,17 +1911,18 @@ where
     let Layout { dims, contig: _ } = original_layout;
     debug_assert!(dims.iter().all(|(_, s)| *s == PhysDim::Dynamic));
 
-    let final_nonone_dim = {
+    let end = if dims.is_empty() {
+        0
+    } else {
         let mut d = dims.len() - 1;
         while d > 0 && shape[d].get() == 1 {
             d -= 1;
         }
+        if INCLUDE_FINAL_NONONE {
+            d += 1;
+        }
         d
     };
-    let mut end = final_nonone_dim;
-    if INCLUDE_FINAL_NONONE {
-        end += 1;
-    }
 
     dims[..end].iter().flat_map(move |&(dim, _)| {
         let dims = dims.clone();
@@ -1947,7 +1985,11 @@ mod tests {
             let subset: HashSet<_> = Avx2Target::move_destination_layouts(&shape, dtype)
                 .into_iter()
                 .collect();
-            assert!(superset.is_superset(&subset));
+            let diff: Vec<_> = subset.difference(&superset).collect();
+            assert!(
+                diff.is_empty(),
+                "move layouts contained {diff:?} not in all_layouts_for_shape: {superset:?}",
+            );
         }
 
         // TODO: Re-enable the following. Enumerating identical layouts wastes time, so this would
@@ -2046,7 +2088,7 @@ mod tests {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [1, 1, 2, 16],
             (u8, CpuMemoryLevel::L1, row_major),
-            (i8, CpuMemoryLevel::VRF, batched_col_major(3), 32),
+            (i8, CpuMemoryLevel::VRF, batched_col_major, 32),
             (i16, CpuMemoryLevel::VRF, row_major, 16),
             serial
         ));
@@ -2057,25 +2099,29 @@ mod tests {
     #[test]
     fn test_all_layouts_for_bf16_includes_interleaved_dim2_oddeven16() {
         let shape = vec![nz!(1u32), nz!(1u32), nz!(2048u32)];
-        let want = layout![0, 1, 2, 2 oe(16)];
+        let want = layout![2, 2 oe(16)];
         let layouts = Avx2Target::all_layouts_for_shape(&shape, Dtype::Bfloat16);
         assert!(
             layouts.contains(&want),
-            "Expected layouts to include {want:?} for shape {shape:?}, but it did not.",
+            "Expected layouts to include {want:?} for shape {shape:?}, but was: {layouts:?}",
         );
     }
 
     #[test]
     fn test_oddeven_layouts_for_standard_layout_includes_dim2_oddeven16_f32() {
         let layouts = oddeven_layouts_for_standard_layout(
-            &row_major(3),
+            &row_major(&shape![1, 1, 16]),
             &shape![1, 1, 16],
             Dtype::Float32,
             &[16u32, 32u32],
         )
         .collect::<Vec<_>>();
-        let expect = layout![0, 1, 2, 2 oe(16)];
-        assert!(layouts.contains(&expect));
+        let expect = layout![2, 2 oe(16)];
+        assert!(
+            layouts.contains(&expect),
+            "{:?} did not contain {expect:?}",
+            layouts
+        );
     }
 
     #[test]
@@ -2090,7 +2136,7 @@ mod tests {
             ),
             MemoryLimits::Standard(MemVec::zero::<Avx2Target>())
         );
-        assert!(spec.is_canonical());
+        assert!(spec.is_canonical(), "{spec:?} not canonical");
 
         let act = Action::Select(Select(CpuKernel::BroadcastVecMultAdd.into(), false));
         let act_application = act.apply(&spec);
@@ -2121,14 +2167,14 @@ mod tests {
             shape![2, 32],
             Dtype::Uint32,
             CpuMemoryLevel::VRF,
-            row_major(2),
+            row_major,
             Some(nz!(8u32)),
         );
         let arg1 = TensorSpec::new_canon(
             shape![2, 32],
             Dtype::Uint32,
             CpuMemoryLevel::L1,
-            row_major(2),
+            row_major,
             None,
         );
         let parameter0: Param<Avx2Target> = Param::new(0, arg0);

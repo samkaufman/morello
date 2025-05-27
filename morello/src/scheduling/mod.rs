@@ -5,7 +5,7 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::{MemoryLevel, Target};
+use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 
 use crate::views::{Param, Tensor, TileError, View, ViewE};
@@ -255,67 +255,71 @@ impl<Tgt: Target> ActionSolver<Tgt> {
         }
     }
 
-    fn tiled_subspec_fast<B>(
-        binds: B,
-        original_spec: &Spec<Tgt>,
-        tile_shape: &[DimSize],
-        parallel: bool,
-    ) -> Result<Spec<Tgt>, ApplyError>
-    where
-        B: Iterator<Item = (usize, usize)> + ExactSizeIterator,
-    {
-        let mut new_spec = original_spec.clone();
-        match &mut new_spec.0 {
-            LogicalSpec::Primitive(PrimitiveBasics { spec_shape, .. }, _, serial_only) => {
-                for (o, t) in binds {
-                    spec_shape[o] = tile_shape[t];
-                }
-                *serial_only = *serial_only || parallel;
-            }
-            _ => unreachable!(),
-        }
-
-        let outer_parameters = original_spec.0.parameters();
-        let new_parameters = new_spec.0.parameters();
-        let LogicalSpec::Primitive(_, new_auxes, _) = &mut new_spec.0 else {
-            unreachable!();
-        };
-
-        // TODO: Should the following be optimized with `tile_shape_is_valid`?
-        for ((outer, inner), new_aux) in outer_parameters
-            .into_iter()
-            .zip(new_parameters)
-            .zip(new_auxes)
-        {
-            if outer.shape() == inner.shape() {
-                continue;
-            }
-
-            // TODO: Need is_valid_tile_shape if we're calling update_for_tiling?
-            if !outer.is_valid_tile_shape(inner.shape(), parallel) {
-                return Err(ApplyError::NotApplicable(
-                    NotApplicableReason::TileShapeInvalid,
-                ));
-            }
-            if outer.level().has_layout() {
-                let Ok(new_layout) = outer
-                    .layout()
-                    .update_for_tiling(outer.shape(), inner.shape())
-                else {
-                    todo!();
-                };
-                new_aux.layout = new_layout;
-            }
-        }
-
-        if new_spec.canonicalize().is_err() {
-            return Err(ApplyError::NotApplicable(
-                NotApplicableReason::TileShapeInvalid,
-            ));
-        }
-
-        Ok(new_spec)
-    }
+    // fn tiled_subspec_fast<B>(
+    //     binds: B,
+    //     original_spec: &Spec<Tgt>,
+    //     tile_shape: &[DimSize],
+    //     parallel: bool,
+    // ) -> Result<Spec<Tgt>, ApplyError>
+    // where
+    //     B: Iterator<Item = (usize, usize)> + ExactSizeIterator,
+    // {
+    //     let mut new_spec = original_spec.clone();
+    //     match &mut new_spec.0 {
+    //         LogicalSpec::Primitive(PrimitiveBasics { spec_shape, .. }, _, serial_only) => {
+    //             for (o, t) in binds {
+    //                 spec_shape[o] = tile_shape[t];
+    //             }
+    //             *serial_only = *serial_only || parallel;
+    //         }
+    //         _ => unreachable!(),
+    //     }
+    //
+    //     let outer_parameters = original_spec.0.parameters();
+    //     let new_parameters = new_spec.0.parameters();
+    //     let LogicalSpec::Primitive(_, new_auxes, _) = &mut new_spec.0 else {
+    //         unreachable!();
+    //     };
+    //
+    //     // TODO: Should the following be optimized with `tile_shape_is_valid`?
+    //     for ((outer, inner), new_aux) in outer_parameters
+    //         .into_iter()
+    //         .zip(new_parameters)
+    //         .zip(new_auxes)
+    //     {
+    //         if outer.shape() == inner.shape() {
+    //             continue;
+    //         }
+    //
+    //         // TODO: Need is_valid_tile_shape if we're calling update_for_tiling?
+    //         if !outer.is_valid_tile_shape(inner.shape(), parallel) {
+    //             return Err(ApplyError::NotApplicable(
+    //                 NotApplicableReason::TileShapeInvalid,
+    //             ));
+    //         }
+    //         if outer.level().has_layout() {
+    //             match outer
+    //                 .layout()
+    //                 .update_for_tiling(outer.shape(), inner.shape())
+    //             {
+    //                 Ok(new_layout) => {
+    //                     new_aux.layout = new_layout;
+    //                 }
+    //                 Err(e) => {
+    //                     todo!("handle layout update failure: {outer:?} -> {inner:?}: {e:?}");
+    //                 }
+    //             }
+    //         }
+    //     }
+    //
+    //     if new_spec.canonicalize().is_err() {
+    //         return Err(ApplyError::NotApplicable(
+    //             NotApplicableReason::TileShapeInvalid,
+    //         ));
+    //     }
+    //
+    //     Ok(new_spec)
+    // }
 }
 
 impl<Tgt: Target> From<MoveActionSolver<Tgt>> for ActionSolver<Tgt> {
@@ -650,7 +654,7 @@ mod tests {
                     },
                     (Err(a), Err(b)) => prop_assert_eq!(a, b),
                     (l, r) => {
-                        prop_assert!(false, "solver returned {l:?} but apply returned {r:?}");
+                        prop_assert!(false, "solver returned {l:?} but applying {action:?} returned {r:?}");
                     }
                 }
             }
@@ -685,13 +689,16 @@ mod tests {
         }
     }
 
+    /// Test that every sub-Spec application introduced by an Action (excluding Move sub-Specs,
+    /// which intentionally change TensorSpecs) has arguments TensorSpecs that match the sub-Spec's
+    /// declared parameters.
     // TODO: Add a solver version, if possible.
     fn shared_test_actions_introduce_subspec_arguments_with_matching_parameters<Tgt: Target>(
         spec: Spec<Tgt>,
     ) -> Result<(), proptest::prelude::TestCaseError> {
         for action in Tgt::actions(&spec.0) {
-            // Skip Moves since they sometimes introduce Move Specs with mismatched
-            // TensorSpecs.
+            // Skip Moves since they sometimes introduce Move Specs with intentionally
+            // mismatched (source vs. destination) TensorSpecs.
             if matches!(action, Action::Move { .. }) {
                 continue;
             }

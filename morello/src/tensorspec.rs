@@ -10,7 +10,7 @@ use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
-use crate::layout::{row_major, Layout, LayoutError, PhysDim};
+use crate::layout::{row_major, Layout, LayoutBuilder, LayoutError, PhysDim};
 use crate::target::{MemoryLevel, Target};
 use crate::utils::join_into_string;
 
@@ -59,22 +59,21 @@ pub enum CanonicalizeError {
 }
 
 impl<Tgt: Target> TensorSpec<Tgt> {
-    pub fn new_canon(
+    pub fn new_canon<L: LayoutBuilder>(
         shape: Shape,
         dtype: Dtype,
         level: Tgt::Level,
-        layout: Layout,
+        layout: L,
         vector_size: Option<DimSize>,
     ) -> Self {
         Self::new_canon_checked(shape, dtype, level, layout, vector_size).unwrap()
     }
 
-    // TODO: Remove contig. parameter here
-    pub fn new_canon_checked(
+    pub fn new_canon_checked<L: LayoutBuilder>(
         shape: Shape,
         dtype: Dtype,
         level: Tgt::Level,
-        layout: Layout,
+        layout: L,
         vector_size: Option<DimSize>,
     ) -> Result<Self, CanonicalizeError> {
         let mut r = Self::new_noncanon(shape, dtype, level, layout, vector_size);
@@ -82,14 +81,14 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         Ok(r)
     }
 
-    // TODO: Remove contig. parameter here
-    pub fn new_noncanon(
+    pub fn new_noncanon<L: LayoutBuilder>(
         shape: Shape,
         dtype: Dtype,
         level: Tgt::Level,
-        layout: Layout,
+        layout: L,
         vector_size: Option<DimSize>,
     ) -> Self {
+        let layout = layout.build(&shape);
         Self::new_noncanon_with_aux(
             shape,
             dtype,
@@ -148,7 +147,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         if shape.iter().all(|d| d.get() == 1) {
             return true;
         }
-        self.aux.layout.applies_to_shape(shape)
+        !level.has_layout() || self.aux.layout.applies_to_shape(shape)
     }
 
     pub fn bytes_used(&self) -> u64 {
@@ -218,6 +217,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     pub fn shrink(&mut self, shape: &[DimSize]) -> Result<(), LayoutError> {
         if self.aux.level.has_layout() {
             self.aux.layout = self.aux.layout.update_for_tiling(self.shape(), shape)?;
+        } else {
+            assert!(self.aux.layout.is_empty());
         }
         self.shape = Shape::from(shape);
         Ok(())
@@ -250,13 +251,13 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         }
 
         let new_layout = if new_shape.iter().all(|&d| d.get() == 1) {
-            row_major(new_shape.len().try_into().unwrap())
+            row_major(&new_shape)
         } else {
             let dropped_dims_set = dropped_dims.iter().copied().collect::<HashSet<_>>();
             self.layout().dim_drop(&dropped_dims_set)
         };
 
-        TensorSpec::new_canon(
+        Self::new_canon(
             new_shape,
             self.dtype(),
             self.level(),
@@ -284,7 +285,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         }
         new_layout.set_contig(new_contig);
 
-        TensorSpec::new_canon(
+        Self::new_canon(
             new_shape,
             self.dtype(),
             self.level(),
@@ -364,7 +365,7 @@ fn arb_noncanon_tensorspec<Tgt: Target>(
 impl<Tgt: Target> TensorSpecAux<Tgt> {
     pub(crate) fn canonicalize(&mut self, shape: &[DimSize]) -> Result<(), CanonicalizeError> {
         if !self.level.has_layout() {
-            self.layout = row_major(u8::try_from(shape.len()).unwrap());
+            self.layout = Layout::empty();
         } else {
             self.layout = self.layout.update_for_tiling(shape, shape)?;
         }
@@ -372,64 +373,12 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
     }
 
     pub fn is_canonical(&self, shape: &[DimSize]) -> bool {
-        // If the target level does not have layouts (e.g., RF), the only
-        // canonical form is a row-major layout with full contiguousness.
         if !self.level.has_layout() {
-            return self.layout.is_row_major() && self.layout.is_fully_contiguous();
+            return self.layout.is_empty();
         }
-
-        if !self.layout.is_row_major() && shape.iter().all(|d| d.get() == 1) {
-            false
-        } else {
-            if self.layout.expand_physical_shape(shape).is_err() {
-                return false;
-            }
-
-            let Layout { dims, contig } = &self.layout;
-
-            // Count the number of packings applied to each logical dimension.
-            // As a special case, `packings` is empty if there are no packed dims.
-            // (This avoids potentially spilling onto the heap for unpacked
-            // layouts.)
-            let mut packings = Vec::new();
-            for (logical_dim, s) in dims.as_slice() {
-                if matches!(s, PhysDim::Packed(_)) {
-                    if packings.is_empty() {
-                        packings.resize(dims.len(), 0);
-                    }
-                    packings[usize::from(*logical_dim)] += 1;
-                }
-            }
-
-            if !packings.is_empty() {
-                for idx in (0..dims.len()).rev() {
-                    let (logical_dim, s) = dims[idx];
-                    let logical_dim_usize = usize::from(logical_dim);
-                    if packings[logical_dim_usize] == 1
-                        && s == PhysDim::Packed(shape[logical_dim_usize])
-                    {
-                        return false;
-                    }
-                }
-            }
-
-            if self.layout.has_noncanon_size_one_dynamic_dimensions(shape) {
-                return false;
-            }
-
-            let physical_rank = dims.len();
-            let first_contig_idx = u8::try_from(physical_rank).unwrap() - contig;
-            if first_contig_idx > 0 {
-                let ps = self
-                    .layout
-                    .physical_size(first_contig_idx - 1, shape)
-                    .unwrap()
-                    .get();
-                if ps == 1 {
-                    return false;
-                }
-            }
-            true
+        match self.layout.update_for_tiling(shape, shape) {
+            Ok(new_layout) => new_layout == self.layout,
+            Err(_) => false, // If update_for_tiling fails, the layout is not canonical
         }
     }
 }
@@ -512,7 +461,7 @@ where
         let layouts = if level.has_layout() {
             Tgt::all_layouts_for_shape(&self.tensor_shape, self.tensor_dtype)
         } else {
-            vec![row_major(u8::try_from(self.tensor_shape.len()).unwrap())]
+            vec![Layout::empty()]
         };
 
         Box::new(iproduct!(layouts.into_iter(), vector_options).flat_map(
@@ -688,9 +637,8 @@ fn arb_tensorspecaux<Tgt: Target>(
     use proptest::prelude::*;
     use proptest::sample::select;
 
-    let max_shape = Shape::from(max_shape);
     (
-        any_with::<Layout>(LayoutArbRankBounds::fixed_rank_unwrap(max_shape.len())),
+        any_with::<Layout>(LayoutArbRankBounds::for_shape(max_shape)),
         select(Tgt::levels().to_vec()),
     )
         .prop_flat_map(move |(layout, level)| {
@@ -786,11 +734,11 @@ mod tests {
         ) {
             let mut canonicalized_aux = aux.clone();
             if canonicalized_aux.canonicalize(&shape).is_ok() {
-                if aux == canonicalized_aux {
-                    prop_assert!(aux.is_canonical(&shape));
-                } else {
-                    prop_assert!(!aux.is_canonical(&shape));
-                }
+                prop_assert_eq!(
+                    aux == canonicalized_aux, aux.is_canonical(&shape),
+                    "canonicalized aux {:?}; shape {:?}",
+                    canonicalized_aux, shape
+                );
             }
         }
 
@@ -820,8 +768,11 @@ mod tests {
             layout,
             None,
         );
-        assert_eq!(tensorspec.layout(), &row_major(2));
-        assert_eq!(tensorspec.contiguous_abs(), row_major(2).contiguous_full());
+        assert_eq!(tensorspec.layout(), &row_major(tensorspec.shape()));
+        assert_eq!(
+            tensorspec.contiguous_abs(),
+            row_major(tensorspec.shape()).contiguous_full()
+        );
     }
 
     // TODO: Rename

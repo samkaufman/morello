@@ -316,7 +316,7 @@ mod tests {
                 origin_shape.clone(),
                 Dtype::Uint32,
                 Avx2Target::levels()[0],
-                row_major(origin_shape.len().try_into().unwrap()),
+                row_major,
                 None,
             );
 
@@ -365,7 +365,7 @@ mod tests {
             shape![5, 7, 6],
             Dtype::Uint32,
             Avx2Target::levels()[0],
-            row_major(3),
+            row_major,
             None,
         );
         let param = Param::new(0, spec);
@@ -413,7 +413,7 @@ mod tests {
             shape![4, 6],
             Dtype::Uint32,
             Avx2Target::levels()[0],
-            row_major(2),
+            row_major,
             None,
         );
         let param = Param::new(0, spec);
@@ -431,7 +431,7 @@ mod tests {
             shape![6, 7, 9],
             Dtype::Uint32,
             Avx2Target::levels()[0],
-            row_major(3),
+            row_major,
             None,
         );
         let param = Param::new(0, spec);

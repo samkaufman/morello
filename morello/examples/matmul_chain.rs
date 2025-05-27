@@ -39,9 +39,10 @@ fn main() {
         spec_shape: shape![BATCH, 2048, 2048, 2048],
         dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
     };
+    let tensors_shape = shape![BATCH, 2048, 2048];
     let aux = TensorSpecAux {
         level: GL,
-        layout: row_major(3),
+        layout: row_major(&tensors_shape),
         vector_size: None,
     };
 

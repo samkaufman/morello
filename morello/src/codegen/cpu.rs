@@ -454,7 +454,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     ) -> CBuffer {
         debug_assert_eq!(vector_size.is_some(), level == CpuMemoryLevel::VRF);
 
-        let name = self.namer.fresh_name();
         let size = shape.iter().map(|d| d.get()).product::<u32>();
         match level.into() {
             CpuMemoryLevel::VRF => {
@@ -464,20 +463,19 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                 let vector_size = vector_size.get();
                 debug_assert_eq!(size % vector_size, 0);
-                CBuffer::VecVars {
+                CBuffer::RegVars {
                     inner_vecs: (0..(size / vector_size))
-                        .map(|_| (self.namer.fresh_name(), vec_type))
+                        .map(|_| (self.namer.fresh_name(), Either::Right(vec_type)))
                         .collect(),
                 }
             }
-            CpuMemoryLevel::RF => {
-                if size > 1 {
-                    CBuffer::StackArray { name, size, dtype }
-                } else {
-                    CBuffer::ValueVar { name, dtype }
-                }
-            }
+            CpuMemoryLevel::RF => CBuffer::RegVars {
+                inner_vecs: (0..size)
+                    .map(|_| (self.namer.fresh_name(), Either::Left(dtype)))
+                    .collect(),
+            },
             CpuMemoryLevel::L1 | CpuMemoryLevel::GL => {
+                let name = self.namer.fresh_name();
                 if size * u32::from(dtype.size()) > STACK_CUTOFF {
                     CBuffer::HeapArray { name, size, dtype }
                 } else {
@@ -597,8 +595,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 CBuffer::HeapArray { name, .. }
                                 | CBuffer::StackArray { name, .. }
                                 | CBuffer::Ptr { name, .. } => format!("{name}[_]"),
-                                CBuffer::ValueVar { name, .. } => name.clone(),
-                                CBuffer::VecVars { inner_vecs, .. } => inner_vecs[0].0.clone(),
+                                CBuffer::RegVars { inner_vecs, .. } => inner_vecs[0].0.clone(),
                             }
                         })
                         .join(", ");
@@ -2042,17 +2039,15 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     expr_to_c(&self.sub_expr_bindings(expr.clone()))
                 ),
             },
-            CBuffer::ValueVar { name, .. } => match reinterpret {
-                Some(_) => unimplemented!(),
-                None => name.clone(),
-            },
-            CBuffer::VecVars { .. } => {
+            CBuffer::RegVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
-                let (name, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
+                let (name, vec_offset) = buffer.inner_reg_from_expr(&subbed_expr);
                 debug_assert!(vec_offset.as_constant().is_some());
                 if let Some(reinterpret) = reinterpret {
                     debug_assert_eq!(vec_offset, 0);
                     format!("*({reinterpret} *)(&{name})")
+                } else if vec_offset == 0 {
+                    name
                 } else {
                     format!("{}[{}]", name, expr_to_c(&vec_offset))
                 }
@@ -2070,15 +2065,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         #![allow(clippy::only_used_in_recursion)]
 
         match buffer {
-            CBuffer::HeapArray { .. }
-            | CBuffer::StackArray { .. }
-            | CBuffer::ValueVar { .. }
-            | CBuffer::Ptr { .. } => {
+            CBuffer::HeapArray { .. } | CBuffer::StackArray { .. } | CBuffer::Ptr { .. } => {
                 unimplemented!()
             }
-            CBuffer::VecVars { .. } => {
+            CBuffer::RegVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
-                let (name, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
+                let (name, vec_offset) = buffer.inner_reg_from_expr(&subbed_expr);
                 debug_assert!(vec_offset.as_constant().is_some());
                 if vec_offset != 0 {
                     panic!("vec_offset must be 0, but was: {vec_offset:?}");
@@ -2112,19 +2104,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 Some(_) => unimplemented!(),
                 None => format!("&{}", self.c_index(buffer, expr, None)),
             },
-            CBuffer::ValueVar { .. } => {
-                if reinterpret.is_some() {
-                    unimplemented!();
-                };
-                let mut ptr_str = format!("&{}", self.c_index(buffer, expr, None));
-                if ptr_str.ends_with("[0]") {
-                    ptr_str = ptr_str[..ptr_str.len() - 3].to_string();
-                }
-                ptr_str
-            }
-            CBuffer::VecVars { .. } => {
+            CBuffer::RegVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
-                let (name, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
+                let (name, vec_offset) = buffer.inner_reg_from_expr(&subbed_expr);
                 debug_assert!(vec_offset.as_constant().is_some());
                 if reinterpret.is_some() {
                     unimplemented!();

@@ -25,12 +25,13 @@ fn main() {
     // Let's construct a multi-threaded matrix-matrix multiplication which takes two bf16
     // matrices and produces a f32 matrix.
     let bcm_layout = layout![0, 2, 1];
-    let spec: Spec<Avx2Target> = spec!(Matmul(
+    let mut spec: Spec<Avx2Target> = spec!(Matmul(
         [nz!(1u32), M, K, N],
         (bf16, GL, row_major),
         (bf16, GL, bcm_layout),
         (f32, GL, row_major)
     ));
+    spec.canonicalize().unwrap();
 
     // Manually schedule the matrix multiplication.
     let interleaved = layout![0, 1, 2, 2 oe(16)];

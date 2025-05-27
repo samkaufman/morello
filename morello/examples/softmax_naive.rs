@@ -23,11 +23,12 @@ use std::panic;
 fn main() {
     const RANK: u8 = 2;
     const SIZE: DimSize = nz!(1024u32);
-    let layouts = [row_major(RANK), row_major(RANK)];
+    let spec_shape = smallvec![SIZE; usize::from(RANK)];
+    let layouts = [row_major(&spec_shape), row_major(&spec_shape)];
     let logical_spec = LogicalSpec::Primitive(
         PrimitiveBasics {
             typ: PrimitiveSpecType::Softmax { scan_dim: 1 },
-            spec_shape: smallvec![SIZE; usize::from(RANK)],
+            spec_shape,
             dtypes: vec![Dtype::Float32; usize::from(RANK)],
         },
         layouts

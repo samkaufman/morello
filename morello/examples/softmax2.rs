@@ -22,6 +22,7 @@ use std::panic;
 fn main() {
     const RANK: u8 = 2;
     const SIZE: DimSize = nz!(128u32);
+    let shape = vec![SIZE; usize::from(RANK)];
     let logical_spec = LogicalSpec::Primitive(
         PrimitiveBasics {
             typ: PrimitiveSpecType::Softmax { scan_dim: 1 },
@@ -31,7 +32,7 @@ fn main() {
         vec![
             TensorSpecAux {
                 level: CpuMemoryLevel::GL,
-                layout: row_major(RANK),
+                layout: row_major(&shape),
                 vector_size: None,
             };
             2
