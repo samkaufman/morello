@@ -55,6 +55,7 @@ enum SpecTask<Tgt: Target> {
     Complete(ActionCostVec, bool),
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum WorkingPartialImpl<Tgt: Target> {
     Constructing {
