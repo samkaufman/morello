@@ -4,7 +4,7 @@ use crate::{
         allocs::Alloc, blocks::Block, functions::FunctionApp, kernels::KernelApp, loops::Loop,
         pipeline::Pipeline, subspecs::SpecApp,
     },
-    memorylimits::{MemVec, MemoryAllocation},
+    memorylimits::MemoryAllocation,
     nameenv::NameEnv,
     spec::Spec,
     target::Target,
@@ -59,14 +59,6 @@ pub trait Impl<Tgt: Target> {
     /// This is not necessarily the only Spec the Impl satisifes. Instead, it is the concrete Spec
     /// goal used during scheduling.
     fn spec(&self) -> Option<&Spec<Tgt>>;
-}
-
-pub trait ImplExt<Tgt: Target>: Impl<Tgt> {
-    /// Returns the peak memory for the Impl.
-    ///
-    /// This traverses the Impl tree. Spec applications are treated as allocating no
-    /// memory.
-    fn peak_memory(&self) -> MemVec;
 }
 
 crate::impl_impl_for_enum!(
@@ -165,18 +157,6 @@ pub mod macros {
                 }
             )*
         }
-    }
-}
-
-impl<Tgt: Target, T: Impl<Tgt>> ImplExt<Tgt> for T {
-    fn peak_memory(&self) -> MemVec {
-        let children = self.children();
-        let mut child_peaks = Vec::with_capacity(children.len());
-        for child in children {
-            child_peaks.push(child.peak_memory());
-        }
-        self.memory_allocated()
-            .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
     }
 }
 

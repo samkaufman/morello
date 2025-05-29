@@ -3203,7 +3203,7 @@ pub mod macros {
 mod tests {
     use super::*;
     use crate::grid::general::AsBimap;
-    use crate::imp::{visit_leaves, Impl, ImplExt, ImplNode};
+    use crate::imp::{visit_leaves, Impl, ImplNode};
     use crate::layout::row_major;
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
     use crate::scheduling::tiling::TileOut;
@@ -3806,6 +3806,16 @@ mod tests {
     fn shared_test_actions_are_valid_through_consumed_memory<Tgt: Target>(
         logical_spec: LogicalSpec<Tgt>,
     ) {
+        fn peak_memory<Tgt: Target>(imp: &ImplNode<Tgt>) -> MemVec {
+            let children = imp.children();
+            let mut child_peaks = Vec::with_capacity(children.len());
+            for child in children {
+                child_peaks.push(peak_memory(child));
+            }
+            imp.memory_allocated()
+                .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
+        }
+
         // If an action consumes x bytes, then it should be valid for any Spec with the same logical
         // Spec at that memory limit and up.
         let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem();
@@ -3842,7 +3852,7 @@ mod tests {
                             // TODO: Can we assert that the change in peak memory is exactly the
                             //   additional amount at the limit?.
                             // TODO: Assert here that the min of each level-wise limit is zero.
-                            assert_eq!(&applied.peak_memory(), limits_memvec);
+                            assert_eq!(&peak_memory(&applied), limits_memvec);
                         }
                         Err(ApplyError::NotApplicable(_)) => {}
                         Err(ApplyError::SpecNotCanonical) => panic!(),
