@@ -8,7 +8,7 @@ use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
-use crate::utils::snap_memvec_up;
+
 use crate::views::{Param, Tensor, TileError, View, ViewE};
 use enum_dispatch::enum_dispatch;
 use serde::{Deserialize, Serialize};
@@ -238,11 +238,9 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                     child_peaks.push(child_cost.peaks);
                 }
                 depth += 1;
-                // TODO: Is snap_memvec_up really needed or can we bake this into MemVec?
-                let peaks = snap_memvec_up(
-                    allocation.peak_memory_from_child_peaks::<Tgt>(&child_peaks),
-                    false,
-                );
+                // TODO: Is snap_up really needed or can we bake this into MemVec?
+                let peaks = allocation.peak_memory_from_child_peaks::<Tgt>(&child_peaks)
+                    .snap_up(false);
                 Cost { main, peaks, depth }
             }
             ActionSolver::Fallback(partial_impl) => {

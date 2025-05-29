@@ -1,4 +1,3 @@
-use crate::memorylimits::MemVec;
 use num_traits::PrimInt;
 use std::fmt;
 use std::io;
@@ -6,10 +5,7 @@ use std::iter;
 
 const INDENT_SIZE: usize = 2;
 
-// If true, schedules will be saved as if they had memory limits, for all banks,
-// that are the next highest power of 2. This discretizes the cache a bit, even
-// though it
-const SNAP_CAP_TO_POWER_OF_TWO: bool = true;
+
 
 pub const ASCII_CHARS: [char; 26] = ascii_chars();
 pub const ASCII_PAIRS: [[char; 2]; 676] = ascii_pairs();
@@ -115,12 +111,7 @@ const fn ascii_pairs() -> [[char; 2]; 676] {
     result
 }
 
-pub fn snap_memvec_up(available: MemVec, always: bool) -> MemVec {
-    if !SNAP_CAP_TO_POWER_OF_TWO && !always {
-        return available;
-    }
-    available.map(|v| if v == 0 { 0 } else { v.next_power_of_two() })
-}
+
 
 pub const fn bit_length(n: u64) -> u32 {
     debug_assert!(n == 0 || is_power_of_two(n));

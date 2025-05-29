@@ -14,6 +14,10 @@ use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::{iter, ops::Sub};
 
+// If true, schedules will be saved as if they had memory limits, for all banks,
+// that are the next highest power of 2. This discretizes the cache a bit.
+const SNAP_CAP_TO_POWER_OF_TWO: bool = true;
+
 /// MemoryLimits are bounds on available memory for each level of a target.
 ///
 /// There are two variants. `MemoryLimits::Standard` simply counts the number of bytes
@@ -327,6 +331,15 @@ impl MemVec {
                 .unwrap();
         }
         self
+    }
+
+    /// Snaps memory values up to the next power of two if SNAP_CAP_TO_POWER_OF_TWO is enabled
+    /// or if `always` is true.
+    pub fn snap_up(self, always: bool) -> MemVec {
+        if !SNAP_CAP_TO_POWER_OF_TWO && !always {
+            return self;
+        }
+        self.map(|v| if v == 0 { 0 } else { v.next_power_of_two() })
     }
 
     /// Returns an [Iterator] over smaller power-of-two [MemVec]s.
