@@ -181,7 +181,7 @@ pub enum CanonicalizeError {
 }
 
 #[cfg(test)]
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PrimitiveBasicsArbParams {
     max_size: Option<DimSize>,
     first_input_shape: Option<Shape>,
@@ -320,6 +320,60 @@ pub fn arb_canonical_spec<Tgt: Target>(
             Some(s)
         },
     )
+}
+
+#[cfg(test)]
+pub fn arb_canonical_primitive_spec<Tgt: Target>(
+    max_size: Option<DimSize>,
+    max_memory: Option<u64>,
+) -> impl proptest::strategy::Strategy<Value = Spec<Tgt>> {
+    use crate::memorylimits::arb_memorylimits;
+    use proptest::prelude::*;
+
+    // Optionally lower the max memory limits.
+    let MemoryLimits::Standard(mut max_memory_limits) = Tgt::max_mem();
+    if let Some(lower_max) = max_memory {
+        max_memory_limits = max_memory_limits.map(|v| v.min(lower_max));
+    }
+
+    (
+        arb_canonical_primitive_logical_spec::<Tgt>(max_size),
+        arb_memorylimits::<Tgt>(&max_memory_limits),
+    )
+        .prop_map(|(logical_spec, mem_limits)| Spec(logical_spec, mem_limits))
+        .prop_filter_map("Must be possible to canonicalize Spec", |mut s| {
+            if s.canonicalize().is_err() {
+                return None;
+            }
+            Some(s)
+        })
+}
+
+#[cfg(test)]
+pub fn arb_canonical_compose_spec<Tgt: Target>(
+    max_size: Option<DimSize>,
+    max_memory: Option<u64>,
+) -> impl proptest::strategy::Strategy<Value = Spec<Tgt>> {
+    use crate::memorylimits::arb_memorylimits;
+    use proptest::prelude::*;
+
+    // Optionally lower the max memory limits.
+    let MemoryLimits::Standard(mut max_memory_limits) = Tgt::max_mem();
+    if let Some(lower_max) = max_memory {
+        max_memory_limits = max_memory_limits.map(|v| v.min(lower_max));
+    }
+
+    (
+        arb_canonical_compose_logical_spec::<Tgt>(max_size),
+        arb_memorylimits::<Tgt>(&max_memory_limits),
+    )
+        .prop_map(|(logical_spec, mem_limits)| Spec(logical_spec, mem_limits))
+        .prop_filter_map("Must be possible to canonicalize Spec", |mut s| {
+            if s.canonicalize().is_err() {
+                return None;
+            }
+            Some(s)
+        })
 }
 
 impl PrimitiveBasics {
@@ -2532,42 +2586,49 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for LogicalSpec<Tgt> {
     type Strategy = proptest::strategy::BoxedStrategy<LogicalSpec<Tgt>>;
 
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
-        use crate::tensorspec::TensorSpecArbMaxShape;
         use proptest::prelude::*;
-
-        let primitive_arb = (any_with::<PrimitiveBasics>(args), any::<bool>())
-            .prop_flat_map(|(basics, serial_only)| {
-                // TODO: These don't all make sense. Are they canonical for shapes?
-                let auxes_strategy = basics
-                    .parameter_shapes()
-                    .into_iter()
-                    .zip(&basics.dtypes)
-                    .map(|(s, &d)| {
-                        any_with::<TensorSpecAux<Tgt>>((TensorSpecArbMaxShape(s), Some(d)))
-                    })
-                    .collect::<Vec<_>>();
-                (Just(basics), auxes_strategy, Just(serial_only))
-            })
-            .prop_map(|(basics, auxes, serial_only)| {
-                LogicalSpec::Primitive(basics, auxes, serial_only)
-            })
-            .prop_filter("Layout must be applicable to TensorSpec shape", |s| {
-                s.clone().canonicalize().is_ok()
-            });
-
-        prop_oneof![primitive_arb, arb_compose_spec()].boxed()
+        prop_oneof![
+            arb_primitive_logical_spec(args.clone()),
+            arb_compose_spec(args.max_size)
+        ]
+        .boxed()
     }
 }
 
 #[cfg(test)]
-pub(crate) fn arb_compose_spec<Tgt>() -> impl proptest::strategy::Strategy<Value = LogicalSpec<Tgt>>
+pub fn arb_primitive_logical_spec<Tgt: Target>(
+    args: PrimitiveBasicsArbParams,
+) -> impl proptest::strategy::Strategy<Value = LogicalSpec<Tgt>> {
+    use crate::tensorspec::TensorSpecArbMaxShape;
+    use proptest::prelude::*;
+
+    (any_with::<PrimitiveBasics>(args), any::<bool>())
+        .prop_flat_map(|(basics, serial_only)| {
+            let auxes_strategy = basics
+                .parameter_shapes()
+                .into_iter()
+                .zip(&basics.dtypes)
+                .map(|(s, &d)| any_with::<TensorSpecAux<Tgt>>((TensorSpecArbMaxShape(s), Some(d))))
+                .collect::<Vec<_>>();
+            (Just(basics), auxes_strategy, Just(serial_only))
+        })
+        .prop_map(|(basics, auxes, serial_only)| LogicalSpec::Primitive(basics, auxes, serial_only))
+        .prop_filter("Layout must be applicable to TensorSpec shape", |s| {
+            s.clone().canonicalize().is_ok()
+        })
+}
+
+#[cfg(test)]
+pub(crate) fn arb_compose_spec<Tgt>(
+    max_size: Option<DimSize>,
+) -> impl proptest::strategy::Strategy<Value = LogicalSpec<Tgt>>
 where
     Tgt: Target,
 {
     use crate::tensorspec::TensorSpecArbMaxShape;
     use proptest::prelude::*;
 
-    arb_compose_components()
+    arb_compose_components(max_size)
         .prop_flat_map(|components| {
             let auxes_strategies = compose_parameter_shapes(&components)
                 .into_iter()
@@ -2590,10 +2651,11 @@ where
 #[cfg(test)]
 fn arb_compose_component_innermost(
     allow_broadcast: bool,
+    max_size: Option<DimSize>,
 ) -> impl proptest::strategy::Strategy<Value = PrimitiveBasics> {
     use proptest::prelude::*;
 
-    any::<PrimitiveBasics>()
+    any_with::<PrimitiveBasics>(max_size.into())
         .prop_filter("Must not be a Broadcast", move |basics| {
             allow_broadcast || !matches!(basics.typ, PrimitiveSpecType::Broadcast { .. })
         })
@@ -2614,6 +2676,7 @@ fn arb_compose_component_successor(
     predecessor: &PrimitiveBasics,
     allow_broadcast: bool,
     allow_side_effects: bool,
+    max_size: Option<DimSize>,
 ) -> impl proptest::strategy::Strategy<Value = PrimitiveBasics> {
     use proptest::prelude::*;
 
@@ -2658,7 +2721,7 @@ fn arb_compose_component_successor(
     // TODO: Update this so we don't need to manually modify `allowed_types` all the time.
 
     any_with::<PrimitiveBasics>(PrimitiveBasicsArbParams {
-        max_size: None,
+        max_size,
         first_input_shape: Some(shapes[out_idx].clone()),
         first_input_dtype: Some(predecessor.dtypes[out_idx]),
         allowed_types: Some(allowed_types),
@@ -2671,23 +2734,25 @@ fn arb_compose_component_successor(
 
 /// Returns a strategy for generating arbitrary 2- and 3-long Compose Specs.
 #[cfg(test)]
-fn arb_compose_components() -> impl proptest::strategy::Strategy<Value = Vec<PrimitiveBasics>> {
+fn arb_compose_components(
+    max_size: Option<DimSize>,
+) -> impl proptest::strategy::Strategy<Value = Vec<PrimitiveBasics>> {
     use proptest::prelude::*;
 
     prop_oneof![
-        arb_compose_component_innermost(false)
-            .prop_flat_map(|c| {
-                let successor = arb_compose_component_successor(&c, true, true);
+        arb_compose_component_innermost(false, max_size)
+            .prop_flat_map(move |c| {
+                let successor = arb_compose_component_successor(&c, true, true, max_size);
                 (successor, Just(c))
             })
             .prop_map(|(s, c)| vec![s, c]),
-        arb_compose_component_innermost(false)
-            .prop_flat_map(|c| {
-                let successor = arb_compose_component_successor(&c, false, false);
+        arb_compose_component_innermost(false, max_size)
+            .prop_flat_map(move |c| {
+                let successor = arb_compose_component_successor(&c, false, false, max_size);
                 (successor, Just(c))
             })
-            .prop_flat_map(|(s, c)| {
-                let successor2 = arb_compose_component_successor(&s, true, true);
+            .prop_flat_map(move |(s, c)| {
+                let successor2 = arb_compose_component_successor(&s, true, true, max_size);
                 (successor2, Just(s), Just(c))
             })
             .prop_map(|(s2, s, c)| vec![s2, s, c]),
@@ -2701,6 +2766,42 @@ pub fn arb_canonical_logical_spec<Tgt: Target>(
     use proptest::prelude::*;
 
     any_with::<LogicalSpec<Tgt>>(max_size.into()).prop_filter_map(
+        "Must be possible to canonicalize LogicalSpec",
+        |mut s| {
+            if s.canonicalize().is_err() {
+                return None;
+            }
+            Some(s)
+        },
+    )
+}
+
+#[cfg(test)]
+pub fn arb_canonical_primitive_logical_spec<Tgt: Target>(
+    max_size: Option<DimSize>,
+) -> impl proptest::strategy::Strategy<Value = LogicalSpec<Tgt>> {
+    use proptest::prelude::*;
+
+    let params = PrimitiveBasicsArbParams::from(max_size);
+
+    arb_primitive_logical_spec(params).prop_filter_map(
+        "Must be possible to canonicalize LogicalSpec",
+        |mut s| {
+            if s.canonicalize().is_err() {
+                return None;
+            }
+            Some(s)
+        },
+    )
+}
+
+#[cfg(test)]
+pub fn arb_canonical_compose_logical_spec<Tgt: Target>(
+    max_size: Option<DimSize>,
+) -> impl proptest::strategy::Strategy<Value = LogicalSpec<Tgt>> {
+    use proptest::prelude::*;
+
+    arb_compose_spec(max_size).prop_filter_map(
         "Must be possible to canonicalize LogicalSpec",
         |mut s| {
             if s.canonicalize().is_err() {
@@ -3562,7 +3663,7 @@ mod tests {
 
         #[test]
         fn test_bufferized_compose_parameters_match_pipeline_parameters(
-            tinp in arb_compose_spec::<X86Target>()
+            tinp in arb_compose_spec::<X86Target>(None)
                 .prop_filter_map("Spec was not canonical", |logical_spec| {
                     let mut s = Spec(logical_spec, X86Target::max_mem());
                     if s.canonicalize().is_err() {

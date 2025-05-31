@@ -837,7 +837,9 @@ mod tests {
     use crate::layout::row_major;
     use crate::lspec;
     use crate::memorylimits::{MemVec, MemoryLimits};
-    use crate::spec::{arb_canonical_spec, LogicalSpec};
+    use crate::spec::{
+        arb_canonical_compose_spec, arb_canonical_primitive_spec, arb_canonical_spec, LogicalSpec,
+    };
     use crate::target::{
         CpuMemoryLevel::{GL, L1, RF},
         X86Target,
@@ -856,10 +858,21 @@ mod tests {
         // TODO: Remove restriction to canonical Specs. Should synth. any Spec.
         #[test]
         #[ignore]
-        fn test_can_synthesize_any_canonical_spec(
-            spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+        fn test_can_synthesize_any_canonical_primitive_spec(
+            spec in arb_canonical_primitive_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = FilesDatabase::new(None, false, 1, 128, 1);
+            let db = FilesDatabase::new(None, false, 1, 2048, 1);
+            top_down(&db, &spec, 1, Some(nz!(1usize)));
+        }
+
+        // TODO: Add an ARM variant!
+        // TODO: Remove restriction to canonical Specs. Should synth. any Spec.
+        #[test]
+        #[ignore]
+        fn test_can_synthesize_any_canonical_compose_spec(
+            spec in arb_canonical_compose_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+        ) {
+            let db = FilesDatabase::new(None, false, 1, 2048, 1);
             top_down(&db, &spec, 1, Some(nz!(1usize)));
         }
 
