@@ -1,13 +1,13 @@
 use morello::codegen::CodeGen;
 use morello::common::{DimSize, Dtype};
 use morello::cost::Cost;
-use morello::db::FilesDatabase;
 use morello::layout::row_major;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use morello::target::CpuKernel;
 use morello::target::{
-    CpuMemoryLevel::{self, GL, VRF},
+    CpuMemoryLevel::{self, GL, L1, RF, VRF},
     Target, X86Target,
 };
 use morello::tensorspec::TensorSpecAux;
@@ -41,8 +41,6 @@ fn main() {
     let spec = Spec::<X86Target>(logical_spec, X86Target::max_mem());
     println!("Logical Spec: {}", spec.0);
 
-    let db = FilesDatabase::new(None, true, 1, 10_000, 1);
-
     let implementation = spec
         // Tile across the batch dimension. (We cannot tile across the scan dimension.)
         .tile_out(&[1, SIZE.get()])
@@ -50,14 +48,34 @@ fn main() {
         .subschedule(&[0], |subspec| {
             subspec.to_max_and_unscaled(GL, row_major(RANK), None)
         })
-        .subschedule(&[0, 0], |subspec| {
-            subspec.to_accum().split(1).synthesize(&db, None)
+        .subschedule(&[0, 0], |subspec| subspec.to_accum().split(1))
+        .subschedule(&[0, 0, 0], |subspec| {
+            subspec
+                .move_param(0, L1, row_major, None)
+                .move_param(0, RF, row_major, None)
+                .subschedule(&[0], |s| s.select(CpuKernel::ValueNegInf))
+                .subschedule(&[1], |s| s.select(CpuKernel::ValueAssign))
         })
-        .subschedule(&[0, 0, 0], |s| s.synthesize(&db, None))
+        .subschedule(&[0, 0, 1], |maxaccum| {
+            maxaccum
+                .move_param(0, L1, row_major, None)
+                .move_param(0, RF, row_major, None)
+                .move_param(1, L1, row_major, None)
+                .move_param(1, RF, row_major, None)
+                .select(CpuKernel::ValueMax)
+                .subschedule(&[0], |s| s.select(CpuKernel::ValueAssign))
+                .subschedule(&[1, 0], |s| s.select(CpuKernel::ValueAssign))
+                .subschedule(&[1, 2], |s| s.select(CpuKernel::ValueAssign))
+        })
         .subschedule(&[0, 1], |subspec| {
             subspec
                 .to_accum()
-                .subschedule(&[0], |s| s.synthesize(&db, None))
+                .subschedule(&[0], |s| {
+                    s.move_param(0, L1, row_major, None)
+                        .move_param(0, RF, row_major, None)
+                        .subschedule(&[0], |s| s.select(CpuKernel::MemsetZero))
+                        .subschedule(&[1], |s| s.select(CpuKernel::ValueAssign))
+                })
                 .subschedule(&[1], |s| {
                     s.tile_out(&[1, 64])
                         .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
@@ -65,15 +83,19 @@ fn main() {
                         .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
                         .move_param(3, CpuMemoryLevel::L1, row_major(2), None)
                         .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
-                        .subschedule(&[0], |m| m.tile_out(&[1, 8]).synthesize(&db, None))
+                        .subschedule(&[0], |m| {
+                            m.tile_out(&[1, 8]).select(CpuKernel::VectorAssign)
+                        })
                         .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
-                        .subschedule(&[1, 0], |m| m.synthesize(&db, None))
+                        .subschedule(&[1, 0], |m| m.select(CpuKernel::ValueAssign))
                         .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
-                        .subschedule(&[1, 1, 0], |m| m.synthesize(&db, None))
-                        .subschedule(&[1, 1, 2], |m| m.synthesize(&db, None))
+                        .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::ValueAssign))
+                        .subschedule(&[1, 1, 2], |m| m.select(CpuKernel::ValueAssign))
                         .move_param(3, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
-                        .subschedule(&[1, 1, 1, 0], |m| m.synthesize(&db, None))
-                        .subschedule(&[1, 1, 1, 1], |m| m.synthesize(&db, None))
+                        .select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
+                        .subschedule(&[1, 1, 1, 1], |move_spec| {
+                            move_spec.tile_out(&[1, 8]).select(CpuKernel::VectorAssign)
+                        })
                 })
         })
         .subschedule(&[1], |subspec| {
@@ -82,12 +104,20 @@ fn main() {
                 .broadcast_first(VRF, row_major(RANK), Some(nz!(4u32)))
                 .subschedule(&[0], |broadcast| {
                     broadcast
-                        .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
-                        .move_param(0, CpuMemoryLevel::RF, row_major(2), None)
-                        .synthesize(&db, None)
-                        .subschedule(&[0], |s| s.synthesize(&db, None))
+                        .move_param(0, CpuMemoryLevel::L1, row_major, None)
+                        .move_param(0, CpuMemoryLevel::RF, row_major, None)
+                        .subschedule(&[0], |s| s.select(CpuKernel::ValueAssign))
+                        .select(CpuKernel::VecScalarAssign)
                 })
-                .subschedule(&[1], |d| d.synthesize(&db, None))
+                .subschedule(&[1], |d| {
+                    d.move_param(0, L1, row_major, None)
+                        .move_param(0, VRF, row_major, Some(nz!(4u32)))
+                        .subschedule(&[0], |m| m.select(CpuKernel::VectorAssign))
+                        .move_param(2, L1, row_major, None)
+                        .move_param(2, VRF, row_major, Some(nz!(4u32)))
+                        .subschedule(&[1, 0], |m| m.select(CpuKernel::DivideVec))
+                        .subschedule(&[1, 1], |m| m.select(CpuKernel::VectorAssign))
+                })
         });
 
     println!("\nImpl resulting from manual scheduling:");
