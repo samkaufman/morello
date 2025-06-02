@@ -976,7 +976,7 @@ fn blockify_point(mut pt: Vec<BimapInt>) -> (Vec<BimapInt>, Vec<u8>) {
 fn put_range_to_fill<Tgt, B>(
     bimap: &B,
     spec: &Spec<Tgt>,
-    impls: &Vec<(ActionNum, Cost)>,
+    impls: &[(ActionNum, Cost)],
 ) -> (TableKey, (Vec<BimapInt>, Vec<BimapInt>))
 where
     Tgt: Target,
