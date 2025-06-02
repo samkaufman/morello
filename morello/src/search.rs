@@ -838,9 +838,10 @@ mod tests {
     use crate::lspec;
     use crate::memorylimits::{MemVec, MemoryLimits};
     use crate::spec::{arb_canonical_primitive_spec, arb_canonical_spec, LogicalSpec};
+    use crate::target::MemoryLevel;
     use crate::target::{
         CpuMemoryLevel::{GL, L1, RF},
-        X86Target,
+        X86Target, LEVEL_COUNT,
     };
     use crate::utils::{bit_length, bit_length_inverse};
     use nonzero::nonzero as nz;
@@ -1150,7 +1151,7 @@ mod tests {
     ) {
         let spec = Spec::<X86Target>(
             logical_spec,
-            MemoryLimits::Standard(MemVec::new_from_binary_scaled([1, 1, 1, 0])),
+            MemoryLimits::Standard(MemVec::new([1, 1, 1, 0])),
         );
         let db = FilesDatabase::new(None, false, 1, 128, 1);
 
@@ -1168,7 +1169,7 @@ mod tests {
     fn test_synthesis_at_peak_memory_yields_same_decision_1() {
         let spec = Spec::<X86Target>(
             lspec!(FillZero([2, 2, 2, 2], (u8, GL, row_major, c0, ua))),
-            MemoryLimits::Standard(MemVec::new_from_binary_scaled([0, 5, 7, 6])),
+            MemoryLimits::Standard(MemVec::new([0, 16, 64, 32])),
         );
 
         let db = FilesDatabase::new(None, false, 1, 128, 1);
@@ -1206,15 +1207,39 @@ mod tests {
                 let MemoryLimits::Standard(top_memvec) = top_memory_c.as_ref();
                 let MemoryLimits::Standard(spec_memvec) = &spec.1;
 
-                let low = bit_length(spec_memvec.get_unscaled(dim_idx_to_raise));
-                let high = bit_length(top_memvec.get_unscaled(dim_idx_to_raise));
-                (Just(spec), Just(dim_idx_to_raise), (low + 1)..=high)
+                let levels = Tgt::levels();
+                let raise_strategy = if levels[dim_idx_to_raise].counts_registers() {
+                    let low = spec_memvec.get_unscaled(dim_idx_to_raise);
+                    let high = top_memvec.get_unscaled(dim_idx_to_raise);
+                    ((low + 1)..=high).boxed()
+                } else {
+                    let low = bit_length(spec_memvec.get_unscaled(dim_idx_to_raise));
+                    let high = bit_length(top_memvec.get_unscaled(dim_idx_to_raise));
+                    ((low + 1)..=high).prop_map(bit_length_inverse).boxed()
+                };
+                (Just(spec), Just(dim_idx_to_raise), raise_strategy)
             })
-            .prop_map(|(spec, dim_idx_to_raise, raise_bits)| {
-                let raise_amount = bit_length_inverse(raise_bits);
-                let mut raised_memory = spec.1.clone();
-                let MemoryLimits::Standard(ref mut raised_memvec) = raised_memory;
-                raised_memvec.set_unscaled(dim_idx_to_raise, raise_amount);
+            .prop_map(|(spec, dim_idx_to_raise, raise_amount)| {
+                let MemoryLimits::Standard(base_memvec) = &spec.1;
+
+                // Get current values
+                let mut new_values: [u64; LEVEL_COUNT] =
+                    base_memvec.iter().collect::<Vec<_>>().try_into().unwrap();
+
+                // Update the specific level
+                new_values[dim_idx_to_raise] = raise_amount;
+
+                // Create encoding flags based on whether each level counts registers
+                let levels = Tgt::levels();
+                let encoding_flags: [bool; LEVEL_COUNT] = levels
+                    .iter()
+                    .map(|level| level.counts_registers())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap();
+
+                let raised_memory =
+                    MemoryLimits::Standard(MemVec::new_mixed(new_values, encoding_flags));
                 let raised_spec = Spec(spec.0.clone(), raised_memory);
                 (spec, raised_spec)
             })

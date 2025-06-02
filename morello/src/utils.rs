@@ -5,8 +5,6 @@ use std::iter;
 
 const INDENT_SIZE: usize = 2;
 
-
-
 pub const ASCII_CHARS: [char; 26] = ascii_chars();
 pub const ASCII_PAIRS: [[char; 2]; 676] = ascii_pairs();
 
@@ -111,8 +109,6 @@ const fn ascii_pairs() -> [[char; 2]; 676] {
     result
 }
 
-
-
 pub const fn bit_length(n: u64) -> u32 {
     debug_assert!(n == 0 || is_power_of_two(n));
     u64::BITS - n.leading_zeros()
@@ -128,6 +124,13 @@ pub const fn bit_length_inverse(n: u32) -> u64 {
         return 0;
     }
     2u64.pow(n - 1)
+}
+
+pub const fn bit_length_inverse_u32(n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    2u32.pow(n - 1)
 }
 
 pub const fn is_power_of_two(n: u64) -> bool {
@@ -162,13 +165,27 @@ pub const fn prev_power_of_two_u32(n: u32) -> u32 {
     (1 << highest_bit_set_idx) & n
 }
 
+/// Like [iter_powers_of_two_range] where start is either 0 or 1.
+///
+/// Behavior is undefined and may panic if `n` is not 0 or a power of two.
 pub fn iter_powers_of_two(
     n: u64,
     include_zero: bool,
 ) -> impl DoubleEndedIterator<Item = u64> + Clone {
     let start = if include_zero { 0 } else { 1 };
-    let top_bits = bit_length(n);
-    (start..top_bits + 1).map(|b| if b == 0 { 0 } else { 2u64.pow(b - 1) })
+    iter_powers_of_two_range(start, n)
+}
+
+/// Returns an iterator over zero and the powers of two within the given range.
+///
+/// Behavior is undefined and may panic if `start` or `end` are not 0 or powers of two.
+pub fn iter_powers_of_two_range(
+    start: u64,
+    end: u64,
+) -> impl DoubleEndedIterator<Item = u64> + Clone {
+    let start_bits = bit_length(start);
+    let end_bits = bit_length(end);
+    (start_bits..end_bits + 1).map(|b| if b == 0 { 0 } else { 2u64.pow(b - 1) })
 }
 
 /// Returns the factors of an integer, in ascending order.
@@ -332,6 +349,38 @@ mod tests {
             .map(|v| v.collect::<Vec<_>>())
             .collect::<Vec<_>>();
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_iter_powers_of_two() {
+        assert_eq!(
+            iter_powers_of_two(8, true).collect::<Vec<_>>(),
+            vec![0, 1, 2, 4, 8]
+        );
+        assert_eq!(
+            iter_powers_of_two(8, false).collect::<Vec<_>>(),
+            vec![1, 2, 4, 8]
+        );
+
+        assert_eq!(iter_powers_of_two(1, true).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(iter_powers_of_two(1, false).collect::<Vec<_>>(), vec![1]);
+
+        assert_eq!(iter_powers_of_two(0, true).collect::<Vec<_>>(), vec![0]);
+        assert_eq!(iter_powers_of_two(0, false).collect::<Vec<_>>(), vec![]);
+    }
+
+    #[test]
+    fn test_iter_powers_of_two_range() {
+        assert_eq!(
+            iter_powers_of_two_range(0, 8).collect::<Vec<_>>(),
+            vec![0, 1, 2, 4, 8]
+        );
+        assert_eq!(
+            iter_powers_of_two_range(2, 16).collect::<Vec<_>>(),
+            vec![2, 4, 8, 16]
+        );
+        assert_eq!(iter_powers_of_two_range(1, 1).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(iter_powers_of_two_range(16, 8).collect::<Vec<_>>(), vec![]);
     }
 
     proptest! {

@@ -6,3 +6,6 @@
 # everyone who runs the test benefits from these saved cases.
 cc 3cc0c925258b779a1ccdfbcfc91d944685e8d2a11ab8b9906180d3bc01fcddad # shrinks to limits = Standard(MemVec([0, 0, 0, 0])), bounds = []
 cc b8b7954448671d244d88975e5eb4f08877ccaa73c57af9b135d0b0991b6a55e0 # shrinks to limits = Standard(MemVec([0, 0, 0, 0])), bounds = []
+cc 9b59c8000e6708d9a1c1c79bf56851a0dfd67e926f9dea172f928eddc39f43e7 # shrinks to limits = Standard(MemVec([128, 128, 0, 0])), bounds = []
+cc 024c7071a94bfefb3d5527e26d1e3d6f456ea9e9d12ab6c5c66bf12fc4143371 # shrinks to limits = Standard(MemVec([128, 128, 0, 0])), bounds = []
+cc 1f28755cc3bd304e272fb1001d75c024f3e7a8b2bbdb54ff6f9dd88aac366bae # shrinks to limits = Standard(MemVec([128, 128, 0, 0])), bounds = []

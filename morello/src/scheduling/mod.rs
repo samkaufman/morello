@@ -239,8 +239,9 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                 }
                 depth += 1;
                 // TODO: Is snap_up really needed or can we bake this into MemVec?
-                let peaks = allocation.peak_memory_from_child_peaks::<Tgt>(&child_peaks)
-                    .snap_up(false);
+                let peaks = allocation
+                    .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
+                    .snap_up_for_target::<Tgt>(false);
                 Cost { main, peaks, depth }
             }
             ActionSolver::Fallback(partial_impl) => {

@@ -3,10 +3,10 @@ use crate::imp::allocs::{alloc_memory_allocation, move_cost, Alloc};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
-use crate::memorylimits::MemoryLimits;
+use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::{ActionSolver, ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, OperandDirection, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::{MemoryLevel, Target};
+use crate::target::{MemoryLevel, Target, LEVEL_COUNT};
 use crate::tensorspec::{self, TensorSpec};
 use crate::utils::prev_power_of_two;
 use crate::views::{CacheView, Param, Tensor, ViewE};
@@ -201,24 +201,42 @@ fn plan_alloc<'a, Tgt: Target>(
     }
 
     let lower_limits: MemoryLimits = {
-        let additional = u64::from(destination_dtype.size())
-            * u64::from(operands[usize::from(source_idx)].volume().get());
+        let levels = Tgt::levels();
+        let updated_level_idx = levels.iter().position(|l| l == &destination_level).unwrap();
+        let additional = if levels[updated_level_idx].counts_registers() {
+            if let Some(vector_size) = destination_vector_size {
+                debug_assert_eq!(
+                    operands[usize::from(source_idx)].volume().get() % vector_size.get(),
+                    0
+                );
+                u64::from(operands[usize::from(source_idx)].volume().get() / vector_size.get())
+            } else {
+                u64::from(operands[usize::from(source_idx)].volume().get())
+            }
+        } else {
+            u64::from(destination_dtype.size())
+                * u64::from(operands[usize::from(source_idx)].volume().get())
+        };
         match &spec.1 {
             MemoryLimits::Standard(base) => {
-                let levels = Tgt::levels();
-                let updated_level_idx =
-                    levels.iter().position(|l| l == &destination_level).unwrap();
-                let mut new_limits = base.clone();
-                let Some(level_updated) = new_limits
-                    .get_unscaled(updated_level_idx)
-                    .checked_sub(additional)
+                let mut new_values: [u64; LEVEL_COUNT] =
+                    base.iter().collect::<Vec<_>>().try_into().unwrap();
+
+                let Some(level_updated) = new_values[updated_level_idx].checked_sub(additional)
                 else {
                     return Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
                         levels[updated_level_idx].to_string(),
                     )));
                 };
-                new_limits.set_unscaled(updated_level_idx, prev_power_of_two(level_updated));
-                MemoryLimits::Standard(new_limits)
+
+                // Update the specific level with correct value based on whether it counts registers
+                if levels[updated_level_idx].counts_registers() {
+                    new_values[updated_level_idx] = level_updated;
+                } else {
+                    new_values[updated_level_idx] = prev_power_of_two(level_updated);
+                }
+
+                MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(new_values))
             }
         }
     };

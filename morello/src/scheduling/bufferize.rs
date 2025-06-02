@@ -82,7 +82,7 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
                         ))
                     })?,
             });
-            m.discretize();
+            m.discretize::<Tgt>();
             m
         };
 

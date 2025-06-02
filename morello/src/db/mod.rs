@@ -984,20 +984,17 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
 {
-    // Compute the per-level maximum limits of the solutions. This lower bounds the range.
-    let mut per_level_peaks = [0; LEVEL_COUNT];
-    for (_, cost) in impls {
-        for (i, peak) in cost.peaks.iter().enumerate() {
-            per_level_peaks[i] = per_level_peaks[i].max(peak);
-        }
-    }
+    // Compute worst-case bound of solutions' memory usage. This lower bounds the range.
+    let per_level_peaks = impls
+        .iter()
+        .fold(MemVec::zero::<Tgt>(), |acc, (_, cost)| acc.max(&cost.peaks));
 
     // Compute the complete upper and lower bounds from the given Spec and that Spec modified with
     // the peaks' bound (computed above).
     let upper_inclusive = bimap.apply(spec);
     let lower_inclusive = {
         let mut lower_bound_spec = spec.clone();
-        lower_bound_spec.1 = MemoryLimits::Standard(MemVec::new(per_level_peaks));
+        lower_bound_spec.1 = MemoryLimits::Standard(per_level_peaks);
         bimap.apply(&lower_bound_spec)
     };
 
@@ -1172,10 +1169,10 @@ mod tests {
         memorylimits::{MemVec, MemoryLimits},
         scheduling::ApplyError,
         spec::arb_canonical_spec,
-        target::X86Target,
-        utils::{bit_length, bit_length_inverse},
+        target::{MemoryLevel, X86Target},
+        utils::{bit_length, bit_length_inverse_u32},
     };
-    use itertools::Itertools;
+    use itertools::{izip, Itertools};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use std::fmt;
@@ -1289,23 +1286,28 @@ mod tests {
             } else {
                 MemVec::zero::<X86Target>()
             };
-            let filled_limits_iter = spec_limits
-                .iter()
-                .zip(peaks.iter())
-                .map(|(l, p)| {
-                    assert!(l == 0 || l.is_power_of_two());
-                    assert!(p == 0 || p.is_power_of_two());
-                    bit_length(p)..=bit_length(l)
-                })
-                .multi_cartesian_product();
             let expected = ActionCostVec(top_actions_costs);
-            for limit_to_check_bits in filled_limits_iter {
-                let limit_to_check_vec = limit_to_check_bits.iter().copied().map(bit_length_inverse).collect::<Vec<_>>();
-                let limit_to_check = MemoryLimits::Standard(MemVec::new(limit_to_check_vec.try_into().unwrap()));
-                let spec_to_check = Spec(top_logical_spec.clone(), limit_to_check);
-                let get_result = db.get(&spec_to_check).expect("Spec should be in database");
-                assert_eq!(get_result, expected, "Entries differed at {}", spec_to_check);
-            }
+            izip!(X86Target::levels(), spec_limits.iter(), peaks.iter())
+                .map(|(level, l, p)| {
+                    if level.counts_registers() {
+                        (u32::try_from(p).unwrap()..=u32::try_from(l).unwrap()).collect::<Vec<_>>()
+                    } else {
+                        assert!(l == 0 || l.is_power_of_two());
+                        assert!(p == 0 || p.is_power_of_two());
+                        (bit_length(p)..=bit_length(l)).map(bit_length_inverse_u32).collect::<Vec<_>>()
+                    }
+                })
+                .multi_cartesian_product()
+                .for_each(|limit_to_check_bits| {
+                    let limit_to_check_vec = limit_to_check_bits
+                        .into_iter()
+                        .map_into()
+                        .collect::<Vec<u64>>();
+                    let limit_to_check = MemoryLimits::Standard(MemVec::new(limit_to_check_vec.try_into().unwrap()));
+                    let spec_to_check = Spec(top_logical_spec.clone(), limit_to_check);
+                    let get_result = db.get(&spec_to_check).expect("Spec should be in database");
+                    assert_eq!(get_result, expected, "Entries differed at {}", spec_to_check);
+                });
         }
 
         // TODO: Fix and re-enable this test.

@@ -36,7 +36,7 @@ use morello::search::top_down_many;
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
 };
-use morello::target::{CpuMemoryLevel, Target, X86Target};
+use morello::target::{CpuMemoryLevel, MemoryLevel, Target, X86Target};
 use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
 use morello::utils::{bit_length, diagonals};
 
@@ -160,6 +160,7 @@ fn main_per_db(
     db_path: Option<&path::Path>,
     multi_opt: Option<MultiProgress>,
 ) {
+    let levels = X86Target::levels();
     let MemoryLimits::Standard(top) = X86Target::max_mem();
 
     // TODO: Most of the following details aren't used in computing the bound.
@@ -306,7 +307,7 @@ fn main_per_db(
                     for (spec, result) in worklist.iter().zip(stage_results) {
                         if let [(_, only_result_cost)] = &result[..] {
                             next_stage.extend(
-                                next_limits(&spec.1, &only_result_cost.peaks)
+                                next_limits(&spec.1, &only_result_cost.peaks, &levels)
                                     .map(|l| Spec(spec.0.clone(), MemoryLimits::Standard(l))),
                             );
                         }
@@ -452,6 +453,7 @@ fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
 fn next_limits<'a>(
     result_limits: &'a MemoryLimits,
     result_peak: &'a MemVec,
+    levels: &'a [CpuMemoryLevel],
 ) -> impl Iterator<Item = MemVec> + 'a {
     let MemoryLimits::Standard(limits_vec) = result_limits;
     debug_assert!(limits_vec
@@ -460,14 +462,13 @@ fn next_limits<'a>(
         .all(|(l, p)| l >= p));
     (0..limits_vec.len()).filter_map(|idx| {
         let mut new_values = limits_vec.clone();
-        if result_peak.get_unscaled(idx) == 0 {
-            return None;
-        }
-        if result_peak.get_unscaled(idx) == 1 {
-            new_values.set_unscaled(idx, 0);
-        } else {
-            new_values.set_unscaled(idx, 1 << (bit_length(result_peak.get_unscaled(idx)) - 2));
-        }
+        let lower = match result_peak.get_unscaled(idx) {
+            0 => return None,
+            1 => 0,
+            prev if levels[idx].counts_registers() => prev - 1,
+            prev => 1 << (bit_length(prev) - 2),
+        };
+        new_values.set(idx, lower);
         Some(new_values)
     })
 }

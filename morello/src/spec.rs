@@ -3178,12 +3178,7 @@ pub mod macros {
         ( $typ:ident $args:tt , [ $($limits:expr),* $(,)? ] ) => {{
             let logical_spec = $crate::lspec!($typ $args);
             let limits_arr: [u64; $crate::target::LEVEL_COUNT] = [ $( $limits as u64 ),* ];
-            $crate::spec::Spec(
-                logical_spec,
-                $crate::memorylimits::MemoryLimits::Standard(
-                    $crate::memorylimits::MemVec::new(limits_arr)
-                ),
-            )
+            $crate::spec::__private::new_with_standard_memory(logical_spec, limits_arr)
         }};
         // Dynamic limits expression: wrap directly with provided MemoryLimits
         ( $typ:ident $args:tt , $mem_limits:expr $(,)? ) => {{
@@ -3199,6 +3194,25 @@ pub mod macros {
     }
 }
 
+#[doc(hidden)] // not part of the public API surface
+pub mod __private {
+    use super::{LogicalSpec, Spec};
+    use crate::memorylimits::{MemVec, MemoryLimits};
+    use crate::target::{Target, LEVEL_COUNT};
+
+    /// A helper constructor for the `spec!` macro. This exists so that the inferred `Tgt` can be
+    /// given to [MemVec::new_for_target].
+    pub fn new_with_standard_memory<Tgt: Target>(
+        logical_spec: LogicalSpec<Tgt>,
+        limits_arr: [u64; LEVEL_COUNT],
+    ) -> Spec<Tgt> {
+        Spec(
+            logical_spec,
+            MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(limits_arr)),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3210,7 +3224,7 @@ mod tests {
     use crate::scheduling::{Action, ActionT as _, ApplyError};
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::target::CpuMemoryLevel::{GL, L1, RF};
-    use crate::target::{ArmTarget, CpuMemoryLevel, MemoryLevel, Target, X86Target};
+    use crate::target::{ArmTarget, CpuMemoryLevel, MemoryLevel, Target, X86Target, LEVEL_COUNT};
     use crate::tensorspec::{TensorSpecArbMaxShape, TensorSpecAuxNonDepBimap};
     use crate::utils::{next_binary_power, sum_seqs};
     use crate::views::View;
@@ -3267,14 +3281,17 @@ mod tests {
     fn test_spec_macro_shorthand() {
         let s: Spec<X86Target> = spec!(
             Move([2, 3], (u32, GL, row_major), (u32, GL, row_major)),
-            [1024, 512, 256, 128]
+            [8, 8, 256, 128]
         );
         let expected_ls: LogicalSpec<X86Target> =
             lspec!(Move([2, 3], (u32, GL, row_major), (u32, GL, row_major)));
         assert_eq!(s.0, expected_ls);
         assert_eq!(
             s.1,
-            MemoryLimits::Standard(MemVec::new([1024, 512, 256, 128]))
+            MemoryLimits::Standard(MemVec::new_mixed(
+                [8, 8, 256, 128],
+                [true, true, false, false]
+            ))
         );
     }
 
@@ -3819,7 +3836,7 @@ mod tests {
         // If an action consumes x bytes, then it should be valid for any Spec with the same logical
         // Spec at that memory limit and up.
         let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem();
-        let mut maxes = maxes_vec.iter_binary_scaled().collect::<Vec<_>>();
+        let mut maxes = maxes_vec.iter().collect::<Vec<_>>();
 
         // Zero out levels which are slower than all present operands' levels.
         let parameter_levels = logical_spec.parameter_levels();
@@ -3839,8 +3856,10 @@ mod tests {
             let mut empty = true;
             for pt in sum_seqs(&maxes, diagonal_idx) {
                 empty = false;
-                shared_spec.1 =
-                    MemoryLimits::Standard(MemVec::new_from_binary_scaled(pt.try_into().unwrap()));
+                let Ok(pt_arr): Result<[u64; LEVEL_COUNT], _> = pt.try_into() else {
+                    panic!("Expected length {LEVEL_COUNT}");
+                };
+                shared_spec.1 = MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(pt_arr));
                 let MemoryLimits::Standard(limits_memvec) = &shared_spec.1;
                 // TODO: Assert that nothing disappears?
                 for i in (0..unseen_actions.len()).rev() {
@@ -3895,10 +3914,16 @@ mod tests {
                     _ => todo!(),
                 };
                 let MemoryLimits::Standard(limits_memvec) = &spec.1;
-                let lower_limit_strategy = arb_memorylimits_ext(
-                    &MemVec::new(lower_bound.map(next_binary_power)),
-                    limits_memvec,
-                );
+                let levels = Tgt::levels();
+                let mut corrected_lower_bound = lower_bound;
+                for i in 0..LEVEL_COUNT {
+                    if !levels[i].counts_registers() {
+                        corrected_lower_bound[i] = next_binary_power(corrected_lower_bound[i]);
+                    }
+                }
+                let candidate_lower = MemVec::new(corrected_lower_bound);
+                let lower_limit_strategy =
+                    arb_memorylimits_ext::<Tgt>(&candidate_lower, limits_memvec);
                 (
                     Just(spec),
                     Just(action),

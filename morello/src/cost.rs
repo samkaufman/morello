@@ -5,7 +5,6 @@ use crate::imp::Impl;
 use crate::memorylimits::MemVec;
 use crate::target::Target;
 
-
 use num_rational::Ratio;
 use serde::{Deserialize, Serialize};
 
@@ -62,9 +61,10 @@ impl Cost {
             .collect::<Vec<_>>();
         let main_cost: MainCost = imp.compute_main_cost(&child_main_costs);
         // TODO: Handle other kinds of memory, not just standard/TinyMap peaks.
-        let raised_peaks = imp.memory_allocated()
+        let raised_peaks = imp
+            .memory_allocated()
             .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
-            .snap_up(false);
+            .snap_up_for_target::<Tgt>(false);
         Cost {
             main: main_cost,
             peaks: raised_peaks,
@@ -95,10 +95,7 @@ impl Ord for Cost {
         // order for Costs.
         debug_assert_eq!(self.peaks.len(), other.peaks.len());
         for i in 0..self.peaks.len() {
-            let peaks_cmp = self
-                .peaks
-                .get_binary_scaled(i)
-                .cmp(&other.peaks.get_binary_scaled(i));
+            let peaks_cmp = self.peaks.get_unscaled(i).cmp(&other.peaks.get_unscaled(i));
             if peaks_cmp != Ordering::Equal {
                 return peaks_cmp;
             }

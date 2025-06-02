@@ -246,6 +246,6 @@ where
                 ))
             })?,
     });
-    lowered_limits.discretize();
+    lowered_limits.discretize::<Tgt>();
     Ok(lowered_limits)
 }

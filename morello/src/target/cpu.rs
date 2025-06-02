@@ -143,7 +143,10 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn max_mem() -> MemoryLimits {
-        MemoryLimits::Standard(MemVec::new([64, 1024, 32_768, 1_073_741_824]))
+        MemoryLimits::Standard(MemVec::new_mixed(
+            [16, 16, 32_768, 1_073_741_824],
+            [true, true, false, false],
+        ))
     }
 
     fn processors() -> u8 {
@@ -1188,17 +1191,16 @@ impl CpuKernel {
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::BroadcastVecMultAddBf16F32 => {
                 let vec_tensor_spec = &parameters[1].spec();
-                let vb = u64::from(vec_tensor_spec.vector_size().unwrap().get())
-                    * u64::from(vec_tensor_spec.dtype().size());
-                MemoryAllocation::Simple(CPU_LEVELS.map(
-                    |level| {
-                        if level.vector_rf() {
-                            vb * 2
-                        } else {
-                            0
-                        }
-                    },
-                ))
+                let regs = u64::from(
+                    vec_tensor_spec.volume().get() / vec_tensor_spec.vector_size().unwrap().get(),
+                );
+                MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
+                    if level.vector_rf() {
+                        regs * 2
+                    } else {
+                        0
+                    }
+                }))
             }
             CpuKernel::DotProductLoop
             | CpuKernel::DotProductLoopBf16Bf16F32
@@ -1208,14 +1210,8 @@ impl CpuKernel {
                 MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
                     let mut used = 0;
                     if level.vector_rf() {
-                        used = 128;
+                        used = 1;
                         // TODO: Add intermediate consumption
-                        match self {
-                            CpuKernel::DotProductLoopBf16Bf16F32 => {}
-                            CpuKernel::DotProductLoopF32InterleavedBf16F32 => {}
-                            CpuKernel::DotProductLoopF32Bf16F32 => {}
-                            _ => {}
-                        }
                     }
                     used
                 }))
@@ -1223,7 +1219,7 @@ impl CpuKernel {
             CpuKernel::PhysicalTransposeByte256 => MemoryAllocation::Simple(CPU_LEVELS.map(
                 |level| {
                     if level.vector_rf() {
-                        64
+                        2
                     } else {
                         0
                     }
@@ -1235,20 +1231,24 @@ impl CpuKernel {
                     0
                 }))
             }
-            CpuKernel::VectorMax => {
-                MemoryAllocation::Simple(
-                    CPU_LEVELS.map(|level| if level.vector_rf() { 128 } else { 0 }),
-                )
-            }
+            CpuKernel::VectorMax => MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
+                if level.vector_rf() {
+                    1 // one __m128 allocated by horizontal_max_f32
+                } else {
+                    0
+                }
+            })),
             CpuKernel::VectorSoftmaxDenominator => {
                 // TODO: Check if VectorSoftmaxDenominator allocates more than 2 vectors.
-                MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
-                    if level.vector_rf() {
-                        2 * 128
-                    } else {
-                        0
-                    }
-                }))
+                MemoryAllocation::Simple(CPU_LEVELS.map(
+                    |level| {
+                        if level.vector_rf() {
+                            2
+                        } else {
+                            0
+                        }
+                    },
+                ))
             }
             _ => MemoryAllocation::none(),
         }
@@ -1446,6 +1446,13 @@ impl MemoryLevel for CpuMemoryLevel {
         match &self {
             CpuMemoryLevel::VRF => &[16, 32],
             _ => &[],
+        }
+    }
+
+    fn counts_registers(&self) -> bool {
+        match self {
+            CpuMemoryLevel::RF | CpuMemoryLevel::VRF => true,
+            CpuMemoryLevel::L1 | CpuMemoryLevel::GL => false,
         }
     }
 }

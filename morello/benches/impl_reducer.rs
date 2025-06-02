@@ -1,4 +1,5 @@
 use iai_callgrind::{library_benchmark, library_benchmark_group, main, LibraryBenchmarkConfig};
+use morello::utils::bit_length_inverse;
 use std::hint::black_box;
 
 use morello::cost::Cost;
@@ -16,11 +17,11 @@ fn init_reduce_costs(k: u16) -> (Vec<(ActionNum, Cost)>, ImplReducer) {
                 i % 10,
                 Cost {
                     main: ((i + 11) % 13).into(),
-                    peaks: MemVec::new_from_binary_scaled([
-                        ((i + 2) % 5).try_into().unwrap(),
-                        ((i + 3) % 4).try_into().unwrap(),
-                        (i % 2).try_into().unwrap(),
-                        (i % 13).try_into().unwrap(),
+                    peaks: MemVec::new([
+                        ((i + 2) % 5).into(),
+                        ((i + 3) % 4).into(),
+                        bit_length_inverse((i % 2).into()),
+                        bit_length_inverse((i % 13).into()),
                     ]),
                     depth: ((i + 1) % 3 + 1).try_into().unwrap(),
                 },

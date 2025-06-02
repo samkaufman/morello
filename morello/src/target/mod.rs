@@ -68,6 +68,7 @@ pub trait MemoryLevel:
     fn vector_rf(&self) -> bool {
         !self.vector_bytes().is_empty()
     }
+    fn counts_registers(&self) -> bool;
 }
 
 pub trait Kernel: PartialEq + Eq + Copy + Clone + Hash + Debug {

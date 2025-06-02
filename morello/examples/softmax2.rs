@@ -59,7 +59,8 @@ fn main() {
                 .to_accum()
                 .subschedule(&[0], |s| s.synthesize(&db, None))
                 .subschedule(&[1], |s| {
-                    s.move_param(0, CpuMemoryLevel::L1, row_major(2), None)
+                    s.tile_out(&[1, 64])
+                        .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
                         .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
                         .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
                         .move_param(3, CpuMemoryLevel::L1, row_major(2), None)

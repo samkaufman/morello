@@ -86,7 +86,6 @@ impl RTreeBlock {
             Some((cost_intensity, peaks, depth, action_num)) => {
                 let cost = Cost {
                     main: cost_intensity.into_main_cost_for_volume(spec_volume),
-                    // peaks: MemVec::new_from_binary_scaled(peaks),
                     peaks: peaks.clone(),
                     depth: *depth,
                 };

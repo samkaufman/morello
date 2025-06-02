@@ -189,10 +189,18 @@ pub(crate) fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tg
 pub(crate) fn alloc_memory_allocation<Tgt: Target>(
     introduced_spec: &TensorSpec<Tgt>,
 ) -> MemoryAllocation {
-    let bytes_consumed = introduced_spec.bytes_used();
     MemoryAllocation::Simple(Tgt::levels().map(|level| {
         if introduced_spec.level() == level {
-            bytes_consumed
+            if level.counts_registers() {
+                if let Some(vector_size) = introduced_spec.vector_size() {
+                    debug_assert_eq!(introduced_spec.volume().get() % vector_size.get(), 0);
+                    u64::from(introduced_spec.volume().get() / vector_size.get())
+                } else {
+                    u64::from(introduced_spec.volume().get())
+                }
+            } else {
+                introduced_spec.bytes_used()
+            }
         } else {
             0u64
         }
