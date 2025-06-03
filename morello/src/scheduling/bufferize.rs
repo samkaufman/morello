@@ -7,7 +7,7 @@ use crate::scheduling::{
     make_inner_compose, make_outer_compose, ActionT, ApplyError, NotApplicableReason,
 };
 use crate::spec::{LogicalSpec, Spec};
-use crate::target::Target;
+use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::TensorSpec;
 use crate::views::Tensor;
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,16 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
                 .product();
             let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
                 if self.level == l {
-                    u64::from(consumer.dtypes[0].size()) * first_input_volume
+                    if self.level.counts_registers() {
+                        if let Some(vector_size) = self.vector_size {
+                            debug_assert_eq!(first_input_volume % u64::from(vector_size.get()), 0);
+                            first_input_volume / u64::from(vector_size.get())
+                        } else {
+                            first_input_volume
+                        }
+                    } else {
+                        u64::from(consumer.dtypes[0].size()) * first_input_volume
+                    }
                 } else {
                     0u64
                 }

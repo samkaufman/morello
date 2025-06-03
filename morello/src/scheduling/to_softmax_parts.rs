@@ -6,7 +6,7 @@ use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::{Target, LEVEL_COUNT};
+use crate::target::{MemoryLevel, Target, LEVEL_COUNT};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::{Param, Tensor, View, ViewE};
 use nonzero::nonzero as nz;
@@ -233,8 +233,16 @@ where
             .iter()
             .position(|l| l == &tensor_spec.level())
             .unwrap();
-        new_buffer_consumption[idx] +=
-            u64::from(tensor_spec.volume().get()) * u64::from(tensor_spec.dtype.size());
+        new_buffer_consumption[idx] += if tensor_spec.level().counts_registers() {
+            if let Some(vector_size) = tensor_spec.vector_size() {
+                debug_assert_eq!(tensor_spec.volume().get() % vector_size.get(), 0);
+                u64::from(tensor_spec.volume().get() / vector_size.get())
+            } else {
+                u64::from(tensor_spec.volume().get())
+            }
+        } else {
+            u64::from(tensor_spec.volume().get()) * u64::from(tensor_spec.dtype.size())
+        };
     }
     let mut lowered_limits = MemoryLimits::Standard(match base_limits.to_owned() {
         MemoryLimits::Standard(v) => v

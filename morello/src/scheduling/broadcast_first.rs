@@ -3,10 +3,11 @@ use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
+use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::Target;
-use crate::tensorspec::TensorSpec;
+use crate::target::{MemoryLevel, Target};
+use crate::tensorspec::{CanonicalizeError, TensorSpec};
 use crate::views::{Param, Tensor, ViewE};
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
@@ -39,15 +40,61 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
 
         let operands = spec.0.parameters();
 
-        let broadcast_destination = Tensor::new(TensorSpec::<Tgt>::new_canon(
-            head.spec_shape.to_vec(),
-            dtypes[1],
-            self.broadcast_layout.contiguous_full(),
-            true,
-            self.broadcast_level,
-            self.broadcast_layout.clone(),
-            self.broadcast_vector_size,
-        ));
+        let broadcast_destination = Tensor::new(
+            TensorSpec::<Tgt>::new_canon_checked(
+                head.spec_shape.to_vec(),
+                dtypes[1],
+                self.broadcast_layout.contiguous_full(),
+                true,
+                self.broadcast_level,
+                self.broadcast_layout.clone(),
+                self.broadcast_vector_size,
+            )
+            .map_err(|e| match e {
+                CanonicalizeError::VectorSizeInvalid => {
+                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid(
+                        dtypes[1],
+                        self.broadcast_vector_size.unwrap(),
+                    ))
+                }
+                _ => ApplyError::NotApplicable(NotApplicableReason::Other(None)),
+            })?,
+        );
+
+        // Compute the memory limits for the new children.
+        let new_limits = {
+            let intermediate_volume: u64 =
+                head.spec_shape.iter().map(|v| u64::from(v.get())).product();
+            let intermediate_mem_consumed = Tgt::levels().map(|l| {
+                if self.broadcast_level == l {
+                    if self.broadcast_level.counts_registers() {
+                        if let Some(vector_size) = self.broadcast_vector_size {
+                            debug_assert_eq!(intermediate_volume % u64::from(vector_size.get()), 0);
+                            intermediate_volume / u64::from(vector_size.get())
+                        } else {
+                            intermediate_volume
+                        }
+                    } else {
+                        u64::from(dtypes[1].size()) * intermediate_volume
+                    }
+                } else {
+                    0u64
+                }
+            });
+
+            let mut m = MemoryLimits::Standard(match &spec.1 {
+                MemoryLimits::Standard(v) => v
+                    .clone()
+                    .checked_sub_snap_down(&intermediate_mem_consumed)
+                    .map_err(|oom_idx| {
+                        ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
+                            Tgt::levels()[oom_idx].to_string(),
+                        ))
+                    })?,
+            });
+            m.discretize::<Tgt>();
+            m
+        };
         let broadcast_app = ImplNode::from(SpecApp::new_primitive_app(
             PrimitiveSpecType::Broadcast { dim: *scan_dim },
             [
@@ -55,7 +102,7 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
                 ViewE::from(broadcast_destination.clone()),
             ],
             spec.0.serial_only(),
-            spec.1.clone(),
+            new_limits.clone(),
         ));
         let dividevec_app = ImplNode::from(SpecApp::new_primitive_app(
             PrimitiveSpecType::DivideVec,
@@ -65,7 +112,7 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
                 ViewE::from(Param::new(2, operands[2].clone())),
             ],
             spec.0.serial_only(),
-            spec.1.clone(),
+            new_limits,
         ));
         Ok(ImplNode::Pipeline(Pipeline {
             stages: vec![broadcast_app, dividevec_app],
