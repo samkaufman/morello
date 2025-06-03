@@ -6,6 +6,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::layout::{batched_col_major, col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
+use crate::scheduling::broadcast_first::BroadcastFirst;
 use crate::scheduling::select::Select;
 use crate::scheduling::spatial_split::SpatialSplit;
 use crate::scheduling::to_accum::ToAccum;
@@ -13,6 +14,7 @@ use crate::scheduling::Action;
 use crate::shape;
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{Kernel, MemoryLevel, Target, TargetId, LEVEL_COUNT};
+use crate::tensorspec::gen_vector_sizes_opt;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::View;
 
@@ -430,6 +432,30 @@ impl<T: CpuTarget> Target for T {
                     } else {
                         Box::new(iter.chain(once(ToAccum::default().into())))
                     }
+                }
+                PrimitiveSpecType::DivideVecScalar { .. } => {
+                    let mut broadcast_firsts = Vec::new();
+                    if let LogicalSpec::Primitive(basics, _, _) = spec {
+                        let spec_shape = &basics.spec_shape;
+                        let dtype = basics.dtypes[1];
+                        for level in Self::levels() {
+                            for layout in Self::move_destination_layouts(spec_shape, dtype) {
+                                gen_vector_sizes_opt(dtype, level.vector_bytes()).for_each(
+                                    |vector_size| {
+                                        broadcast_firsts.push(
+                                            BroadcastFirst {
+                                                broadcast_level: level,
+                                                broadcast_layout: layout.clone(),
+                                                broadcast_vector_size: vector_size,
+                                            }
+                                            .into(),
+                                        );
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    Box::new(iter.chain(broadcast_firsts))
                 }
                 _ => Box::new(iter),
             },

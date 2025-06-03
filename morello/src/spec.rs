@@ -3636,7 +3636,6 @@ mod tests {
             spec in arb_canonical_spec::<X86Target>(None, None)
         ) {
             X86Target::actions(&spec.0).for_each(|action| {
-                println!("spec: {}\naction: {action:?}", spec.0);  // TODO: Remove
                 let Ok(applied) = action.apply(&spec) else {
                     return;
                 };
@@ -3921,6 +3920,16 @@ mod tests {
                         corrected_lower_bound[i] = next_binary_power(corrected_lower_bound[i]);
                     }
                 }
+                assert!(
+                    corrected_lower_bound
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .all(|(i, a)| a <= limits_memvec.get_unscaled(i)),
+                    "Lower bound {:?} was greater than Spec's memory limits {:?}",
+                    corrected_lower_bound,
+                    limits_memvec
+                );
                 let candidate_lower = MemVec::new(corrected_lower_bound);
                 let lower_limit_strategy =
                     arb_memorylimits_ext::<Tgt>(&candidate_lower, limits_memvec);
