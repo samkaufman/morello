@@ -7,9 +7,9 @@ use crate::scheduling::{
     make_inner_compose, make_outer_compose, ActionT, ApplyError, NotApplicableReason,
 };
 use crate::spec::{LogicalSpec, Spec};
-use crate::target::{MemoryLevel, Target};
+use crate::target::Target;
 use crate::tensorspec::TensorSpec;
-use crate::views::Tensor;
+use crate::views::{Tensor, View};
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 
@@ -57,23 +57,9 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
             // Compute the amount of memory consumed by the new, intermediate
             // tensor.
             // TODO: This shouldn't need to be both here and in `memory_allocated`.
-            let first_input_volume: u64 = consumer
-                .input_shape(0)
-                .into_iter()
-                .map(|v| u64::from(v.get()))
-                .product();
             let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
                 if self.level == l {
-                    if self.level.counts_registers() {
-                        if let Some(vector_size) = self.vector_size {
-                            debug_assert_eq!(first_input_volume % u64::from(vector_size.get()), 0);
-                            first_input_volume / u64::from(vector_size.get())
-                        } else {
-                            first_input_volume
-                        }
-                    } else {
-                        u64::from(consumer.dtypes[0].size()) * first_input_volume
-                    }
+                    intermediate_tensor.spec().memory_units()
                 } else {
                     0u64
                 }

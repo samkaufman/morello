@@ -6,9 +6,9 @@ use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::{MemoryLevel, Target};
+use crate::target::Target;
 use crate::tensorspec::{CanonicalizeError, TensorSpec};
-use crate::views::{Param, Tensor, ViewE};
+use crate::views::{Param, Tensor, View, ViewE};
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 
@@ -63,20 +63,9 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
 
         // Compute the memory limits for the new children.
         let new_limits = {
-            let intermediate_volume: u64 =
-                head.spec_shape.iter().map(|v| u64::from(v.get())).product();
             let intermediate_mem_consumed = Tgt::levels().map(|l| {
                 if self.broadcast_level == l {
-                    if self.broadcast_level.counts_registers() {
-                        if let Some(vector_size) = self.broadcast_vector_size {
-                            debug_assert_eq!(intermediate_volume % u64::from(vector_size.get()), 0);
-                            intermediate_volume / u64::from(vector_size.get())
-                        } else {
-                            intermediate_volume
-                        }
-                    } else {
-                        u64::from(dtypes[1].size()) * intermediate_volume
-                    }
+                    broadcast_destination.spec().memory_units()
                 } else {
                     0u64
                 }

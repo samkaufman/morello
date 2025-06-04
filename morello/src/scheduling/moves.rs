@@ -203,20 +203,7 @@ fn plan_alloc<'a, Tgt: Target>(
     let lower_limits: MemoryLimits = {
         let levels = Tgt::levels();
         let updated_level_idx = levels.iter().position(|l| l == &destination_level).unwrap();
-        let additional = if levels[updated_level_idx].counts_registers() {
-            if let Some(vector_size) = destination_vector_size {
-                debug_assert_eq!(
-                    operands[usize::from(source_idx)].volume().get() % vector_size.get(),
-                    0
-                );
-                u64::from(operands[usize::from(source_idx)].volume().get() / vector_size.get())
-            } else {
-                u64::from(operands[usize::from(source_idx)].volume().get())
-            }
-        } else {
-            u64::from(destination_dtype.size())
-                * u64::from(operands[usize::from(source_idx)].volume().get())
-        };
+        let additional = new_spec.memory_units();
         match &spec.1 {
             MemoryLimits::Standard(base) => {
                 let mut new_values: [u64; LEVEL_COUNT] =

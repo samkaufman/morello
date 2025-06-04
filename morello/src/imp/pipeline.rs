@@ -5,7 +5,7 @@ use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
 use crate::spec::Spec;
-use crate::target::{MemoryLevel, Target};
+use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::views::{Tensor, View, ViewE};
 use itertools::Itertools as _;
@@ -44,19 +44,7 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
                         let mut level_consumption = 0;
                         for t in &wiring.intermediate_tensors {
                             if t.spec().level() == l {
-                                level_consumption += if l.counts_registers() {
-                                    if let Some(vector_size) = t.spec().vector_size() {
-                                        debug_assert_eq!(
-                                            t.spec().volume().get() % vector_size.get(),
-                                            0
-                                        );
-                                        u64::from(t.spec().volume().get() / vector_size.get())
-                                    } else {
-                                        u64::from(t.spec().volume().get())
-                                    }
-                                } else {
-                                    t.spec().bytes_used()
-                                };
+                                level_consumption += t.spec().memory_units();
                             }
                         }
                         level_consumption

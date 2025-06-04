@@ -191,16 +191,7 @@ pub(crate) fn alloc_memory_allocation<Tgt: Target>(
 ) -> MemoryAllocation {
     MemoryAllocation::Simple(Tgt::levels().map(|level| {
         if introduced_spec.level() == level {
-            if level.counts_registers() {
-                if let Some(vector_size) = introduced_spec.vector_size() {
-                    debug_assert_eq!(introduced_spec.volume().get() % vector_size.get(), 0);
-                    u64::from(introduced_spec.volume().get() / vector_size.get())
-                } else {
-                    u64::from(introduced_spec.volume().get())
-                }
-            } else {
-                introduced_spec.bytes_used()
-            }
+            introduced_spec.memory_units()
         } else {
             0u64
         }

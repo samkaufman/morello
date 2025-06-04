@@ -178,6 +178,22 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         u64::from(self.dtype.size()) * u64::from(self.volume().get())
     }
 
+    /// Returns the memory units consumed by this tensor based on its level's memory model.
+    ///
+    /// For register-counting levels, returns register counts, possibly divided by vector size.
+    /// For other levels, returns bytes.
+    pub fn memory_units(&self) -> u64 {
+        if self.level().counts_registers() {
+            if let Some(vector_size) = self.vector_size() {
+                u64::from(self.volume().get().div_ceil(vector_size.get()))
+            } else {
+                u64::from(self.volume().get())
+            }
+        } else {
+            self.bytes_used()
+        }
+    }
+
     pub fn shape(&self) -> &[DimSize] {
         &self.shape
     }
