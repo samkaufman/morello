@@ -3381,6 +3381,7 @@ mod tests {
     use crate::{lspec, shape, spec};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
+    use proptest::strategy::{Just, Strategy};
     use std::iter;
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);

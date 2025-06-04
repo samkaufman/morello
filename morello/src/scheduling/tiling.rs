@@ -1331,6 +1331,7 @@ fn spec_canonicalize_to_apply_err(canon_error: CanonicalizeError) -> ApplyError 
 mod tests {
     use super::*;
     use crate::common::Dtype;
+    use crate::imp::subspecs::SpecApp;
     use crate::imp::{loops::Loop, Impl, ImplNode};
     use crate::layout::{row_major, PhysDim};
     use crate::scheduling::{Action, ActionT, ApplyError, NotApplicableReason};
@@ -2318,5 +2319,93 @@ mod tests {
                 }
             }
         }
+    }
+
+    proptest! {
+        /// If (spec -> tile_a) succeeds, then (tile_a -> tile_b) should equal (spec -> tile_b),
+        /// unless (spec -> tile_a) constructs a parallel loop. (This latter case is a problem
+        /// because it would produce a serial-only sub-Spec, which prevents tile_a -> tile_b from
+        /// being a parallel loop, even if spec -> tile_b could be.)
+        #[test]
+        fn test_tile_out_transitivity(
+            (spec, tile_a, tile_b) in arb_spec_and_nested_tilings()
+        ) {
+            // First try spec -> tile_a. If this fails, ignore this test case.
+            let tile_a_result = tile_a.apply(&spec);
+            let Ok(ImplNode::Loop(Loop { bodies: bodies_a, .. })) = tile_a_result else {
+                return Ok(());
+            };
+            let [ImplNode::SpecApp(SpecApp(nested_spec, _))] = &bodies_a[..] else {
+                return Ok(())
+            };
+
+            // Now compare: (spec -> tile_b) vs ((spec -> tile_a) -> tile_b)
+            let direct_path = tile_b.apply(&spec);
+            let indirect_path = tile_b.apply(nested_spec);
+
+            // If spec -> tile_a succeeds, then (spec -> tile_b) should have the
+            // same result as (spec -> tile_a -> tile_b).
+            match (direct_path, indirect_path) {
+                (Ok(_), Ok(_)) | (Err(_), Err(_)) => {}
+                (Ok(_), b @ Err(_)) => {
+                    prop_assert!(
+                        false,
+                        "spec->B succeeded but spec->A->B failed; A: Ok(_), B: {b:?}",
+                    );
+                }
+                (a @ Err(_), Ok(_)) => {
+                    prop_assert!(
+                        false,
+                        "spec->B failed but spec->A->B succeeded; A: {a:?}, B: Ok(_)",
+                    );
+                }
+            }
+        }
+    }
+
+    fn arb_spec_and_nested_tilings() -> impl Strategy<Value = (Spec<Avx2Target>, TileOut, TileOut)>
+    {
+        arb_canonical_spec::<Avx2Target>(Some(nz!(8u32)), Some(1024))
+            .prop_filter_map("Spec must have unique output to tile", |spec| {
+                let output_idx = spec.0.unique_output_index()?;
+                let output_shape = spec.0.parameter_shape(output_idx);
+                Some((spec, output_shape.to_vec()))
+            })
+            .prop_flat_map(|(spec, output_shape)| {
+                (
+                    Just(spec),
+                    output_shape.iter().map(|d| 1..=d.get()).collect::<Vec<_>>(),
+                )
+            })
+            .prop_filter(
+                "tiling must be smaller in at least one dimension",
+                |(spec, tile_a)| {
+                    let output_shape = spec
+                        .0
+                        .parameter_shape(spec.0.unique_output_index().unwrap());
+                    output_shape.iter().zip(tile_a).any(|(&a, &b)| a.get() != b)
+                },
+            )
+            .prop_flat_map(|(spec, tile_a)| {
+                let tile_b_dims = tile_a.iter().map(|&d| 1..=d).collect::<Vec<_>>();
+                (Just(spec), Just(tile_a), tile_b_dims, any::<bool>())
+            })
+            .prop_filter(
+                "tiling must be smaller in at least one dimension",
+                |(_, tile_a, tile_b, _)| tile_a != tile_b,
+            )
+            .prop_map(|(spec, tile_a, tile_b, parallel_b)| {
+                (
+                    spec,
+                    TileOut::MultiLoop {
+                        output_shape: tile_a.iter().map(|&d| DimSize::new(d).unwrap()).collect(),
+                        parallel: false,
+                    },
+                    TileOut::MultiLoop {
+                        output_shape: tile_b.iter().map(|&d| DimSize::new(d).unwrap()).collect(),
+                        parallel: parallel_b,
+                    },
+                )
+            })
     }
 }
