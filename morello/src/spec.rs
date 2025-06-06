@@ -3832,10 +3832,14 @@ mod tests {
                 .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
         }
 
-        // If an action consumes x bytes, then it should be valid for any Spec with the same logical
-        // Spec at that memory limit and up.
+        // If an action consumes x bytes, then it should be valid for any Spec
+        // with the same logical Spec at that memory limit and up. To keep
+        // performance acceptable, we limit memory.
+        let mut maxes = vec![];
         let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem();
-        let mut maxes = maxes_vec.iter().collect::<Vec<_>>();
+        for v in maxes_vec.iter() {
+            maxes.push(v.min(64));
+        }
 
         // Zero out levels which are slower than all present operands' levels.
         let parameter_levels = logical_spec.parameter_levels();
