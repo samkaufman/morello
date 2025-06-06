@@ -112,6 +112,7 @@ impl Layout {
         l.assert_no_size_1_packings();
         l.assert_no_odd_deinterleaves();
         l.merge_consecutive_dimensions();
+        debug_assert!(l.is_fully_contiguous());
         l
     }
 
