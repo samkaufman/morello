@@ -54,7 +54,7 @@ where
     // Set up table
     let mut table = prettytable::Table::new();
     let titles = match style {
-        ImplPrintStyle::Full => row!["Impl", "Logical Spec", "Cost", "Peaks", "Depth"],
+        ImplPrintStyle::Full => row!["Impl", "Logical Spec", "Cost", "Peaks", "Depth", "Path"],
         ImplPrintStyle::Compact => row!["Impl"],
     };
     table.set_titles(titles);
@@ -73,6 +73,7 @@ where
         &mut costs_table,
         0,
         style,
+        &[],
     );
 
     // Format and print the table.
@@ -94,6 +95,7 @@ fn pprint_inner<'a, Tgt>(
     costs_table: &mut HashMap<ByThinAddress<&'a ImplNode<Tgt>>, Cost>,
     depth: usize,
     style: ImplPrintStyle,
+    path: &[usize],
 ) where
     Tgt: Target,
 {
@@ -103,11 +105,19 @@ fn pprint_inner<'a, Tgt>(
         let mut r;
 
         let cost = fill_costs_table_entry(costs_table, imp);
+        let path_str = format!(
+            "[{}]",
+            path.iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let mut extra_column_values = vec![
             "".to_owned(),
             cost.main.to_string(),
             cost.peaks.to_string(),
             cost.depth.to_string(),
+            path_str,
         ];
         if let Some(spec) = imp.spec() {
             extra_column_values[0] = spec.to_string();
@@ -121,7 +131,10 @@ fn pprint_inner<'a, Tgt>(
                 }
             }
             ImplPrintStyle::Compact => {
+                let path_info = extra_column_values.pop().unwrap();
                 extra_column_values.retain(|s| !s.is_empty());
+                extra_column_values.push(format!("path: {}", path_info));
+
                 if !extra_column_values.is_empty() {
                     let joined = extra_column_values.join(", ");
                     r = row![format!("{indent_str}/* {joined} */\n{main_str}\n")];
@@ -133,8 +146,21 @@ fn pprint_inner<'a, Tgt>(
         table.add_row(r);
     }
 
-    for child in imp.children() {
-        pprint_inner(table, child, name_env, costs_table, depth + 1, style);
+    let children = imp.children();
+    for (i, child) in children.iter().enumerate() {
+        let mut child_path = path.to_vec();
+        if children.len() > 1 {
+            child_path.push(i);
+        }
+        pprint_inner(
+            table,
+            child,
+            name_env,
+            costs_table,
+            depth + 1,
+            style,
+            &child_path,
+        );
     }
 }
 
