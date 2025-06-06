@@ -54,22 +54,22 @@ fn main() {
         )
         .subschedule(&[0], |z| {
             z.tile_out(&[1, 1, 16])
-                .move_param(0, CpuMemoryLevel::L1, row_major, None)
-                .move_param(0, CpuMemoryLevel::VRF, row_major, Some(nz!(16u32)))
+                .move_param(0, CpuMemoryLevel::L1)
+                .move_relayout(0, CpuMemoryLevel::VRF, row_major, Some(nz!(16u32)))
                 .subschedule(&[0], |z| z.select(CpuKernel::VectorAssign))
                 .subschedule(&[1], |z| {
-                    z.move_param(1, CpuMemoryLevel::VRF, interleaved.clone(), Some(nz!(8u32)))
+                    z.move_relayout(1, CpuMemoryLevel::VRF, interleaved.clone(), Some(nz!(8u32)))
                         .subschedule(&[0], |z| z.select(CpuKernel::VectorInterleaveBf16F32))
                         .subschedule(&[1], |z| z.select(CpuKernel::VectorAssign))
                 })
         })
         .tile_out_parallel(&[1, 1, 128])
         .tile_out(&[1, 1, 1])
-        .move_param(2, CpuMemoryLevel::L1, row_major, None)
-        .move_param(2, CpuMemoryLevel::RF, row_major, None)
+        .move_param(2, CpuMemoryLevel::L1)
+        .move_param(2, CpuMemoryLevel::RF)
         .to_accum()
         .subschedule(&[1, 0, 0], |z| z.select(CpuKernel::MemsetZero))
-        .move_param(1, CpuMemoryLevel::L1, bcm_layout, None)
+        .move_param(1, CpuMemoryLevel::L1)
         .select(CpuKernel::DotProductLoopF32InterleavedBf16F32)
         .subschedule(&[1, 1], |body| body.select(CpuKernel::ValueAssign));
 

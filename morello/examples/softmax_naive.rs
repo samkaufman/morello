@@ -62,12 +62,12 @@ fn main() {
             subspec
                 .to_accum()
                 .split(64)
-                .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
-                .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
-                .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
-                .move_param(0, CpuMemoryLevel::VRF, row_major(2), Some(nz!(8u32)))
-                .move_param(1, CpuMemoryLevel::RF, row_major(2), None)
-                .move_param(2, CpuMemoryLevel::RF, row_major(2), None)
+                .move_param(0, CpuMemoryLevel::L1)
+                .move_param(1, CpuMemoryLevel::L1)
+                .move_param(2, CpuMemoryLevel::L1)
+                .move_vrf(0, CpuMemoryLevel::VRF, nz!(8u32))
+                .move_param(1, CpuMemoryLevel::RF)
+                .move_param(2, CpuMemoryLevel::RF)
                 .select(CpuKernel::VectorSoftmaxDenominator)
         })
         .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db, None))
@@ -78,10 +78,10 @@ fn main() {
         // This [1] corresponds to SoftmaxComplete
         .subschedule(&[1], |softmax_complete| {
             softmax_complete
-                .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
-                .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
-                .move_param(2, CpuMemoryLevel::L1, row_major(2), None)
-                .move_param(3, CpuMemoryLevel::L1, row_major(2), None)
+                .move_param(0, CpuMemoryLevel::L1)
+                .move_param(1, CpuMemoryLevel::L1)
+                .move_param(2, CpuMemoryLevel::L1)
+                .move_param(3, CpuMemoryLevel::L1)
                 .tile_out(&[1, 32])
                 .synthesize(&db, None)
         });

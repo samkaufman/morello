@@ -33,7 +33,14 @@ pub trait SchedulingSugar<Tgt: Target> {
     fn tile_out(&self, output_shape: &[u32]) -> ImplNode<Tgt>;
     fn tile_out_parallel(&self, output_shape: &[u32]) -> ImplNode<Tgt>;
     fn split(&self, k: u32) -> ImplNode<Tgt>;
-    fn move_param(
+    fn move_param(&self, source_idx: u8, destination_level: Tgt::Level) -> ImplNode<Tgt>;
+    fn move_vrf(
+        &self,
+        source_idx: u8,
+        destination_level: Tgt::Level,
+        destination_vector_size: DimSize,
+    ) -> ImplNode<Tgt>;
+    fn move_relayout(
         &self,
         source_idx: u8,
         destination_level: Tgt::Level,
@@ -138,7 +145,38 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         apply_unwrap(self, action)
     }
 
-    fn move_param(
+    fn move_param(&self, source_idx: u8, destination_level: Tgt::Level) -> ImplNode<Tgt> {
+        let dest = self.0.parameter(usize::from(source_idx));
+        let destination_dtype = dest.dtype();
+        let action = Action::Move(Move {
+            source_idx,
+            destination_dtype,
+            destination_level,
+            destination_layout: dest.layout().clone(),
+            destination_vector_size: None,
+        });
+        apply_unwrap(self, action)
+    }
+
+    fn move_vrf(
+        &self,
+        source_idx: u8,
+        destination_level: Tgt::Level,
+        destination_vector_size: DimSize,
+    ) -> ImplNode<Tgt> {
+        let dest = self.0.parameter(usize::from(source_idx));
+        let destination_dtype = dest.dtype();
+        let action = Action::Move(Move {
+            source_idx,
+            destination_dtype,
+            destination_level,
+            destination_layout: dest.layout().clone(),
+            destination_vector_size: Some(destination_vector_size),
+        });
+        apply_unwrap(self, action)
+    }
+
+    fn move_relayout(
         &self,
         source_idx: u8,
         destination_level: Tgt::Level,
@@ -337,7 +375,22 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.split(k))
     }
 
-    fn move_param(
+    fn move_param(&self, source_idx: u8, destination_level: Tgt::Level) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| spec.move_param(source_idx, destination_level))
+    }
+
+    fn move_vrf(
+        &self,
+        source_idx: u8,
+        destination_level: Tgt::Level,
+        destination_vector_size: DimSize,
+    ) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, |spec| {
+            spec.move_vrf(source_idx, destination_level, destination_vector_size)
+        })
+    }
+
+    fn move_relayout(
         &self,
         source_idx: u8,
         destination_level: Tgt::Level,
@@ -345,7 +398,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
-            spec.move_param(
+            spec.move_relayout(
                 source_idx,
                 destination_level,
                 destination_layout,

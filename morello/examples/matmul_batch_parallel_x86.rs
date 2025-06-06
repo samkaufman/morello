@@ -5,7 +5,7 @@ use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec;
 use morello::spec::Spec;
-use morello::target::CpuKernel;
+use morello::target::{CpuKernel, MemoryLevel};
 use morello::target::{
     CpuMemoryLevel::{GL, L1, RF, VRF},
     X86Target,
@@ -42,23 +42,23 @@ fn main() {
     let implementation = spec
         .tile_out_parallel(&[1, 2048, 2048])
         .split(512) // Test larger split size
-        .move_param(1, GL, layout_b.clone(), None)
-        .subschedule(&[0], naive_scalar_move_impl)
-        .move_param(0, GL, layout_a.clone(), None)
-        .subschedule(&[1, 0], naive_scalar_move_impl)
+        .move_relayout(1, GL, layout_b.clone(), None)
+        .move_relayout(0, GL, layout_a.clone(), None)
         .tile_out(&[1, 256, 128]) // Keep memory_opt's successful tile configuration
         .tile_out(&[1, 4, 16])
-        .move_param(0, L1, layout_a.clone(), None)
-        .move_param(2, L1, row_major, None)
-        .move_param(2, VRF, row_major, Some(nz!(8u32)))
-        .subschedule(&[1, 1, 0], naive_vector_move_impl)
+        .move_param(0, L1)
+        .move_param(2, L1)
+        .move_vrf(2, VRF, nz!(8u32))
         .split(1)
         .tile_out(&[1, 1, 16])
-        .move_param(1, L1, layout_b.clone(), None)
-        .move_param(1, VRF, layout_b.clone(), Some(nz!(8u32)))
+        .move_param(1, L1)
+        .move_vrf(1, VRF, nz!(8u32))
+        .select(CpuKernel::BroadcastVecMultAdd)
+        .subschedule(&[0], naive_scalar_move_impl)
+        .subschedule(&[1, 0], naive_scalar_move_impl)
+        .subschedule(&[1, 1, 0], naive_vector_move_impl)
         .subschedule(&[1, 1, 1, 0], naive_vector_move_impl)
-        .subschedule(&[1, 1, 2], naive_vector_move_impl)
-        .select(CpuKernel::BroadcastVecMultAdd);
+        .subschedule(&[1, 1, 2, 0], naive_vector_move_impl);
 
     implementation
         .emit(
@@ -104,15 +104,23 @@ fn main() {
 fn naive_scalar_move_impl(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
     move_spec
         .tile_out(&[1, 1, 1])
-        .move_param(0, L1, row_major, None)
-        .move_param(1, L1, row_major, None)
-        .move_param(0, RF, row_major, None)
+        .move_relayout(0, L1, row_major, None)
+        .move_relayout(1, L1, row_major, None)
+        .move_relayout(0, RF, row_major, None)
         .subschedule(&[0], |m0| m0.select(CpuKernel::ValueAssign))
         .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
 }
 
 fn naive_vector_move_impl(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
-    move_spec
-        .tile_out(&[1, 1, 8])
-        .select(CpuKernel::VectorAssign)
+    let imp = move_spec.tile_out(&[1, 1, 8]);
+    if move_spec
+        .0
+        .parameters()
+        .into_iter()
+        .any(|p| p.level().vector_rf())
+    {
+        imp.select(CpuKernel::VectorAssign)
+    } else {
+        imp
+    }
 }

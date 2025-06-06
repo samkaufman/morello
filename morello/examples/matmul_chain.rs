@@ -114,23 +114,23 @@ fn main() {
 
 fn schedule_matmulaccum(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
     spec.split(128)
-        .move_param(1, GL, layout_b(), None)
+        .move_relayout(1, GL, layout_b(), None)
         .subschedule(&[0], |pack_b| {
             // TODO: This stinks. Use vectors at least.
             pack_b
                 .tile_out(&[1, 1, 1])
-                .move_param(0, L1, row_major, None)
-                .move_param(1, L1, row_major, None)
-                .move_param(0, RF, row_major, None)
+                .move_relayout(0, L1, row_major, None)
+                .move_relayout(1, L1, row_major, None)
+                .move_relayout(0, RF, row_major, None)
                 .subschedule(&[0], |m0| m0.select(CpuKernel::ValueAssign))
                 .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
         })
         .tile_out(&[1, 128, 1024])
         .tile_out(&[1, 4, 16])
-        .move_param(0, L1, row_major, None)
-        .move_param(1, L1, layout_b(), None)
-        .move_param(2, L1, row_major, None)
-        .move_param(2, VRF, row_major, Some(nz!(8u32)))
+        .move_relayout(0, L1, row_major, None)
+        .move_relayout(1, L1, layout_b(), None)
+        .move_relayout(2, L1, row_major, None)
+        .move_vrf(2, VRF, nz!(8u32))
         .subschedule(&[1, 0], |m| {
             m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
         })
@@ -139,7 +139,7 @@ fn schedule_matmulaccum(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
         })
         .split(1)
         .tile_out(&[1, 1, 16])
-        .move_param(1, VRF, layout_b(), Some(nz!(8u32)))
+        .move_relayout(1, VRF, layout_b(), Some(nz!(8u32)))
         .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::VectorAssign))
         .subschedule(&[1, 1, 1], |m| m.select(CpuKernel::BroadcastVecMultAdd))
 }
@@ -167,15 +167,15 @@ fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
         .subschedule(&[0, 1, 1], |subspec| {
             subspec
                 .tile_out(&[1, 1, 16])
-                .move_param(0, L1, row_major(RANK), None)
-                .move_param(1, L1, row_major(RANK), None)
-                .move_param(2, L1, row_major(RANK), None)
-                .move_param(3, L1, row_major(RANK), None)
-                .move_param(1, RF, row_major(RANK), None)
-                .move_param(2, RF, row_major(RANK), None)
+                .move_param(0, L1)
+                .move_param(1, L1)
+                .move_param(2, L1)
+                .move_param(3, L1)
+                .move_param(1, RF)
+                .move_param(2, RF)
                 .subschedule(&[1, 1], |s| {
-                    s.move_param(0, VRF, row_major(RANK), Some(nz!(8u32)))
-                        .move_param(3, VRF, row_major(RANK), Some(nz!(8u32)))
+                    s.move_relayout(0, VRF, row_major(RANK), Some(nz!(8u32)))
+                        .move_relayout(3, VRF, row_major(RANK), Some(nz!(8u32)))
                         .subschedule(&[0], |m| m.synthesize(&db, None))
                         .subschedule(&[1, 1], |m| m.synthesize(&db, None))
                         .subschedule(&[1, 0], |m| {
@@ -193,8 +193,8 @@ fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
                 .broadcast_first(VRF, row_major(RANK), Some(nz!(8u32)))
                 .subschedule(&[0], |broadcast| {
                     broadcast
-                        .move_param(0, L1, row_major(RANK), None)
-                        .move_param(0, RF, row_major(RANK), None)
+                        .move_relayout(0, L1, row_major(RANK), None)
+                        .move_relayout(0, RF, row_major(RANK), None)
                         .synthesize(&db, None)
                         .subschedule(&[0], |s| s.synthesize(&db, None))
                 })
@@ -204,9 +204,9 @@ fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
 
 fn schedule_zero(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
     spec.tile_out(&[1, 32, 1])
-        .move_param(0, L1, row_major, None)
+        .move_param(0, L1)
         .tile_out(&[1, 16, 1])
-        .move_param(0, RF, row_major, None)
+        .move_param(0, RF)
         .subschedule(&[0], |s| {
             s.tile_out(&[1, 1, 1]).select(CpuKernel::MemsetZero)
         })
