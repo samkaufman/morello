@@ -208,15 +208,13 @@ impl From<Option<DimSize>> for PrimitiveBasicsArbParams {
 
 impl<Tgt: Target> Spec<Tgt> {
     pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
-        let parameters = self.0.parameters();
-        let levels = parameters.iter().map(|p| p.level()).collect::<Vec<_>>();
+        let levels = self.0.parameter_levels();
         self.1.zero_levels_slower_than_all::<Tgt>(&levels);
         self.0.canonicalize()
     }
 
     pub fn is_canonical(&self) -> bool {
-        let parameters = self.0.parameters();
-        let levels = parameters.iter().map(|p| p.level()).collect::<Vec<_>>();
+        let levels = self.0.parameter_levels();
         !self.1.any_nonzero_levels_slower_than::<Tgt>(&levels) && self.0.is_canonical()
     }
 
@@ -1393,6 +1391,22 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => basics.typ.operand_count(),
             LogicalSpec::Compose { components, .. } => compose_parameter_count(components),
+        }
+    }
+
+    pub fn parameter_levels(&self) -> Vec<Tgt::Level> {
+        match self {
+            LogicalSpec::Primitive(_, auxes, _) => auxes.iter().map(|aux| aux.level).collect(),
+            LogicalSpec::Compose { operand_auxes, .. } => {
+                operand_auxes.iter().map(|aux| aux.level).collect()
+            }
+        }
+    }
+
+    pub fn parameter_level(&self, idx: usize) -> Tgt::Level {
+        match self {
+            LogicalSpec::Primitive(_, auxes, _) => auxes[idx].level,
+            LogicalSpec::Compose { operand_auxes, .. } => operand_auxes[idx].level,
         }
     }
 
@@ -3389,6 +3403,34 @@ mod tests {
         }
 
         #[test]
+        fn test_parameter_levels_matches_parameters_levels(
+            spec in any::<LogicalSpec<X86Target>>()
+        ) {
+            let levels_from_parameter_levels = spec.parameter_levels();
+            let levels_from_parameters = spec.parameters().iter().map(|p| p.level()).collect::<Vec<_>>();
+            prop_assert_eq!(levels_from_parameter_levels, levels_from_parameters);
+        }
+
+        #[test]
+        fn test_parameter_levels_matches_parameters_levels_arm(
+            spec in any::<LogicalSpec<ArmTarget>>()
+        ) {
+            let levels_from_parameter_levels = spec.parameter_levels();
+            let levels_from_parameters = spec.parameters().iter().map(|p| p.level()).collect::<Vec<_>>();
+            prop_assert_eq!(levels_from_parameter_levels, levels_from_parameters);
+        }
+
+        // TODO: Add ARM variant
+        #[test]
+        fn test_parameter_level_matches_parameter_levels_x86(
+            spec in any::<LogicalSpec<X86Target>>()
+        ) {
+            for (i, level) in spec.parameter_levels().into_iter().enumerate() {
+                prop_assert_eq!(level, spec.parameter_level(i));
+            }
+        }
+
+        #[test]
         fn test_no_action_panics_x86(spec in arb_canonical_spec::<X86Target>(None, None)) {
             shared_test_no_action_panics(spec);
         }
@@ -3770,9 +3812,9 @@ mod tests {
         let mut maxes = maxes_vec.iter_binary_scaled().collect::<Vec<_>>();
 
         // Zero out levels which are slower than all present operands' levels.
-        let parameters = logical_spec.parameters();
+        let parameter_levels = logical_spec.parameter_levels();
         for (level_idx, level) in Tgt::levels().into_iter().enumerate() {
-            if parameters.iter().all(|p| p.level() < level) {
+            if parameter_levels.iter().all(|l| *l < level) {
                 maxes[level_idx] = 0;
             }
         }
