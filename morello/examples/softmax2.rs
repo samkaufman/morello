@@ -77,7 +77,7 @@ fn main() {
                         .subschedule(&[1], |s| s.select(CpuKernel::ValueAssign))
                 })
                 .subschedule(&[1], |s| {
-                    s.tile_out(&[1, 64])
+                    s.tile_out(&[1, 32])
                         .move_param(0, CpuMemoryLevel::L1, row_major(2), None)
                         .move_param(1, CpuMemoryLevel::L1, row_major(2), None)
                         .move_param(2, CpuMemoryLevel::L1, row_major(2), None)

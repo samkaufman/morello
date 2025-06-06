@@ -1276,6 +1276,9 @@ impl CpuKernel {
                     },
                 ))
             }
+            CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => MemoryAllocation::Simple(
+                CPU_LEVELS.map(|level| if level.vector_rf() { 4 } else { 0 }),
+            ),
             _ => MemoryAllocation::none(),
         }
     }
