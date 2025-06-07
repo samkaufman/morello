@@ -115,33 +115,35 @@ fn main() {
 fn schedule_matmulaccum(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
     spec.split(128)
         .move_relayout(1, GL, layout_b(), None)
+        .tile_out(&[1, 128, 1024])
+        .tile_out(&[1, 4, 16])
+        .move_param(0, L1)
+        .move_param(1, L1)
+        .move_param(2, L1)
+        .move_vrf(2, VRF, nz!(8u32))
+        .split(1)
+        .tile_out(&[1, 1, 16])
+        .move_vrf(1, VRF, nz!(8u32))
+        .select(CpuKernel::BroadcastVecMultAdd)
         .subschedule(&[0], |pack_b| {
             // TODO: This stinks. Use vectors at least.
             pack_b
                 .tile_out(&[1, 1, 1])
-                .move_relayout(0, L1, row_major, None)
-                .move_relayout(1, L1, row_major, None)
-                .move_relayout(0, RF, row_major, None)
+                .move_param(0, L1)
+                .move_param(1, L1)
+                .move_param(0, RF)
                 .subschedule(&[0], |m0| m0.select(CpuKernel::ValueAssign))
                 .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
         })
-        .tile_out(&[1, 128, 1024])
-        .tile_out(&[1, 4, 16])
-        .move_relayout(0, L1, row_major, None)
-        .move_relayout(1, L1, layout_b(), None)
-        .move_relayout(2, L1, row_major, None)
-        .move_vrf(2, VRF, nz!(8u32))
         .subschedule(&[1, 0], |m| {
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
+        })
+        .subschedule(&[1, 1, 0], |m| {
             m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
         })
         .subschedule(&[1, 2], |m| {
             m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
         })
-        .split(1)
-        .tile_out(&[1, 1, 16])
-        .move_relayout(1, VRF, layout_b(), Some(nz!(8u32)))
-        .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::VectorAssign))
-        .subschedule(&[1, 1, 1], |m| m.select(CpuKernel::BroadcastVecMultAdd))
 }
 
 fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
