@@ -171,8 +171,14 @@ pub fn move_actions<Tgt: Target>(
         // includes relayouts in registers and movements from level 1 to RF.
         let i = u8::try_from(i).unwrap();
         let operand_dtype = operand.dtype();
-        for layout in Tgt::move_destination_layouts(operand.shape(), operand_dtype) {
+        let destination_layouts = Tgt::move_destination_layouts(operand.shape(), operand_dtype);
+        let mut contains_source_layout = false;
+
+        for layout in &destination_layouts {
             // TODO: Prevent moving into packed layouts where strip size equals the whole dim.
+            if !contains_source_layout && layout == operand.layout() {
+                contains_source_layout = true;
+            }
             for level in Tgt::possible_destination_levels(operand.level()) {
                 for &destination_dtype in
                     iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
@@ -193,6 +199,35 @@ pub fn move_actions<Tgt: Target>(
                             },
                         ),
                     )
+                }
+            }
+        }
+
+        // For cache destinations, generate moves that preserve original layout, unless
+        // it was already added. This preserves the layout's contiguity when moving
+        // into cache.
+        let original_layout = operand.layout();
+        if !contains_source_layout {
+            for level in Tgt::possible_destination_levels(operand.level()) {
+                if !level.is_addressed() {
+                    // This is a cache level, generate a move with the original layout
+                    for &destination_dtype in
+                        iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
+                    {
+                        results.extend(
+                            gen_vector_sizes_opt(destination_dtype, level.vector_bytes()).map(
+                                |vector_size| {
+                                    Action::Move(Move {
+                                        source_idx: i,
+                                        destination_dtype,
+                                        destination_level: level,
+                                        destination_layout: original_layout.clone(),
+                                        destination_vector_size: vector_size,
+                                    })
+                                },
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -263,9 +298,13 @@ fn gen_tile_sizes<Tgt: Target>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduling::{moves::Move, Action};
     use crate::shape;
+    use crate::spec::arb_canonical_logical_spec;
     use crate::target::X86Target;
-    use itertools::Itertools as _;
+    use itertools::Itertools;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_gen_tile_sizes_empty() {
@@ -389,5 +428,89 @@ mod tests {
             "gen_tile_sizes({:?}, drop_given={}, serial={}) returned {:?}, expected {:?}",
             tensor_shape, drop_given, multi_dim, actual, expected
         );
+    }
+
+    proptest! {
+        #[test]
+        fn test_move_actions_never_returns_duplicates(
+            spec in arb_canonical_logical_spec::<X86Target>(None)
+        ) {
+            let actions = move_actions::<X86Target>(&spec).collect::<Vec<_>>();
+            let mut seen_moves = HashSet::new();
+            let mut duplicate_count = 0;
+            for action in &actions {
+                if let Action::Move(Move {
+                    source_idx,
+                    destination_level,
+                    destination_layout,
+                    destination_dtype,
+                    destination_vector_size,
+                }) = action
+                {
+                    let move_key = (
+                        source_idx,
+                        destination_level,
+                        destination_layout,
+                        destination_dtype,
+                        destination_vector_size,
+                    );
+                    if !seen_moves.insert(move_key) {
+                        duplicate_count += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                duplicate_count, 0,
+                "Found {} duplicate Move actions",
+                duplicate_count
+            );
+        }
+
+        #[test]
+        fn test_move_actions_preserves_layout_for_cache_destinations(
+            spec in arb_canonical_logical_spec::<X86Target>(None)
+        ) {
+            let actions = move_actions::<X86Target>(&spec).collect::<Vec<_>>();
+            let operands = spec.parameters();
+
+            let mut cache_moves_by_operand = vec![HashSet::new(); operands.len()];
+            for action in &actions {
+                if let Action::Move(Move {
+                    source_idx,
+                    destination_level,
+                    destination_layout,
+                    ..
+                }) = action
+                {
+                    if !destination_level.is_addressed() {
+                        cache_moves_by_operand[usize::from(*source_idx)].insert((
+                            *destination_level,
+                            destination_layout.clone(),
+                        ));
+                    }
+                }
+            }
+
+            for (operand_idx, operand) in operands.iter().enumerate() {
+                let seen_destination_levels: HashSet<_> = cache_moves_by_operand[operand_idx]
+                    .iter()
+                    .map(|(destination_level, _)| destination_level)
+                    .collect();
+                for destination_level in seen_destination_levels {
+                    if cache_moves_by_operand[operand_idx].iter().any(|(_, layout)| {
+                        layout == operand.layout()
+                    }) {
+                        continue;
+                    }
+                    prop_assert!(
+                        false,
+                        "No layout-preserving move found for operand {} (layout: {:?}) to cache level {:?}.",
+                        operand_idx,
+                        operand.layout(),
+                        destination_level
+                    );
+                }
+            }
+        }
     }
 }
