@@ -459,7 +459,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                     )
                     .into(),
                 );
-                debug_assert_eq!(new_app_args.len(), spec.0.parameters().len());
+                debug_assert_eq!(new_app_args.len(), spec.0.operand_count());
                 *app_args = new_app_args;
 
                 // Replace the application Spec with a shrunken target

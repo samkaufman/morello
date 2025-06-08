@@ -1413,14 +1413,16 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     pub fn parameters(&self) -> Vec<TensorSpec<Tgt>> {
         match self {
             LogicalSpec::Primitive(basics, auxes, _) => {
-                debug_assert_eq!(basics.parameter_shapes().len(), basics.dtypes.len());
-                debug_assert_eq!(basics.parameter_shapes().len(), auxes.len());
+                debug_assert_eq!(basics.typ.operand_count(), basics.dtypes.len());
+                debug_assert_eq!(basics.typ.operand_count(), auxes.len());
                 basics
-                    .parameter_shapes()
-                    .into_iter()
-                    .zip(&basics.dtypes)
+                    .dtypes
+                    .iter()
                     .zip(auxes)
-                    .map(|((s, dt), a)| TensorSpec::new_noncanon_with_aux(s, *dt, a.clone()))
+                    .enumerate()
+                    .map(|(i, (dt, a))| {
+                        TensorSpec::new_noncanon_with_aux(basics.parameter_shape(i), *dt, a.clone())
+                    })
                     .collect()
             }
             LogicalSpec::Compose {
