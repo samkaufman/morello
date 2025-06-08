@@ -3881,10 +3881,13 @@ mod tests {
                     panic!("Expected length {LEVEL_COUNT}");
                 };
                 shared_spec.1 = MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(pt_arr));
+                assert!(shared_spec.is_canonical());
                 let MemoryLimits::Standard(limits_memvec) = &shared_spec.1;
                 // TODO: Assert that nothing disappears?
                 for i in (0..unseen_actions.len()).rev() {
-                    match unseen_actions[i].apply(&shared_spec) {
+                    // We could use `apply` for safety, but instead we use `apply_unchecked_canon`
+                    // since we assert the shared_spec is canonical outside the loop.
+                    match unseen_actions[i].apply_unchecked_canon(&shared_spec) {
                         Ok(applied) => {
                             unseen_actions.swap_remove(i);
                             // TODO: Should we also assert that applying the same action at each level
