@@ -8,10 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PROPTEST_CASES: 256
-  PROPTEST_MAX_GLOBAL_REJECTS: 1024
-  PROPTEST_MAX_LOCAL_REJECTS: 65536
-  PROPTEST_TIMEOUT: 20000
   CLANG: clang
 
 jobs:
@@ -35,7 +31,8 @@ jobs:
           sudo apt update
           sudo apt-get install -y libomp-dev
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-features -- --include-ignored
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --all-features --run-ignored=all --profile ci
   
   smoke-test-example:
     strategy:
