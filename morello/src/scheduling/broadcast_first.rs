@@ -42,7 +42,7 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
 
         let broadcast_destination = Tensor::new(
             TensorSpec::<Tgt>::new_canon_checked(
-                head.spec_shape.to_vec(),
+                head.spec_shape.clone(),
                 dtypes[1],
                 self.broadcast_layout.contiguous_full(),
                 true,

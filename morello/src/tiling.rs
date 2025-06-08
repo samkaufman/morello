@@ -8,7 +8,7 @@ use crate::views::{Tile, TileError, View};
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Tiling {
     shape: Shape,
-    step_sizes: Vec<DimSize>,
+    step_sizes: Shape,
 }
 
 /// A tiling over either Spec or operand shapes.

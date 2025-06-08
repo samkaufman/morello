@@ -14,6 +14,7 @@ use morello::common::{DimSize, Dtype};
 use morello::db::FilesDatabase;
 use morello::layout::{col_major, row_major};
 use morello::pprint::{pprint, ImplPrintStyle};
+use morello::smallvec::smallvec;
 use morello::target::{ArmTarget, CpuMemoryLevel::GL, CpuTarget, Target, TargetId, X86Target};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
@@ -217,7 +218,7 @@ where
             LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Softmax { scan_dim: rank - 1 },
-                    spec_shape: vec![*size; usize::from(*rank)],
+                    spec_shape: smallvec![*size; usize::from(*rank)],
                     dtypes: vec![Dtype::Uint32; usize::from(*rank)],
                 },
                 layouts

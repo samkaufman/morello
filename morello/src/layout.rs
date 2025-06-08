@@ -8,6 +8,7 @@ use crate::{
 use itertools::Itertools;
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec};
 use std::{collections::HashSet, fmt::Display, hash::Hash};
 
 pub trait LayoutBuilder {
@@ -253,7 +254,7 @@ impl Layout {
         }
 
         let mut seen = vec![false; logical_shape.len()];
-        let mut strides = vec![nz!(1u32); logical_shape.len()];
+        let mut strides = smallvec![nz!(1u32); logical_shape.len()];
         let mut last_stride = nz!(1u32);
         for (logical_dim, _) in &dims.iter().rev().chunk_by(|(dim, _)| *dim) {
             // We won't visit the chunk's contents. We're just interested in the dimension's
@@ -673,11 +674,9 @@ impl Layout {
         logical_shape: &[DimSize],
     ) -> Result<Shape, LayoutError> {
         let Layout(dims) = self;
-        let mut physical_shape = Vec::with_capacity(dims.len());
-        let mut logical_shape_remaining: Vec<u32> = Shape::from(logical_shape)
-            .into_iter()
-            .map(|x| x.get())
-            .collect();
+        let mut physical_shape = Shape::with_capacity(dims.len());
+        let mut logical_shape_remaining: SmallVec<[_; 5]> =
+            logical_shape.iter().map(|x| x.get()).collect();
         for (dim, phys_dim) in dims.iter().rev() {
             let remaining_size = &mut logical_shape_remaining[usize::from(*dim)];
             debug_assert_ne!(
@@ -1544,7 +1543,7 @@ mod tests {
         let layout = row_major(2);
         assert_eq!(
             layout.strides(&[nz!(4u32), nz!(6u32)]),
-            Ok(vec![nz!(6u32), nz!(1u32)])
+            Ok(smallvec![nz!(6u32), nz!(1u32)])
         );
     }
 
@@ -1557,7 +1556,7 @@ mod tests {
         ]);
         assert_eq!(
             layout.strides(&[nz!(2u32), nz!(4u32), nz!(6u32)]),
-            Ok(vec![nz!(4u32), nz!(1u32), nz!(8u32)])
+            Ok(smallvec![nz!(4u32), nz!(1u32), nz!(8u32)])
         );
     }
 

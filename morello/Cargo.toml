@@ -32,6 +32,7 @@ rle_vec = { git = "https://github.com/samkaufman/rle_vec.git", branch = "morello
 ] }
 rstar = { version = "0.12", features = ["serde"] }
 serde = { version = "1.0.160", features = ["derive"] }
+smallvec = { version = "1.15.1", features = ["serde", "union", "const_generics"] }
 tempfile = "3"
 thiserror = "1.0.47"
 nonzero = "0.2.0"

@@ -314,7 +314,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     pub(crate) fn one_prefix(&self) -> TensorSpec<Tgt> {
-        let mut new_shape = Vec::with_capacity(self.shape().len() + 1);
+        let mut new_shape = Shape::with_capacity(self.shape().len() + 1);
         new_shape.push(nz!(1u32));
         new_shape.extend_from_slice(self.shape());
 

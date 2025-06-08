@@ -5,6 +5,7 @@ use morello::db::FilesDatabase;
 use morello::layout::row_major;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule as _};
+use morello::smallvec::smallvec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::CpuKernel;
 use morello::target::{
@@ -25,7 +26,7 @@ fn main() {
     let logical_spec = LogicalSpec::Primitive(
         PrimitiveBasics {
             typ: PrimitiveSpecType::Softmax { scan_dim: 1 },
-            spec_shape: vec![SIZE; usize::from(RANK)],
+            spec_shape: smallvec![SIZE; usize::from(RANK)],
             dtypes: vec![Dtype::Float32; usize::from(RANK)],
         },
         layouts

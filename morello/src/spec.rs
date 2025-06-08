@@ -13,6 +13,7 @@ use crate::utils::{bit_length_inverse, bit_length_u32, join_into_string, prev_po
 use itertools::{izip, Itertools};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
+use smallvec::smallvec;
 
 use std::fmt;
 use std::fmt::Display;
@@ -432,7 +433,7 @@ impl PrimitiveBasics {
             PrimitiveSpecType::OnePrefix => match idx {
                 0 => self.spec_shape.clone(),
                 1 => {
-                    let mut shape = vec![];
+                    let mut shape = smallvec![];
                     shape.reserve_exact(self.spec_shape.len() + 1);
                     shape.push(nz!(1u32));
                     shape.extend_from_slice(&self.spec_shape);
@@ -441,9 +442,9 @@ impl PrimitiveBasics {
                 _ => panic!("OnePrefix has only 2 parameters"),
             },
             PrimitiveSpecType::Matmul { .. } => match idx {
-                0 => vec![self.spec_shape[0], self.spec_shape[1], self.spec_shape[2]],
-                1 => vec![self.spec_shape[0], self.spec_shape[2], self.spec_shape[3]],
-                2 => vec![self.spec_shape[0], self.spec_shape[1], self.spec_shape[3]],
+                0 => smallvec![self.spec_shape[0], self.spec_shape[1], self.spec_shape[2]],
+                1 => smallvec![self.spec_shape[0], self.spec_shape[2], self.spec_shape[3]],
+                2 => smallvec![self.spec_shape[0], self.spec_shape[1], self.spec_shape[3]],
                 _ => panic!("Matmul has only 3 parameters"),
             },
             PrimitiveSpecType::Conv { .. } => {
@@ -459,8 +460,8 @@ impl PrimitiveBasics {
                     fw
                 );
                 match idx {
-                    0 => vec![b, c, h, w],
-                    1 => vec![f, c, fh, fw],
+                    0 => smallvec![b, c, h, w],
+                    1 => smallvec![f, c, fh, fw],
                     2 => conv_infer_output_shape(&[b, c, h, w], &[f, c, fh, fw]),
                     _ => panic!("Conv has only 3 parameters"),
                 }
@@ -490,7 +491,7 @@ impl PrimitiveBasics {
                 _ => panic!("DivideVecScalar has only 2 parameters"),
             },
             PrimitiveSpecType::Softmax { .. } => match idx {
-                0 | 1 => self.spec_shape.to_vec(),
+                0 | 1 => self.spec_shape.clone(),
                 _ => panic!("Softmax has only 2 parameters"),
             },
             PrimitiveSpecType::SoftmaxComplete { scan_dim } => match idx {
@@ -630,12 +631,12 @@ impl PrimitiveBasics {
             ) => TilingInference(vec![
                 (
                     Tiling::new_sliding(
-                        vec![
+                        smallvec![
                             smaller_output.shape()[0],
                             smaller_output.shape()[1],
                             spec_shape[2],
                         ],
-                        vec![
+                        smallvec![
                             smaller_output.step_sizes()[0],
                             smaller_output.step_sizes()[1],
                             spec_shape[2],
@@ -645,12 +646,12 @@ impl PrimitiveBasics {
                 ),
                 (
                     Tiling::new_sliding(
-                        vec![
+                        smallvec![
                             smaller_output.shape()[0],
                             spec_shape[2],
                             smaller_output.shape()[2],
                         ],
-                        vec![
+                        smallvec![
                             smaller_output.step_sizes()[0],
                             spec_shape[2],
                             smaller_output.step_sizes()[2],
@@ -719,7 +720,7 @@ impl PrimitiveBasics {
                     // Softmax's scan dimension cannot be tiled
                     return None;
                 }
-                let mut tiled_step_sizes = smaller_output.step_sizes().to_vec();
+                let mut tiled_step_sizes = Shape::from_slice(smaller_output.step_sizes());
                 tiled_step_sizes[scan_dim_us] = spec_shape[scan_dim_us];
                 let mut bindings = (0..smaller_output.shape().len())
                     .map(|d| Some(d.try_into().unwrap()))
@@ -759,10 +760,10 @@ impl PrimitiveBasics {
                     .collect::<Vec<_>>();
                 let mut x_shape = smaller_output.shape().clone();
                 x_shape[usize::from(*scan_dim)] = spec_shape[usize::from(*scan_dim)];
-                let mut x_steps = smaller_output.step_sizes().to_vec();
+                let mut x_steps = Shape::from_slice(smaller_output.step_sizes());
                 x_steps[usize::from(*scan_dim)] = spec_shape[usize::from(*scan_dim)];
                 let maxes_shape = smaller_output.shape().clone();
-                let maxes_steps = smaller_output.step_sizes().to_vec();
+                let maxes_steps = Shape::from_slice(smaller_output.step_sizes());
                 TilingInference(vec![
                     (Tiling::new_sliding(x_shape, x_steps), bindings.clone()),
                     (Tiling::new_sliding(maxes_shape, maxes_steps), bindings),
@@ -778,7 +779,7 @@ impl PrimitiveBasics {
             ) => {
                 let mut input_shape = smaller_output.shape().clone();
                 input_shape[usize::from(*dim)] = spec_shape[usize::from(*dim)];
-                let mut input_steps = smaller_output.step_sizes().to_vec();
+                let mut input_steps = Shape::from_slice(smaller_output.step_sizes());
                 input_steps[usize::from(*dim)] = spec_shape[usize::from(*dim)];
                 TilingInference(vec![(
                     Tiling::new_sliding(input_shape, input_steps),
@@ -817,8 +818,8 @@ impl PrimitiveBasics {
                 },
                 _,
             ) => {
-                let shape = smaller_output.shape()[1..].to_vec();
-                let steps = smaller_output.step_sizes()[1..].to_vec();
+                let shape = Shape::from_slice(&smaller_output.shape()[1..]);
+                let steps = Shape::from_slice(&smaller_output.step_sizes()[1..]);
                 let bindings = (1..shape.len())
                     .map(|v| Some(v.try_into().unwrap()))
                     .collect();
@@ -1060,7 +1061,7 @@ impl PrimitiveSpecType {
                 assert_eq!(lhs[1], out[1]);
                 assert_eq!(rhs[2], out[2]);
                 assert_eq!(lhs[2], rhs[1]);
-                vec![lhs[0], lhs[1], lhs[2], rhs[2]]
+                smallvec![lhs[0], lhs[1], lhs[2], rhs[2]]
             }
             PrimitiveSpecType::Conv { accum: _ } => {
                 let lhs = parameter_shapes.next().unwrap();
@@ -1073,7 +1074,7 @@ impl PrimitiveSpecType {
                 let [f, alt_c, fh, fw] = *rhs else { panic!() };
                 assert_eq!(c, alt_c);
                 // TODO: Assert consistency with the output as well
-                vec![b, f, c, h, w, fh, fw]
+                smallvec![b, f, c, h, w, fh, fw]
             }
             PrimitiveSpecType::Broadcast { dim } => {
                 let inp = parameter_shapes.next().unwrap();
@@ -1228,14 +1229,14 @@ impl PrimitiveSpecType {
                 let ([b, m, _k], [_, _, n]) = (inputs[0], inputs[1]) else {
                     panic!("Matmul inputs must have 3 dimensions each");
                 };
-                Some(vec![*b, *m, *n])
+                Some(smallvec![*b, *m, *n])
             }
             PrimitiveSpecType::Conv { .. } => {
                 let ([b, _, h, w], [f, _, fh, fw]) = (inputs[0], inputs[1]) else {
                     panic!("Conv inputs must have 4 dimensions each");
                 };
                 debug_assert!(h.get() >= fh.get() && w.get() >= fw.get());
-                Some(vec![
+                Some(smallvec![
                     *b,
                     *f,
                     DimSize::new(1 + h.get() - fh.get()).unwrap(),
@@ -1257,10 +1258,10 @@ impl PrimitiveSpecType {
             ),
             PrimitiveSpecType::OnePrefix => {
                 let input = inputs[0];
-                let mut output = vec![];
+                let mut output = smallvec![];
                 output.reserve_exact(input.len() + 1);
                 output.push(nz!(1u32));
-                output.extend(input);
+                output.extend_from_slice(input);
                 Some(output)
             }
             PrimitiveSpecType::SoftmaxDenominator { .. } => Some(inputs[1].into()),
@@ -1271,7 +1272,7 @@ impl PrimitiveSpecType {
             | PrimitiveSpecType::DivideVec
             | PrimitiveSpecType::DivideVecScalar { .. } => {
                 // The shape and dtype match for moves and zero.
-                Some(inputs[0].to_vec())
+                Some(Shape::from_slice(inputs[0]))
             }
             PrimitiveSpecType::Broadcast { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
@@ -1888,7 +1889,10 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     // shape is compatible with many output shapes.
                     let (new_output_shape, new_output_dtype) = if component_idx == 0 {
                         let last_operand = new_operands.last().unwrap();
-                        (last_operand.shape().to_vec(), last_operand.dtype())
+                        (
+                            Shape::from_slice(last_operand.shape()),
+                            last_operand.dtype(),
+                        )
                     } else {
                         let inp_shapes = component_inputs
                             .iter()
@@ -2562,7 +2566,7 @@ impl BiMap for PrimitiveBasicsBimap {
 }
 
 impl BiMap for ShapeBimap {
-    type Domain = Vec<DimSize>;
+    type Domain = Shape;
     type Codomain = Vec<BimapInt>;
 
     fn apply(&self, shape: &Self::Domain) -> Self::Codomain {
@@ -2979,7 +2983,7 @@ fn one_reduced_dimension_tiling_tuple(
     let dim_us = usize::from(reduction_dim);
     let mut shape = output.shape().clone();
     shape[dim_us] = nz!(1u32);
-    let mut steps = output.step_sizes().to_vec();
+    let mut steps = Shape::from_slice(output.step_sizes());
     steps[dim_us] = nz!(1u32);
     let bindings = (0..output.shape().len())
         .map(|d| {
@@ -3029,13 +3033,13 @@ pub mod macros {
         ($dim:expr; $n:expr) => {{
             use $crate::spec::macros::internal::IntoDimSize;
             // Bind to a variable with an explicit type to help out type inference.
-            let sv: $crate::common::Shape = vec![ ($dim).into_dim_size(); $n ];
+            let sv: $crate::common::Shape = smallvec::smallvec![ ($dim).into_dim_size(); $n ];
             sv
         }};
         ($($dim:expr),*$(,)*) => {{
             use $crate::spec::macros::internal::IntoDimSize;
             // Bind to a variable with an explicit type to help out type inference.
-            let sv: $crate::common::Shape = vec![ $( ($dim).into_dim_size() ),* ];
+            let sv: $crate::common::Shape = smallvec::smallvec![ $( ($dim).into_dim_size() ),* ];
             sv
         }};
     }
@@ -3311,27 +3315,39 @@ mod tests {
 
         let expected_parameters: Vec<TensorSpec<X86Target>> = vec![
             TensorSpec::new_noncanon_with_aux(
-                [0, 2, 3].map(|i| components[0].spec_shape[i]).into(),
+                [0, 2, 3]
+                    .into_iter()
+                    .map(|i| components[0].spec_shape[i])
+                    .collect(),
                 components[0].dtypes[1],
                 operand_auxes[0].clone(),
             ),
             TensorSpec::new_noncanon_with_aux(
-                [0, 2, 3].map(|i| components[1].spec_shape[i]).into(),
+                [0, 2, 3]
+                    .into_iter()
+                    .map(|i| components[1].spec_shape[i])
+                    .collect(),
                 components[1].dtypes[1],
                 operand_auxes[1].clone(),
             ),
             TensorSpec::new_noncanon_with_aux(
-                components[2].spec_shape[..3].to_vec(),
+                Shape::from_slice(&components[2].spec_shape[..3]),
                 components[2].dtypes[0],
                 operand_auxes[2].clone(),
             ),
             TensorSpec::new_noncanon_with_aux(
-                [0, 2, 3].map(|i| components[2].spec_shape[i]).into(),
+                [0, 2, 3]
+                    .into_iter()
+                    .map(|i| components[2].spec_shape[i])
+                    .collect(),
                 components[2].dtypes[1],
                 operand_auxes[3].clone(),
             ),
             TensorSpec::new_noncanon_with_aux(
-                [0, 1, 3].map(|i| components[0].spec_shape[i]).into(),
+                [0, 1, 3]
+                    .into_iter()
+                    .map(|i| components[0].spec_shape[i])
+                    .collect(),
                 components[0].dtypes[2],
                 operand_auxes.last().unwrap().clone(),
             ),
@@ -3710,7 +3726,7 @@ mod tests {
             let parameter_shapes = spec.parameter_shapes();
             prop_assert_eq!(parameters.len(), parameter_shapes.len());
             for (p, s) in parameters.iter().zip(&parameter_shapes) {
-                assert_eq!(p.shape(), s);
+                assert_eq!(p.shape(), s.as_slice());
             }
         }
 

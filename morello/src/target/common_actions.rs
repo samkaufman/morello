@@ -1,9 +1,5 @@
 //! Scheduling actions shared between targets.
 
-use std::iter::{self, once};
-
-use itertools::Either;
-
 use super::{MemoryLevel, Target};
 use crate::{
     common::{DimSize, Shape},
@@ -17,6 +13,9 @@ use crate::{
     tensorspec::{gen_vector_sizes, gen_vector_sizes_opt},
     utils::is_power_of_two_u32,
 };
+use itertools::Either;
+use smallvec::smallvec;
+use std::iter::{self, once};
 
 /// Whether `tile_out` actions should tile in all dimensions per Spec.
 const MULTI_DIM_TILING: bool = false;
@@ -216,20 +215,20 @@ fn gen_tile_sizes<Tgt: Target>(
             if drop_given && d == one_dim {
                 None
             } else {
-                Some(vec![d])
+                Some(smallvec![d])
             }
         }));
     }
 
     if multi_dim {
-        let tensor_shape = tensor_shape.to_vec();
+        let tensor_shape = Shape::from_slice(tensor_shape);
         Box::new(
             gen_tile_sizes::<Tgt>(&tensor_shape[1..], false, multi_dim).flat_map(move |rest| {
                 let tensor_shape = tensor_shape.clone();
                 dim_range(tensor_shape[0], true).flat_map(move |d| {
-                    let mut new_shape = vec![d];
+                    let mut new_shape = smallvec![d];
                     new_shape.extend(rest.clone());
-                    if drop_given && tensor_shape == new_shape[..] {
+                    if drop_given && tensor_shape[..] == new_shape[..] {
                         None
                     } else {
                         Some(new_shape)
@@ -238,7 +237,7 @@ fn gen_tile_sizes<Tgt: Target>(
             }),
         )
     } else {
-        let tensor_shape = tensor_shape.to_vec();
+        let tensor_shape = Shape::from_slice(tensor_shape);
         let own_shape_iter = if !drop_given
             && tensor_shape
                 .iter()

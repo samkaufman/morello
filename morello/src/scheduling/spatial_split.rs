@@ -3,6 +3,7 @@ use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::scheduling::{tile_to_apply_err, ActionT, ApplyError, NotApplicableReason};
+use crate::smallvec::smallvec;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::views::{Param, Tile, View, ViewE, ViewExt};
@@ -83,7 +84,7 @@ impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
         let body_spec = LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Matmul { accum: true },
-                spec_shape: vec![
+                spec_shape: smallvec![
                     nz!(1u32),
                     operands[0].shape()[0],
                     operands[0].shape()[1],

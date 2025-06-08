@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::fmt::Display;
 use std::num::NonZeroU32;
 
@@ -6,7 +7,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 
 pub type DimSize = NonZeroU32;
-pub type Shape = Vec<DimSize>;
+pub type Shape = SmallVec<[DimSize; 5]>;
 pub type Contig = u8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]

@@ -33,6 +33,7 @@ use morello::layout::row_major;
 use morello::lspec;
 use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::search::top_down_many;
+use morello::smallvec::smallvec;
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
 };
@@ -420,7 +421,7 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
                 LogicalSpec::Primitive(
                     PrimitiveBasics {
                         typ: PrimitiveSpecType::Conv { accum: false },
-                        spec_shape: vec![
+                        spec_shape: smallvec![
                             args.batch,
                             args.filters,
                             args.channels,

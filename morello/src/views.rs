@@ -7,6 +7,7 @@ use crate::{
     target::Target,
     tensorspec::TensorSpec,
 };
+use smallvec::smallvec;
 use std::{
     borrow::Borrow,
     fmt::{Debug, Display, Formatter},
@@ -213,7 +214,7 @@ pub trait ViewExt: View {
         let [h, w] = self.shape() else {
             panic!("Cannot transpose a tensor with shape {:?}", self.shape());
         };
-        let shape = vec![*w, *h];
+        let shape = smallvec![*w, *h];
 
         let (transposed_layout, new_contig) = self
             .spec()
@@ -541,7 +542,7 @@ impl<V: View> CacheView<V> {
 #[derive(Debug, Clone)]
 pub struct Tile<V: View> {
     shape: Shape,
-    step_sizes: Vec<DimSize>,
+    step_sizes: Shape,
     pub view: V,
     expr_term_id: OpaqueSymbol,
     spec: TensorSpec<V::Tgt>,

@@ -1,4 +1,4 @@
-use crate::common::{DimSize, Dtype};
+use crate::common::{DimSize, Dtype, Shape};
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
@@ -110,7 +110,7 @@ fn scalar_tensor<Tgt: Target>(
     max_vector_size: Option<DimSize>,
 ) -> Tensor<Tgt> {
     let mut max_spec = TensorSpec {
-        shape: spec_shape.to_vec(),
+        shape: Shape::from_slice(spec_shape),
         dtype,
         aux: TensorSpecAux {
             contig: max_layout.contiguous_full(),

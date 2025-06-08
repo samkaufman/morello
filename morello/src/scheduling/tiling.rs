@@ -16,6 +16,7 @@ use crate::views::{Param, Tile, View, ViewE};
 use itertools::Either;
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
+use smallvec::smallvec;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub enum TileOut {
@@ -280,8 +281,8 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                                 parameter_index: 0,
                                 axes: vec![0, 1, 2],
                                 tile: Tile::new(
-                                    vec![lhs.shape()[0], lhs.shape()[1], self.k],
-                                    vec![lhs.shape()[0], lhs.shape()[1], self.k],
+                                    smallvec![lhs.shape()[0], lhs.shape()[1], self.k],
+                                    smallvec![lhs.shape()[0], lhs.shape()[1], self.k],
                                     Param::new(0, lhs.clone()),
                                 )
                                 .map(|v| v.boxed_viewe())
@@ -291,8 +292,8 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                                 parameter_index: 1,
                                 axes: vec![0, 2, 3],
                                 tile: Tile::new(
-                                    vec![rhs.shape()[0], self.k, rhs.shape()[2]],
-                                    vec![rhs.shape()[0], self.k, rhs.shape()[2]],
+                                    smallvec![rhs.shape()[0], self.k, rhs.shape()[2]],
+                                    smallvec![rhs.shape()[0], self.k, rhs.shape()[2]],
                                     Param::new(1, rhs.clone()),
                                 )
                                 .map(|v| v.boxed_viewe())
@@ -320,7 +321,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                             )));
                         }
 
-                        let mut split_shape = in_tensor_spec.shape().to_vec();
+                        let mut split_shape = Shape::from_slice(in_tensor_spec.shape());
                         split_shape[usize::from(*dim)] = self.k;
 
                         let tiles = vec![LoopTile {
@@ -420,11 +421,11 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                 let new_head_rhs_looptile = LoopTile {
                     parameter_index: 0,
                     axes: vec![tail_output_tile.axes[0], tail_output_tile.axes[2], 255], // TODO: Replace 255
-                    tile: Tiling::new_simple(vec![*old_b, self.k, *old_n])
+                    tile: Tiling::new_simple(smallvec![*old_b, self.k, *old_n])
                         .apply(Param::new(
                             0,
                             TensorSpec::new_noncanon_with_aux(
-                                vec![*old_b, *old_k, *old_n],
+                                smallvec![*old_b, *old_k, *old_n],
                                 components[0].dtypes[1],
                                 operand_auxes[0].clone(),
                             ),

@@ -26,3 +26,7 @@ pub mod utils;
 #[cfg(feature = "verification")]
 pub mod verification;
 pub mod views;
+
+// Temporarily-export smallvec dependency
+// TODO: Wrap the Shape type instead.
+pub use smallvec;
