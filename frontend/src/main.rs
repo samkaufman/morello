@@ -223,12 +223,14 @@ where
                 },
                 layouts
                     .into_iter()
-                    .map(|layout| TensorSpecAux::<Tgt> {
-                        contig: layout.contiguous_full(),
-                        aligned: true,
-                        level: GL,
-                        layout,
-                        vector_size: None,
+                    .map(|layout| {
+                        debug_assert!(layout.is_fully_contiguous()); // row_major should be contig.
+                        TensorSpecAux::<Tgt> {
+                            aligned: true,
+                            level: GL,
+                            layout,
+                            vector_size: None,
+                        }
                     })
                     .collect(),
                 true,

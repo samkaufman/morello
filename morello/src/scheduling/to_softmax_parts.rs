@@ -63,14 +63,15 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
             self.denominator_layout.clone(),
             self.denominator_vector_size,
         );
+        let mut exps_layout_contiguous = self.exps_layout.clone();
+        exps_layout_contiguous.set_contiguous_full();
         let exps_tensor = Tensor::new(TensorSpec::<Tgt> {
             shape: spec_shape.clone(),
             dtype: dtypes[0],
             aux: TensorSpecAux {
-                contig: self.exps_layout.contiguous_full(),
                 aligned: true,
                 level: self.exps_level,
-                layout: self.exps_layout.clone(),
+                layout: exps_layout_contiguous,
                 vector_size: self.exps_vector_size,
             },
         });
@@ -204,11 +205,11 @@ fn softmax_scalar_tensor<Tgt: Target>(
     max_layout: Layout,
     max_vector_size: Option<DimSize>,
 ) -> Tensor<Tgt> {
+    debug_assert!(max_layout.is_fully_contiguous());
     let mut max_spec = TensorSpec {
         shape: Shape::from_slice(spec_shape),
         dtype,
         aux: TensorSpecAux {
-            contig: max_layout.contiguous_full(),
             aligned: true,
             level: max_level,
             layout: max_layout,

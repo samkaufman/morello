@@ -195,7 +195,7 @@ impl<T: CpuTarget> Target for T {
 
         let all_packing_sizes = pack_sizes_all(dtype, &all_target_vector_bytes).collect::<Vec<_>>();
         result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
-            let Layout(dims) = original_layout;
+            let Layout { dims, contig: _ } = original_layout;
             (0..dims.len())
                 .cartesian_product(&all_packing_sizes)
                 .filter_map(|(packing_dim, &packing_size)| {
@@ -220,7 +220,7 @@ impl<T: CpuTarget> Target for T {
         let all_oddeven_sizes =
             oddeven_sizes_all(dtype, &all_target_vector_bytes).collect::<Vec<_>>();
         result.extend(unpacked_layouts.iter().flat_map(|original_layout| {
-            let Layout(dims) = original_layout;
+            let Layout { dims, contig: _ } = original_layout;
             (0..dims.len())
                 .cartesian_product(&all_oddeven_sizes)
                 .filter_map(|(packing_dim, &packing_size)| {
@@ -698,7 +698,6 @@ impl CpuKernel {
                                 layout: src_layout,
                                 vector_size: src_vs,
                                 aligned: _,
-                                contig: _
                             },
                         },
                         dest @ TensorSpec {
@@ -709,7 +708,6 @@ impl CpuKernel {
                                 layout: dest_layout,
                                 vector_size: dest_vs,
                                 aligned: _,
-                                contig: _
                             },
                         },
                     ] if src.is_contiguous() && dest.is_contiguous()
@@ -719,8 +717,8 @@ impl CpuKernel {
                       && src_vs == &Some(nz!(16u32))
                       && dest_vs == &Some(nz!(8u32))
                       && src_layout.is_row_major()
-                      && dest_layout.0.iter().all(|(_, pd)| pd == &PhysDim::Dynamic || pd == &leaved)
-                      && dest_layout.0.iter().filter(|(_, pd)| pd == &leaved).count() == 1
+                      && dest_layout.dims.iter().all(|(_, pd)| pd == &PhysDim::Dynamic || pd == &leaved)
+                      && dest_layout.dims.iter().filter(|(_, pd)| pd == &leaved).count() == 1
                 )
             }
             CpuKernel::VectorDeinterleaveF32Bf16 => {
@@ -1573,14 +1571,13 @@ where
                 dtype: Dtype::Uint8 | Dtype::Sint8,
                 aux:
                     TensorSpecAux {
-                        contig,
                         aligned: _,
                         level: CpuMemoryLevel::VRF,
                         layout,
                         vector_size: Some(v),
                     },
             } if shape[..] == *shape![2, vector_values]
-                && *contig == layout.contiguous_full()
+                && layout.is_fully_contiguous()
                 && v.get() == vector_values => {}
             _ => return false,
         };
@@ -1739,7 +1736,7 @@ where
     Fr: 'a + Iterator<Item = DimSize>,
     G: 'a + Fn(DimSize) -> PhysDim,
 {
-    let Layout(dims) = &original_layout;
+    let Layout { dims, contig: _ } = original_layout;
     debug_assert!(dims.iter().all(|(_, s)| *s == PhysDim::Dynamic));
 
     let final_nonone_dim = {
@@ -1959,7 +1956,6 @@ mod tests {
         let arg0 = TensorSpec::new_canon(
             shape![2, 32],
             Dtype::Uint32,
-            row_major(2).contiguous_full(),
             true,
             CpuMemoryLevel::VRF,
             row_major(2),
@@ -1968,7 +1964,6 @@ mod tests {
         let arg1 = TensorSpec::new_canon(
             shape![2, 32],
             Dtype::Uint32,
-            row_major(2).contiguous_full(),
             true,
             CpuMemoryLevel::L1,
             row_major(2),

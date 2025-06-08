@@ -37,13 +37,21 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
             ))));
         };
 
+        if !self.layout.is_fully_contiguous() {
+            // The following could be a warning since contiguousness is meant to
+            // be an underapproximation. We'll generate code which allocates a contiguous buffer,
+            // but it's not necessarily a problem to underapproximate contiguousness.
+            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                "Buffer layout is not fully contiguous",
+            ))));
+        }
+
         debug_assert!(self.index < components.len() - 1);
         let consumer = &components[self.index];
         let intermediate_tensor = Tensor::new(
             TensorSpec::new_canon_checked(
                 consumer.input_shape(0),
                 consumer.input_dtype(0),
-                self.layout.contiguous_full(),
                 true,
                 self.level,
                 self.layout.clone(),
@@ -142,7 +150,6 @@ mod tests {
             dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
         };
         let aux = TensorSpecAux {
-            contig: row_major(3).contiguous_full(),
             aligned: true,
             level: CpuMemoryLevel::GL,
             layout: row_major(3),

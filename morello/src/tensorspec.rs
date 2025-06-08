@@ -26,7 +26,6 @@ pub struct TensorSpec<Tgt: Target> {
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct TensorSpecAux<Tgt: Target> {
-    pub contig: Contig,
     pub aligned: bool,
     pub level: Tgt::Level,
     pub layout: Layout,
@@ -62,50 +61,32 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     pub fn new_canon(
         shape: Shape,
         dtype: Dtype,
-        contiguous_abs: Contig,
         aligned: bool,
         level: Tgt::Level,
         layout: Layout,
         vector_size: Option<DimSize>,
     ) -> Self {
-        Self::new_canon_checked(
-            shape,
-            dtype,
-            contiguous_abs,
-            aligned,
-            level,
-            layout,
-            vector_size,
-        )
-        .unwrap()
+        Self::new_canon_checked(shape, dtype, aligned, level, layout, vector_size).unwrap()
     }
 
+    // TODO: Remove contig. parameter here
     pub fn new_canon_checked(
         shape: Shape,
         dtype: Dtype,
-        contiguous_abs: Contig,
         aligned: bool,
         level: Tgt::Level,
         layout: Layout,
         vector_size: Option<DimSize>,
     ) -> Result<Self, CanonicalizeError> {
-        let mut r = Self::new_noncanon(
-            shape,
-            dtype,
-            contiguous_abs,
-            aligned,
-            level,
-            layout,
-            vector_size,
-        );
+        let mut r = Self::new_noncanon(shape, dtype, aligned, level, layout, vector_size);
         r.canonicalize()?;
         Ok(r)
     }
 
+    // TODO: Remove contig. parameter here
     pub fn new_noncanon(
         shape: Shape,
         dtype: Dtype,
-        contiguous_abs: Contig,
         aligned: bool,
         level: Tgt::Level,
         layout: Layout,
@@ -115,7 +96,6 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             shape,
             dtype,
             TensorSpecAux {
-                contig: contiguous_abs,
                 aligned,
                 level,
                 layout,
@@ -206,16 +186,14 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.dtype
     }
 
-    pub fn contiguous_abs(&self) -> Contig {
-        self.aux.contig
+    // TODO: Remove. Should not be public.
+    pub(crate) fn contiguous_abs(&self) -> Contig {
+        self.aux.layout.contig()
     }
 
-    pub fn set_contiguous_abs(&mut self, contiguous_abs: Contig) {
-        self.aux.contig = contiguous_abs;
-    }
-
+    // TODO: Remove. This is just sugar for Layout's is_fully_contiguous().
     pub fn is_contiguous(&self) -> bool {
-        self.aux.contig == self.aux.layout.contiguous_full()
+        self.aux.layout.is_fully_contiguous()
     }
 
     pub fn aligned(&self) -> bool {
@@ -251,13 +229,9 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     /// The result's layout and contiguousness abstraction will have been
     /// canonicalized for the given shape.
     pub fn shrink(&mut self, shape: &[DimSize], aligned: bool) -> Result<(), LayoutError> {
-        let (new_layout, new_contig) =
-            self.aux
-                .layout
-                .update_for_tiling(self.shape(), shape, self.aux.contig)?;
+        let new_layout = self.aux.layout.update_for_tiling(self.shape(), shape)?;
         self.shape = Shape::from(shape);
         self.aux.layout = new_layout;
-        self.aux.contig = new_contig;
         self.aux.aligned = aligned;
         Ok(())
     }
@@ -292,20 +266,16 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             new_shape.remove(dim.into());
         }
 
-        let (new_layout, new_contig) = if new_shape.iter().all(|&d| d.get() == 1) {
-            let new_layout = row_major(new_shape.len().try_into().unwrap());
-            let new_contig = new_layout.contiguous_full();
-            (new_layout, new_contig)
+        let new_layout = if new_shape.iter().all(|&d| d.get() == 1) {
+            row_major(new_shape.len().try_into().unwrap())
         } else {
             let dropped_dims_set = dropped_dims.iter().copied().collect::<HashSet<_>>();
-            self.layout()
-                .dim_drop(&dropped_dims_set, self.contiguous_abs())
+            self.layout().dim_drop(&dropped_dims_set)
         };
 
         TensorSpec::new_canon(
             new_shape,
             self.dtype(),
-            new_contig,
             self.aligned(),
             self.level(),
             new_layout,
@@ -319,22 +289,22 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         new_shape.extend_from_slice(self.shape());
 
         let mut new_layout = self.layout().clone();
-        let was_initially_contiguous = new_layout.contiguous_full() == self.contiguous_abs();
+        let was_initially_contiguous = self.layout().is_fully_contiguous();
 
-        for (logical_dim, _) in new_layout.0.iter_mut() {
+        for (logical_dim, _) in new_layout.dims.iter_mut() {
             *logical_dim += 1;
         }
-        new_layout.0.insert(0, (0, PhysDim::Dynamic));
+        new_layout.dims.insert(0, (0, PhysDim::Dynamic));
 
         let mut new_contig = self.contiguous_abs();
         if was_initially_contiguous {
             new_contig = new_layout.contiguous_full();
         }
+        new_layout.set_contig(new_contig);
 
         TensorSpec::new_canon(
             new_shape,
             self.dtype(),
-            new_contig,
             self.aligned(),
             self.level(),
             new_layout,
@@ -426,9 +396,7 @@ fn arb_noncanon_tensorspec<Tgt: Target>(
 
 impl<Tgt: Target> TensorSpecAux<Tgt> {
     pub(crate) fn canonicalize(&mut self, shape: &[DimSize]) -> Result<(), CanonicalizeError> {
-        let (new_layout, new_contig) = self.layout.update_for_tiling(shape, shape, self.contig)?;
-        self.layout = new_layout;
-        self.contig = new_contig;
+        self.layout = self.layout.update_for_tiling(shape, shape)?;
         Ok(())
     }
 
@@ -436,7 +404,7 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
         if !self.layout.is_row_major() && shape.iter().all(|d| d.get() == 1) {
             false
         } else {
-            let Layout(dims) = &self.layout;
+            let Layout { dims, contig } = &self.layout;
 
             // Count the number of packings applied to each logical dimension.
             // As a special case, `packings` is empty if there are no packed dims.
@@ -469,7 +437,7 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
             }
 
             let physical_rank = dims.len();
-            let first_contig_idx = u8::try_from(physical_rank).unwrap() - self.contig;
+            let first_contig_idx = u8::try_from(physical_rank).unwrap() - contig;
             if first_contig_idx > 0 {
                 let ps = self
                     .layout
@@ -567,15 +535,16 @@ where
                 vector_options
             )
             .flat_map(move |(aligned, layout, vector_size)| {
-                layout
-                    .all_contiguous_abs()
-                    .map(move |contig| TensorSpecAux {
-                        contig,
+                layout.all_contiguous_abs().map(move |contig| {
+                    let mut layout_with_contig = layout.clone();
+                    layout_with_contig.set_contig(contig);
+                    TensorSpecAux {
                         aligned,
-                        layout: layout.clone(),
+                        layout: layout_with_contig,
                         vector_size: vector_size.map(|v| DimSize::new(v).unwrap()),
                         level,
-                    })
+                    }
+                })
             }),
         )
     }
@@ -617,7 +586,7 @@ where
             (aux.layout.clone(),),
             [
                 level_int.into(),
-                aux.contig.into(),
+                aux.layout.contig().into(),
                 aux.aligned as _,
                 vector_size_idx.try_into().unwrap(),
             ],
@@ -640,9 +609,10 @@ where
             Some(DimSize::new(b).unwrap())
         };
 
+        let mut layout = layout.clone();
+        layout.set_contig(contig.try_into().unwrap());
         TensorSpecAux {
-            layout: layout.clone(),
-            contig: contig.try_into().unwrap(),
+            layout,
             aligned: aligned_val != 0,
             level,
             vector_size,
@@ -711,12 +681,8 @@ fn tensorspec_aux_str<Tgt: Target>(aux: &TensorSpecAux<Tgt>) -> String {
     let mut parts = Vec::with_capacity(5);
     parts.push(aux.level.to_string());
 
-    if !aux.layout.is_row_major() {
+    if !aux.layout.is_row_major() || !aux.layout.is_fully_contiguous() {
         parts.push(aux.layout.to_string());
-    }
-
-    if aux.contig != aux.layout.contiguous_full() {
-        parts.push(format!("c{}", aux.contig));
     }
 
     if !aux.aligned {
@@ -753,15 +719,15 @@ fn arb_tensorspecaux<Tgt: Target>(
                 select(gen_vector_sizes_opt(dtype, level.vector_bytes()).collect::<Vec<_>>()),
             )
         })
-        .prop_map(
-            |(layout, level, contig, aligned, vector_size)| TensorSpecAux {
-                contig,
+        .prop_map(|(mut layout, level, contig, aligned, vector_size)| {
+            layout.set_contig(contig);
+            TensorSpecAux {
                 aligned,
                 level,
                 layout,
                 vector_size,
-            },
-        )
+            }
+        })
         .boxed()
 }
 
@@ -858,7 +824,6 @@ mod tests {
         let tensorspec = TensorSpec::<X86Target>::new_canon(
             shape![32, 8],
             Dtype::Uint8,
-            layout.contiguous_full(),
             true,
             CpuMemoryLevel::GL,
             layout,
@@ -874,34 +839,37 @@ mod tests {
         let mut tspec = TensorSpec::<X86Target> {
             shape: shape![5, 2, 8, 4],
             dtype: crate::common::Dtype::Uint8,
-            aux: crate::tensorspec::TensorSpecAux {
-                contig: 3,
-                aligned: false,
-                level: CpuMemoryLevel::GL,
-                layout: layout![
+            aux: {
+                let mut layout = layout![
                     (0, PhysDim::Dynamic),
                     (2, PhysDim::Dynamic),
                     (3, PhysDim::Dynamic),
                     (1, PhysDim::Dynamic),
-                    (2, PhysDim::Packed(4))
-                ],
-                vector_size: None,
+                ];
+                layout.set_contig(3);
+                crate::tensorspec::TensorSpecAux {
+                    aligned: false,
+                    level: CpuMemoryLevel::GL,
+                    layout,
+                    vector_size: None,
+                }
             },
         };
         tspec.canonicalize().unwrap();
-        assert_eq!(tspec.aux.contig, 3);
+        assert_eq!(tspec.aux.layout.contig(), 3);
     }
 
     #[test]
     #[should_panic]
     fn test_cannot_build_tensorspec_with_invalid_vector_size_canon() {
+        let mut l = layout![(0, PhysDim::Packed(4))];
+        l.set_contiguous_none();
         TensorSpec::<X86Target>::new_canon(
             shape![1, 1, 1],
             Dtype::Uint32,
-            0,
             false,
             CpuMemoryLevel::VRF,
-            layout![(0, PhysDim::Packed(4))],
+            l,
             Some(nz!(16u32)),
         );
     }
@@ -909,13 +877,14 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_cannot_build_tensorspec_with_invalid_vector_size_noncanon() {
+        let mut l = layout![(0, PhysDim::Packed(4))];
+        l.set_contiguous_none();
         TensorSpec::<X86Target>::new_noncanon(
             shape![1, 1, 1],
             Dtype::Uint32,
-            0,
             false,
             CpuMemoryLevel::VRF,
-            layout![(0, PhysDim::Packed(4))],
+            l,
             Some(nz!(16u32)),
         );
     }
@@ -923,14 +892,15 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_cannot_build_tensorspec_with_invalid_vector_size_noncanon_with_aux() {
+        let mut layout = layout![(0, PhysDim::Packed(4))];
+        layout.set_contiguous_none();
         TensorSpec::<X86Target>::new_noncanon_with_aux(
             shape![1, 1, 1],
             Dtype::Uint32,
             TensorSpecAux {
-                contig: 0,
                 aligned: false,
                 level: CpuMemoryLevel::VRF,
-                layout: layout![(0, PhysDim::Packed(4))],
+                layout,
                 vector_size: Some(nz!(16u32)),
             },
         );
@@ -951,13 +921,13 @@ mod tests {
         let mut second = tspec.clone();
         second.canonicalize().unwrap();
 
-        let Layout(dims_a) = tspec.layout();
-        let Layout(dims_b) = second.layout();
+        let Layout { dims: dims_a, .. } = tspec.layout();
+        let Layout { dims: dims_b, .. } = second.layout();
         assert!(
-            dims_a != dims_b || tspec.aux.contig == second.aux.contig,
+            dims_a != dims_b || tspec.layout().contig() == second.layout().contig(),
             "Dims were unchanged, but contig. changed from {:?} to {:?}",
-            tspec.aux.contig,
-            second.aux.contig
+            tspec.layout().contig(),
+            second.layout().contig()
         );
     }
 }

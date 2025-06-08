@@ -32,7 +32,6 @@ fn main() {
         layouts
             .into_iter()
             .map(|layout| TensorSpecAux {
-                contig: layout.contiguous_full(),
                 aligned: true,
                 level: CpuMemoryLevel::GL,
                 layout,

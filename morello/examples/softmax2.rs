@@ -29,7 +29,6 @@ fn main() {
         },
         vec![
             TensorSpecAux {
-                contig: row_major(RANK).contiguous_full(),
                 aligned: true,
                 level: CpuMemoryLevel::GL,
                 layout: row_major(RANK),

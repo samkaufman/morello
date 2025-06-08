@@ -292,16 +292,14 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                     NotApplicableReason::TileShapeInvalid,
                 ));
             }
-            let Ok((new_layout, new_contig)) = outer.layout().update_for_tiling(
-                outer.shape(),
-                inner.shape(),
-                outer.contiguous_abs(),
-            ) else {
+            let Ok(new_layout) = outer
+                .layout()
+                .update_for_tiling(outer.shape(), inner.shape())
+            else {
                 todo!();
             };
             new_aux.aligned = aligned_approx(inner.shape(), inner.shape(), &outer).unwrap();
             new_aux.layout = new_layout;
-            new_aux.contig = new_contig;
         }
 
         if new_spec.canonicalize().is_err() {

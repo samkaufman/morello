@@ -68,7 +68,6 @@ mod tests {
         let parent = TensorSpec::<X86Target>::new_canon(
             shape![16, 16, 16],
             Dtype::Uint8,
-            row_major(3).contiguous_full(),
             true,
             CpuMemoryLevel::GL,
             row_major(3),

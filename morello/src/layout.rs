@@ -9,6 +9,7 @@ use itertools::Itertools;
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
+use std::fmt;
 use std::{collections::HashSet, fmt::Display, hash::Hash};
 
 pub trait LayoutBuilder {
@@ -16,7 +17,10 @@ pub trait LayoutBuilder {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
-pub struct Layout(pub Vec<(u8, PhysDim)>);
+pub struct Layout {
+    pub(crate) dims: Vec<(u8, PhysDim)>,
+    pub(crate) contig: Contig,
+}
 
 // TODO: Remove PartialOrd and Ord
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize, Serialize)]
@@ -101,11 +105,14 @@ impl Layout {
         }
 
         // TODO: Adapt merge_consecutive_dimensions to make the following less convoluted.
-        let l = Layout(dims);
+        let contig = dims.len().try_into().unwrap();
+        let mut l = Layout { dims, contig };
+        debug_assert!(l.is_fully_contiguous());
         l.assert_no_consecutive_dimensions();
         l.assert_no_size_1_packings();
         l.assert_no_odd_deinterleaves();
-        l.merge_consecutive_dimensions(l.contiguous_full()).0
+        l.merge_consecutive_dimensions();
+        l
     }
 
     pub fn buffer_indexing_expr(
@@ -113,7 +120,7 @@ impl Layout {
         expr_id: OpaqueSymbol,
         concrete_shape: &[DimSize],
     ) -> NonAffineExpr<BufferVar> {
-        let Layout(dims) = self;
+        let Layout { dims, contig: _ } = self;
 
         let tensor_rank = concrete_shape.len();
         debug_assert_eq!(
@@ -167,8 +174,8 @@ impl Layout {
         working_expr
     }
 
-    pub fn contiguous_full(&self) -> Contig {
-        self.0.len().try_into().unwrap()
+    pub(crate) fn contiguous_full(&self) -> Contig {
+        self.dims.len().try_into().unwrap()
     }
 
     pub fn contiguous_none(&self) -> Contig {
@@ -183,13 +190,35 @@ impl Layout {
         contig <= self.contiguous_full()
     }
 
+    pub(crate) fn contig(&self) -> Contig {
+        self.contig
+    }
+
+    pub fn is_fully_contiguous(&self) -> bool {
+        self.contig == self.contiguous_full()
+    }
+
+    // TODO: Remove this fn.
+    pub(crate) fn set_contig(&mut self, contig: Contig) {
+        debug_assert!(self.is_valid_contiguous_abs(contig));
+        self.contig = contig;
+    }
+
+    pub fn set_contiguous_full(&mut self) {
+        self.contig = self.contiguous_full();
+    }
+
+    pub fn set_contiguous_none(&mut self) {
+        self.contig = self.contiguous_none();
+    }
+
     pub fn estimate_cache_lines<Tgt: Target>(
         &self,
         shape: &[DimSize],
         dtype: Dtype,
         contig: Contig,
     ) -> u32 {
-        let Layout(dims) = self;
+        let Layout { dims, contig: _ } = self;
 
         assert!(
             usize::from(contig) <= dims.len(),
@@ -223,8 +252,8 @@ impl Layout {
     }
 
     pub fn is_row_major(&self) -> bool {
-        let Layout(dims) = self;
-        dims.iter()
+        self.dims
+            .iter()
             .enumerate()
             .all(|(i, (d, s))| i == usize::from(*d) && *s == PhysDim::Dynamic)
     }
@@ -247,7 +276,7 @@ impl Layout {
     /// defined for layouts which "re-visit" a logical dimension while iterating over physical
     /// dimensions.
     pub fn strides(&self, logical_shape: &[DimSize]) -> Result<Shape, StridesError> {
-        let Layout(dims) = self;
+        let Layout { dims, contig: _ } = self;
 
         if usize::from(*dims.iter().map(|(d, _)| d).max().unwrap()) + 1 != logical_shape.len() {
             return Err(StridesError::InvalidShape(logical_shape.into()));
@@ -276,13 +305,16 @@ impl Layout {
     /// logical dimensions removed.
     ///
     /// The remaining dimensions will have their logical indices shifted.
-    pub fn dim_drop(&self, dropped_dims: &HashSet<u8>, contiguous_abs: Contig) -> (Layout, Contig) {
+    pub fn dim_drop(&self, dropped_dims: &HashSet<u8>) -> Layout {
         if dropped_dims.is_empty() {
-            return (self.clone(), contiguous_abs);
+            return self.clone();
         }
 
-        let Layout(dims) = self;
-        let first_contig_idx = dims.len() - usize::from(contiguous_abs);
+        let Layout {
+            ref dims,
+            contig: contiguous_abs,
+        } = *self;
+        let first_contig_idx = self.dims.len() - usize::from(self.contig);
 
         let mut new_contig = contiguous_abs
             - u8::try_from(
@@ -336,29 +368,30 @@ impl Layout {
 
             new_dims.push((new_logical_dim, *phys_dim));
         }
-        (Layout::new(new_dims), new_contig)
+
+        let mut new_layout = Layout::new(new_dims);
+        new_layout.contig = new_contig;
+        new_layout
     }
 
-    pub fn swap_dims(&self, dims: (u8, u8), contiguous_abs: Contig) -> (Layout, Contig) {
-        let Layout(orig_dims) = self;
-        (
-            Layout::new(
-                orig_dims
-                    .iter()
-                    .copied()
-                    .map(|(orig_dim, orig_size)| {
-                        if orig_dim == dims.0 {
-                            (dims.1, orig_size)
-                        } else if orig_dim == dims.1 {
-                            (dims.0, orig_size)
-                        } else {
-                            (orig_dim, orig_size)
-                        }
-                    })
-                    .collect(),
-            ),
-            contiguous_abs,
-        )
+    pub fn swap_dims(&self, dims: (u8, u8)) -> Layout {
+        let mut result = Layout::new(
+            self.dims
+                .iter()
+                .copied()
+                .map(|(orig_dim, orig_size)| {
+                    if orig_dim == dims.0 {
+                        (dims.1, orig_size)
+                    } else if orig_dim == dims.1 {
+                        (dims.0, orig_size)
+                    } else {
+                        (orig_dim, orig_size)
+                    }
+                })
+                .collect(),
+        );
+        result.contig = self.contig;
+        result
     }
 
     pub fn canonicalize(&self, shape: &[DimSize]) -> Result<Layout, LayoutError> {
@@ -372,6 +405,7 @@ impl Layout {
             new_layout.expand_physical_shape(shape)?;
             new_layout.drop_unneeded_packings(shape);
             new_layout.reorder_size_one_dynamic_dimensions(shape)?;
+            new_layout.increase_contig_through_ones(shape);
             Ok(new_layout)
         }
     }
@@ -380,40 +414,41 @@ impl Layout {
         &self,
         parent_shape: &[DimSize],
         tile_shape: &[DimSize],
-        contig: Contig,
-    ) -> Result<(Layout, Contig), LayoutError> {
+    ) -> Result<Layout, LayoutError> {
         // TODO: Can we remove this case without affecting behavior?
         if tile_shape.iter().all(|d| d.get() == 1) {
-            let rm_layout = row_major(tile_shape.len().try_into().unwrap());
-            let new_contig = rm_layout.contiguous_full();
-            Ok((rm_layout, new_contig))
+            Ok(row_major(tile_shape.len().try_into().unwrap()))
         } else {
             let new_contig =
-                self.lower_contig_to_first_broken_dimension(parent_shape, tile_shape, contig)?;
+                self.lower_contig_to_first_broken_dimension(parent_shape, tile_shape)?;
             debug_assert!(
-                parent_shape != tile_shape || new_contig == contig,
+                parent_shape != tile_shape || new_contig == self.contig,
                 "Contig. shouldn't change when the shape ({:?}) doesn't, but {:?} is now {:?}",
                 parent_shape,
-                contig,
+                self.contig,
                 new_contig
             );
             self.assert_no_consecutive_dimensions();
             let mut new_layout = self.clone();
-            let new_contig = new_layout.drop_unneeded_packings_with_contig(tile_shape, new_contig);
+            new_layout.contig = new_contig;
+            new_layout.drop_unneeded_packings(tile_shape);
             new_layout.reorder_size_one_dynamic_dimensions(tile_shape)?;
-            let new_contig = new_layout.increase_contig_through_ones(tile_shape, new_contig);
-            Ok((new_layout, new_contig))
+            new_layout.increase_contig_through_ones(tile_shape);
+            Ok(new_layout)
         }
     }
 
+    // TODO: Instead of returning the `Contig`, update self.
     /// Drop Contig to the first broken physical dimension.
     fn lower_contig_to_first_broken_dimension(
         &self,
         parent_shape: &[DimSize],
         tile_shape: &[DimSize],
-        source_contig: Contig,
     ) -> Result<Contig, LayoutError> {
-        let Layout(dims) = self;
+        let Layout {
+            ref dims,
+            contig: source_contig,
+        } = *self;
         let parent_physical_shape = self.expand_physical_shape(parent_shape)?;
         let tile_physical_shape = self.expand_physical_shape(tile_shape)?;
         debug_assert_eq!(parent_physical_shape.len(), tile_physical_shape.len());
@@ -438,15 +473,14 @@ impl Layout {
     fn assert_no_consecutive_dimensions(&self) {
         #[cfg(debug_assertions)]
         {
-            let Layout(dims) = self;
-            for idx in 1..dims.len() {
-                if dims[idx - 1].0 == dims[idx].0
-                    && matches!(dims[idx - 1].1, PhysDim::Dynamic | PhysDim::Packed(_))
-                    && matches!(dims[idx].1, PhysDim::Dynamic | PhysDim::Packed(_))
+            for idx in 1..self.dims.len() {
+                if self.dims[idx - 1].0 == self.dims[idx].0
+                    && matches!(self.dims[idx - 1].1, PhysDim::Dynamic | PhysDim::Packed(_))
+                    && matches!(self.dims[idx].1, PhysDim::Dynamic | PhysDim::Packed(_))
                 {
                     panic!(
-                        "Consecutive packed dimensions for logical dimension {} in layout: {:?}",
-                        dims[idx].0, dims
+                        "Consecutive matching dimensions for logical dimension {} in layout: {:?}",
+                        self.dims[idx].0, self.dims
                     );
                 }
             }
@@ -454,16 +488,14 @@ impl Layout {
     }
 
     /// Merge matching, consecutive dimensions.
-    fn merge_consecutive_dimensions(&self, source_contig: Contig) -> (Layout, Contig) {
-        let Layout(dims) = self;
+    fn merge_consecutive_dimensions(&mut self) {
+        let first_contig_idx = self.dims.len() - usize::from(self.contig);
 
-        let first_contig_idx = dims.len() - usize::from(source_contig);
+        let mut new_contig = self.contig;
+        let mut new_dims = Vec::with_capacity(self.dims.len());
+        new_dims.push(self.dims[0]);
 
-        let mut new_contig = source_contig;
-        let mut new_dims = Vec::with_capacity(dims.len());
-        new_dims.push(dims[0]);
-
-        for (idx, (dim, phys_dim)) in dims.iter().skip(1).enumerate() {
+        for (idx, (dim, phys_dim)) in self.dims.iter().skip(1).enumerate() {
             let (last_dim, last_phys_dim): &mut (u8, PhysDim) = new_dims.last_mut().unwrap();
             if dim != last_dim {
                 new_dims.push((*dim, *phys_dim));
@@ -492,80 +524,28 @@ impl Layout {
             }
         }
 
-        (Layout(new_dims), new_contig)
+        self.dims = new_dims;
+        self.contig = new_contig;
     }
 
     /// Increase contig through any all-ones prefix.
-    fn increase_contig_through_ones(&self, tile_shape: &[DimSize], contig: Contig) -> Contig {
+    fn increase_contig_through_ones(&mut self, tile_shape: &[DimSize]) {
         let physical_tile_shape = self.expand_physical_shape(tile_shape).unwrap();
-        let mut first_contig_idx = physical_tile_shape.len() - usize::from(contig);
-        let mut new_contig = contig;
+        let mut first_contig_idx = physical_tile_shape.len() - usize::from(self.contig);
         while first_contig_idx > 0 {
             first_contig_idx -= 1;
             if physical_tile_shape[first_contig_idx].get() != 1 {
                 break;
             }
-            new_contig += 1;
+            self.contig += 1;
         }
-        Contig::from(new_contig)
     }
 
-    // TODO: Somehow merge with drop_unneeded_packings_with_contig
     fn drop_unneeded_packings(&mut self, tile_shape: &[DimSize]) {
-        let Layout(dims) = self;
-
-        // Count the number of packings applied to each logical dimension.
-        let mut packings = vec![0; dims.len()];
-        for (logical_dim, s) in dims.as_slice() {
-            if matches!(s, PhysDim::Packed(_)) {
-                packings[usize::from(*logical_dim)] += 1;
-            }
-        }
-
-        // Walk from physically innermost to outermost, clearing packings unique to a logical
-        // dimension.
-        //
-        // Cleared packings are recorded in `logical_dims_noneified` to be used in the next step.
-        // Logical dimensions are mapped to the index of the cleared packing for that dimension.
-        let mut logical_dims_noneified = vec![None; dims.len()];
-        for idx in (0..dims.len()).rev() {
-            let (logical_dim, s) = dims[idx];
-            let logical_dim_usize = usize::from(logical_dim);
-            if packings[logical_dim_usize] != 1 {
-                continue;
-            }
-            match s {
-                PhysDim::Packed(fixed_size) if tile_shape[logical_dim_usize] == fixed_size => {
-                    dims[idx] = (logical_dim, PhysDim::Dynamic);
-                    logical_dims_noneified[logical_dim_usize] = Some(idx);
-                }
-                _ => {}
-            }
-        }
-
-        // Layouts only include a single dynamic size reference to a logical dimension. If any
-        // packings were cleared (changed to dynamic size) in the previous step, then any outer
-        // reference to that same dimension is removed.
-        let mut i = 0;
-        dims.retain(|(logical_dim, _)| {
-            let should_retain =
-                if let Some(noneified_idx) = logical_dims_noneified[usize::from(*logical_dim)] {
-                    i >= noneified_idx
-                } else {
-                    true
-                };
-            i += 1;
-            should_retain
-        });
-    }
-
-    fn drop_unneeded_packings_with_contig(
-        &mut self,
-        tile_shape: &[DimSize],
-        contig: Contig,
-    ) -> Contig {
-        let Layout(dims) = self;
-
+        let Layout {
+            ref mut dims,
+            contig,
+        } = *self;
         let first_contig_idx = dims.len() - usize::from(contig);
 
         // Count the number of packings applied to each logical dimension.
@@ -623,7 +603,7 @@ impl Layout {
             should_retain
         });
 
-        new_contig
+        self.contig = new_contig;
     }
 
     /// Canonicalize runs of physical dimension which have size 1 for the given `shape`.
@@ -632,9 +612,7 @@ impl Layout {
         shape: &[DimSize],
     ) -> Result<(), LayoutError> {
         let physical_shape = self.expand_physical_shape(shape)?;
-
-        let Layout(dims) = self;
-
+        let Layout { dims, contig: _ } = self;
         let mut start = 0;
         while start < physical_shape.len() {
             let mut end = start;
@@ -650,7 +628,6 @@ impl Layout {
 
     pub(crate) fn has_noncanon_size_one_dynamic_dimensions(&self, shape: &[DimSize]) -> bool {
         // This implementation could be much more efficient.
-        let Layout(dims) = self;
         let physical_shape = self.expand_physical_shape(shape).unwrap();
         let mut start = 0;
         while start < physical_shape.len() {
@@ -658,7 +635,7 @@ impl Layout {
             while end < physical_shape.len() && physical_shape[end].get() == 1 {
                 end += 1;
             }
-            let ones_slice = &dims[start..end];
+            let ones_slice = &self.dims[start..end];
             if ones_slice.windows(2).any(|w| w[0].0 > w[1].0) {
                 return true;
             }
@@ -673,7 +650,7 @@ impl Layout {
         &self,
         logical_shape: &[DimSize],
     ) -> Result<Shape, LayoutError> {
-        let Layout(dims) = self;
+        let Layout { dims, contig: _ } = self;
         let mut physical_shape = Shape::with_capacity(dims.len());
         let mut logical_shape_remaining: SmallVec<[_; 5]> =
             logical_shape.iter().map(|x| x.get()).collect();
@@ -710,7 +687,7 @@ impl Layout {
         physical_dim: u8,
         logical_shape: &[DimSize],
     ) -> Result<DimSize, LayoutError> {
-        let Layout(dims) = self;
+        let Layout { dims, contig: _ } = self;
         let physical_dim_usize = usize::from(physical_dim);
         let corresponding_logical_dim = dims
             .get(physical_dim_usize)
@@ -762,13 +739,11 @@ impl Layout {
     fn assert_no_size_1_packings(&self) {
         #[cfg(debug_assertions)]
         {
-            let Layout(dims) = self;
-            for (_, size) in dims {
+            for (_, size) in &self.dims {
                 debug_assert_ne!(
                     size,
                     &PhysDim::Packed(nz!(1u32)),
-                    "Size-1 packing in layout: {:?}",
-                    dims
+                    "Size-1 packings are disallowed"
                 );
             }
         }
@@ -777,8 +752,7 @@ impl Layout {
     fn assert_no_odd_deinterleaves(&self) {
         #[cfg(debug_assertions)]
         {
-            let Layout(dims) = self;
-            for (_, size) in dims {
+            for (_, size) in &self.dims {
                 if let PhysDim::OddEven(s) = size {
                     debug_assert_eq!(s.get() % 2, 0);
                 }
@@ -831,18 +805,29 @@ impl proptest::arbitrary::Arbitrary for Layout {
         );
 
         (required_dims, additional_dims)
-            .prop_map(|(prefix, additional)| {
-                Layout::new(prefix.into_iter().chain(additional).collect())
+            .prop_flat_map(|(prefix, additional)| {
+                let new_layout = Layout::new(prefix.into_iter().chain(additional).collect());
+                assert_eq!(
+                    new_layout.all_contiguous_abs().collect::<Vec<_>>(),
+                    (0..=new_layout.contiguous_full()).collect::<Vec<_>>()
+                );
+                let contigs_range = 0..=new_layout.contiguous_full();
+                (Just(new_layout), contigs_range)
+            })
+            .prop_map(|(mut layout, contig)| {
+                layout.contig = contig;
+                layout
             })
             .boxed()
     }
 }
 
 impl Display for Layout {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Layout(dims) = self;
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Layout { dims, contig } = self;
+
         if self.is_row_major() {
-            write!(f, "RM")
+            write!(f, "RM")?;
         } else if dims[..]
             == [
                 (0, PhysDim::Dynamic),
@@ -851,7 +836,7 @@ impl Display for Layout {
                 (1, PhysDim::Dynamic),
             ]
         {
-            write!(f, "NHWC")
+            write!(f, "NHWC")?;
         } else if dims.iter().all(|(_, s)| s == &PhysDim::Dynamic) {
             write!(
                 f,
@@ -860,7 +845,7 @@ impl Display for Layout {
                     .map(|(d, _)| d.to_string())
                     .collect::<Vec<_>>()
                     .join(",")
-            )
+            )?;
         } else {
             write!(
                 f,
@@ -873,8 +858,14 @@ impl Display for Layout {
                     .map(|(_, s)| format!("{:?}", s))
                     .collect::<Vec<_>>()
                     .join(", ")
-            )
+            )?;
         }
+
+        if !self.is_fully_contiguous() {
+            write!(f, ":c{}", contig)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -911,7 +902,7 @@ pub fn col_major(rank: u8) -> Layout {
 pub(crate) fn batched_col_major(rank: u8) -> Layout {
     let rank_us = usize::from(rank);
     let mut layout = row_major(rank);
-    layout.0.swap(rank_us - 1, rank_us - 2);
+    layout.dims.swap(rank_us - 1, rank_us - 2);
     layout
 }
 
@@ -963,7 +954,6 @@ mod tests {
         arbitrary::{any, any_with},
         prelude::prop,
         prop_assert, prop_assert_eq, prop_assume, proptest,
-        sample::select,
         strategy::{Just, Strategy},
     };
     use std::{collections::HashSet, iter, num::NonZeroU8};
@@ -1053,19 +1043,18 @@ mod tests {
     #[test]
     fn test_col_major_slices_are_non_contiguous() {
         let cm = col_major(2);
-        let (_, inner_contig) = cm
-            .update_for_tiling(&shape![128, 128], &shape![8, 1], cm.contiguous_full())
+        let result_layout = cm
+            .update_for_tiling(&shape![128, 128], &shape![8, 1])
             .unwrap();
-        assert_eq!(inner_contig, cm.contiguous_full());
+        assert!(result_layout.is_fully_contiguous());
     }
 
     #[test]
     fn test_dim_drop_1() {
         let layout = layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)];
-        let initial_contig = layout.contiguous_full();
-        let (new_layout, new_contig) = layout.dim_drop(&iter::once(0u8).collect(), initial_contig);
+        let new_layout = layout.dim_drop(&iter::once(0u8).collect());
         assert_eq!(new_layout, layout![(0, PhysDim::Dynamic)]);
-        assert_eq!(new_contig, new_layout.contiguous_full());
+        assert!(new_layout.is_fully_contiguous());
     }
 
     #[test]
@@ -1075,15 +1064,14 @@ mod tests {
             (1, PhysDim::Dynamic),
             (0, PhysDim::Packed(4))
         ];
-        let initial_contig = layout.contiguous_full();
-        let (new_layout, new_contig) = layout.dim_drop(&iter::once(1u8).collect(), initial_contig);
+        let new_layout = layout.dim_drop(&iter::once(1u8).collect());
         assert_eq!(
             new_layout,
             // Would be [(0, PhysDim::Dynamic), (0, PhysDim::Packed(4))], but for merging adjacent
             // dimensions.
             layout![(0, PhysDim::Dynamic)]
         );
-        assert_eq!(new_contig, new_layout.contiguous_full());
+        assert!(new_layout.is_fully_contiguous());
     }
 
     #[test]
@@ -1094,72 +1082,69 @@ mod tests {
             (0, PhysDim::Packed(4)),
             (2, PhysDim::Dynamic)
         ];
-        let initial_contig = layout.contiguous_full();
-        let (new_layout, new_contig) = layout.dim_drop(&iter::once(1u8).collect(), initial_contig);
+        let new_layout = layout.dim_drop(&iter::once(1u8).collect());
         assert_eq!(
             new_layout,
             layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
         );
-        assert_eq!(new_contig, new_layout.contiguous_full());
+        assert!(new_layout.is_fully_contiguous());
     }
 
     #[test]
     fn test_dim_drop_4() {
-        let layout = layout![
+        let mut layout = layout![
             (0, PhysDim::Dynamic),
             (1, PhysDim::Dynamic),
             (0, PhysDim::Packed(4)),
             (2, PhysDim::Dynamic)
         ];
-        let initial_contig = 3;
-        let (new_layout, new_contig) = layout.dim_drop(&iter::once(1u8).collect(), initial_contig);
-        assert_eq!(
-            new_layout,
-            layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
-        );
+        layout.contig = 3;
+        let new_layout = layout.dim_drop(&iter::once(1u8).collect());
+        let mut expected = layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)];
+        expected.contig = 1;
+        assert_eq!(new_layout, expected);
         // Merging the Dynamic and Packed physical dimensions for logical dimension 0, which are
         // adjacent after dropping dimension 1, results in a loss of contiguousness. Initially,
         // we knew `(0, PhysDim::Packed(4))` was contiguous but `(0, PhysDim::Dynamic)` was not.
         // After merging, we lose the information about those 4-value strips. The final contig.
         // value becomes 1, corresponding to what was `(2, PhysDim::Dynamic)` and is now
         // `(1, PhysDim::Dynamic)`.
-        assert_eq!(new_contig, 1);
+        assert_eq!(new_layout.contig(), 1);
     }
 
     #[test]
     fn test_dim_drop_5() {
-        let layout = layout![
+        let mut layout = layout![
             (0, PhysDim::Dynamic),
             (1, PhysDim::Dynamic),
             (0, PhysDim::Packed(4)),
             (2, PhysDim::Dynamic)
         ];
-        let initial_contig = 3;
-        let (new_layout, new_contig) = layout.dim_drop(&iter::once(0u8).collect(), initial_contig);
+        layout.contig = 3;
+        let new_layout = layout.dim_drop(&iter::once(0u8).collect());
         assert_eq!(
             new_layout,
             layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
         );
-        assert_eq!(new_contig, 2);
+        assert_eq!(new_layout.contig(), 2);
     }
 
     #[test]
     fn test_dim_drop_6() {
-        let layout = layout![
+        let mut layout = layout![
             (0, PhysDim::Dynamic),
             (1, PhysDim::Dynamic),
             (0, PhysDim::Packed(4)),
             (2, PhysDim::Dynamic)
         ];
-        let initial_contig = 2;
-        let (new_layout, new_contig) = layout.dim_drop(&iter::once(1u8).collect(), initial_contig);
-        assert_eq!(
-            new_layout,
-            layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
-        );
+        layout.contig = 2;
+        let new_layout = layout.dim_drop(&iter::once(1u8).collect());
+        let mut expected = layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)];
+        expected.contig = 1;
+        assert_eq!(new_layout, expected);
         // As in test_dim_drop_4, we lose some contiguousness information here as a result
         // of merging during dim_drop.
-        assert_eq!(new_contig, 1);
+        assert_eq!(new_layout.contig(), 1);
     }
 
     #[test]
@@ -1170,13 +1155,12 @@ mod tests {
             (0, PhysDim::Packed(4)),
             (2, PhysDim::Dynamic)
         ];
-        let initial_contig = layout.contiguous_full();
-        let (new_layout, new_contig) = layout.dim_drop(&iter::once(0u8).collect(), initial_contig);
+        let new_layout = layout.dim_drop(&iter::once(0u8).collect());
         assert_eq!(
             new_layout,
             layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
         );
-        assert_eq!(new_contig, new_layout.contiguous_full());
+        assert!(new_layout.is_fully_contiguous());
     }
 
     #[test]
@@ -1187,8 +1171,7 @@ mod tests {
             (0, PhysDim::Packed(4)),
             (2, PhysDim::Dynamic)
         ];
-        let initial_contig = layout.contiguous_full();
-        let (new_layout, new_contig) = layout.dim_drop(&iter::once(2u8).collect(), initial_contig);
+        let new_layout = layout.dim_drop(&iter::once(2u8).collect());
         assert_eq!(
             new_layout,
             layout![
@@ -1197,7 +1180,7 @@ mod tests {
                 (0, PhysDim::Packed(4))
             ]
         );
-        assert_eq!(new_contig, new_layout.contiguous_full());
+        assert!(new_layout.is_fully_contiguous());
     }
 
     proptest! {
@@ -1218,8 +1201,7 @@ mod tests {
         fn test_expand_physical_shape_matches_physical_size_for_tensor_layouts(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
-            let Layout(dims) = &layout;
-            let physical_rank = dims.len();
+            let physical_rank = layout.dims.len();
 
             let lhs = layout.expand_physical_shape(&shape);
 
@@ -1242,8 +1224,7 @@ mod tests {
         fn test_physical_shape_raises_error_on_some_dim_when_expansion_does(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
-            let Layout(dims) = &layout;
-            let physical_rank = dims.len();
+            let physical_rank = layout.dims.len();
 
             let lhs = layout.expand_physical_shape(&shape).err();
 
@@ -1285,7 +1266,7 @@ mod tests {
             let tensor_volume = tensor_shape.iter().map(|d| d.get()).product::<u32>();
             let tensor_buffer = (first_int..(first_int + tensor_volume)).collect::<Vec<_>>();
 
-            let (layout, updated_contig) = layout.update_for_tiling(&tensor_shape, &tile_shape, layout.contiguous_full()).unwrap();
+            let layout = layout.update_for_tiling(&tensor_shape, &tile_shape).unwrap();
 
             // Walk the memory locations to check correctness.
             let mut visited = HashSet::new();
@@ -1320,12 +1301,12 @@ mod tests {
                 == (1 + visited.iter().copied().max().unwrap() - visited.iter().copied().min().unwrap())
                     .try_into()
                     .unwrap();
-            let analysis_result_fully_contig = updated_contig == layout.contiguous_full();
+            let analysis_result_fully_contig = layout.is_fully_contiguous();
             prop_assert_eq!(
                 analysis_result_fully_contig, is_fully_contig,
                 "Tile is {}fully contiguous but contig.={:?} (full={:?}) (tensor={:?}, tile={:?}, visited={:?})",
                 if is_fully_contig { "" } else { "not " },
-                updated_contig,
+                layout.contig(),
                 layout.contiguous_full(),
                 tensor_shape,
                 tile_shape,
@@ -1334,21 +1315,11 @@ mod tests {
         }
 
         #[test]
-        fn test_drop_unneeded_packings_matches_with_and_without_contig(
-            (shape, mut layout, contig) in arb_shape_layout_contig()
-        ) {
-            let mut layout_b = layout.clone();
-            layout_b.drop_unneeded_packings(&shape);
-            layout.drop_unneeded_packings_with_contig(&shape, contig);
-            prop_assert_eq!(layout_b, layout);
-        }
-
-        #[test]
         fn test_canonicalize_matches_update_for_tiling(
-            (shape, layout, contig) in arb_shape_layout_contig()
+            (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
-            match (layout.canonicalize(&shape), layout.update_for_tiling(&shape, &shape, contig)) {
-                (Ok(l0), Ok((l1, _))) if l0 == l1 => {}
+            match (layout.canonicalize(&shape), layout.update_for_tiling(&shape, &shape)) {
+                (Ok(l0), Ok(l1)) if l0 == l1 => {}
                 (Err(e0), Err(e1)) if e0 == e1 => {}
                 (a, b) => {
                     prop_assert!(false, "{:?} != {:?}", a, b);
@@ -1358,7 +1329,7 @@ mod tests {
 
         #[test]
         fn test_dim_drop_returns_valid_contig(
-            (shape, layout, contig) in arb_shape_layout_contig()
+            (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
             let rank = u8::try_from(shape.len()).unwrap();
             for dims_to_drop in (0..rank).powerset() {
@@ -1366,9 +1337,8 @@ mod tests {
                 if dims_to_drop.len() == shape.len() {
                     continue;
                 }
-                let (new_layout, new_contig) =
-                    layout.dim_drop(&dims_to_drop.into_iter().collect(), contig);
-                prop_assert!(new_layout.is_valid_contiguous_abs(new_contig));
+                let new_layout = layout.dim_drop(&dims_to_drop.into_iter().collect());
+                prop_assert!(new_layout.is_valid_contiguous_abs(new_layout.contig()));
             }
         }
     }
@@ -1481,9 +1451,7 @@ mod tests {
             .prop_filter(
                 "Layout did not apply to shape",
                 |(tensor_shape, layout, tile_shape, _)| {
-                    layout
-                        .update_for_tiling(tensor_shape, tile_shape, layout.contiguous_full())
-                        .is_ok()
+                    layout.update_for_tiling(tensor_shape, tile_shape).is_ok()
                 },
             )
     }
@@ -1587,13 +1555,6 @@ mod tests {
             };
             let all_layouts = any_with::<Layout>(bounds);
             (Just(Shape::from(shape)), all_layouts)
-        })
-    }
-
-    fn arb_shape_layout_contig() -> impl Strategy<Value = (Shape, Layout, Contig)> {
-        arb_shape_and_same_rank_layout().prop_flat_map(|(shape, layout)| {
-            let contigs = layout.all_contiguous_abs().collect::<Vec<_>>();
-            (Just(shape), Just(layout), select(contigs))
         })
     }
 }

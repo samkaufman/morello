@@ -113,7 +113,6 @@ fn scalar_tensor<Tgt: Target>(
         shape: Shape::from_slice(spec_shape),
         dtype,
         aux: TensorSpecAux {
-            contig: max_layout.contiguous_full(),
             aligned: true,
             level: max_level,
             layout: max_layout,

@@ -216,14 +216,10 @@ pub trait ViewExt: View {
         };
         let shape = smallvec![*w, *h];
 
-        let (transposed_layout, new_contig) = self
-            .spec()
-            .layout()
-            .swap_dims((0, 1), self.spec().contiguous_abs());
+        let transposed_layout = self.spec().layout().swap_dims((0, 1));
         let spec = TensorSpec::new_canon(
             shape,
             self.spec().dtype(),
-            new_contig,
             self.spec().aligned(),
             self.spec().level(),
             transposed_layout,

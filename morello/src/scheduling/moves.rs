@@ -136,30 +136,36 @@ fn plan_alloc<'a, Tgt: Target>(
 ) -> Result<AllocPlan<'a, Tgt>, ApplyError> {
     let outer_moved_operand_spec = &operands[usize::from(source_idx)];
 
-    let destination_layout_canonicalized = destination_layout
+    let mut destination_layout_canonicalized = destination_layout
         .canonicalize(outer_moved_operand_spec.shape())
         .unwrap();
+    let is_cache_miss = move_is_cache_miss(
+        outer_moved_operand_spec,
+        destination_dtype,
+        &destination_level,
+        &destination_layout_canonicalized,
+    );
+    if !is_cache_miss {
+        destination_layout_canonicalized.set_contiguous_full();
+        // Canonicalize again in case setting contiguous affected anything.
+        // TODO: Don't call canonicalize twice.
+        destination_layout_canonicalized = destination_layout_canonicalized
+            .canonicalize(outer_moved_operand_spec.shape())
+            .unwrap();
+    }
     let mut new_spec = TensorSpec::<Tgt>::new_noncanon(
         outer_moved_operand_spec.shape().into(),
         destination_dtype,
-        outer_moved_operand_spec.contiguous_abs(),
         outer_moved_operand_spec.aligned(),
         destination_level,
         destination_layout_canonicalized,
         destination_vector_size,
     );
 
-    let is_cache_miss = move_is_cache_miss(
-        outer_moved_operand_spec,
-        destination_dtype,
-        &destination_level,
-        new_spec.layout(),
-    );
     // If this is anything other than a simple cache miss, a new buffer will be allocated, so that
     // buffer will be aligned and fully contiguous.
     if !is_cache_miss {
         new_spec.set_aligned(true);
-        new_spec.set_contiguous_abs(new_spec.layout().contiguous_full());
         new_spec
             .canonicalize()
             .map_err(|canon_error| match canon_error {
@@ -176,16 +182,6 @@ fn plan_alloc<'a, Tgt: Target>(
                 }
             })?;
     }
-    debug_assert_eq!(
-        is_cache_miss,
-        move_is_cache_miss(
-            outer_moved_operand_spec,
-            new_spec.dtype(),
-            &new_spec.level(),
-            new_spec.layout(),
-        ),
-        "simple_cache_miss changes after updating alignment and contiguousness"
-    );
 
     assert!(
         new_spec.layout().applies_to_shape(new_spec.shape()),

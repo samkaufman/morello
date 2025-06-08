@@ -38,7 +38,6 @@ fn main() {
         dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
     };
     let aux = TensorSpecAux {
-        contig: row_major(3).contiguous_full(),
         aligned: true,
         level: GL,
         layout: row_major(3),

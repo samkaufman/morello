@@ -44,7 +44,6 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
             TensorSpec::<Tgt>::new_canon_checked(
                 head.spec_shape.clone(),
                 dtypes[1],
-                self.broadcast_layout.contiguous_full(),
                 true,
                 self.broadcast_level,
                 self.broadcast_layout.clone(),

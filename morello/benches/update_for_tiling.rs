@@ -13,8 +13,8 @@ fn update_for_tiling() {
         (2, PhysDim::Dynamic),
         (1, PhysDim::Packed(8))
     ];
-    let c = layout.contiguous_full();
-    black_box(layout.update_for_tiling(&shape, &tile_shape, c)).unwrap();
+    assert!(layout.is_fully_contiguous());
+    black_box(layout.update_for_tiling(&shape, &tile_shape)).unwrap();
 }
 
 library_benchmark_group!(

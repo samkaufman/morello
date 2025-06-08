@@ -1633,13 +1633,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         && primitive_aux.iter().map(|a| &a.layout).all_equal()
                         && primitive_aux
                             .iter()
-                            .all(|aux| aux.contig == aux.layout.contiguous_full())
+                            .all(|aux| aux.layout.is_fully_contiguous())
                     {
                         let rm = row_major(shape.len().try_into().unwrap());
-                        let new_contig = rm.contiguous_full();
                         for aux in primitive_aux.iter_mut() {
                             aux.layout = rm.clone();
-                            aux.contig = new_contig;
                         }
                     }
                 }
@@ -1726,9 +1724,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         && primitive_aux.iter().map(|a| &a.layout).all_equal()
                         && primitive_aux
                             .iter()
-                            .all(|aux| aux.contig == aux.layout.contiguous_full())
+                            .all(|aux| aux.layout.is_fully_contiguous())
                         && primitive_aux.iter().any(|aux| {
-                            !aux.layout.is_row_major() || aux.contig != aux.layout.contiguous_full()
+                            !aux.layout.is_row_major() || !aux.layout.is_fully_contiguous()
                         })
                     {
                         return false;
@@ -3105,14 +3103,13 @@ pub mod macros {
         ( @tensorspecaux_inner $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr,
           $c:literal, $a:literal ) =>
         {{
-            let layout = $crate::layout::LayoutBuilder::build($layout, $shp);
-            let contig = if $c {
-                layout.contiguous_full()
+            let mut layout = $crate::layout::LayoutBuilder::build($layout, $shp);
+            if $c {
+                layout.set_contiguous_full();
             } else {
-                layout.contiguous_none()
-            };
+                layout.set_contiguous_none();
+            }
             $crate::tensorspec::TensorSpecAux {
-                contig,
                 aligned: $a,
                 level: $level,
                 layout,
@@ -3251,21 +3248,20 @@ mod tests {
             serial
         ));
         let lhs = TensorSpecAux {
-            contig: row_major(3).contiguous_full(),
             aligned: true,
             level: GL,
             layout: row_major(3),
             vector_size: None,
         };
+        let mut rhs_layout = row_major(3);
+        rhs_layout.set_contiguous_none();
         let rhs = TensorSpecAux {
-            contig: row_major(3).contiguous_none(),
             aligned: true,
             level: GL,
-            layout: row_major(3),
+            layout: rhs_layout,
             vector_size: None,
         };
         let out = TensorSpecAux {
-            contig: row_major(3).contiguous_full(),
             aligned: false,
             level: GL,
             layout: row_major(3),
@@ -3984,39 +3980,39 @@ mod tests {
             dtypes: vec![Dtype::Uint8, Dtype::Uint8, Dtype::Uint32],
         };
 
+        let aux0_1_layout = row_major(3);
         let aux0_1 = TensorSpecAux {
-            contig: row_major(3).contiguous_full(),
             aligned: true,
             level: GL,
-            layout: row_major(3),
+            layout: aux0_1_layout,
             vector_size: None,
         };
+        let aux1_1_layout = row_major(3);
         let aux1_1 = TensorSpecAux {
-            contig: row_major(3).contiguous_full(),
             aligned: true,
             level: L1,
-            layout: row_major(3),
+            layout: aux1_1_layout,
             vector_size: None,
         };
+        let aux2_0_layout = row_major(3);
         let aux2_0 = TensorSpecAux {
-            contig: row_major(3).contiguous_full(),
             aligned: false,
             level: GL,
-            layout: row_major(3),
+            layout: aux2_0_layout,
             vector_size: None,
         };
+        let aux2_1_layout = row_major(3);
         let aux2_1 = TensorSpecAux {
-            contig: row_major(3).contiguous_full(),
             aligned: false,
             level: L1,
-            layout: row_major(3),
+            layout: aux2_1_layout,
             vector_size: None,
         };
+        let aux0_out_layout = row_major(3);
         let aux0_out = TensorSpecAux {
-            contig: row_major(3).contiguous_full(),
             aligned: true,
             level: RF,
-            layout: row_major(3),
+            layout: aux0_out_layout,
             vector_size: None,
         };
 
