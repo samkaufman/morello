@@ -711,51 +711,52 @@ impl Layout {
         logical_shape: &[DimSize],
     ) -> Result<DimSize, LayoutError> {
         let Layout(dims) = self;
-        let logical_dim = dims[usize::from(physical_dim)].0;
-        let expanded = self.expand_logical_dim_physical_shape(logical_dim, logical_shape)?;
-        expanded
-            .into_iter()
-            .find(|(idx, _)| *idx == usize::from(physical_dim))
-            .map(|(_, s)| s)
-            .ok_or_else(|| LayoutError::InvalidShape(logical_shape.into()))
-    }
+        let physical_dim_usize = usize::from(physical_dim);
+        let corresponding_logical_dim = dims
+            .get(physical_dim_usize)
+            .ok_or_else(|| LayoutError::InvalidShape(logical_shape.into()))?
+            .0;
+        let mut current_remaining_size = logical_shape
+            .get(usize::from(corresponding_logical_dim))
+            .ok_or_else(|| LayoutError::InvalidShape(logical_shape.into()))?
+            .get();
+        let mut size_of_target_dim = None;
 
-    fn expand_logical_dim_physical_shape(
-        &self,
-        logical_dim: u8,
-        logical_shape: &[DimSize],
-    ) -> Result<Vec<(usize, DimSize)>, LayoutError> {
-        let Layout(dims) = self;
-        let mut physical_shape = vec![];
-        let mut remaining_size = logical_shape[usize::from(logical_dim)].get();
-        for (idx, (dim, fixed_size)) in dims.iter().enumerate().rev() {
-            if *dim != logical_dim {
+        // TODO: This could short-circuit! It would just have to avoid checking correctness of
+        // remaining dimensions.
+        for i in (0..dims.len()).rev() {
+            let (ldim, pdim) = dims[i];
+            if ldim != corresponding_logical_dim {
                 continue;
             }
-            debug_assert_ne!(
-                remaining_size, 0,
-                "Logical dimension {} with unpacked size already seen in {:?}",
-                dim, dims
-            );
-            match fixed_size {
-                PhysDim::OddEven(s) | PhysDim::Packed(s) => {
-                    if remaining_size % *s != 0 {
+            assert_ne!(current_remaining_size, 0, "Dynamic already seen");
+            match pdim {
+                PhysDim::Packed(s) | PhysDim::OddEven(s) => {
+                    if current_remaining_size % s.get() != 0 {
                         return Err(LayoutError::InvalidShape(logical_shape.into()));
                     }
-                    physical_shape.push((idx, *s));
-                    remaining_size /= s.get();
+                    if i == physical_dim_usize {
+                        size_of_target_dim = Some(s);
+                    }
+                    current_remaining_size /= s.get();
                 }
                 PhysDim::Dynamic => {
-                    physical_shape.push((idx, DimSize::new(remaining_size).unwrap()));
-                    remaining_size = 0; // zero is a special value for error detection
+                    let dynamic_dim_size = DimSize::new(current_remaining_size)
+                        .ok_or_else(|| LayoutError::InvalidShape(logical_shape.into()))?;
+                    if i == physical_dim_usize {
+                        size_of_target_dim = Some(dynamic_dim_size);
+                    }
+                    current_remaining_size = 0; // mark consumption by Dynamic
                 }
             }
         }
-        if remaining_size > 1 {
+
+        // If current_remaining_size is 0, a Dynamic dim consumed remaining volume.  If 1, all
+        // Packed/OddEven dims divided perfectly. If > 1, the shape is invalid.
+        if current_remaining_size > 1 {
             return Err(LayoutError::InvalidShape(logical_shape.into()));
         }
-        physical_shape.reverse();
-        Ok(physical_shape)
+        Ok(size_of_target_dim.expect("No size for physical dimension"))
     }
 
     fn assert_no_size_1_packings(&self) {
