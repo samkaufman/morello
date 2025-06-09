@@ -28,7 +28,13 @@ use tempfile::tempdir;
 
 pub use self::cpu::CpuCodeGenThreadStyle;
 
-const CLI_FLAGS: [&str; 4] = ["-std=gnu99", "-O3", "-rtlib=compiler-rt", "-o"];
+const CLI_FLAGS: [&str; 5] = [
+    "-std=gnu99",
+    "-O3",
+    "-rtlib=compiler-rt",
+    "-Werror=unused-variable",
+    "-o",
+];
 const OPENMP_FLAG: &str = "-fopenmp";
 
 const X86_CLI_VEC_FLAGS: [&str; 2] = ["-mavx2", "-mfma"];
