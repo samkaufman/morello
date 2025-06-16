@@ -1173,7 +1173,7 @@ mod tests {
     use itertools::{izip, Itertools};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
-    use std::fmt;
+    use std::{collections::HashSet, fmt};
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);
     const TEST_SMALL_MEM: u64 = 256;
@@ -1462,8 +1462,18 @@ mod tests {
 
     /// Will return a [Decision] by choosing the first action for the Spec (if any) and recursively
     /// choosing the first action for all child Specs in the resulting partial Impl.
-    fn recursively_decide_actions<Tgt: Target>(spec: &Spec<Tgt>) -> Decision<Tgt> {
-        if let Some((action_num, partial_impl)) = Tgt::actions(&spec.0)
+    fn recursively_decide_actions_with_visited<Tgt: Target>(
+        spec: &Spec<Tgt>,
+        visited: &mut HashSet<Spec<Tgt>>,
+    ) -> Decision<Tgt> {
+        assert!(
+            !visited.contains(spec),
+            "detected cycle: {spec} already in call stack; whole stack is\n{}",
+            visited.iter().map(|s| s.to_string()).join("\n")
+        );
+        visited.insert(spec.clone());
+
+        let result = if let Some((action_num, partial_impl)) = Tgt::actions(&spec.0)
             .enumerate()
             .filter_map(|(i, a)| match a.apply(spec) {
                 Ok(imp) => Some((i, imp)),
@@ -1472,14 +1482,22 @@ mod tests {
             })
             .next()
         {
-            recursively_decide_with_action(spec, action_num.try_into().unwrap(), &partial_impl)
+            recursively_decide_with_action_with_visited(
+                spec,
+                action_num.try_into().unwrap(),
+                &partial_impl,
+                visited,
+            )
         } else {
             Decision {
                 spec: spec.clone(),
                 actions_costs: vec![],
                 children: vec![],
             }
-        }
+        };
+
+        visited.remove(spec);
+        result
     }
 
     fn recursively_decide_with_action<Tgt: Target>(
@@ -1487,11 +1505,25 @@ mod tests {
         action_num: ActionNum,
         partial_impl: &ImplNode<Tgt>,
     ) -> Decision<Tgt> {
+        recursively_decide_with_action_with_visited(
+            spec,
+            action_num,
+            partial_impl,
+            &mut HashSet::new(),
+        )
+    }
+
+    fn recursively_decide_with_action_with_visited<Tgt: Target>(
+        spec: &Spec<Tgt>,
+        action_num: ActionNum,
+        partial_impl: &ImplNode<Tgt>,
+        visited: &mut HashSet<Spec<Tgt>>,
+    ) -> Decision<Tgt> {
         let mut children = Vec::new();
         let mut unsat = false;
         visit_leaves(partial_impl, &mut |leaf| {
             if let ImplNode::SpecApp(spec_app) = leaf {
-                let cd = recursively_decide_actions(&spec_app.0);
+                let cd = recursively_decide_actions_with_visited(&spec_app.0, visited);
                 if cd.actions_costs.is_empty() {
                     unsat = true;
                     return false;
