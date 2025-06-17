@@ -264,11 +264,12 @@ impl Layout {
     /// For example,
     /// ```
     /// # use morello::layout::col_major;
+    /// # use morello::common::Shape;
     /// # use nonzero::nonzero as nz;
     /// let layout = col_major(2);
     /// assert_eq!(
     ///     layout.strides(&[nz!(4u32), nz!(6u32)]),
-    ///     Ok(vec![nz!(1u32), nz!(4u32)])
+    ///     Ok(Shape::from(vec![nz!(1u32), nz!(4u32)]))
     /// );
     /// ```
     ///
