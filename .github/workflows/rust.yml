@@ -32,7 +32,10 @@ jobs:
           sudo apt-get install -y libomp-dev
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --all-features --run-ignored=all --profile ci
+      - name: Run test suite
+        run: cargo nextest run --all-features --run-ignored=all --profile ci
+      - name: Run documentation tests
+        run: cargo test --doc --all-features
   
   smoke-test-example:
     strategy:
