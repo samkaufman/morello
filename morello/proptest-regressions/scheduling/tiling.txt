@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0f8ad4e96a1b742aa386a672e3ad162d629c4bd1f310dcc76a5ce9aa976fd345 # shrinks to aux = TensorSpecAux { aligned: false, level: RF, layout: Layout { dims: [(0, Dynamic), (1, Dynamic)], contig: 0 }, vector_size: None }, shape = [1], dtype = Uint8
+cc a1c355977241873decae78806f69ca2d77bd22aa3ae98794b491a649b1351f1f # shrinks to aux = TensorSpecAux { aligned: false, level: VRF, layout: Layout { dims: [(1, Dynamic), (0, Dynamic), (1, Packed(2))], contig: 0 }, vector_size: Some(4) }, original_shape = [2, 5, 6], new_shape = [7, 2, 1], dtype = Uint16
+cc 63fd55515c4c54fbf0ab888501b94baeed43cec0db9536af76ee51209cca7847 # shrinks to aux = TensorSpecAux { aligned: false, level: RF, layout: Layout { dims: [(0, Dynamic), (1, Dynamic)], contig: 0 }, vector_size: None }, original_shape = [4], dtype = Uint8

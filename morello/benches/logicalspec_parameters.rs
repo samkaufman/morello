@@ -22,7 +22,7 @@ fn matmul_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
 #[export_name = "morello_bench_logicalspec_parameters::conv_spec"]
 fn conv_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
     lspec!(Conv(
-        [size, size, size, size, size, size, size],
+        [size, size, size, 1, 1, size, size],
         (u32, Tgt::default_level(), row_major),
         (u32, Tgt::default_level(), row_major),
         (u32, Tgt::default_level(), row_major),

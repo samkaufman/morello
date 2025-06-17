@@ -1,4 +1,5 @@
 use crate::alignment::aligned_approx;
+use crate::common::Dtype;
 use crate::common::{DimSize, Shape};
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
@@ -8,11 +9,14 @@ use crate::scheduling::{
     NotApplicableReason,
 };
 use crate::scheduling_sugar::SchedulingSugar;
-use crate::spec::{self, FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{
+    self, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
+    PrimitiveSpecType, Spec,
+};
 use crate::target::Target;
-use crate::tensorspec::TensorSpec;
+use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
-use crate::views::{Param, Tile, View, ViewE};
+use crate::views::{Param, View, ViewE};
 use itertools::Either;
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
@@ -97,8 +101,10 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         };
 
         // 2. Construct tilings which respect the data deps. of the new output tile.
-        let Some(updated_input_tilings) =
-            logical_spec.input_tilings_for_tile_out(&smaller_output_tiling)
+        let Some(LogicalSpecInputTilingInference {
+            input_tilings,
+            component_parameter_shapes: component_input_tilings,
+        }) = logical_spec.input_tilings_for_tile_out(&smaller_output_tiling)
         else {
             return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
                 "Tiling doesn't apply to logical Spec",
@@ -107,59 +113,16 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
 
         // 3. Reify the tilings into Tiles we'll store with this action. Tiles objects track
         // the index and shape of the Impl parameter being tiled.
-        let mut next_fresh_loop_dim = u8::try_from(rank).unwrap();
-        let mut new_tiles: Vec<LoopTile<Tgt>> = vec![];
-        for (operand_idx, (original_input, (updated_input_tiling, updated_input_axes))) in
-            operands.iter().zip(updated_input_tilings.0).enumerate()
-        {
-            if operand_idx == output_idx {
-                continue;
-            }
-
-            let tiling_shape = updated_input_tiling.shape();
-            if !original_input.is_valid_tile_shape(tiling_shape, parallel) {
-                return Err(ApplyError::NotApplicable(
-                    NotApplicableReason::TileShapeInvalid,
-                ));
-            }
-
-            // Compute loop dimension names for the tile. Any axis which is None
-            // is given a fresh integer identifier, otherwise is given the
-            // identifier of the corresponding dimension in the output.
-            let axes = updated_input_axes
-                .iter()
-                .map(|b| {
-                    match *b {
-                        Some(output_dim) => {
-                            // It's correct to use the output dim. here because
-                            // we earlier initialized the output axes to be
-                            // simply their indices.
-                            output_dim
-                        }
-                        None => {
-                            let fresh_dim = next_fresh_loop_dim;
-                            next_fresh_loop_dim += 1;
-                            fresh_dim
-                        }
-                    }
-                })
-                .collect();
-
-            if original_input.shape() != &tiling_shape[..] {
-                let operand_idx_u8 = u8::try_from(operand_idx).unwrap();
-                new_tiles.push(LoopTile {
-                    parameter_index: operand_idx_u8,
-                    axes,
-                    tile: updated_input_tiling
-                        .apply(Param::new(operand_idx_u8, original_input.clone()))
-                        .map(|v| v.boxed_viewe())
-                        .map_err(tile_to_apply_err)?,
-                });
-            }
-        }
+        let mut new_tiles =
+            input_tiles_for_tile_out(&operands, input_tilings.0, rank, output_idx, parallel)?;
         new_tiles.push(smaller_output);
-
-        loop_spec_with_shrunken_tiles(operands, new_tiles, logical_spec, parallel, spec)
+        loop_spec_with_shrunken_tiles(
+            component_input_tilings,
+            new_tiles,
+            logical_spec,
+            parallel,
+            spec,
+        )
     }
 
     fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
@@ -276,32 +239,42 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                             )));
                         }
 
+                        let lhs_tiling =
+                            Tiling::new_simple(smallvec![lhs.shape()[0], lhs.shape()[1], self.k]);
+                        let rhs_tiling =
+                            Tiling::new_simple(smallvec![rhs.shape()[0], self.k, rhs.shape()[2]]);
+                        let output_tiling = Tiling::new_simple(operands[2].shape().into());
+
                         let tiles = vec![
                             LoopTile {
                                 parameter_index: 0,
                                 axes: vec![0, 1, 2],
-                                tile: Tile::new(
-                                    smallvec![lhs.shape()[0], lhs.shape()[1], self.k],
-                                    smallvec![lhs.shape()[0], lhs.shape()[1], self.k],
-                                    Param::new(0, lhs.clone()),
-                                )
-                                .map(|v| v.boxed_viewe())
-                                .map_err(tile_to_apply_err)?,
+                                tile: lhs_tiling
+                                    .apply(Param::new(0, lhs.clone()))
+                                    .map(|v| v.boxed_viewe())
+                                    .map_err(tile_to_apply_err)?,
                             },
                             LoopTile {
                                 parameter_index: 1,
                                 axes: vec![0, 2, 3],
-                                tile: Tile::new(
-                                    smallvec![rhs.shape()[0], self.k, rhs.shape()[2]],
-                                    smallvec![rhs.shape()[0], self.k, rhs.shape()[2]],
-                                    Param::new(1, rhs.clone()),
-                                )
-                                .map(|v| v.boxed_viewe())
-                                .map_err(tile_to_apply_err)?,
+                                tile: rhs_tiling
+                                    .apply(Param::new(1, rhs.clone()))
+                                    .map(|v| v.boxed_viewe())
+                                    .map_err(tile_to_apply_err)?,
                             },
                         ];
 
-                        loop_spec_with_shrunken_tiles(operands, tiles, logical_spec, false, spec)
+                        loop_spec_with_shrunken_tiles(
+                            vec![vec![
+                                lhs_tiling.shape().clone(),
+                                rhs_tiling.shape().clone(),
+                                output_tiling.shape().clone(),
+                            ]],
+                            tiles,
+                            logical_spec,
+                            false,
+                            spec,
+                        )
                     }
                     PrimitiveSpecType::Max { dim, accum: true }
                     | PrimitiveSpecType::SoftmaxDenominator {
@@ -323,20 +296,25 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
 
                         let mut split_shape = Shape::from_slice(in_tensor_spec.shape());
                         split_shape[usize::from(*dim)] = self.k;
-
+                        let split_tiling = Tiling::new_simple(split_shape.clone());
                         let tiles = vec![LoopTile {
                             parameter_index: 0,
                             axes: (0..u8::try_from(in_tensor_spec.shape().len()).unwrap())
                                 .collect(),
-                            tile: Tile::new(
-                                split_shape.clone(),
-                                split_shape,
-                                Param::new(0, in_tensor_spec.clone()),
-                            )
-                            .map(|t| t.boxed_viewe())
-                            .map_err(tile_to_apply_err)?,
+                            tile: split_tiling
+                                .apply(Param::new(0, in_tensor_spec.clone()))
+                                .map(|v| v.boxed_viewe())
+                                .map_err(tile_to_apply_err)?,
                         }];
-                        loop_spec_with_shrunken_tiles(operands, tiles, logical_spec, false, spec)
+                        let mut new_shapes = vec![split_shape]; // TODO: Reserve capacity
+                        new_shapes.extend(operands.iter().skip(1).map(|o| o.shape().into()));
+                        loop_spec_with_shrunken_tiles(
+                            vec![new_shapes],
+                            tiles,
+                            logical_spec,
+                            false,
+                            spec,
+                        )
                     }
                     _ => unimplemented!("Split not implemented for {:?}", typ),
                 }
@@ -486,6 +464,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
     }
 }
 
+/// A `TileOut` special case for [SoftmaxDenominatorAndUnscaledFromMax].
 fn tile_out_daufm<Tgt: Target>(
     spec: &Spec<Tgt>,
     tileout: &TileOut,
@@ -552,64 +531,100 @@ fn tile_out_daufm<Tgt: Target>(
     let mut onescan_shape: Shape = new_output_shape.clone().either_into();
     onescan_shape[usize::from(*scan_dim)] = nz!(1u32);
     let updated_input_tilings = [
-        Tiling::new_simple(new_output_shape.either_into()), // input
-        Tiling::new_simple(onescan_shape.clone()),          // max
-        Tiling::new_simple(onescan_shape),                  // output: denominator
+        Tiling::new_simple(new_output_shape.clone().either_into()), // input
+        Tiling::new_simple(onescan_shape.clone()),                  // max
+        Tiling::new_simple(onescan_shape.clone()),                  // output: denominator
     ];
 
-    // 3. Reify the tilings into Tiles we'll store with this action. Tiles objects track
-    // the index and shape of the Impl parameter being tiled.
-    let mut new_tiles: Vec<LoopTile<Tgt>> = vec![];
-    for (operand_idx, (original_input, updated_input_tiling)) in
-        operands.iter().zip(updated_input_tilings).enumerate()
-    {
-        let tiling_shape = updated_input_tiling.shape();
-        if !original_input.is_valid_tile_shape(tiling_shape, false) {
-            return Some(Err(ApplyError::NotApplicable(
-                NotApplicableReason::TileShapeInvalid,
-            )));
+    // 3. Reify the tilings into Tiles we'll store with this action.
+    let tilings_and_bindings: Vec<(Tiling, Vec<Option<u8>>)> = updated_input_tilings
+        .into_iter()
+        .map(|tiling| (tiling, (0..rank).map(Some).collect()))
+        .collect();
+    match input_tiles_for_tile_out(&operands, tilings_and_bindings, usize::from(rank), 3, false) {
+        Ok(mut new_tiles) => {
+            new_tiles.push(smaller_output);
+            Some(loop_spec_with_shrunken_tiles(
+                vec![vec![
+                    new_output_shape.clone().either_into(), // parameter 0: input
+                    onescan_shape.clone(),                  // parameter 1: max
+                    onescan_shape,                          // parameter 2: denominator output
+                    new_output_shape.either_into(),         // parameter 3: unscaled output
+                ]],
+                new_tiles,
+                &spec.0,
+                false,
+                spec,
+            ))
         }
-
-        if original_input.shape() != &tiling_shape[..] {
-            let operand_idx_u8 = u8::try_from(operand_idx).unwrap();
-            let tile = match updated_input_tiling
-                .apply(Param::new(operand_idx_u8, original_input.clone()))
-            {
-                Ok(t) => t.boxed_viewe(),
-                Err(err) => return Some(Err(tile_to_apply_err(err))),
-            };
-            new_tiles.push(LoopTile {
-                parameter_index: operand_idx_u8,
-                axes: (0..rank).collect(),
-                tile,
-            });
-        }
+        Err(e) => Some(Err(e)),
     }
-    new_tiles.push(smaller_output);
-
-    Some(loop_spec_with_shrunken_tiles(
-        operands, new_tiles, &spec.0, false, spec,
-    ))
 }
 
+/// Returns a [Loop] with a smaller sub-Spec application.
 fn loop_spec_with_shrunken_tiles<Tgt: Target>(
-    mut operands: Vec<TensorSpec<Tgt>>,
+    component_parameter_shapes: Vec<Vec<Shape>>,
     tiles: Vec<LoopTile<Tgt>>,
     logical_spec: &LogicalSpec<Tgt>,
     parallel: bool,
     spec: &Spec<Tgt>,
 ) -> Result<ImplNode<Tgt>, ApplyError> {
-    // Modify `operands` TensorSpecs' shapes to accord with the tilings.
-    for loop_tile in &tiles {
-        let ref_op = &mut operands[usize::from(loop_tile.parameter_index)];
-        let aligned =
-            aligned_approx(loop_tile.tile.shape(), loop_tile.tile.step_sizes(), ref_op).unwrap();
-        ref_op.shrink(loop_tile.tile.shape(), aligned).unwrap();
-    }
-
-    // Update the Spec with these new operands, as well as its serial_only flag.
     let mut inner_spec = logical_spec.clone();
-    inner_spec.replace_io(&operands);
+    match &mut inner_spec {
+        LogicalSpec::Primitive(prim_basics, primitive_aux, _) => {
+            debug_assert_eq!(component_parameter_shapes.len(), 1);
+            debug_assert_eq!(
+                component_parameter_shapes[0].len(),
+                prim_basics.dtypes.len()
+            );
+
+            let original_shapes = prim_basics.parameter_shapes();
+            prim_basics.replace_io(
+                &component_parameter_shapes[0]
+                    .iter()
+                    .zip(&prim_basics.dtypes)
+                    .map(|(shape, &dtype)| (&shape[..], dtype))
+                    .collect::<Vec<_>>(),
+            );
+
+            for (param_idx, ((original_shape, new_shape), aux)) in original_shapes
+                .into_iter()
+                .zip(prim_basics.parameter_shapes())
+                .zip(primitive_aux.iter_mut())
+                .enumerate()
+            {
+                update_aux_for_tiling(
+                    aux,
+                    &original_shape,
+                    &new_shape,
+                    prim_basics.dtypes[param_idx],
+                );
+            }
+        }
+        LogicalSpec::Compose {
+            components,
+            operand_auxes,
+            ..
+        } => {
+            debug_assert!(!components.is_empty());
+            debug_assert_eq!(components.len(), component_parameter_shapes.len());
+            let original_component_shapes: Vec<Vec<Shape>> = components
+                .iter()
+                .map(|subspec| subspec.parameter_shapes())
+                .collect();
+            for (subspec, shapes) in components.iter_mut().zip(component_parameter_shapes) {
+                debug_assert_eq!(shapes.len(), subspec.typ.operand_count());
+                debug_assert_eq!(shapes.len(), subspec.dtypes.len());
+                let new_operands: Vec<(&[DimSize], Dtype)> = shapes
+                    .iter()
+                    .zip(&subspec.dtypes)
+                    .map(|(shape, &dtype)| (&shape[..], dtype))
+                    .collect();
+                subspec.replace_io(&new_operands);
+            }
+            update_compose_aux_for_tiling(components, &original_component_shapes, operand_auxes);
+        }
+    };
     inner_spec.set_serial_only(inner_spec.serial_only() || parallel);
     inner_spec
         .canonicalize()
@@ -642,14 +657,165 @@ fn loop_spec_with_shrunken_tiles<Tgt: Target>(
     }))
 }
 
+/// Create [LoopTile]s corresponding to a set of input [Tiling]s and bindings.
+fn input_tiles_for_tile_out<Tgt: Target>(
+    operands: &[TensorSpec<Tgt>],
+    tilings_and_bindings: Vec<(Tiling, Vec<Option<u8>>)>,
+    rank: usize,
+    output_idx: usize,
+    parallel: bool,
+) -> Result<Vec<LoopTile<Tgt>>, ApplyError> {
+    let mut next_fresh_loop_dim = u8::try_from(rank).unwrap();
+    let mut new_tiles = Vec::new();
+    for (operand_idx, (original_input, (tiling, axes_binding))) in
+        operands.iter().zip(tilings_and_bindings).enumerate()
+    {
+        if operand_idx == output_idx {
+            continue;
+        }
+        if !original_input.is_valid_tile_shape(tiling.shape(), parallel) {
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::TileShapeInvalid,
+            ));
+        }
+        if original_input.shape() == &tiling.shape()[..] {
+            continue;
+        }
+
+        let operand_idx_u8 = u8::try_from(operand_idx).unwrap();
+        new_tiles.push(LoopTile {
+            parameter_index: operand_idx_u8,
+            axes: axes_binding
+                .iter()
+                .map(|binding| match *binding {
+                    Some(output_dim) => output_dim,
+                    None => {
+                        // fresh axis IDs where none is bound
+                        let fresh = next_fresh_loop_dim;
+                        next_fresh_loop_dim += 1;
+                        fresh
+                    }
+                })
+                .collect(),
+            tile: tiling
+                .apply(Param::new(operand_idx_u8, original_input.clone()))
+                .map(|v| v.boxed_viewe())
+                .map_err(tile_to_apply_err)?,
+        });
+    }
+    Ok(new_tiles)
+}
+
+// TODO: We really shouldn't need this helper function.
+/// Updates the layout and alignment of `aux`. Alignment is not updated if the shape of the tensor
+/// is unchanged.
+fn update_aux_for_tiling<Tgt: Target>(
+    aux: &mut crate::tensorspec::TensorSpecAux<Tgt>,
+    original_shape: &[DimSize],
+    new_shape: &[DimSize],
+    dtype: Dtype,
+) {
+    let original_tensor_spec = TensorSpec {
+        dtype,
+        shape: original_shape.into(),
+        aux: aux.clone(),
+    };
+    if let Ok(new_layout) = aux.layout.update_for_tiling(original_shape, new_shape) {
+        aux.layout = new_layout;
+    }
+    if original_shape != new_shape {
+        aux.aligned =
+            aligned_approx(new_shape, new_shape, &original_tensor_spec).unwrap_or(aux.aligned);
+    }
+}
+
+/// Runs [update_aux_for_tiling] on all Compose parameters' [TensorSpecAux]es.
+fn update_compose_aux_for_tiling<Tgt: Target>(
+    components: &[PrimitiveBasics],
+    original_component_shapes: &[Vec<Shape>],
+    operand_auxes: &mut [TensorSpecAux<Tgt>],
+) {
+    let mut aux_idx = 0;
+
+    // First component's external parameters (skip output and first input)
+    let c0_output_idx = components[0].typ.unique_output_index().unwrap();
+    for parameter in 1..components[0].typ.operand_count() {
+        if parameter != c0_output_idx {
+            let original_shape = &original_component_shapes[0][parameter];
+            let new_shape = components[0].parameter_shape(parameter);
+            update_aux_for_tiling(
+                &mut operand_auxes[aux_idx],
+                original_shape,
+                &new_shape,
+                components[0].dtypes[parameter],
+            );
+            aux_idx += 1;
+        }
+    }
+
+    // Middle components' external parameters (skip output and first input)
+    for (component_idx, component) in components
+        .iter()
+        .enumerate()
+        .take(components.len() - 1)
+        .skip(1)
+    {
+        let output_idx = component.typ.unique_output_index().unwrap();
+        for parameter in 1..component.typ.operand_count() {
+            if parameter != output_idx {
+                let original_shape = &original_component_shapes[component_idx][parameter];
+                let new_shape = component.parameter_shape(parameter);
+                update_aux_for_tiling(
+                    &mut operand_auxes[aux_idx],
+                    original_shape,
+                    &new_shape,
+                    component.dtypes[parameter],
+                );
+                aux_idx += 1;
+            }
+        }
+    }
+
+    // Last component's external parameters (skip output but include all inputs)
+    let last_component_idx = components.len() - 1;
+    let last_component = &components[last_component_idx];
+    let cl_output_idx = last_component.typ.unique_output_index().unwrap();
+    for parameter in 0..last_component.typ.operand_count() {
+        if parameter != cl_output_idx {
+            let original_shape = &original_component_shapes[last_component_idx][parameter];
+            let new_shape = last_component.parameter_shape(parameter);
+            update_aux_for_tiling(
+                &mut operand_auxes[aux_idx],
+                original_shape,
+                &new_shape,
+                last_component.dtypes[parameter],
+            );
+            aux_idx += 1;
+        }
+    }
+
+    // Finally, handle the compose output (which is the first component's output)
+    let original_shape = &original_component_shapes[0][c0_output_idx];
+    let new_shape = components[0].parameter_shape(c0_output_idx);
+    update_aux_for_tiling(
+        &mut operand_auxes[aux_idx],
+        original_shape,
+        &new_shape,
+        components[0].dtypes[c0_output_idx],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imp::loops::Loop;
     use crate::layout::{row_major, Layout, PhysDim};
     use crate::scheduling::Action;
     use crate::target::{CpuMemoryLevel, X86Target};
+    use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape, TensorSpecAux};
     use crate::{shape, spec};
     use nonzero::nonzero as nz;
+    use proptest::prelude::*;
 
     /// Test that a TileOut::SingleLoop with a non-multiple size fails to apply.
     ///
@@ -702,5 +868,95 @@ mod tests {
             ),
             "expected NotApplicable(Other) but got {application:?}",
         );
+    }
+
+    #[test]
+    fn test_tile_out_daufm() {
+        // Create a SoftmaxDenominatorAndUnscaledFromMax Spec
+        let spec = Spec::<X86Target>(
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+                        scan_dim: 2,
+                        accum: true,
+                    },
+                    spec_shape: smallvec![nz!(4u32), nz!(8u32), nz!(16u32)],
+                    dtypes: vec![Dtype::Float32; 4],
+                },
+                vec![
+                    TensorSpecAux {
+                        aligned: true,
+                        level: CpuMemoryLevel::GL,
+                        layout: row_major(3),
+                        vector_size: None,
+                    };
+                    4
+                ],
+                false,
+            ),
+            X86Target::max_mem(),
+        );
+
+        let tile_action = TileOut::SingleLoop {
+            dim: 2,
+            size: nz!(8u32),
+            parallel: false,
+        };
+
+        let ImplNode::Loop(Loop {
+            tiles,
+            body,
+            parallel,
+            spec: loop_spec,
+        }) = tile_action
+            .apply(&spec)
+            .expect("TileOut should apply successfully")
+        else {
+            panic!("Expected ImplNode::Loop")
+        };
+
+        assert!(!parallel);
+        assert_eq!(loop_spec, Some(spec));
+
+        // Parameters 0 and 3 should be tiled
+        let param_indices: Vec<u8> = tiles.iter().map(|t| t.parameter_index).collect();
+        assert_eq!(param_indices, [0, 3]);
+
+        // Check shapes of the body SpecApp
+        let body_params: Vec<_> = body.parameters().collect();
+        let expected_shapes = [
+            &[nz!(4u32), nz!(8u32), nz!(8u32)][..], // Parameter 0: input (tiled)
+            &[nz!(4u32), nz!(8u32), nz!(1u32)][..], // Parameter 1: max (reduced)
+            &[nz!(4u32), nz!(8u32), nz!(1u32)][..], // Parameter 2: denominator (reduced)
+            &[nz!(4u32), nz!(8u32), nz!(8u32)][..], // Parameter 3: output (tiled)
+        ];
+        assert_eq!(
+            body_params.iter().map(|p| p.shape()).collect::<Vec<_>>(),
+            expected_shapes
+        );
+
+        // Check that the tile shapes match the body parameter shapes
+        assert!(tiles.iter().all(|tile| {
+            let param_idx = usize::from(tile.parameter_index);
+            tile.tile.shape() == body_params[param_idx].shape()
+        }));
+    }
+
+    proptest! {
+        /// Test that [update_aux_for_tiling] preserves auxiliary information when shapes are
+        /// identical.
+        #[test]
+        fn test_update_aux_for_tiling_identical_shapes_preserves_aux(
+            mut tspec in any_with::<TensorSpec<X86Target>>(TensorSpecArbMaxShape(shape![8, 8, 8]))
+        ) {
+            let shape = tspec.shape().to_vec();
+            let dtype = tspec.dtype();
+            let original_aux = tspec.aux.clone();
+            update_aux_for_tiling(&mut tspec.aux, &shape, &shape, dtype);
+            prop_assert_eq!(tspec.aux.layout, original_aux.layout);
+            prop_assert_eq!(tspec.aux.aligned, original_aux.aligned);
+            prop_assert_eq!(tspec.aux.level, original_aux.level);
+            prop_assert_eq!(tspec.aux.vector_size, original_aux.vector_size);
+        }
     }
 }

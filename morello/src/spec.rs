@@ -146,9 +146,20 @@ pub enum FillValue {
 /// `vec![None, Some(1)]` for each of its inputs, indicating that the first
 /// dimension of the first input (the m dimension) is bound to the m dimension
 /// of the output, and so on for the n dimension.
-#[derive(Debug)]
-#[cfg_attr(test, derive(PartialEq))]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TilingInference(pub Vec<(Tiling, Vec<Option<u8>>)>);
+
+/// Combines a [TilingInference] with the new shapes of all component [LogicalSpec]s.
+///
+/// For [LogicalSpec::Primitive], `component_parameter_shapes` is the same shapes as those in
+/// `compose_input_tilings` with the addition of the output. For [LogicalSpec::Compose], it includes
+/// "internal" shapes of internal components, which are shapes which aren't composed by parameters
+/// to the `Compose`.
+#[derive(Debug)]
+pub(crate) struct LogicalSpecInputTilingInference {
+    pub input_tilings: TilingInference,
+    pub component_parameter_shapes: Vec<Vec<Shape>>,
+}
 
 /// A [BiMap] which extends [LogicalSpecSurMap] with memory limits dimensions.
 ///
@@ -448,17 +459,15 @@ impl PrimitiveBasics {
                 _ => panic!("Matmul has only 3 parameters"),
             },
             PrimitiveSpecType::Conv { .. } => {
-                let [b, f, c, h, w, fh, fw] = self.spec_shape[..] else {
+                let [b, f, c, h_add_1, w_add_1, fh, fw] = self.spec_shape[..] else {
                     panic!("Conv must have rank 7")
                 };
-                debug_assert!(
-                    h >= fh && w >= fw,
-                    "Conv spatial dims. {h}x{w} were larger than filter {fh}x{fw}"
-                );
+                let h = DimSize::new(h_add_1.get() - 1 + fh.get()).unwrap();
+                let w = DimSize::new(w_add_1.get() - 1 + fw.get()).unwrap();
                 match idx {
                     0 => smallvec![b, c, h, w],
                     1 => smallvec![f, c, fh, fw],
-                    2 => conv_infer_output_shape(&[b, c, h, w], &[f, c, fh, fw]),
+                    2 => smallvec![b, f, h_add_1, w_add_1],
                     _ => panic!("Conv has only 3 parameters"),
                 }
             }
@@ -677,24 +686,15 @@ impl PrimitiveBasics {
                 };
 
                 // Compute the new input image Tiling.
-                let new_image_shape: Shape = [smaller_output.shape()[0], channels]
-                    .into_iter()
-                    .chain(
-                        smaller_output.shape()[2..]
-                            .iter()
-                            .zip([fh, fw])
-                            .map(|(&o, f)| o.get() + f.get() - 1)
-                            .map(|d| DimSize::new(d).unwrap()),
-                    )
-                    .collect();
+                let h = DimSize::new(smaller_output.shape()[2].get() + fh.get() - 1).unwrap();
+                let w = DimSize::new(smaller_output.shape()[3].get() + fw.get() - 1).unwrap();
+                let new_image_shape: Shape = smallvec![smaller_output.shape()[0], channels, h, w];
                 let mut new_image_steps: Shape = smaller_output.step_sizes().into();
                 new_image_steps[1] = channels;
 
                 // Compute the new filters Tiling.
-                let new_filters_shape: Shape = [smaller_output.shape()[1], channels]
-                    .into_iter()
-                    .chain([fh, fw])
-                    .collect();
+                let new_filters_shape: Shape =
+                    smallvec![smaller_output.shape()[1], channels, fh, fw];
                 let mut new_filters_steps: Shape = new_filters_shape.clone();
                 new_filters_steps[0] = smaller_output.step_sizes()[1];
 
@@ -926,35 +926,23 @@ impl proptest::arbitrary::Arbitrary for PrimitiveBasics {
                         vec![b, m, k, (1..=max_size).sboxed()].sboxed()
                     }
                     PrimitiveSpecType::Conv { accum: _ } => {
-                        let (b, c, h, w) = match args.first_input_shape.as_deref() {
-                            Some([b, c, h, w]) => (
-                                Just(b.get()).sboxed(),
-                                Just(c.get()).sboxed(),
-                                Just(h.get()).sboxed(),
-                                Just(w.get()).sboxed(),
-                            ),
+                        match args.first_input_shape.as_deref() {
+                            Some([b, c, h, w]) => {
+                                let (h_val, w_val, b_val, c_val) =
+                                    (h.get(), w.get(), b.get(), c.get());
+                                (1..=max_size.min(h_val), 1..=max_size.min(w_val))
+                                    .prop_flat_map(move |(fh, fw)| {
+                                        let h_add_1 = h_val - fh + 1;
+                                        let w_add_1 = w_val - fw + 1;
+                                        (1..=max_size).prop_map(move |f| {
+                                            vec![b_val, f, c_val, h_add_1, w_add_1, fh, fw]
+                                        })
+                                    })
+                                    .sboxed()
+                            }
                             Some(_) => panic!("Conv requires a rank-4 first input"),
-                            None => (
-                                (1..=max_size).sboxed(),
-                                (1..=max_size).sboxed(),
-                                (1..=max_size).sboxed(),
-                                (1..=max_size).sboxed(),
-                            ),
-                        };
-                        (b, c, h, w)
-                            .prop_flat_map(move |(b, c, h, w)| {
-                                (
-                                    Just(b),
-                                    1..max_size,
-                                    Just(c),
-                                    Just(h),
-                                    Just(w),
-                                    1..=h,
-                                    1..=w,
-                                )
-                            })
-                            .prop_map(|(b, f, c, h, w, fh, fw)| vec![b, f, c, h, w, fh, fw])
-                            .sboxed()
+                            None => proptest::collection::vec(1..=max_size, 7).sboxed(),
+                        }
                     }
                     PrimitiveSpecType::Softmax { scan_dim, .. }
                     | PrimitiveSpecType::SoftmaxComplete { scan_dim, .. }
@@ -1070,15 +1058,39 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::Conv { accum: _ } => {
                 let lhs = parameter_shapes.next().unwrap();
                 let rhs = parameter_shapes.next().unwrap();
-                let _out = parameter_shapes.next().unwrap();
-
+                let out = parameter_shapes.next().unwrap();
                 let [b, c, h, w] = *lhs else {
                     panic!();
                 };
                 let [f, alt_c, fh, fw] = *rhs else { panic!() };
                 assert_eq!(c, alt_c);
-                // TODO: Assert consistency with the output as well
-                smallvec![b, f, c, h, w, fh, fw]
+                assert!(
+                    h.get() >= fh.get(),
+                    "Image height {} must be >= filter height {}",
+                    h.get(),
+                    fh.get()
+                );
+                assert!(
+                    w.get() >= fw.get(),
+                    "Image width {} must be >= filter width {}",
+                    w.get(),
+                    fw.get()
+                );
+                debug_assert_eq!(
+                    out.iter().map(|v| v.get()).collect::<Vec<_>>(),
+                    [
+                        b.get(),
+                        f.get(),
+                        h.get() - fh.get() + 1,
+                        w.get() - fw.get() + 1
+                    ],
+                    "unexpected output shape: {out:?}"
+                );
+                let h_add = h.get() - fh.get();
+                let w_add = w.get() - fw.get();
+                let h_add_1 = DimSize::new(h_add + 1).unwrap();
+                let w_add_1 = DimSize::new(w_add + 1).unwrap();
+                smallvec![b, f, c, h_add_1, w_add_1, fh, fw]
             }
             PrimitiveSpecType::Broadcast { dim } => {
                 let inp = parameter_shapes.next().unwrap();
@@ -1239,7 +1251,14 @@ impl PrimitiveSpecType {
                 let ([b, _, h, w], [f, _, fh, fw]) = (inputs[0], inputs[1]) else {
                     panic!("Conv inputs must have 4 dimensions each");
                 };
-                debug_assert!(h.get() >= fh.get() && w.get() >= fw.get());
+                assert!(
+                    h.get() >= fh.get(),
+                    "Image height {h} must be >= filter height {fh}",
+                );
+                assert!(
+                    w.get() >= fw.get(),
+                    "Image width {w} must be >= filter width {fw}",
+                );
                 Some(smallvec![
                     *b,
                     *f,
@@ -1817,13 +1836,28 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         true
     }
 
-    pub fn input_tilings_for_tile_out(&self, smaller_output: &Tiling) -> Option<TilingInference> {
+    pub(crate) fn input_tilings_for_tile_out(
+        &self,
+        smaller_output: &Tiling,
+    ) -> Option<LogicalSpecInputTilingInference> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => {
-                basics.input_tilings_for_tile_out(smaller_output)
+                let ti = basics.input_tilings_for_tile_out(smaller_output)?;
+                let mut component_parameter_shapes: Vec<Vec<Shape>> =
+                    vec![ti.0.iter().map(|(t, _)| t.shape().clone()).collect()];
+                component_parameter_shapes[0].insert(
+                    basics.typ.unique_output_index().unwrap(),
+                    smaller_output.shape().clone(),
+                );
+                Some(LogicalSpecInputTilingInference {
+                    input_tilings: ti.clone(),
+                    component_parameter_shapes,
+                })
             }
             LogicalSpec::Compose { components, .. } => {
-                let mut accumulated_input_tilings = Vec::with_capacity(self.operand_count() - 1);
+                let mut compose_input_tilings = Vec::with_capacity(self.operand_count() - 1);
+                let mut component_input_tilings =
+                    Vec::<Vec<Shape>>::with_capacity(components.len());
 
                 // Compute [TilingInference] for the outermost (last-executed) component.
                 // `accumulated_input_tilings` will contain the [Tiling]s and dimensions for all but
@@ -1831,23 +1865,60 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 // component's output).
                 let mut first_inference =
                     components[0].input_tilings_for_tile_out(smaller_output)?;
-                accumulated_input_tilings.extend(first_inference.0.drain(1..));
+                compose_input_tilings.extend_from_slice(&first_inference.0[1..]);
+                component_input_tilings.push(
+                    first_inference
+                        .0
+                        .iter()
+                        .map(|(t, _)| t.shape().clone())
+                        .collect(),
+                );
+                component_input_tilings[0].insert(
+                    components[0].typ.unique_output_index().unwrap(),
+                    smaller_output.shape().clone(),
+                );
 
                 let mut last_output_tiling = first_inference.0.remove(0).0;
                 for subspec in &components[1..components.len() - 1] {
-                    let mut subspec_input_tilings =
+                    let mut input_tilings =
                         subspec.input_tilings_for_tile_out(&last_output_tiling)?;
-                    accumulated_input_tilings.extend(subspec_input_tilings.0.drain(1..));
-                    last_output_tiling = subspec_input_tilings.0.remove(0).0;
+                    component_input_tilings.push(
+                        input_tilings
+                            .0
+                            .iter()
+                            .map(|(t, _)| t.shape().clone())
+                            .collect(),
+                    );
+                    component_input_tilings.last_mut().unwrap().insert(
+                        subspec.typ.unique_output_index().unwrap(),
+                        last_output_tiling.shape().clone(),
+                    );
+                    compose_input_tilings.extend(input_tilings.0.drain(1..));
+                    last_output_tiling = input_tilings.0.remove(0).0;
                 }
 
-                accumulated_input_tilings.extend(
+                let innermost_tiling = components[components.len() - 1]
+                    .input_tilings_for_tile_out(&last_output_tiling)?;
+                compose_input_tilings.extend_from_slice(&innermost_tiling.0);
+                component_input_tilings.push(
+                    innermost_tiling
+                        .0
+                        .iter()
+                        .map(|(t, _)| t.shape().clone())
+                        .collect(),
+                );
+                component_input_tilings.last_mut().unwrap().insert(
                     components[components.len() - 1]
-                        .input_tilings_for_tile_out(&last_output_tiling)?
-                        .0,
+                        .typ
+                        .unique_output_index()
+                        .unwrap(),
+                    last_output_tiling.shape().clone(),
                 );
 
-                Some(TilingInference(accumulated_input_tilings))
+                Some(LogicalSpecInputTilingInference {
+                    input_tilings: TilingInference(compose_input_tilings),
+                    component_parameter_shapes: component_input_tilings,
+                })
             }
         }
     }
@@ -2281,13 +2352,7 @@ impl BiMap for PrimitiveBasicsBimap {
                 )
             }
             PrimitiveSpecType::Conv { accum } => {
-                let mut v: Vec<_> = once(!accum as _).chain(shifted_shape).collect();
-                // Conv's image dimensions must be larger than or equal to the corresponding filter
-                // dimensions (the final two dimensions in `v`/`shifted_shape`), so we'll subtract
-                // the filter sizes from the image sizes, thereby normalizing the image dims. to
-                // zero.
-                v[4] -= v[6];
-                v[5] -= v[7];
+                let v: Vec<_> = once(!accum as _).chain(shifted_shape).collect();
                 (
                     SpecKey::Conv {
                         dtypes: dtypes.as_slice().try_into().unwrap(),
@@ -2443,11 +2508,6 @@ impl BiMap for PrimitiveBasicsBimap {
                 };
 
                 let mut spec_shape: Vec<BimapInt> = v.iter().skip(1).copied().collect();
-                // Reverse the normalization of image dimensions (see `apply`).
-                if matches!(key, SpecKey::Conv { .. }) {
-                    spec_shape[3] += spec_shape[5];
-                    spec_shape[4] += spec_shape[6];
-                }
                 for d in &mut spec_shape[..] {
                     if self.binary_scale_shapes {
                         *d = u32::try_from((bit_length_inverse(*d) + 1).next_power_of_two())
@@ -2832,31 +2892,6 @@ pub fn dim_range(dim_size: DimSize, include_end: bool) -> impl Iterator<Item = D
         .take_while(move |x| *x < dim_size.get())
         .map(|x| DimSize::new(x).unwrap())
         .chain(once(if include_end { Some(dim_size) } else { None }).flatten())
-}
-
-// TODO: Drop in favor of primary output shape inference.
-pub fn conv_infer_output_shape(image_shape: &[DimSize], filters_shape: &[DimSize]) -> Shape {
-    let batch_cnt = image_shape[0];
-    let channels = image_shape[1];
-    let filter_cnt = filters_shape[0];
-    // TODO: We don't need to store this dimension twice.
-    assert_eq!(
-        channels, filters_shape[1],
-        "Image had {} channels and filters had {}",
-        channels, filters_shape[1]
-    );
-    vec![batch_cnt, filter_cnt]
-        .into_iter()
-        .chain(image_shape[2..].iter().zip(filters_shape[2..].iter()).map(
-            |(&img_dim, &filt_dim)| {
-                assert!(
-                    img_dim >= filt_dim,
-                    "Image dimension {img_dim} was smaller than filter dimension {filt_dim}"
-                );
-                DimSize::new(img_dim.get() - filt_dim.get() + 1).unwrap()
-            },
-        ))
-        .collect()
 }
 
 fn compose_parameter_shapes(components: &[PrimitiveBasics]) -> Vec<Shape> {
@@ -3293,7 +3328,7 @@ mod tests {
 
     #[test]
     fn test_compose_parameters() {
-        let spec = compose_logicalspec_test_data();
+        let spec = matmul_chain_test_data();
         let LogicalSpec::Compose {
             components,
             operand_auxes,
@@ -3347,9 +3382,72 @@ mod tests {
     }
 
     #[test]
+    fn test_conv_input_tilings_for_tile_out() {
+        let spec_shape = shape![
+            1, // batch size
+            2, // output filters
+            3, // input channels
+            4, // additional img. height + 1 (img. height = 2 + 4 - 1 = 5)
+            5, // additional img. width + 1 (img. width = 2 + 5 - 1 = 6)
+            2, // filter height
+            2, // filter width
+        ];
+        let basics = PrimitiveBasics {
+            typ: PrimitiveSpecType::Conv { accum: false },
+            spec_shape,
+            dtypes: vec![Dtype::Uint8, Dtype::Uint8, Dtype::Uint8],
+        };
+        assert_eq!(
+            basics.unique_output_shape().unwrap(),
+            shape![1, 2, 4, 5],
+            "initial output shape should be [1, 2, 4, 5]"
+        );
+
+        let output_tiling = Tiling::new_simple(shape![1, 2, 4, 3]);
+
+        let mut steps: Shape = output_tiling.step_sizes().into();
+        steps[1] = nz!(3u32);
+        let expected_img_tiling = Tiling::new_sliding(shape![1, 3, 5, 4], steps);
+
+        let mut steps: Shape = shape![2, 3, 2, 2];
+        steps[0] = output_tiling.step_sizes()[1];
+        let expected_filt_tiling = Tiling::new_sliding(shape![2, 3, 2, 2], steps);
+
+        assert_eq!(
+            basics.input_tilings_for_tile_out(&output_tiling),
+            Some(TilingInference(vec![
+                (expected_img_tiling, vec![Some(0), None, None, None]),
+                (expected_filt_tiling, vec![None, Some(1), None, None]),
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_compose_canonicalization_accepts_accmulating_head() {
+        let mut spec = matmul_chain_test_data();
+        let LogicalSpec::Compose { components, .. } = &mut spec else {
+            unreachable!();
+        };
+        components[0].typ = PrimitiveSpecType::Matmul { accum: true };
+        assert!(spec.canonicalize().is_ok());
+    }
+
+    #[test]
+    fn test_compose_canonicalization_rejects_accmulating_tail_components() {
+        let mut spec = matmul_chain_test_data();
+        let LogicalSpec::Compose { components, .. } = &mut spec else {
+            unreachable!();
+        };
+        components[1].typ = PrimitiveSpecType::Matmul { accum: true };
+        assert!(spec.canonicalize().is_err());
+    }
+
+    #[test]
     fn test_compose_input_tiling_inference() {
-        let spec = compose_logicalspec_test_data();
+        let spec = matmul_chain_test_data();
         let output_tiling = Tiling::new_simple(shape![8, 32, 128]);
+        let ci = spec.input_tilings_for_tile_out(&output_tiling).unwrap();
+
         let expected = TilingInference(vec![
             (
                 Tiling::new_simple(shape![8, 128, 128]),
@@ -3368,30 +3466,32 @@ mod tests {
                 vec![Some(0), None, Some(2)],
             ),
         ]);
-        assert_eq!(
-            spec.input_tilings_for_tile_out(&output_tiling),
-            Some(expected)
-        );
-    }
+        assert_eq!(ci.input_tilings, expected);
+        assert_eq!(ci.component_parameter_shapes.len(), 3); // 3 components in the compose
+        for component_tilings in &ci.component_parameter_shapes {
+            assert_eq!(component_tilings.len(), 3);
+        }
 
-    #[test]
-    fn test_compose_canonicalization_accepts_accmulating_head() {
-        let mut spec = compose_logicalspec_test_data();
-        let LogicalSpec::Compose { components, .. } = &mut spec else {
-            unreachable!();
-        };
-        components[0].typ = PrimitiveSpecType::Matmul { accum: true };
-        assert!(spec.canonicalize().is_ok());
-    }
+        let expected_comp0 = vec![
+            shape![8, 32, 128],  // first input (from component 1's output)
+            shape![8, 128, 128], // second input (external)
+            shape![8, 32, 128],  // output (final result)
+        ];
+        assert_eq!(ci.component_parameter_shapes[0], expected_comp0);
 
-    #[test]
-    fn test_compose_canonicalization_rejects_accmulating_tail_components() {
-        let mut spec = compose_logicalspec_test_data();
-        let LogicalSpec::Compose { components, .. } = &mut spec else {
-            unreachable!();
-        };
-        components[1].typ = PrimitiveSpecType::Matmul { accum: true };
-        assert!(spec.canonicalize().is_err());
+        let expected_comp1 = vec![
+            shape![8, 32, 128],  // first input (from component 2's output)
+            shape![8, 128, 128], // second input (external)
+            shape![8, 32, 128],  // output (feeds into component 0)
+        ];
+        assert_eq!(ci.component_parameter_shapes[1], expected_comp1);
+
+        let expected_comp2 = vec![
+            shape![8, 32, 128],  // first input (external)
+            shape![8, 128, 128], // second input (external)
+            shape![8, 32, 128],  // output (feeds into component 1)
+        ];
+        assert_eq!(ci.component_parameter_shapes[2], expected_comp2);
     }
 
     #[test]
@@ -3954,7 +4054,7 @@ mod tests {
             })
     }
 
-    fn compose_logicalspec_test_data() -> LogicalSpec<X86Target> {
+    fn matmul_chain_test_data() -> LogicalSpec<X86Target> {
         let basic0 = PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
             spec_shape: shape![16, 128, 128, 128],

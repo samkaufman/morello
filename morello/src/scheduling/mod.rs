@@ -650,6 +650,20 @@ mod tests {
         ) {
             shared_test_actions_introduce_subspec_arguments_with_matching_parameters(spec)?;
         }
+
+        #[test]
+        fn test_actions_do_not_introduce_self_nested_subspec_x86(
+            spec in arb_canonical_spec::<X86Target>(None, None),
+        ) {
+            shared_test_actions_do_not_introduce_self_nested_subspec(spec)?;
+        }
+
+        #[test]
+        fn test_actions_do_not_introduce_self_nested_subspec_arm(
+            spec in arb_canonical_spec::<ArmTarget>(None, None),
+        ) {
+            shared_test_actions_do_not_introduce_self_nested_subspec(spec)?;
+        }
     }
 
     // TODO: Add a solver version, if possible.
@@ -709,6 +723,31 @@ mod tests {
                 // TODO: Replace panic with a proptest-friendly result
                 Err(e) => panic!("unexpected error: {e:?}"),
             };
+        }
+        Ok(())
+    }
+
+    fn shared_test_actions_do_not_introduce_self_nested_subspec<Tgt: Target>(
+        spec: Spec<Tgt>,
+    ) -> Result<(), TestCaseError> {
+        for action in Tgt::actions(&spec.0) {
+            let Ok(rewritten) = action.apply(&spec) else {
+                continue;
+            };
+            let mut found_self = false;
+            visit_leaves(&rewritten, &mut |leaf| {
+                if let ImplNode::SpecApp(spec_app) = leaf {
+                    if spec_app.0 == spec {
+                        found_self = true;
+                        return false;
+                    }
+                }
+                true
+            });
+            prop_assert!(
+                !found_self,
+                "action {action:?} applied to {spec} yielded sub-Spec cycle",
+            );
         }
         Ok(())
     }
