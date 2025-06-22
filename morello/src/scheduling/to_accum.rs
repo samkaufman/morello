@@ -4,7 +4,6 @@ use crate::imp::ImplNode;
 use crate::scheduling::{make_accum_inits_for_spec, ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
-use crate::views::{Param, ViewE};
 use serde::{Deserialize, Serialize};
 
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -47,12 +46,8 @@ impl<Tgt: Target> ActionT<Tgt> for ToAccum {
         accum_spec
             .canonicalize()
             .expect("ToAccum's introduced accumulating Spec should be canonicalizable");
-        let app_arguments = operands
-            .iter()
-            .enumerate()
-            .map(|(i, t)| ViewE::from(Param::new(i.try_into().unwrap(), t.clone())));
         let zero_apps = make_accum_inits_for_spec(&accum_spec);
-        let accum_app = SpecApp::new(accum_spec, app_arguments).into();
+        let accum_app = SpecApp::new_with_default_params(accum_spec).into();
 
         let mut stages = zero_apps;
         stages.push(accum_app);

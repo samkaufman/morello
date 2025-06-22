@@ -1,3 +1,4 @@
+use crate::common::DimSize;
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
@@ -5,13 +6,10 @@ use crate::nameenv::NameEnv;
 use crate::spec::Spec;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
-use crate::views::{Tile, View, ViewE};
+use crate::views::{BoundaryTile, Tile, TileError, View, ViewE};
 use itertools::Itertools;
+use std::fmt::{self, Debug};
 use std::iter;
-use std::{
-    fmt::{self, Debug},
-    slice,
-};
 
 const PAR_TILE_OVERHEAD: MainCost = 45_000; // rough cycle estimate
 
@@ -38,8 +36,20 @@ const PAR_TILE_OVERHEAD: MainCost = 45_000; // rough cycle estimate
 #[derive(Clone)]
 pub struct Loop<Tgt: Target> {
     pub tiles: Vec<LoopTile<Tgt>>,
-    pub body: Box<ImplNode<Tgt>>,
+    // pub boundary_tiles: Vec<Vec<BoundaryLoopTile<Tgt>>>,
+    /// Implementations for different regions of the loop. This is never empty; the
+    /// first body is the main, largest sub-Impl.
+    ///
+    /// The vector is sorted by a lexicographic ordering of bitvectors where each bit
+    /// corresponds to an iteration dimension. A bit is set if that body is in the
+    /// boundary region of that dimension. Not every iteration dimension has a boundary
+    /// region, so not every region is represented in this Vec.
+    pub bodies: Vec<ImplNode<Tgt>>,
+    /// Region IDs corresponding to boundary region bodies. This `Vec` zips with
+    /// `bodies[1..bodies.len()]`.
+    pub region_ids: Vec<usize>,
     pub parallel: bool,
+    /// The [Spec] implemented by this [Loop].
     pub spec: Option<Spec<Tgt>>,
 }
 
@@ -49,6 +59,13 @@ pub struct LoopTile<Tgt: Target> {
     pub axes: Vec<u8>,
     pub tile: Tile<Box<ViewE<Tgt>>>,
 }
+
+// #[derive(Debug, Clone)]
+// pub struct BoundaryLoopTile<Tgt: Target> {
+//     pub parameter_index: u8,
+//     pub axes: Vec<u8>,
+//     pub tile: BoundaryTile<Box<ViewE<Tgt>>>,
+// }
 
 impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
     type BindOut = Self;
@@ -65,7 +82,7 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
         // Return an iterator over parameters from loop tiles where they apply and the inner body
         // elsewhere.
         let mut next_tile_idx = 0;
-        let mut body_parameters = self.body.parameters().enumerate();
+        let mut body_parameters = self.bodies[0].parameters().enumerate();
         Box::new(iter::from_fn(move || match body_parameters.next() {
             None => {
                 debug_assert_eq!(next_tile_idx, self.tiles.len());
@@ -82,7 +99,11 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
     }
 
     fn children(&self) -> &[ImplNode<Tgt>] {
-        slice::from_ref(&self.body)
+        &self.bodies
+    }
+
+    fn default_child(&self) -> Option<usize> {
+        Some(0) // the full-tile sub-Spec
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
@@ -90,23 +111,22 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        compute_loop_main_cost::<Tgt>(
-            self.steps(),
-            self.full_steps(),
-            self.parallel,
-            child_costs[0],
-        )
+        let all_dims: Vec<(u32, u32)> = unique_dims_per_axis(&self.tiles)
+            .map(|(lt, dim)| (lt.tile.steps_dim(dim), lt.tile.full_steps_dim(dim)))
+            .collect();
+        compute_loop_main_cost::<Tgt>(&all_dims, self.parallel, child_costs)
     }
 
-    fn replace_children(&self, mut new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
-        let new_loop = Loop {
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
+        let bodies: Vec<_> = new_children.collect();
+        assert_eq!(bodies.len(), self.bodies.len());
+        Loop {
             tiles: self.tiles.clone(),
-            body: Box::new(new_children.next().unwrap()),
+            bodies,
+            region_ids: self.region_ids.clone(),
             parallel: self.parallel,
             spec: self.spec.clone(),
-        };
-        debug_assert!(new_children.next().is_none());
-        new_loop
+        }
     }
 
     fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
@@ -126,9 +146,33 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
             });
             inner_args[usize::from(tile.parameter_index)] = ViewE::Tile(bound);
         }
+
+        let mut bodies = Vec::with_capacity(self.bodies.len());
+        bodies.push(self.bodies[0].clone().bind(&inner_args));
+        // debug_assert!(matches!(bodies[0], ImplNode::SpecApp(_)));  // Temporarily disabled
+
+        // Bind boundary region bodies (indices 1..) with boundary tiles
+        for (body_idx, region_id) in self.region_ids.iter().enumerate() {
+            let boundary_body = &self.bodies[body_idx + 1]; // +1 because region_ids corresponds to bodies[1..]
+
+            // Create boundary tile arguments for this region
+            let mut boundary_args = inner_args.clone();
+            for loop_tile in &new_tiles {
+                let boundary_tile = self
+                    .create_boundary_tile_for_region(loop_tile, *region_id)
+                    .expect("Failed to create boundary tile");
+                boundary_args[usize::from(loop_tile.parameter_index)] =
+                    ViewE::BoundaryTile(boundary_tile);
+            }
+
+            // Bind the boundary region body with boundary tiles.
+            bodies.push(boundary_body.clone().bind(&boundary_args));
+        }
+
         Loop {
             tiles: new_tiles,
-            body: Box::new(self.body.bind(&inner_args)),
+            bodies,
+            region_ids: self.region_ids,
             parallel: self.parallel,
             spec: self.spec,
         }
@@ -164,6 +208,7 @@ impl<Tgt: Target> Debug for Loop<Tgt> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Loop")
             .field("tiles", &self.tiles)
+            .field("region_ids", &self.region_ids)
             .field("parallel", &self.parallel)
             .field("spec", &self.spec)
             .finish_non_exhaustive()
@@ -171,39 +216,112 @@ impl<Tgt: Target> Debug for Loop<Tgt> {
 }
 
 impl<Tgt: Target> Loop<Tgt> {
-    pub fn steps(&self) -> u32 {
-        first_dim_per_axis(self)
-            .map(|(loop_tile, dim_idx)| loop_tile.tile.steps_dim(dim_idx))
-            .product()
-    }
-
     pub fn full_steps(&self) -> u32 {
-        first_dim_per_axis(self)
+        unique_dims_per_axis(&self.tiles)
             .map(|(loop_tile, dim_idx)| loop_tile.tile.full_steps_dim(dim_idx))
             .product()
     }
+
+    /// Create a boundary tile for a specific region and loop tile
+    fn create_boundary_tile_for_region(
+        &self,
+        loop_tile: &LoopTile<Tgt>,
+        region_id: usize,
+    ) -> Result<BoundaryTile<Box<ViewE<Tgt>>>, TileError> {
+        let tile_shape = loop_tile.tile.shape();
+        let original_shape = loop_tile.tile.view.shape();
+        let axes = &loop_tile.axes;
+
+        let mut boundary_shape = original_shape.to_vec();
+        let mut offsets_raw = vec![0u32; original_shape.len()];
+
+        // Check each tiled dimension for boundary regions
+        for (dim_idx, &axis) in axes.iter().enumerate() {
+            let axis_idx = usize::from(axis);
+
+            // Check if this axis has a boundary region in this region_id
+            if (region_id & (1 << axis_idx)) != 0 {
+                // This dimension has a boundary region
+                let tile_size = tile_shape[dim_idx];
+                let original_size = original_shape[dim_idx];
+
+                // Calculate the boundary size (remainder)
+                if let Some(boundary_size) = DimSize::new(original_size.get() % tile_size.get()) {
+                    boundary_shape[dim_idx] = boundary_size;
+
+                    // Calculate the offset (where the boundary starts)
+                    let full_tiles = original_size.get() / tile_size.get();
+                    let offset = full_tiles * tile_size.get();
+                    offsets_raw[dim_idx] = offset;
+                }
+            }
+        }
+
+        BoundaryTile::new(
+            boundary_shape.into(),
+            offsets_raw,
+            loop_tile.tile.view.clone(),
+        )
+    }
 }
 
+/// Compute the main cost of a tile-loop by summing full and boundary regions.
+///
+/// Panics if any boundary dimension violates the constraint that `steps == full_steps + 1`.
+///
+/// # Arguments
+///
+/// * `dims` - slice of per-dimension `(steps, full_steps)` pairs.
+///   **Note**: For boundary dimensions, `steps` must equal `full_steps + 1`
+///   (boundary regions have exactly one iteration)
+/// * `parallel` is `true` if this is a parellel loop.
+/// * `body_costs` is the cost of each region's sub-Spec. The slice
+///   must have length 2^B, where B is the number of boundary dimensions (axes with a
+///   partial extra tile). Entry at index `m` gives the cost for region `m`, where bit 0
+///   selects the innermost boundary dimension, bit 1 the next outer dimension, and so on.
+///   For example, with two boundary dimensions:
+///   - index 0 (`0b00`): full region (no boundaries),
+///   - index 1 (`0b01`): innermost dimension's boundary only,
+///   - index 2 (`0b10`): next outer dimension's boundary only,
+///   - index 3 (`0b11`): the corner/boundary of both dimensions.
 pub(crate) fn compute_loop_main_cost<Tgt: Target>(
-    steps: u32,
-    full_steps: u32,
+    dims: &[(u32, u32)],
     parallel: bool,
-    body_cost: MainCost,
+    body_costs: &[MainCost],
 ) -> MainCost {
-    let (factor, overhead) = if parallel {
-        let processors = u32::from(Tgt::processors());
-        let boundary_steps = steps - full_steps;
-        let per_thread_factor = full_steps.div_ceil(processors) + boundary_steps;
-        (per_thread_factor, PAR_TILE_OVERHEAD)
-    } else {
-        (steps, 0)
+    debug_assert!(!body_costs.is_empty());
+
+    // Initialize total with the main region's cost.
+    let mut total = {
+        let mut full_iterations = 1u32;
+        for &(_, full_steps) in dims {
+            full_iterations = full_iterations
+                .checked_mul(full_steps)
+                .expect("number of full iterations doesn't overflow");
+        }
+        if parallel {
+            full_iterations = full_iterations.div_ceil(u32::from(Tgt::processors()))
+        }
+        body_costs[0].saturating_mul(full_iterations)
     };
-    body_cost.saturating_mul(factor).saturating_add(overhead)
+
+    // Add boundary region costs (each boundary region is executed exactly once)
+    for &cost in &body_costs[1..] {
+        total = total.saturating_add(cost);
+    }
+
+    if parallel {
+        total = total.saturating_add(PAR_TILE_OVERHEAD);
+    }
+    total
 }
 
-/// Yields the first tile and tile dimension seen for each unique axis.
-fn first_dim_per_axis<Tgt: Target>(imp: &Loop<Tgt>) -> impl Iterator<Item = (&LoopTile<Tgt>, u8)> {
-    imp.tiles
+/// Returns an iterator of representative dimensions from given [LoopTile]s, returning
+/// one per axis (across all tiles).
+pub(crate) fn unique_dims_per_axis<Tgt: Target>(
+    tiles: &[LoopTile<Tgt>],
+) -> impl Iterator<Item = (&LoopTile<Tgt>, u8)> {
+    tiles
         .iter()
         .flat_map(|loop_tile| {
             loop_tile
@@ -213,5 +331,51 @@ fn first_dim_per_axis<Tgt: Target>(imp: &Loop<Tgt>) -> impl Iterator<Item = (&Lo
                 .map(move |(i, s)| (loop_tile, u8::try_from(i).unwrap(), *s))
         })
         .unique_by(|(_, _, axis)| *axis)
-        .map(|(i, s, _)| (i, s))
+        .map(|(lt, dim, _)| (lt, dim))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::target::X86Target;
+
+    #[test]
+    fn test_compute_loop_main_cost_serial_1d() {
+        // Single axis. Boundary has 1 step.
+        let cost = compute_loop_main_cost::<X86Target>(&[(9, 8)], false, &[5, 4]);
+        assert_eq!(cost, 5 * 8 + 4);
+    }
+
+    #[test]
+    fn test_compute_loop_main_cost_parallel_1d() {
+        // Single axis, parallel. Boundary has 1 step.
+        let procs = u32::from(X86Target::processors());
+        let cost = compute_loop_main_cost::<X86Target>(&[(9, 8)], true, &[5, 5]);
+        let expected = 5 * 8u32.div_ceil(procs) + 5 + PAR_TILE_OVERHEAD;
+        assert_eq!(cost, expected);
+    }
+
+    #[test]
+    fn test_compute_loop_main_cost_serial_exact_div_1d() {
+        // Single axis that divides evenly => no boundary contribution
+        let cost = compute_loop_main_cost::<X86Target>(&[(8, 8)], false, &[4]);
+        assert_eq!(cost, 4 * 8);
+    }
+
+    #[test]
+    fn test_compute_loop_main_cost_serial_2d() {
+        let dims = &[(3, 2), (5, 4)];
+        let cost = compute_loop_main_cost::<X86Target>(dims, false, &[7, 6, 9, 10]);
+        let expected = (7 * 2 * 4) + 6 + 9 + 10; // 3 boundary regions (each executed once)
+        assert_eq!(cost, expected);
+    }
+
+    #[test]
+    fn test_compute_loop_main_cost_serial_2d_with_one_exact_axis() {
+        // Only axis 1 has boundary conditions.
+        let dims = &[(8, 8), (4, 3)];
+        let cost = compute_loop_main_cost::<X86Target>(dims, false, &[2, 3]);
+        let expected = (2 * 8 * 3) + 3; // 1 boundary region
+        assert_eq!(cost, expected);
+    }
 }

@@ -19,6 +19,11 @@ pub fn aligned_approx<Tgt: Target>(
 ) -> Result<bool, LayoutError> {
     debug_assert_eq!(tile_shape.len(), tile_step_sizes.len());
 
+    // If the tile shape is the same as the parent shape, we assume alignment hasn't changed.
+    if tile_shape == parent.shape() {
+        return Ok(parent.aligned());
+    }
+
     // If the tile source is unaligned or not contiguous, we assume the tile is also un-aligned.
     if !parent.is_contiguous() || !parent.aligned() {
         return Ok(false);

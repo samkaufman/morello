@@ -711,7 +711,7 @@ impl Iterator for MemVecIter<'_> {
     }
 }
 
-impl<'a> ExactSizeIterator for MemVecIter<'a> {}
+impl ExactSizeIterator for MemVecIter<'_> {}
 
 impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
     type Domain = MemoryLimits;

@@ -113,17 +113,16 @@ impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
                     tile: outer_filters_tile.boxed_viewe(),
                 },
             ],
-            body: Box::new(
-                SpecApp::new(
-                    Spec(body_spec, spec.1.clone()),
-                    [
-                        ViewE::from(inner_image_tile),
-                        ViewE::from(inner_filters_tile),
-                        ViewE::from(inner_output_view),
-                    ],
-                )
-                .into(),
-            ),
+            bodies: vec![SpecApp::new(
+                Spec(body_spec, spec.1.clone()),
+                [
+                    ViewE::from(inner_image_tile),
+                    ViewE::from(inner_filters_tile),
+                    ViewE::from(inner_output_view),
+                ],
+            )
+            .into()],
+            region_ids: vec![], // No boundary regions in spatial split
             parallel: false,
             spec: Some(spec.clone()),
         }))

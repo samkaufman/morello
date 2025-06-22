@@ -49,6 +49,9 @@ pub trait Impl<Tgt: Target> {
     #[must_use]
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self;
 
+    // Replaces [Param] references within this Impl with concrete [ViewE] instances from
+    // the provided `args` array, recursively transforming the entire subtree to
+    // eliminate parameterization.
     #[must_use]
     fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut;
 

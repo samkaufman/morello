@@ -200,13 +200,8 @@ mod tests {
     fn test_can_pprint_a_specapp_with_no_aux() {
         let logical_spec: LogicalSpec<X86Target> =
             lspec!(Move([4], (u8, GL, row_major), (u8, L1, row_major)));
-        let args = logical_spec
-            .parameters()
-            .into_iter()
-            .enumerate()
-            .map(|(i, ts)| ViewE::from(Param::new(i.try_into().unwrap(), ts)));
         let spec_app: ImplNode<X86Target> =
-            SpecApp::new(Spec(logical_spec, X86Target::max_mem()), args).into();
+            SpecApp::new_with_default_params(Spec(logical_spec, X86Target::max_mem())).into();
         pprint(&spec_app, ImplPrintStyle::Full);
         pprint(&spec_app, ImplPrintStyle::Compact);
     }

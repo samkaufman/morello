@@ -106,7 +106,7 @@ pub enum Action<Tgt: Target> {
 pub enum ActionSolver<Tgt: Target> {
     PrimitiveTileOut {
         outer_spec: Spec<Tgt>,
-        body_spec: Spec<Tgt>,
+        body_specs: Vec<Spec<Tgt>>,
     },
     Move {
         prologue: Option<Spec<Tgt>>,
@@ -148,10 +148,10 @@ impl<Tgt: Target> ActionSolver<Tgt> {
         match self {
             ActionSolver::PrimitiveTileOut {
                 outer_spec: _,
-                body_spec,
+                body_specs,
             } => {
                 // TODO: Avoid this clone
-                vec![body_spec.clone()].into_iter()
+                body_specs.clone().into_iter()
             }
             ActionSolver::Move {
                 prologue,
@@ -182,9 +182,13 @@ impl<Tgt: Target> ActionSolver<Tgt> {
         match self {
             ActionSolver::PrimitiveTileOut {
                 outer_spec,
-                body_spec,
+                body_specs,
             } => {
-                let parallel = !outer_spec.0.serial_only() && body_spec.0.serial_only();
+                if body_specs.is_empty() {
+                    unreachable!("PrimitiveTileOut should have at least one body spec");
+                }
+
+                let parallel = !outer_spec.0.serial_only() && body_specs[0].0.serial_only();
                 match &outer_spec.0 {
                     LogicalSpec::Primitive(
                         PrimitiveBasics {
@@ -199,26 +203,37 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                     ) => {
                         let LogicalSpec::Primitive(
                             PrimitiveBasics {
-                                spec_shape: body_shape,
+                                spec_shape: main_body_shape,
                                 ..
                             },
                             ..,
-                        ) = &body_spec.0
+                        ) = &body_specs[0].0
                         else {
                             unreachable!();
                         };
 
-                        let mut steps = 1;
-                        let mut full_steps = 1;
-                        for (o, t) in spec_shape.iter().zip(body_shape) {
-                            steps *= o.get().div_ceil(t.get());
-                            full_steps *= o.get() / t.get();
+                        let mut child_main_costs = Vec::with_capacity(body_specs.len());
+                        let first_cost = child_costs.next().unwrap();
+                        let mut max_depth = 0;
+                        child_main_costs.push(first_cost.main);
+                        for child_cost in child_costs {
+                            child_main_costs.push(child_cost.main);
+                            max_depth = max_depth.max(child_cost.depth);
                         }
-                        let mut cost = child_costs.next().unwrap();
-                        cost.main =
-                            compute_loop_main_cost::<Tgt>(steps, full_steps, parallel, cost.main);
-                        cost.depth += 1;
-                        cost
+                        debug_assert_eq!(child_main_costs.len(), body_specs.len());
+
+                        // per-axis (steps, full_steps) pairs for cost dispatch
+                        let dims: Vec<(u32, u32)> = spec_shape
+                            .iter()
+                            .zip(main_body_shape)
+                            .map(|(o, t)| (o.get().div_ceil(t.get()), o.get() / t.get()))
+                            .collect();
+
+                        let mut combined_cost = first_cost.clone();
+                        combined_cost.main =
+                            compute_loop_main_cost::<Tgt>(&dims, parallel, &child_main_costs);
+                        combined_cost.depth = max_depth + 1;
+                        combined_cost
                     }
                     _ => unreachable!(),
                 }
@@ -415,16 +430,6 @@ fn check_tile_out_applies<Tgt: Target>(
         return Err(ApplyError::NotApplicable(
             NotApplicableReason::TileShapeInvalid,
         ));
-    }
-
-    if output_shape
-        .iter()
-        .enumerate()
-        .any(|(dim, out_size)| current_out_shape[dim].get() % out_size.get() != 0)
-    {
-        return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-            "Original size is not a multiple of tile size",
-        ))));
     }
 
     Ok(())

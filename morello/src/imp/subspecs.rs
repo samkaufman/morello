@@ -5,7 +5,7 @@ use crate::nameenv::NameEnv;
 use crate::spec::{LogicalSpec, PrimitiveSpecType, Spec};
 use crate::target::LEVEL_COUNT;
 use crate::tensorspec::TensorSpec;
-use crate::views::{View, ViewE};
+use crate::views::{Param, View, ViewE};
 use itertools::Itertools;
 use std::borrow::Borrow;
 use std::fmt::{self, Debug, Display};
@@ -21,6 +21,21 @@ impl<A: View> SpecApp<A> {
         // canonicalizes both parameters to be row-major (i.e., erasing layouts).
         debug_assert_eq!(spec.0.operand_count(), a.len());
         Self(spec, a)
+    }
+
+    /// Create a [SpecApp] with [Param]s for each argument.
+    pub fn new_with_default_params(spec: Spec<A::Tgt>) -> Self
+    where
+        A: From<Param<A::Tgt>>,
+    {
+        let arguments = spec
+            .0
+            .parameters()
+            .into_iter()
+            .enumerate()
+            .map(|(i, param)| A::from(Param::new(i.try_into().unwrap(), param)))
+            .collect();
+        Self(spec, arguments)
     }
 
     /// Create an application of a primitive [LogicalSpec].
@@ -116,19 +131,7 @@ where
         use proptest::prelude::*;
 
         any::<Spec<Tgt>>()
-            .prop_map(|spec| {
-                let parameter_specs = spec.0.parameters();
-                SpecApp(
-                    spec,
-                    parameter_specs
-                        .into_iter()
-                        .enumerate()
-                        .map(|(idx, parameter_spec)| {
-                            crate::views::Param::new(idx.try_into().unwrap(), parameter_spec)
-                        })
-                        .collect(),
-                )
-            })
+            .prop_map(SpecApp::new_with_default_params)
             .boxed()
     }
 }

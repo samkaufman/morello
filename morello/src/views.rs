@@ -242,6 +242,7 @@ pub enum ViewE<Tgt: Target> {
     Param(Param<Tgt>),
     CacheView(CacheView<Box<ViewE<Tgt>>>),
     Tile(Tile<Box<ViewE<Tgt>>>),
+    BoundaryTile(BoundaryTile<Box<ViewE<Tgt>>>),
     SqueezeDimsView(SqueezeDimsView<Box<ViewE<Tgt>>>),
     OnePrefixView(OnePrefixView<Box<ViewE<Tgt>>>),
     TransposeView(TransposeView<Box<ViewE<Tgt>>>),
@@ -256,6 +257,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::Param(param) => param.identifier(),
             ViewE::CacheView(cache_view) => cache_view.identifier(),
             ViewE::Tile(tile) => tile.identifier(),
+            ViewE::BoundaryTile(boundary_tile) => boundary_tile.identifier(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.identifier(),
             ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.identifier(),
             ViewE::TransposeView(transpose_view) => transpose_view.identifier(),
@@ -268,6 +270,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::Param(param) => param.backing_tensor(),
             ViewE::CacheView(cache_view) => cache_view.backing_tensor(),
             ViewE::Tile(tile) => tile.backing_tensor(),
+            ViewE::BoundaryTile(boundary_tile) => boundary_tile.backing_tensor(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.backing_tensor(),
             ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.backing_tensor(),
             ViewE::TransposeView(transpose_view) => transpose_view.backing_tensor(),
@@ -280,6 +283,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::Param(param) => param.spec(),
             ViewE::CacheView(cache_view) => cache_view.spec(),
             ViewE::Tile(tile) => tile.spec(),
+            ViewE::BoundaryTile(boundary_tile) => boundary_tile.spec(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.spec(),
             ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.spec(),
             ViewE::TransposeView(transpose_view) => transpose_view.spec(),
@@ -294,6 +298,9 @@ impl<Tgt: Target> View for ViewE<Tgt> {
                 cache_view.make_buffer_indexing_expr_with_layout(layout)
             }
             ViewE::Tile(tile) => tile.make_buffer_indexing_expr_with_layout(layout),
+            ViewE::BoundaryTile(boundary_tile) => {
+                boundary_tile.make_buffer_indexing_expr_with_layout(layout)
+            }
             ViewE::SqueezeDimsView(squeeze_dims_view) => {
                 squeeze_dims_view.make_buffer_indexing_expr_with_layout(layout)
             }
@@ -315,6 +322,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::Param(param) => param.bind(args),
             ViewE::CacheView(cache_view) => cache_view.bind(args),
             ViewE::Tile(tile) => tile.bind(args),
+            ViewE::BoundaryTile(boundary_tile) => boundary_tile.bind(args),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.bind(args),
             ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.bind(args),
             ViewE::TransposeView(transpose_view) => transpose_view.bind(args),
@@ -327,6 +335,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::Param(param) => param.shape(),
             ViewE::CacheView(cache_view) => cache_view.shape(),
             ViewE::Tile(tile) => tile.shape(),
+            ViewE::BoundaryTile(boundary_tile) => boundary_tile.shape(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.shape(),
             ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.shape(),
             ViewE::TransposeView(transpose_view) => transpose_view.shape(),
@@ -339,6 +348,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::Param(param) => param.make_buffer_indexing_expr(),
             ViewE::CacheView(cache_view) => cache_view.make_buffer_indexing_expr(),
             ViewE::Tile(tile) => tile.make_buffer_indexing_expr(),
+            ViewE::BoundaryTile(boundary_tile) => boundary_tile.make_buffer_indexing_expr(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => {
                 squeeze_dims_view.make_buffer_indexing_expr()
             }
@@ -353,6 +363,7 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::Param(param) => param.to_param(),
             ViewE::CacheView(cache_view) => cache_view.to_param(),
             ViewE::Tile(tile) => tile.to_param(),
+            ViewE::BoundaryTile(boundary_tile) => boundary_tile.to_param(),
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.to_param(),
             ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.to_param(),
             ViewE::TransposeView(transpose_view) => transpose_view.to_param(),
@@ -437,6 +448,22 @@ where
             inner: Box::new(view.inner.into()),
             spec: view.spec,
             unique_id: view.unique_id,
+        })
+    }
+}
+
+impl<V> From<BoundaryTile<V>> for ViewE<V::Tgt>
+where
+    V: View + Into<ViewE<V::Tgt>>,
+{
+    fn from(boundary_tile: BoundaryTile<V>) -> Self {
+        ViewE::BoundaryTile(BoundaryTile {
+            shape: boundary_tile.shape,
+            offsets: boundary_tile.offsets,
+            view: Box::new(boundary_tile.view.into()),
+            expr_term_id: boundary_tile.expr_term_id,
+            spec: boundary_tile.spec,
+            unique_id: boundary_tile.unique_id,
         })
     }
 }
@@ -543,6 +570,38 @@ pub struct Tile<V: View> {
     expr_term_id: OpaqueSymbol,
     spec: TensorSpec<V::Tgt>,
     unique_id: OpaqueSymbol,
+}
+
+/// A boundary tile that represents a fixed region of a tensor without loop iteration.
+/// Unlike regular tiles, boundary tiles generate buffer indexing expressions that
+/// use constant offsets instead of loop iterator variables.
+#[derive(Debug, Clone)]
+pub struct BoundaryTile<V: View> {
+    shape: Shape,
+    offsets: Vec<u32>,
+    pub view: V,
+    expr_term_id: OpaqueSymbol,
+    spec: TensorSpec<V::Tgt>,
+    unique_id: OpaqueSymbol,
+}
+
+impl<V: View> BoundaryTile<V> {
+    pub fn new(shape: Shape, offsets: Vec<u32>, view: V) -> Result<Self, TileError> {
+        let expr_term_id = OpaqueSymbol::new();
+        let unique_id = OpaqueSymbol::new();
+        let mut spec = view.spec().clone();
+        // For boundary tiles, we use the shape as step sizes since it represents the actual boundary region size
+        let aligned = aligned_approx(&shape, &shape, view.spec())?;
+        spec.shrink(&shape, aligned)?;
+        Ok(Self {
+            shape,
+            offsets,
+            view,
+            expr_term_id,
+            spec,
+            unique_id,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -736,8 +795,9 @@ impl<V: View> Tile<V> {
             BufferVar::Pt(dim, _) => {
                 let e = self.expr_term_id;
                 let size_in_dim = self.shape()[usize::from(dim)];
-                let mut terms = vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e)))];
+                let mut terms = vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e)))]; // pt_{dim}
                 if size_in_dim != self.view.shape()[usize::from(dim)] {
+                    // pt_{dim} + tile_idx_{dim} * size_in_dim
                     terms.push(Term(
                         size_in_dim.get().try_into().unwrap(),
                         NonAffine::Leaf(BufferVar::TileIdx(dim, e)),
@@ -888,6 +948,70 @@ impl<T: View> View for TransposeView<T> {
             inner: self.inner.bind(args),
             spec: self.spec,
             unique_id: self.unique_id,
+        })
+    }
+}
+
+impl<V: View> BoundaryTile<V> {
+    pub fn shape(&self) -> &[DimSize] {
+        &self.shape
+    }
+
+    pub fn offsets(&self) -> &[u32] {
+        &self.offsets
+    }
+
+    /// Replace points in the given indexing expression with boundary-specific constant offsets.
+    /// Unlike regular tiles, boundary tiles use constant offsets instead of tile coordinate variables.
+    pub fn compose_buffer_indexing_expr(
+        &self,
+        inner_expr: NonAffineExpr<BufferVar>,
+    ) -> NonAffineExpr<BufferVar> {
+        inner_expr.map_vars(&mut |term_var| match term_var {
+            BufferVar::Pt(dim, _) => {
+                let offset_in_dim = self.offsets[usize::from(dim)];
+                let e = self.expr_term_id;
+                // pt_{dim} + offset_{dim}
+                AffineForm(
+                    vec![Term(1, NonAffine::Leaf(BufferVar::Pt(dim, e)))],
+                    offset_in_dim.try_into().unwrap(),
+                )
+            }
+            BufferVar::TileIdx(_, _) => NonAffine::Leaf(term_var).into(),
+        })
+    }
+}
+
+impl<T: View> View for BoundaryTile<T> {
+    type Tgt = T::Tgt;
+
+    fn identifier(&self) -> OpaqueSymbol {
+        self.unique_id
+    }
+
+    fn backing_tensor(&self) -> Option<&Tensor<Self::Tgt>> {
+        self.view.backing_tensor()
+    }
+
+    fn spec(&self) -> &TensorSpec<Self::Tgt> {
+        &self.spec
+    }
+
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        self.compose_buffer_indexing_expr(self.view.make_buffer_indexing_expr_with_layout(layout))
+    }
+
+    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
+    where
+        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
+    {
+        ViewE::from(BoundaryTile {
+            view: self.view.bind(args),
+            unique_id: self.unique_id,
+            shape: self.shape,
+            offsets: self.offsets,
+            expr_term_id: self.expr_term_id,
+            spec: self.spec,
         })
     }
 }

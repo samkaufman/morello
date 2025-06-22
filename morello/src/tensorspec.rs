@@ -776,25 +776,25 @@ mod tests {
 
         // TODO: Modify `any::<TensorSpec<_>>` to generate multiple ranks and dtypes.
         #[test]
-        fn tensorspec_canonicalize_should_be_idempodent_x86(tspec in any::<TensorSpec<X86Target>>()) {
+        fn test_tensorspec_canonicalize_should_be_idempodent_x86(tspec in any::<TensorSpec<X86Target>>()) {
             shared_tensorspec_canonicalize_should_be_idempodent(tspec)
         }
 
         // TODO: Modify `any::<TensorSpec<_>>` to generate multiple ranks and dtypes.
         #[test]
-        fn tensorspec_canonicalize_should_be_idempodent_arm(tspec in any::<TensorSpec<ArmTarget>>()) {
+        fn test_tensorspec_canonicalize_should_be_idempodent_arm(tspec in any::<TensorSpec<ArmTarget>>()) {
             shared_tensorspec_canonicalize_should_be_idempodent(tspec)
         }
 
         #[test]
-        fn tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_x86(
+        fn test_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_x86(
             tspec in any_with::<TensorSpec<X86Target>>(TensorSpecArbMaxShape(shape![4, 4, 4, 4]))
         ) {
             shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
         }
 
         #[test]
-        fn tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_arm(
+        fn test_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_arm(
             tspec in any_with::<TensorSpec<ArmTarget>>(TensorSpecArbMaxShape(shape![4, 4, 4, 4]))
         ) {
             shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)

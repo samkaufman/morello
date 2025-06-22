@@ -12,13 +12,14 @@ use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineForm, Bounds as _, NonAffine, NonAffineExpr, Substitute, Term};
 use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
-use crate::imp::loops::Loop;
+use crate::imp::loops::{unique_dims_per_axis, Loop};
 use crate::imp::pipeline::Pipeline;
 use crate::imp::Impl;
 use crate::imp::ImplNode;
 use crate::layout::BufferVar;
 use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
+
 use crate::target::{
     cpu::{
         DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE,
@@ -517,7 +518,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 }) {
                     self.emit_unrolled_loop(w, l, depth)
                 } else {
-                    self.emit_rolled_loop(w, l, depth)
+                    self.emit_rolled_loop_nest(w, l, depth)
                 }
             }
             ImplNode::Alloc(alloc_binding) => {
@@ -1825,39 +1826,46 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         }
     }
 
-    fn emit_rolled_loop<W: Write>(
+    fn emit_rolled_loop_nest<W: Write>(
         &mut self,
         w: &mut W,
         l: &Loop<Tgt>,
         depth: usize,
     ) -> fmt::Result {
-        let axes_to_emit = axis_order_and_steps(l).collect::<Vec<_>>();
+        for body in l.bodies.iter().skip(1) {
+            for (arg_shape, parameter) in body
+                .spec()
+                .unwrap()
+                .0
+                .parameter_shapes()
+                .iter()
+                .zip(body.parameters())
+            {
+                debug_assert_eq!(&arg_shape[..], parameter.shape());
+            }
+        }
 
-        // Map non-degen. axis names to fresh loop iterator names.
+        let nontrivial_axes = get_axis_steps(l);
+        self.emit_main_loop_nest(w, l, &nontrivial_axes, depth)?;
+        self.emit_boundary_regions(w, l, depth)
+    }
+
+    fn emit_main_loop_nest<W: Write>(
+        &mut self,
+        w: &mut W,
+        l: &Loop<Tgt>,
+        axes_to_emit: &[(u8, u32, u32)],
+        depth: usize,
+    ) -> fmt::Result {
         let mut iter_var_names = HashMap::new();
-        iter_var_names.reserve(axes_to_emit.len());
-        for (axis, _) in &axes_to_emit {
+        for (axis, _, _) in axes_to_emit {
             iter_var_names
                 .entry(*axis)
                 .or_insert_with(|| self.namer.fresh_name());
         }
 
-        // Associate each of the tile indices in each LoopTile with the correct
-        // name and store that association in the `self.loop_iter_names`.
-        for loop_tile in &l.tiles {
-            for tt in loop_tile.tile.tile_dim_terms() {
-                let BufferVar::TileIdx(dim, _) = tt else {
-                    unreachable!();
-                };
-                let axis = loop_tile.axes[usize::from(dim)];
-                if let Some(axis_loop_iter_name) = iter_var_names.get(&axis) {
-                    // The following might override loop iter. bindings if we emit the same loop
-                    // twice. This happens if emit_rolled_loop is called from emit_unrolled_loop.
-                    self.loop_iter_bindings
-                        .insert(tt.clone(), Either::Left(axis_loop_iter_name.clone()));
-                }
-            }
-        }
+        // Bind tile indices to the axis' C iterator name in `self.loop_iter_names`.
+        self.bind_tile_dimensions(l, &iter_var_names);
 
         if l.parallel {
             match self.thread_style {
@@ -1873,18 +1881,18 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     if axes_to_emit.len() != 1 {
                         todo!("collapse loops for Highway parallel-for");
                     }
-                    for (axis, steps) in &axes_to_emit {
+                    for (axis, full_steps, _) in axes_to_emit {
                         let var_name = iter_var_names.get(axis).unwrap();
                         // TODO: Lift the pool out into a kernel argument.
                         writeln!(
                             w,
                             "{}pool.Run(0, {}, [&](const uint64_t {}, size_t) HWY_ATTR {{",
                             indent(depth),
-                            steps,
+                            full_steps,
                             var_name,
                         )?;
                     }
-                    self.emit(w, &l.body, depth + 1)?;
+                    self.emit(w, &l.bodies[0], depth + 1)?;
                     for _ in 0..axes_to_emit.len() {
                         writeln!(w, "{}}});", indent(depth))?;
                     }
@@ -1892,17 +1900,32 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 }
             }
         }
-        for (axis, steps) in &axes_to_emit {
+        for (axis, full_steps, _) in axes_to_emit {
             let var_name = iter_var_names.get(axis).unwrap();
             writeln!(
                 w,
-                "{0}for (int {var_name} = 0; {var_name} < {steps}; {var_name}++) {{",
+                "{0}for (int {var_name} = 0; {var_name} < {full_steps}; {var_name}++) {{",
                 indent(depth)
             )?;
         }
-        self.emit(w, &l.body, depth + 1)?;
+
+        self.emit(w, &l.bodies[0], depth + 1)?;
+
         for _ in 0..axes_to_emit.len() {
             writeln!(w, "{}}}", indent(depth))?;
+        }
+
+        Ok(())
+    }
+
+    fn emit_boundary_regions<W: Write>(
+        &mut self,
+        w: &mut W,
+        l: &Loop<Tgt>,
+        depth: usize,
+    ) -> fmt::Result {
+        for body in &l.bodies[1..] {
+            self.emit(w, body, depth)?;
         }
         Ok(())
     }
@@ -1917,42 +1940,73 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             todo!("Support parallel, unrolled loops");
         }
 
-        let axes_to_emit = axis_order_and_steps(l).collect::<Vec<_>>();
-
-        for pt in axes_to_emit
+        // Main tiles.
+        let axis_steps = get_axis_steps(l);
+        for axis_positions in axis_steps
             .iter()
-            .map(|&(_, steps)| 0..steps)
+            .map(|&(_, full_steps, _)| 0..full_steps)
             .multi_cartesian_product()
         {
-            // Map the axes we'll emit to their index for a single step of the unrolled loop.
-            // TODO: Allocating a HashMap is overkill.
-            let axes_to_indices = axes_to_emit
+            let axes_to_indices: HashMap<u8, u32> = axis_steps
                 .iter()
-                .zip(pt)
-                .map(|((axis, _), axis_step)| (*axis, axis_step))
-                .collect::<HashMap<_, _>>();
+                .enumerate()
+                .map(|(i, (axis, _, _))| (*axis, axis_positions[i]))
+                .collect();
+            self.bind_tile_dimensions_for_unrolled(l, &axes_to_indices);
+            self.emit(w, &l.bodies[0], depth)?;
+        }
 
-            // Bind all in loop_iter_bindings. On subsequent loop iterations, this will
-            // overwrite.
-            for loop_tile in &l.tiles {
-                for tt in loop_tile.tile.tile_dim_terms() {
-                    let BufferVar::TileIdx(dim, _) = &tt else {
-                        unreachable!();
-                    };
-                    let axis = loop_tile.axes[usize::from(*dim)];
-                    if let Some(axis_step) = axes_to_indices.get(&axis) {
-                        self.loop_iter_bindings.insert(
-                            tt.clone(),
-                            Either::Right(i32::try_from(*axis_step).unwrap()),
-                        );
-                    }
+        // Then, emit boundary regions by zipping bodies[1..] with region_ids
+        for body in &l.bodies[1..] {
+            self.emit(w, body, depth)?;
+        }
+
+        Ok(())
+    }
+
+    /// Binds each dimension of each tile to the corresponding axis' C iterator name.
+    /// If an axis is present in the [Loop] but not in `iter_var_names`, it is set to
+    /// zero.
+    fn bind_tile_dimensions(&mut self, l: &Loop<Tgt>, iter_var_names: &HashMap<u8, String>) {
+        for loop_tile in &l.tiles {
+            debug_assert_eq!(loop_tile.axes.len(), loop_tile.tile.shape().len());
+            for tt in loop_tile.tile.tile_dim_terms() {
+                let BufferVar::TileIdx(dim, _) = tt else {
+                    unreachable!();
+                };
+                let axis = loop_tile.axes[usize::from(dim)];
+                if let Some(var_name) = iter_var_names.get(&axis) {
+                    self.loop_iter_bindings
+                        .insert(tt.clone(), Either::Left(var_name.clone()));
+                } else {
+                    self.loop_iter_bindings.insert(tt.clone(), Either::Right(0));
                 }
             }
-
-            // Emit the body once for each step
-            self.emit(w, &l.body, depth)?;
         }
-        Ok(())
+    }
+
+    /// Binds each dimension of each tile to the corresponding axis step value for unrolled loops.
+    /// If an axis is not present in `axes_to_indices`, it is set to zero.
+    fn bind_tile_dimensions_for_unrolled(
+        &mut self,
+        l: &Loop<Tgt>,
+        axes_to_indices: &HashMap<u8, u32>,
+    ) {
+        for loop_tile in &l.tiles {
+            debug_assert_eq!(loop_tile.axes.len(), loop_tile.tile.shape().len());
+            for tt in loop_tile.tile.tile_dim_terms() {
+                let BufferVar::TileIdx(dim, _) = &tt else {
+                    unreachable!();
+                };
+                let axis = loop_tile.axes[usize::from(*dim)];
+                if let Some(&axis_step) = axes_to_indices.get(&axis) {
+                    self.loop_iter_bindings
+                        .insert(tt.clone(), Either::Right(i32::try_from(axis_step).unwrap()));
+                } else {
+                    self.loop_iter_bindings.insert(tt.clone(), Either::Right(0));
+                }
+            }
+        }
     }
 
     fn param_args_to_c_indices<A, F>(&self, arguments: &[A], f: F) -> Vec<String>
@@ -2209,45 +2263,22 @@ fn vec_func_names(
     }
 }
 
-fn axis_order_and_steps<Tgt: Target>(l: &Loop<Tgt>) -> impl Iterator<Item = (u8, u32)> + '_ {
-    // TODO: Choose loop order according to a skip-minimizing heuristic.
-    let result = l
-        .tiles
-        .iter()
-        .flat_map(|t| {
-            t.axes.iter().enumerate().filter_map(|(dim_idx, axis)| {
-                let steps = t.tile.steps_dim(dim_idx.try_into().unwrap());
-                debug_assert_ne!(steps, 0);
-                if steps == 1 {
-                    None
-                } else {
-                    Some((*axis, steps))
-                }
-            })
-        })
-        .unique();
+/// Compute (axis, full_steps, total_steps) for each Spec axis where with at
+/// least 2 steps.
+fn get_axis_steps<Tgt: Target>(l: &Loop<Tgt>) -> Vec<(u8, u32, u32)> {
+    let mut axis_steps = Vec::new();
 
-    // Assert that `r` doesn't contain duplicate axes. This is expensive, so only do so in debug
-    // builds.
-    #[cfg(debug_assertions)]
-    {
-        let mut seen = std::collections::HashSet::new();
-        let rv = result.clone().collect::<Vec<_>>();
-        for (axis, _) in rv.clone() {
-            if !seen.insert(axis) {
-                panic!(
-                    "Duplicate axis {axis} (steps: {}) from loop for {}",
-                    rv.iter()
-                        .filter(|(a, _)| a == &axis)
-                        .map(|(_, s)| s)
-                        .join(", "),
-                    l.spec().map(|s| s.to_string()).unwrap_or("_".to_string())
-                );
-            }
+    for (lt, dim) in unique_dims_per_axis(&l.tiles) {
+        let axis = lt.axes[usize::from(dim)];
+        let total_steps = lt.tile.steps_dim(dim);
+        let full_steps = lt.tile.full_steps_dim(dim);
+
+        if total_steps > 1 {
+            axis_steps.push((axis, full_steps, total_steps));
         }
     }
 
-    result
+    axis_steps
 }
 
 fn get_vector(
