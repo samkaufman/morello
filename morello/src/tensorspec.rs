@@ -53,8 +53,10 @@ pub struct TensorSpecArbMaxShape(pub Shape);
 pub enum CanonicalizeError {
     #[error("Layout does not apply: {0}")]
     LayoutError(#[from] LayoutError),
-    #[error("Volume is not a multiple of vector size")]
+    #[error("Target does not support the specified vector size for this data type")]
     VectorSizeInvalid,
+    #[error("Tensor volume is not compatible with the specified vector size")]
+    VectorSizeVolumeIncompatible,
 }
 
 impl<Tgt: Target> TensorSpec<Tgt> {
@@ -238,9 +240,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
         let vector_size = self.aux.vector_size;
-        if !check_tensor_vector_size::<Tgt>(self.shape(), self.dtype, &self.level(), vector_size) {
-            return Err(CanonicalizeError::VectorSizeInvalid);
-        }
+        check_tensor_vector_size::<Tgt>(self.shape(), self.dtype, &self.level(), vector_size)?;
         self.aux.canonicalize(&self.shape)
     }
 
@@ -659,22 +659,30 @@ pub(crate) fn gen_vector_sizes_opt(
 /// This checks both that the vector exists for that target and that the vector size is a multiple
 /// of the shape and dtype.
 ///
-/// Returns `true` if the level is not a VRF.
+/// Returns `Ok`, a `CanonicalizeError::VectorSizeInvalid`, or
+/// `CanonicalizeError::VectorSizeVolumeIncompatible`.
 pub(crate) fn check_tensor_vector_size<Tgt: Target>(
     shape: &[DimSize],
     dtype: Dtype,
     level: &Tgt::Level,
     vector_size: Option<DimSize>,
-) -> bool {
+) -> Result<(), CanonicalizeError> {
     let vector_bytes = level.vector_bytes();
     if vector_bytes.is_empty() {
         debug_assert!(vector_size.is_none());
-        return true;
+        return Ok(());
     }
     let vector_size = vector_size.unwrap();
     let volume = DimSize::new(shape.iter().map(|d| d.get()).product()).unwrap();
     let bytes = volume.get() * u32::from(dtype.size());
-    volume.get() % vector_size.get() == 0 && vector_bytes.iter().any(|&vb| bytes % vb == 0)
+
+    if !vector_bytes.iter().any(|&vb| bytes % vb == 0) {
+        return Err(CanonicalizeError::VectorSizeInvalid);
+    }
+    if volume.get() % vector_size.get() != 0 {
+        return Err(CanonicalizeError::VectorSizeVolumeIncompatible);
+    }
+    Ok(())
 }
 
 fn tensorspec_aux_str<Tgt: Target>(aux: &TensorSpecAux<Tgt>) -> String {

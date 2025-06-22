@@ -1,5 +1,5 @@
 use crate::alignment::aligned_approx;
-use crate::common::{DimSize, Dtype};
+use crate::common::DimSize;
 use crate::cost::{Cost, MainCost};
 use crate::imp::loops::compute_loop_main_cost;
 use crate::imp::subspecs::SpecApp;
@@ -137,7 +137,8 @@ pub enum NotApplicableReason {
     ParallelPrevented,
     LayoutIncompatible,
     SelfMove,
-    VectorSizeInvalid(Dtype, DimSize),
+    VectorSizeInvalid,
+    VectorSizeVolumeIncompatible,
     MultipleOutputs,
     Other(Option<&'static str>),
 }
@@ -339,10 +340,16 @@ impl Display for NotApplicableReason {
                     "Source and destination TensorSpecs were equal after canonicalization"
                 )
             }
-            NotApplicableReason::VectorSizeInvalid(dtype, size) => {
+            NotApplicableReason::VectorSizeInvalid => {
                 write!(
                     f,
-                    "Target does not support {dtype} vectors with {size} values"
+                    "Target does not support the specified vector size for this data type"
+                )
+            }
+            NotApplicableReason::VectorSizeVolumeIncompatible => {
+                write!(
+                    f,
+                    "Tensor volume is not compatible with the specified vector size"
                 )
             }
             NotApplicableReason::MultipleOutputs => {

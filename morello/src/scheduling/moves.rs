@@ -173,12 +173,10 @@ fn plan_alloc<'a, Tgt: Target>(
                     ApplyError::NotApplicable(NotApplicableReason::LayoutIncompatible)
                 }
                 tensorspec::CanonicalizeError::VectorSizeInvalid => {
-                    let vs = destination_vector_size
-                        .expect("destination vector size is set if VectorSizeInvalid returned");
-                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid(
-                        destination_dtype,
-                        vs,
-                    ))
+                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid)
+                }
+                tensorspec::CanonicalizeError::VectorSizeVolumeIncompatible => {
+                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeVolumeIncompatible)
                 }
             })?;
     }

@@ -51,10 +51,10 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
             )
             .map_err(|e| match e {
                 CanonicalizeError::VectorSizeInvalid => {
-                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid(
-                        dtypes[1],
-                        self.broadcast_vector_size.unwrap(),
-                    ))
+                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid)
+                }
+                CanonicalizeError::VectorSizeVolumeIncompatible => {
+                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeVolumeIncompatible)
                 }
                 _ => ApplyError::NotApplicable(NotApplicableReason::Other(None)),
             })?,
