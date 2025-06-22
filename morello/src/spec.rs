@@ -15,6 +15,7 @@ use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter::once;
 use std::iter::Iterator;
@@ -472,15 +473,7 @@ impl PrimitiveBasics {
     }
 
     pub(crate) fn input_idx(&self, index: usize) -> usize {
-        if let Some(output_idx) = self.typ.unique_output_index() {
-            if index < output_idx {
-                index
-            } else {
-                index + 1
-            }
-        } else {
-            todo!()
-        }
+        self.typ.input_idx(index)
     }
 
     pub fn parameter_shapes(&self) -> Vec<Shape> {
@@ -1239,6 +1232,18 @@ impl PrimitiveSpecType {
             | PrimitiveSpecType::SoftmaxDenominator { .. }
             | PrimitiveSpecType::Max { .. }
             | PrimitiveSpecType::Fill { .. } => parameter_shapes.next().unwrap().into(),
+        }
+    }
+
+    pub(crate) fn input_idx(&self, index: usize) -> usize {
+        if let Some(output_idx) = self.unique_output_index() {
+            if index < output_idx {
+                index
+            } else {
+                index + 1
+            }
+        } else {
+            todo!()
         }
     }
 
@@ -3044,6 +3049,61 @@ fn compose_parameter_dtypes(components: &[PrimitiveBasics]) -> Vec<Dtype> {
     result
 }
 
+fn compose_basics_shapes_to_unified_shape() {
+    todo!()
+}
+
+fn compose_unified_shape_to_basics_shapes() {
+    todo!()
+}
+
+fn compose_basics_dtypes_to_internal(components: &[PrimitiveBasics]) -> Vec<Dtype> {
+    let mut result = Vec::new();
+
+    result.extend_from_slice(&components[0].dtypes);
+    for component in components.iter().skip(1) {
+        // TODO: Use the output index; don't just assume it's the last thing
+        let output_idx = component.typ.unique_output_index().unwrap();
+        result.extend_from_slice(&component.dtypes[..output_idx]);
+        result.extend_from_slice(&component.dtypes[output_idx + 1..]);
+    }
+
+    result
+}
+
+fn compose_internal_to_basics_dtypes(
+    internal_dtypes: &[Dtype],
+    component_types: &[PrimitiveSpecType],
+) -> Vec<Vec<Dtype>> {
+    let mut result = Vec::with_capacity(component_types.len());
+    let first_operand_count = component_types[0].operand_count();
+    result.push(internal_dtypes[..first_operand_count].to_vec());
+
+    let mut dtype_index = first_operand_count;
+    for (i, component_type) in component_types.iter().enumerate().skip(1) {
+        let operand_count = component_type.operand_count();
+
+        // For subsequent components, consume operand_count - 1 dtypes from internal_dtypes
+        // and copy the first input's dtype from the previous component as the output
+        let input_count = operand_count - 1;
+        let mut component_dtypes = internal_dtypes[dtype_index..dtype_index + input_count].to_vec();
+        dtype_index += input_count;
+
+        // The output dtype is the first input dtype from the previous component
+        let last_component = &component_types[i - 1];
+        let last_component_first_input_index = last_component.input_idx(0);
+        let prev_component_first_input = result[i - 1][last_component_first_input_index];
+        component_dtypes.insert(
+            component_type.unique_output_index().unwrap(),
+            prev_component_first_input,
+        );
+
+        result.push(component_dtypes);
+    }
+
+    result
+}
+
 fn compose_parameter_directions(components: &[PrimitiveBasics]) -> Vec<OperandDirection> {
     let mut result = vec![];
     result.reserve_exact(compose_parameter_count(components));
@@ -3370,7 +3430,15 @@ mod tests {
     use crate::{lspec, shape, spec};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
+    use std::collections::{HashMap, HashSet};
     use std::iter;
+
+    /// Used by [test_compose_shape_matches_constraint_system].
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum ComposeCSNode {
+        SpecDim(usize, usize),
+        OperandDim(usize, usize, usize),
+    }
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);
 
@@ -3599,6 +3667,54 @@ mod tests {
     }
 
     #[test]
+    fn test_compose_basics_dtypes_to_internal() {
+        let basics_outer = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![8, 32, 128],
+            dtypes: vec![Dtype::Sint16, Dtype::Sint8, Dtype::Uint16],
+        };
+        let basics_inner = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: true },
+            spec_shape: shape![8, 32, 128],
+            dtypes: vec![Dtype::Uint8, Dtype::Sint8, Dtype::Sint16],
+        };
+        assert_eq!(
+            &compose_basics_dtypes_to_internal(&[basics_outer, basics_inner]),
+            &[
+                Dtype::Sint16,
+                Dtype::Sint8,
+                Dtype::Uint16,
+                Dtype::Uint8,
+                Dtype::Sint8
+            ]
+        )
+    }
+
+    #[test]
+    fn test_compose_internal_to_basics_dtypes() {
+        let component_types = [
+            PrimitiveSpecType::Matmul { accum: false },
+            PrimitiveSpecType::Matmul { accum: true },
+        ];
+        assert_eq!(
+            &compose_internal_to_basics_dtypes(
+                &[
+                    Dtype::Sint16,
+                    Dtype::Sint8,
+                    Dtype::Uint16,
+                    Dtype::Uint8,
+                    Dtype::Sint8
+                ],
+                &component_types
+            ),
+            &[
+                vec![Dtype::Sint16, Dtype::Sint8, Dtype::Uint16],
+                vec![Dtype::Uint8, Dtype::Sint8, Dtype::Sint16]
+            ]
+        );
+    }
+
+    #[test]
     fn test_dim_range_with_odd_max() {
         assert_eq!(
             dim_range(nz!(3u32), false).collect::<Vec<_>>(),
@@ -3617,6 +3733,140 @@ mod tests {
             dim_range(nz!(7u32), true).collect::<Vec<_>>(),
             vec![nz!(1u32), nz!(2u32), nz!(4u32), nz!(7u32)]
         );
+    }
+
+    // TODO: Add Arm variant
+    // TODO: Convert into a proptest over arbitrary LogicalSpec::Compose
+    // TODO: Rename test
+    #[test]
+    fn test_compose_shape_matches_constraint_system() {
+        let LogicalSpec::Compose { components, .. } = matmul_chain_test_data() else {
+            unreachable!();
+        };
+
+        let mut cs_nodes = HashSet::new();
+        let mut cs_hyperedges = HashSet::new();
+        for (component_idx, component) in components.iter().enumerate() {
+            for dim_idx in 0..component.spec_shape.len() {
+                cs_nodes.insert(ComposeCSNode::SpecDim(component_idx, dim_idx));
+            }
+            for parameter_idx in 0..component.typ.operand_count() {
+                for dim_idx in 0..component.parameter_shape(parameter_idx).len() {
+                    cs_nodes.insert(ComposeCSNode::OperandDim(
+                        component_idx,
+                        parameter_idx,
+                        dim_idx,
+                    ));
+                }
+
+                for (operand_dim_idx, association) in component
+                    .spec_dim_associations(parameter_idx.try_into().unwrap())
+                    .into_iter()
+                    .enumerate()
+                {
+                    match association {
+                        DimAssociation::SpecDim(spec_dim_idx) => {
+                            cs_hyperedges.insert(vec![
+                                ComposeCSNode::SpecDim(component_idx, spec_dim_idx),
+                                ComposeCSNode::OperandDim(
+                                    component_idx,
+                                    parameter_idx,
+                                    operand_dim_idx,
+                                ),
+                            ]);
+                        }
+                        DimAssociation::SpecDimSum(spec_dim_a, spec_dim_b, _) => {
+                            cs_hyperedges.insert(vec![
+                                ComposeCSNode::SpecDim(component_idx, spec_dim_a),
+                                ComposeCSNode::SpecDim(component_idx, spec_dim_b),
+                                ComposeCSNode::OperandDim(
+                                    component_idx,
+                                    parameter_idx,
+                                    operand_dim_idx,
+                                ),
+                            ]);
+                        }
+                        DimAssociation::Constant(_) => {}
+                    }
+                }
+
+                // Constrain the output to the first input of the previous
+                if component_idx > 0 {
+                    let prev_component = &components[component_idx - 1];
+                    let prev_first_input_idx = prev_component.typ.input_idx(0);
+                    let output_input = component.typ.unique_output_index().unwrap();
+                    for dim_idx in 0..component.parameter_shape(output_input).len() {
+                        assert_eq!(
+                            component.parameter_shape(output_input)[dim_idx],
+                            prev_component.parameter_shape(prev_first_input_idx)[dim_idx]
+                        );
+                        cs_hyperedges.insert(vec![
+                            ComposeCSNode::OperandDim(
+                                component_idx - 1,
+                                prev_first_input_idx,
+                                dim_idx,
+                            ),
+                            ComposeCSNode::OperandDim(component_idx, output_input, dim_idx),
+                        ]);
+                    }
+                }
+            }
+        }
+        assert!(cs_nodes.is_superset(
+            &cs_hyperedges
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<HashSet<_>>()
+        ));
+
+        let mut representatives = cs_nodes
+            .iter()
+            .map(|node| (node, node))
+            .collect::<HashMap<_, _>>();
+        let mut any_change = true;
+        while any_change {
+            any_change = false;
+
+            // Wherever all nodes in a hyperedge *except one* have the same representative, set the
+            // remaining node's representative to that one.
+            for hyperedge in &cs_hyperedges {
+                // Group nodes by their current representative
+                let mut rep_to_nodes = HashMap::<&ComposeCSNode, Vec<&ComposeCSNode>>::new();
+                for node in hyperedge {
+                    rep_to_nodes
+                        .entry(representatives[node])
+                        .or_default()
+                        .push(node);
+                }
+
+                // If all nodes except one have the same representative, update the remaining one
+                if rep_to_nodes.len() == 2 {
+                    let [(left_rep, left), (right_rep, right)] = rep_to_nodes
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap();
+
+                    if left.len() != 1 && right.len() != 1 {
+                        continue;
+                    }
+
+                    let (most_common_rep, unique) = if left.len() == 1 {
+                        (right_rep, left[0])
+                    } else if right.len() == 1 {
+                        (left_rep, right[0])
+                    } else {
+                        continue;
+                    };
+                    *representatives.get_mut(unique).unwrap() = most_common_rep;
+                    any_change = true;
+                }
+            }
+        }
+
+        let expected_spec_dims = representatives.values().unique().count();
+        todo!("compare expected_spec_dims with... something");
     }
 
     proptest! {
