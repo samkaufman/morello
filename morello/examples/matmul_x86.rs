@@ -48,22 +48,43 @@ fn main() {
                 .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
         })
         .tile_out(&[1, 128, 1024])
-        .tile_out(&[1, 4, 16])
+        .tile_out(&[1, 6, 16])
         .move_param(0, L1)
         .move_param(1, L1)
         .move_param(2, L1)
         .move_vrf(2, VRF, nz!(8u32))
-        .subschedule(&[1, 0], |m| {
-            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
-        })
-        .subschedule(&[1, 2], |m| {
-            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
-        })
         .split(1)
         .tile_out(&[1, 1, 16])
         .move_vrf(1, VRF, nz!(8u32))
-        .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::VectorAssign))
-        .subschedule(&[1, 1, 1], |m| m.select(CpuKernel::BroadcastVecMultAdd));
+        .subschedule(&[1, 0, 1, 1], |m| m.select(CpuKernel::BroadcastVecMultAdd))
+        .subschedule(&[1, 1], |m| {
+            m.tile_out(&[1, 1, 16])
+                .split(1)
+                .move_param(0, L1)
+                .move_param(1, L1)
+                .move_param(2, L1)
+                .move_vrf(1, VRF, nz!(8u32))
+                .move_vrf(2, VRF, nz!(8u32))
+                .select(CpuKernel::BroadcastVecMultAdd)
+        })
+        .subschedule(&[1, 0, 0], |m| {
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
+        })
+        .subschedule(&[1, 0, 2], |m| {
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
+        })
+        .subschedule(&[1, 1, 0], |m| {
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
+        })
+        .subschedule(&[1, 0, 1, 0], |m| {
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
+        })
+        .subschedule(&[1, 1, 1, 0], |m| {
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
+        })
+        .subschedule(&[1, 1, 1, 2], |m| {
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
+        });
 
     implementation
         .emit(
