@@ -1211,9 +1211,20 @@ impl CpuKernel {
     pub fn memory_allocated<P: View>(&self, parameters: &[P]) -> MemoryAllocation {
         match self {
             // TODO: Model memory correctly for BroadcastVecMultAddBf16F32
-            CpuKernel::BroadcastVecMultAdd
-            | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
-            | CpuKernel::BroadcastVecMultAddBf16F32 => {
+            CpuKernel::BroadcastVecMultAdd => {
+                // BroadcastVecMult applies to 1x1xn Matmuls. It broadcasts into a single
+                // vector register which is reused across all n-axis vectors.
+                MemoryAllocation::Simple(CPU_LEVELS.map(
+                    |level| {
+                        if level.vector_rf() {
+                            1
+                        } else {
+                            0
+                        }
+                    },
+                ))
+            }
+            CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 | CpuKernel::BroadcastVecMultAddBf16F32 => {
                 let vec_tensor_spec = &parameters[1].spec();
                 let regs = u64::from(
                     vec_tensor_spec.volume().get() / vec_tensor_spec.vector_size().unwrap().get(),

@@ -692,7 +692,7 @@ impl Display for MemVec {
     }
 }
 
-impl<'a> Iterator for MemVecIter<'a> {
+impl Iterator for MemVecIter<'_> {
     type Item = u64;
 
     fn next(&mut self) -> Option<Self::Item> {
