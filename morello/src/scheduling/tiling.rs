@@ -20,7 +20,7 @@ use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::iter::once;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub enum TileOut {
@@ -906,7 +906,7 @@ fn create_region_output_tiling<Tgt: Target>(
         let original_size = original_param_shape[dim_idx];
         let actual_axis = output_tile.axes[dim_idx];
         if region_id.get() & (1_usize << actual_axis) != 0 {
-            let remainder = NonZeroU32::new(original_size.get() % tile_size.get()).unwrap();
+            let remainder = DimSize::new(original_size.get() % tile_size.get()).unwrap();
             region_tile_shape[dim_idx] = remainder;
         }
     }
@@ -1347,7 +1347,7 @@ mod tests {
     use crate::common::Dtype;
     use crate::imp::subspecs::SpecApp;
     use crate::imp::{loops::Loop, Impl, ImplNode};
-    use crate::layout::{row_major, PhysDim};
+    use crate::layout::{row_major, Layout, PhysDim};
     use crate::scheduling::{Action, ActionT, ApplyError, NotApplicableReason};
     use crate::spec::Spec;
     use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
@@ -1360,6 +1360,7 @@ mod tests {
     use crate::{lspec, shape, spec};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
+    use std::num::NonZeroU32;
 
     #[test]
     fn test_non_multiple_tile_out_single_succeeds() {
@@ -1888,6 +1889,31 @@ mod tests {
                 }
                 Ok(_) => unreachable!(),
                 Err(_) => {} // skip apply failures
+            }
+        }
+
+        /// Test that tiling actions don't introduce cycles.  This tests actions of all
+        /// sizes, which is stronger than simply checking that `Tgt::actions()` does not
+        /// introduce cycles.
+        #[test]
+        fn test_boundary_region_actions_do_not_introduce_cycles(
+            (spec, action) in arb_spec_and_boundary_tiling_action()
+        ) {
+            if let Ok(rewritten) = action.apply(&spec) {
+                let mut found_self = false;
+                rewritten.visit_leaves(&mut |leaf| {
+                    if let ImplNode::SpecApp(spec_app) = leaf {
+                        if spec_app.0 == spec {
+                            found_self = true;
+                            return false;
+                        }
+                    }
+                    true
+                });
+                prop_assert!(
+                    !found_self,
+                    "Action introduced a cycle: spec={spec}, action={action:?}"
+                );
             }
         }
     }
@@ -2426,6 +2452,107 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Generate a proptest strategy that produces a spec and a tiling action
+    /// that creates boundary regions. For Matmul specs, it can generate TileOut
+    /// or Split actions. For other specs, it generates TileOut actions.
+    fn arb_spec_and_boundary_tiling_action(
+    ) -> impl Strategy<Value = (Spec<Avx2Target>, Action<Avx2Target>)> {
+        arb_canonical_spec::<Avx2Target>(None, None)
+            .prop_filter("must have unique output", |spec| {
+                spec.0.unique_output_index().is_some()
+            })
+            .prop_filter("must have a dimension > 1", |spec| {
+                let output_idx = spec.0.unique_output_index().unwrap();
+                let output_shape = spec.0.parameter_shape(output_idx);
+                output_shape.iter().any(|&dim_size| dim_size.get() > 1)
+            })
+            .prop_flat_map(|spec| {
+                let mut strategies = Vec::new();
+                let output_idx = spec.0.unique_output_index().unwrap();
+                let output_shape = spec.0.parameter_shape(output_idx);
+
+                // SingleLoop TileOut strategies
+                for (dim_idx, &dim_size) in output_shape.iter().enumerate() {
+                    if dim_size.get() > 1 {
+                        strategies.push(
+                            (1..dim_size.get())
+                                .prop_map(move |tile_size| {
+                                    Action::TileOut(TileOut::SingleLoop {
+                                        dim: u8::try_from(dim_idx).unwrap(),
+                                        size: DimSize::new(tile_size).unwrap(),
+                                        parallel: false,
+                                    })
+                                })
+                                .boxed(),
+                        );
+                    }
+                }
+
+                // MultiLoop TileOut strategy
+                let tile_strategies: Vec<_> = output_shape
+                    .iter()
+                    .map(|&orig_size| {
+                        (1..=orig_size.get())
+                            .prop_map(|size| DimSize::new(size).unwrap())
+                            .boxed()
+                    })
+                    .collect();
+
+                let output_shape_for_filter = output_shape.clone();
+                strategies.push(
+                    tile_strategies
+                        .prop_map(|vec| {
+                            Action::TileOut(TileOut::MultiLoop {
+                                output_shape: vec.into_iter().collect(),
+                                parallel: false,
+                            })
+                        })
+                        .prop_filter("tile shape must differ from original", move |action| {
+                            let Action::TileOut(TileOut::MultiLoop {
+                                output_shape: tile_shape,
+                                ..
+                            }) = action
+                            else {
+                                unreachable!();
+                            };
+                            tile_shape.as_slice() != output_shape_for_filter.as_slice()
+                        })
+                        .boxed(),
+                );
+
+                // Split strategy for Matmul with accum=true
+                // TODO: Extend this to other Split-supporting Specs
+                if matches!(
+                    &spec.0,
+                    LogicalSpec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::Matmul { accum: true },
+                            ..
+                        },
+                        ..
+                    )
+                ) {
+                    let first_operand_shape = spec.0.parameter_shape(0);
+                    if first_operand_shape.len() >= 3 {
+                        let inner_dim_size = first_operand_shape[2];
+                        if inner_dim_size.get() > 1 {
+                            strategies.push(
+                                (1..inner_dim_size.get())
+                                    .prop_map(|k_size| {
+                                        Action::Split(Split {
+                                            k: DimSize::new(k_size).unwrap(),
+                                        })
+                                    })
+                                    .boxed(),
+                            );
+                        }
+                    }
+                }
+
+                (Just(spec), prop::strategy::Union::new(strategies))
+            })
     }
 
     fn arb_spec_and_nested_tilings() -> impl Strategy<Value = (Spec<Avx2Target>, TileOut, TileOut)>
