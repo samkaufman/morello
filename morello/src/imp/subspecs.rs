@@ -16,6 +16,9 @@ pub struct SpecApp<A: View>(pub Spec<A::Tgt>, pub Vec<A>);
 impl<A: View> SpecApp<A> {
     pub fn new(spec: Spec<A::Tgt>, args: impl IntoIterator<Item = A>) -> Self {
         let a = args.into_iter().collect::<Vec<_>>();
+        // Assert that the number of arguments matches. We *don't* assert that parameter and
+        // argument Specs match because Moves may intentionally violate this, such as when a Move
+        // canonicalizes both parameters to be row-major (i.e., erasing layouts).
         debug_assert_eq!(spec.0.operand_count(), a.len());
         Self(spec, a)
     }
