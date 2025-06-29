@@ -505,7 +505,6 @@ impl PrimitiveBasics {
             },
             PrimitiveSpecType::SoftmaxDenominator { scan_dim: dim, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim: dim, .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim: dim, .. }
             | PrimitiveSpecType::Max { dim, .. } => match idx {
                 0 => self.spec_shape.clone(),
                 x if x < self.typ.operand_count() => {
@@ -514,6 +513,15 @@ impl PrimitiveBasics {
                     reduced
                 }
                 _ => panic!(),
+            },
+            PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim: dim, .. } => match idx {
+                0 | 2 => self.spec_shape.clone(),
+                1 => {
+                    let mut reduced = self.spec_shape.clone();
+                    reduced[usize::from(dim)] = nz!(1u32);
+                    reduced
+                }
+                _ => panic!("SoftmaxDenominatorAndUnscaled has only 3 parameters"),
             },
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { scan_dim, .. } => match idx {
                 0 | 3 => self.spec_shape.clone(),
